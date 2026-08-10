@@ -11,6 +11,7 @@ use thiserror::Error;
 
 use crate::types::manifest_v1::{
     BuildStepV1, BuildV1, CapsuleManifestV1, ConfigKindV1, OutputsV1, SealAtV1, StaticWebOutputV1,
+    validate_static_web_output_contract,
 };
 
 pub const PROGRAM_INTENT_DRAFT_V1_SCHEMA: &str = "ato.program-intent-draft/v1";
@@ -214,6 +215,8 @@ pub enum ProgramIntentError {
     Nul { field: &'static str },
     #[error("workspace path is unsafe: {0}")]
     UnsafeWorkspacePath(String),
+    #[error("static Web output is invalid: {0}")]
+    InvalidStaticWebOutput(String),
     #[error("environment name is invalid: {0}")]
     InvalidEnvironmentName(String),
     #[error("list must be sorted and duplicate-free after normalization: {0}")]
@@ -272,13 +275,12 @@ pub fn normalize_program_intent(
         ));
     }
     if let Some(static_web_output) = &draft.static_web_output {
-        validate_workspace_path(static_web_output.root.as_str())?;
-        validate_workspace_path(static_web_output.entry_path.as_str())?;
-        if static_web_output.entry_path == WorkspacePathV1::root() {
-            return Err(ProgramIntentError::UnsafeWorkspacePath(
-                "static_web_output.entry_path must name a file".to_string(),
-            ));
-        }
+        validate_static_web_output_contract(
+            static_web_output.root.as_str(),
+            static_web_output.entry_path.as_str(),
+            &static_web_output.connect_src,
+        )
+        .map_err(|error| ProgramIntentError::InvalidStaticWebOutput(error.to_string()))?;
         if !output_roots.contains(&static_web_output.root) {
             output_roots.push(static_web_output.root.clone());
             output_roots.sort();

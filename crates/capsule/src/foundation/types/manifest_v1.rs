@@ -62,6 +62,7 @@
 //! saying so is more useful than minting an identity that omits them.
 
 use std::collections::BTreeMap;
+use std::net::IpAddr;
 use std::path::Path;
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
@@ -381,6 +382,89 @@ pub struct StaticWebOutputV1 {
 
 fn default_static_web_spa_fallback() -> bool {
     true
+}
+
+/// Validate the identity-bearing static Web output contract shared by manifest
+/// parsing and Program Intent normalization.
+pub fn validate_static_web_output_contract(
+    root: &str,
+    entry_path: &str,
+    connect_src: &[String],
+) -> Result<(), ManifestV1Error> {
+    validate_source_relative_path("outputs.static_web.root", root, true)?;
+    validate_source_relative_path("outputs.static_web.entry_path", entry_path, false)?;
+    if entry_path == "." {
+        return Err(ManifestV1Error::Invalid {
+            field: "outputs.static_web.entry_path",
+            reason: "must identify a file relative to outputs.static_web.root".to_string(),
+        });
+    }
+    let mut previous: Option<&str> = None;
+    for origin in connect_src {
+        validate_static_web_connect_source(origin)?;
+        if previous.is_some_and(|last| last >= origin.as_str()) {
+            return Err(ManifestV1Error::Invalid {
+                field: "outputs.static_web.connect_src",
+                reason: "must be ASCII-sorted without duplicate origins".to_string(),
+            });
+        }
+        previous = Some(origin);
+    }
+    Ok(())
+}
+
+fn validate_static_web_connect_source(value: &str) -> Result<(), ManifestV1Error> {
+    let parsed = Url::parse(value).map_err(|_| ManifestV1Error::Invalid {
+        field: "outputs.static_web.connect_src",
+        reason: "must be a public https:// or wss:// origin".to_string(),
+    })?;
+    let invalid = |reason: &str| ManifestV1Error::Invalid {
+        field: "outputs.static_web.connect_src",
+        reason: reason.to_string(),
+    };
+    if !matches!(parsed.scheme(), "https" | "wss")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.path() != "/"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(invalid(
+            "must be a public https:// or wss:// origin without credentials, path, query, or fragment",
+        ));
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| invalid("must name a public DNS hostname"))?;
+    if host.parse::<IpAddr>().is_ok()
+        || host == "localhost"
+        || host.ends_with(".localhost")
+        || host.ends_with(".local")
+        || !host.contains('.')
+        || host.len() > 253
+        || host.contains("..")
+        || !host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .as_bytes()
+                    .last()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+    {
+        return Err(invalid("must name a public DNS hostname"));
+    }
+    if parsed.origin().ascii_serialization() != value {
+        return Err(invalid("must use canonical serialized form"));
+    }
+    Ok(())
 }
 
 /// `[web]`. Both fields are authored — neither has a default.
@@ -852,18 +936,11 @@ impl CapsuleManifestV1 {
             .as_ref()
             .and_then(|outputs| outputs.static_web.as_ref())
         {
-            validate_source_relative_path("outputs.static_web.root", &static_web.root, true)?;
-            validate_source_relative_path(
-                "outputs.static_web.entry_path",
+            validate_static_web_output_contract(
+                &static_web.root,
                 &static_web.entry_path,
-                false,
+                &static_web.connect_src,
             )?;
-            if static_web.entry_path == "." {
-                return Err(ManifestV1Error::Invalid {
-                    field: "outputs.static_web.entry_path",
-                    reason: "must identify a file relative to outputs.static_web.root".to_string(),
-                });
-            }
         }
 
         if let Some(surface) = &self.surface {

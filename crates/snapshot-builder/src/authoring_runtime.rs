@@ -622,6 +622,15 @@ struct StaticWebCandidate {
     output_root: WorkspacePathV1,
     entry_path: WorkspacePathV1,
     toolchains: Vec<capsule::authoring_intent::ToolchainRequirementV1>,
+    spa_fallback: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StaticBuildFramework {
+    Vite,
+    CreateReactApp,
+    Astro,
+    Eleventy,
 }
 
 /// Infer a static delivery candidate from source evidence.
@@ -638,6 +647,7 @@ pub fn infer_static_web_intent(
         output_root,
         entry_path,
         toolchains,
+        spa_fallback,
     } = infer_static_web_candidate(source_root)?;
     normalize_program_intent(ProgramIntentDraftV1 {
         schema: capsule::authoring_intent::PROGRAM_INTENT_DRAFT_V1_SCHEMA.to_string(),
@@ -652,19 +662,7 @@ pub fn infer_static_web_intent(
                 required_tools: Vec::new(),
             })
             .collect(),
-        launch: ProgramCommandDraftV1::Argv {
-            argv: vec![
-                "python3".to_string(),
-                "-m".to_string(),
-                "http.server".to_string(),
-                "8000".to_string(),
-                "--bind".to_string(),
-                "0.0.0.0".to_string(),
-            ],
-            cwd: WorkspacePathV1::root(),
-            requested_environment: Vec::new(),
-            required_tools: vec!["python3".to_string()],
-        },
+        launch: static_preview_launch(&output_root),
         readiness: ReadinessIntentV1::Http {
             port: 8000,
             path: "/".to_string(),
@@ -674,7 +672,7 @@ pub fn infer_static_web_intent(
         static_web_output: Some(StaticWebOutputIntentV1 {
             root: output_root,
             entry_path,
-            spa_fallback: true,
+            spa_fallback,
             connect_src: Vec::new(),
         }),
         bindings: Vec::new(),
@@ -683,17 +681,38 @@ pub fn infer_static_web_intent(
     .map_err(|error| error.to_string())
 }
 
-fn infer_static_web_candidate(source_root: &Path) -> Result<StaticWebCandidate, String> {
-    if !source_root.join("index.html").is_file() {
-        return Err("static Web inference requires a root index.html".to_string());
+fn static_preview_launch(output_root: &WorkspacePathV1) -> ProgramCommandDraftV1 {
+    ProgramCommandDraftV1::Argv {
+        argv: vec![
+            "python3".to_string(),
+            "-m".to_string(),
+            "http.server".to_string(),
+            "8000".to_string(),
+            "--bind".to_string(),
+            "0.0.0.0".to_string(),
+            "--directory".to_string(),
+            output_root.as_str().to_string(),
+        ],
+        cwd: WorkspacePathV1::root(),
+        requested_environment: Vec::new(),
+        required_tools: vec!["python3".to_string()],
     }
+}
+
+fn infer_static_web_candidate(source_root: &Path) -> Result<StaticWebCandidate, String> {
     let package_path = source_root.join("package.json");
     if !package_path.is_file() {
+        if !source_root.join("index.html").is_file() {
+            return Err(
+                "dependency-free static Web inference requires a root index.html".to_string(),
+            );
+        }
         return Ok(StaticWebCandidate {
             build_command: None,
             output_root: WorkspacePathV1::root(),
             entry_path: WorkspacePathV1::parse("index.html").map_err(|error| error.to_string())?,
             toolchains: Vec::new(),
+            spa_fallback: false,
         });
     }
 
@@ -704,53 +723,138 @@ fn infer_static_web_candidate(source_root: &Path) -> Result<StaticWebCandidate, 
     let scripts = package
         .get("scripts")
         .and_then(serde_json::Value::as_object);
-    if scripts.is_some_and(has_process_server_evidence) {
+    let build = scripts
+        .and_then(|scripts| scripts.get("build"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            "package.json has no recognized static build; choose manual setup".to_string()
+        })?;
+    let framework = infer_static_build_framework(source_root, &package, build)?;
+    if scripts.is_some_and(|scripts| has_process_server_evidence(scripts, framework)) {
         return Err(
             "package.json declares a runtime server; static delivery was not inferred".to_string(),
         );
     }
-
-    let build = scripts
-        .and_then(|scripts| scripts.get("build"))
-        .and_then(serde_json::Value::as_str);
-    let (output_root, known_static_build) = match build {
-        Some(command) if command_contains(command, &["vite", "build"]) => {
-            if has_vite_custom_out_dir(source_root)? {
-                return Err("Vite outDir is customized; choose static output manually".to_string());
-            }
-            ("dist", true)
-        }
-        Some(command) if command_contains(command, &["react-scripts", "build"]) => ("build", true),
-        Some(command) if command_contains(command, &["astro", "build"]) => ("dist", true),
-        Some(command) if command_contains(command, &["eleventy"]) => ("_site", true),
-        _ => (".", false),
+    let (output_root, spa_fallback) = match framework {
+        StaticBuildFramework::Vite => ("dist", false),
+        StaticBuildFramework::CreateReactApp => ("build", true),
+        StaticBuildFramework::Astro => ("dist", false),
+        StaticBuildFramework::Eleventy => ("_site", false),
     };
-    let build_command = known_static_build.then(|| package_manager_build_command(source_root));
     Ok(StaticWebCandidate {
-        build_command,
+        build_command: Some(package_manager_build_command(source_root, &package)?),
         output_root: WorkspacePathV1::parse(output_root).map_err(|error| error.to_string())?,
         entry_path: WorkspacePathV1::parse("index.html").map_err(|error| error.to_string())?,
-        toolchains: if known_static_build {
-            vec![capsule::authoring_intent::ToolchainRequirementV1 {
-                name: "node".to_string(),
-                version_constraint: "20".to_string(),
-            }]
-        } else {
-            Vec::new()
-        },
+        toolchains: vec![node_toolchain_requirement(source_root, &package)],
+        spa_fallback,
     })
 }
 
-fn has_process_server_evidence(scripts: &serde_json::Map<String, serde_json::Value>) -> bool {
+fn infer_static_build_framework(
+    source_root: &Path,
+    package: &serde_json::Value,
+    build: &str,
+) -> Result<StaticBuildFramework, String> {
+    if command_contains(build, &["vite", "build"]) && has_package_dependency(package, "vite") {
+        if !source_root.join("index.html").is_file() {
+            return Err("Vite static inference requires a root index.html".to_string());
+        }
+        if has_vite_custom_out_dir(source_root)? {
+            return Err("Vite outDir is customized; choose static output manually".to_string());
+        }
+        return Ok(StaticBuildFramework::Vite);
+    }
+    if command_contains(build, &["react-scripts", "build"])
+        && has_package_dependency(package, "react-scripts")
+        && source_root.join("public/index.html").is_file()
+    {
+        return Ok(StaticBuildFramework::CreateReactApp);
+    }
+    if command_contains(build, &["astro", "build"])
+        && has_package_dependency(package, "astro")
+        && astro_static_output_is_declared(source_root)?
+    {
+        return Ok(StaticBuildFramework::Astro);
+    }
+    if command_contains(build, &["eleventy"])
+        && has_package_dependency(package, "@11ty/eleventy")
+        && has_eleventy_entry_evidence(source_root)
+    {
+        return Ok(StaticBuildFramework::Eleventy);
+    }
+    Err("package.json has no recognized static build; choose manual setup".to_string())
+}
+
+fn has_process_server_evidence(
+    scripts: &serde_json::Map<String, serde_json::Value>,
+    framework: StaticBuildFramework,
+) -> bool {
     ["start", "dev"].into_iter().any(|name| {
         scripts
             .get(name)
             .and_then(serde_json::Value::as_str)
-            .is_some_and(|command| {
-                !(command_contains(command, &["vite", "preview"])
-                    || command_contains(command, &["vite"]))
-            })
+            .is_some_and(|command| !is_framework_dev_command(command, framework))
     })
+}
+
+fn is_framework_dev_command(command: &str, framework: StaticBuildFramework) -> bool {
+    match framework {
+        StaticBuildFramework::Vite => command_contains(command, &["vite"]),
+        StaticBuildFramework::CreateReactApp => {
+            command_contains(command, &["react-scripts", "start"])
+        }
+        StaticBuildFramework::Astro => {
+            command_contains(command, &["astro", "dev"])
+                || command_contains(command, &["astro", "preview"])
+        }
+        StaticBuildFramework::Eleventy => command_contains(command, &["eleventy"]),
+    }
+}
+
+fn has_package_dependency(package: &serde_json::Value, name: &str) -> bool {
+    ["dependencies", "devDependencies", "peerDependencies"]
+        .into_iter()
+        .any(|field| {
+            package
+                .get(field)
+                .and_then(|value| value.get(name))
+                .is_some()
+        })
+}
+
+fn astro_static_output_is_declared(source_root: &Path) -> Result<bool, String> {
+    let config_names = [
+        "astro.config.ts",
+        "astro.config.js",
+        "astro.config.mjs",
+        "astro.config.cjs",
+    ];
+    let configs = config_names
+        .into_iter()
+        .filter(|name| source_root.join(name).is_file())
+        .map(|name| {
+            std::fs::read_to_string(source_root.join(name))
+                .map_err(|error| format!("read {name}: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if configs.is_empty() {
+        return Err("Astro static inference requires an astro.config file".to_string());
+    }
+    if configs
+        .iter()
+        .any(|config| config.contains("output: 'server'") || config.contains("output: \"server\""))
+    {
+        return Err("Astro server output requires manual setup".to_string());
+    }
+    Ok(configs
+        .iter()
+        .any(|config| config.contains("output: 'static'") || config.contains("output: \"static\"")))
+}
+
+fn has_eleventy_entry_evidence(source_root: &Path) -> bool {
+    ["index.njk", "index.md", "src/index.njk", "src/index.md"]
+        .into_iter()
+        .any(|path| source_root.join(path).is_file())
 }
 
 fn command_contains(command: &str, expected: &[&str]) -> bool {
@@ -777,15 +881,91 @@ fn has_vite_custom_out_dir(source_root: &Path) -> Result<bool, String> {
     .map(|configs| configs.iter().any(|config| config.contains("outDir")))
 }
 
-fn package_manager_build_command(source_root: &Path) -> Vec<String> {
-    if source_root.join("pnpm-lock.yaml").is_file() {
-        vec!["pnpm".to_string(), "run".to_string(), "build".to_string()]
-    } else if source_root.join("yarn.lock").is_file() {
-        vec!["yarn".to_string(), "build".to_string()]
-    } else if source_root.join("bun.lockb").is_file() || source_root.join("bun.lock").is_file() {
-        vec!["bun".to_string(), "run".to_string(), "build".to_string()]
-    } else {
-        vec!["npm".to_string(), "run".to_string(), "build".to_string()]
+fn package_manager_build_command(
+    source_root: &Path,
+    package: &serde_json::Value,
+) -> Result<Vec<String>, String> {
+    let declared = package
+        .get("packageManager")
+        .and_then(serde_json::Value::as_str)
+        .map(|value| value.split('@').next().unwrap_or(value));
+    let manager = match declared {
+        Some("npm") => "npm",
+        Some("pnpm") => "pnpm",
+        Some("yarn") => "yarn",
+        Some("bun") => {
+            return Err("Bun static builds are not supported yet; choose manual setup".to_string());
+        }
+        Some(other) => {
+            return Err(format!(
+                "unsupported packageManager {other:?}; choose manual setup"
+            ));
+        }
+        None => resolve_locked_package_manager(source_root)?,
+    };
+    Ok(match manager {
+        "npm" => vec!["npm".to_string(), "run".to_string(), "build".to_string()],
+        "pnpm" => vec!["pnpm".to_string(), "run".to_string(), "build".to_string()],
+        "yarn" => vec!["yarn".to_string(), "build".to_string()],
+        _ => unreachable!("package manager was validated above"),
+    })
+}
+
+fn resolve_locked_package_manager(source_root: &Path) -> Result<&'static str, String> {
+    if source_root.join("bun.lockb").is_file() || source_root.join("bun.lock").is_file() {
+        return Err("Bun static builds are not supported yet; choose manual setup".to_string());
+    }
+    let managers = [
+        ("package-lock.json", "npm"),
+        ("pnpm-lock.yaml", "pnpm"),
+        ("yarn.lock", "yarn"),
+    ]
+    .into_iter()
+    .filter_map(|(lockfile, manager)| source_root.join(lockfile).is_file().then_some(manager))
+    .collect::<Vec<_>>();
+    match managers.as_slice() {
+        [manager] => Ok(manager),
+        [] => Err(
+            "package.json has no packageManager or supported lockfile; choose manual setup"
+                .to_string(),
+        ),
+        _ => Err("multiple package manager lockfiles found; choose manual setup".to_string()),
+    }
+}
+
+fn node_toolchain_requirement(
+    source_root: &Path,
+    package: &serde_json::Value,
+) -> capsule::authoring_intent::ToolchainRequirementV1 {
+    let version_constraint = [".nvmrc", ".node-version"]
+        .into_iter()
+        .find_map(|name| std::fs::read_to_string(source_root.join(name)).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            package
+                .get("volta")
+                .and_then(|volta| volta.get("node"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            package
+                .get("engines")
+                .and_then(|engines| engines.get("node"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.trim_start_matches(['^', '~']).to_string())
+        })
+        // Keep this in sync with the source-inference default until the resolver
+        // is extracted from the CLI crate into a shared capsule dependency.
+        .unwrap_or_else(|| "20".to_string());
+    capsule::authoring_intent::ToolchainRequirementV1 {
+        name: "node".to_string(),
+        version_constraint,
     }
 }
 
@@ -1311,7 +1491,16 @@ mod tests {
         let normalized = infer_static_web_intent(root.path()).expect("intent");
         assert_eq!(
             normalized.intent.launch.argv,
-            ["python3", "-m", "http.server", "8000", "--bind", "0.0.0.0",]
+            [
+                "python3",
+                "-m",
+                "http.server",
+                "8000",
+                "--bind",
+                "0.0.0.0",
+                "--directory",
+                ".",
+            ]
         );
         let manifest = render_static_web_capsule_toml(&normalized).expect("manifest");
         let parsed =
@@ -1324,6 +1513,7 @@ mod tests {
             .expect("static output");
         assert_eq!(output.root, ".");
         assert_eq!(output.entry_path, "index.html");
+        assert!(!output.spa_fallback);
         let authored = normalize_capsule_toml(&manifest).expect("normalize authored manifest");
         assert_eq!(authored.intent.launch.argv, normalized.intent.launch.argv);
         assert_eq!(
@@ -1359,6 +1549,19 @@ mod tests {
                 .as_str(),
             "dist"
         );
+        assert_eq!(
+            inferred.intent.launch.argv,
+            [
+                "python3",
+                "-m",
+                "http.server",
+                "8000",
+                "--bind",
+                "0.0.0.0",
+                "--directory",
+                "dist",
+            ]
+        );
     }
 
     #[test]
@@ -1367,7 +1570,7 @@ mod tests {
         std::fs::write(root.path().join("index.html"), "<div id=app></div>").expect("index");
         std::fs::write(
             root.path().join("package.json"),
-            r#"{"scripts":{"build":"vite build","preview":"vite preview"}}"#,
+            r#"{"scripts":{"build":"vite build","preview":"vite preview"},"devDependencies":{"vite":"6"},"packageManager":"npm@10"}"#,
         )
         .expect("package");
 
@@ -1385,30 +1588,56 @@ mod tests {
     }
 
     #[test]
-    fn package_without_scripts_and_with_a_root_entrypoint_is_static() {
+    fn package_without_a_known_static_build_requires_manual_setup() {
         let root = tempfile::tempdir().expect("tempdir");
         std::fs::write(root.path().join("index.html"), "<main>static</main>").expect("index");
         std::fs::write(root.path().join("package.json"), r#"{"name":"docs"}"#).expect("package");
 
-        let inferred = infer_static_web_intent(root.path()).expect("infer static package");
+        let error = infer_static_web_intent(root.path()).expect_err("manual setup");
 
-        assert!(inferred.intent.build_steps.is_empty());
+        assert!(error.contains("recognized static build"));
     }
 
     #[test]
-    fn known_static_build_tools_declare_their_expected_output_roots() {
-        for (script, expected_root) in [
-            ("react-scripts build", "build"),
-            ("astro build", "dist"),
-            ("eleventy", "_site"),
+    fn static_build_frameworks_use_realistic_source_evidence() {
+        for (package, entry, expected_root, expected_spa_fallback) in [
+            (
+                r#"{"scripts":{"start":"react-scripts start","build":"react-scripts build"},"dependencies":{"react-scripts":"5"},"packageManager":"npm@10"}"#,
+                "public/index.html",
+                "build",
+                true,
+            ),
+            (
+                r#"{"scripts":{"dev":"astro dev","build":"astro build"},"dependencies":{"astro":"5"},"packageManager":"npm@10"}"#,
+                "astro.config.mjs",
+                "dist",
+                false,
+            ),
+            (
+                r#"{"scripts":{"start":"eleventy --serve","build":"eleventy"},"devDependencies":{"@11ty/eleventy":"3"},"packageManager":"npm@10"}"#,
+                "src/index.njk",
+                "_site",
+                false,
+            ),
         ] {
             let root = tempfile::tempdir().expect("tempdir");
-            std::fs::write(root.path().join("index.html"), "<main>static</main>").expect("index");
-            std::fs::write(
-                root.path().join("package.json"),
-                format!(r#"{{"scripts":{{"build":"{script}"}}}}"#),
-            )
-            .expect("package");
+            let entry_path = root.path().join(entry);
+            std::fs::create_dir_all(entry_path.parent().expect("entry parent")).expect("entry dir");
+            let contents = if entry == "astro.config.mjs" {
+                "export default { output: 'static' }"
+            } else {
+                "<main>static</main>"
+            };
+            std::fs::write(entry_path, contents).expect("entry");
+            if entry == "astro.config.mjs" {
+                std::fs::create_dir_all(root.path().join("src/pages")).expect("pages dir");
+                std::fs::write(
+                    root.path().join("src/pages/index.astro"),
+                    "<main>static</main>",
+                )
+                .expect("astro page");
+            }
+            std::fs::write(root.path().join("package.json"), package).expect("package");
 
             let inferred = infer_static_web_intent(root.path()).expect("infer static build");
 
@@ -1416,10 +1645,20 @@ mod tests {
                 inferred
                     .intent
                     .static_web_output
+                    .as_ref()
                     .expect("output")
                     .root
                     .as_str(),
                 expected_root
+            );
+            assert_eq!(
+                inferred
+                    .intent
+                    .static_web_output
+                    .as_ref()
+                    .expect("output")
+                    .spa_fallback,
+                expected_spa_fallback
             );
         }
     }
@@ -1432,7 +1671,7 @@ mod tests {
         std::fs::write(root.path().join("dist/index.html"), "stale").expect("stale output");
         std::fs::write(
             root.path().join("package.json"),
-            r#"{"scripts":{"start":"node server.js","build":"vite build"}}"#,
+            r#"{"scripts":{"start":"node server.js","build":"vite build"},"devDependencies":{"vite":"6"},"packageManager":"npm@10"}"#,
         )
         .expect("package");
 
@@ -1447,7 +1686,7 @@ mod tests {
         std::fs::write(root.path().join("index.html"), "<div id=app></div>").expect("index");
         std::fs::write(
             root.path().join("package.json"),
-            r#"{"scripts":{"build":"vite build"}}"#,
+            r#"{"scripts":{"build":"vite build"},"devDependencies":{"vite":"6"},"packageManager":"npm@10"}"#,
         )
         .expect("package");
         std::fs::write(
@@ -1459,6 +1698,54 @@ mod tests {
         let error = infer_static_web_intent(root.path()).expect_err("custom output needs review");
 
         assert!(error.contains("outDir"));
+    }
+
+    #[test]
+    fn stale_or_ambiguous_package_manager_evidence_requires_manual_setup() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("index.html"), "<div id=app></div>").expect("index");
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"scripts":{"build":"vite build"},"devDependencies":{"vite":"6"}}"#,
+        )
+        .expect("package");
+        std::fs::write(root.path().join("pnpm-lock.yaml"), "lock").expect("pnpm lock");
+        std::fs::write(root.path().join("yarn.lock"), "lock").expect("yarn lock");
+
+        let error = infer_static_web_intent(root.path()).expect_err("ambiguous lockfiles");
+
+        assert!(error.contains("multiple package manager"));
+    }
+
+    #[test]
+    fn declared_package_manager_wins_over_a_stale_lockfile() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("index.html"), "<div id=app></div>").expect("index");
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"packageManager":"yarn@4.5.0","scripts":{"build":"vite build"},"devDependencies":{"vite":"6"}}"#,
+        )
+        .expect("package");
+        std::fs::write(root.path().join("pnpm-lock.yaml"), "stale").expect("stale lock");
+
+        let inferred = infer_static_web_intent(root.path()).expect("declared manager");
+
+        assert_eq!(inferred.intent.build_steps[0].argv, ["yarn", "build"]);
+    }
+
+    #[test]
+    fn bun_static_build_requires_manual_setup_until_builder_provisions_it() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("index.html"), "<div id=app></div>").expect("index");
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"packageManager":"bun@1.2.0","scripts":{"build":"vite build"},"devDependencies":{"vite":"6"}}"#,
+        )
+        .expect("package");
+
+        let error = infer_static_web_intent(root.path()).expect_err("Bun unsupported");
+
+        assert!(error.contains("Bun"));
     }
 
     #[test]
