@@ -105,6 +105,10 @@ pub struct AuthoringStoreMetadata {
 #[serde(deny_unknown_fields)]
 pub struct AuthoringWork {
     pub kind: String,
+    /// Additive operation discriminator emitted by newer staging APIs. The
+    /// existing `kind` field remains the execution authority for this builder.
+    #[serde(default, rename = "purpose")]
+    pub _purpose: Option<String>,
     pub work_id: String,
     /// Per-claim fencing generation for queued builder jobs. Setup leases
     /// predate job fencing and therefore legitimately omit this field.
