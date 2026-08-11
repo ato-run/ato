@@ -13,7 +13,10 @@ mod state;
 mod validate;
 
 pub use connector::{CURRENT_SCHEMA_VERSION, CapsuleDescriptor, ConnectorDef};
-pub use ids::{ConnectorId, ContentRef, IdentifierError, ProtocolId, RecordKindId, StateTypeId};
+pub use ids::{
+    COMPONENT_ID_PATTERN, ConnectorId, ContentRef, IdentifierError, MAX_IDENTIFIER_BYTES,
+    ProtocolId, RecordKindId, StateTypeId, VERSIONED_ID_PATTERN,
+};
 pub use record::{Direction, IoRecord, Payload};
 pub use state::StateRef;
 pub use validate::{DescriptorError, StreamValidationError, StreamValidator};
