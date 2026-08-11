@@ -7,6 +7,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use capsule::protocol_bundle::{PortableCapsule, capture_workspace_state};
+
 fn scratch_dir(prefix: &str) -> tempfile::TempDir {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join(".ato")
@@ -110,5 +112,55 @@ fn capsule_protocol_pty_transfers_replays_and_continues_without_producer() {
         fs::read_to_string(restored.join("main.rs")).expect("restored source"),
         fs::read_to_string(fixture).expect("fixture source"),
         "consumer State must come from the bundle"
+    );
+}
+
+#[test]
+fn capsule_protocol_replay_reports_divergence_from_actual_egress() {
+    let producer = scratch_dir("protocol-diverge-producer-");
+    let transfer = scratch_dir("protocol-diverge-transfer-");
+    let workspace = producer.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(
+        workspace.join("main.rs"),
+        "fn main() { let _: u8 = \"recorded\"; }\n",
+    )
+    .unwrap();
+    let bundle_path = transfer.path().join("diverge.capsule");
+    let captured = run_capture(producer.path(), &bundle_path);
+    assert!(captured.status.success());
+
+    // Replace the State with a different, internally valid State object while
+    // retaining the recorded ingress/egress. Bundle closure and digests remain
+    // valid, so only actual execution can discover the divergence.
+    let changed = scratch_dir("protocol-diverge-state-");
+    fs::write(
+        changed.path().join("main.rs"),
+        "fn main() { let _: bool = 7; }\n",
+    )
+    .unwrap();
+    let (state, object) = capture_workspace_state(changed.path()).unwrap();
+    let mut bundle = PortableCapsule::read(&bundle_path).unwrap();
+    bundle.objects.clear();
+    bundle.objects.insert(state.state_ref.clone(), object);
+    bundle.descriptor.base_state = state;
+    bundle.write(&bundle_path).unwrap();
+
+    let consumer = scratch_dir("protocol-diverge-consumer-");
+    let replayed = Command::new(env!("CARGO_BIN_EXE_ato"))
+        .args(["internal", "capsule-protocol", "replay"])
+        .arg(&bundle_path)
+        .arg("--into")
+        .arg(consumer.path().join("restored"))
+        .arg("--no-continue")
+        .env("ATO_HOME", consumer.path().join("ato-home"))
+        .env("HOME", consumer.path().join("user-home"))
+        .output()
+        .unwrap();
+    assert!(!replayed.status.success());
+    assert!(
+        String::from_utf8_lossy(&replayed.stderr).contains("replay diverged at seq 2"),
+        "stderr: {}",
+        String::from_utf8_lossy(&replayed.stderr)
     );
 }
