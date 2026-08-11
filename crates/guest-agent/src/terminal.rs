@@ -332,13 +332,14 @@ fn open_pty(cols: u16, rows: u16) -> io::Result<(File, File)> {
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
+    let size_ptr = std::ptr::from_mut(&mut size);
     let rc = unsafe {
         libc::openpty(
             &mut master,
             &mut slave,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            &mut size,
+            size_ptr,
         )
     };
     if rc < 0 {

@@ -767,13 +767,14 @@ fn open_smoke_pty(cols: u16, rows: u16) -> std::io::Result<(File, File)> {
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
+    let size_ptr = std::ptr::from_mut(&mut size);
     if unsafe {
         libc::openpty(
             &mut master,
             &mut slave,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            &mut size,
+            size_ptr,
         )
     } < 0
     {
