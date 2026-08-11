@@ -6,15 +6,21 @@ use std::io::{Cursor, Read};
 use std::path::{Component, Path, PathBuf};
 
 use capsule_codec::{
-    decode_descriptor, decode_record_stream, encode_descriptor, encode_record_stream,
+    MAX_RECORDS, decode_descriptor, decode_record_stream, encode_descriptor, encode_record_stream,
 };
 use capsule_protocol::{CapsuleDescriptor, ContentRef, IoRecord, StateRef, StateTypeId};
 use thiserror::Error;
+
+use crate::packers::pack_filter::PackFilter;
+use crate::security::no_secret::scan_credential_material;
 
 const DESCRIPTOR_MEMBER: &str = "protocol/descriptor.cbor";
 const RECORDS_MEMBER: &str = "protocol/records.cborseq";
 const OBJECT_PREFIX: &str = "objects/";
 const MAX_MEMBER_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_ARCHIVE_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_MEMBER_COUNT: usize = 16_384;
+const MAX_OBJECT_COUNT: usize = 16_000;
 
 #[derive(Debug, Error)]
 pub enum ProtocolBundleError {
@@ -41,16 +47,37 @@ impl PortableCapsule {
             .validate()
             .map_err(|error| ProtocolBundleError::Invalid(error.to_string()))?;
         encode_record_stream(&self.descriptor, &self.records)?;
-        let state_bytes = self
-            .objects
-            .get(&self.descriptor.base_state.state_ref)
-            .ok_or_else(|| {
-                ProtocolBundleError::Invalid(format!(
-                    "base state object {} is missing",
-                    self.descriptor.base_state.state_ref
-                ))
+        if self.objects.len() > MAX_OBJECT_COUNT {
+            return Err(ProtocolBundleError::Invalid(format!(
+                "object count exceeds {MAX_OBJECT_COUNT}"
+            )));
+        }
+        if self.records.len() > MAX_RECORDS {
+            return Err(ProtocolBundleError::Invalid(format!(
+                "record count exceeds {MAX_RECORDS}"
+            )));
+        }
+        let mut reachable = vec![&self.descriptor.base_state.state_ref];
+        reachable.extend(
+            self.descriptor
+                .connectors
+                .values()
+                .filter_map(|connector| connector.config_ref.as_ref()),
+        );
+        reachable.extend(
+            self.records
+                .iter()
+                .filter_map(|record| match &record.payload {
+                    capsule_protocol::Payload::Inline(_) => None,
+                    capsule_protocol::Payload::Object(reference) => Some(reference),
+                }),
+        );
+        for reference in reachable {
+            let bytes = self.objects.get(reference).ok_or_else(|| {
+                ProtocolBundleError::Invalid(format!("reachable object {reference} is missing"))
             })?;
-        verify_content_ref(&self.descriptor.base_state.state_ref, state_bytes)?;
+            verify_content_ref(reference, bytes)?;
+        }
         for (reference, bytes) in &self.objects {
             verify_content_ref(reference, bytes)?;
         }
@@ -87,15 +114,39 @@ impl PortableCapsule {
     }
 
     pub fn read(path: &Path) -> Result<Self, ProtocolBundleError> {
+        let archive_size = fs::metadata(path)?.len();
+        if archive_size > MAX_ARCHIVE_BYTES {
+            return Err(ProtocolBundleError::Invalid(format!(
+                "archive exceeds {MAX_ARCHIVE_BYTES}-byte limit"
+            )));
+        }
         let mut descriptor_bytes = None;
         let mut record_bytes = None;
         let mut objects = BTreeMap::new();
+        let mut member_count = 0usize;
+        let mut total_member_bytes = 0u64;
         let mut archive = tar::Archive::new(fs::File::open(path)?);
         for entry in archive.entries()? {
             let mut entry = entry?;
+            member_count += 1;
+            if member_count > MAX_MEMBER_COUNT {
+                return Err(ProtocolBundleError::Invalid(format!(
+                    "member count exceeds {MAX_MEMBER_COUNT}"
+                )));
+            }
             if entry.size() > MAX_MEMBER_BYTES {
                 return Err(ProtocolBundleError::Invalid(format!(
                     "member exceeds {MAX_MEMBER_BYTES}-byte limit"
+                )));
+            }
+            total_member_bytes = total_member_bytes
+                .checked_add(entry.size())
+                .ok_or_else(|| {
+                    ProtocolBundleError::Invalid("aggregate member size overflow".to_owned())
+                })?;
+            if total_member_bytes > MAX_ARCHIVE_BYTES {
+                return Err(ProtocolBundleError::Invalid(format!(
+                    "aggregate member bytes exceed {MAX_ARCHIVE_BYTES}"
                 )));
             }
             let member_path = entry.path()?.into_owned();
@@ -108,6 +159,11 @@ impl PortableCapsule {
                 DESCRIPTOR_MEMBER => set_once(&mut descriptor_bytes, bytes, member)?,
                 RECORDS_MEMBER => set_once(&mut record_bytes, bytes, member)?,
                 _ if member.starts_with(OBJECT_PREFIX) => {
+                    if objects.len() >= MAX_OBJECT_COUNT {
+                        return Err(ProtocolBundleError::Invalid(format!(
+                            "object count exceeds {MAX_OBJECT_COUNT}"
+                        )));
+                    }
                     let suffix = &member[OBJECT_PREFIX.len()..];
                     let (algorithm, digest) = suffix.split_once('/').ok_or_else(|| {
                         ProtocolBundleError::Invalid(format!("invalid object member `{member}`"))
@@ -156,8 +212,10 @@ pub fn capture_workspace_state(
             workspace.display()
         )));
     }
+    let filter = PackFilter::for_portable_state()
+        .map_err(|error| ProtocolBundleError::Invalid(error.to_string()))?;
     let mut entries = Vec::new();
-    collect_workspace_entries(&workspace, &workspace, &mut entries)?;
+    collect_workspace_entries(&workspace, &workspace, &filter, &mut entries)?;
     entries.sort();
 
     let mut archive = tar::Builder::new(Vec::new());
@@ -171,6 +229,15 @@ pub fn capture_workspace_state(
         if metadata.is_dir() {
             append_directory(&mut archive, &relative)?;
         } else if metadata.is_file() {
+            let bytes = fs::read(&source)?;
+            let findings = scan_credential_material(&bytes);
+            if let Some(finding) = findings.first() {
+                return Err(ProtocolBundleError::Invalid(format!(
+                    "credential material detected in `{}` ({})",
+                    relative.display(),
+                    finding.kind
+                )));
+            }
             append_file(&mut archive, &relative, &source, &metadata)?;
         } else {
             return Err(ProtocolBundleError::UnsupportedWorkspaceEntry(relative));
@@ -180,7 +247,7 @@ pub fn capture_workspace_state(
     let reference = content_ref(&bytes);
     Ok((
         StateRef {
-            state_type: StateTypeId::parse("ato.state.workspace-posix@1")
+            state_type: StateTypeId::parse("ato.state.workspace-posix-host@1")
                 .expect("static state type"),
             state_ref: reference,
         },
@@ -193,7 +260,7 @@ pub fn restore_workspace_state(
     object: &[u8],
     destination: &Path,
 ) -> Result<(), ProtocolBundleError> {
-    if state.state_type.as_str() != "ato.state.workspace-posix@1" {
+    if state.state_type.as_str() != "ato.state.workspace-posix-host@1" {
         return Err(ProtocolBundleError::Invalid(format!(
             "unsupported state type {}",
             state.state_type
@@ -234,12 +301,13 @@ pub fn content_ref(bytes: &[u8]) -> ContentRef {
 fn collect_workspace_entries(
     root: &Path,
     directory: &Path,
+    filter: &PackFilter,
     output: &mut Vec<PathBuf>,
 ) -> Result<(), ProtocolBundleError> {
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
         let name = entry.file_name();
-        if directory == root && (name == ".git" || name == ".ato") {
+        if matches!(name.to_str(), Some(".git" | ".ato" | ".tmp")) {
             continue;
         }
         let path = entry.path();
@@ -247,9 +315,12 @@ fn collect_workspace_entries(
             .strip_prefix(root)
             .map_err(|error| ProtocolBundleError::Invalid(error.to_string()))?
             .to_path_buf();
+        if !filter.should_include_file(&relative) {
+            continue;
+        }
         output.push(relative);
         if entry.file_type()?.is_dir() {
-            collect_workspace_entries(root, &path, output)?;
+            collect_workspace_entries(root, &path, filter, output)?;
         }
     }
     Ok(())
@@ -367,7 +438,10 @@ fn validate_relative_path(path: &Path) -> Result<(), ProtocolBundleError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_protocol::{CURRENT_SCHEMA_VERSION, ConnectorDef, ConnectorId, ProtocolId};
+    use capsule_protocol::{
+        CURRENT_SCHEMA_VERSION, ConnectorDef, ConnectorId, Direction, Payload, ProtocolId,
+        RecordKindId,
+    };
 
     #[test]
     fn workspace_state_round_trips_without_original_directory() {
@@ -383,6 +457,31 @@ mod tests {
             fs::read_to_string(destination.join("main.rs")).unwrap(),
             "fn main() {}\n"
         );
+    }
+
+    #[test]
+    fn workspace_state_excludes_known_secret_files_and_rejects_credential_material() {
+        let producer = tempfile::tempdir().unwrap();
+        fs::write(producer.path().join("main.txt"), "safe\n").unwrap();
+        fs::write(producer.path().join(".env"), "TOKEN=do-not-copy\n").unwrap();
+        fs::write(
+            producer.path().join("leak.txt"),
+            "OPENAI_API_KEY=sk-proj-ABCDEFGHIJ1234567890abcdef\n",
+        )
+        .unwrap();
+
+        let error = capture_workspace_state(producer.path()).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("credential material detected"));
+        assert!(message.contains("leak.txt"));
+        assert!(!message.contains("ABCDEFGHIJ1234567890abcdef"));
+
+        fs::remove_file(producer.path().join("leak.txt")).unwrap();
+        let (state, object) = capture_workspace_state(producer.path()).unwrap();
+        let consumer = tempfile::tempdir().unwrap();
+        restore_workspace_state(&state, &object, consumer.path()).unwrap();
+        assert!(consumer.path().join("main.txt").is_file());
+        assert!(!consumer.path().join(".env").exists());
     }
 
     #[test]
@@ -425,11 +524,56 @@ mod tests {
             .unwrap();
         let object = archive.into_inner().unwrap();
         let state = StateRef {
-            state_type: StateTypeId::parse("ato.state.workspace-posix@1").unwrap(),
+            state_type: StateTypeId::parse("ato.state.workspace-posix-host@1").unwrap(),
             state_ref: content_ref(&object),
         };
         let destination = tempfile::tempdir().unwrap();
         let error = restore_workspace_state(&state, &object, destination.path()).unwrap_err();
         assert!(error.to_string().contains("unsupported state member type"));
+    }
+
+    #[test]
+    fn validation_requires_connector_and_record_object_closure() {
+        let state_bytes = b"state".to_vec();
+        let state_ref = content_ref(&state_bytes);
+        let config_ref = content_ref(b"config");
+        let payload_ref = content_ref(b"payload");
+        let connector = ConnectorId::parse("test.object").unwrap();
+        let bundle = PortableCapsule {
+            descriptor: CapsuleDescriptor {
+                schema_version: CURRENT_SCHEMA_VERSION,
+                base_state: StateRef {
+                    state_type: StateTypeId::parse("ato.state.test@1").unwrap(),
+                    state_ref: state_ref.clone(),
+                },
+                connectors: BTreeMap::from([(
+                    connector.clone(),
+                    ConnectorDef {
+                        protocol: ProtocolId::parse("ato.io.test@1").unwrap(),
+                        config_ref: Some(config_ref.clone()),
+                    },
+                )]),
+            },
+            records: vec![IoRecord {
+                seq: 1,
+                offset_ns: None,
+                observed_at_unix_ns: None,
+                connector,
+                direction: Direction::Ingress,
+                kind: RecordKindId::parse("object").unwrap(),
+                payload: Payload::Object(payload_ref.clone()),
+            }],
+            objects: BTreeMap::from([(state_ref, state_bytes)]),
+        };
+
+        let error = bundle.validate().unwrap_err().to_string();
+        assert!(error.contains(config_ref.as_str()));
+
+        let mut without_payload = bundle.clone();
+        without_payload
+            .objects
+            .insert(config_ref, b"config".to_vec());
+        let error = without_payload.validate().unwrap_err().to_string();
+        assert!(error.contains(payload_ref.as_str()));
     }
 }

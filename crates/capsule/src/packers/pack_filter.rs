@@ -87,6 +87,24 @@ pub struct PackFilter {
 }
 
 impl PackFilter {
+    /// Canonical fail-safe filter for portable State capture.
+    ///
+    /// Portable State has no manifest-level include overrides: it starts from
+    /// the same smart exclusions as capsule packing and cannot opt known
+    /// credential files back in.
+    pub fn for_portable_state() -> Result<Self> {
+        Ok(Self {
+            include: None,
+            exclude: build_glob_set(
+                &SMART_DEFAULT_EXCLUDES
+                    .iter()
+                    .map(|pattern| (*pattern).to_owned())
+                    .collect::<Vec<_>>(),
+            )?,
+            profile: PublishProfile::Artifact,
+        })
+    }
+
     pub fn from_manifest_path(manifest_path: &Path) -> Result<Self> {
         let raw = std::fs::read_to_string(manifest_path).map_err(CapsuleError::Io)?;
         let manifest = CapsuleManifest::from_toml(&raw).map_err(|e| {

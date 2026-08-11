@@ -18,6 +18,7 @@ use thiserror::Error;
 
 pub const WIRE_VERSION: u16 = 1;
 pub const MAX_INLINE_PAYLOAD: usize = 1024 * 1024;
+pub const MAX_RECORDS: usize = 1_000_000;
 
 #[derive(Debug, Error)]
 pub enum CodecError {
@@ -98,6 +99,11 @@ pub fn decode_record_stream(
     let mut input = Cursor::new(bytes);
     let mut records = Vec::new();
     while (input.position() as usize) < bytes.len() {
+        if records.len() >= MAX_RECORDS {
+            return Err(CodecError::InvalidValue(format!(
+                "record count exceeds {MAX_RECORDS}"
+            )));
+        }
         let wire: WireIoRecordV1 = ciborium::de::from_reader(&mut input)
             .map_err(|error| CodecError::Decode(error.to_string()))?;
         let record = IoRecord::try_from(wire)?;
@@ -314,7 +320,7 @@ mod tests {
         CapsuleDescriptor {
             schema_version: 1,
             base_state: StateRef {
-                state_type: StateTypeId::parse("ato.state.workspace-posix@1").unwrap(),
+                state_type: StateTypeId::parse("ato.state.workspace-posix-host@1").unwrap(),
                 state_ref: ContentRef::parse(format!("blake3:{}", "12".repeat(32))).unwrap(),
             },
             connectors: BTreeMap::from([(
@@ -404,7 +410,7 @@ mod tests {
             WIRE_VERSION,
             1,
             WireStateRef(
-                "ato.state.workspace-posix@1".to_owned(),
+                "ato.state.workspace-posix-host@1".to_owned(),
                 format!("blake3:{}", "12".repeat(32)),
             ),
             vec![
