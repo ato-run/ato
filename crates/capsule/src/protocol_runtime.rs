@@ -9,6 +9,7 @@ use capsule_protocol::{
     CapsuleDescriptor, ConnectorId, Direction, IoRecord, Payload, RecordKindId,
 };
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use rand::RngCore;
 use thiserror::Error;
 
 const PTY_CONNECTOR_ID: &str = "terminal.main";
@@ -223,7 +224,7 @@ impl PtyConnector {
     fn initialize(&mut self) -> Result<(), ProtocolRuntimeError> {
         const READY_MARKER: &[u8] = b"__ATO_PROTOCOL_READY__";
         // Disable terminal echo before recording. Otherwise the shell echoes
-        // the completion command (including its per-process marker), making an
+        // the completion command (including its random marker), making an
         // otherwise deterministic egress differ between producer and consumer.
         self.writer.write_all(initialization_command())?;
         self.writer.flush()?;
@@ -232,11 +233,8 @@ impl PtyConnector {
     }
 
     pub fn read_command_output(&mut self) -> Result<Vec<u8>, ProtocolRuntimeError> {
-        let marker = format!(
-            "__ATO_PROTOCOL_DONE_{}__",
-            self.child.process_id().unwrap_or(0)
-        );
-        let command = completion_command(self.child.process_id().unwrap_or(0));
+        let marker = random_completion_marker();
+        let command = completion_command(&marker);
         self.writer.write_all(command.as_bytes())?;
         self.writer.flush()?;
         let output = read_until_marker(&self.output_receiver, marker.as_bytes())?;
@@ -372,6 +370,16 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
+fn random_completion_marker() -> String {
+    let mut nonce = [0_u8; 16];
+    rand::thread_rng().fill_bytes(&mut nonce);
+    completion_marker(nonce)
+}
+
+fn completion_marker(nonce: [u8; 16]) -> String {
+    format!("__ATO_PROTOCOL_DONE_{}__", hex::encode(nonce))
+}
+
 #[cfg(unix)]
 fn shell_join(argv: &[String]) -> String {
     argv.iter()
@@ -412,13 +420,13 @@ fn initialization_command() -> &'static [u8] {
 }
 
 #[cfg(unix)]
-fn completion_command(process_id: u32) -> String {
-    format!("printf '\\n__ATO_PROTOCOL_%s__\\n' 'DONE_{process_id}'\n")
+fn completion_command(marker: &str) -> String {
+    format!("printf '\\n%s\\n' '{marker}'\n")
 }
 
 #[cfg(windows)]
-fn completion_command(process_id: u32) -> String {
-    format!("echo __ATO_PROTOCOL_DONE_{process_id}__\r\n")
+fn completion_command(marker: &str) -> String {
+    format!("echo {marker}\r\n")
 }
 
 #[cfg(unix)]
@@ -513,5 +521,48 @@ mod tests {
         assert_eq!(outcome.records_processed, 2);
         assert_eq!(connector.injected, 1);
         assert_eq!(connector.observed, 1);
+    }
+
+    #[test]
+    fn empty_record_stream_is_a_zero_step_replay() {
+        let descriptor = CapsuleDescriptor {
+            schema_version: 1,
+            base_state: StateRef {
+                state_type: StateTypeId::parse("ato.state.test@1").unwrap(),
+                state_ref: capsule_protocol::ContentRef::parse(format!(
+                    "blake3:{}",
+                    "00".repeat(32)
+                ))
+                .unwrap(),
+            },
+            connectors: BTreeMap::from([(
+                ConnectorId::parse("test.echo").unwrap(),
+                ConnectorDef {
+                    protocol: ProtocolId::parse("ato.io.test.echo@1").unwrap(),
+                    config_ref: None,
+                },
+            )]),
+        };
+        let mut connector = EchoConnector {
+            pending: None,
+            injected: 0,
+            observed: 0,
+        };
+
+        let outcome = ReplayEngine::replay(&descriptor, &[], &mut connector).unwrap();
+
+        assert_eq!(outcome.records_processed, 0);
+        assert_eq!(connector.injected, 0);
+        assert_eq!(connector.observed, 0);
+    }
+
+    #[test]
+    fn completion_marker_uses_the_full_128_bit_nonce() {
+        let marker = completion_marker([0xab; 16]);
+        assert_eq!(
+            marker,
+            "__ATO_PROTOCOL_DONE_abababababababababababababababab__"
+        );
+        assert_ne!(marker, completion_marker([0xac; 16]));
     }
 }
