@@ -79,6 +79,23 @@ const SMART_DEFAULT_EXCLUDES: &[&str] = &[
     "**/.pypirc",
 ];
 
+/// Credential stores and local databases are never portable State. These are
+/// stricter than normal artifact packing because a State transfer captures
+/// live developer-machine contents rather than declared build inputs.
+const PORTABLE_STATE_SECRET_EXCLUDES: &[&str] = &[
+    ".ssh/**",
+    "**/.ssh/**",
+    ".aws/**",
+    "**/.aws/**",
+    ".config/gcloud/**",
+    "**/.config/gcloud/**",
+    ".kube/config",
+    "**/.kube/config",
+    "**/*.db",
+    "**/*.sqlite",
+    "**/*.sqlite3",
+];
+
 #[derive(Debug, Clone)]
 pub struct PackFilter {
     include: Option<GlobSet>,
@@ -93,14 +110,14 @@ impl PackFilter {
     /// the same smart exclusions as capsule packing and cannot opt known
     /// credential files back in.
     pub fn for_portable_state() -> Result<Self> {
+        let patterns = SMART_DEFAULT_EXCLUDES
+            .iter()
+            .chain(PORTABLE_STATE_SECRET_EXCLUDES)
+            .map(|pattern| (*pattern).to_owned())
+            .collect::<Vec<_>>();
         Ok(Self {
             include: None,
-            exclude: build_glob_set(
-                &SMART_DEFAULT_EXCLUDES
-                    .iter()
-                    .map(|pattern| (*pattern).to_owned())
-                    .collect::<Vec<_>>(),
-            )?,
+            exclude: build_glob_set(&patterns)?,
             profile: PublishProfile::Artifact,
         })
     }
