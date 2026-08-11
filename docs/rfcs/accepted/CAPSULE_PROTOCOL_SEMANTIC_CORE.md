@@ -95,6 +95,13 @@ State type such as `ato.state.ready-state@1` whose restore contract owns every
 replay-relevant runtime influence, or an equivalently pinned Ato-managed
 runtime.
 
+CI's normative portability acceptance uses the Ato-managed
+`ato.state.fixture-machine@1` runtime in two separate jobs. Its versioned State
+semantics close computation inside Ato, the only transferred input is the
+validated `.capsule`, replay compares actual egress, and the restored machine
+accepts new input after replay. The PTY/rustc test remains a separate
+host-bound integration smoke and makes no cross-environment portability claim.
+
 ## 5. Compatibility surface
 
 The initial schema version is 1. Valid streams may be empty, start at any
