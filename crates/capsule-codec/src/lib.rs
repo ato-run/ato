@@ -176,16 +176,17 @@ impl TryFrom<WireDescriptorV1> for CapsuleDescriptor {
     fn try_from(value: WireDescriptorV1) -> Result<Self, Self::Error> {
         validate_wire_version(value.0)?;
         let mut connectors = BTreeMap::new();
+        let mut previous_id = None;
         for (id, definition) in value.3 {
             let id = ConnectorId::parse(id).map_err(invalid_identifier)?;
-            if connectors
-                .insert(id.clone(), ConnectorDef::try_from(definition)?)
-                .is_some()
-            {
+            if previous_id.as_ref().is_some_and(|previous| previous >= &id) {
                 return Err(CodecError::InvalidValue(format!(
-                    "duplicate connector id `{id}`"
+                    "connector id `{id}` is not in strictly ascending order"
                 )));
             }
+            let definition = ConnectorDef::try_from(definition)?;
+            previous_id = Some(id.clone());
+            connectors.insert(id, definition);
         }
         let descriptor = Self {
             schema_version: value.1,
@@ -427,7 +428,43 @@ mod tests {
         let bytes = encode_item(&wire).unwrap();
         assert!(matches!(
             decode_descriptor(&bytes),
-            Err(CodecError::InvalidValue(message)) if message.contains("duplicate connector")
+            Err(CodecError::InvalidValue(message)) if message.contains("strictly ascending")
         ));
+    }
+
+    #[test]
+    fn unsorted_wire_connectors_are_rejected() {
+        let wire = WireDescriptorV1(
+            WIRE_VERSION,
+            1,
+            WireStateRef(
+                "ato.state.workspace-posix-host@1".to_owned(),
+                format!("blake3:{}", "12".repeat(32)),
+            ),
+            vec![
+                (
+                    "terminal.z".to_owned(),
+                    WireConnectorDef("ato.io.pty@1".to_owned(), None),
+                ),
+                (
+                    "terminal.a".to_owned(),
+                    WireConnectorDef("ato.io.pty@1".to_owned(), None),
+                ),
+            ],
+        );
+        let bytes = encode_item(&wire).unwrap();
+        assert!(matches!(
+            decode_descriptor(&bytes),
+            Err(CodecError::InvalidValue(message)) if message.contains("strictly ascending")
+        ));
+    }
+
+    #[test]
+    fn normative_cddl_identifier_patterns_match_the_domain_contract() {
+        let cddl = include_str!("../../../docs/rfcs/accepted/CAPSULE_CBOR_V1.cddl");
+        let normalized_patterns = cddl.replace("\\\\", "\\");
+        assert!(normalized_patterns.contains(capsule_protocol::COMPONENT_ID_PATTERN));
+        assert!(normalized_patterns.contains(capsule_protocol::VERSIONED_ID_PATTERN));
+        assert!(cddl.contains("strictly ascending connector-id byte order"));
     }
 }
