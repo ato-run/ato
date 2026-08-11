@@ -66,9 +66,12 @@ may report divergence when actual and recorded observations disagree. Replay
 may leave the connector attached and return control to a user, producing
 interactive continuation without introducing another semantic primitive.
 
-No I/O does not imply no state transition. It means only that, without
-unrecorded external information, evolution is closed under the state type's
-execution semantics.
+Historical replay advances State only as required to process the recorded I/O
+sequence. An empty record stream is a zero-step replay: State is unchanged and
+no Connector is invoked. Autonomous evolution after historical replay belongs
+to continuation, not historical replay. A State type that requires an implicit
+clock, scheduler step, or other influence to reproduce history must model that
+influence as recorded I/O rather than adding another Core primitive.
 
 ## 4. Domain and encoding boundary
 
@@ -79,6 +82,13 @@ workspace-crate dependency.
 Portable encoding is a separate layer. Semantic records are not encoded frames;
 wire DTOs must convert explicitly to and from domain values. Large payloads use
 algorithm-tagged content references rather than unbounded inline bytes.
+
+All component identifiers use lowercase ASCII namespace segments separated by
+`.`. A segment starts and ends with a lowercase letter or digit and may contain
+`-` or `_` internally. Versioned identifiers contain at least two segments and
+end in `@<positive-decimal-version>` without a leading zero. The 255-byte limit
+applies to the complete identifier, including `@version`. Descriptor connector
+entries are encoded in strictly ascending `ConnectorId` byte order.
 
 The normative v1 wire schema is `CAPSULE_CBOR_V1.cddl`. A descriptor is one
 CBOR item and its record stream is an RFC 8742 CBOR Sequence. Tuple positions,
