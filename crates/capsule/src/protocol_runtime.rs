@@ -225,8 +225,7 @@ impl PtyConnector {
         // Disable terminal echo before recording. Otherwise the shell echoes
         // the completion command (including its per-process marker), making an
         // otherwise deterministic egress differ between producer and consumer.
-        self.writer
-            .write_all(b"stty -echo\nprintf '__ATO_PROTOCOL_%s__\\n' 'READY'\n")?;
+        self.writer.write_all(initialization_command())?;
         self.writer.flush()?;
         let _ = read_until_marker(&self.output_receiver, READY_MARKER)?;
         Ok(())
@@ -237,14 +236,11 @@ impl PtyConnector {
             "__ATO_PROTOCOL_DONE_{}__",
             self.child.process_id().unwrap_or(0)
         );
-        let command = format!(
-            "printf '\\n__ATO_PROTOCOL_%s__\\n' 'DONE_{}'\n",
-            self.child.process_id().unwrap_or(0)
-        );
+        let command = completion_command(self.child.process_id().unwrap_or(0));
         self.writer.write_all(command.as_bytes())?;
         self.writer.flush()?;
         let output = read_until_marker(&self.output_receiver, marker.as_bytes())?;
-        Ok(normalize_pty_output(&output))
+        Ok(output)
     }
 
     fn take_pending_output(&mut self) -> Result<Vec<u8>, ProtocolRuntimeError> {
@@ -376,18 +372,53 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-fn normalize_pty_output(bytes: &[u8]) -> Vec<u8> {
-    String::from_utf8_lossy(bytes)
-        .replace("\r\n", "\n")
-        .replace('\r', "\n")
-        .into_bytes()
-}
-
+#[cfg(unix)]
 fn shell_join(argv: &[String]) -> String {
     argv.iter()
         .map(|argument| format!("'{}'", argument.replace('\'', "'\\''")))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[cfg(windows)]
+fn shell_join(argv: &[String]) -> String {
+    argv.iter()
+        .map(|argument| {
+            let escaped = argument
+                .replace('^', "^^")
+                .replace('&', "^&")
+                .replace('|', "^|")
+                .replace('<', "^<")
+                .replace('>', "^>")
+                .replace('(', "^(")
+                .replace(')', "^)")
+                .replace('%', "^%")
+                .replace('!', "^^!")
+                .replace('"', "\\\"");
+            format!("\"{escaped}\"")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(unix)]
+fn initialization_command() -> &'static [u8] {
+    b"stty -echo\nprintf '__ATO_PROTOCOL_%s__\\n' 'READY'\n"
+}
+
+#[cfg(windows)]
+fn initialization_command() -> &'static [u8] {
+    b"@echo off\r\necho __ATO_PROTOCOL_READY__\r\n"
+}
+
+#[cfg(unix)]
+fn completion_command(process_id: u32) -> String {
+    format!("printf '\\n__ATO_PROTOCOL_%s__\\n' 'DONE_{process_id}'\n")
+}
+
+#[cfg(windows)]
+fn completion_command(process_id: u32) -> String {
+    format!("echo __ATO_PROTOCOL_DONE_{process_id}__\r\n")
 }
 
 #[cfg(unix)]
