@@ -8,4 +8,5 @@
 pub mod static_web_bundle;
 pub mod static_web_emit;
 pub mod static_web_output;
+pub mod static_web_replay_bridge;
 pub mod static_web_transport;
