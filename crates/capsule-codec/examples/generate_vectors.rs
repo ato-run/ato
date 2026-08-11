@@ -10,7 +10,7 @@ fn main() {
     let descriptor = CapsuleDescriptor {
         schema_version: 1,
         base_state: StateRef {
-            state_type: StateTypeId::parse("ato.state.workspace-posix@1").unwrap(),
+            state_type: StateTypeId::parse("ato.state.workspace-posix-host@1").unwrap(),
             state_ref: ContentRef::parse(format!("blake3:{}", "12".repeat(32))).unwrap(),
         },
         connectors: BTreeMap::from([(
