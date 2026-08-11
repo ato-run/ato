@@ -285,7 +285,10 @@ fn media_type_for(path: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::static_web_output::{StaticWebOutputPlan, extract_static_web_output};
+    use crate::static_web_output::{
+        StaticWebOutputPlan, extract_static_web_output, extract_static_web_output_with_replay,
+    };
+    use crate::static_web_replay_bridge::REPLAY_BRIDGE_PATH;
 
     fn plan() -> StaticWebOutputPlan {
         StaticWebOutputPlan {
@@ -336,6 +339,25 @@ mod tests {
             !fs::read(one.bundle_root.join("manifest.json"))
                 .unwrap()
                 .ends_with(b"\n")
+        );
+    }
+
+    #[test]
+    fn bundle_hashes_the_instrumented_replay_bytes() {
+        let image = fixture_root();
+        let extracted = extract_static_web_output_with_replay(image.path(), &plan(), true).unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let produced =
+            produce_static_web_bundle(&plan(), extracted.output_root(), parent.path(), &[])
+                .unwrap();
+        let manifest: StaticWebManifestV1 =
+            serde_json::from_slice(&produced.manifest_bytes).unwrap();
+        assert!(manifest.files.contains_key(REPLAY_BRIDGE_PATH));
+        let entry = manifest.files.get("index.html").unwrap();
+        let instrumented = fs::read(extracted.output_root().join("index.html")).unwrap();
+        assert_eq!(
+            entry.blob,
+            format!("sha256:{:x}", Sha256::digest(instrumented))
         );
     }
 

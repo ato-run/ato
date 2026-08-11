@@ -15,6 +15,10 @@ use capsule::contract::static_web_manifest::{
 };
 use tempfile::TempDir;
 
+use crate::static_web_replay_bridge::{
+    REPLAY_BRIDGE_PATH, REPLAY_BRIDGE_SCRIPT_TAG, REPLAY_BRIDGE_V0_JS,
+};
+
 /// An explicit materialization decision for immutable static output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StaticWebOutputPlan {
@@ -77,6 +81,18 @@ pub fn extract_static_web_output(
     image_root: &Path,
     plan: &StaticWebOutputPlan,
 ) -> Result<ExtractedStaticWebOutput> {
+    let replay_enabled =
+        std::env::var("STATIC_WEB_REPLAY_BRIDGE_ENABLED").is_ok_and(|value| value == "true");
+    extract_static_web_output_with_replay(image_root, plan, replay_enabled)
+}
+
+/// Explicit variant used by tests and staging orchestration. `false` preserves
+/// the extracted bytes exactly; no replay path or HTML mutation is created.
+pub fn extract_static_web_output_with_replay(
+    image_root: &Path,
+    plan: &StaticWebOutputPlan,
+    replay_enabled: bool,
+) -> Result<ExtractedStaticWebOutput> {
     plan.validate()?;
     let source = image_root.join(&plan.image_output_root);
     let source_meta = fs::symlink_metadata(&source)
@@ -91,10 +107,42 @@ pub fn extract_static_web_output(
         .context("create static web extraction workspace")?;
     let output_root = workspace.path().join("output");
     copy_tree_no_links(&source, &output_root)?;
+    if replay_enabled {
+        instrument_replay_bridge(&output_root, &plan.entry_path)?;
+    }
     Ok(ExtractedStaticWebOutput {
         _workspace: workspace,
         output_root,
     })
+}
+
+fn instrument_replay_bridge(output_root: &Path, entry_path: &str) -> Result<()> {
+    let bridge_path = output_root.join(REPLAY_BRIDGE_PATH);
+    if bridge_path.exists() {
+        bail!("static output already contains reserved path {REPLAY_BRIDGE_PATH}");
+    }
+    let entry = output_root.join(entry_path);
+    let html = fs::read_to_string(&entry)
+        .with_context(|| format!("read replay entry HTML {}", entry.display()))?;
+    let insertion = find_replay_insertion(&html);
+    let mut instrumented = String::with_capacity(html.len() + REPLAY_BRIDGE_SCRIPT_TAG.len());
+    instrumented.push_str(&html[..insertion]);
+    instrumented.push_str(REPLAY_BRIDGE_SCRIPT_TAG);
+    instrumented.push_str(&html[insertion..]);
+    fs::create_dir_all(bridge_path.parent().expect("bridge path has parent"))
+        .context("create reserved replay bridge directory")?;
+    fs::write(&bridge_path, REPLAY_BRIDGE_V0_JS).context("write replay bridge adapter")?;
+    fs::write(&entry, instrumented)
+        .with_context(|| format!("write instrumented entry HTML {}", entry.display()))?;
+    Ok(())
+}
+
+fn find_replay_insertion(html: &str) -> usize {
+    let lower = html.to_ascii_lowercase();
+    lower
+        .find("<script")
+        .or_else(|| lower.find("</head>"))
+        .unwrap_or(0)
 }
 
 fn validate_output_root(path: &Path) -> Result<()> {
@@ -205,6 +253,59 @@ mod tests {
         let workspace = extracted.output_root().parent().unwrap().to_path_buf();
         drop(extracted);
         assert!(!workspace.exists());
+    }
+
+    #[test]
+    fn replay_flag_off_preserves_output_bytes_and_adds_nothing() {
+        let image = tempfile::tempdir().unwrap();
+        let output = image.path().join("srv/app/dist");
+        fs::create_dir_all(&output).unwrap();
+        let original = b"<html><script src=\"application.js\"></script></html>";
+        fs::write(output.join("index.html"), original).unwrap();
+
+        let extracted =
+            extract_static_web_output_with_replay(image.path(), &plan(), false).unwrap();
+        assert_eq!(
+            fs::read(extracted.output_root().join("index.html")).unwrap(),
+            original
+        );
+        assert!(!extracted.output_root().join(REPLAY_BRIDGE_PATH).exists());
+    }
+
+    #[test]
+    fn replay_flag_on_injects_once_before_application_and_leaves_source_untouched() {
+        let image = tempfile::tempdir().unwrap();
+        let output = image.path().join("srv/app/dist");
+        fs::create_dir_all(&output).unwrap();
+        let original =
+            "<html><head></head><body><script src=\"application.js\"></script></body></html>";
+        fs::write(output.join("index.html"), original).unwrap();
+
+        let extracted = extract_static_web_output_with_replay(image.path(), &plan(), true).unwrap();
+        let html = fs::read_to_string(extracted.output_root().join("index.html")).unwrap();
+        assert_eq!(html.matches(REPLAY_BRIDGE_SCRIPT_TAG).count(), 1);
+        assert!(
+            html.find(REPLAY_BRIDGE_SCRIPT_TAG).unwrap() < html.find("application.js").unwrap()
+        );
+        assert_eq!(
+            fs::read_to_string(output.join("index.html")).unwrap(),
+            original
+        );
+        assert_eq!(
+            fs::read_to_string(extracted.output_root().join(REPLAY_BRIDGE_PATH)).unwrap(),
+            REPLAY_BRIDGE_V0_JS
+        );
+    }
+
+    #[test]
+    fn replay_instrumentation_refuses_reserved_path_collision() {
+        let image = tempfile::tempdir().unwrap();
+        let output = image.path().join("srv/app/dist");
+        fs::create_dir_all(output.join("__ato")).unwrap();
+        fs::write(output.join("index.html"), "<script></script>").unwrap();
+        fs::write(output.join(REPLAY_BRIDGE_PATH), "owned by app").unwrap();
+        let error = extract_static_web_output_with_replay(image.path(), &plan(), true).unwrap_err();
+        assert!(error.to_string().contains("reserved path"));
     }
 
     #[test]
