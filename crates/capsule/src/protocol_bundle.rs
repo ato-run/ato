@@ -35,6 +35,12 @@ const BUNDLE_LIMITS: BundleLimits = BundleLimits {
     member_count: MAX_MEMBER_COUNT,
 };
 
+const STATE_LIMITS: BundleLimits = BundleLimits {
+    member_bytes: MAX_MEMBER_BYTES,
+    archive_bytes: MAX_MEMBER_BYTES,
+    member_count: MAX_MEMBER_COUNT,
+};
+
 #[derive(Debug)]
 struct MemberLimitValidator {
     limits: BundleLimits,
@@ -292,12 +298,7 @@ pub fn capture_workspace_state(
 
     let mut archive = tar::Builder::new(Vec::new());
     archive.mode(tar::HeaderMode::Deterministic);
-    let state_limits = BundleLimits {
-        member_bytes: MAX_MEMBER_BYTES,
-        archive_bytes: MAX_MEMBER_BYTES,
-        member_count: MAX_MEMBER_COUNT,
-    };
-    let mut limits = MemberLimitValidator::new(state_limits);
+    let mut limits = MemberLimitValidator::new(STATE_LIMITS);
     for relative in entries {
         let source = workspace.join(&relative);
         let metadata = fs::symlink_metadata(&source)?;
@@ -369,7 +370,9 @@ pub fn restore_workspace_state(
             state.state_type
         )));
     }
+    validate_workspace_state_size(object)?;
     verify_content_ref(&state.state_ref, object)?;
+    validate_workspace_state_archive(object)?;
     if destination.exists() && destination.read_dir()?.next().is_some() {
         return Err(ProtocolBundleError::Invalid(format!(
             "restore destination is not empty: {}",
@@ -392,6 +395,37 @@ pub fn restore_workspace_state(
             )));
         }
         entry.unpack_in(destination)?;
+    }
+    Ok(())
+}
+
+fn validate_workspace_state_size(object: &[u8]) -> Result<(), ProtocolBundleError> {
+    if object.len() as u64 > STATE_LIMITS.archive_bytes {
+        return Err(ProtocolBundleError::Invalid(format!(
+            "state archive exceeds {}-byte limit",
+            STATE_LIMITS.archive_bytes
+        )));
+    }
+    Ok(())
+}
+
+fn validate_workspace_state_archive(object: &[u8]) -> Result<(), ProtocolBundleError> {
+    let mut limits = MemberLimitValidator::new(STATE_LIMITS);
+    let mut archive = tar::Archive::new(Cursor::new(object));
+    for entry in archive.entries()? {
+        let entry = entry?;
+        limits.accept(entry.size())?;
+        let path = entry.path()?.into_owned();
+        validate_relative_path(&path)?;
+        if !matches!(
+            entry.header().entry_type(),
+            tar::EntryType::Regular | tar::EntryType::Directory
+        ) {
+            return Err(ProtocolBundleError::Invalid(format!(
+                "unsupported state member type for `{}`",
+                path.display()
+            )));
+        }
     }
     Ok(())
 }
@@ -653,6 +687,31 @@ mod tests {
         let destination = tempfile::tempdir().unwrap();
         let error = restore_workspace_state(&state, &object, destination.path()).unwrap_err();
         assert!(error.to_string().contains("unsupported state member type"));
+    }
+
+    #[test]
+    fn restore_rejects_state_archives_with_too_many_entries_before_unpacking() {
+        let mut archive = tar::Builder::new(Vec::new());
+        for index in 0..=MAX_MEMBER_COUNT {
+            let mut header = tar::Header::new_gnu();
+            normalize_header(&mut header, 0, 0o644, tar::EntryType::Regular);
+            archive
+                .append_data(&mut header, format!("files/{index:05}"), std::io::empty())
+                .unwrap();
+        }
+        let object = archive.into_inner().unwrap();
+        let state = StateRef {
+            state_type: StateTypeId::parse("ato.state.workspace-posix-host@1").unwrap(),
+            state_ref: content_ref(&object),
+        };
+        let destination = tempfile::tempdir().unwrap();
+
+        let error = restore_workspace_state(&state, &object, destination.path())
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("member count exceeds"));
+        assert_eq!(destination.path().read_dir().unwrap().count(), 0);
     }
 
     #[test]
