@@ -169,16 +169,18 @@ impl TryFrom<WireDescriptorV1> for CapsuleDescriptor {
 
     fn try_from(value: WireDescriptorV1) -> Result<Self, Self::Error> {
         validate_wire_version(value.0)?;
-        let connectors = value
-            .3
-            .into_iter()
-            .map(|(id, definition)| {
-                Ok((
-                    ConnectorId::parse(id).map_err(invalid_identifier)?,
-                    ConnectorDef::try_from(definition)?,
-                ))
-            })
-            .collect::<Result<BTreeMap<_, _>, CodecError>>()?;
+        let mut connectors = BTreeMap::new();
+        for (id, definition) in value.3 {
+            let id = ConnectorId::parse(id).map_err(invalid_identifier)?;
+            if connectors
+                .insert(id.clone(), ConnectorDef::try_from(definition)?)
+                .is_some()
+            {
+                return Err(CodecError::InvalidValue(format!(
+                    "duplicate connector id `{id}`"
+                )));
+            }
+        }
         let descriptor = Self {
             schema_version: value.1,
             base_state: StateRef::try_from(value.2)?,
@@ -393,6 +395,33 @@ mod tests {
         assert!(matches!(
             encode_record_stream(&descriptor(), &records),
             Err(CodecError::InlinePayloadTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn duplicate_wire_connector_is_rejected_instead_of_overwritten() {
+        let wire = WireDescriptorV1(
+            WIRE_VERSION,
+            1,
+            WireStateRef(
+                "ato.state.workspace-posix@1".to_owned(),
+                format!("blake3:{}", "12".repeat(32)),
+            ),
+            vec![
+                (
+                    "terminal.main".to_owned(),
+                    WireConnectorDef("ato.io.pty@1".to_owned(), None),
+                ),
+                (
+                    "terminal.main".to_owned(),
+                    WireConnectorDef("ato.io.pty@1".to_owned(), None),
+                ),
+            ],
+        );
+        let bytes = encode_item(&wire).unwrap();
+        assert!(matches!(
+            decode_descriptor(&bytes),
+            Err(CodecError::InvalidValue(message)) if message.contains("duplicate connector")
         ));
     }
 }

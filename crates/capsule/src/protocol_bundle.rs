@@ -212,6 +212,15 @@ pub fn restore_workspace_state(
         let mut entry = entry?;
         let path = entry.path()?.into_owned();
         validate_relative_path(&path)?;
+        if !matches!(
+            entry.header().entry_type(),
+            tar::EntryType::Regular | tar::EntryType::Directory
+        ) {
+            return Err(ProtocolBundleError::Invalid(format!(
+                "unsupported state member type for `{}`",
+                path.display()
+            )));
+        }
         entry.unpack_in(destination)?;
     }
     Ok(())
@@ -402,5 +411,25 @@ mod tests {
         let decoded = PortableCapsule::read(&output).unwrap();
         assert_eq!(decoded.descriptor, bundle.descriptor);
         assert_eq!(decoded.objects, bundle.objects);
+    }
+
+    #[test]
+    fn restore_rejects_link_entries_even_when_object_digest_is_valid() {
+        let mut archive = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        normalize_header(&mut header, 0, 0o777, tar::EntryType::Symlink);
+        header.set_link_name("../outside").unwrap();
+        header.set_cksum();
+        archive
+            .append_data(&mut header, "link", std::io::empty())
+            .unwrap();
+        let object = archive.into_inner().unwrap();
+        let state = StateRef {
+            state_type: StateTypeId::parse("ato.state.workspace-posix@1").unwrap(),
+            state_ref: content_ref(&object),
+        };
+        let destination = tempfile::tempdir().unwrap();
+        let error = restore_workspace_state(&state, &object, destination.path()).unwrap_err();
+        assert!(error.to_string().contains("unsupported state member type"));
     }
 }
