@@ -1,6 +1,7 @@
 ---
 title: "Capsule v1 Execution Identity and Snapshot Model"
-status: accepted
+status: superseded
+superseded_by: CAPSULE_PROTOCOL_SEMANTIC_CORE.md
 date: 2026-07-21
 author: "@egamikohsuke"
 ssot:
@@ -67,8 +68,10 @@ The governing sentence is:
 
 ## 2. Status and scope
 
-This document is the accepted design authority for the Capsule v1 execution
-model. The accepted v0.3 Capsule specification remains authoritative for the
+This document is retained as an implementation-compatibility reference and is
+no longer the semantic design authority. It is superseded by
+[`CAPSULE_PROTOCOL_SEMANTIC_CORE.md`](CAPSULE_PROTOCOL_SEMANTIC_CORE.md).
+The accepted v0.3 Capsule specification remains authoritative for the
 currently shipped `capsule.toml` parser until the v1 authoring schema is wired
 into the CLI. Legacy Ready-State artifacts remain governed by their existing
 wire contract and the migration rules in section 16.3.

@@ -1,0 +1,14 @@
+[package]
+name = "capsule-protocol"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MPL-2.0"
+description = "Dependency-free semantic core for Capsule State and I/O"
+homepage = "https://ato.run"
+repository = "https://github.com/ato-run/ato"
+
+[package.metadata.dist]
+dist = false
+
+[dependencies]
+thiserror = "2.0"
