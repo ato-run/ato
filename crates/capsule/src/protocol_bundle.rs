@@ -464,6 +464,8 @@ mod tests {
         let producer = tempfile::tempdir().unwrap();
         fs::write(producer.path().join("main.txt"), "safe\n").unwrap();
         fs::write(producer.path().join(".env"), "TOKEN=do-not-copy\n").unwrap();
+        fs::write(producer.path().join(".npmrc"), "//registry/:_authToken=x\n").unwrap();
+        fs::write(producer.path().join("local.sqlite3"), b"local database").unwrap();
         fs::write(
             producer.path().join("leak.txt"),
             "OPENAI_API_KEY=sk-proj-ABCDEFGHIJ1234567890abcdef\n",
@@ -482,6 +484,8 @@ mod tests {
         restore_workspace_state(&state, &object, consumer.path()).unwrap();
         assert!(consumer.path().join("main.txt").is_file());
         assert!(!consumer.path().join(".env").exists());
+        assert!(!consumer.path().join(".npmrc").exists());
+        assert!(!consumer.path().join("local.sqlite3").exists());
     }
 
     #[test]
