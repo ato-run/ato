@@ -84,7 +84,11 @@ pub fn scan_credential_material(bytes: &[u8]) -> Vec<CredentialFinding> {
                 offset += 1;
                 continue;
             }
-            let boundary = offset == 0 || !is_token_byte(bytes[offset - 1]);
+            let boundary = offset == 0
+                || !matches!(
+                    bytes[offset - 1],
+                    b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-' | b'.'
+                );
             let mut end = offset + prefix.len();
             while end < bytes.len() && is_token_byte(bytes[end]) {
                 end += 1;
