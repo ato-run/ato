@@ -22,6 +22,87 @@ const MAX_ARCHIVE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_MEMBER_COUNT: usize = 16_384;
 const MAX_OBJECT_COUNT: usize = 16_000;
 
+#[derive(Debug, Clone, Copy)]
+struct BundleLimits {
+    member_bytes: u64,
+    archive_bytes: u64,
+    member_count: usize,
+}
+
+const BUNDLE_LIMITS: BundleLimits = BundleLimits {
+    member_bytes: MAX_MEMBER_BYTES,
+    archive_bytes: MAX_ARCHIVE_BYTES,
+    member_count: MAX_MEMBER_COUNT,
+};
+
+#[derive(Debug)]
+struct MemberLimitValidator {
+    limits: BundleLimits,
+    member_count: usize,
+    total_member_bytes: u64,
+    projected_archive_bytes: u64,
+}
+
+impl MemberLimitValidator {
+    fn new(limits: BundleLimits) -> Self {
+        Self {
+            limits,
+            member_count: 0,
+            total_member_bytes: 0,
+            projected_archive_bytes: 1024,
+        }
+    }
+
+    fn accept(&mut self, member_bytes: u64) -> Result<(), ProtocolBundleError> {
+        self.member_count = self
+            .member_count
+            .checked_add(1)
+            .ok_or_else(|| ProtocolBundleError::Invalid("member count overflow".to_owned()))?;
+        if self.member_count > self.limits.member_count {
+            return Err(ProtocolBundleError::Invalid(format!(
+                "member count exceeds {}",
+                self.limits.member_count
+            )));
+        }
+        if member_bytes > self.limits.member_bytes {
+            return Err(ProtocolBundleError::Invalid(format!(
+                "member exceeds {}-byte limit",
+                self.limits.member_bytes
+            )));
+        }
+        self.total_member_bytes = self
+            .total_member_bytes
+            .checked_add(member_bytes)
+            .ok_or_else(|| {
+                ProtocolBundleError::Invalid("aggregate member size overflow".to_owned())
+            })?;
+        if self.total_member_bytes > self.limits.archive_bytes {
+            return Err(ProtocolBundleError::Invalid(format!(
+                "aggregate member bytes exceed {}",
+                self.limits.archive_bytes
+            )));
+        }
+        let padded_bytes = member_bytes
+            .checked_add(511)
+            .map(|bytes| bytes / 512 * 512)
+            .ok_or_else(|| ProtocolBundleError::Invalid("member size overflow".to_owned()))?;
+        self.projected_archive_bytes = self
+            .projected_archive_bytes
+            .checked_add(512)
+            .and_then(|bytes| bytes.checked_add(padded_bytes))
+            .ok_or_else(|| {
+                ProtocolBundleError::Invalid("projected archive size overflow".to_owned())
+            })?;
+        if self.projected_archive_bytes > self.limits.archive_bytes {
+            return Err(ProtocolBundleError::Invalid(format!(
+                "archive exceeds {}-byte limit",
+                self.limits.archive_bytes
+            )));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ProtocolBundleError {
     #[error("bundle I/O failed: {0}")]
@@ -43,10 +124,25 @@ pub struct PortableCapsule {
 
 impl PortableCapsule {
     pub fn validate(&self) -> Result<(), ProtocolBundleError> {
-        self.descriptor
-            .validate()
-            .map_err(|error| ProtocolBundleError::Invalid(error.to_string()))?;
-        encode_record_stream(&self.descriptor, &self.records)?;
+        let _ = self.validated_wire_members()?;
+        Ok(())
+    }
+
+    fn validated_wire_members(&self) -> Result<(Vec<u8>, Vec<u8>), ProtocolBundleError> {
+        self.validate_counts()?;
+        let descriptor_bytes = encode_descriptor(&self.descriptor)?;
+        let record_bytes = encode_record_stream(&self.descriptor, &self.records)?;
+        validate_member_limits(
+            [descriptor_bytes.len() as u64, record_bytes.len() as u64]
+                .into_iter()
+                .chain(self.objects.values().map(|bytes| bytes.len() as u64)),
+            BUNDLE_LIMITS,
+        )?;
+        self.validate_object_graph()?;
+        Ok((descriptor_bytes, record_bytes))
+    }
+
+    fn validate_counts(&self) -> Result<(), ProtocolBundleError> {
         if self.objects.len() > MAX_OBJECT_COUNT {
             return Err(ProtocolBundleError::Invalid(format!(
                 "object count exceeds {MAX_OBJECT_COUNT}"
@@ -57,6 +153,10 @@ impl PortableCapsule {
                 "record count exceeds {MAX_RECORDS}"
             )));
         }
+        Ok(())
+    }
+
+    fn validate_object_graph(&self) -> Result<(), ProtocolBundleError> {
         let mut reachable = vec![&self.descriptor.base_state.state_ref];
         reachable.extend(
             self.descriptor
@@ -85,22 +185,14 @@ impl PortableCapsule {
     }
 
     pub fn write(&self, path: &Path) -> Result<(), ProtocolBundleError> {
-        self.validate()?;
+        let (descriptor_bytes, record_bytes) = self.validated_wire_members()?;
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
         fs::create_dir_all(parent)?;
         let file = fs::File::create(path)?;
         let mut archive = tar::Builder::new(file);
         archive.mode(tar::HeaderMode::Deterministic);
-        append_bytes(
-            &mut archive,
-            DESCRIPTOR_MEMBER,
-            &encode_descriptor(&self.descriptor)?,
-        )?;
-        append_bytes(
-            &mut archive,
-            RECORDS_MEMBER,
-            &encode_record_stream(&self.descriptor, &self.records)?,
-        )?;
+        append_bytes(&mut archive, DESCRIPTOR_MEMBER, &descriptor_bytes)?;
+        append_bytes(&mut archive, RECORDS_MEMBER, &record_bytes)?;
         for (reference, bytes) in &self.objects {
             let member = format!(
                 "{OBJECT_PREFIX}{}/{}",
@@ -123,32 +215,11 @@ impl PortableCapsule {
         let mut descriptor_bytes = None;
         let mut record_bytes = None;
         let mut objects = BTreeMap::new();
-        let mut member_count = 0usize;
-        let mut total_member_bytes = 0u64;
+        let mut limits = MemberLimitValidator::new(BUNDLE_LIMITS);
         let mut archive = tar::Archive::new(fs::File::open(path)?);
         for entry in archive.entries()? {
             let mut entry = entry?;
-            member_count += 1;
-            if member_count > MAX_MEMBER_COUNT {
-                return Err(ProtocolBundleError::Invalid(format!(
-                    "member count exceeds {MAX_MEMBER_COUNT}"
-                )));
-            }
-            if entry.size() > MAX_MEMBER_BYTES {
-                return Err(ProtocolBundleError::Invalid(format!(
-                    "member exceeds {MAX_MEMBER_BYTES}-byte limit"
-                )));
-            }
-            total_member_bytes = total_member_bytes
-                .checked_add(entry.size())
-                .ok_or_else(|| {
-                    ProtocolBundleError::Invalid("aggregate member size overflow".to_owned())
-                })?;
-            if total_member_bytes > MAX_ARCHIVE_BYTES {
-                return Err(ProtocolBundleError::Invalid(format!(
-                    "aggregate member bytes exceed {MAX_ARCHIVE_BYTES}"
-                )));
-            }
+            limits.accept(entry.size())?;
             let member_path = entry.path()?.into_owned();
             let member = member_path.to_str().ok_or_else(|| {
                 ProtocolBundleError::Invalid("member path is not UTF-8".to_owned())
@@ -197,7 +268,8 @@ impl PortableCapsule {
             records,
             objects,
         };
-        bundle.validate()?;
+        bundle.validate_counts()?;
+        bundle.validate_object_graph()?;
         Ok(bundle)
     }
 }
@@ -220,6 +292,12 @@ pub fn capture_workspace_state(
 
     let mut archive = tar::Builder::new(Vec::new());
     archive.mode(tar::HeaderMode::Deterministic);
+    let state_limits = BundleLimits {
+        member_bytes: MAX_MEMBER_BYTES,
+        archive_bytes: MAX_MEMBER_BYTES,
+        member_count: MAX_MEMBER_COUNT,
+    };
+    let mut limits = MemberLimitValidator::new(state_limits);
     for relative in entries {
         let source = workspace.join(&relative);
         let metadata = fs::symlink_metadata(&source)?;
@@ -227,9 +305,29 @@ pub fn capture_workspace_state(
             return Err(ProtocolBundleError::UnsupportedWorkspaceEntry(relative));
         }
         if metadata.is_dir() {
+            limits.accept(0)?;
             append_directory(&mut archive, &relative)?;
         } else if metadata.is_file() {
-            let bytes = fs::read(&source)?;
+            limits.accept(metadata.len())?;
+            let capacity = usize::try_from(metadata.len()).map_err(|_| {
+                ProtocolBundleError::Invalid(format!(
+                    "workspace file is too large for this platform: {}",
+                    relative.display()
+                ))
+            })?;
+            let read_limit = metadata.len().checked_add(1).ok_or_else(|| {
+                ProtocolBundleError::Invalid("workspace file size overflow".to_owned())
+            })?;
+            let mut bytes = Vec::with_capacity(capacity);
+            fs::File::open(&source)?
+                .take(read_limit)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() as u64 != metadata.len() {
+                return Err(ProtocolBundleError::Invalid(format!(
+                    "workspace file changed during capture: {}",
+                    relative.display()
+                )));
+            }
             let findings = scan_credential_material(&bytes);
             if let Some(finding) = findings.first() {
                 return Err(ProtocolBundleError::Invalid(format!(
@@ -238,12 +336,17 @@ pub fn capture_workspace_state(
                     finding.kind
                 )));
             }
-            append_file(&mut archive, &relative, &source, &metadata)?;
+            append_file(&mut archive, &relative, &metadata, &bytes)?;
         } else {
             return Err(ProtocolBundleError::UnsupportedWorkspaceEntry(relative));
         }
     }
     let bytes = archive.into_inner()?;
+    if bytes.len() as u64 > MAX_MEMBER_BYTES {
+        return Err(ProtocolBundleError::Invalid(format!(
+            "captured state exceeds {MAX_MEMBER_BYTES}-byte limit"
+        )));
+    }
     let reference = content_ref(&bytes);
     Ok((
         StateRef {
@@ -319,6 +422,11 @@ fn collect_workspace_entries(
             continue;
         }
         output.push(relative);
+        if output.len() > MAX_MEMBER_COUNT {
+            return Err(ProtocolBundleError::Invalid(format!(
+                "workspace entry count exceeds {MAX_MEMBER_COUNT}"
+            )));
+        }
         if entry.file_type()?.is_dir() {
             collect_workspace_entries(root, &path, filter, output)?;
         }
@@ -353,13 +461,24 @@ fn append_directory(
 fn append_file(
     archive: &mut tar::Builder<Vec<u8>>,
     relative: &Path,
-    source: &Path,
     metadata: &fs::Metadata,
+    bytes: &[u8],
 ) -> Result<(), std::io::Error> {
     let mode = file_mode(metadata);
     let mut header = tar::Header::new_gnu();
     normalize_header(&mut header, metadata.len(), mode, tar::EntryType::Regular);
-    archive.append_data(&mut header, relative, fs::File::open(source)?)
+    archive.append_data(&mut header, relative, Cursor::new(bytes))
+}
+
+fn validate_member_limits(
+    sizes: impl IntoIterator<Item = u64>,
+    limits: BundleLimits,
+) -> Result<(), ProtocolBundleError> {
+    let mut validator = MemberLimitValidator::new(limits);
+    for size in sizes {
+        validator.accept(size)?;
+    }
+    Ok(())
 }
 
 fn normalize_header(header: &mut tar::Header, size: u64, mode: u32, kind: tar::EntryType) {
@@ -579,5 +698,39 @@ mod tests {
             .insert(config_ref, b"config".to_vec());
         let error = without_payload.validate().unwrap_err().to_string();
         assert!(error.contains(payload_ref.as_str()));
+    }
+
+    #[test]
+    fn shared_member_limits_reject_unreadable_writer_outputs() {
+        let limits = BundleLimits {
+            member_bytes: 8,
+            archive_bytes: 3_000,
+            member_count: 3,
+        };
+        assert!(validate_member_limits([9], limits).is_err());
+        assert!(validate_member_limits([8, 8, 8, 1], limits).is_err());
+
+        let archive_limited = BundleLimits {
+            member_bytes: 1_024,
+            archive_bytes: 2_000,
+            member_count: 3,
+        };
+        let error = validate_member_limits([1], archive_limited)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("archive exceeds"));
+    }
+
+    #[test]
+    fn workspace_capture_rejects_oversized_file_from_metadata_before_reading() {
+        let producer = tempfile::tempdir().unwrap();
+        let path = producer.path().join("oversized.bin");
+        let file = fs::File::create(&path).unwrap();
+        file.set_len(MAX_MEMBER_BYTES + 1).unwrap();
+
+        let error = capture_workspace_state(producer.path())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("member exceeds"));
     }
 }
