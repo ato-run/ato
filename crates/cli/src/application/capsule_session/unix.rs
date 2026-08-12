@@ -158,10 +158,12 @@ pub(crate) fn serve(session: &str, bundle: &Path, into: &Path) -> Result<()> {
         "starting",
         &state.state_type,
         &state.state_ref,
+        RecordFrontier::Origin,
         DurableFrontier {
             records_through: historical_frontier,
             journal_through: JournalLsn::ORIGIN,
         },
+        into.to_path_buf(),
         identity.clone(),
     );
     store.write(&stored)?;
@@ -438,7 +440,7 @@ where
                     next_seq = next_seq
                         .checked_add(1)
                         .ok_or_else(|| anyhow!("seq exhausted"))?;
-                    stored.committed_frontier = frontier;
+                    stored.durable_frontier = frontier;
                     store.write(stored)?;
                     clients.retain(|client| {
                         match client.sender.try_send(ControlMessage::Output {
@@ -497,7 +499,7 @@ where
                 coordinator
                     .deliver_ingress(random_operation_id("pty-input")?, &record)
                     .map_err(|error| anyhow!(error.to_string()))?;
-                stored.committed_frontier = wal.durable_frontier()?;
+                stored.durable_frontier = wal.durable_frontier()?;
                 next_seq = next_seq
                     .checked_add(1)
                     .ok_or_else(|| anyhow!("seq exhausted"))?;
@@ -517,7 +519,7 @@ where
                 coordinator
                     .deliver_ingress(operation_id, &record)
                     .map_err(|error| anyhow!(error.to_string()))?;
-                stored.committed_frontier = wal.durable_frontier()?;
+                stored.durable_frontier = wal.durable_frontier()?;
                 next_seq = next_seq
                     .checked_add(1)
                     .ok_or_else(|| anyhow!("seq exhausted"))?;
@@ -536,7 +538,7 @@ where
                     pid: stored.supervisor.pid,
                     writer_attached: writer_client.is_some(),
                     observers: clients.len(),
-                    frontier: stored.committed_frontier,
+                    frontier: stored.durable_frontier,
                 });
             }
             Ok(SupervisorCommand::Kill { reply }) => {
@@ -614,7 +616,7 @@ where
     coordinator
         .commit_egress(random_operation_id("pty-exit")?, &record)
         .map_err(|error| anyhow!(error.to_string()))?;
-    stored.committed_frontier = wal.durable_frontier()?;
+    stored.durable_frontier = wal.durable_frontier()?;
     store.write(stored)?;
     Ok(())
 }
