@@ -14,14 +14,15 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use capsule::protocol_bundle::{
-    PortableCapsule, capture_local_workspace_checkpoint, restore_workspace_state,
+    PortableCapsule, SpoolBundle, StreamingBundleReader, capture_local_workspace_checkpoint,
+    restore_workspace_state,
 };
 use capsule_protocol::{ConnectorId, Direction, IoRecord, Payload, RecordKindId};
 use capsule_session_runtime::{
     BoundaryCoordinator, BoundaryDriver, BoundaryOperationId, CapsuleProtocolSessionStore,
     DurableFrontier, JournalLsn, NewStoredProtocolSession, NewSupervisorIdentity, RecordFrontier,
     SessionId, SharedSessionWal, StoredConnectorCheckpoint, StoredLocalCheckpoint,
-    StoredProtocolSession, StoredReplayVerification, SupervisorIdentity,
+    StoredProtocolSession, StoredReplayVerification, StoredRuntimeProfile, SupervisorIdentity,
 };
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size as terminal_size};
 use fs2::FileExt;
@@ -30,6 +31,11 @@ use portable_pty::{
 };
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use snapshot::capsule_state::{
+    READY_STATE_STATE_TYPE, ReadyStateStateObjectV1, import_ready_state,
+    select_backend_for_ready_state,
+};
+use snapshot::{RestoreReadyStateInput, RestoredSession, SnapshotBackend};
 
 const CONTROL_FRAME_LIMIT: usize = 16 * 1024 * 1024;
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -42,7 +48,6 @@ const READY_MARKER: &[u8] = b"__ATO_SESSION_READY__";
 const WATCHDOG_DISARM: &[u8] = b"DISARM\n";
 
 pub(crate) fn start(bundle: &Path, into: &Path, no_attach: bool) -> Result<()> {
-    PortableCapsule::read(bundle).context("invalid Capsule bundle")?;
     let bundle = bundle
         .canonicalize()
         .with_context(|| format!("failed to resolve {}", bundle.display()))?;
@@ -50,6 +55,8 @@ pub(crate) fn start(bundle: &Path, into: &Path, no_attach: bool) -> Result<()> {
     let session_id = random_session_id()?;
     let paths = SessionPaths::new(&session_id)?;
     paths.create()?;
+    StreamingBundleReader::read_into(&bundle, &paths.root.join("validation-spool"))
+        .context("invalid Capsule bundle")?;
     import_session_seed(&bundle, &paths.seed_capsule)?;
     write_bootstrap_metadata(&paths, &SessionBootstrapMetadata::default())?;
     launch_session(&session_id, &paths, &into, no_attach)
@@ -125,6 +132,26 @@ pub(crate) fn serve(session: &str, bundle: &Path, into: &Path) -> Result<()> {
     let session_id = SessionId::parse(session)?;
     let paths = SessionPaths::new(&session_id)?;
     paths.create()?;
+    let spool = StreamingBundleReader::read_into(bundle, &paths.root.join("bundle-spool"))
+        .context("failed to read Capsule bundle")?;
+    match spool.descriptor.base_state.state_type.as_str() {
+        "ato.state.workspace-posix-host@1" => {
+            let capsule = PortableCapsule {
+                records: spool.records.materialize(&spool.descriptor)?,
+                objects: spool.objects.materialize()?,
+                descriptor: spool.descriptor,
+            };
+            serve_workspace_pty(session, into, capsule)
+        }
+        READY_STATE_STATE_TYPE => serve_ready_state(session, into, spool),
+        other => bail!("UnsupportedStateType: {other}"),
+    }
+}
+
+fn serve_workspace_pty(session: &str, into: &Path, capsule: PortableCapsule) -> Result<()> {
+    let session_id = SessionId::parse(session)?;
+    let paths = SessionPaths::new(&session_id)?;
+    paths.create()?;
     let bootstrap: SessionBootstrapMetadata =
         serde_json::from_slice(&fs::read(&paths.bootstrap).context("missing Session bootstrap")?)?;
     let lock = OpenOptions::new()
@@ -137,7 +164,6 @@ pub(crate) fn serve(session: &str, bundle: &Path, into: &Path) -> Result<()> {
     lock.try_lock_exclusive()
         .context("another Supervisor already owns this Session")?;
 
-    let capsule = PortableCapsule::read(bundle).context("failed to read Capsule bundle")?;
     let state = &capsule.descriptor.base_state;
     if bootstrap.resume_checkpoint.is_none() {
         let object = capsule
@@ -209,7 +235,9 @@ pub(crate) fn serve(session: &str, bundle: &Path, into: &Path) -> Result<()> {
                 records_through: historical_frontier,
                 journal_through: JournalLsn::ORIGIN,
             },
-            workspace: into.to_path_buf(),
+            runtime_profile: StoredRuntimeProfile::WorkspacePty {
+                workspace: into.to_path_buf(),
+            },
             supervisor: identity.clone(),
         });
         stored.base_connector_checkpoints = bootstrap.base_connector_checkpoints.clone();
@@ -321,6 +349,232 @@ pub(crate) fn serve(session: &str, bundle: &Path, into: &Path) -> Result<()> {
     let _ = fs::remove_file(&paths.socket);
     let _ = lock.unlock();
     result
+}
+
+fn serve_ready_state(session: &str, _into: &Path, spool: SpoolBundle) -> Result<()> {
+    if !spool.descriptor.connectors.is_empty() {
+        bail!("ReadyStateConnectorAttachmentUnsupported");
+    }
+    if spool.records.count() != 0 {
+        bail!("ReadyStateHistoricalReplayUnsupported");
+    }
+
+    let session_id = SessionId::parse(session)?;
+    let paths = SessionPaths::new(&session_id)?;
+    paths.create()?;
+    let lock = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&paths.lock)
+        .context("failed to open Supervisor lock")?;
+    lock.try_lock_exclusive()
+        .context("another Supervisor already owns this Session")?;
+
+    let state = spool.descriptor.base_state.clone();
+    let cas_root = paths.directory.join("ready-state-cas");
+    let imported = import_ready_state(&state, &spool.objects, &cas_root)
+        .context("failed to import Ready-State State")?;
+    let state_object = ReadyStateStateObjectV1 {
+        schema: snapshot::capsule_state::READY_STATE_STATE_OBJECT_SCHEMA.to_string(),
+        legacy_manifest: imported.legacy_manifest.clone(),
+        snapshot_manifest: imported.snapshot_manifest.clone(),
+        artifact_envelope: imported.artifact_envelope.clone(),
+    };
+    let backend = select_backend_for_ready_state(&state_object)
+        .context("failed to select exact Ready-State backend")?;
+    let overlay_root = paths.directory.join("ready-state-overlay");
+    fs::create_dir_all(&overlay_root)?;
+    fs::set_permissions(&overlay_root, fs::Permissions::from_mode(0o700))?;
+    let restore = backend
+        .restore(RestoreReadyStateInput {
+            store: &imported.cas_store,
+            manifest: imported.legacy_manifest,
+            overlay_root: overlay_root.clone(),
+            host_runner_class: None,
+            uffd_preview: false,
+        })
+        .context("Ready-State backend restore failed")?;
+    let manifest_id = restore.ready_state_manifest_id.clone();
+    let mut session_guard = ReadyStateSessionGuard::new(backend, restore.session);
+
+    let generated = NewSupervisorIdentity::generate(
+        1,
+        std::process::id(),
+        process_start_identity(std::process::id()),
+    );
+    replace_secret(&paths.token, generated.secret())?;
+    let identity = generated.identity;
+    let vmm_identity = session_guard
+        .session()
+        .vmm_pid
+        .map(|pid| workload_process_start_identity(pid as u32))
+        .transpose()?;
+    if let (Some(pid), Some(start_identity)) =
+        (session_guard.session().vmm_pid, vmm_identity.as_deref())
+    {
+        session_guard.arm_watchdog(pid as u32, start_identity, &overlay_root)?;
+    }
+
+    let store = CapsuleProtocolSessionStore::open(&paths.root)?;
+    let mut stored = StoredProtocolSession::new(NewStoredProtocolSession {
+        session_id: session_id.clone(),
+        lifecycle: "starting".to_string(),
+        state_type: &state.state_type,
+        base_state: &state.state_ref,
+        base_frontier: RecordFrontier::Origin,
+        durable_frontier: DurableFrontier {
+            records_through: RecordFrontier::Origin,
+            journal_through: JournalLsn::ORIGIN,
+        },
+        runtime_profile: StoredRuntimeProfile::ReadyState {
+            backend_id: session_guard.session().backend_id.clone(),
+            ready_state_manifest_id: manifest_id,
+            cas_root,
+            overlay_root: overlay_root.clone(),
+            vmm_pid: session_guard.session().vmm_pid,
+            vmm_process_start_identity: vmm_identity,
+        },
+        supervisor: identity.clone(),
+    });
+    store.write(&stored)?;
+
+    if paths.socket.exists() {
+        fs::remove_file(&paths.socket).context("failed to remove stale control socket")?;
+    }
+    let listener = UnixListener::bind(&paths.socket).context("failed to bind control socket")?;
+    fs::set_permissions(&paths.socket, fs::Permissions::from_mode(0o600))?;
+    capsule_session_runtime::session_store::write_atomic_owner_only(
+        &paths.socket_address,
+        paths.socket.as_os_str().as_encoded_bytes(),
+    )?;
+    let (command_tx, command_rx) = mpsc::channel();
+    let auth = ControlAuth {
+        session_id: session_id.clone(),
+        identity,
+    };
+    thread::Builder::new()
+        .name(format!("capsule-control-{session_id}"))
+        .spawn(move || accept_control(listener, auth, command_tx))
+        .context("failed to start control listener")?;
+
+    stored.lifecycle = "running".to_string();
+    store.write(&stored)?;
+    let result = ready_state_supervisor_loop(
+        &session_id,
+        &store,
+        &mut stored,
+        &mut session_guard,
+        command_rx,
+    );
+    if result.is_err() {
+        stored.lifecycle = "failed".to_string();
+        let _ = store.write(&stored);
+    }
+    let _ = fs::remove_file(&paths.socket);
+    let _ = lock.unlock();
+    result
+}
+
+fn ready_state_supervisor_loop(
+    session_id: &SessionId,
+    store: &CapsuleProtocolSessionStore,
+    stored: &mut StoredProtocolSession,
+    session: &mut ReadyStateSessionGuard,
+    commands: Receiver<SupervisorCommand>,
+) -> Result<()> {
+    loop {
+        match commands.recv()? {
+            SupervisorCommand::Status { reply } => {
+                let _ = reply.send(ControlMessage::Status {
+                    session_id: session_id.to_string(),
+                    lifecycle: stored.lifecycle.clone(),
+                    pid: stored.supervisor.pid,
+                    writer_attached: false,
+                    observers: 0,
+                    frontier: stored.durable_frontier,
+                });
+            }
+            SupervisorCommand::Kill { reply } => {
+                stored.lifecycle = "terminating".to_string();
+                store.write(stored)?;
+                session.stop()?;
+                stored.lifecycle = "stopped".to_string();
+                if let StoredRuntimeProfile::ReadyState { vmm_pid, .. } =
+                    &mut stored.runtime_profile
+                {
+                    *vmm_pid = None;
+                }
+                store.write(stored)?;
+                let _ = reply.send(ControlMessage::Killed);
+                return Ok(());
+            }
+            SupervisorCommand::Attach { reply, .. } => {
+                let _ = reply.send(Err("ReadyStateConnectorAttachmentUnsupported".to_string()));
+            }
+            SupervisorCommand::CreateFrontier { reply } => {
+                let _ = reply.send(Err("ReadyStateBranchUnsupported".to_string()));
+            }
+            SupervisorCommand::Suspend { reply } => {
+                let _ = reply.send(Err("ReadyStateSuspendUnsupported".to_string()));
+            }
+            SupervisorCommand::Input { .. }
+            | SupervisorCommand::Resize { .. }
+            | SupervisorCommand::Detach { .. } => {}
+        }
+    }
+}
+
+struct ReadyStateSessionGuard {
+    backend: Box<dyn SnapshotBackend>,
+    restored: Option<RestoredSession>,
+    lease: Option<File>,
+    watchdog: Option<ProcessChild>,
+}
+
+impl ReadyStateSessionGuard {
+    fn new(backend: Box<dyn SnapshotBackend>, restored: RestoredSession) -> Self {
+        Self {
+            backend,
+            restored: Some(restored),
+            lease: None,
+            watchdog: None,
+        }
+    }
+
+    fn session(&self) -> &RestoredSession {
+        self.restored.as_ref().expect("restored session is present")
+    }
+
+    fn arm_watchdog(&mut self, pid: u32, identity: &str, overlay: &Path) -> Result<()> {
+        let (lease, watchdog) = spawn_watchdog(pid, 0, identity, Some(overlay))?;
+        self.lease = Some(lease);
+        self.watchdog = Some(watchdog);
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<()> {
+        if let Some(restored) = self.restored.take() {
+            self.backend.stop(restored)?;
+        }
+        if let Some(mut lease) = self.lease.take() {
+            lease.write_all(WATCHDOG_DISARM)?;
+            lease.flush()?;
+        }
+        if let Some(mut watchdog) = self.watchdog.take() {
+            watchdog.wait()?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ReadyStateSessionGuard {
+    fn drop(&mut self) {
+        if self.restored.is_some() {
+            let _ = self.stop();
+        }
+    }
 }
 
 struct ResumeStartupRollback {
@@ -543,7 +797,7 @@ pub(crate) fn resume(session: &str) -> Result<()> {
     if stored.latest_consistent_frontier != Some(checkpoint.captured_at) {
         bail!("suspended Session checkpoint is not a consistent frontier");
     }
-    let (current_state, current_object) = capture_local_workspace_checkpoint(&stored.workspace)
+    let (current_state, current_object) = capture_local_workspace_checkpoint(stored.workspace()?)
         .context("failed to hash suspended workspace")?;
     if current_state.state_ref.to_string() != checkpoint.workspace_digest {
         bail!("WorkspaceDrift: suspended workspace differs from its checkpoint");
@@ -583,7 +837,7 @@ pub(crate) fn resume(session: &str) -> Result<()> {
             resume_checkpoint: Some(checkpoint),
         },
     )?;
-    match launch_session(&session_id, &paths, &stored.workspace, true) {
+    match launch_session(&session_id, &paths, stored.workspace()?, true) {
         Ok(()) => Ok(()),
         Err(error) => {
             capsule_session_runtime::session_store::write_atomic_owner_only(
@@ -635,6 +889,7 @@ pub(crate) fn watchdog(
     pgid: i32,
     expected_start_identity: &str,
     lease_fd: i32,
+    overlay_root: Option<&Path>,
 ) -> Result<()> {
     if lease_fd < 0 {
         bail!("invalid watchdog lease fd");
@@ -645,13 +900,28 @@ pub(crate) fn watchdog(
     if message == WATCHDOG_DISARM {
         return Ok(());
     }
-    if !workload_identity_matches(pid, pgid, expected_start_identity) {
-        return Ok(());
+    if pgid > 0 {
+        if !workload_identity_matches(pid, pgid, expected_start_identity) {
+            return Ok(());
+        }
+        let targets = workload_tree(pid, pgid, expected_start_identity);
+        signal_workload_tree(&targets, libc::SIGTERM);
+        thread::sleep(Duration::from_millis(500));
+        signal_workload_tree(&targets, libc::SIGKILL);
+    } else if workload_process_start_identity(pid)
+        .is_ok_and(|identity| identity == expected_start_identity)
+    {
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        thread::sleep(Duration::from_millis(500));
+        if workload_process_start_identity(pid)
+            .is_ok_and(|identity| identity == expected_start_identity)
+        {
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        }
     }
-    let targets = workload_tree(pid, pgid, expected_start_identity);
-    signal_workload_tree(&targets, libc::SIGTERM);
-    thread::sleep(Duration::from_millis(500));
-    signal_workload_tree(&targets, libc::SIGKILL);
+    if let Some(overlay_root) = overlay_root {
+        let _ = fs::remove_dir_all(overlay_root);
+    }
     Ok(())
 }
 
@@ -1029,7 +1299,7 @@ where
         }
 
         let frontier = wal.durable_frontier()?;
-        let (state, object) = capture_local_workspace_checkpoint(&stored.workspace)
+        let (state, object) = capture_local_workspace_checkpoint(stored.workspace()?)
             .context("failed to capture local workspace checkpoint")?;
         frozen.verify_root()?;
         persist_checkpoint_object(session_id, &state.state_ref.to_string(), &object)?;
@@ -1223,7 +1493,7 @@ impl PtyComputation {
         }
         let process_start_identity = workload_process_start_identity(pid)?;
         let killer = child.clone_killer();
-        let (lease, watchdog) = spawn_watchdog(pid, pgid, &process_start_identity)?;
+        let (lease, watchdog) = spawn_watchdog(pid, pgid, &process_start_identity, None)?;
         Ok(Self {
             master: Arc::new(Mutex::new(pair.master)),
             child,
@@ -1363,6 +1633,7 @@ fn spawn_watchdog(
     pid: u32,
     pgid: i32,
     process_start_identity: &str,
+    overlay_root: Option<&Path>,
 ) -> Result<(File, ProcessChild)> {
     let mut fds = [0_i32; 2];
     if unsafe { libc::pipe(fds.as_mut_ptr()) } == -1 {
@@ -1377,20 +1648,24 @@ fn spawn_watchdog(
         }
         return Err(std::io::Error::last_os_error()).context("failed to protect watchdog lease");
     }
-    let child = Command::new(std::env::current_exe()?)
-        .args([
-            "internal",
-            "capsule-session",
-            "watchdog",
-            "--pid",
-            &pid.to_string(),
-            "--pgid",
-            &pgid.to_string(),
-            "--process-start-identity",
-            process_start_identity,
-            "--lease-fd",
-            &read_fd.to_string(),
-        ])
+    let mut command = Command::new(std::env::current_exe()?);
+    command.args([
+        "internal",
+        "capsule-session",
+        "watchdog",
+        "--pid",
+        &pid.to_string(),
+        "--pgid",
+        &pgid.to_string(),
+        "--process-start-identity",
+        process_start_identity,
+        "--lease-fd",
+        &read_fd.to_string(),
+    ]);
+    if let Some(overlay_root) = overlay_root {
+        command.arg("--overlay-root").arg(overlay_root);
+    }
+    let child = command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
