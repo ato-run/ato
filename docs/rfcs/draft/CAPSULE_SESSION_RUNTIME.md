@@ -95,6 +95,17 @@ recovery. A duplicate operation MUST NOT add another WAL frame.
 Runtime memory transitions are applied only after the corresponding WAL state
 transition commits, so a failed commit leaves memory at the last durable state.
 
+When recovery finds an incomplete EOF tail, `SessionWal::open` truncates the
+physical file to `DurableFrontier.journal_through` and durably commits that
+repair before permitting another append. A repaired WAL therefore remains
+recoverable after later valid frames are added.
+
+The WAL owns sequence allocation authority. A new Record candidate MUST have a
+`seq` strictly greater than the durable allocated high-water mark. Sequence
+gaps are valid. High-water marks are monotonic non-decreasing, and the mark
+written immediately after a candidate may equal that candidate's `seq`.
+Append and recovery both enforce these rules; reuse or regression fails closed.
+
 External effect states are Prepared, Authorized, Dispatching, optionally
 Dispatched, Completed, InDoubt, Reconciled, and Rejected. `Dispatching` is
 committed before dispatch permission. A crash from Dispatching until Completed
@@ -123,6 +134,12 @@ Bootstrap failure closes every Driver already prepared or connected and
 terminates any restored computation. Barrier failure invalidates the whole
 runtime incarnation: all Drivers are closed, computation is terminated, and
 recovery starts from a durable common frontier. Driver `close` is idempotent.
+
+Session checkpoint manifests persist `captured_at: DurableFrontier`, and local
+Session records persist the complete committed `DurableFrontier`. Connector
+checkpoint consistency compares `applied_through` with
+`captured_at.records_through`. This distinguishes multiple durable WAL cuts at
+the same Record frontier, including effect transaction metadata transitions.
 
 ## 7. Portable export
 
