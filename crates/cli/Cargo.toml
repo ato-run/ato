@@ -31,6 +31,7 @@ path = "src/main.rs"
 [dependencies]
 capsule = { path = "../capsule", version = "0.11.0" }
 capsule-protocol = { path = "../capsule-protocol", version = "0.1.0" }
+capsule-session-runtime = { path = "../capsule-session-runtime", version = "0.1.0" }
 snapshot = { path = "../snapshot", version = "0.1.0" }
 capsulefs = { path = "../capsulefs", version = "0.1.0" }
 protocol = { path = "../protocol", version = "0.1.0" }
@@ -89,6 +90,7 @@ rcgen = "0.13"
 urlencoding = "2.1"
 hickory-resolver = "0.24"
 libc = "0.2"
+portable-pty = "0.9"
 goblin = "0.8"
 age = { version = "0.10", features = ["armor"] }
 rpassword = "7"
