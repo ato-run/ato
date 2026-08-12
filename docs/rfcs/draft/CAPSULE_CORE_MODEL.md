@@ -6,7 +6,7 @@
 **Related**: #490 (Execution Graph Model, internal IR), #501 (provider boundary), #498/#499 (realization), #508 (installed-state DB), #509 (cross-device placement)
 
 > **Capsule v1 identity baseline:**
-> [CAPSULE_V1_EXECUTION_MODEL_SPEC](../accepted/CAPSULE_V1_EXECUTION_MODEL_SPEC.md)
+> [archived CAPSULE_V1_EXECUTION_MODEL_SPEC](../archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md)
 > supersedes the multi-identity wording in earlier revisions of this draft.
 > ExecutionGraph, ExecutionPlan, Realization, and Materialization remain
 > internal implementation structures, not public exact identities.

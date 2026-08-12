@@ -1,7 +1,7 @@
 ---
 title: "Capsule v1 Execution Identity and Snapshot Model"
-status: superseded
-superseded_by: CAPSULE_PROTOCOL_SEMANTIC_CORE.md
+status: archived
+superseded_by: ../accepted/protocol/CAPSULE_PROTOCOL_SEMANTIC_CORE.md
 date: 2026-07-21
 author: "@egamikohsuke"
 ssot:
@@ -15,7 +15,7 @@ related:
   - "../draft/CAPSULE_CORE_MODEL.md"
   - "../draft/beyond-reproducible-build.md"
   - "../draft/HASH_AND_PROVENANCE_POLICY.md"
-  - "../archived/EXECUTION_IDENTITY_SPEC.md"
+  - "EXECUTION_IDENTITY_SPEC.md"
   - "../accepted/ADR-002-signature-format-jcs.md"
   - "../../execution-identity.md"
   - "../../snapshot.md"
@@ -70,7 +70,7 @@ The governing sentence is:
 
 This document is retained as an implementation-compatibility reference and is
 no longer the semantic design authority. It is superseded by
-[`CAPSULE_PROTOCOL_SEMANTIC_CORE.md`](CAPSULE_PROTOCOL_SEMANTIC_CORE.md).
+[`CAPSULE_PROTOCOL_SEMANTIC_CORE.md`](../accepted/protocol/CAPSULE_PROTOCOL_SEMANTIC_CORE.md).
 The accepted v0.3 Capsule specification remains authoritative for the
 currently shipped `capsule.toml` parser until the v1 authoring schema is wired
 into the CLI. Legacy Ready-State artifacts remain governed by their existing
@@ -990,7 +990,7 @@ contract produces the v1 public `execution_id`.
 ### 16.2 Superseded Snapshot-derived draft
 
 The archived
-[Execution Identity Spec](../archived/EXECUTION_IDENTITY_SPEC.md) defined
+[Execution Identity Spec](EXECUTION_IDENTITY_SPEC.md) defined
 `execution_id` from post-seal Snapshot layer CAS IDs and runner-class facets.
 This specification supersedes that model:
 
@@ -1131,7 +1131,7 @@ Tests MUST prove that excluded mutations do not change `execution_id`:
   composition, placement, and install model under revision.
 - [Hash and Provenance Policy](../draft/HASH_AND_PROVENANCE_POLICY.md) — project hash
   domains and provenance separation.
-- [ADR-002: Signature Format JCS](ADR-002-signature-format-jcs.md) —
+- [ADR-002: Signature Format JCS](../accepted/ADR-002-signature-format-jcs.md) —
   canonical JSON precedent.
 - [Execution Identity](../../execution-identity.md) — public identity guide.
 - [Snapshot](../../snapshot.md) — public Snapshot and lifecycle guide.

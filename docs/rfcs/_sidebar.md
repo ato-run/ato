@@ -2,14 +2,22 @@
 
 **Accepted**
 
+- [Accepted RFC Authority Index](accepted/README.md)
+
+**Capsule Protocol**
+
+- [Semantic Core](accepted/protocol/CAPSULE_PROTOCOL_SEMANTIC_CORE.md)
+- [CBOR v1](accepted/protocol/CAPSULE_CBOR_V1.cddl)
+- [Bundle v1](accepted/protocol/CAPSULE_BUNDLE_V1.md)
+
+**Ato Specifications**
+
 - [A1 Blob Hash](accepted/A1_BLOB_HASH.md)
 - [ATO CLI Spec](accepted/ATO_CLI_SPEC.md)
 - [Capsule Core](accepted/CAPSULE_CORE.md)
 - [Capsule Dependency Contracts](accepted/CAPSULE_DEPENDENCY_CONTRACTS.md)
-- [Capsule Format v2](accepted/CAPSULE_FORMAT_V2.md)
 - [Capsule Handle Spec](accepted/CAPSULE_HANDLE_SPEC.md)
-- [Capsule IPC Spec](accepted/CAPSULE_IPC_SPEC.md)
-- [Capsule v1 Execution Model](accepted/CAPSULE_V1_EXECUTION_MODEL_SPEC.md)
+- [Ato JSON-RPC IPC (legacy filename)](accepted/CAPSULE_IPC_SPEC.md)
 - [Capsule Spec](accepted/CAPSULE_SPEC.md)
 - [Capsule Sync Spec](accepted/CAPSULE_SYNC_SPEC.md)
 - [ExecutionPlan Canonicalization Spec](accepted/EXECUTIONPLAN_CANONICALIZATION_SPEC.md)
