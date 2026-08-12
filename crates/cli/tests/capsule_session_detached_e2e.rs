@@ -130,6 +130,12 @@ fn detached_session_survives_cli_and_preserves_one_shell_across_reattach() {
     let root = scratch_dir("detached-capsule-session-");
     let bundle = make_bundle(root.path());
     let session_id = start_session(root.path(), &bundle, "restored");
+    fs::remove_file(&bundle).expect("remove caller-owned input bundle");
+    let seed = session_directory(root.path(), &session_id).join("seed/source.capsule.local");
+    assert!(
+        seed.is_file(),
+        "Session must own an immutable recovery seed"
+    );
 
     let initial = status(root.path(), &session_id);
     assert_eq!(initial["lifecycle"], "running");
