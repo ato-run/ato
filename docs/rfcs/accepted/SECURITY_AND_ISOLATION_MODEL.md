@@ -8,7 +8,7 @@ ssot:
 related:
   - "CAPSULE_CORE.md"
   - "ARCHITECTURE_OVERVIEW.md"
-  - "CAPSULE_FORMAT_V2.md"
+  - "../archived/CAPSULE_FORMAT_V2.md"
   - "SIGNATURE_SPEC.md"
 ---
 
@@ -35,7 +35,8 @@ related:
 - 配布物（`.capsule`）は `signature.json` を用いて Ed25519 署名し、JCS（RFC 8785）で正規化して検証する。
 - `manifest_hash` と `payload_hash` の二重ハッシュで改ざん耐性を持つ。
 
-参照: `CAPSULE_FORMAT_V2.md`, `SIGNATURE_SPEC.md`
+参照: legacy distribution artifactの
+[`CAPSULE_FORMAT_V2.md`](../archived/CAPSULE_FORMAT_V2.md), `SIGNATURE_SPEC.md`
 
 ## 3. 環境変数の扱い（reconstructed baseline）
 

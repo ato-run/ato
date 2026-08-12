@@ -4,10 +4,11 @@ status: accepted
 date: 2026-08-12
 author: "@egamikohsuke"
 supersedes:
-  - "CAPSULE_V1_EXECUTION_MODEL_SPEC.md"
+  - "../../archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md"
 ssot:
   - "crates/capsule-protocol/"
   - "CAPSULE_CBOR_V1.cddl"
+  - "CAPSULE_BUNDLE_V1.md"
 ---
 
 # Capsule Protocol Semantic Core
@@ -15,9 +16,10 @@ ssot:
 ## 1. Authority
 
 This specification supersedes the five-element semantic model in
-`CAPSULE_V1_EXECUTION_MODEL_SPEC.md`. Existing manifests, execution contracts,
-and Ready-State artifacts remain supported implementation inputs; they are no
-longer primitives of the Capsule Protocol Semantic Core.
+[`CAPSULE_V1_EXECUTION_MODEL_SPEC.md`](../../archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md).
+Existing manifests, execution contracts, and Ready-State artifacts remain
+supported implementation inputs; they are no longer primitives of the Capsule
+Protocol Semantic Core.
 
 ## 2. Core
 
@@ -96,6 +98,11 @@ null semantics, numeric bounds, payload tags, and `ContentRef` spelling are
 fixed there. Exact tuple arity is required: decoders reject unknown/trailing
 fields. Golden vectors under `crates/capsule-codec/tests/vectors/` test this
 schema but are not the specification.
+
+The normative portable container is `CAPSULE_BUNDLE_V1.md`. It defines how the
+descriptor, record sequence, and content-addressed objects are carried in one
+deterministic `.capsule` file. Bundle versioning is independent from CBOR wire
+versioning.
 
 `ato.state.workspace-posix-host@1` is explicitly host-bound and best-effort. It
 owns workspace bytes only; host shell, runtime, toolchain, libraries, `PATH`,
