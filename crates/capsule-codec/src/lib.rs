@@ -210,7 +210,21 @@ pub fn encode_descriptor(descriptor: &CapsuleDescriptor) -> Result<Vec<u8>, Code
 }
 
 pub fn decode_descriptor(bytes: &[u8]) -> Result<CapsuleDescriptor, CodecError> {
-    let wire: WireDescriptorV1 = decode_item(bytes)?;
+    decode_descriptor_reader(Cursor::new(bytes), bytes.len() as u64)
+}
+
+pub fn decode_descriptor_reader<R: Read>(
+    reader: R,
+    encoded_bytes: u64,
+) -> Result<CapsuleDescriptor, CodecError> {
+    let mut reader = reader.take(encoded_bytes);
+    let wire: WireDescriptorV1 = ciborium::de::from_reader(&mut reader)
+        .map_err(|error| CodecError::Decode(error.to_string()))?;
+    if reader.limit() != 0 {
+        return Err(CodecError::Decode(
+            "trailing bytes after CBOR item".to_owned(),
+        ));
+    }
     CapsuleDescriptor::try_from(wire)
 }
 
@@ -250,18 +264,6 @@ fn encode_item<T: Serialize>(value: &T) -> Result<Vec<u8>, CodecError> {
     ciborium::ser::into_writer(value, &mut bytes)
         .map_err(|error| CodecError::Encode(error.to_string()))?;
     Ok(bytes)
-}
-
-fn decode_item<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, CodecError> {
-    let mut input = Cursor::new(bytes);
-    let value = ciborium::de::from_reader(&mut input)
-        .map_err(|error| CodecError::Decode(error.to_string()))?;
-    if input.position() as usize != bytes.len() {
-        return Err(CodecError::Decode(
-            "trailing bytes after CBOR item".to_owned(),
-        ));
-    }
-    Ok(value)
 }
 
 fn validate_wire_version(version: u16) -> Result<(), CodecError> {
@@ -495,6 +497,21 @@ mod tests {
         let decoded = decode_descriptor(&first).unwrap();
         assert_eq!(decoded, descriptor());
         assert_eq!(encode_descriptor(&decoded).unwrap(), first);
+    }
+
+    #[test]
+    fn descriptor_reader_decodes_exact_member_without_buffering_wrapper() {
+        let bytes = encode_descriptor(&descriptor()).unwrap();
+        assert_eq!(
+            decode_descriptor_reader(bytes.as_slice(), bytes.len() as u64).unwrap(),
+            descriptor()
+        );
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(matches!(
+            decode_descriptor_reader(trailing.as_slice(), trailing.len() as u64),
+            Err(CodecError::Decode(message)) if message.contains("trailing bytes")
+        ));
     }
 
     #[test]

@@ -18,7 +18,7 @@ pub use streaming::{
     AllowAllPortableExportPolicy, BundleSummary, BundleWriteOutcome, DirectoryObjectSource,
     InMemoryObjectSource, ObjectMetadata, ObjectSource, PortableExportError, PortableExportPolicy,
     PortableObjectRole, PtyPortableExportPolicy, RecordSpool, SpoolBundle, SpoolObjectStore,
-    StreamingBundleReader, StreamingBundleWriter,
+    StreamingBundleReader, StreamingBundleWriter, StrictPortableExportPolicy,
 };
 
 const DESCRIPTOR_MEMBER: &str = "protocol/descriptor.cbor";
@@ -704,7 +704,10 @@ fn set_owner_only_path(path: &Path) -> Result<(), std::io::Error> {
 
 #[cfg(not(unix))]
 fn set_owner_only_path(_path: &Path) -> Result<(), std::io::Error> {
-    Ok(())
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "secure owner-only spool is unsupported on this platform",
+    ))
 }
 
 #[cfg(unix)]
