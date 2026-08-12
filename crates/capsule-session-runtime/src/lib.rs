@@ -43,8 +43,9 @@ pub use runtime::{
     RuntimeBoundaryError, SessionBootstrap, StateRuntime,
 };
 pub use session_store::{
-    CapsuleProtocolSessionStore, ControlAuthorizationError, NewSupervisorIdentity, SessionId,
-    SessionStoreError, StoredLocalCheckpoint, StoredProtocolSession, SupervisorIdentity,
+    CapsuleProtocolSessionStore, ControlAuthorizationError, NewStoredProtocolSession,
+    NewSupervisorIdentity, SessionId, SessionStoreError, StoredLocalCheckpoint,
+    StoredProtocolSession, SupervisorIdentity,
 };
 pub use supervisor::{
     BarrierError, BarrierId, BoundaryCoordinator, BoundaryDriver, DriverBoundaryError,
