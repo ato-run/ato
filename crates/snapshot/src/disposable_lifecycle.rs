@@ -123,6 +123,7 @@ impl<S: CandidateSource> DisposableAcceptanceLifecycle for BackendDisposableLife
                 manifest: self.candidate.legacy_manifest()?,
                 overlay_root: overlay,
                 host_runner_class: None,
+                containment: None,
                 uffd_preview: false,
             })
             .map_err(|error| error.to_string())?;

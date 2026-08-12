@@ -109,8 +109,8 @@ pub use artifact_envelope::{
 pub use backend::{
     BackendCapabilities, BindingCapabilities, BuildLayers, BuildReadyStateInput,
     BuildReadyStateReceipt, DeviceProfile, FilesystemModel, GpuMode, IsolationBoundary,
-    RestoreReadyStateInput, RestoreReceipt, RestoredSession, SnapshotBackend, SnapshotError,
-    SnapshotInspection, SnapshotKind, SupervisorBindings, TeardownReceipt,
+    RestoreContainment, RestoreReadyStateInput, RestoreReceipt, RestoredSession, SnapshotBackend,
+    SnapshotError, SnapshotInspection, SnapshotKind, SupervisorBindings, TeardownReceipt,
     ensure_gpu_not_in_snapshot,
 };
 pub use compose_plan::{
@@ -208,6 +208,7 @@ mod e2e_tests {
                 manifest: manifest.clone(),
                 overlay_root: dir.path().join("ov"),
                 host_runner_class: None,
+                containment: None,
                 uffd_preview: false,
             })
             .expect("restore");

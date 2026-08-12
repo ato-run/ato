@@ -157,6 +157,7 @@ fn fc_kvm_build_restore_roundtrip() {
             manifest: m,
             overlay_root: dir.path().join("ov"),
             host_runner_class: None,
+            containment: None,
             uffd_preview: false,
         })
         .expect("restore");
@@ -263,6 +264,7 @@ fn fc_kvm_uffd_zero_pages_plumbing() {
         manifest: m,
         overlay_root: overlay.clone(),
         host_runner_class: None,
+        containment: None,
         uffd_preview: false,
     });
     unsafe { std::env::remove_var("ATO_FC_UFFD") };
@@ -318,6 +320,7 @@ fn fc_kvm_uffd_real_pages_reaches_health() {
         manifest: m,
         overlay_root: overlay.clone(),
         host_runner_class: None,
+        containment: None,
         uffd_preview: false,
     });
     unsafe { std::env::remove_var("ATO_FC_UFFD") };
@@ -381,6 +384,7 @@ fn fc_kvm_uffd_cas_demand_serves_from_local_cas() {
         manifest: m,
         overlay_root: overlay.clone(),
         host_runner_class: None,
+        containment: None,
         uffd_preview: false,
     });
     unsafe { std::env::remove_var("ATO_FC_UFFD") };
@@ -451,6 +455,7 @@ fn fc_kvm_uffd_preview_input_reaches_health() {
             manifest: m,
             overlay_root: overlay.clone(),
             host_runner_class: None,
+            containment: None,
             uffd_preview: true,
         })
         .expect("restore (uffd_preview input)");
@@ -510,6 +515,7 @@ fn fc_kvm_uffd_hotset_persistence_round_trip() {
             manifest: m.clone(),
             overlay_root: ov1.clone(),
             host_runner_class: None,
+            containment: None,
             uffd_preview: false,
         })
         .expect("restore 1");
@@ -527,6 +533,7 @@ fn fc_kvm_uffd_hotset_persistence_round_trip() {
             manifest: m,
             overlay_root: ov2.clone(),
             host_runner_class: None,
+            containment: None,
             uffd_preview: false,
         })
         .expect("restore 2");
@@ -588,6 +595,7 @@ fn fc_kvm_uffd_fault_trace_records_hotset() {
         manifest: m,
         overlay_root: overlay.clone(),
         host_runner_class: None,
+        containment: None,
         uffd_preview: false,
     });
     unsafe { std::env::remove_var("ATO_FC_UFFD") };
@@ -654,6 +662,7 @@ fn fc_kvm_uffd_hotset_prefetch_cuts_demand_faults() {
         manifest: m.clone(),
         overlay_root: ov1.clone(),
         host_runner_class: None,
+        containment: None,
         uffd_preview: false,
     });
     unsafe { std::env::remove_var("ATO_FC_UFFD") };
@@ -680,6 +689,7 @@ fn fc_kvm_uffd_hotset_prefetch_cuts_demand_faults() {
         manifest: m,
         overlay_root: ov2.clone(),
         host_runner_class: None,
+        containment: None,
         uffd_preview: false,
     });
     unsafe {
@@ -774,6 +784,7 @@ fn fc_kvm_uffd_corrupt_cas_chunk_fails_closed() {
         manifest: m,
         overlay_root: overlay.clone(),
         host_runner_class: None,
+        containment: None,
         uffd_preview: false,
     });
     unsafe { std::env::remove_var("ATO_FC_UFFD") };
@@ -889,6 +900,7 @@ fn fc_kvm_uffd_preview_corrupt_cas_fails_closed() {
         manifest: m,
         overlay_root: overlay.clone(),
         host_runner_class: None,
+        containment: None,
         uffd_preview: true,
     });
     let elapsed = started.elapsed();
@@ -1020,6 +1032,7 @@ fn fc_kvm_uffd_preview_missing_cas_chunk_fails_closed_pre_boot() {
         manifest: m,
         overlay_root: overlay.clone(),
         host_runner_class: None,
+        containment: None,
         uffd_preview: true,
     });
     let elapsed = started.elapsed();
@@ -1116,6 +1129,7 @@ fn fc_kvm_uffd_remote_readthrough_reaches_health() {
         manifest: m.clone(),
         overlay_root: overlay.clone(),
         host_runner_class: None,
+        containment: None,
         uffd_preview: false,
     });
     unsafe {
@@ -1184,6 +1198,7 @@ fn fc_kvm_rootfs_is_read_only_shared_across_restores() {
             manifest: m.clone(),
             overlay_root: dir.path().join("ov1"),
             host_runner_class: None,
+            containment: None,
             uffd_preview: false,
         })
         .expect("restore1");
@@ -1195,6 +1210,7 @@ fn fc_kvm_rootfs_is_read_only_shared_across_restores() {
             manifest: m,
             overlay_root: dir.path().join("ov2"),
             host_runner_class: None,
+            containment: None,
             uffd_preview: false,
         })
         .expect("restore2");
@@ -1226,6 +1242,7 @@ fn fc_kvm_restore_latency_20x() {
                 manifest: m.clone(),
                 overlay_root: ov,
                 host_runner_class: None,
+                containment: None,
                 uffd_preview: false,
             })
             .expect("restore");
@@ -1263,6 +1280,7 @@ fn fc_kvm_runner_class_mismatch_fails_closed() {
             manifest: m,
             overlay_root: dir.path().join("ov"),
             host_runner_class: Some(wrong),
+            containment: None,
             uffd_preview: false,
         })
         .unwrap_err();
@@ -1291,6 +1309,7 @@ fn fc_kvm_state_leak_regression() {
             manifest: m.clone(),
             overlay_root: dir.path().join("ov1"),
             host_runner_class: None,
+            containment: None,
             uffd_preview: false,
         })
         .expect("restore1");
@@ -1305,6 +1324,7 @@ fn fc_kvm_state_leak_regression() {
             manifest: m,
             overlay_root: dir.path().join("ov2"),
             host_runner_class: None,
+            containment: None,
             uffd_preview: false,
         })
         .expect("restore2");
@@ -1353,6 +1373,7 @@ fn fc_kvm_sealed_bytes_predate_runtime_writes() {
             manifest: m.clone(),
             overlay_root: dir.path().join("ov"),
             host_runner_class: None,
+            containment: None,
             uffd_preview: false,
         })
         .expect("restore");
@@ -1410,6 +1431,7 @@ fn fc_kvm_cross_process_stop_via_record() {
                 manifest: m.clone(),
                 overlay_root: overlay.clone(),
                 host_runner_class: None,
+                containment: None,
                 uffd_preview: false,
             })
             .expect("restore");
@@ -1560,6 +1582,7 @@ fn fc_kvm_vsock_agent_connects_after_restore() {
         manifest: m,
         overlay_root: overlay.clone(),
         host_runner_class: None,
+        containment: None,
         uffd_preview: false,
     });
     unsafe { std::env::remove_var("ATO_FC_VSOCK") };
@@ -1693,6 +1716,7 @@ fn fc_kvm_binding_lease_live_e2e() {
         manifest: m,
         overlay_root: overlay.clone(),
         host_runner_class: None,
+        containment: None,
         uffd_preview: false,
     });
     unsafe { std::env::remove_var("ATO_FC_VSOCK") };
@@ -1888,6 +1912,7 @@ fn fc_kvm_supervisor_full_e2e() {
         manifest: m,
         overlay_root: overlay.clone(),
         host_runner_class: None,
+        containment: None,
         uffd_preview: false,
     });
     unsafe { std::env::remove_var("ATO_FC_VSOCK") };
@@ -2061,6 +2086,7 @@ fn fc_kvm_binding_negative_paths() {
         manifest: m,
         overlay_root: overlay.clone(),
         host_runner_class: None,
+        containment: None,
         uffd_preview: false,
     });
     unsafe { std::env::remove_var("ATO_FC_VSOCK") };
@@ -2266,6 +2292,7 @@ fn fc_kvm_hold_candidate_restores_and_serves() {
             manifest: candidate.receipt.manifest.clone(),
             overlay_root: dir.path().join("ov"),
             host_runner_class: None,
+            containment: None,
             uffd_preview: false,
         })
         .expect("restore the held candidate");
