@@ -307,7 +307,10 @@ fn detached_session_survives_cli_and_preserves_one_shell_across_reattach() {
     assert!(kinds.contains(&"stdin"));
     assert!(kinds.contains(&"output"));
     assert!(kinds.contains(&"resize"));
-    assert!(kinds.contains(&"exit"));
+    assert!(
+        !kinds.contains(&"exit"),
+        "Control Plane kill must not synthesize a PTY exit record"
+    );
     assert!(
         kinds
             .iter()
@@ -325,16 +328,136 @@ fn supervisor_sigkill_revokes_workload_lease() {
         .as_u64()
         .expect("Supervisor pid") as u32;
     let shell_pid = wait_for_shell_child(supervisor_pid);
+    let grandchild_file = root.path().join("restored/grandchild.pid");
+    let started = attach_with_input(
+        root.path(),
+        &session_id,
+        b"sleep 1000 & echo $! > grandchild.pid\n",
+    );
+    assert!(started.status.success());
+    let grandchild_pid = wait_for_pid_file(&grandchild_file);
 
     unsafe { libc::kill(supervisor_pid as libc::pid_t, libc::SIGKILL) };
     let deadline = Instant::now() + Duration::from_secs(5);
-    while process_alive(shell_pid) && Instant::now() < deadline {
+    while (process_alive(shell_pid) || process_alive(grandchild_pid)) && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(50));
     }
     assert!(
         !process_alive(shell_pid),
         "workload {shell_pid} survived Supervisor lease loss"
     );
+    assert!(
+        !process_alive(grandchild_pid),
+        "grandchild {grandchild_pid} survived Supervisor lease loss"
+    );
+
+    let listed = ato(root.path())
+        .args(["internal", "capsule-session", "list"])
+        .output()
+        .expect("list orphaned Sessions");
+    assert!(listed.status.success());
+    let listed = String::from_utf8_lossy(&listed.stdout);
+    assert!(
+        listed.contains(&format!("{session_id}\torphaned\t{supervisor_pid}")),
+        "dead Supervisor must not remain running in list output: {listed}"
+    );
+}
+
+#[test]
+fn natural_exit_is_committed_once_after_final_output_with_actual_status() {
+    let root = scratch_dir("capsule-session-natural-exit-");
+    let bundle = make_bundle(root.path());
+    let session_id = start_session(root.path(), &bundle, "restored");
+    let mut client = ato(root.path())
+        .args(["internal", "capsule-session", "attach", &session_id])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("attach for natural exit");
+    client
+        .stdin
+        .as_mut()
+        .expect("attach stdin")
+        .write_all(b"printf FINAL-OUTPUT; exit 7\n")
+        .expect("request natural shell exit");
+    drop(client.stdin.take());
+    let output = client.wait_with_output().expect("wait natural exit client");
+    assert!(
+        output.status.success(),
+        "attach failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let directory = session_directory(root.path(), &session_id);
+    wait_for_stored_lifecycle(&directory, "stopped");
+    let recovered = SessionWal::open(directory.join("journal/wal-000001"))
+        .expect("open natural-exit WAL")
+        .recover()
+        .expect("recover natural-exit WAL");
+    let records: Vec<_> = recovered
+        .entries
+        .iter()
+        .filter_map(|entry| match entry {
+            WalEntry::RecordCandidate { record, .. } => Some(record),
+            _ => None,
+        })
+        .collect();
+    let exits: Vec<_> = records
+        .iter()
+        .filter(|record| record.kind.as_str() == "exit")
+        .collect();
+    assert_eq!(exits.len(), 1, "natural exit must be idempotent");
+    assert_eq!(records.last().expect("last record").kind.as_str(), "exit");
+    let exit_record: capsule_protocol::IoRecord = (*exits[0])
+        .clone()
+        .try_into()
+        .expect("decode WAL exit record");
+    let capsule_protocol::Payload::Inline(payload) = &exit_record.payload else {
+        panic!("exit payload must be inline");
+    };
+    let exit: serde_json::Value = serde_json::from_slice(payload).expect("exit payload JSON");
+    assert_eq!(exit["exit_code"], 7);
+    assert_eq!(exit["reason"], "natural");
+    assert_eq!(exit["signal"], serde_json::Value::Null);
+    assert!(
+        records
+            .iter()
+            .take(records.len() - 1)
+            .any(|record| record.kind.as_str() == "output"),
+        "final output must be durable before exit"
+    );
+}
+
+fn wait_for_stored_lifecycle(directory: &Path, expected: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let stored: serde_json::Value = serde_json::from_slice(
+            &fs::read(directory.join("session.json")).expect("read stored Session"),
+        )
+        .expect("stored Session JSON");
+        if stored["lifecycle"] == expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Session did not reach {expected}: {stored}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn wait_for_pid_file(path: &Path) -> u32 {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(value) = fs::read_to_string(path)
+            && let Ok(pid) = value.trim().parse()
+        {
+            return pid;
+        }
+        assert!(Instant::now() < deadline, "PID file did not appear");
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
 fn wait_for_shell_child(supervisor_pid: u32) -> u32 {

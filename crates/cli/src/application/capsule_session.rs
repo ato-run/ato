@@ -50,6 +50,11 @@ pub(crate) fn list() -> Result<()> {
 }
 
 #[cfg(not(unix))]
-pub(crate) fn watchdog(_pid: u32, _lease_fd: i32) -> Result<()> {
+pub(crate) fn watchdog(
+    _pid: u32,
+    _pgid: i32,
+    _process_start_identity: &str,
+    _lease_fd: i32,
+) -> Result<()> {
     unsupported()
 }
