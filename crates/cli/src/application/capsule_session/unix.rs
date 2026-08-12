@@ -6,18 +6,22 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child as ProcessChild, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
-use capsule::protocol_bundle::{PortableCapsule, restore_workspace_state};
+use capsule::protocol_bundle::{
+    PortableCapsule, capture_local_workspace_checkpoint, restore_workspace_state,
+};
 use capsule_protocol::{ConnectorId, Direction, IoRecord, Payload, RecordKindId};
 use capsule_session_runtime::{
     BoundaryCoordinator, BoundaryDriver, BoundaryOperationId, CapsuleProtocolSessionStore,
     DurableFrontier, JournalLsn, NewStoredProtocolSession, NewSupervisorIdentity, RecordFrontier,
-    SessionId, SharedSessionWal, StoredProtocolSession, SupervisorIdentity,
+    SessionId, SharedSessionWal, StoredLocalCheckpoint, StoredProtocolSession,
+    StoredReplayVerification, SupervisorIdentity,
 };
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size as terminal_size};
 use fs2::FileExt;
@@ -45,7 +49,16 @@ pub(crate) fn start(bundle: &Path, into: &Path, no_attach: bool) -> Result<()> {
     let paths = SessionPaths::new(&session_id)?;
     paths.create()?;
     import_session_seed(&bundle, &paths.seed_capsule)?;
+    write_bootstrap_metadata(&paths, &SessionBootstrapMetadata::default())?;
+    launch_session(&session_id, &paths, &into, no_attach)
+}
 
+fn launch_session(
+    session_id: &SessionId,
+    paths: &SessionPaths,
+    into: &Path,
+    no_attach: bool,
+) -> Result<()> {
     let executable = std::env::current_exe().context("failed to locate ato executable")?;
     let log = owner_only_log(&paths.supervisor_log)?;
     let stderr = log.try_clone().context("failed to clone Supervisor log")?;
@@ -56,7 +69,7 @@ pub(crate) fn start(bundle: &Path, into: &Path, no_attach: bool) -> Result<()> {
         .arg("--bundle")
         .arg(&paths.seed_capsule)
         .arg("--into")
-        .arg(&into)
+        .arg(into)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(stderr));
@@ -82,7 +95,7 @@ pub(crate) fn start(bundle: &Path, into: &Path, no_attach: bool) -> Result<()> {
             let log = fs::read_to_string(&paths.supervisor_log).unwrap_or_default();
             bail!("Session Supervisor exited during startup ({status}): {log}");
         }
-        match request(&session_id, ControlAction::Status) {
+        match request(session_id, ControlAction::Status) {
             Ok(ControlMessage::Status { lifecycle, .. }) if lifecycle == "running" => break,
             Ok(ControlMessage::Error { message }) => {
                 let _ = child.kill();
@@ -108,6 +121,8 @@ pub(crate) fn serve(session: &str, bundle: &Path, into: &Path) -> Result<()> {
     let session_id = SessionId::parse(session)?;
     let paths = SessionPaths::new(&session_id)?;
     paths.create()?;
+    let bootstrap: SessionBootstrapMetadata =
+        serde_json::from_slice(&fs::read(&paths.bootstrap).context("missing Session bootstrap")?)?;
     let lock = OpenOptions::new()
         .write(true)
         .create(true)
@@ -120,47 +135,71 @@ pub(crate) fn serve(session: &str, bundle: &Path, into: &Path) -> Result<()> {
 
     let capsule = PortableCapsule::read(bundle).context("failed to read Capsule bundle")?;
     let state = &capsule.descriptor.base_state;
-    let object = capsule
-        .objects
-        .get(&state.state_ref)
-        .ok_or_else(|| anyhow!("base State object is missing"))?;
-    restore_workspace_state(state, object, into).context("failed to restore workspace State")?;
+    if bootstrap.resume_checkpoint.is_none() {
+        let object = capsule
+            .objects
+            .get(&state.state_ref)
+            .ok_or_else(|| anyhow!("base State object is missing"))?;
+        restore_workspace_state(state, object, into)
+            .context("failed to restore workspace State")?;
+    }
 
     let mut computation = PtyComputation::spawn(into)?;
     initialize_terminal(&mut computation.reader, &computation.writer)?;
-    let historical_frontier = capsule
-        .records
-        .last()
-        .map_or(RecordFrontier::Origin, |record| {
-            RecordFrontier::Through(record.seq)
-        });
-    let next_seq = capsule.records.last().map_or(Ok(1), |record| {
-        record
-            .seq
-            .checked_add(1)
-            .ok_or_else(|| anyhow!("seq exhausted"))
-    })?;
+    let historical_frontier = bootstrap.resume_checkpoint.as_ref().map_or_else(
+        || {
+            capsule
+                .records
+                .last()
+                .map_or(RecordFrontier::Origin, |record| {
+                    RecordFrontier::Through(record.seq)
+                })
+        },
+        |checkpoint| checkpoint.captured_at.records_through,
+    );
+    let next_seq = match historical_frontier {
+        RecordFrontier::Origin => 1,
+        RecordFrontier::Through(seq) => {
+            seq.checked_add(1).ok_or_else(|| anyhow!("seq exhausted"))?
+        }
+    };
     let generated = NewSupervisorIdentity::generate(
-        1,
+        bootstrap.generation,
         std::process::id(),
         process_start_identity(std::process::id()),
     );
-    write_secret(&paths.token, generated.secret())?;
+    replace_secret(&paths.token, generated.secret())?;
     let identity = generated.identity;
     let store = CapsuleProtocolSessionStore::open(&paths.root)?;
-    let mut stored = StoredProtocolSession::new(NewStoredProtocolSession {
-        session_id: session_id.clone(),
-        lifecycle: "starting".to_owned(),
-        state_type: &state.state_type,
-        base_state: &state.state_ref,
-        base_frontier: RecordFrontier::Origin,
-        durable_frontier: DurableFrontier {
-            records_through: historical_frontier,
-            journal_through: JournalLsn::ORIGIN,
-        },
-        workspace: into.to_path_buf(),
-        supervisor: identity.clone(),
-    });
+    let mut stored = if let Some(checkpoint) = &bootstrap.resume_checkpoint {
+        let store = CapsuleProtocolSessionStore::open(&paths.root)?;
+        let mut stored = store.read(&session_id)?;
+        stored.lifecycle = "starting".to_owned();
+        stored.base_state = checkpoint.state_ref.clone();
+        stored.base_frontier = checkpoint.captured_at.records_through;
+        stored.durable_frontier = SharedSessionWal::open(&paths.wal)?.durable_frontier()?;
+        stored.latest_consistent_frontier = Some(checkpoint.captured_at);
+        stored.active_checkpoint = Some(checkpoint.clone());
+        stored.historical_replay = None;
+        stored.supervisor = identity.clone();
+        stored
+    } else {
+        let mut stored = StoredProtocolSession::new(NewStoredProtocolSession {
+            session_id: session_id.clone(),
+            lifecycle: "starting".to_owned(),
+            state_type: &state.state_type,
+            base_state: &state.state_ref,
+            base_frontier: bootstrap.base_frontier,
+            durable_frontier: DurableFrontier {
+                records_through: historical_frontier,
+                journal_through: JournalLsn::ORIGIN,
+            },
+            workspace: into.to_path_buf(),
+            supervisor: identity.clone(),
+        });
+        stored.source_session_id = bootstrap.source_session_id.clone();
+        stored
+    };
     store.write(&stored)?;
 
     if paths.socket.exists() {
@@ -168,22 +207,46 @@ pub(crate) fn serve(session: &str, bundle: &Path, into: &Path) -> Result<()> {
     }
     let listener = UnixListener::bind(&paths.socket).context("failed to bind control socket")?;
     fs::set_permissions(&paths.socket, fs::Permissions::from_mode(0o600))?;
-    write_owner_only(
+    capsule_session_runtime::session_store::write_atomic_owner_only(
         &paths.socket_address,
         paths.socket.as_os_str().as_encoded_bytes(),
     )?;
 
     let (pty_tx, pty_rx) = mpsc::sync_channel(PTY_DRAIN_QUEUE_DEPTH);
     let reader = computation.take_reader()?;
+    let drain_state = Arc::new(PtyDrainState::default());
+    let drain_master_fd = computation.master_raw_fd()?;
+    let reader_state = Arc::clone(&drain_state);
     thread::Builder::new()
         .name(format!("capsule-pty-drain-{session_id}"))
-        .spawn(move || drain_pty(reader, pty_tx))
+        .spawn(move || drain_pty(reader, drain_master_fd, reader_state, pty_tx))
         .context("failed to start PTY drain")?;
-    PtyHistoricalReplayer::new(&mut computation, &pty_rx).replay(
-        &capsule.records,
-        RecordFrontier::Origin,
-        historical_frontier,
-    )?;
+    if bootstrap.resume_checkpoint.is_none() {
+        PtyHistoricalReplayer::new(&mut computation, &pty_rx, &drain_state).replay(
+            &capsule.records,
+            bootstrap.base_frontier,
+            historical_frontier,
+        )?;
+        stored.historical_replay = Some(StoredReplayVerification {
+            from: bootstrap.base_frontier,
+            through: historical_frontier,
+        });
+    }
+    if let Some(expected) = bootstrap.expected_workspace_digest.as_deref() {
+        let targets = workload_tree(
+            computation.pid,
+            computation.pgid,
+            &computation.process_start_identity,
+        );
+        signal_workload_tree(&targets, libc::SIGSTOP);
+        let verification = capture_local_workspace_checkpoint(into)
+            .context("failed to verify branched workspace State");
+        signal_workload_tree(&targets, libc::SIGCONT);
+        let verification = verification?;
+        if verification.0.state_ref.to_string() != expected {
+            bail!("BranchDiverged: replayed workspace State differs from source frontier");
+        }
+    }
 
     let wal = SharedSessionWal::open(&paths.wal)?;
     let driver = PtyBoundaryWriter {
@@ -213,6 +276,7 @@ pub(crate) fn serve(session: &str, bundle: &Path, into: &Path) -> Result<()> {
         &wal,
         command_rx,
         pty_rx,
+        drain_state,
         next_seq,
     );
     if result.is_err() {
@@ -340,6 +404,116 @@ pub(crate) fn kill(session: &str) -> Result<()> {
     }
 }
 
+pub(crate) fn branch(session: &str, into: &Path, no_attach: bool) -> Result<()> {
+    let source_id = SessionId::parse(session)?;
+    let checkpoint = match request(&source_id, ControlAction::CreateFrontier)? {
+        ControlMessage::FrontierCreated { checkpoint } => checkpoint,
+        ControlMessage::Error { message } => bail!("failed to create branch frontier: {message}"),
+        _ => bail!("unexpected CreateFrontier response"),
+    };
+    let source_paths = SessionPaths::new(&source_id)?;
+    let store = CapsuleProtocolSessionStore::open(&source_paths.root)?;
+    let source = store.read(&source_id)?;
+    if source.latest_consistent_frontier != Some(checkpoint.captured_at) {
+        bail!("source Session did not commit the requested consistent frontier");
+    }
+
+    let mut seed = PortableCapsule::read(&source_paths.seed_capsule)
+        .context("failed to read source Session seed")?;
+    let existing_through = seed.records.last().map_or(0, |record| record.seq);
+    let through = checkpoint.captured_at.records_through;
+    let recovered = capsule_session_runtime::SessionWal::open(&source_paths.wal)?.recover()?;
+    for entry in recovered.entries {
+        let capsule_session_runtime::WalEntry::RecordCandidate { record, .. } = entry else {
+            continue;
+        };
+        if record.seq > existing_through
+            && !source.base_frontier.contains(record.seq)
+            && through.contains(record.seq)
+        {
+            seed.records.push(record.try_into()?);
+        }
+    }
+    seed.records.sort_by_key(|record| record.seq);
+    seed.validate().context("invalid child recovery seed")?;
+
+    let child_id = random_session_id()?;
+    let child_paths = SessionPaths::new(&child_id)?;
+    child_paths.create()?;
+    write_capsule_seed(&seed, &child_paths.seed_capsule)?;
+    write_bootstrap_metadata(
+        &child_paths,
+        &SessionBootstrapMetadata {
+            source_session_id: Some(source_id),
+            expected_workspace_digest: Some(checkpoint.workspace_digest),
+            base_frontier: source.base_frontier,
+            ..SessionBootstrapMetadata::default()
+        },
+    )?;
+    launch_session(&child_id, &child_paths, &absolute_path(into)?, no_attach)
+}
+
+pub(crate) fn suspend(session: &str) -> Result<()> {
+    let session_id = SessionId::parse(session)?;
+    match request(&session_id, ControlAction::Suspend)? {
+        ControlMessage::Suspended => Ok(()),
+        ControlMessage::Error { message } => bail!("failed to suspend Session: {message}"),
+        _ => bail!("unexpected Suspend response"),
+    }
+}
+
+pub(crate) fn resume(session: &str) -> Result<()> {
+    let session_id = SessionId::parse(session)?;
+    let paths = SessionPaths::new(&session_id)?;
+    let store = CapsuleProtocolSessionStore::open(&paths.root)?;
+    let stored = store.read(&session_id)?;
+    if stored.lifecycle != "suspended" {
+        bail!("Session is not suspended");
+    }
+    let checkpoint = stored
+        .active_checkpoint
+        .clone()
+        .ok_or_else(|| anyhow!("suspended Session has no active checkpoint"))?;
+    if stored.latest_consistent_frontier != Some(checkpoint.captured_at) {
+        bail!("suspended Session checkpoint is not a consistent frontier");
+    }
+    let (current_state, current_object) = capture_local_workspace_checkpoint(&stored.workspace)
+        .context("failed to hash suspended workspace")?;
+    if current_state.state_ref.to_string() != checkpoint.workspace_digest {
+        bail!("WorkspaceDrift: suspended workspace differs from its checkpoint");
+    }
+    let checkpoint_object = checkpoint_object_path(&paths, &checkpoint.state_ref)?;
+    if fs::read(&checkpoint_object).context("failed to read local checkpoint object")?
+        != current_object
+    {
+        bail!("local checkpoint object does not match suspended workspace");
+    }
+
+    let mut seed = PortableCapsule::read(&paths.seed_capsule)?;
+    seed.descriptor.base_state.state_ref =
+        capsule_protocol::ContentRef::parse(&checkpoint.state_ref)?;
+    seed.records.clear();
+    seed.objects
+        .insert(seed.descriptor.base_state.state_ref.clone(), current_object);
+    replace_capsule_seed(&seed, &paths.seed_capsule)?;
+    let generation = stored
+        .supervisor
+        .generation
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("Supervisor generation exhausted"))?;
+    replace_bootstrap_metadata(
+        &paths,
+        &SessionBootstrapMetadata {
+            source_session_id: stored.source_session_id,
+            expected_workspace_digest: None,
+            generation,
+            base_frontier: checkpoint.captured_at.records_through,
+            resume_checkpoint: Some(checkpoint),
+        },
+    )?;
+    launch_session(&session_id, &paths, &stored.workspace, true)
+}
+
 pub(crate) fn list() -> Result<()> {
     let root = session_root()?;
     let store = CapsuleProtocolSessionStore::open(root)?;
@@ -398,6 +572,7 @@ fn supervisor_loop<J, D>(
     wal: &SharedSessionWal,
     commands: Receiver<SupervisorCommand>,
     pty_events: Receiver<PtyEvent>,
+    drain_state: Arc<PtyDrainState>,
     mut next_seq: u64,
 ) -> Result<()>
 where
@@ -412,6 +587,7 @@ where
     let mut child_status: Option<ExitStatus> = None;
     let mut exit_committed = false;
     let mut kill_replies = Vec::new();
+    let mut suspend_replies = Vec::new();
 
     loop {
         if let Ok(event) = pty_events.try_recv() {
@@ -432,29 +608,15 @@ where
                             | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                         }
                     }
-                    let record = pty_record(next_seq, Direction::Egress, "output", bytes.clone());
-                    let operation_id = random_operation_id("pty-output")?;
-                    let frontier = coordinator
-                        .commit_egress(operation_id, &record)
-                        .map_err(|error| anyhow!(error.to_string()))?;
-                    next_seq = next_seq
-                        .checked_add(1)
-                        .ok_or_else(|| anyhow!("seq exhausted"))?;
-                    stored.durable_frontier = frontier;
-                    store.write(stored)?;
-                    clients.retain(|client| {
-                        match client.sender.try_send(ControlMessage::Output {
-                            bytes: bytes.clone(),
-                        }) {
-                            Ok(()) => true,
-                            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
-                                if writer_client == Some(client.id) {
-                                    writer_client = None;
-                                }
-                                false
-                            }
-                        }
-                    });
+                    commit_output_bytes(
+                        coordinator,
+                        store,
+                        stored,
+                        &mut clients,
+                        &mut writer_client,
+                        &mut next_seq,
+                        bytes,
+                    )?;
                     if close_after_commit {
                         pty_closed = true;
                         termination.get_or_insert(TerminationReason::Natural);
@@ -550,6 +712,61 @@ where
                     computation.request_termination();
                 }
             }
+            Ok(SupervisorCommand::CreateFrontier { reply }) => {
+                if termination.is_some() {
+                    let _ = reply.send(Err("Session is terminating".to_owned()));
+                    continue;
+                }
+                let result = create_consistent_checkpoint(
+                    session_id,
+                    computation,
+                    coordinator,
+                    wal,
+                    store,
+                    stored,
+                    &pty_events,
+                    &drain_state,
+                    &mut clients,
+                    &mut writer_client,
+                    &mut next_seq,
+                    true,
+                )
+                .map_err(|error| error.to_string());
+                let _ = reply.send(result);
+            }
+            Ok(SupervisorCommand::Suspend { reply }) => {
+                if termination.is_some() {
+                    let _ = reply.send(Err("Session is terminating".to_owned()));
+                    continue;
+                }
+                stored.lifecycle = "suspending".to_owned();
+                store.write(stored)?;
+                match create_consistent_checkpoint(
+                    session_id,
+                    computation,
+                    coordinator,
+                    wal,
+                    store,
+                    stored,
+                    &pty_events,
+                    &drain_state,
+                    &mut clients,
+                    &mut writer_client,
+                    &mut next_seq,
+                    false,
+                ) {
+                    Ok(_) => {
+                        termination = Some(TerminationReason::Suspend);
+                        suspend_replies.push(reply);
+                        computation.force_termination();
+                    }
+                    Err(error) => {
+                        stored.lifecycle = "running".to_owned();
+                        store.write(stored)?;
+                        let _ = reply.send(Err(error.to_string()));
+                    }
+                }
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 if termination.is_none() {
@@ -584,7 +801,11 @@ where
     }
 
     computation.disarm_watchdog()?;
-    stored.lifecycle = "stopped".to_owned();
+    stored.lifecycle = if termination == Some(TerminationReason::Suspend) {
+        "suspended".to_owned()
+    } else {
+        "stopped".to_owned()
+    };
     store.write(stored)?;
     for reply in kill_replies {
         let _ = reply.send(ControlMessage::Killed);
@@ -592,7 +813,174 @@ where
     for client in clients {
         let _ = client.sender.try_send(ControlMessage::Detached);
     }
+    for reply in suspend_replies {
+        let _ = reply.send(Ok(()));
+    }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn commit_output_bytes<J, D>(
+    coordinator: &mut BoundaryCoordinator<J, D>,
+    store: &CapsuleProtocolSessionStore,
+    stored: &mut StoredProtocolSession,
+    clients: &mut Vec<ClientRegistration>,
+    writer_client: &mut Option<u64>,
+    next_seq: &mut u64,
+    bytes: Vec<u8>,
+) -> Result<()>
+where
+    J: capsule_session_runtime::supervisor::JournalCommit,
+    D: BoundaryDriver,
+{
+    let record = pty_record(*next_seq, Direction::Egress, "output", bytes.clone());
+    stored.durable_frontier = coordinator
+        .commit_egress(random_operation_id("pty-output")?, &record)
+        .map_err(|error| anyhow!(error.to_string()))?;
+    *next_seq = (*next_seq)
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("seq exhausted"))?;
+    store.write(stored)?;
+    clients.retain(|client| {
+        match client.sender.try_send(ControlMessage::Output {
+            bytes: bytes.clone(),
+        }) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                if *writer_client == Some(client.id) {
+                    *writer_client = None;
+                }
+                false
+            }
+        }
+    });
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_consistent_checkpoint<J, D>(
+    session_id: &SessionId,
+    computation: &mut PtyComputation,
+    coordinator: &mut BoundaryCoordinator<J, D>,
+    wal: &SharedSessionWal,
+    store: &CapsuleProtocolSessionStore,
+    stored: &mut StoredProtocolSession,
+    pty_events: &Receiver<PtyEvent>,
+    drain_state: &PtyDrainState,
+    clients: &mut Vec<ClientRegistration>,
+    writer_client: &mut Option<u64>,
+    next_seq: &mut u64,
+    resume_workload: bool,
+) -> Result<StoredLocalCheckpoint>
+where
+    J: capsule_session_runtime::supervisor::JournalCommit,
+    D: BoundaryDriver,
+{
+    let targets = workload_tree(
+        computation.pid,
+        computation.pgid,
+        &computation.process_start_identity,
+    );
+    signal_workload_tree(&targets, libc::SIGSTOP);
+    let result = (|| {
+        let master_fd = computation.master_raw_fd()?;
+        loop {
+            let mut observed = false;
+            while let Ok(event) = pty_events.try_recv() {
+                observed = true;
+                match event {
+                    PtyEvent::Output(bytes) => commit_output_bytes(
+                        coordinator,
+                        store,
+                        stored,
+                        clients,
+                        writer_client,
+                        next_seq,
+                        bytes,
+                    )?,
+                    PtyEvent::Closed => bail!("PTY closed while creating a consistent frontier"),
+                    PtyEvent::Failed(message) => bail!("PTY drain failed: {message}"),
+                }
+            }
+            let reader_idle = !drain_state.read_in_flight.load(Ordering::SeqCst);
+            if !observed && reader_idle && !poll_readable(master_fd, 10)? {
+                // A second zero-time observation closes the race between the
+                // reader consuming kernel bytes and publishing its queue item.
+                match pty_events.try_recv() {
+                    Ok(PtyEvent::Output(bytes)) => commit_output_bytes(
+                        coordinator,
+                        store,
+                        stored,
+                        clients,
+                        writer_client,
+                        next_seq,
+                        bytes,
+                    )?,
+                    Ok(PtyEvent::Closed) => {
+                        bail!("PTY closed while creating a consistent frontier")
+                    }
+                    Ok(PtyEvent::Failed(message)) => bail!("PTY drain failed: {message}"),
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        bail!("PTY drain disconnected while creating a consistent frontier")
+                    }
+                    Err(mpsc::TryRecvError::Empty)
+                        if !drain_state.read_in_flight.load(Ordering::SeqCst)
+                            && !poll_readable(master_fd, 0)? =>
+                    {
+                        break;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {}
+                }
+            }
+        }
+
+        let frontier = wal.durable_frontier()?;
+        let (state, object) = capture_local_workspace_checkpoint(&stored.workspace)
+            .context("failed to capture local workspace checkpoint")?;
+        persist_checkpoint_object(session_id, &state.state_ref.to_string(), &object)?;
+        let checkpoint = StoredLocalCheckpoint {
+            state_ref: state.state_ref.to_string(),
+            captured_at: frontier,
+            workspace_digest: state.state_ref.to_string(),
+            resume_fidelity: "filesystem_restart".to_owned(),
+        };
+        stored.durable_frontier = frontier;
+        stored.latest_consistent_frontier = Some(frontier);
+        stored.active_checkpoint = Some(checkpoint.clone());
+        store.write(stored)?;
+        Ok(checkpoint)
+    })();
+    if resume_workload || result.is_err() {
+        signal_workload_tree(&targets, libc::SIGCONT);
+    }
+    result
+}
+
+fn persist_checkpoint_object(session_id: &SessionId, reference: &str, bytes: &[u8]) -> Result<()> {
+    let paths = SessionPaths::new(session_id)?;
+    let path = checkpoint_object_path(&paths, reference)?;
+    let directory = path
+        .parent()
+        .ok_or_else(|| anyhow!("checkpoint object path has no parent"))?;
+    fs::create_dir_all(directory)?;
+    fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
+    if path.exists() {
+        let existing = fs::read(&path)?;
+        if existing != bytes {
+            bail!("checkpoint object collision for {reference}");
+        }
+        return Ok(());
+    }
+    write_owner_only(&path, bytes)?;
+    File::open(directory)?.sync_all()?;
+    Ok(())
+}
+
+fn checkpoint_object_path(paths: &SessionPaths, reference: &str) -> Result<PathBuf> {
+    let (algorithm, digest) = reference
+        .split_once(':')
+        .ok_or_else(|| anyhow!("invalid checkpoint ContentRef"))?;
+    Ok(paths.directory.join("objects").join(algorithm).join(digest))
 }
 
 fn commit_terminal_exit<J, D>(
@@ -780,10 +1168,26 @@ impl PtyComputation {
             .map_err(|error| anyhow!("failed to resize PTY: {error}"))
     }
 
+    fn master_raw_fd(&self) -> Result<RawFd> {
+        let master = self
+            .master
+            .lock()
+            .map_err(|_| anyhow!("PTY master lock poisoned"))?;
+        master
+            .as_raw_fd()
+            .ok_or_else(|| anyhow!("PTY master does not expose a Unix file descriptor"))
+    }
+
     fn request_termination(&mut self) {
         if workload_identity_matches(self.pid, self.pgid, &self.process_start_identity) {
             signal_workload(self.pid, self.pgid, libc::SIGTERM);
         }
+        let _ = self.killer.kill();
+    }
+
+    fn force_termination(&mut self) {
+        let targets = workload_tree(self.pid, self.pgid, &self.process_start_identity);
+        signal_workload_tree(&targets, libc::SIGKILL);
         let _ = self.killer.kill();
     }
 
@@ -873,14 +1277,20 @@ fn initialize_terminal(
 struct PtyHistoricalReplayer<'a> {
     computation: &'a mut PtyComputation,
     events: &'a Receiver<PtyEvent>,
+    drain_state: &'a PtyDrainState,
     output: PtyOutputVerifier,
 }
 
 impl<'a> PtyHistoricalReplayer<'a> {
-    fn new(computation: &'a mut PtyComputation, events: &'a Receiver<PtyEvent>) -> Self {
+    fn new(
+        computation: &'a mut PtyComputation,
+        events: &'a Receiver<PtyEvent>,
+        drain_state: &'a PtyDrainState,
+    ) -> Self {
         Self {
             computation,
             events,
+            drain_state,
             output: PtyOutputVerifier::default(),
         }
     }
@@ -942,19 +1352,44 @@ impl<'a> PtyHistoricalReplayer<'a> {
                 _ => bail!("unsupported historical PTY record at seq {}", record.seq),
             }
         }
-        while let Ok(event) = self.events.try_recv() {
-            match event {
-                PtyEvent::Output(bytes) => self.output.push(&bytes),
-                PtyEvent::Closed => {}
-                PtyEvent::Failed(message) => bail!("PTY replay drain failed: {message}"),
-            }
-        }
+        self.drain_actual_output_to_quiescence()?;
         if self.output.available() != 0 {
             let seq = match through {
                 RecordFrontier::Origin => 0,
                 RecordFrontier::Through(seq) => seq,
             };
             bail!("historical PTY replay diverged after seq {seq}");
+        }
+        Ok(())
+    }
+
+    fn drain_actual_output_to_quiescence(&mut self) -> Result<()> {
+        let master_fd = self.computation.master_raw_fd()?;
+        loop {
+            while let Ok(event) = self.events.try_recv() {
+                match event {
+                    PtyEvent::Output(bytes) => self.output.push(&bytes),
+                    PtyEvent::Closed => {}
+                    PtyEvent::Failed(message) => bail!("PTY replay drain failed: {message}"),
+                }
+            }
+            if !self.drain_state.read_in_flight.load(Ordering::SeqCst)
+                && !poll_readable(master_fd, 10)?
+            {
+                match self.events.try_recv() {
+                    Ok(PtyEvent::Output(bytes)) => self.output.push(&bytes),
+                    Ok(PtyEvent::Closed) => {}
+                    Ok(PtyEvent::Failed(message)) => bail!("PTY replay drain failed: {message}"),
+                    Err(mpsc::TryRecvError::Disconnected) => break,
+                    Err(mpsc::TryRecvError::Empty)
+                        if !self.drain_state.read_in_flight.load(Ordering::SeqCst)
+                            && !poll_readable(master_fd, 0)? =>
+                    {
+                        break;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {}
+                }
+            }
         }
         Ok(())
     }
@@ -1031,11 +1466,26 @@ fn find_subslice(bytes: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-fn drain_pty(mut reader: Box<dyn Read + Send>, sender: SyncSender<PtyEvent>) {
+fn drain_pty(
+    mut reader: Box<dyn Read + Send>,
+    master_fd: RawFd,
+    state: Arc<PtyDrainState>,
+    sender: SyncSender<PtyEvent>,
+) {
     let mut buffer = [0_u8; 8192];
     loop {
+        match poll_readable(master_fd, 100) {
+            Ok(false) => continue,
+            Ok(true) => {}
+            Err(error) => {
+                let _ = sender.send(PtyEvent::Failed(error.to_string()));
+                return;
+            }
+        }
+        state.read_in_flight.store(true, Ordering::SeqCst);
         match reader.read(&mut buffer) {
             Ok(0) => {
+                state.read_in_flight.store(false, Ordering::SeqCst);
                 let _ = sender.send(PtyEvent::Closed);
                 return;
             }
@@ -1044,19 +1494,36 @@ fn drain_pty(mut reader: Box<dyn Read + Send>, sender: SyncSender<PtyEvent>) {
                     .send(PtyEvent::Output(buffer[..count].to_vec()))
                     .is_err()
                 {
+                    state.read_in_flight.store(false, Ordering::SeqCst);
                     return;
                 }
+                state.read_in_flight.store(false, Ordering::SeqCst);
             }
             Err(error) if error.raw_os_error() == Some(libc::EIO) => {
+                state.read_in_flight.store(false, Ordering::SeqCst);
                 let _ = sender.send(PtyEvent::Closed);
                 return;
             }
             Err(error) => {
+                state.read_in_flight.store(false, Ordering::SeqCst);
                 let _ = sender.send(PtyEvent::Failed(error.to_string()));
                 return;
             }
         }
     }
+}
+
+fn poll_readable(fd: RawFd, timeout_ms: i32) -> std::io::Result<bool> {
+    let mut descriptor = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let result = unsafe { libc::poll(&mut descriptor, 1, timeout_ms) };
+    if result < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(result > 0 && descriptor.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0)
 }
 
 fn accept_control(
@@ -1091,6 +1558,24 @@ fn handle_control(
             let (reply_tx, reply_rx) = mpsc::sync_channel(1);
             sender.send(SupervisorCommand::Kill { reply: reply_tx })?;
             write_frame(&mut stream, &reply_rx.recv()?)?;
+        }
+        ControlAction::CreateFrontier => {
+            let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+            sender.send(SupervisorCommand::CreateFrontier { reply: reply_tx })?;
+            match reply_rx.recv()? {
+                Ok(checkpoint) => {
+                    write_frame(&mut stream, &ControlMessage::FrontierCreated { checkpoint })?
+                }
+                Err(message) => write_frame(&mut stream, &ControlMessage::Error { message })?,
+            }
+        }
+        ControlAction::Suspend => {
+            let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+            sender.send(SupervisorCommand::Suspend { reply: reply_tx })?;
+            match reply_rx.recv()? {
+                Ok(()) => write_frame(&mut stream, &ControlMessage::Suspended)?,
+                Err(message) => write_frame(&mut stream, &ControlMessage::Error { message })?,
+            }
         }
         ControlAction::Attach { observe } => {
             let (out_tx, out_rx) = mpsc::sync_channel(CLIENT_QUEUE_DEPTH);
@@ -1264,6 +1749,8 @@ struct ControlEnvelope {
 #[serde(rename_all = "snake_case", tag = "method", content = "params")]
 enum ControlAction {
     Status,
+    CreateFrontier,
+    Suspend,
     Attach { observe: bool },
     Input { bytes: Vec<u8> },
     Resize { rows: u16, cols: u16 },
@@ -1290,6 +1777,10 @@ enum ControlMessage {
     },
     Detached,
     Killed,
+    FrontierCreated {
+        checkpoint: StoredLocalCheckpoint,
+    },
+    Suspended,
     Error {
         message: String,
     },
@@ -1325,6 +1816,12 @@ enum SupervisorCommand {
     Kill {
         reply: SyncSender<ControlMessage>,
     },
+    CreateFrontier {
+        reply: SyncSender<Result<StoredLocalCheckpoint, String>>,
+    },
+    Suspend {
+        reply: SyncSender<Result<(), String>>,
+    },
 }
 
 struct AttachGrant {
@@ -1343,11 +1840,17 @@ enum PtyEvent {
     Failed(String),
 }
 
+#[derive(Default)]
+struct PtyDrainState {
+    read_in_flight: AtomicBool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TerminationReason {
     Natural,
     ControlKill,
     ControlChannelClosed,
+    Suspend,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1383,6 +1886,7 @@ struct SessionPaths {
     lock: PathBuf,
     wal: PathBuf,
     seed_capsule: PathBuf,
+    bootstrap: PathBuf,
     supervisor_log: PathBuf,
 }
 
@@ -1405,6 +1909,7 @@ impl SessionPaths {
             lock: control.join("supervisor.lock"),
             wal: directory.join("journal").join("wal-000001"),
             seed_capsule: directory.join("seed").join("source.capsule.local"),
+            bootstrap: control.join("bootstrap.json"),
             supervisor_log: directory.join("logs").join("supervisor.log"),
             directory,
             control,
@@ -1426,6 +1931,51 @@ impl SessionPaths {
         }
         Ok(())
     }
+}
+
+#[derive(Serialize, Deserialize)]
+struct SessionBootstrapMetadata {
+    source_session_id: Option<SessionId>,
+    expected_workspace_digest: Option<String>,
+    #[serde(default = "initial_supervisor_generation")]
+    generation: u64,
+    resume_checkpoint: Option<StoredLocalCheckpoint>,
+    #[serde(default)]
+    base_frontier: RecordFrontier,
+}
+
+fn initial_supervisor_generation() -> u64 {
+    1
+}
+
+impl Default for SessionBootstrapMetadata {
+    fn default() -> Self {
+        Self {
+            source_session_id: None,
+            expected_workspace_digest: None,
+            generation: initial_supervisor_generation(),
+            resume_checkpoint: None,
+            base_frontier: RecordFrontier::Origin,
+        }
+    }
+}
+
+fn write_bootstrap_metadata(
+    paths: &SessionPaths,
+    metadata: &SessionBootstrapMetadata,
+) -> Result<()> {
+    write_owner_only(&paths.bootstrap, &serde_json::to_vec_pretty(metadata)?)
+}
+
+fn replace_bootstrap_metadata(
+    paths: &SessionPaths,
+    metadata: &SessionBootstrapMetadata,
+) -> Result<()> {
+    capsule_session_runtime::session_store::write_atomic_owner_only(
+        &paths.bootstrap,
+        &serde_json::to_vec_pretty(metadata)?,
+    )
+    .map_err(Into::into)
 }
 
 fn import_session_seed(source: &Path, destination: &Path) -> Result<()> {
@@ -1451,6 +2001,36 @@ fn import_session_seed(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
+fn write_capsule_seed(capsule: &PortableCapsule, destination: &Path) -> Result<()> {
+    capsule
+        .write(destination)
+        .context("failed to write child Session seed")?;
+    let file = File::open(destination)?;
+    file.set_permissions(fs::Permissions::from_mode(0o400))?;
+    file.sync_all()?;
+    File::open(
+        destination
+            .parent()
+            .ok_or_else(|| anyhow!("Session seed path has no parent"))?,
+    )?
+    .sync_all()?;
+    Ok(())
+}
+
+fn replace_capsule_seed(capsule: &PortableCapsule, destination: &Path) -> Result<()> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| anyhow!("Session seed path has no parent"))?;
+    let temporary = parent.join(".source.capsule.local.new");
+    if temporary.exists() {
+        fs::remove_file(&temporary)?;
+    }
+    write_capsule_seed(capsule, &temporary)?;
+    fs::rename(&temporary, destination)?;
+    File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
 fn session_root() -> Result<PathBuf> {
     Ok(capsule::config::config_dir()?.join("capsule-protocol-sessions"))
 }
@@ -1464,8 +2044,9 @@ fn owner_only_log(path: &Path) -> Result<File> {
         .with_context(|| format!("failed to open {}", path.display()))
 }
 
-fn write_secret(path: &Path, secret: &[u8]) -> Result<()> {
-    write_owner_only(path, secret)
+fn replace_secret(path: &Path, secret: &[u8]) -> Result<()> {
+    capsule_session_runtime::session_store::write_atomic_owner_only(path, secret)
+        .map_err(Into::into)
 }
 
 fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -1474,7 +2055,7 @@ fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<()> {
         .create_new(true)
         .mode(0o600)
         .open(path)
-        .context("failed to create Session control token")?;
+        .with_context(|| format!("failed to create owner-only file {}", path.display()))?;
     file.write_all(bytes)?;
     file.sync_all()?;
     Ok(())
