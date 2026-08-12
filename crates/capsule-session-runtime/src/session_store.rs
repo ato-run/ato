@@ -11,7 +11,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::RecordFrontier;
+use crate::DurableFrontier;
 
 const SESSION_STORE_SCHEMA_VERSION: u16 = 1;
 const SESSION_SECRET_BYTES: usize = 32;
@@ -110,7 +110,7 @@ pub struct StoredProtocolSession {
     pub lifecycle: String,
     pub state_type: String,
     pub state_ref: String,
-    pub committed_frontier: RecordFrontier,
+    pub committed_frontier: DurableFrontier,
     pub supervisor: SupervisorIdentity,
 }
 
@@ -120,7 +120,7 @@ impl StoredProtocolSession {
         lifecycle: impl Into<String>,
         state_type: &StateTypeId,
         state_ref: &ContentRef,
-        committed_frontier: RecordFrontier,
+        committed_frontier: DurableFrontier,
         supervisor: SupervisorIdentity,
     ) -> Self {
         Self {
@@ -328,7 +328,10 @@ mod tests {
             "running",
             &StateTypeId::parse("ato.state.test@1").expect("state type"),
             &ContentRef::parse(format!("blake3:{}", "a".repeat(64))).expect("state ref"),
-            RecordFrontier::Through(42),
+            DurableFrontier {
+                records_through: crate::RecordFrontier::Through(42),
+                journal_through: crate::JournalLsn::new(8192),
+            },
             identity,
         )
     }
