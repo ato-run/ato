@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{IsTerminal, Read, Write};
 use std::os::fd::{FromRawFd, RawFd};
@@ -20,15 +21,19 @@ use capsule_session_runtime::{
 };
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size as terminal_size};
 use fs2::FileExt;
-use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{
+    Child, ChildKiller, CommandBuilder, ExitStatus, MasterPty, PtySize, native_pty_system,
+};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
 const CONTROL_FRAME_LIMIT: usize = 16 * 1024 * 1024;
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const CLIENT_QUEUE_DEPTH: usize = 64;
+const PTY_DRAIN_QUEUE_DEPTH: usize = 64;
 const PTY_CONNECTOR_ID: &str = "terminal.main";
 const READY_MARKER: &[u8] = b"__ATO_SESSION_READY__";
+const WATCHDOG_DISARM: &[u8] = b"DISARM\n";
 
 pub(crate) fn start(bundle: &Path, into: &Path, no_attach: bool) -> Result<()> {
     PortableCapsule::read(bundle).context("invalid Capsule bundle")?;
@@ -134,7 +139,12 @@ pub(crate) fn serve(session: &str, bundle: &Path, into: &Path) -> Result<()> {
         .map_or(RecordFrontier::Origin, |record| {
             RecordFrontier::Through(record.seq)
         });
-    let next_seq = capsule.records.last().map_or(1, |record| record.seq + 1);
+    let next_seq = capsule.records.last().map_or(Ok(1), |record| {
+        record
+            .seq
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("seq exhausted"))
+    })?;
     let generated = NewSupervisorIdentity::generate(
         1,
         std::process::id(),
@@ -185,7 +195,7 @@ pub(crate) fn serve(session: &str, bundle: &Path, into: &Path) -> Result<()> {
     stored.lifecycle = "running".to_owned();
     store.write(&stored)?;
 
-    let (pty_tx, pty_rx) = mpsc::channel();
+    let (pty_tx, pty_rx) = mpsc::sync_channel(PTY_DRAIN_QUEUE_DEPTH);
     let reader = computation.take_reader()?;
     thread::Builder::new()
         .name(format!("capsule-pty-drain-{session_id}"))
@@ -332,30 +342,45 @@ pub(crate) fn list() -> Result<()> {
     let root = session_root()?;
     let store = CapsuleProtocolSessionStore::open(root)?;
     for session in store.list()? {
+        let lifecycle = if matches!(
+            session.lifecycle.as_str(),
+            "starting" | "running" | "terminating"
+        ) && !supervisor_identity_is_live(&session.supervisor)
+        {
+            "orphaned"
+        } else {
+            &session.lifecycle
+        };
         println!(
             "{}\t{}\t{}",
-            session.session_id, session.lifecycle, session.supervisor.pid
+            session.session_id, lifecycle, session.supervisor.pid
         );
     }
     Ok(())
 }
 
-pub(crate) fn watchdog(pid: u32, lease_fd: i32) -> Result<()> {
+pub(crate) fn watchdog(
+    pid: u32,
+    pgid: i32,
+    expected_start_identity: &str,
+    lease_fd: i32,
+) -> Result<()> {
     if lease_fd < 0 {
         bail!("invalid watchdog lease fd");
     }
     let mut lease = unsafe { File::from_raw_fd(lease_fd as RawFd) };
-    let mut byte = [0_u8; 1];
-    while lease.read(&mut byte)? != 0 {}
-    unsafe {
-        libc::kill(-(pid as libc::pid_t), libc::SIGTERM);
-        libc::kill(pid as libc::pid_t, libc::SIGTERM);
+    let mut message = Vec::new();
+    lease.read_to_end(&mut message)?;
+    if message == WATCHDOG_DISARM {
+        return Ok(());
     }
+    if !workload_identity_matches(pid, pgid, expected_start_identity) {
+        return Ok(());
+    }
+    let targets = workload_tree(pid, pgid, expected_start_identity);
+    signal_workload_tree(&targets, libc::SIGTERM);
     thread::sleep(Duration::from_millis(500));
-    unsafe {
-        libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
-        libc::kill(pid as libc::pid_t, libc::SIGKILL);
-    }
+    signal_workload_tree(&targets, libc::SIGKILL);
     Ok(())
 }
 
@@ -380,15 +405,19 @@ where
     let mut clients: Vec<ClientRegistration> = Vec::new();
     let mut writer_client: Option<u64> = None;
     let mut next_client_id = 1_u64;
-    let mut running = true;
+    let mut termination: Option<TerminationReason> = None;
+    let mut pty_closed = false;
+    let mut child_status: Option<ExitStatus> = None;
+    let mut exit_committed = false;
+    let mut kill_replies = Vec::new();
 
-    while running {
+    loop {
         if let Ok(event) = pty_events.try_recv() {
             match event {
                 PtyEvent::Output(mut bytes) => {
                     let mut close_after_commit = false;
                     while bytes.len() < 256 * 1024 {
-                        match pty_events.try_recv() {
+                        match pty_events.recv_timeout(Duration::from_millis(1)) {
                             Ok(PtyEvent::Output(more)) => bytes.extend_from_slice(&more),
                             Ok(PtyEvent::Closed) => {
                                 close_after_commit = true;
@@ -397,7 +426,8 @@ where
                             Ok(PtyEvent::Failed(message)) => {
                                 bail!("PTY drain failed: {message}")
                             }
-                            Err(_) => break,
+                            Err(mpsc::RecvTimeoutError::Timeout)
+                            | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                         }
                     }
                     let record = pty_record(next_seq, Direction::Egress, "output", bytes.clone());
@@ -424,20 +454,13 @@ where
                         }
                     });
                     if close_after_commit {
-                        commit_terminal_exit(
-                            coordinator,
-                            wal,
-                            store,
-                            stored,
-                            next_seq,
-                            "pty_closed",
-                        )?;
-                        running = false;
+                        pty_closed = true;
+                        termination.get_or_insert(TerminationReason::Natural);
                     }
                 }
                 PtyEvent::Closed => {
-                    commit_terminal_exit(coordinator, wal, store, stored, next_seq, "pty_closed")?;
-                    running = false;
+                    pty_closed = true;
+                    termination.get_or_insert(TerminationReason::Natural);
                 }
                 PtyEvent::Failed(message) => bail!("PTY drain failed: {message}"),
             }
@@ -449,6 +472,10 @@ where
                 sender,
                 reply,
             }) => {
+                if termination.is_some() {
+                    let _ = reply.send(Err("Session is terminating".to_owned()));
+                    continue;
+                }
                 let writer = !observe && writer_client.is_none();
                 if !observe && !writer {
                     let _ = reply.send(Err("interactive writer lease is already held".to_owned()));
@@ -463,7 +490,7 @@ where
                 let _ = reply.send(Ok(AttachGrant { id, writer }));
             }
             Ok(SupervisorCommand::Input { client_id, bytes }) => {
-                if writer_client != Some(client_id) {
+                if termination.is_some() || writer_client != Some(client_id) {
                     continue;
                 }
                 let record = pty_record(next_seq, Direction::Ingress, "stdin", bytes);
@@ -481,7 +508,7 @@ where
                 rows,
                 cols,
             }) => {
-                if writer_client != Some(client_id) {
+                if termination.is_some() || writer_client != Some(client_id) {
                     continue;
                 }
                 let payload = serde_json::to_vec(&ResizePayload { rows, cols })?;
@@ -513,21 +540,53 @@ where
                 });
             }
             Ok(SupervisorCommand::Kill { reply }) => {
-                commit_terminal_exit(coordinator, wal, store, stored, next_seq, "control_kill")?;
-                let _ = reply.send(ControlMessage::Killed);
-                running = false;
+                kill_replies.push(reply);
+                if termination.is_none() {
+                    termination = Some(TerminationReason::ControlKill);
+                    stored.lifecycle = "terminating".to_owned();
+                    store.write(stored)?;
+                    computation.request_termination();
+                }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => running = false,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                if termination.is_none() {
+                    termination = Some(TerminationReason::ControlChannelClosed);
+                    stored.lifecycle = "terminating".to_owned();
+                    store.write(stored)?;
+                    computation.request_termination();
+                }
+            }
         }
-        if running && computation.has_exited()? {
-            commit_terminal_exit(coordinator, wal, store, stored, next_seq, "process_exit")?;
-            running = false;
+
+        if child_status.is_none()
+            && let Some(status) = computation.try_wait()?
+        {
+            child_status = Some(status);
+            if termination.is_none() {
+                termination = Some(TerminationReason::Natural);
+                stored.lifecycle = "terminating".to_owned();
+                store.write(stored)?;
+            }
+        }
+
+        if pty_closed && let (Some(reason), Some(status)) = (termination, child_status.as_ref()) {
+            if reason == TerminationReason::Natural && !exit_committed {
+                commit_terminal_exit(coordinator, wal, store, stored, next_seq, status)?;
+                exit_committed = true;
+            }
+            if reason != TerminationReason::Natural || exit_committed {
+                break;
+            }
         }
     }
 
+    computation.disarm_watchdog()?;
     stored.lifecycle = "stopped".to_owned();
     store.write(stored)?;
+    for reply in kill_replies {
+        let _ = reply.send(ControlMessage::Killed);
+    }
     for client in clients {
         let _ = client.sender.try_send(ControlMessage::Detached);
     }
@@ -540,13 +599,17 @@ fn commit_terminal_exit<J, D>(
     store: &CapsuleProtocolSessionStore,
     stored: &mut StoredProtocolSession,
     seq: u64,
-    reason: &str,
+    status: &ExitStatus,
 ) -> Result<()>
 where
     J: capsule_session_runtime::supervisor::JournalCommit,
     D: BoundaryDriver,
 {
-    let payload = serde_json::to_vec(&ExitPayload { reason })?;
+    let payload = serde_json::to_vec(&ExitPayload {
+        exit_code: status.exit_code(),
+        signal: status.signal(),
+        reason: "natural",
+    })?;
     let record = pty_record(seq, Direction::Egress, "exit", payload);
     coordinator
         .commit_egress(random_operation_id("pty-exit")?, &record)
@@ -619,6 +682,9 @@ struct PtyComputation {
     killer: Box<dyn ChildKiller + Send + Sync>,
     reader: Option<Box<dyn Read + Send>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    pid: u32,
+    pgid: i32,
+    process_start_identity: String,
     lease: Option<File>,
     watchdog: Option<ProcessChild>,
 }
@@ -656,14 +722,22 @@ impl PtyComputation {
         let pid = child
             .process_id()
             .ok_or_else(|| anyhow!("PTY child did not expose a process id"))?;
+        let pgid = unsafe { libc::getpgid(pid as libc::pid_t) };
+        if pgid < 1 {
+            bail!("PTY child did not expose a valid process group");
+        }
+        let process_start_identity = workload_process_start_identity(pid)?;
         let killer = child.clone_killer();
-        let (lease, watchdog) = spawn_watchdog(pid)?;
+        let (lease, watchdog) = spawn_watchdog(pid, pgid, &process_start_identity)?;
         Ok(Self {
             master: Arc::new(Mutex::new(pair.master)),
             child,
             killer,
             reader: Some(reader),
             writer: Arc::new(Mutex::new(writer)),
+            pid,
+            pgid,
+            process_start_identity,
             lease: Some(lease),
             watchdog: Some(watchdog),
         })
@@ -675,25 +749,46 @@ impl PtyComputation {
             .ok_or_else(|| anyhow!("PTY reader already taken"))
     }
 
-    fn has_exited(&mut self) -> Result<bool> {
-        self.child
-            .try_wait()
-            .map(|status| status.is_some())
-            .context("failed to poll shell")
+    fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
+        self.child.try_wait().context("failed to poll shell")
+    }
+
+    fn request_termination(&mut self) {
+        if workload_identity_matches(self.pid, self.pgid, &self.process_start_identity) {
+            signal_workload(self.pid, self.pgid, libc::SIGTERM);
+        }
+        let _ = self.killer.kill();
+    }
+
+    fn disarm_watchdog(&mut self) -> Result<()> {
+        if let Some(mut lease) = self.lease.take() {
+            lease
+                .write_all(WATCHDOG_DISARM)
+                .context("failed to disarm workload watchdog")?;
+            lease.flush().context("failed to flush watchdog DISARM")?;
+            drop(lease);
+        }
+        if let Some(mut watchdog) = self.watchdog.take() {
+            watchdog
+                .wait()
+                .context("failed to reap workload watchdog")?;
+        }
+        Ok(())
     }
 
     fn terminate(&mut self) -> Result<()> {
-        let _ = self.killer.kill();
+        self.request_termination();
         let _ = self.child.wait();
-        self.lease.take();
-        if let Some(mut watchdog) = self.watchdog.take() {
-            let _ = watchdog.wait();
-        }
+        self.disarm_watchdog()?;
         Ok(())
     }
 }
 
-fn spawn_watchdog(pid: u32) -> Result<(File, ProcessChild)> {
+fn spawn_watchdog(
+    pid: u32,
+    pgid: i32,
+    process_start_identity: &str,
+) -> Result<(File, ProcessChild)> {
     let mut fds = [0_i32; 2];
     if unsafe { libc::pipe(fds.as_mut_ptr()) } == -1 {
         return Err(std::io::Error::last_os_error()).context("failed to create watchdog pipe");
@@ -714,6 +809,10 @@ fn spawn_watchdog(pid: u32) -> Result<(File, ProcessChild)> {
             "watchdog",
             "--pid",
             &pid.to_string(),
+            "--pgid",
+            &pgid.to_string(),
+            "--process-start-identity",
+            process_start_identity,
             "--lease-fd",
             &read_fd.to_string(),
         ])
@@ -744,6 +843,10 @@ fn initialize_terminal(
     Ok(())
 }
 
+// Compatibility replay for capsules produced by the original one-command
+// fixture. It injects a shell completion marker after each stdin record and is
+// therefore not the general PTY v1 replayer for REPLs, foreground TUIs, or
+// arbitrary interleaved stdin/resize/output histories.
 fn replay_history(
     records: &[IoRecord],
     reader: &mut Option<Box<dyn Read + Send>>,
@@ -830,7 +933,7 @@ fn find_subslice(bytes: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-fn drain_pty(mut reader: Box<dyn Read + Send>, sender: mpsc::Sender<PtyEvent>) {
+fn drain_pty(mut reader: Box<dyn Read + Send>, sender: SyncSender<PtyEvent>) {
     let mut buffer = [0_u8; 8192];
     loop {
         match reader.read(&mut buffer) {
@@ -1142,6 +1245,13 @@ enum PtyEvent {
     Failed(String),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TerminationReason {
+    Natural,
+    ControlKill,
+    ControlChannelClosed,
+}
+
 #[derive(Serialize, Deserialize)]
 struct ResizePayload {
     rows: u16,
@@ -1150,6 +1260,8 @@ struct ResizePayload {
 
 #[derive(Serialize)]
 struct ExitPayload<'a> {
+    exit_code: u32,
+    signal: Option<&'a str>,
     reason: &'a str,
 }
 
@@ -1320,6 +1432,99 @@ fn pty_record(seq: u64, direction: Direction, kind: &str, bytes: Vec<u8>) -> IoR
 fn process_start_identity(pid: u32) -> String {
     capsule::state::session::process::process_start_time_unix_ms(pid)
         .map_or_else(|| format!("pid-{pid}-unknown"), |value| value.to_string())
+}
+
+fn workload_process_start_identity(pid: u32) -> Result<String> {
+    capsule::state::session::process::process_start_time_unix_ms(pid)
+        .map(|value| value.to_string())
+        .ok_or_else(|| anyhow!("failed to read workload process start identity for PID {pid}"))
+}
+
+fn workload_identity_matches(pid: u32, pgid: i32, expected_start_identity: &str) -> bool {
+    workload_process_start_identity(pid).is_ok_and(|actual| actual == expected_start_identity)
+        && unsafe { libc::getpgid(pid as libc::pid_t) } == pgid
+}
+
+#[derive(Clone, Debug)]
+struct ProcessTarget {
+    pid: u32,
+    pgid: i32,
+    process_start_identity: String,
+}
+
+fn workload_tree(pid: u32, pgid: i32, process_start_identity: &str) -> Vec<ProcessTarget> {
+    let mut targets = vec![ProcessTarget {
+        pid,
+        pgid,
+        process_start_identity: process_start_identity.to_owned(),
+    }];
+    let Ok(output) = Command::new("ps")
+        .args(["-e", "-o", "pid=", "-o", "ppid="])
+        .output()
+    else {
+        return targets;
+    };
+    let processes: Vec<(u32, u32)> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
+        })
+        .collect();
+    let mut discovered = BTreeSet::from([pid]);
+    loop {
+        let mut added = false;
+        for &(candidate, parent) in &processes {
+            if discovered.contains(&parent) && discovered.insert(candidate) {
+                added = true;
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+    for descendant in discovered.into_iter().filter(|candidate| *candidate != pid) {
+        let descendant_pgid = unsafe { libc::getpgid(descendant as libc::pid_t) };
+        if descendant_pgid < 1 {
+            continue;
+        }
+        let Ok(identity) = workload_process_start_identity(descendant) else {
+            continue;
+        };
+        targets.push(ProcessTarget {
+            pid: descendant,
+            pgid: descendant_pgid,
+            process_start_identity: identity,
+        });
+    }
+    targets
+}
+
+fn signal_workload_tree(targets: &[ProcessTarget], signal: i32) {
+    let mut signaled_groups = BTreeSet::new();
+    for target in targets.iter().rev() {
+        if !workload_identity_matches(target.pid, target.pgid, &target.process_start_identity) {
+            continue;
+        }
+        if signaled_groups.insert(target.pgid) {
+            unsafe { libc::kill(-target.pgid, signal) };
+        }
+        unsafe { libc::kill(target.pid as libc::pid_t, signal) };
+    }
+}
+
+fn supervisor_identity_is_live(identity: &SupervisorIdentity) -> bool {
+    let pid = identity.pid;
+    (unsafe { libc::kill(pid as libc::pid_t, 0) }) == 0
+        && capsule::state::session::process::process_start_time_unix_ms(pid)
+            .is_some_and(|value| value.to_string() == identity.process_start_identity)
+}
+
+fn signal_workload(pid: u32, pgid: i32, signal: i32) {
+    unsafe {
+        libc::kill(-pgid, signal);
+        libc::kill(pid as libc::pid_t, signal);
+    }
 }
 
 fn absolute_path(path: &Path) -> Result<PathBuf> {
