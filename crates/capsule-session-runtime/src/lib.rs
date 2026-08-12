@@ -7,6 +7,7 @@ pub mod attachment;
 pub mod boundary;
 pub mod domain;
 pub mod driver_binding;
+pub mod driver_registry;
 pub mod effect;
 pub mod recovery;
 pub mod runtime;
@@ -24,6 +25,10 @@ pub use boundary::{
 pub use domain::{
     ConnectorMode, HistoricalReplayVerdict, RecordFrontier, SessionBlockReason, SessionFailure,
     SessionLifecycle,
+};
+pub use driver_registry::{
+    DriverBindingProfile, DriverExecutable, DriverRegistration, DriverRegistry,
+    DriverRegistryError, DriverTrust,
 };
 pub use effect::{
     EffectClass, EffectIntent, EffectOperationDigest, EffectState, EffectTransaction,
