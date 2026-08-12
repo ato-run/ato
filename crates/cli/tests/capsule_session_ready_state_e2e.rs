@@ -53,12 +53,13 @@ fn make_bundles(root: &Path) -> BundleFixtures {
     let producer_root = root.join("producer-cas");
     let store = CasStore::open(&producer_root).unwrap();
     let backend = FakeSnapshotBackend::new();
+    let host_runner_class = backend.host_runner_class().unwrap();
     let execution = ExecutionId::new(format!("blake3:{}", "a".repeat(64))).unwrap();
     let receipt = backend
         .build_ready_state(BuildReadyStateInput {
             store: &store,
             capsule_manifest_hash: format!("blake3:{}", "b".repeat(64)),
-            runner_class: None,
+            runner_class: Some(host_runner_class),
             surface_requirement: None,
             layers: BuildLayers {
                 rootfs: b"rootfs".to_vec(),
