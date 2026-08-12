@@ -213,7 +213,7 @@ impl CapsuleProtocolSessionStore {
     }
 }
 
-fn write_atomic_owner_only(path: &Path, bytes: &[u8]) -> Result<(), SessionStoreError> {
+pub(crate) fn write_atomic_owner_only(path: &Path, bytes: &[u8]) -> Result<(), SessionStoreError> {
     let parent = path.parent().ok_or(SessionStoreError::InvalidStorePath)?;
     let mut nonce = [0_u8; 8];
     rand::thread_rng().fill_bytes(&mut nonce);
@@ -236,13 +236,13 @@ fn write_atomic_owner_only(path: &Path, bytes: &[u8]) -> Result<(), SessionStore
 }
 
 #[cfg(unix)]
-fn set_directory_owner_only(path: &Path) -> Result<(), std::io::Error> {
+pub(crate) fn set_directory_owner_only(path: &Path) -> Result<(), std::io::Error> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
 }
 
 #[cfg(not(unix))]
-fn set_directory_owner_only(_path: &Path) -> Result<(), std::io::Error> {
+pub(crate) fn set_directory_owner_only(_path: &Path) -> Result<(), std::io::Error> {
     Ok(())
 }
 
