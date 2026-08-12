@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use capsule_protocol::ConnectorId;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -55,15 +56,22 @@ impl AttachmentPlan {
     pub fn resolve(
         requirements: &[AttachmentRequirement],
         available: &[AttachmentMechanism],
-    ) -> Result<Self, ConnectorId> {
+    ) -> Result<Self, AttachmentPlanError> {
         let mut plan = Self::default();
         for requirement in requirements {
+            if plan.connectors.contains_key(&requirement.connector_id) {
+                return Err(AttachmentPlanError::DuplicateConnector(
+                    requirement.connector_id.clone(),
+                ));
+            }
             let Some(mechanism) = requirement
                 .accepted_mechanisms
                 .iter()
                 .find(|candidate| available.contains(candidate))
             else {
-                return Err(requirement.connector_id.clone());
+                return Err(AttachmentPlanError::Unavailable(
+                    requirement.connector_id.clone(),
+                ));
             };
             plan.connectors.insert(
                 requirement.connector_id.clone(),
@@ -75,6 +83,14 @@ impl AttachmentPlan {
         }
         Ok(plan)
     }
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum AttachmentPlanError {
+    #[error("no compatible attachment for Connector {0}")]
+    Unavailable(ConnectorId),
+    #[error("duplicate active Connector {0}")]
+    DuplicateConnector(ConnectorId),
 }
 
 #[cfg(test)]
@@ -91,6 +107,23 @@ mod tests {
 
         let error = AttachmentPlan::resolve(&requirements, &[AttachmentMechanism::PtyEndpoint])
             .expect_err("incompatible attachment must fail");
-        assert_eq!(error, connector_id);
+        assert_eq!(error, AttachmentPlanError::Unavailable(connector_id));
+    }
+
+    #[test]
+    fn attachment_plan_rejects_duplicate_connector_ids() {
+        let connector_id = ConnectorId::parse("network.main").expect("connector id");
+        let requirement = AttachmentRequirement {
+            connector_id: connector_id.clone(),
+            accepted_mechanisms: vec![AttachmentMechanism::HttpProxy],
+        };
+
+        assert_eq!(
+            AttachmentPlan::resolve(
+                &[requirement.clone(), requirement],
+                &[AttachmentMechanism::HttpProxy]
+            ),
+            Err(AttachmentPlanError::DuplicateConnector(connector_id))
+        );
     }
 }

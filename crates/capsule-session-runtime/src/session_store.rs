@@ -1,7 +1,10 @@
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+
+#[cfg(unix)]
+use std::fs::File;
 
 use capsule_protocol::{ContentRef, StateTypeId};
 use rand::RngCore;
@@ -160,6 +163,7 @@ pub struct CapsuleProtocolSessionStore {
 impl CapsuleProtocolSessionStore {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, SessionStoreError> {
         let root = root.as_ref().to_path_buf();
+        ensure_owner_only_store_supported()?;
         fs::create_dir_all(&root)?;
         set_directory_owner_only(&root)?;
         Ok(Self { root })
@@ -214,6 +218,7 @@ impl CapsuleProtocolSessionStore {
 }
 
 pub(crate) fn write_atomic_owner_only(path: &Path, bytes: &[u8]) -> Result<(), SessionStoreError> {
+    ensure_owner_only_store_supported()?;
     let parent = path.parent().ok_or(SessionStoreError::InvalidStorePath)?;
     let mut nonce = [0_u8; 8];
     rand::thread_rng().fill_bytes(&mut nonce);
@@ -236,6 +241,19 @@ pub(crate) fn write_atomic_owner_only(path: &Path, bytes: &[u8]) -> Result<(), S
 }
 
 #[cfg(unix)]
+pub(crate) fn ensure_owner_only_store_supported() -> Result<(), std::io::Error> {
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn ensure_owner_only_store_supported() -> Result<(), std::io::Error> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "owner-only Protocol Session storage requires an implemented platform ACL backend",
+    ))
+}
+
+#[cfg(unix)]
 pub(crate) fn set_directory_owner_only(path: &Path) -> Result<(), std::io::Error> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
@@ -243,7 +261,7 @@ pub(crate) fn set_directory_owner_only(path: &Path) -> Result<(), std::io::Error
 
 #[cfg(not(unix))]
 pub(crate) fn set_directory_owner_only(_path: &Path) -> Result<(), std::io::Error> {
-    Ok(())
+    ensure_owner_only_store_supported()
 }
 
 #[cfg(unix)]
@@ -303,6 +321,7 @@ pub enum SessionStoreError {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     fn stored_session(identity: SupervisorIdentity) -> StoredProtocolSession {
         StoredProtocolSession::new(
             SessionId::parse("session-1").expect("session id"),
@@ -314,6 +333,7 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
     #[test]
     fn session_store_round_trips_validated_record() {
         let directory = tempfile::tempdir().expect("tempdir");
@@ -378,5 +398,16 @@ mod tests {
                 & 0o777,
             0o600
         );
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn session_store_fails_closed_without_owner_only_acl_backend() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        assert!(matches!(
+            CapsuleProtocolSessionStore::open(directory.path()),
+            Err(SessionStoreError::Io(error))
+                if error.kind() == std::io::ErrorKind::Unsupported
+        ));
     }
 }

@@ -1,24 +1,32 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use capsule_protocol::{ConnectorId, IoRecord};
 use thiserror::Error;
 
 use crate::{
-    BoundaryDeliveryLedger, BoundaryOperationId, EffectIntent, EffectState, EffectTransaction,
-    RecordFrontier, SessionWal, WalEntry, WalError, WalRecord,
+    BoundaryDeliveryLedger, BoundaryOperationId, DurableFrontier, EffectIntent, EffectState,
+    EffectTransaction, RecordFrontier, SessionWal, SharedSessionWal, WalEntry, WalError, WalRecord,
 };
 
 pub trait JournalCommit {
     type Error: std::error::Error + Send + Sync + 'static;
 
-    fn commit(&mut self, entries: &[WalEntry]) -> Result<(), Self::Error>;
+    fn commit(&mut self, entries: &[WalEntry]) -> Result<DurableFrontier, Self::Error>;
 }
 
 impl JournalCommit for SessionWal {
     type Error = WalError;
 
-    fn commit(&mut self, entries: &[WalEntry]) -> Result<(), Self::Error> {
+    fn commit(&mut self, entries: &[WalEntry]) -> Result<DurableFrontier, Self::Error> {
         self.append_batch(entries)
+    }
+}
+
+impl JournalCommit for SharedSessionWal {
+    type Error = WalError;
+
+    fn commit(&mut self, entries: &[WalEntry]) -> Result<DurableFrontier, Self::Error> {
+        self.with_mut(|wal| wal.append_batch(entries))
     }
 }
 
@@ -48,6 +56,7 @@ pub struct BoundaryCoordinator<J, D> {
     driver: D,
     deliveries: BoundaryDeliveryLedger,
     effects: BTreeMap<BoundaryOperationId, EffectTransaction>,
+    operation_ids: BTreeSet<BoundaryOperationId>,
 }
 
 impl<J, D> BoundaryCoordinator<J, D>
@@ -61,6 +70,7 @@ where
             driver,
             deliveries: BoundaryDeliveryLedger::default(),
             effects: BTreeMap::new(),
+            operation_ids: BTreeSet::new(),
         }
     }
 
@@ -69,16 +79,18 @@ where
         operation_id: BoundaryOperationId,
         record: &IoRecord,
     ) -> Result<(), DriverBoundaryError> {
-        self.journal
-            .commit(&[
-                WalEntry::RecordCandidate {
-                    operation_id: operation_id.clone(),
-                    record: WalRecord::from(record),
-                    effect: None,
-                },
-                WalEntry::HighWaterMark { seq: record.seq },
-            ])
-            .map_err(journal_error)?;
+        self.reserve_operation(&operation_id)?;
+        if let Err(error) = self.journal.commit(&[
+            WalEntry::RecordCandidate {
+                operation_id: operation_id.clone(),
+                record: WalRecord::from(record),
+                effect: None,
+            },
+            WalEntry::HighWaterMark { seq: record.seq },
+        ]) {
+            self.operation_ids.remove(&operation_id);
+            return Err(journal_error(error));
+        }
         self.deliveries
             .candidate_durable(operation_id.clone())
             .map_err(|error| DriverBoundaryError::Protocol(error.to_string()))?;
@@ -113,25 +125,22 @@ where
         record: &IoRecord,
         intent: EffectIntent,
     ) -> Result<(), DriverBoundaryError> {
-        if self.effects.contains_key(&operation_id) {
-            return Err(DriverBoundaryError::Protocol(format!(
-                "duplicate effect operation {operation_id}"
-            )));
+        self.reserve_operation(&operation_id)?;
+        if let Err(error) = self.journal.commit(&[
+            WalEntry::RecordCandidate {
+                operation_id: operation_id.clone(),
+                record: WalRecord::from(record),
+                effect: Some(intent.clone()),
+            },
+            WalEntry::EffectTransition {
+                operation_id: operation_id.clone(),
+                state: EffectState::Prepared,
+            },
+            WalEntry::HighWaterMark { seq: record.seq },
+        ]) {
+            self.operation_ids.remove(&operation_id);
+            return Err(journal_error(error));
         }
-        self.journal
-            .commit(&[
-                WalEntry::RecordCandidate {
-                    operation_id: operation_id.clone(),
-                    record: WalRecord::from(record),
-                    effect: Some(intent.clone()),
-                },
-                WalEntry::EffectTransition {
-                    operation_id: operation_id.clone(),
-                    state: EffectState::Prepared,
-                },
-                WalEntry::HighWaterMark { seq: record.seq },
-            ])
-            .map_err(journal_error)?;
         self.effects.insert(
             operation_id.clone(),
             EffectTransaction::prepare(operation_id, intent),
@@ -143,12 +152,11 @@ where
         &mut self,
         operation_id: &BoundaryOperationId,
     ) -> Result<(), DriverBoundaryError> {
-        let transaction = self.effects.get_mut(operation_id).ok_or_else(|| {
+        let transaction = self.effects.get(operation_id).ok_or_else(|| {
             DriverBoundaryError::Protocol(format!("unknown effect {operation_id}"))
         })?;
-
-        transaction
-            .authorize()
+        let authorized = transaction
+            .authorized()
             .map_err(|error| DriverBoundaryError::Protocol(error.to_string()))?;
         self.journal
             .commit(&[WalEntry::EffectTransition {
@@ -156,9 +164,11 @@ where
                 state: EffectState::Authorized,
             }])
             .map_err(journal_error)?;
+        self.effects
+            .insert(operation_id.clone(), authorized.clone());
 
-        transaction
-            .begin_dispatch()
+        let dispatching = authorized
+            .dispatching()
             .map_err(|error| DriverBoundaryError::Protocol(error.to_string()))?;
         self.journal
             .commit(&[WalEntry::EffectTransition {
@@ -166,9 +176,11 @@ where
                 state: EffectState::Dispatching,
             }])
             .map_err(journal_error)?;
+        self.effects
+            .insert(operation_id.clone(), dispatching.clone());
 
         self.driver
-            .dispatch_effect(operation_id, &transaction.intent)
+            .dispatch_effect(operation_id, &dispatching.intent)
             .map_err(|error| DriverBoundaryError::Driver(error.to_string()))?;
         Ok(())
     }
@@ -189,6 +201,18 @@ where
 
     pub fn into_parts(self) -> (J, D) {
         (self.journal, self.driver)
+    }
+
+    fn reserve_operation(
+        &mut self,
+        operation_id: &BoundaryOperationId,
+    ) -> Result<(), DriverBoundaryError> {
+        if !self.operation_ids.insert(operation_id.clone()) {
+            return Err(DriverBoundaryError::Protocol(format!(
+                "duplicate boundary operation {operation_id}"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -230,19 +254,19 @@ pub struct DriverQuiesceReport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrontierBarrier {
     pub barrier_id: BarrierId,
-    pub through: RecordFrontier,
+    pub durable_frontier: DurableFrontier,
     expected_connectors: Vec<ConnectorId>,
 }
 
 impl FrontierBarrier {
     pub fn new(
         barrier_id: BarrierId,
-        through: RecordFrontier,
+        durable_frontier: DurableFrontier,
         expected_connectors: Vec<ConnectorId>,
     ) -> Self {
         Self {
             barrier_id,
-            through,
+            durable_frontier,
             expected_connectors,
         }
     }
@@ -262,10 +286,10 @@ impl FrontierBarrier {
             if !report.safe_cut {
                 return Err(BarrierError::UnsafeCut(report.connector_id.clone()));
             }
-            if report.through != self.through {
+            if report.through != self.durable_frontier.records_through {
                 return Err(BarrierError::FrontierMismatch {
                     connector_id: report.connector_id.clone(),
-                    expected: self.through,
+                    expected: self.durable_frontier.records_through,
                     actual: report.through,
                 });
             }
@@ -303,6 +327,8 @@ mod tests {
     struct FakeJournal {
         durable: Vec<WalEntry>,
         fail_next: bool,
+        successful_commits_before_failure: Option<usize>,
+        durable_frontier: DurableFrontier,
     }
 
     #[derive(Debug, Error)]
@@ -312,12 +338,25 @@ mod tests {
     impl JournalCommit for FakeJournal {
         type Error = FakeJournalError;
 
-        fn commit(&mut self, entries: &[WalEntry]) -> Result<(), Self::Error> {
+        fn commit(&mut self, entries: &[WalEntry]) -> Result<DurableFrontier, Self::Error> {
             if std::mem::take(&mut self.fail_next) {
                 return Err(FakeJournalError);
             }
+            if let Some(remaining) = &mut self.successful_commits_before_failure {
+                if *remaining == 0 {
+                    self.successful_commits_before_failure = None;
+                    return Err(FakeJournalError);
+                }
+                *remaining -= 1;
+            }
             self.durable.extend_from_slice(entries);
-            Ok(())
+            if let Some(seq) = entries.iter().filter_map(WalEntry::record_seq).max() {
+                self.durable_frontier.records_through = RecordFrontier::Through(seq);
+            }
+            self.durable_frontier.journal_through = crate::JournalLsn::new(
+                self.durable_frontier.journal_through.get() + entries.len() as u64,
+            );
+            Ok(self.durable_frontier)
         }
     }
 
@@ -392,6 +431,81 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_operation_is_rejected_before_second_wal_write() {
+        let mut coordinator =
+            BoundaryCoordinator::new(FakeJournal::default(), FakeDriver::default());
+        let operation_id = BoundaryOperationId::parse("input-duplicate").expect("operation");
+        coordinator
+            .deliver_ingress(operation_id.clone(), &record(1, Direction::Ingress))
+            .expect("first delivery");
+        let durable_before_duplicate = coordinator.journal.durable.clone();
+
+        assert!(matches!(
+            coordinator.deliver_ingress(operation_id, &record(2, Direction::Ingress)),
+            Err(DriverBoundaryError::Protocol(_))
+        ));
+        assert_eq!(coordinator.journal.durable, durable_before_duplicate);
+    }
+
+    #[test]
+    fn failed_effect_commit_does_not_advance_memory_state() {
+        let mut coordinator =
+            BoundaryCoordinator::new(FakeJournal::default(), FakeDriver::default());
+        let operation_id = BoundaryOperationId::parse("charge-fail").expect("operation");
+        coordinator
+            .prepare_effect(
+                operation_id.clone(),
+                &record(3, Direction::Egress),
+                EffectIntent {
+                    class: EffectClass::External,
+                    operation_digest: EffectOperationDigest::for_bytes(b"charge"),
+                },
+            )
+            .expect("prepare effect");
+        coordinator.journal.fail_next = true;
+
+        assert!(matches!(
+            coordinator.authorize_and_dispatch(&operation_id),
+            Err(DriverBoundaryError::Journal(_))
+        ));
+        assert_eq!(
+            coordinator
+                .effect(&operation_id)
+                .map(|effect| &effect.state),
+            Some(&EffectState::Prepared)
+        );
+    }
+
+    #[test]
+    fn failed_dispatching_commit_leaves_memory_at_durable_authorized_state() {
+        let mut coordinator =
+            BoundaryCoordinator::new(FakeJournal::default(), FakeDriver::default());
+        let operation_id = BoundaryOperationId::parse("charge-dispatch-fail").expect("operation");
+        coordinator
+            .prepare_effect(
+                operation_id.clone(),
+                &record(4, Direction::Egress),
+                EffectIntent {
+                    class: EffectClass::External,
+                    operation_digest: EffectOperationDigest::for_bytes(b"charge"),
+                },
+            )
+            .expect("prepare effect");
+        coordinator.journal.successful_commits_before_failure = Some(1);
+
+        assert!(matches!(
+            coordinator.authorize_and_dispatch(&operation_id),
+            Err(DriverBoundaryError::Journal(_))
+        ));
+        assert_eq!(
+            coordinator
+                .effect(&operation_id)
+                .map(|effect| &effect.state),
+            Some(&EffectState::Authorized)
+        );
+    }
+
+    #[test]
     fn uncertain_delivery_requires_new_runtime_incarnation() {
         let driver = FakeDriver {
             fail_delivery_after_accept: true,
@@ -444,7 +558,10 @@ mod tests {
         let barrier_id = BarrierId::new("barrier-1").expect("barrier");
         let barrier = FrontierBarrier::new(
             barrier_id.clone(),
-            RecordFrontier::Through(8),
+            DurableFrontier {
+                records_through: RecordFrontier::Through(8),
+                journal_through: crate::JournalLsn::new(800),
+            },
             vec![connector.clone()],
         );
         let report = DriverQuiesceReport {

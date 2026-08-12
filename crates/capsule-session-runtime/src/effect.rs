@@ -85,10 +85,22 @@ impl EffectTransaction {
         self.transition(EffectState::Prepared, EffectState::Authorized)
     }
 
+    pub fn authorized(&self) -> Result<Self, EffectTransitionError> {
+        let mut next = self.clone();
+        next.authorize()?;
+        Ok(next)
+    }
+
     /// Enters the durable pre-dispatch state. External dispatch is forbidden
     /// until this transition itself has been committed by the Session WAL.
     pub fn begin_dispatch(&mut self) -> Result<(), EffectTransitionError> {
         self.transition(EffectState::Authorized, EffectState::Dispatching)
+    }
+
+    pub fn dispatching(&self) -> Result<Self, EffectTransitionError> {
+        let mut next = self.clone();
+        next.begin_dispatch()?;
+        Ok(next)
     }
 
     pub fn mark_dispatched(&mut self) -> Result<(), EffectTransitionError> {

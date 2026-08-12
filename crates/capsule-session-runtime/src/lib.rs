@@ -16,15 +16,15 @@ pub mod supervisor;
 pub mod wal;
 
 pub use attachment::{
-    AttachmentEndpoint, AttachmentMechanism, AttachmentPlan, AttachmentRequirement,
-    PortableEligibility, StateRuntimeCapabilities,
+    AttachmentEndpoint, AttachmentMechanism, AttachmentPlan, AttachmentPlanError,
+    AttachmentRequirement, PortableEligibility, StateRuntimeCapabilities,
 };
 pub use boundary::{
     BoundaryDeliveryLedger, BoundaryDeliveryState, BoundaryOperationId, BoundaryProtocolError,
 };
 pub use domain::{
-    ConnectorMode, HistoricalReplayVerdict, RecordFrontier, SessionBlockReason, SessionFailure,
-    SessionLifecycle,
+    ConnectorMode, DurableFrontier, HistoricalReplayVerdict, JournalLsn, RecordFrontier,
+    SessionBlockReason, SessionFailure, SessionLifecycle,
 };
 pub use driver_registry::{
     DriverBindingProfile, DriverExecutable, DriverRegistration, DriverRegistry,
@@ -39,8 +39,8 @@ pub use recovery::{
     RecoveryPlanError, ResumeFidelity, SessionCheckpoint, StateRecoveryPoint,
 };
 pub use runtime::{
-    ConnectorDriverRuntime, PausedComputationRuntime, RunningSessionRuntime, RuntimeBoundaryError,
-    SessionBootstrap, StateRuntime,
+    ConnectorDriverRuntime, DurableFrontierSource, PausedComputationRuntime, RunningSessionRuntime,
+    RuntimeBoundaryError, SessionBootstrap, StateRuntime,
 };
 pub use session_store::{
     CapsuleProtocolSessionStore, ControlAuthorizationError, NewSupervisorIdentity, SessionId,
@@ -50,4 +50,4 @@ pub use supervisor::{
     BarrierError, BarrierId, BoundaryCoordinator, BoundaryDriver, DriverBoundaryError,
     DriverQuiesceReport, FrontierBarrier, JournalCommit,
 };
-pub use wal::{RecoveredJournal, SessionWal, WalEntry, WalError, WalRecord};
+pub use wal::{RecoveredJournal, SessionWal, SharedSessionWal, WalEntry, WalError, WalRecord};
