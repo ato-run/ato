@@ -222,11 +222,16 @@ impl StoredProtocolSession {
                 vmm_pid,
                 vmm_process_start_identity,
             } => {
-                if backend_id.is_empty()
-                    || ready_state_manifest_id.is_empty()
+                let manifest_id_valid = ContentRef::parse(ready_state_manifest_id).is_ok();
+                if backend_id.trim().is_empty()
+                    || !manifest_id_valid
                     || !cas_root.is_absolute()
                     || !overlay_root.is_absolute()
                     || vmm_pid.is_some() != vmm_process_start_identity.is_some()
+                    || vmm_pid.is_some_and(|pid| pid <= 0)
+                    || vmm_process_start_identity
+                        .as_ref()
+                        .is_some_and(|identity| identity.trim().is_empty())
                 {
                     return Err(SessionStoreError::InvalidRecord(
                         "invalid Ready-State runtime profile".to_owned(),
@@ -609,6 +614,82 @@ mod tests {
             Err(SessionStoreError::InvalidRecord(message))
                 if message.contains("Connector checkpoint frontier")
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ready_state_runtime_profile_validation_fails_closed() {
+        let supervisor = NewSupervisorIdentity::generate(3, 100, "start-100");
+        let mut session = stored_session(supervisor.identity);
+        let valid = || StoredRuntimeProfile::ReadyState {
+            backend_id: "fake".to_string(),
+            ready_state_manifest_id: format!("blake3:{}", "b".repeat(64)),
+            cas_root: std::env::current_dir().unwrap().join("cas"),
+            overlay_root: std::env::current_dir().unwrap().join("overlay"),
+            vmm_pid: Some(42),
+            vmm_process_start_identity: Some("start-42".to_string()),
+        };
+        session.runtime_profile = valid();
+        assert!(session.validate().is_ok());
+
+        let invalid_profiles = [
+            mutate_ready_state_profile(valid(), |vmm_pid, _, _, _, _, _| *vmm_pid = Some(0)),
+            mutate_ready_state_profile(valid(), |_, identity, _, _, _, _| *identity = None),
+            mutate_ready_state_profile(valid(), |_, _, manifest_id, _, _, _| {
+                *manifest_id = "not-a-content-ref".to_string()
+            }),
+            mutate_ready_state_profile(valid(), |_, _, _, backend_id, _, _| {
+                *backend_id = " ".to_string()
+            }),
+            mutate_ready_state_profile(valid(), |_, _, _, _, cas_root, _| {
+                *cas_root = PathBuf::from("relative-cas")
+            }),
+            mutate_ready_state_profile(valid(), |_, _, _, _, _, overlay_root| {
+                *overlay_root = PathBuf::from("relative-overlay")
+            }),
+        ];
+        for profile in invalid_profiles {
+            session.runtime_profile = profile;
+            assert!(matches!(
+                session.validate(),
+                Err(SessionStoreError::InvalidRecord(message))
+                    if message.contains("Ready-State runtime profile")
+            ));
+        }
+    }
+
+    #[cfg(unix)]
+    fn mutate_ready_state_profile(
+        mut profile: StoredRuntimeProfile,
+        mutate: impl FnOnce(
+            &mut Option<i32>,
+            &mut Option<String>,
+            &mut String,
+            &mut String,
+            &mut PathBuf,
+            &mut PathBuf,
+        ),
+    ) -> StoredRuntimeProfile {
+        let StoredRuntimeProfile::ReadyState {
+            backend_id,
+            ready_state_manifest_id,
+            cas_root,
+            overlay_root,
+            vmm_pid,
+            vmm_process_start_identity,
+        } = &mut profile
+        else {
+            unreachable!()
+        };
+        mutate(
+            vmm_pid,
+            vmm_process_start_identity,
+            ready_state_manifest_id,
+            backend_id,
+            cas_root,
+            overlay_root,
+        );
+        profile
     }
 
     #[test]
