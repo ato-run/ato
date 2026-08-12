@@ -1014,6 +1014,7 @@ dependencies = [
  "bollard",
  "capsule-codec",
  "capsule-protocol",
+ "capsule-session-runtime",
  "chrono",
  "ctrlc",
  "dhat",
