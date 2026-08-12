@@ -70,6 +70,11 @@ pub use contract::tools;
 // `docs/rfcs/draft/CAPSULE_FORMAT_V3.md`.
 pub mod import_bundle;
 
+// Capsule Protocol portable bundle and runtime bridge. This is intentionally
+// separate from the legacy source-only import bundle above.
+pub mod protocol_bundle;
+pub mod protocol_runtime;
+
 // ── Layer 3: Routing ──────────────────────────────────────────────────────
 pub mod routing;
 pub use routing::discovery;

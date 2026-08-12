@@ -4,7 +4,7 @@
 //! External State is mutable or principal-specific state attached to a Session —
 //! user data, persistent app data, secret/API-key values, OAuth tokens, Ato
 //! identity, concrete database/service bindings (RFC
-//! `docs/rfcs/accepted/CAPSULE_V1_EXECUTION_MODEL_SPEC.md` §9.1). Capsule v1 makes
+//! `docs/rfcs/archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md` §9.1). Capsule v1 makes
 //! it a **structurally separate runtime attachment** whose *schema contract* is
 //! identity-bearing while its concrete *instance* and *values* are not.
 //!

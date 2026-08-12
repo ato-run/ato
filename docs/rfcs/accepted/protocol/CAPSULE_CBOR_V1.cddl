@@ -1,0 +1,46 @@
+; Capsule Protocol CBOR v1 normative wire schema.
+; RFC 8610 CDDL. The record stream is an RFC 8742 CBOR Sequence whose every
+; item is io-record-v1. Arrays have exact arity: unknown/trailing fields are
+; invalid. Encoders emit definite-length arrays and shortest-form integers.
+
+descriptor-v1 = [
+  wire-version: 1,
+  semantic-schema-version: uint .le 65535,
+  base-state: state-ref,
+  ; Entries MUST be encoded in strictly ascending connector-id byte order.
+  connectors: [* connector-entry]
+]
+
+state-ref = [state-type-id, content-ref]
+connector-entry = [connector-id, connector-def]
+connector-def = [protocol-id, config-ref: content-ref / nil]
+
+io-record-v1 = [
+  wire-version: 1,
+  seq: uint .le 18446744073709551615,
+  offset-ns: uint .le 18446744073709551615 / nil,
+  observed-at-unix-ns: int .ge -9223372036854775808 .le 9223372036854775807 / nil,
+  connector: connector-id,
+  direction: ingress / egress,
+  kind: record-kind-id,
+  payload: payload
+]
+
+ingress = 0
+egress = 1
+
+payload = inline-payload / object-payload
+inline-payload = [0, bytes: bstr .size (0..1048576), nil]
+object-payload = [1, h'', content-ref]
+
+content-ref = blake3-ref / sha256-ref
+blake3-ref = tstr .regexp "blake3:[0-9a-f]{64}"
+sha256-ref = tstr .regexp "sha256:[0-9a-f]{64}"
+
+connector-id = component-id
+record-kind-id = component-id
+component-id = tstr .size (1..255) .regexp "[a-z0-9]([a-z0-9_-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9_-]*[a-z0-9])?)*"
+
+state-type-id = versioned-id
+protocol-id = versioned-id
+versioned-id = tstr .size (5..255) .regexp "[a-z0-9]([a-z0-9_-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9_-]*[a-z0-9])?)+@[1-9][0-9]*"

@@ -3,7 +3,7 @@
 **Status:** Draft decision note  
 **Date:** 2026-05-02  
 **Scope:** Git commit SHA の扱い、Ato internal CAS hash、source provenance、normalized tree identity、Git LFS / package ecosystem hash との境界  
-**Related:** [CAPSULE_HANDLE_SPEC.md](../accepted/CAPSULE_HANDLE_SPEC.md), [CAPSULE_FORMAT_V2.md](../accepted/CAPSULE_FORMAT_V2.md), [DEPENDENCY_DERIVATION_CACHE.md](DEPENDENCY_DERIVATION_CACHE.md), [ATO_HOME_LAYOUT.md](ATO_HOME_LAYOUT.md)
+**Related:** [CAPSULE_HANDLE_SPEC.md](../accepted/CAPSULE_HANDLE_SPEC.md), [archived CAPSULE_FORMAT_V2.md](../archived/CAPSULE_FORMAT_V2.md), [DEPENDENCY_DERIVATION_CACHE.md](DEPENDENCY_DERIVATION_CACHE.md), [ATO_HOME_LAYOUT.md](ATO_HOME_LAYOUT.md)
 
 ## 1. 結論
 
@@ -177,7 +177,7 @@ It is not the same as Git tree SHA.
 
 ## 6. Capsule Payload Integrity
 
-Capsule artifact integrity follows [CAPSULE_FORMAT_V2.md](../accepted/CAPSULE_FORMAT_V2.md).
+Legacy Capsule artifact integrity follows [CAPSULE_FORMAT_V2.md](../archived/CAPSULE_FORMAT_V2.md).
 
 ```json
 {

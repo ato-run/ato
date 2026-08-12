@@ -5,6 +5,7 @@ All technical specifications are managed as RFCs.
 ```
 rfcs/
 ├── accepted/      ← accepted specs that back current implementation
+│   └── protocol/  ← the three active Capsule Protocol authorities
 ├── draft/         ← under discussion, not implementation authority yet
 ├── archived/      ← retired, old-version, or non-spec documents
 ├── TEMPLATE_ADR.md
@@ -91,6 +92,10 @@ single document internally consistent.
 2. Fill in the frontmatter
 3. Review it in a PR
 4. When accepted, move it to `accepted/` and update `status: accepted`
+
+Capsule Protocol documents live under `accepted/protocol/`. Ato-specific
+authoring, runtime, IPC, and operational documents are not Protocol authorities;
+the [accepted RFC index](accepted/README.md) records the boundary.
 
 ## Public site
 

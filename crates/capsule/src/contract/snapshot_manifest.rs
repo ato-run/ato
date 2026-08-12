@@ -39,7 +39,7 @@
 //! types. The `cas_root_digest` and other Artifact-Envelope fields
 //! (`ato.snapshot-artifact-envelope/v1`) are likewise out of scope here. The
 //! normative spec is
-//! `docs/rfcs/accepted/CAPSULE_V1_EXECUTION_MODEL_SPEC.md` §7 and §16.3.
+//! `docs/rfcs/archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md` §7 and §16.3.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

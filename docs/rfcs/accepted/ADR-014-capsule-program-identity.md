@@ -4,7 +4,7 @@ status: accepted       # draft | accepted | archived
 date: 2026-07-24
 author: "@egamikohsuke"
 related:
-  - "CAPSULE_V1_EXECUTION_MODEL_SPEC.md"
+  - "../archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md"
   - "../draft/CAPSULE_CORE_MODEL.md"
   - "../draft/ADR-012-capsule-lifecycle-column.md"
 ---
@@ -194,7 +194,7 @@ An external review of the Capsule architecture converged on a critique of the
 Capsule v1 spec: Execution Identity — a content-addressed identity of a
 *resolved, target-specific* launch contract — is well designed, but the spec
 prohibits any identity above it
-(`docs/rfcs/accepted/CAPSULE_V1_EXECUTION_MODEL_SPEC.md` §3.2, §16.4).
+(`docs/rfcs/archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md` §3.2, §16.4).
 "Same declared Capsule, N targets" is expressible today only through names
 and versions.
 
@@ -978,7 +978,7 @@ submodules/LFS rather than resolving them).
 
 ## Follow-up
 
-### Spec edits — `docs/rfcs/accepted/CAPSULE_V1_EXECUTION_MODEL_SPEC.md`
+### Historical spec edits — `docs/rfcs/archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md`
 
 As r3/r4 listed (§1 governing sentence + six-element model, §2.1, §3.1
 cardinalities, §3.2 carve-out, new §3.4, §5, §7.5, §13, §15, §16.4,
