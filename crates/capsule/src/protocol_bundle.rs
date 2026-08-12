@@ -5,14 +5,21 @@ use std::fs;
 use std::io::{Cursor, Read};
 use std::path::{Component, Path, PathBuf};
 
-use capsule_codec::{
-    MAX_RECORDS, decode_descriptor, decode_record_stream, encode_descriptor, encode_record_stream,
-};
+use capsule_codec::{MAX_RECORDS, encode_descriptor, encode_record_stream};
 use capsule_protocol::{CapsuleDescriptor, ContentRef, IoRecord, StateRef, StateTypeId};
 use thiserror::Error;
 
 use crate::packers::pack_filter::PackFilter;
-use crate::security::no_secret::scan_credential_material;
+use crate::security::no_secret::CredentialScanner;
+
+mod streaming;
+
+pub use streaming::{
+    AllowAllPortableExportPolicy, BundleSummary, BundleWriteOutcome, DirectoryObjectSource,
+    InMemoryObjectSource, ObjectMetadata, ObjectSource, PortableExportError, PortableExportPolicy,
+    PortableObjectRole, PtyPortableExportPolicy, RecordSpool, SpoolBundle, SpoolObjectStore,
+    StreamingBundleReader, StreamingBundleWriter,
+};
 
 const DESCRIPTOR_MEMBER: &str = "protocol/descriptor.cbor";
 const RECORDS_MEMBER: &str = "protocol/records.cborseq";
@@ -119,6 +126,8 @@ pub enum ProtocolBundleError {
     Invalid(String),
     #[error("workspace entry is unsupported: {0}")]
     UnsupportedWorkspaceEntry(PathBuf),
+    #[error(transparent)]
+    PortableExport(#[from] PortableExportError),
 }
 
 #[derive(Debug, Clone)]
@@ -212,98 +221,49 @@ impl PortableCapsule {
     }
 
     pub fn write(&self, path: &Path) -> Result<(), ProtocolBundleError> {
-        let (descriptor_bytes, record_bytes) = self.validated_wire_members()?;
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        fs::create_dir_all(parent)?;
-        let file = fs::File::create(path)?;
-        let mut archive = tar::Builder::new(file);
-        archive.mode(tar::HeaderMode::Deterministic);
-        append_bytes(&mut archive, DESCRIPTOR_MEMBER, &descriptor_bytes)?;
-        append_bytes(&mut archive, RECORDS_MEMBER, &record_bytes)?;
-        for (reference, bytes) in &self.objects {
-            let member = format!(
-                "{OBJECT_PREFIX}{}/{}",
-                reference.algorithm(),
-                reference.digest()
-            );
-            append_bytes(&mut archive, &member, bytes)?;
-        }
-        archive.finish()?;
+        let source = InMemoryObjectSource::new(&self.objects);
+        let records = self.records.iter().cloned().map(Ok);
+        let mut policy = AllowAllPortableExportPolicy;
+        StreamingBundleWriter::write(path, &self.descriptor, records, &source, &mut policy)?;
         Ok(())
     }
 
     pub fn read(path: &Path) -> Result<Self, ProtocolBundleError> {
-        let archive_size = fs::metadata(path)?.len();
-        if archive_size > MAX_ARCHIVE_BYTES {
-            return Err(ProtocolBundleError::Invalid(format!(
-                "archive exceeds {MAX_ARCHIVE_BYTES}-byte limit"
-            )));
-        }
-        let mut descriptor_bytes = None;
-        let mut record_bytes = None;
-        let mut objects = BTreeMap::new();
-        let mut limits = MemberLimitValidator::new(BUNDLE_LIMITS);
-        let mut archive = tar::Archive::new(fs::File::open(path)?);
-        for entry in archive.entries()? {
-            let mut entry = entry?;
-            limits.accept(entry.size())?;
-            let member_path = entry.path()?.into_owned();
-            let member = member_path.to_str().ok_or_else(|| {
-                ProtocolBundleError::Invalid("member path is not UTF-8".to_owned())
-            })?;
-            let mut bytes = Vec::with_capacity(entry.size() as usize);
-            entry.read_to_end(&mut bytes)?;
-            match member {
-                DESCRIPTOR_MEMBER => set_once(&mut descriptor_bytes, bytes, member)?,
-                RECORDS_MEMBER => set_once(&mut record_bytes, bytes, member)?,
-                _ if member.starts_with(OBJECT_PREFIX) => {
-                    if objects.len() >= MAX_OBJECT_COUNT {
-                        return Err(ProtocolBundleError::Invalid(format!(
-                            "object count exceeds {MAX_OBJECT_COUNT}"
-                        )));
-                    }
-                    let suffix = &member[OBJECT_PREFIX.len()..];
-                    let (algorithm, digest) = suffix.split_once('/').ok_or_else(|| {
-                        ProtocolBundleError::Invalid(format!("invalid object member `{member}`"))
-                    })?;
-                    let reference = ContentRef::parse(format!("{algorithm}:{digest}"))
-                        .map_err(|error| ProtocolBundleError::Invalid(error.to_string()))?;
-                    if objects.insert(reference, bytes).is_some() {
-                        return Err(ProtocolBundleError::Invalid(format!(
-                            "duplicate object member `{member}`"
-                        )));
-                    }
-                }
-                _ => {
-                    return Err(ProtocolBundleError::Invalid(format!(
-                        "unknown bundle member `{member}`"
-                    )));
-                }
-            }
-        }
-        let descriptor = decode_descriptor(&descriptor_bytes.ok_or_else(|| {
-            ProtocolBundleError::Invalid(format!("missing `{DESCRIPTOR_MEMBER}`"))
-        })?)?;
-        let records = decode_record_stream(
-            &descriptor,
-            &record_bytes.ok_or_else(|| {
-                ProtocolBundleError::Invalid(format!("missing `{RECORDS_MEMBER}`"))
-            })?,
-        )?;
-        let bundle = Self {
-            descriptor,
+        let spool_parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let spool = StreamingBundleReader::read_into(path, spool_parent)?;
+        let records = spool.records.materialize(&spool.descriptor)?;
+        let objects = spool.objects.materialize()?;
+        Ok(Self {
+            descriptor: spool.descriptor,
             records,
             objects,
-        };
-        bundle.validate_counts()?;
-        bundle.validate_object_graph()?;
-        Ok(bundle)
+        })
     }
 }
 
 pub fn capture_workspace_state(
     workspace: &Path,
 ) -> Result<(StateRef, Vec<u8>), ProtocolBundleError> {
+    let parent = workspace.parent().unwrap_or_else(|| Path::new("."));
+    let spool = tempfile::Builder::new()
+        .prefix(".portable-state-")
+        .tempdir_in(parent)?;
+    let captured = capture_workspace_state_streaming(workspace, spool.path())?;
+    let bytes = fs::read(&captured.path)?;
+    Ok((captured.state, bytes))
+}
+
+#[derive(Debug, Clone)]
+pub struct CapturedStateObject {
+    pub state: StateRef,
+    pub size: u64,
+    pub path: PathBuf,
+}
+
+pub fn capture_workspace_state_streaming(
+    workspace: &Path,
+    spool_root: &Path,
+) -> Result<CapturedStateObject, ProtocolBundleError> {
     let workspace = workspace.canonicalize()?;
     if !workspace.is_dir() {
         return Err(ProtocolBundleError::Invalid(format!(
@@ -317,73 +277,86 @@ pub fn capture_workspace_state(
     collect_workspace_entries(&workspace, &workspace, &filter, &mut entries)?;
     entries.sort();
 
-    let mut archive = tar::Builder::new(Vec::new());
-    archive.mode(tar::HeaderMode::Deterministic);
-    let mut limits = MemberLimitValidator::new(STATE_LIMITS);
-    for relative in entries {
-        let source = workspace.join(&relative);
-        let metadata = fs::symlink_metadata(&source)?;
-        if metadata.file_type().is_symlink() {
-            return Err(ProtocolBundleError::UnsupportedWorkspaceEntry(relative));
-        }
-        if metadata.is_dir() {
-            limits.accept(0)?;
-            append_directory(&mut archive, &relative, file_mode(&metadata))?;
-        } else if metadata.is_file() {
-            limits.accept(metadata.len())?;
-            let capacity = usize::try_from(metadata.len()).map_err(|_| {
-                ProtocolBundleError::Invalid(format!(
-                    "workspace file is too large for this platform: {}",
-                    relative.display()
-                ))
-            })?;
-            let read_limit = metadata.len().checked_add(1).ok_or_else(|| {
-                ProtocolBundleError::Invalid("workspace file size overflow".to_owned())
-            })?;
-            let mut bytes = Vec::with_capacity(capacity);
-            fs::File::open(&source)?
-                .take(read_limit)
-                .read_to_end(&mut bytes)?;
-            if bytes.len() as u64 != metadata.len() {
-                return Err(ProtocolBundleError::Invalid(format!(
-                    "workspace file changed during capture: {}",
-                    relative.display()
-                )));
+    fs::create_dir_all(spool_root)?;
+    let mut output = tempfile::Builder::new()
+        .prefix(".workspace-state-")
+        .tempfile_in(spool_root)?;
+    set_owner_only_path(output.path())?;
+    {
+        let mut archive = tar::Builder::new(output.as_file_mut());
+        archive.mode(tar::HeaderMode::Deterministic);
+        let mut limits = MemberLimitValidator::new(STATE_LIMITS);
+        for relative in entries {
+            let source = workspace.join(&relative);
+            let metadata = fs::symlink_metadata(&source)?;
+            if metadata.file_type().is_symlink() {
+                return Err(ProtocolBundleError::UnsupportedWorkspaceEntry(relative));
             }
-            let findings = scan_credential_material(&bytes);
-            if let Some(finding) = findings.first() {
-                return Err(ProtocolBundleError::Invalid(format!(
-                    "credential material detected in `{}` ({})",
-                    relative.display(),
-                    finding.kind
-                )));
+            if metadata.is_dir() {
+                limits.accept(0)?;
+                append_directory(&mut archive, &relative, file_mode(&metadata))?;
+            } else if metadata.is_file() {
+                limits.accept(metadata.len())?;
+                let mut scanner = CredentialScanner::new();
+                let mut reader = CredentialScanningReader {
+                    inner: fs::File::open(&source)?,
+                    scanner: &mut scanner,
+                };
+                append_file_reader(
+                    &mut archive,
+                    &relative,
+                    metadata.len(),
+                    &mut reader,
+                    file_mode(&metadata),
+                )?;
+                drop(reader);
+                if let Some(finding) = scanner.finish().first() {
+                    return Err(ProtocolBundleError::Invalid(format!(
+                        "credential material detected in `{}` ({})",
+                        relative.display(),
+                        finding.kind
+                    )));
+                }
+                let after = fs::symlink_metadata(&source)?;
+                if after.len() != metadata.len()
+                    || after.modified().ok() != metadata.modified().ok()
+                    || !after.is_file()
+                {
+                    return Err(ProtocolBundleError::Invalid(format!(
+                        "workspace file changed during capture: {}",
+                        relative.display()
+                    )));
+                }
+            } else {
+                return Err(ProtocolBundleError::UnsupportedWorkspaceEntry(relative));
             }
-            append_file(
-                &mut archive,
-                &relative,
-                &metadata,
-                &bytes,
-                file_mode(&metadata),
-            )?;
-        } else {
-            return Err(ProtocolBundleError::UnsupportedWorkspaceEntry(relative));
         }
+        archive.finish()?;
     }
-    let bytes = archive.into_inner()?;
-    if bytes.len() as u64 > MAX_MEMBER_BYTES {
+    output.as_file_mut().sync_all()?;
+    let size = output.as_file().metadata()?.len();
+    if size > MAX_MEMBER_BYTES {
         return Err(ProtocolBundleError::Invalid(format!(
             "captured state exceeds {MAX_MEMBER_BYTES}-byte limit"
         )));
     }
-    let reference = content_ref(&bytes);
-    Ok((
-        StateRef {
+    let reference = content_ref_reader(fs::File::open(output.path())?)?;
+    let final_path = spool_root
+        .join(reference.algorithm())
+        .join(reference.digest());
+    fs::create_dir_all(final_path.parent().expect("state object has parent"))?;
+    output
+        .persist(&final_path)
+        .map_err(|error| ProtocolBundleError::Io(error.error))?;
+    Ok(CapturedStateObject {
+        state: StateRef {
             state_type: StateTypeId::parse("ato.state.workspace-posix-host@1")
                 .expect("static state type"),
             state_ref: reference,
         },
-        bytes,
-    ))
+        size,
+        path: final_path,
+    })
 }
 
 /// Captures a same-machine Session checkpoint without portable-export policy.
@@ -660,23 +633,8 @@ fn collect_local_workspace_entries(
     Ok(entries)
 }
 
-fn append_bytes(
-    archive: &mut tar::Builder<fs::File>,
-    path: &str,
-    bytes: &[u8],
-) -> Result<(), std::io::Error> {
-    let mut header = tar::Header::new_gnu();
-    normalize_header(
-        &mut header,
-        bytes.len() as u64,
-        0o644,
-        tar::EntryType::Regular,
-    );
-    archive.append_data(&mut header, path, Cursor::new(bytes))
-}
-
-fn append_directory(
-    archive: &mut tar::Builder<Vec<u8>>,
+fn append_directory<W: std::io::Write>(
+    archive: &mut tar::Builder<W>,
     path: &Path,
     mode: u32,
 ) -> Result<(), std::io::Error> {
@@ -695,6 +653,58 @@ fn append_file(
     let mut header = tar::Header::new_gnu();
     normalize_header(&mut header, metadata.len(), mode, tar::EntryType::Regular);
     archive.append_data(&mut header, relative, Cursor::new(bytes))
+}
+
+fn append_file_reader<W: std::io::Write, R: Read>(
+    archive: &mut tar::Builder<W>,
+    relative: &Path,
+    size: u64,
+    reader: R,
+    mode: u32,
+) -> Result<(), std::io::Error> {
+    let mut header = tar::Header::new_gnu();
+    normalize_header(&mut header, size, mode, tar::EntryType::Regular);
+    archive.append_data(&mut header, relative, reader)
+}
+
+struct CredentialScanningReader<'a> {
+    inner: fs::File,
+    scanner: &'a mut CredentialScanner,
+}
+
+impl Read for CredentialScanningReader<'_> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        let count = self.inner.read(bytes)?;
+        self.scanner.push(&bytes[..count]);
+        Ok(count)
+    }
+}
+
+fn content_ref_reader(mut reader: impl Read) -> Result<ContentRef, ProtocolBundleError> {
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok(
+        ContentRef::parse(format!("blake3:{}", hasher.finalize().to_hex()))
+            .expect("BLAKE3 always produces a valid content ref"),
+    )
+}
+
+#[cfg(unix)]
+fn set_owner_only_path(path: &Path) -> Result<(), std::io::Error> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn set_owner_only_path(_path: &Path) -> Result<(), std::io::Error> {
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -761,19 +771,6 @@ fn verify_content_ref(reference: &ContentRef, bytes: &[u8]) -> Result<(), Protoc
     Ok(())
 }
 
-fn set_once(
-    slot: &mut Option<Vec<u8>>,
-    value: Vec<u8>,
-    member: &str,
-) -> Result<(), ProtocolBundleError> {
-    if slot.replace(value).is_some() {
-        return Err(ProtocolBundleError::Invalid(format!(
-            "duplicate `{member}`"
-        )));
-    }
-    Ok(())
-}
-
 fn validate_relative_path(path: &Path) -> Result<(), ProtocolBundleError> {
     if path.as_os_str().is_empty()
         || path.is_absolute()
@@ -813,6 +810,26 @@ mod tests {
         assert_eq!(
             fs::read_to_string(destination.join("main.rs")).unwrap(),
             "fn main() {}\n"
+        );
+    }
+
+    #[test]
+    fn workspace_state_streaming_capture_writes_content_addressed_spool() {
+        let producer = tempfile::tempdir().unwrap();
+        fs::write(producer.path().join("main.rs"), "fn main() {}\n").unwrap();
+        let spool = tempfile::tempdir().unwrap();
+        let captured = capture_workspace_state_streaming(producer.path(), spool.path()).unwrap();
+        assert_eq!(captured.size, fs::metadata(&captured.path).unwrap().len());
+        assert_eq!(
+            captured.path,
+            spool
+                .path()
+                .join(captured.state.state_ref.algorithm())
+                .join(captured.state.state_ref.digest())
+        );
+        assert_eq!(
+            content_ref_reader(fs::File::open(&captured.path).unwrap()).unwrap(),
+            captured.state.state_ref
         );
     }
 
