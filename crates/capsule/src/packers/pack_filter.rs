@@ -103,6 +103,7 @@ const PORTABLE_STATE_SECRET_EXCLUDES: &[&str] = &[
 
 #[derive(Debug, Clone)]
 pub struct PackFilter {
+    portable_state_hard_exclude: GlobSet,
     hard_exclude: GlobSet,
     include: Option<GlobSet>,
     exclude: GlobSet,
@@ -118,7 +119,10 @@ impl PackFilter {
     pub fn for_portable_state() -> Result<Self> {
         let hard_patterns = HARD_SECURITY_EXCLUDES
             .iter()
-            .chain(PORTABLE_STATE_SECRET_EXCLUDES)
+            .map(|pattern| (*pattern).to_owned())
+            .collect::<Vec<_>>();
+        let portable_state_hard_patterns = PORTABLE_STATE_SECRET_EXCLUDES
+            .iter()
             .map(|pattern| (*pattern).to_owned())
             .collect::<Vec<_>>();
         let exclude_patterns = SMART_DEFAULT_EXCLUDES
@@ -126,6 +130,7 @@ impl PackFilter {
             .map(|pattern| (*pattern).to_owned())
             .collect::<Vec<_>>();
         Ok(Self {
+            portable_state_hard_exclude: build_glob_set(&portable_state_hard_patterns)?,
             hard_exclude: build_glob_set(&hard_patterns)?,
             include: None,
             exclude: build_glob_set(&exclude_patterns)?,
@@ -184,6 +189,7 @@ impl PackFilter {
             .collect::<Vec<_>>();
         let exclude = build_glob_set(&excludes)?;
         Ok(Self {
+            portable_state_hard_exclude: build_glob_set(&[])?,
             hard_exclude: build_glob_set(&hard_excludes)?,
             include,
             exclude,
@@ -194,6 +200,10 @@ impl PackFilter {
     pub fn should_include_file(&self, relative_path: &Path) -> bool {
         let rel = normalize_rel_path(relative_path);
         if rel.is_empty() {
+            return false;
+        }
+
+        if self.portable_state_hard_exclude.is_match(&rel) {
             return false;
         }
 
@@ -743,6 +753,16 @@ mod tests {
         assert!(
             filter.should_include_file(Path::new(".next/standalone/node_modules/pkg/index.js"))
         );
+    }
+
+    #[test]
+    fn portable_state_credential_stores_cannot_use_env_template_exceptions() {
+        let filter = PackFilter::for_portable_state().expect("portable filter");
+
+        assert!(!filter.should_include_file(Path::new(".ssh/.env.example")));
+        assert!(!filter.should_include_file(Path::new(".aws/.env.example")));
+        assert!(!filter.should_include_file(Path::new(".config/gcloud/.env.example")));
+        assert!(filter.should_include_file(Path::new("config/.env.example")));
     }
 
     fn make_manifest_with_pack(include: Vec<String>, exclude: Vec<String>) -> CapsuleManifest {
