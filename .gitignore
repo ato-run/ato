@@ -41,6 +41,11 @@ samples/tutorial/
 # ato-launch dist is a single-file Vite build (vite-plugin-singlefile); commit it.
 !crates/ato-desktop/assets/system/ato-launch/dist/
 
+# desktop-tauri: local build output (sidecar binaries, tauri gen/, frontend bundle)
+crates/desktop-tauri/binaries/
+crates/desktop-tauri/gen/
+crates/desktop-tauri/frontend/
+
 # Parallel-development worktrees (see CLAUDE.md → "Parallel development with git worktrees").
 # The directory itself is tracked via .worktrees/.gitkeep so it always exists
 # after clone; everything else inside is host-local.
