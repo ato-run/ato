@@ -44,6 +44,7 @@ pub(crate) fn start(bundle: &Path, into: &Path, no_attach: bool) -> Result<()> {
     let session_id = random_session_id()?;
     let paths = SessionPaths::new(&session_id)?;
     paths.create()?;
+    import_session_seed(&bundle, &paths.seed_capsule)?;
 
     let executable = std::env::current_exe().context("failed to locate ato executable")?;
     let log = owner_only_log(&paths.supervisor_log)?;
@@ -53,7 +54,7 @@ pub(crate) fn start(bundle: &Path, into: &Path, no_attach: bool) -> Result<()> {
         .args(["internal", "capsule-session", "serve", "--session"])
         .arg(session_id.as_str())
         .arg("--bundle")
-        .arg(&bundle)
+        .arg(&paths.seed_capsule)
         .arg("--into")
         .arg(&into)
         .stdin(Stdio::null())
@@ -1381,6 +1382,7 @@ struct SessionPaths {
     token: PathBuf,
     lock: PathBuf,
     wal: PathBuf,
+    seed_capsule: PathBuf,
     supervisor_log: PathBuf,
 }
 
@@ -1402,6 +1404,7 @@ impl SessionPaths {
             token: control.join("token"),
             lock: control.join("supervisor.lock"),
             wal: directory.join("journal").join("wal-000001"),
+            seed_capsule: directory.join("seed").join("source.capsule.local"),
             supervisor_log: directory.join("logs").join("supervisor.log"),
             directory,
             control,
@@ -1414,6 +1417,7 @@ impl SessionPaths {
             &self.directory,
             &self.control,
             &self.directory.join("journal"),
+            &self.directory.join("seed"),
             &self.directory.join("objects"),
             &self.directory.join("logs"),
         ] {
@@ -1422,6 +1426,29 @@ impl SessionPaths {
         }
         Ok(())
     }
+}
+
+fn import_session_seed(source: &Path, destination: &Path) -> Result<()> {
+    let mut input = File::open(source)
+        .with_context(|| format!("failed to open Session seed {}", source.display()))?;
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(destination)
+        .with_context(|| format!("failed to create Session seed {}", destination.display()))?;
+    std::io::copy(&mut input, &mut output).context("failed to import Session seed")?;
+    output
+        .set_permissions(fs::Permissions::from_mode(0o400))
+        .context("failed to make Session seed immutable")?;
+    output.sync_all().context("failed to sync Session seed")?;
+    let seed_directory = destination
+        .parent()
+        .ok_or_else(|| anyhow!("Session seed path has no parent"))?;
+    File::open(seed_directory)
+        .and_then(|directory| directory.sync_all())
+        .context("failed to sync Session seed directory")?;
+    Ok(())
 }
 
 fn session_root() -> Result<PathBuf> {
