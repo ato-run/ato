@@ -11,9 +11,9 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::DurableFrontier;
+use crate::{DurableFrontier, RecordFrontier};
 
-const SESSION_STORE_SCHEMA_VERSION: u16 = 1;
+const SESSION_STORE_SCHEMA_VERSION: u16 = 2;
 const SESSION_SECRET_BYTES: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -104,13 +104,26 @@ impl SupervisorIdentity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredLocalCheckpoint {
+    pub state_ref: String,
+    pub captured_at: DurableFrontier,
+    pub workspace_digest: String,
+    pub resume_fidelity: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredProtocolSession {
     pub schema_version: u16,
     pub session_id: SessionId,
     pub lifecycle: String,
     pub state_type: String,
-    pub state_ref: String,
-    pub committed_frontier: DurableFrontier,
+    pub durable_frontier: DurableFrontier,
+    pub latest_consistent_frontier: Option<DurableFrontier>,
+    pub base_state: String,
+    pub base_frontier: RecordFrontier,
+    pub active_checkpoint: Option<StoredLocalCheckpoint>,
+    pub workspace: PathBuf,
+    pub source_session_id: Option<SessionId>,
     pub supervisor: SupervisorIdentity,
 }
 
@@ -119,8 +132,10 @@ impl StoredProtocolSession {
         session_id: SessionId,
         lifecycle: impl Into<String>,
         state_type: &StateTypeId,
-        state_ref: &ContentRef,
-        committed_frontier: DurableFrontier,
+        base_state: &ContentRef,
+        base_frontier: RecordFrontier,
+        durable_frontier: DurableFrontier,
+        workspace: PathBuf,
         supervisor: SupervisorIdentity,
     ) -> Self {
         Self {
@@ -128,8 +143,13 @@ impl StoredProtocolSession {
             session_id,
             lifecycle: lifecycle.into(),
             state_type: state_type.to_string(),
-            state_ref: state_ref.to_string(),
-            committed_frontier,
+            durable_frontier,
+            latest_consistent_frontier: None,
+            base_state: base_state.to_string(),
+            base_frontier,
+            active_checkpoint: None,
+            workspace,
+            source_session_id: None,
             supervisor,
         }
     }
@@ -141,8 +161,29 @@ impl StoredProtocolSession {
         SessionId::parse(self.session_id.to_string())?;
         StateTypeId::parse(&self.state_type)
             .map_err(|error| SessionStoreError::InvalidRecord(error.to_string()))?;
-        ContentRef::parse(&self.state_ref)
+        ContentRef::parse(&self.base_state)
             .map_err(|error| SessionStoreError::InvalidRecord(error.to_string()))?;
+        if !self.workspace.is_absolute() {
+            return Err(SessionStoreError::InvalidRecord(
+                "workspace path must be absolute".to_owned(),
+            ));
+        }
+        if let Some(checkpoint) = &self.active_checkpoint {
+            ContentRef::parse(&checkpoint.state_ref)
+                .map_err(|error| SessionStoreError::InvalidRecord(error.to_string()))?;
+            ContentRef::parse(&checkpoint.workspace_digest)
+                .map_err(|error| SessionStoreError::InvalidRecord(error.to_string()))?;
+            if checkpoint.resume_fidelity != "filesystem_restart" {
+                return Err(SessionStoreError::InvalidRecord(
+                    "unsupported local checkpoint resume fidelity".to_owned(),
+                ));
+            }
+            if self.latest_consistent_frontier != Some(checkpoint.captured_at) {
+                return Err(SessionStoreError::InvalidRecord(
+                    "active checkpoint must match latest consistent frontier".to_owned(),
+                ));
+            }
+        }
         if self.lifecycle.is_empty()
             || self.supervisor.incarnation_nonce.is_empty()
             || self.supervisor.process_start_identity.is_empty()
@@ -328,10 +369,12 @@ mod tests {
             "running",
             &StateTypeId::parse("ato.state.test@1").expect("state type"),
             &ContentRef::parse(format!("blake3:{}", "a".repeat(64))).expect("state ref"),
+            crate::RecordFrontier::Origin,
             DurableFrontier {
                 records_through: crate::RecordFrontier::Through(42),
                 journal_through: crate::JournalLsn::new(8192),
             },
+            std::env::current_dir().expect("absolute current directory"),
             identity,
         )
     }
