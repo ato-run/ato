@@ -201,6 +201,7 @@ fn run_mode(
             manifest: manifest.clone(),
             overlay_root: ov.clone(),
             host_runner_class: None,
+            containment: None,
             uffd_preview: false,
         });
         let total = t.elapsed().as_secs_f64() * 1000.0;
@@ -291,6 +292,7 @@ fn main() {
         manifest: manifest.clone(),
         overlay_root: prof_ov.clone(),
         host_runner_class: None,
+        containment: None,
         uffd_preview: false,
     }) {
         has_profile = build_hotset_profile(&prof_ov, &profile_path);
@@ -353,6 +355,7 @@ fn main() {
                 manifest: manifest.clone(),
                 overlay_root: dir.join("ov-warm-prime"),
                 host_runner_class: None,
+                containment: None,
                 uffd_preview: false,
             }) {
                 let _ = backend.stop(r.session);

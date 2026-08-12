@@ -45,7 +45,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use capsule::foundation::install_lifecycle::RunnerClassFacts;
+use capsule::foundation::install_lifecycle::{RunnerClassFacts, RunnerClassId};
 use capsule::snapshot_manifest::{
     PortabilityTier, SNAPSHOT_COMPATIBILITY_V1_SCHEMA, SnapshotBackendKind,
     SnapshotCompatibilityContractV1,
@@ -790,15 +790,22 @@ impl FirecrackerBackend {
         let _ = std::fs::remove_file(sock);
         let log = std::fs::File::create(console_log)
             .map_err(|e| self.backend_err(format!("create console log: {e}")))?;
-        let child = self
-            .fc_command(vsock_isolation)
+        let mut command = self.fc_command(vsock_isolation);
+        command
             .arg("--api-sock")
             .arg(sock)
             .stdout(Stdio::from(
                 log.try_clone()
                     .map_err(|e| self.backend_err(e.to_string()))?,
             ))
-            .stderr(Stdio::from(log))
+            .stderr(Stdio::from(log));
+        #[cfg(target_os = "linux")]
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            let expected_parent = libc::getpid();
+            command.pre_exec(move || install_parent_death_containment(expected_parent));
+        }
+        let child = command
             .spawn()
             .map_err(|e| self.backend_err(format!("spawn firecracker: {e}")))?;
         let mut fc = FcProcess {
@@ -1348,6 +1355,19 @@ impl FirecrackerBackend {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn install_parent_death_containment(expected_parent: libc::pid_t) -> std::io::Result<()> {
+    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { libc::getppid() } != expected_parent {
+        return Err(std::io::Error::other(
+            "Firecracker restore parent exited during spawn",
+        ));
+    }
+    Ok(())
+}
+
 fn hc_port(c: &RestoreContract, fallback: u16) -> u16 {
     c.ports.first().copied().unwrap_or(fallback)
 }
@@ -1745,6 +1765,13 @@ struct FcProcess {
     sock: PathBuf,
 }
 impl FcProcess {
+    fn pid(&self) -> u32 {
+        self.child
+            .as_ref()
+            .expect("live Firecracker process has a child")
+            .id()
+    }
+
     fn api(
         &self,
         b: &FirecrackerBackend,
@@ -2637,6 +2664,11 @@ impl SnapshotBackend for FirecrackerBackend {
         })
     }
 
+    fn host_runner_class(&self) -> Result<RunnerClassId, SnapshotError> {
+        self.ensure_available()?;
+        Ok(self.runner_facts().id())
+    }
+
     fn build_ready_state(
         &self,
         input: BuildReadyStateInput<'_>,
@@ -2860,19 +2892,22 @@ impl SnapshotBackend for FirecrackerBackend {
     fn restore(&self, input: RestoreReadyStateInput<'_>) -> Result<RestoreReceipt, SnapshotError> {
         self.ensure_available()?;
         // ── runner-class gate (fail-closed) ──────────────────────────────────
-        let host_class = input
-            .host_runner_class
-            .unwrap_or_else(|| self.runner_facts().id());
-        if let Some(expected) = &input.manifest.runner_class_id
-            && expected != &host_class
-        {
-            return Err(SnapshotError::RunnerClassMismatch(
-                capsule::foundation::install_lifecycle::RunnerClassMismatch {
+        match (&input.manifest.runner_class_id, &input.host_runner_class) {
+            (Some(expected), Some(actual)) if expected != actual => {
+                return Err(SnapshotError::RunnerClassMismatch(
+                    capsule::foundation::install_lifecycle::RunnerClassMismatch {
+                        expected: expected.clone(),
+                        actual: actual.clone(),
+                        first_divergent_field: "runner_class_id".to_string(),
+                    },
+                ));
+            }
+            (Some(expected), None) => {
+                return Err(SnapshotError::MissingHostRunnerClass {
                     expected: expected.clone(),
-                    actual: host_class,
-                    first_divergent_field: "runner_class_id".to_string(),
-                },
-            ));
+                });
+            }
+            _ => {}
         }
 
         let rootfs = input
@@ -3168,6 +3203,9 @@ impl SnapshotBackend for FirecrackerBackend {
             let fc = bench::time("restore.start_fc", || {
                 self.start_fc_with(&input.overlay_root.join("api.sock"), &input.overlay_root.join("console.log"), vsock_isolation)
             })?;
+            if let Some(containment) = input.containment {
+                containment.install(fc.pid())?;
+            }
             // Phase 8a-HW (#912): the snapshot carries the vsock device with its baked
             // uds_path; FC re-creates that socket on load, so its directory must exist.
             // The artifact self-describes vsock (manifest.has_vsock) so restore preps it
@@ -4071,6 +4109,7 @@ mod tests {
             manifest: m,
             overlay_root: dir.path().join("ov"),
             host_runner_class: None,
+            containment: None,
             uffd_preview: false,
         };
         assert!(matches!(
@@ -4870,6 +4909,75 @@ mod tests {
             .stop(session)
             .expect("stop must not fail on a missing fsync target");
         assert!(receipt.overlay_removed);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parent_death_containment_kills_vmm_while_restore_is_blocked() {
+        use std::ffi::CString;
+
+        let sleep = CString::new("sleep").unwrap();
+        let duration = CString::new("30").unwrap();
+        let mut pipe = [0_i32; 2];
+        assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
+        let supervisor = unsafe { libc::fork() };
+        assert!(supervisor >= 0);
+        if supervisor == 0 {
+            unsafe { libc::close(pipe[0]) };
+            let vmm = unsafe { libc::fork() };
+            if vmm == 0 {
+                let parent = unsafe { libc::getppid() };
+                if install_parent_death_containment(parent).is_err() {
+                    unsafe { libc::_exit(120) };
+                }
+                unsafe {
+                    libc::execlp(
+                        sleep.as_ptr(),
+                        sleep.as_ptr(),
+                        duration.as_ptr(),
+                        std::ptr::null::<libc::c_char>(),
+                    );
+                    libc::_exit(121);
+                }
+            }
+            if vmm < 0 {
+                unsafe { libc::_exit(122) };
+            }
+            let bytes = vmm.to_ne_bytes();
+            unsafe {
+                libc::write(pipe[1], bytes.as_ptr().cast(), bytes.len());
+                libc::close(pipe[1]);
+                // Models restore blocking after VMM spawn/containment install.
+                loop {
+                    libc::pause();
+                }
+            }
+        }
+
+        unsafe { libc::close(pipe[1]) };
+        let mut bytes = [0_u8; std::mem::size_of::<libc::pid_t>()];
+        let count = unsafe { libc::read(pipe[0], bytes.as_mut_ptr().cast(), bytes.len()) };
+        unsafe { libc::close(pipe[0]) };
+        assert_eq!(count as usize, bytes.len());
+        let vmm = libc::pid_t::from_ne_bytes(bytes);
+        assert!(vmm > 0);
+
+        assert_eq!(unsafe { libc::kill(supervisor, libc::SIGKILL) }, 0);
+        unsafe { libc::waitpid(supervisor, std::ptr::null_mut(), 0) };
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let state = std::fs::read_to_string(format!("/proc/{vmm}/stat"))
+                .ok()
+                .and_then(|stat| stat.rsplit_once(") ").map(|(_, tail)| tail.as_bytes()[0]));
+            if state.is_none() || state == Some(b'Z') {
+                break;
+            }
+            if Instant::now() >= deadline {
+                unsafe { libc::kill(vmm, libc::SIGKILL) };
+                panic!("contained VMM survived its restore Supervisor");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 }
 
