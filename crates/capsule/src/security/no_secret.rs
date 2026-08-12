@@ -39,6 +39,7 @@ const PRIVATE_KEY_MARKERS: &[&[u8]] = &[
 
 const MIN_PROVIDER_SUFFIX_LEN: usize = 20;
 const MIN_ENV_VALUE_LEN: usize = 6;
+const SCAN_DRAIN_TARGET: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialFinding {
@@ -62,6 +63,54 @@ fn class_count(bytes: &[u8]) -> usize {
 /// Fail-closed, high-precision scan for credential material. Findings never
 /// include the credential value itself.
 pub fn scan_credential_material(bytes: &[u8]) -> Vec<CredentialFinding> {
+    let mut scanner = CredentialScanner::new();
+    scanner.push(bytes);
+    scanner.finish()
+}
+
+#[derive(Debug, Default)]
+pub struct CredentialScanner {
+    pending: Vec<u8>,
+    base_offset: usize,
+    findings: Vec<CredentialFinding>,
+}
+
+impl CredentialScanner {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn push(&mut self, chunk: &[u8]) {
+        self.pending.extend_from_slice(chunk);
+        while self.pending.len() > SCAN_DRAIN_TARGET * 2 {
+            let Some(split) = self.pending[SCAN_DRAIN_TARGET..]
+                .iter()
+                .position(|byte| matches!(byte, b'\n' | b'\r' | b'\0'))
+                .map(|offset| SCAN_DRAIN_TARGET + offset + 1)
+            else {
+                break;
+            };
+            let mut findings = scan_segment(&self.pending[..split]);
+            for finding in &mut findings {
+                finding.offset += self.base_offset;
+            }
+            self.findings.extend(findings);
+            self.pending.drain(..split);
+            self.base_offset += split;
+        }
+    }
+
+    pub fn finish(mut self) -> Vec<CredentialFinding> {
+        let mut findings = scan_segment(&self.pending);
+        for finding in &mut findings {
+            finding.offset += self.base_offset;
+        }
+        self.findings.extend(findings);
+        self.findings
+    }
+}
+
+fn scan_segment(bytes: &[u8]) -> Vec<CredentialFinding> {
     let mut findings = Vec::new();
     for marker in PRIVATE_KEY_MARKERS {
         if let Some(offset) = bytes
@@ -157,5 +206,30 @@ mod tests {
         );
         assert!(findings.iter().any(|finding| finding.kind == "private-key"));
         assert!(!format!("{findings:?}").contains("ABCDEFGHIJ1234567890abcdef"));
+    }
+
+    #[test]
+    fn incremental_scanner_is_independent_of_chunk_boundaries() {
+        let input = b"safe\nOPENAI_API_KEY=sk-proj-ABCDEFGHIJ1234567890abcdef\n\
+            -----BEGIN PRIVATE KEY-----\nmore safe output\n";
+        let expected = scan_credential_material(input);
+        for chunk_size in [1, 7, 4 * 1024, 64 * 1024] {
+            let mut scanner = CredentialScanner::new();
+            for chunk in input.chunks(chunk_size) {
+                scanner.push(chunk);
+            }
+            assert_eq!(scanner.finish(), expected, "chunk size {chunk_size}");
+        }
+
+        let mut scanner = CredentialScanner::new();
+        let mut offset = 0;
+        let mut step = 17_usize;
+        while offset < input.len() {
+            step = (step * 37 + 11) % 31 + 1;
+            let end = (offset + step).min(input.len());
+            scanner.push(&input[offset..end]);
+            offset = end;
+        }
+        assert_eq!(scanner.finish(), expected);
     }
 }
