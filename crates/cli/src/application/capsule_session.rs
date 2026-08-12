@@ -12,7 +12,9 @@ use anyhow::{Result, bail};
 mod unix;
 
 #[cfg(unix)]
-pub(crate) use unix::{attach, kill, list, serve, start, status, watchdog};
+pub(crate) use unix::{
+    attach, branch, kill, list, resume, serve, start, status, suspend, watchdog,
+};
 
 #[cfg(not(unix))]
 fn unsupported() -> Result<()> {
@@ -31,6 +33,21 @@ pub(crate) fn serve(_session: &str, _bundle: &Path, _into: &Path) -> Result<()> 
 
 #[cfg(not(unix))]
 pub(crate) fn attach(_session: &str, _observe: bool) -> Result<()> {
+    unsupported()
+}
+
+#[cfg(not(unix))]
+pub(crate) fn branch(_session: &str, _into: &Path, _no_attach: bool) -> Result<()> {
+    unsupported()
+}
+
+#[cfg(not(unix))]
+pub(crate) fn suspend(_session: &str) -> Result<()> {
+    unsupported()
+}
+
+#[cfg(not(unix))]
+pub(crate) fn resume(_session: &str) -> Result<()> {
     unsupported()
 }
 

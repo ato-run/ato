@@ -45,10 +45,12 @@ pub use runtime::{
 pub use session_store::{
     CapsuleProtocolSessionStore, ControlAuthorizationError, NewStoredProtocolSession,
     NewSupervisorIdentity, SessionId, SessionStoreError, StoredLocalCheckpoint,
-    StoredProtocolSession, SupervisorIdentity,
+    StoredProtocolSession, StoredReplayVerification, SupervisorIdentity,
 };
 pub use supervisor::{
     BarrierError, BarrierId, BoundaryCoordinator, BoundaryDriver, DriverBoundaryError,
     DriverQuiesceReport, FrontierBarrier, JournalCommit,
 };
-pub use wal::{RecoveredJournal, SessionWal, SharedSessionWal, WalEntry, WalError, WalRecord};
+pub use wal::{
+    RecoveredJournal, SessionWal, SharedSessionWal, WalEntry, WalError, WalPayload, WalRecord,
+};
