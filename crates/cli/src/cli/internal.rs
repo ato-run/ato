@@ -167,6 +167,8 @@ pub(crate) enum CapsuleSessionInternalCommands {
         process_start_identity: String,
         #[arg(long)]
         lease_fd: i32,
+        #[arg(long)]
+        overlay_root: Option<PathBuf>,
     },
 }
 

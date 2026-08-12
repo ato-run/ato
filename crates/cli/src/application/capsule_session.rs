@@ -72,6 +72,7 @@ pub(crate) fn watchdog(
     _pgid: i32,
     _process_start_identity: &str,
     _lease_fd: i32,
+    _overlay_root: Option<&Path>,
 ) -> Result<()> {
     unsupported()
 }
