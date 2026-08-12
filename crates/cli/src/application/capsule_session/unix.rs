@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{IsTerminal, Read, Write};
 use std::os::fd::{FromRawFd, RawFd};
@@ -20,8 +20,8 @@ use capsule_protocol::{ConnectorId, Direction, IoRecord, Payload, RecordKindId};
 use capsule_session_runtime::{
     BoundaryCoordinator, BoundaryDriver, BoundaryOperationId, CapsuleProtocolSessionStore,
     DurableFrontier, JournalLsn, NewStoredProtocolSession, NewSupervisorIdentity, RecordFrontier,
-    SessionId, SharedSessionWal, StoredLocalCheckpoint, StoredProtocolSession,
-    StoredReplayVerification, SupervisorIdentity,
+    SessionId, SharedSessionWal, StoredConnectorCheckpoint, StoredLocalCheckpoint,
+    StoredProtocolSession, StoredReplayVerification, SupervisorIdentity,
 };
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size as terminal_size};
 use fs2::FileExt;
@@ -36,6 +36,8 @@ const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const CLIENT_QUEUE_DEPTH: usize = 64;
 const PTY_DRAIN_QUEUE_DEPTH: usize = 64;
 const PTY_CONNECTOR_ID: &str = "terminal.main";
+const PTY_PROTOCOL_ID: &str = "ato.io.pty@1";
+const PTY_CHECKPOINT_FORMAT: &str = "ato.io.pty.local-checkpoint@1";
 const READY_MARKER: &[u8] = b"__ATO_SESSION_READY__";
 const WATCHDOG_DISARM: &[u8] = b"DISARM\n";
 
@@ -99,11 +101,13 @@ fn launch_session(
             Ok(ControlMessage::Status { lifecycle, .. }) if lifecycle == "running" => break,
             Ok(ControlMessage::Error { message }) => {
                 let _ = child.kill();
+                let _ = child.wait();
                 bail!("Session Supervisor failed readiness: {message}");
             }
             Ok(_) | Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
             Ok(_) | Err(_) => {
                 let _ = child.kill();
+                let _ = child.wait();
                 bail!("Session Supervisor did not become ready within {READY_TIMEOUT:?}");
             }
         }
@@ -146,6 +150,9 @@ pub(crate) fn serve(session: &str, bundle: &Path, into: &Path) -> Result<()> {
 
     let mut computation = PtyComputation::spawn(into)?;
     initialize_terminal(&mut computation.reader, &computation.writer)?;
+    if let Some(checkpoint) = bootstrap.base_connector_checkpoints.get(PTY_CONNECTOR_ID) {
+        restore_pty_checkpoint(&computation, checkpoint)?;
+    }
     let historical_frontier = bootstrap.resume_checkpoint.as_ref().map_or_else(
         || {
             capsule
@@ -171,12 +178,20 @@ pub(crate) fn serve(session: &str, bundle: &Path, into: &Path) -> Result<()> {
     replace_secret(&paths.token, generated.secret())?;
     let identity = generated.identity;
     let store = CapsuleProtocolSessionStore::open(&paths.root)?;
+    let resume_rollback = if bootstrap.resume_checkpoint.is_some() {
+        let mut suspended = store.read(&session_id)?;
+        suspended.lifecycle = "suspended".to_owned();
+        Some(ResumeStartupRollback::new(store.clone(), suspended))
+    } else {
+        None
+    };
     let mut stored = if let Some(checkpoint) = &bootstrap.resume_checkpoint {
         let store = CapsuleProtocolSessionStore::open(&paths.root)?;
         let mut stored = store.read(&session_id)?;
         stored.lifecycle = "starting".to_owned();
         stored.base_state = checkpoint.state_ref.clone();
         stored.base_frontier = checkpoint.captured_at.records_through;
+        stored.base_connector_checkpoints = checkpoint.connector_checkpoints.clone();
         stored.durable_frontier = SharedSessionWal::open(&paths.wal)?.durable_frontier()?;
         stored.latest_consistent_frontier = Some(checkpoint.captured_at);
         stored.active_checkpoint = Some(checkpoint.clone());
@@ -197,10 +212,16 @@ pub(crate) fn serve(session: &str, bundle: &Path, into: &Path) -> Result<()> {
             workspace: into.to_path_buf(),
             supervisor: identity.clone(),
         });
+        stored.base_connector_checkpoints = bootstrap.base_connector_checkpoints.clone();
         stored.source_session_id = bootstrap.source_session_id.clone();
         stored
     };
     store.write(&stored)?;
+    if bootstrap.resume_checkpoint.is_some()
+        && std::env::var_os("ATO_TEST_FAIL_RESUME_STARTUP").is_some()
+    {
+        bail!("injected resume startup failure");
+    }
 
     if paths.socket.exists() {
         fs::remove_file(&paths.socket).context("failed to remove stale control socket")?;
@@ -228,20 +249,29 @@ pub(crate) fn serve(session: &str, bundle: &Path, into: &Path) -> Result<()> {
             historical_frontier,
         )?;
         stored.historical_replay = Some(StoredReplayVerification {
+            connector: PTY_CONNECTOR_ID.to_owned(),
+            protocol: PTY_PROTOCOL_ID.to_owned(),
             from: bootstrap.base_frontier,
             through: historical_frontier,
         });
     }
     if let Some(expected) = bootstrap.expected_workspace_digest.as_deref() {
-        let targets = workload_tree(
+        let frozen = freeze_workload_tree(
             computation.pid,
             computation.pgid,
             &computation.process_start_identity,
-        );
-        signal_workload_tree(&targets, libc::SIGSTOP);
+        )
+        .inspect_err(|_| {
+            let root = ProcessTarget {
+                pid: computation.pid,
+                pgid: computation.pgid,
+                process_start_identity: computation.process_start_identity.clone(),
+            };
+            let _ = checked_signal(&root, libc::SIGCONT);
+        })?;
         let verification = capture_local_workspace_checkpoint(into)
             .context("failed to verify branched workspace State");
-        signal_workload_tree(&targets, libc::SIGCONT);
+        thaw_workload_tree(&frozen)?;
         let verification = verification?;
         if verification.0.state_ref.to_string() != expected {
             bail!("BranchDiverged: replayed workspace State differs from source frontier");
@@ -252,6 +282,7 @@ pub(crate) fn serve(session: &str, bundle: &Path, into: &Path) -> Result<()> {
     let driver = PtyBoundaryWriter {
         writer: Arc::clone(&computation.writer),
         master: Arc::clone(&computation.master),
+        current_size: Arc::clone(&computation.current_size),
     };
     let mut coordinator = BoundaryCoordinator::new(wal.clone(), driver);
     let (command_tx, command_rx) = mpsc::channel();
@@ -266,6 +297,9 @@ pub(crate) fn serve(session: &str, bundle: &Path, into: &Path) -> Result<()> {
 
     stored.lifecycle = "running".to_owned();
     store.write(&stored)?;
+    if let Some(rollback) = resume_rollback {
+        rollback.commit();
+    }
 
     let result = supervisor_loop(
         &session_id,
@@ -287,6 +321,34 @@ pub(crate) fn serve(session: &str, bundle: &Path, into: &Path) -> Result<()> {
     let _ = fs::remove_file(&paths.socket);
     let _ = lock.unlock();
     result
+}
+
+struct ResumeStartupRollback {
+    store: CapsuleProtocolSessionStore,
+    suspended: StoredProtocolSession,
+    armed: bool,
+}
+
+impl ResumeStartupRollback {
+    fn new(store: CapsuleProtocolSessionStore, suspended: StoredProtocolSession) -> Self {
+        Self {
+            store,
+            suspended,
+            armed: true,
+        }
+    }
+
+    fn commit(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ResumeStartupRollback {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.store.write(&self.suspended);
+        }
+    }
 }
 
 pub(crate) fn attach(session: &str, observe: bool) -> Result<()> {
@@ -316,7 +378,7 @@ pub(crate) fn attach(session: &str, observe: bool) -> Result<()> {
     let _raw_guard = RawModeGuard(raw);
 
     if !observe {
-        if let Ok((cols, rows)) = terminal_size() {
+        if raw && let Ok((cols, rows)) = terminal_size() {
             send_action(&mut stream, &auth, ControlAction::Resize { rows, cols })?;
         }
         let mut input_stream = stream.try_clone()?;
@@ -405,6 +467,9 @@ pub(crate) fn kill(session: &str) -> Result<()> {
 }
 
 pub(crate) fn branch(session: &str, into: &Path, no_attach: bool) -> Result<()> {
+    eprintln!(
+        "warning: workspace-posix-host + ato.io.pty@1 branch is experimental; only PTY boundary history is verified, and unmediated host external effects may be re-executed"
+    );
     let source_id = SessionId::parse(session)?;
     let checkpoint = match request(&source_id, ControlAction::CreateFrontier)? {
         ControlMessage::FrontierCreated { checkpoint } => checkpoint,
@@ -447,6 +512,7 @@ pub(crate) fn branch(session: &str, into: &Path, no_attach: bool) -> Result<()> 
             source_session_id: Some(source_id),
             expected_workspace_digest: Some(checkpoint.workspace_digest),
             base_frontier: source.base_frontier,
+            base_connector_checkpoints: source.base_connector_checkpoints,
             ..SessionBootstrapMetadata::default()
         },
     )?;
@@ -495,6 +561,11 @@ pub(crate) fn resume(session: &str) -> Result<()> {
     seed.records.clear();
     seed.objects
         .insert(seed.descriptor.base_state.state_ref.clone(), current_object);
+    seed.prune_unreachable_objects();
+    seed.validate()?;
+    let previous_seed = fs::read(&paths.seed_capsule)?;
+    let previous_bootstrap = fs::read(&paths.bootstrap)?;
+    let previous_token = fs::read(&paths.token)?;
     replace_capsule_seed(&seed, &paths.seed_capsule)?;
     let generation = stored
         .supervisor
@@ -504,14 +575,38 @@ pub(crate) fn resume(session: &str) -> Result<()> {
     replace_bootstrap_metadata(
         &paths,
         &SessionBootstrapMetadata {
-            source_session_id: stored.source_session_id,
+            source_session_id: stored.source_session_id.clone(),
             expected_workspace_digest: None,
             generation,
             base_frontier: checkpoint.captured_at.records_through,
+            base_connector_checkpoints: checkpoint.connector_checkpoints.clone(),
             resume_checkpoint: Some(checkpoint),
         },
     )?;
-    launch_session(&session_id, &paths, &stored.workspace, true)
+    match launch_session(&session_id, &paths, &stored.workspace, true) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            capsule_session_runtime::session_store::write_atomic_owner_only(
+                &paths.seed_capsule,
+                &previous_seed,
+            )?;
+            fs::set_permissions(&paths.seed_capsule, fs::Permissions::from_mode(0o400))?;
+            capsule_session_runtime::session_store::write_atomic_owner_only(
+                &paths.bootstrap,
+                &previous_bootstrap,
+            )?;
+            capsule_session_runtime::session_store::write_atomic_owner_only(
+                &paths.token,
+                &previous_token,
+            )?;
+            let _ = fs::remove_file(&paths.socket);
+            let _ = fs::remove_file(&paths.socket_address);
+            let mut suspended = stored;
+            suspended.lifecycle = "suspended".to_owned();
+            store.write(&suspended)?;
+            Err(error)
+        }
+    }
 }
 
 pub(crate) fn list() -> Result<()> {
@@ -876,12 +971,11 @@ where
     J: capsule_session_runtime::supervisor::JournalCommit,
     D: BoundaryDriver,
 {
-    let targets = workload_tree(
+    let frozen = freeze_workload_tree(
         computation.pid,
         computation.pgid,
         &computation.process_start_identity,
-    );
-    signal_workload_tree(&targets, libc::SIGSTOP);
+    )?;
     let result = (|| {
         let master_fd = computation.master_raw_fd()?;
         loop {
@@ -937,12 +1031,17 @@ where
         let frontier = wal.durable_frontier()?;
         let (state, object) = capture_local_workspace_checkpoint(&stored.workspace)
             .context("failed to capture local workspace checkpoint")?;
+        frozen.verify_root()?;
         persist_checkpoint_object(session_id, &state.state_ref.to_string(), &object)?;
         let checkpoint = StoredLocalCheckpoint {
             state_ref: state.state_ref.to_string(),
             captured_at: frontier,
             workspace_digest: state.state_ref.to_string(),
             resume_fidelity: "filesystem_restart".to_owned(),
+            connector_checkpoints: BTreeMap::from([(
+                PTY_CONNECTOR_ID.to_owned(),
+                pty_connector_checkpoint(frontier, computation.current_terminal_size()?),
+            )]),
         };
         stored.durable_frontier = frontier;
         stored.latest_consistent_frontier = Some(frontier);
@@ -951,7 +1050,7 @@ where
         Ok(checkpoint)
     })();
     if resume_workload || result.is_err() {
-        signal_workload_tree(&targets, libc::SIGCONT);
+        thaw_workload_tree(&frozen)?;
     }
     result
 }
@@ -1012,6 +1111,7 @@ where
 struct PtyBoundaryWriter {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    current_size: Arc<Mutex<TerminalSize>>,
 }
 
 impl BoundaryDriver for PtyBoundaryWriter {
@@ -1044,6 +1144,10 @@ impl BoundaryDriver for PtyBoundaryWriter {
                     pixel_height: 0,
                 })
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
+            *self
+                .current_size
+                .lock()
+                .map_err(|_| std::io::Error::other("PTY size lock poisoned"))? = size;
             return Ok(());
         }
         let mut writer = self
@@ -1072,6 +1176,7 @@ struct PtyComputation {
     killer: Box<dyn ChildKiller + Send + Sync>,
     reader: Option<Box<dyn Read + Send>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    current_size: Arc<Mutex<TerminalSize>>,
     pid: u32,
     pgid: i32,
     process_start_identity: String,
@@ -1125,6 +1230,10 @@ impl PtyComputation {
             killer,
             reader: Some(reader),
             writer: Arc::new(Mutex::new(writer)),
+            current_size: Arc::new(Mutex::new(TerminalSize {
+                rows: 24,
+                cols: 120,
+            })),
             pid,
             pgid,
             process_start_identity,
@@ -1165,7 +1274,12 @@ impl PtyComputation {
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .map_err(|error| anyhow!("failed to resize PTY: {error}"))
+            .map_err(|error| anyhow!("failed to resize PTY: {error}"))?;
+        *self
+            .current_size
+            .lock()
+            .map_err(|_| anyhow!("PTY size lock poisoned"))? = TerminalSize { rows, cols };
+        Ok(())
     }
 
     fn master_raw_fd(&self) -> Result<RawFd> {
@@ -1176,6 +1290,13 @@ impl PtyComputation {
         master
             .as_raw_fd()
             .ok_or_else(|| anyhow!("PTY master does not expose a Unix file descriptor"))
+    }
+
+    fn current_terminal_size(&self) -> Result<TerminalSize> {
+        self.current_size
+            .lock()
+            .map(|size| *size)
+            .map_err(|_| anyhow!("PTY size lock poisoned"))
     }
 
     fn request_termination(&mut self) {
@@ -1213,6 +1334,29 @@ impl PtyComputation {
         self.disarm_watchdog()?;
         Ok(())
     }
+}
+
+fn pty_connector_checkpoint(
+    applied_at: DurableFrontier,
+    size: TerminalSize,
+) -> StoredConnectorCheckpoint {
+    StoredConnectorCheckpoint {
+        protocol_id: PTY_PROTOCOL_ID.to_owned(),
+        applied_at,
+        format: PTY_CHECKPOINT_FORMAT.to_owned(),
+        payload: serde_json::to_value(size).expect("TerminalSize is JSON serializable"),
+    }
+}
+
+fn restore_pty_checkpoint(
+    computation: &PtyComputation,
+    checkpoint: &StoredConnectorCheckpoint,
+) -> Result<()> {
+    if checkpoint.protocol_id != PTY_PROTOCOL_ID || checkpoint.format != PTY_CHECKPOINT_FORMAT {
+        bail!("unsupported PTY Connector checkpoint");
+    }
+    let size: TerminalSize = serde_json::from_value(checkpoint.payload.clone())?;
+    computation.resize(size.rows, size.cols)
 }
 
 fn spawn_watchdog(
@@ -1853,11 +1997,13 @@ enum TerminationReason {
     Suspend,
 }
 
-#[derive(Serialize, Deserialize)]
-struct ResizePayload {
+#[derive(Clone, Copy, Serialize, Deserialize)]
+struct TerminalSize {
     rows: u16,
     cols: u16,
 }
+
+type ResizePayload = TerminalSize;
 
 #[derive(Serialize, Deserialize)]
 struct ExitPayload {
@@ -1942,6 +2088,8 @@ struct SessionBootstrapMetadata {
     resume_checkpoint: Option<StoredLocalCheckpoint>,
     #[serde(default)]
     base_frontier: RecordFrontier,
+    #[serde(default = "default_pty_connector_checkpoints")]
+    base_connector_checkpoints: BTreeMap<String, StoredConnectorCheckpoint>,
 }
 
 fn initial_supervisor_generation() -> u64 {
@@ -1956,8 +2104,25 @@ impl Default for SessionBootstrapMetadata {
             generation: initial_supervisor_generation(),
             resume_checkpoint: None,
             base_frontier: RecordFrontier::Origin,
+            base_connector_checkpoints: default_pty_connector_checkpoints(),
         }
     }
+}
+
+fn default_pty_connector_checkpoints() -> BTreeMap<String, StoredConnectorCheckpoint> {
+    BTreeMap::from([(
+        PTY_CONNECTOR_ID.to_owned(),
+        pty_connector_checkpoint(
+            DurableFrontier {
+                records_through: RecordFrontier::Origin,
+                journal_through: JournalLsn::ORIGIN,
+            },
+            TerminalSize {
+                rows: 24,
+                cols: 120,
+            },
+        ),
+    )])
 }
 
 fn write_bootstrap_metadata(
@@ -2149,6 +2314,227 @@ struct ProcessTarget {
     pid: u32,
     pgid: i32,
     process_start_identity: String,
+}
+
+struct FrozenWorkload {
+    root: ProcessTarget,
+    targets: Vec<ProcessTarget>,
+}
+
+impl FrozenWorkload {
+    fn verify_root(&self) -> Result<()> {
+        if workload_identity_matches(
+            self.root.pid,
+            self.root.pgid,
+            &self.root.process_start_identity,
+        ) {
+            Ok(())
+        } else {
+            bail!("root process disappeared while creating frontier")
+        }
+    }
+}
+
+struct FreezeInProgress {
+    root: ProcessTarget,
+    targets: BTreeMap<u32, ProcessTarget>,
+    armed: bool,
+}
+
+impl FreezeInProgress {
+    fn new(root: ProcessTarget) -> Self {
+        Self {
+            targets: BTreeMap::from([(root.pid, root.clone())]),
+            root,
+            armed: true,
+        }
+    }
+
+    fn finish(mut self) -> FrozenWorkload {
+        self.armed = false;
+        FrozenWorkload {
+            root: self.root.clone(),
+            targets: self.targets.values().cloned().collect(),
+        }
+    }
+}
+
+impl Drop for FreezeInProgress {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        for target in self.targets.values().rev() {
+            if workload_identity_matches(target.pid, target.pgid, &target.process_start_identity) {
+                // Roll back every stop already issued while preserving the
+                // original fail-closed discovery error.
+                unsafe {
+                    libc::kill(-target.pgid, libc::SIGCONT);
+                    libc::kill(target.pid as libc::pid_t, libc::SIGCONT);
+                }
+            }
+        }
+    }
+}
+
+fn discover_process_tree(root_pid: u32) -> Result<BTreeSet<u32>> {
+    if std::env::var_os("ATO_TEST_FAIL_PROCESS_DISCOVERY").is_some() {
+        bail!("injected process discovery failure");
+    }
+    let output = Command::new("ps")
+        .args(["-e", "-o", "pid=", "-o", "ppid="])
+        .output()
+        .context("failed to execute process discovery")?;
+    if !output.status.success() {
+        bail!("process discovery exited with {}", output.status);
+    }
+    let mut processes = Vec::new();
+    for line in String::from_utf8(output.stdout)
+        .context("process discovery was not UTF-8")?
+        .lines()
+    {
+        let mut fields = line.split_whitespace();
+        let candidate = fields
+            .next()
+            .ok_or_else(|| anyhow!("process discovery omitted PID"))?
+            .parse::<u32>()
+            .context("process discovery returned invalid PID")?;
+        let parent = fields
+            .next()
+            .ok_or_else(|| anyhow!("process discovery omitted PPID"))?
+            .parse::<u32>()
+            .context("process discovery returned invalid PPID")?;
+        processes.push((candidate, parent));
+    }
+    let mut discovered = BTreeSet::from([root_pid]);
+    loop {
+        let before = discovered.len();
+        for &(candidate, parent) in &processes {
+            if discovered.contains(&parent) {
+                discovered.insert(candidate);
+            }
+        }
+        if discovered.len() == before {
+            return Ok(discovered);
+        }
+    }
+}
+
+fn checked_signal(target: &ProcessTarget, signal: i32) -> Result<()> {
+    if !workload_identity_matches(target.pid, target.pgid, &target.process_start_identity) {
+        bail!("process identity changed for PID {}", target.pid);
+    }
+    if unsafe { libc::kill(-target.pgid, signal) } == -1 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("failed to signal process group {}", target.pgid));
+    }
+    if unsafe { libc::kill(target.pid as libc::pid_t, signal) } == -1 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("failed to signal PID {}", target.pid));
+    }
+    Ok(())
+}
+
+fn freeze_workload_tree(
+    pid: u32,
+    pgid: i32,
+    process_start_identity: &str,
+) -> Result<FrozenWorkload> {
+    let root = ProcessTarget {
+        pid,
+        pgid,
+        process_start_identity: process_start_identity.to_owned(),
+    };
+    checked_signal(&root, libc::SIGSTOP)?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut freezing = FreezeInProgress::new(root);
+    for _ in 0..32 {
+        let discovered = discover_process_tree(pid)?;
+        for descendant in discovered
+            .iter()
+            .copied()
+            .filter(|candidate| *candidate != pid)
+        {
+            if freezing.targets.contains_key(&descendant) {
+                continue;
+            }
+            let descendant_pgid = unsafe { libc::getpgid(descendant as libc::pid_t) };
+            if descendant_pgid < 1 {
+                if !discover_process_tree(pid)?.contains(&descendant) {
+                    continue;
+                }
+                bail!("failed to read process group for live PID {descendant}");
+            }
+            let process_start_identity = match workload_process_start_identity(descendant) {
+                Ok(identity) => identity,
+                Err(_) if !discover_process_tree(pid)?.contains(&descendant) => continue,
+                Err(error) => return Err(error),
+            };
+            let target = ProcessTarget {
+                pid: descendant,
+                pgid: descendant_pgid,
+                process_start_identity,
+            };
+            match checked_signal(&target, libc::SIGSTOP) {
+                Ok(()) => {
+                    freezing.targets.insert(descendant, target);
+                }
+                Err(_) if !discover_process_tree(pid)?.contains(&descendant) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        let stable = discover_process_tree(pid)?;
+        if stable
+            .iter()
+            .all(|candidate| freezing.targets.contains_key(candidate))
+        {
+            for target in freezing.targets.values() {
+                if stable.contains(&target.pid)
+                    && !workload_identity_matches(
+                        target.pid,
+                        target.pgid,
+                        &target.process_start_identity,
+                    )
+                {
+                    bail!("process identity changed while freezing PID {}", target.pid);
+                }
+            }
+            if !workload_identity_matches(pid, pgid, process_start_identity) {
+                bail!("root process disappeared while creating frontier");
+            }
+            return Ok(freezing.finish());
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+    }
+    bail!("ProcessTreeDidNotQuiesce")
+}
+
+fn thaw_workload_tree(workload: &FrozenWorkload) -> Result<()> {
+    let mut groups = BTreeSet::new();
+    for target in workload.targets.iter().rev() {
+        match workload_process_start_identity(target.pid) {
+            Ok(identity) if identity == target.process_start_identity => {
+                let current_pgid = unsafe { libc::getpgid(target.pid as libc::pid_t) };
+                if current_pgid != target.pgid {
+                    bail!("process group changed before thaw for PID {}", target.pid);
+                }
+                if groups.insert(target.pgid)
+                    && unsafe { libc::kill(-target.pgid, libc::SIGCONT) } == -1
+                {
+                    return Err(std::io::Error::last_os_error())
+                        .context("failed to thaw process group");
+                }
+                if unsafe { libc::kill(target.pid as libc::pid_t, libc::SIGCONT) } == -1 {
+                    return Err(std::io::Error::last_os_error()).context("failed to thaw process");
+                }
+            }
+            Ok(_) => bail!("PID reuse detected while thawing PID {}", target.pid),
+            Err(_) => {}
+        }
+    }
+    Ok(())
 }
 
 fn workload_tree(pid: u32, pgid: i32, process_start_identity: &str) -> Vec<ProcessTarget> {
