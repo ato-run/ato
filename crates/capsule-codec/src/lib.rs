@@ -555,6 +555,19 @@ mod tests {
     }
 
     #[test]
+    fn streaming_encoder_rejects_record_after_normative_limit() {
+        let descriptor = descriptor();
+        let mut output = Vec::new();
+        let mut encoder = RecordStreamEncoder::new(&descriptor, &mut output).unwrap();
+        encoder.count = MAX_RECORDS;
+        assert!(matches!(
+            encoder.push(&records()[0]),
+            Err(CodecError::InvalidValue(message)) if message.contains("record count exceeds")
+        ));
+        assert!(output.is_empty());
+    }
+
+    #[test]
     fn empty_sequence_is_valid() {
         assert_eq!(
             encode_record_stream(&descriptor(), &[]).unwrap(),

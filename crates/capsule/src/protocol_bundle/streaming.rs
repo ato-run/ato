@@ -593,9 +593,7 @@ impl StreamingBundleReader {
         let mut roles = BTreeMap::new();
         let mut object_index = BTreeMap::new();
         let mut previous_object = None;
-        let mut position = 0_usize;
-
-        for entry in archive.entries()?.raw(true) {
+        for (position, entry) in archive.entries()?.raw(true).enumerate() {
             let mut entry = entry?;
             limits.accept(entry.size())?;
             validate_bundle_header(entry.header())?;
@@ -684,7 +682,6 @@ impl StreamingBundleReader {
                     )));
                 }
             }
-            position += 1;
         }
 
         let descriptor = descriptor.ok_or_else(|| {
@@ -922,14 +919,14 @@ fn copy_exact(reader: &mut dyn Read, writer: &mut File) -> Result<u64, ProtocolB
 }
 
 enum ObjectHasher {
-    Blake3(blake3::Hasher),
+    Blake3(Box<blake3::Hasher>),
     Sha256(Sha256),
 }
 
 impl ObjectHasher {
     fn new(algorithm: &str) -> Self {
         match algorithm {
-            "blake3" => Self::Blake3(blake3::Hasher::new()),
+            "blake3" => Self::Blake3(Box::new(blake3::Hasher::new())),
             "sha256" => Self::Sha256(Sha256::new()),
             _ => unreachable!("ContentRef restricts hash algorithms"),
         }
@@ -1520,5 +1517,49 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn reader_rejects_oversized_physical_bundle_and_truncated_object() {
+        let fixture = tempfile::tempdir().unwrap();
+        let oversized = fixture.path().join("oversized.capsule");
+        File::create(&oversized)
+            .unwrap()
+            .set_len(MAX_ARCHIVE_BYTES + 1)
+            .unwrap();
+        assert!(
+            StreamingBundleReader::read_into(&oversized, &fixture.path().join("oversized-spool"))
+                .is_err()
+        );
+
+        let object = vec![7_u8; 4096];
+        let reference = super::super::content_ref(&object);
+        let descriptor_bytes =
+            encode_descriptor(&descriptor(reference.clone(), "ato.io.pty@1")).unwrap();
+        let member = object_member(&reference);
+        let truncated = fixture.path().join("truncated.capsule");
+        write_raw_bundle(
+            &truncated,
+            &[
+                (
+                    DESCRIPTOR_MEMBER,
+                    &descriptor_bytes,
+                    tar::EntryType::Regular,
+                ),
+                (RECORDS_MEMBER, b"", tar::EntryType::Regular),
+                (&member, &object, tar::EntryType::Regular),
+            ],
+        );
+        let length = fs::metadata(&truncated).unwrap().len();
+        File::options()
+            .write(true)
+            .open(&truncated)
+            .unwrap()
+            .set_len(length - 1024 - 2048)
+            .unwrap();
+        assert!(
+            StreamingBundleReader::read_into(&truncated, &fixture.path().join("truncated-spool"))
+                .is_err()
+        );
     }
 }
