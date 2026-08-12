@@ -127,30 +127,32 @@ pub struct StoredProtocolSession {
     pub supervisor: SupervisorIdentity,
 }
 
+pub struct NewStoredProtocolSession<'a> {
+    pub session_id: SessionId,
+    pub lifecycle: String,
+    pub state_type: &'a StateTypeId,
+    pub base_state: &'a ContentRef,
+    pub base_frontier: RecordFrontier,
+    pub durable_frontier: DurableFrontier,
+    pub workspace: PathBuf,
+    pub supervisor: SupervisorIdentity,
+}
+
 impl StoredProtocolSession {
-    pub fn new(
-        session_id: SessionId,
-        lifecycle: impl Into<String>,
-        state_type: &StateTypeId,
-        base_state: &ContentRef,
-        base_frontier: RecordFrontier,
-        durable_frontier: DurableFrontier,
-        workspace: PathBuf,
-        supervisor: SupervisorIdentity,
-    ) -> Self {
+    pub fn new(input: NewStoredProtocolSession<'_>) -> Self {
         Self {
             schema_version: SESSION_STORE_SCHEMA_VERSION,
-            session_id,
-            lifecycle: lifecycle.into(),
-            state_type: state_type.to_string(),
-            durable_frontier,
+            session_id: input.session_id,
+            lifecycle: input.lifecycle,
+            state_type: input.state_type.to_string(),
+            durable_frontier: input.durable_frontier,
             latest_consistent_frontier: None,
-            base_state: base_state.to_string(),
-            base_frontier,
+            base_state: input.base_state.to_string(),
+            base_frontier: input.base_frontier,
             active_checkpoint: None,
-            workspace,
+            workspace: input.workspace,
             source_session_id: None,
-            supervisor,
+            supervisor: input.supervisor,
         }
     }
 
@@ -364,19 +366,22 @@ mod tests {
 
     #[cfg(unix)]
     fn stored_session(identity: SupervisorIdentity) -> StoredProtocolSession {
-        StoredProtocolSession::new(
-            SessionId::parse("session-1").expect("session id"),
-            "running",
-            &StateTypeId::parse("ato.state.test@1").expect("state type"),
-            &ContentRef::parse(format!("blake3:{}", "a".repeat(64))).expect("state ref"),
-            crate::RecordFrontier::Origin,
-            DurableFrontier {
+        let state_type = StateTypeId::parse("ato.state.test@1").expect("state type");
+        let base_state =
+            ContentRef::parse(format!("blake3:{}", "a".repeat(64))).expect("state ref");
+        StoredProtocolSession::new(NewStoredProtocolSession {
+            session_id: SessionId::parse("session-1").expect("session id"),
+            lifecycle: "running".to_owned(),
+            state_type: &state_type,
+            base_state: &base_state,
+            base_frontier: crate::RecordFrontier::Origin,
+            durable_frontier: DurableFrontier {
                 records_through: crate::RecordFrontier::Through(42),
                 journal_through: crate::JournalLsn::new(8192),
             },
-            std::env::current_dir().expect("absolute current directory"),
-            identity,
-        )
+            workspace: std::env::current_dir().expect("absolute current directory"),
+            supervisor: identity,
+        })
     }
 
     #[cfg(unix)]

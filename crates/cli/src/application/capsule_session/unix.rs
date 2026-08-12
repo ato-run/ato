@@ -16,8 +16,8 @@ use capsule::protocol_bundle::{PortableCapsule, restore_workspace_state};
 use capsule_protocol::{ConnectorId, Direction, IoRecord, Payload, RecordKindId};
 use capsule_session_runtime::{
     BoundaryCoordinator, BoundaryDriver, BoundaryOperationId, CapsuleProtocolSessionStore,
-    DurableFrontier, JournalLsn, NewSupervisorIdentity, RecordFrontier, SessionId,
-    SharedSessionWal, StoredProtocolSession, SupervisorIdentity,
+    DurableFrontier, JournalLsn, NewStoredProtocolSession, NewSupervisorIdentity, RecordFrontier,
+    SessionId, SharedSessionWal, StoredProtocolSession, SupervisorIdentity,
 };
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size as terminal_size};
 use fs2::FileExt;
@@ -153,19 +153,19 @@ pub(crate) fn serve(session: &str, bundle: &Path, into: &Path) -> Result<()> {
     write_secret(&paths.token, generated.secret())?;
     let identity = generated.identity;
     let store = CapsuleProtocolSessionStore::open(&paths.root)?;
-    let mut stored = StoredProtocolSession::new(
-        session_id.clone(),
-        "starting",
-        &state.state_type,
-        &state.state_ref,
-        RecordFrontier::Origin,
-        DurableFrontier {
+    let mut stored = StoredProtocolSession::new(NewStoredProtocolSession {
+        session_id: session_id.clone(),
+        lifecycle: "starting".to_owned(),
+        state_type: &state.state_type,
+        base_state: &state.state_ref,
+        base_frontier: RecordFrontier::Origin,
+        durable_frontier: DurableFrontier {
             records_through: historical_frontier,
             journal_through: JournalLsn::ORIGIN,
         },
-        into.to_path_buf(),
-        identity.clone(),
-    );
+        workspace: into.to_path_buf(),
+        supervisor: identity.clone(),
+    });
     store.write(&stored)?;
 
     if paths.socket.exists() {
