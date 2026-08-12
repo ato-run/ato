@@ -53,9 +53,12 @@ fn execute_capsule_session(command: CapsuleSessionInternalCommands) -> Result<()
         CapsuleSessionInternalCommands::Status { session } => capsule_session::status(&session),
         CapsuleSessionInternalCommands::Kill { session } => capsule_session::kill(&session),
         CapsuleSessionInternalCommands::List => capsule_session::list(),
-        CapsuleSessionInternalCommands::Watchdog { pid, lease_fd } => {
-            capsule_session::watchdog(pid, lease_fd)
-        }
+        CapsuleSessionInternalCommands::Watchdog {
+            pid,
+            pgid,
+            process_start_identity,
+            lease_fd,
+        } => capsule_session::watchdog(pid, pgid, &process_start_identity, lease_fd),
     }
 }
 

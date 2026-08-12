@@ -150,6 +150,10 @@ pub(crate) enum CapsuleSessionInternalCommands {
         #[arg(long)]
         pid: u32,
         #[arg(long)]
+        pgid: i32,
+        #[arg(long)]
+        process_start_identity: String,
+        #[arg(long)]
         lease_fd: i32,
     },
 }
