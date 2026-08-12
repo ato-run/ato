@@ -5,10 +5,22 @@
 //! are weaker than the public CLI: arguments may evolve in lockstep
 //! with the calling shell.
 
+use std::path::PathBuf;
+
 use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub(crate) enum InternalCommands {
+    /// Experimental vertical slice for Capsule Protocol State + PTY I/O.
+    #[command(
+        hide = true,
+        about = "Capture or replay a portable Capsule Protocol bundle"
+    )]
+    CapsuleProtocol {
+        #[command(subcommand)]
+        command: CapsuleProtocolInternalCommands,
+    },
+
     /// Consent-store plumbing surface. Currently only carries the
     /// approve-execution-plan endpoint that the desktop's E302 modal
     /// (and the matching `approve_execution_plan_consent` MCP tool)
@@ -91,6 +103,30 @@ pub(crate) enum InternalCommands {
         /// Emit machine-readable JSON output on stdout.
         #[arg(long, default_value_t = false)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum CapsuleProtocolInternalCommands {
+    /// Capture workspace State before running a command and record its PTY I/O.
+    #[command(hide = true, trailing_var_arg = true)]
+    Capture {
+        #[arg(long, default_value = ".")]
+        workspace: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(required = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+
+    /// Restore, replay with observed egress, then keep the PTY interactive.
+    #[command(hide = true)]
+    Replay {
+        bundle: PathBuf,
+        #[arg(long)]
+        into: PathBuf,
+        #[arg(long, default_value_t = false)]
+        no_continue: bool,
     },
 }
 

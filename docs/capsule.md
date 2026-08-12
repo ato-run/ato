@@ -35,7 +35,7 @@ applying a recipe to inputs.
 References:
 
 - [`rfcs/accepted/CAPSULE_SPEC.md`](rfcs/accepted/CAPSULE_SPEC.md)
-- [`rfcs/accepted/CAPSULE_FORMAT_V2.md`](rfcs/accepted/CAPSULE_FORMAT_V2.md)
+- [legacy Capsule Artifact Format v2](rfcs/archived/CAPSULE_FORMAT_V2.md)
 - [`rfcs/accepted/CAPSULE_DEPENDENCY_CONTRACTS.md`](rfcs/accepted/CAPSULE_DEPENDENCY_CONTRACTS.md)
 - [Recipes](recipe.md)
 

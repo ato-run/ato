@@ -6,7 +6,7 @@
 # if any crate depends on a workspace crate it is forbidden from depending on.
 # This keeps the wire / domain / runtime / shell layering honest:
 #
-#   protocol  — DAG root: NO workspace-crate deps.
+#   protocol / capsule-protocol — DAG roots: NO workspace-crate deps.
 #   capsule       — domain + local state: may dep protocol; NOT
 #                   cli / desktop / netd / nacelle.
 #   netd          — speaks protocol: may dep protocol; NOT
@@ -104,11 +104,33 @@ check_forbidden() {
   done
 }
 
+# Read the package set from Cargo rather than maintaining another partial list.
+# `--no-deps` keeps this local and deterministic; package names are sufficient
+# because dependency keys in this workspace use package names directly.
+WORKSPACE_PACKAGES=()
+while IFS= read -r package; do
+  WORKSPACE_PACKAGES+=("$package")
+done < <(
+  cargo metadata --format-version 1 --no-deps \
+    | jq -r '.workspace_members as $members | .packages[] | select(.id as $id | $members | index($id)) | .name' \
+    | sort -u
+)
+
+check_dag_root() {
+  local root="$1" manifest="$2"
+  local package
+  for package in "${WORKSPACE_PACKAGES[@]}"; do
+    if [ "$package" != "$root" ] && has_dep "$manifest" "$package"; then
+      err "$root is a DAG root and must NOT depend on workspace package '$package'"
+    fi
+  done
+}
+
 echo "Checking workspace dependency direction..."
 
-# protocol: DAG root — no workspace-crate deps at all.
-check_forbidden "protocol" "crates/protocol/Cargo.toml" \
-  capsule cli desktop netd nacelle lock-draft-engine
+# Semantic and IPC roots may not depend on any other workspace package.
+check_dag_root "protocol" "crates/protocol/Cargo.toml"
+check_dag_root "capsule-protocol" "crates/capsule-protocol/Cargo.toml"
 
 # capsule: may dep protocol; not the rest.
 check_forbidden "capsule" "crates/capsule/Cargo.toml" \
