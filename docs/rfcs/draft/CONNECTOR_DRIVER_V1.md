@@ -55,11 +55,19 @@ incarnation.
 
 `quiesce(barrier_id)` prevents new Ingress delivery, drains operations accepted
 before the barrier, buffers or backpressures later external input, and returns
-`quiesced` only at a protocol-defined safe cut.
+`quiesced` only at a protocol-defined safe cut. The report contains the
+Driver's independently reached Record frontier. The Supervisor does not send
+an expected frontier for the Driver to echo; it compares the report with the
+WAL-backed durable frontier.
 
 Unexpected loss of an active Driver is a boundary failure. The Supervisor
 immediately freezes computation. Same-incarnation reattachment is permitted
 only when no boundary delivery or external effect is uncertain.
+
+`close` is idempotent and releases resources from prepared, connected, and
+quiescing states. Any bootstrap failure closes all Drivers already touched. A
+barrier failure invalidates the whole runtime incarnation rather than leaving
+some Drivers quiesced around a paused computation.
 
 ## 5. Discovery and trust
 
