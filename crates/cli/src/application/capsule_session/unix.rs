@@ -127,12 +127,6 @@ pub(crate) fn serve(session: &str, bundle: &Path, into: &Path) -> Result<()> {
 
     let mut computation = PtyComputation::spawn(into)?;
     initialize_terminal(&mut computation.reader, &computation.writer)?;
-    replay_history(
-        &capsule.records,
-        &mut computation.reader,
-        &computation.writer,
-    )?;
-
     let historical_frontier = capsule
         .records
         .last()
@@ -178,6 +172,18 @@ pub(crate) fn serve(session: &str, bundle: &Path, into: &Path) -> Result<()> {
         paths.socket.as_os_str().as_encoded_bytes(),
     )?;
 
+    let (pty_tx, pty_rx) = mpsc::sync_channel(PTY_DRAIN_QUEUE_DEPTH);
+    let reader = computation.take_reader()?;
+    thread::Builder::new()
+        .name(format!("capsule-pty-drain-{session_id}"))
+        .spawn(move || drain_pty(reader, pty_tx))
+        .context("failed to start PTY drain")?;
+    PtyHistoricalReplayer::new(&mut computation, &pty_rx).replay(
+        &capsule.records,
+        RecordFrontier::Origin,
+        historical_frontier,
+    )?;
+
     let wal = SharedSessionWal::open(&paths.wal)?;
     let driver = PtyBoundaryWriter {
         writer: Arc::clone(&computation.writer),
@@ -196,13 +202,6 @@ pub(crate) fn serve(session: &str, bundle: &Path, into: &Path) -> Result<()> {
 
     stored.lifecycle = "running".to_owned();
     store.write(&stored)?;
-
-    let (pty_tx, pty_rx) = mpsc::sync_channel(PTY_DRAIN_QUEUE_DEPTH);
-    let reader = computation.take_reader()?;
-    thread::Builder::new()
-        .name(format!("capsule-pty-drain-{session_id}"))
-        .spawn(move || drain_pty(reader, pty_tx))
-        .context("failed to start PTY drain")?;
 
     let result = supervisor_loop(
         &session_id,
@@ -609,8 +608,8 @@ where
 {
     let payload = serde_json::to_vec(&ExitPayload {
         exit_code: status.exit_code(),
-        signal: status.signal(),
-        reason: "natural",
+        signal: status.signal().map(str::to_owned),
+        reason: "natural".to_owned(),
     })?;
     let record = pty_record(seq, Direction::Egress, "exit", payload);
     coordinator
@@ -755,6 +754,31 @@ impl PtyComputation {
         self.child.try_wait().context("failed to poll shell")
     }
 
+    fn write_input(&self, bytes: &[u8]) -> Result<()> {
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow!("PTY writer lock poisoned"))?;
+        writer.write_all(bytes)?;
+        writer.flush()?;
+        Ok(())
+    }
+
+    fn resize(&self, rows: u16, cols: u16) -> Result<()> {
+        let master = self
+            .master
+            .lock()
+            .map_err(|_| anyhow!("PTY master lock poisoned"))?;
+        master
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|error| anyhow!("failed to resize PTY: {error}"))
+    }
+
     fn request_termination(&mut self) {
         if workload_identity_matches(self.pid, self.pgid, &self.process_start_identity) {
             signal_workload(self.pid, self.pgid, libc::SIGTERM);
@@ -845,72 +869,143 @@ fn initialize_terminal(
     Ok(())
 }
 
-// Compatibility replay for capsules produced by the original one-command
-// fixture. It injects a shell completion marker after each stdin record and is
-// therefore not the general PTY v1 replayer for REPLs, foreground TUIs, or
-// arbitrary interleaved stdin/resize/output histories.
-fn replay_history(
-    records: &[IoRecord],
-    reader: &mut Option<Box<dyn Read + Send>>,
-    writer: &Arc<Mutex<Box<dyn Write + Send>>>,
-) -> Result<()> {
-    let reader = reader
-        .as_mut()
-        .ok_or_else(|| anyhow!("PTY reader missing"))?;
-    let mut index = 0;
-    while index < records.len() {
-        let ingress = &records[index];
-        if ingress.connector.as_str() != PTY_CONNECTOR_ID
-            || ingress.direction != Direction::Ingress
-            || ingress.kind.as_str() != "stdin"
-        {
-            bail!("unsupported historical PTY record at seq {}", ingress.seq);
-        }
-        let Payload::Inline(input) = &ingress.payload else {
-            bail!("historical PTY stdin must be inline");
-        };
-        index += 1;
-        let mut expected_segments = Vec::new();
-        while index < records.len() && records[index].direction == Direction::Egress {
-            let output = &records[index];
-            if output.connector.as_str() != PTY_CONNECTOR_ID || output.kind.as_str() != "output" {
-                bail!("unsupported historical PTY egress at seq {}", output.seq);
-            }
-            let Payload::Inline(bytes) = &output.payload else {
-                bail!("historical PTY output must be inline");
-            };
-            expected_segments.push((output.seq, bytes.as_slice()));
-            index += 1;
-        }
-        let marker = random_marker();
-        {
-            let mut writer = writer
-                .lock()
-                .map_err(|_| anyhow!("PTY writer lock poisoned"))?;
-            writer.write_all(input)?;
-            writer.write_all(format!("printf '\\n%s\\n' '{marker}'\n").as_bytes())?;
-            writer.flush()?;
-        }
-        let actual = read_until_marker(reader, marker.as_bytes())?;
-        verify_output_stream(&expected_segments, &actual)?;
-    }
-    Ok(())
+struct PtyHistoricalReplayer<'a> {
+    computation: &'a mut PtyComputation,
+    events: &'a Receiver<PtyEvent>,
+    output: PtyOutputVerifier,
 }
 
-fn verify_output_stream(expected: &[(u64, &[u8])], actual: &[u8]) -> Result<()> {
-    let mut offset = 0;
-    for (seq, segment) in expected {
-        let end = offset + segment.len();
-        if actual.get(offset..end) != Some(*segment) {
+impl<'a> PtyHistoricalReplayer<'a> {
+    fn new(computation: &'a mut PtyComputation, events: &'a Receiver<PtyEvent>) -> Self {
+        Self {
+            computation,
+            events,
+            output: PtyOutputVerifier::default(),
+        }
+    }
+
+    fn replay(
+        mut self,
+        records: &[IoRecord],
+        from: RecordFrontier,
+        through: RecordFrontier,
+    ) -> Result<()> {
+        for record in records
+            .iter()
+            .filter(|record| from.replay_contains(through, record.seq))
+        {
+            if record.connector.as_str() != PTY_CONNECTOR_ID {
+                bail!("unsupported historical Connector at seq {}", record.seq);
+            }
+            let Payload::Inline(payload) = &record.payload else {
+                bail!(
+                    "historical PTY payload must be inline at seq {}",
+                    record.seq
+                );
+            };
+            match (record.direction, record.kind.as_str()) {
+                (Direction::Ingress, "stdin") => self.computation.write_input(payload)?,
+                (Direction::Ingress, "resize") => {
+                    let resize: ResizePayload = serde_json::from_slice(payload)?;
+                    self.computation.resize(resize.rows, resize.cols)?;
+                }
+                (Direction::Egress, "output") => {
+                    while self.output.available() < payload.len() {
+                        match self.events.recv_timeout(Duration::from_secs(30)) {
+                            Ok(PtyEvent::Output(bytes)) => self.output.push(&bytes),
+                            Ok(PtyEvent::Closed) => {
+                                bail!("PTY closed during historical output at seq {}", record.seq)
+                            }
+                            Ok(PtyEvent::Failed(message)) => {
+                                bail!("PTY replay drain failed: {message}")
+                            }
+                            Err(mpsc::RecvTimeoutError::Timeout) => {
+                                bail!("historical PTY replay timed out at seq {}", record.seq)
+                            }
+                            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                                bail!("PTY replay drain disconnected at seq {}", record.seq)
+                            }
+                        }
+                    }
+                    self.output.consume(record.seq, payload)?;
+                }
+                (Direction::Egress, "exit") => {
+                    let expected: ExitPayload = serde_json::from_slice(payload)?;
+                    let status = self.wait_for_exit(record.seq)?;
+                    if status.exit_code() != expected.exit_code
+                        || status.signal() != expected.signal.as_deref()
+                    {
+                        bail!("historical PTY replay diverged at seq {}", record.seq);
+                    }
+                }
+                _ => bail!("unsupported historical PTY record at seq {}", record.seq),
+            }
+        }
+        while let Ok(event) = self.events.try_recv() {
+            match event {
+                PtyEvent::Output(bytes) => self.output.push(&bytes),
+                PtyEvent::Closed => {}
+                PtyEvent::Failed(message) => bail!("PTY replay drain failed: {message}"),
+            }
+        }
+        if self.output.available() != 0 {
+            let seq = match through {
+                RecordFrontier::Origin => 0,
+                RecordFrontier::Through(seq) => seq,
+            };
+            bail!("historical PTY replay diverged after seq {seq}");
+        }
+        Ok(())
+    }
+
+    fn wait_for_exit(&mut self, seq: u64) -> Result<ExitStatus> {
+        loop {
+            if let Some(status) = self.computation.try_wait()? {
+                return Ok(status);
+            }
+            match self.events.recv_timeout(Duration::from_secs(30)) {
+                Ok(PtyEvent::Output(bytes)) => self.output.push(&bytes),
+                Ok(PtyEvent::Closed) => {}
+                Ok(PtyEvent::Failed(message)) => bail!("PTY replay drain failed: {message}"),
+                Err(_) => bail!("historical PTY exit timed out at seq {seq}"),
+            }
+            if self.output.available() != 0 {
+                bail!("historical PTY replay diverged at seq {seq}");
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct PtyOutputVerifier {
+    buffered: Vec<u8>,
+    consumed: usize,
+}
+
+impl PtyOutputVerifier {
+    fn push(&mut self, bytes: &[u8]) {
+        self.buffered.extend_from_slice(bytes);
+    }
+
+    fn available(&self) -> usize {
+        self.buffered.len().saturating_sub(self.consumed)
+    }
+
+    fn consume(&mut self, seq: u64, expected: &[u8]) -> Result<()> {
+        let end = self
+            .consumed
+            .checked_add(expected.len())
+            .ok_or_else(|| anyhow!("PTY replay buffer overflow"))?;
+        if self.buffered.get(self.consumed..end) != Some(expected) {
             bail!("historical PTY replay diverged at seq {seq}");
         }
-        offset = end;
+        self.consumed = end;
+        if self.consumed == self.buffered.len() {
+            self.buffered.clear();
+            self.consumed = 0;
+        }
+        Ok(())
     }
-    if offset != actual.len() {
-        let seq = expected.last().map_or(0, |(seq, _)| *seq);
-        bail!("historical PTY replay diverged after seq {seq}");
-    }
-    Ok(())
 }
 
 fn read_until_marker(reader: &mut dyn Read, marker: &[u8]) -> Result<Vec<u8>> {
@@ -1260,11 +1355,11 @@ struct ResizePayload {
     cols: u16,
 }
 
-#[derive(Serialize)]
-struct ExitPayload<'a> {
+#[derive(Serialize, Deserialize)]
+struct ExitPayload {
     exit_code: u32,
-    signal: Option<&'a str>,
-    reason: &'a str,
+    signal: Option<String>,
+    reason: String,
 }
 
 struct RawModeGuard(bool);
@@ -1410,12 +1505,6 @@ fn random_operation_id(prefix: &str) -> Result<BoundaryOperationId> {
     BoundaryOperationId::parse(format!("{prefix}-{}", hex::encode(bytes))).map_err(Into::into)
 }
 
-fn random_marker() -> String {
-    let mut bytes = [0_u8; 16];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    format!("__ATO_SESSION_DONE_{}__", hex::encode(bytes))
-}
-
 fn pty_record(seq: u64, direction: Direction, kind: &str, bytes: Vec<u8>) -> IoRecord {
     IoRecord {
         seq,
@@ -1543,12 +1632,18 @@ mod tests {
 
     #[test]
     fn replay_verification_ignores_os_read_segmentation() {
-        verify_output_stream(&[(2, b"hel"), (3, b"lo\n")], b"hello\n").expect("same byte stream");
+        let mut verifier = PtyOutputVerifier::default();
+        verifier.push(b"hello\n");
+        verifier.consume(2, b"hel").expect("first segment");
+        verifier.consume(3, b"lo\n").expect("second segment");
+        assert_eq!(verifier.available(), 0);
     }
 
     #[test]
     fn replay_verification_detects_one_byte_divergence() {
-        let error = verify_output_stream(&[(2, b"hello\n")], b"hallo\n").expect_err("must diverge");
+        let mut verifier = PtyOutputVerifier::default();
+        verifier.push(b"hallo\n");
+        let error = verifier.consume(2, b"hello\n").expect_err("must diverge");
         assert!(error.to_string().contains("seq 2"));
     }
 

@@ -49,11 +49,12 @@ verified against actual output and MUST NOT be journaled again as new Isolated
 history. Any byte difference is `Diverged`; verified history may enter
 Isolated continuation only after the recorded frontier is fully verified.
 
-The initial detached-Session implementation has a narrower compatibility
-replayer for bundles produced by the legacy one-command fixture. It appends a
-shell completion marker after recorded stdin, so it is not a conforming
-general PTY v1 replay path for REPLs, foreground TUIs, or arbitrary
-interleaving. Generic PTY v1 replay remains draft work.
+The detached Supervisor replays the ordered Record stream directly. It injects
+recorded `stdin` and `resize` ingress and consumes the exact recorded payload
+length from a continuously drained actual-output byte stream for each `output`
+egress. The legacy one-command producer may use private completion framing
+while capturing one command, but that framing is Control Plane data and is
+excluded from recorded PTY output.
 
 ## Safe cuts
 
