@@ -34,4 +34,3 @@ Handles are bound to the logical Session, Driver instance, Supervisor
 generation, and incarnation nonce. A handle from another Driver or stale
 incarnation is rejected. Object content is streamed and verified against its
 declared digest; the backing filesystem layout is not an ABI.
-

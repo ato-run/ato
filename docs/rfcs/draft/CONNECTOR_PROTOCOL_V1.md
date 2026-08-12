@@ -58,4 +58,3 @@ The protocol specification identifies credentials, private data, and other
 payload fields that require rejection or redaction during portable export.
 This policy applies to inline records, object-backed records, and Connector
 configuration objects. Local checkpoints are outside portable export.
-
