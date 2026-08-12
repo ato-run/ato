@@ -197,3 +197,31 @@ Supervisor lease: unexpected EOF terminates the identity-checked workload
 process group, while an explicit `DISARM` makes graceful termination exit
 without signaling. Windows compiles the plumbing but returns Unsupported until
 its current-user ACL and named-pipe backend exists.
+
+## 10. Workspace lifecycle profile
+
+The hidden workspace profile distinguishes the WAL's `durable_frontier` from
+`latest_consistent_frontier`. Only the latter may be used by Branch, Suspend,
+checkpoint, or export. To create it, the Supervisor closes its ingress gate,
+stops the complete shell process tree, drains the master PTY until `poll(2)`
+reports no readable bytes and the bounded reader queue is empty, commits all
+drained output, captures an owner-only local workspace State, and atomically
+commits that State and the WAL `DurableFrontier` in `session.json`.
+
+Every Session imports its input bundle as an owner-only, read-only local seed.
+Branch creates a new self-contained child seed from the active base State and
+committed Records through the source frontier. The child restores into a fresh
+workspace, replays that Record stream exactly once, and compares the resulting
+workspace digest with the source checkpoint before entering Isolated mode.
+Branch creation resumes and does not mutate the source Session.
+
+Suspend commits such a frontier, terminates the shell without synthesizing a
+PTY `exit` Record, disarms the watchdog, and leaves the lifecycle `Suspended`.
+Workspace resume has `FilesystemRestart` fidelity: it verifies both the local
+checkpoint object and the unchanged workspace, rotates the Supervisor token,
+generation, and incarnation, and starts a fresh shell. Files, including local
+credentials and databases, are preserved; shell environment, current working
+directory, foreground processes, file descriptors, and heap are not. The
+runtime rebases its active State and base frontier at the suspended frontier;
+pre-suspend Records are not replayed against that State. Workspace drift fails
+closed and is never overwritten implicitly.

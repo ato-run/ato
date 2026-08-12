@@ -112,6 +112,12 @@ pub struct StoredLocalCheckpoint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredReplayVerification {
+    pub from: RecordFrontier,
+    pub through: RecordFrontier,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredProtocolSession {
     pub schema_version: u16,
     pub session_id: SessionId,
@@ -122,6 +128,7 @@ pub struct StoredProtocolSession {
     pub base_state: String,
     pub base_frontier: RecordFrontier,
     pub active_checkpoint: Option<StoredLocalCheckpoint>,
+    pub historical_replay: Option<StoredReplayVerification>,
     pub workspace: PathBuf,
     pub source_session_id: Option<SessionId>,
     pub supervisor: SupervisorIdentity,
@@ -150,6 +157,7 @@ impl StoredProtocolSession {
             base_state: input.base_state.to_string(),
             base_frontier: input.base_frontier,
             active_checkpoint: None,
+            historical_replay: None,
             workspace: input.workspace,
             source_session_id: None,
             supervisor: input.supervisor,
@@ -185,6 +193,16 @@ impl StoredProtocolSession {
                     "active checkpoint must match latest consistent frontier".to_owned(),
                 ));
             }
+        }
+        if let Some(verification) = &self.historical_replay
+            && matches!(
+                (verification.from, verification.through),
+                (RecordFrontier::Through(from), RecordFrontier::Through(through)) if from > through
+            )
+        {
+            return Err(SessionStoreError::InvalidRecord(
+                "historical replay range is reversed".to_owned(),
+            ));
         }
         if self.lifecycle.is_empty()
             || self.supervisor.incarnation_nonce.is_empty()
@@ -260,7 +278,7 @@ impl CapsuleProtocolSessionStore {
     }
 }
 
-pub(crate) fn write_atomic_owner_only(path: &Path, bytes: &[u8]) -> Result<(), SessionStoreError> {
+pub fn write_atomic_owner_only(path: &Path, bytes: &[u8]) -> Result<(), SessionStoreError> {
     ensure_owner_only_store_supported()?;
     let parent = path.parent().ok_or(SessionStoreError::InvalidStorePath)?;
     let mut nonce = [0_u8; 8];
