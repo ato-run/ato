@@ -420,7 +420,7 @@ nacelle が受け取った env は append-only （ato-cli が指定したもの�
 | [RUNTIME_AND_BUILD_MODEL](../accepted/RUNTIME_AND_BUILD_MODEL.md) | `RuntimeProvisioner` trait を本 RFC が定義する上位層 |
 | [EXECUTIONPLAN_ISOLATION_MODEL](../accepted/EXECUTIONPLAN_ISOLATION_MODEL.md) | PATH / env の default-deny を本 RFC が PATH にも拡張 |
 | [SECURITY_AND_ISOLATION_MODEL](../accepted/SECURITY_AND_ISOLATION_MODEL.md) | PDF §5.4 の env default-deny を PATH に適用する実装根拠 |
-| [CAPSULE_FORMAT_V2](../accepted/CAPSULE_FORMAT_V2.md) | `ato.lock.json::runtime_tools` スキーマ拡張を本 RFC が規定 |
+| [archived CAPSULE_FORMAT_V2](../archived/CAPSULE_FORMAT_V2.md) | `ato.lock.json::runtime_tools` スキーマ拡張を本 RFC が規定 |
 
 ---
 
@@ -437,6 +437,5 @@ nacelle が受け取った env は append-only （ato-cli が指定したもの�
 
 ## 11. 参考資料
 
-- [docs/chats/ato-cli v0.5 リリース前レビューと ToDo.md](../../chats/ato-cli%20v0.5%E3%83%AA%E3%83%AA%E3%83%BC%E3%82%B9%E5%89%8D%E3%83%AC%E3%83%93%E3%83%A5%E3%83%BC%E3%81%A8ToDo.md)
 - Issue #282 (Node/TS entrypoint inference) / #146 (GitHub install) / #294 (npm: LTS auto-provision)
 - Issue #165 (E102/E999 error taxonomy 細分化)

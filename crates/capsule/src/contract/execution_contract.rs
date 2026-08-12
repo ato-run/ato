@@ -179,7 +179,7 @@
 //! `ato.execution-contract/v1` is.
 //!
 //! The normative spec is
-//! `docs/rfcs/accepted/CAPSULE_V1_EXECUTION_MODEL_SPEC.md` (§4.2 facet table,
+//! `docs/rfcs/archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md` (§4.2 facet table,
 //! §4.5 canonicalization), whose front-matter names this file as SSOT. It is
 //! landing on `nightly` via ato-run/ato#1098 (tracking issue #1086); until it
 //! is in this tree, this module and the shared vectors below are the normative

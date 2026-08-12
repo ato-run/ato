@@ -461,7 +461,7 @@ mod tests {
 
     #[test]
     fn normative_cddl_identifier_patterns_match_the_domain_contract() {
-        let cddl = include_str!("../../../docs/rfcs/accepted/CAPSULE_CBOR_V1.cddl");
+        let cddl = include_str!("../../../docs/rfcs/accepted/protocol/CAPSULE_CBOR_V1.cddl");
         let normalized_patterns = cddl.replace("\\\\", "\\");
         assert!(normalized_patterns.contains(capsule_protocol::COMPONENT_ID_PATTERN));
         assert!(normalized_patterns.contains(capsule_protocol::VERSIONED_ID_PATTERN));
