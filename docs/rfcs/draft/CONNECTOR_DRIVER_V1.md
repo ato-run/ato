@@ -68,4 +68,3 @@ Registry. Ato MUST NOT search `PATH` or execute a local program merely because
 a Capsule names an unknown Protocol. Unknown or untrusted implementations fail
 closed. Third-party v1 Drivers are trusted local plugins; this contract does
 not claim same-user sandboxing.
-
