@@ -50,6 +50,13 @@ fn execute_capsule_session(command: CapsuleSessionInternalCommands) -> Result<()
         CapsuleSessionInternalCommands::Attach { session, observe } => {
             capsule_session::attach(&session, observe)
         }
+        CapsuleSessionInternalCommands::Branch {
+            session,
+            into,
+            no_attach,
+        } => capsule_session::branch(&session, &into, no_attach),
+        CapsuleSessionInternalCommands::Suspend { session } => capsule_session::suspend(&session),
+        CapsuleSessionInternalCommands::Resume { session } => capsule_session::resume(&session),
         CapsuleSessionInternalCommands::Status { session } => capsule_session::status(&session),
         CapsuleSessionInternalCommands::Kill { session } => capsule_session::kill(&session),
         CapsuleSessionInternalCommands::List => capsule_session::list(),

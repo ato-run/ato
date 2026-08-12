@@ -400,6 +400,15 @@ fn read_until_marker(
 fn trim_at_marker(mut bytes: Vec<u8>, marker: &[u8]) -> Vec<u8> {
     if let Some(index) = find_subslice(&bytes, marker) {
         bytes.truncate(index);
+        // The legacy capture helper prints one delimiter newline immediately
+        // before its private completion marker. That delimiter is Control
+        // Plane framing, not command egress, and must not leak into the PTY
+        // Record stream consumed by the marker-free historical replayer.
+        if bytes.ends_with(b"\r\n") {
+            bytes.truncate(bytes.len() - 2);
+        } else if bytes.ends_with(b"\n") {
+            bytes.truncate(bytes.len() - 1);
+        }
     }
     bytes
 }
@@ -664,5 +673,17 @@ mod tests {
             "__ATO_PROTOCOL_DONE_abababababababababababababababab__"
         );
         assert_ne!(marker, completion_marker([0xac; 16]));
+    }
+
+    #[test]
+    fn completion_framing_newline_is_not_recorded_as_pty_output() {
+        assert_eq!(
+            trim_at_marker(b"hello\r\nMARKER\r\n".to_vec(), b"MARKER"),
+            b"hello"
+        );
+        assert_eq!(
+            trim_at_marker(b"hello\r\n\r\nMARKER\r\n".to_vec(), b"MARKER"),
+            b"hello\r\n"
+        );
     }
 }
