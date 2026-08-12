@@ -6641,6 +6641,7 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "capsule",
+ "capsule-protocol",
  "capsulefs",
  "hex",
  "image",
