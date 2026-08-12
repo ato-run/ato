@@ -35,6 +35,7 @@ anyhow = "1.0"
 base64 = "0.22"
 blake3 = "1.5"
 capsule = { path = "../capsule" }
+capsule-protocol = { path = "../capsule-protocol" }
 # Hex encoding for the source-receipt digest label. Already a transitive dep via
 # capsule; declared directly because this crate now formats digests itself.
 hex = "0.4"
