@@ -90,6 +90,12 @@ impl SnapshotBackend for QemuBackend {
         Err(self.unsupported())
     }
 
+    fn host_runner_class(
+        &self,
+    ) -> Result<capsule::foundation::install_lifecycle::RunnerClassId, SnapshotError> {
+        Err(self.unsupported())
+    }
+
     fn build_ready_state(
         &self,
         _input: BuildReadyStateInput<'_>,

@@ -76,6 +76,7 @@ pub(crate) fn restore_and_expose(
             manifest,
             overlay_root,
             host_runner_class,
+            containment: None,
             uffd_preview,
         })
         .context("snapshot backend restore failed")?;
@@ -378,9 +379,10 @@ mod tests {
         let other_envelope = ArtifactEnvelopeV1::accepted(&legacy, &other_identity).unwrap();
         let error =
             verify_v1_candidate(&backend, &legacy, &other_identity, &other_envelope).unwrap_err();
+        let error_chain = format!("{error:#}");
         assert!(
-            error.to_string().contains("execution_id mismatch"),
-            "{error}"
+            error_chain.contains("execution_id mismatch"),
+            "{error_chain}"
         );
     }
 }

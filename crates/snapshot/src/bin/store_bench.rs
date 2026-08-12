@@ -187,6 +187,7 @@ fn run_capsule(
             manifest: manifest.clone(),
             overlay_root: ov,
             host_runner_class: None,
+            containment: None,
             uffd_preview: false,
         }) {
             Ok(rs) => {
@@ -208,6 +209,7 @@ fn run_capsule(
             manifest: manifest.clone(),
             overlay_root: capdir.join("ov-warm-prime"),
             host_runner_class: None,
+            containment: None,
             uffd_preview: false,
         }) {
             let _ = backend.stop(rs.session);
@@ -220,6 +222,7 @@ fn run_capsule(
                 manifest: manifest.clone(),
                 overlay_root: ov,
                 host_runner_class: None,
+                containment: None,
                 uffd_preview: false,
             }) {
                 Ok(rs) => {

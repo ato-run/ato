@@ -35,7 +35,9 @@ use snapshot::capsule_state::{
     READY_STATE_STATE_TYPE, ReadyStateStateObjectV1, import_ready_state,
     select_backend_for_ready_state,
 };
-use snapshot::{RestoreReadyStateInput, RestoredSession, SnapshotBackend};
+use snapshot::{
+    RestoreContainment, RestoreReadyStateInput, RestoredSession, SnapshotBackend, SnapshotError,
+};
 
 const CONTROL_FRAME_LIMIT: usize = 16 * 1024 * 1024;
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -384,20 +386,32 @@ fn serve_ready_state(session: &str, _into: &Path, spool: SpoolBundle) -> Result<
     };
     let backend = select_backend_for_ready_state(&state_object)
         .context("failed to select exact Ready-State backend")?;
+    let host_runner_class = backend
+        .host_runner_class()
+        .context("failed to resolve actual host runner class")?;
     let overlay_root = paths.directory.join("ready-state-overlay");
     fs::create_dir_all(&overlay_root)?;
     fs::set_permissions(&overlay_root, fs::Permissions::from_mode(0o700))?;
+    let containment = ReadyStateRestoreContainment::new(overlay_root.clone());
     let restore = backend
         .restore(RestoreReadyStateInput {
             store: &imported.cas_store,
             manifest: imported.legacy_manifest,
             overlay_root: overlay_root.clone(),
-            host_runner_class: None,
+            host_runner_class: Some(host_runner_class),
+            containment: Some(&containment),
             uffd_preview: false,
         })
         .context("Ready-State backend restore failed")?;
     let manifest_id = restore.ready_state_manifest_id.clone();
-    let mut session_guard = ReadyStateSessionGuard::new(backend, restore.session);
+    let installed_containment = containment
+        .take_for(restore.session.vmm_pid)
+        .context("Ready-State restore containment mismatch")?;
+    let vmm_identity = installed_containment
+        .as_ref()
+        .map(|installed| installed.process_start_identity.clone());
+    let mut session_guard =
+        ReadyStateSessionGuard::new(backend, restore.session, installed_containment);
 
     let generated = NewSupervisorIdentity::generate(
         1,
@@ -406,17 +420,6 @@ fn serve_ready_state(session: &str, _into: &Path, spool: SpoolBundle) -> Result<
     );
     replace_secret(&paths.token, generated.secret())?;
     let identity = generated.identity;
-    let vmm_identity = session_guard
-        .session()
-        .vmm_pid
-        .map(|pid| workload_process_start_identity(pid as u32))
-        .transpose()?;
-    if let (Some(pid), Some(start_identity)) =
-        (session_guard.session().vmm_pid, vmm_identity.as_deref())
-    {
-        session_guard.arm_watchdog(pid as u32, start_identity, &overlay_root)?;
-    }
-
     let store = CapsuleProtocolSessionStore::open(&paths.root)?;
     let mut stored = StoredProtocolSession::new(NewStoredProtocolSession {
         session_id: session_id.clone(),
@@ -533,17 +536,19 @@ fn ready_state_supervisor_loop(
 struct ReadyStateSessionGuard {
     backend: Box<dyn SnapshotBackend>,
     restored: Option<RestoredSession>,
-    lease: Option<File>,
-    watchdog: Option<ProcessChild>,
+    containment: Option<InstalledRestoreContainment>,
 }
 
 impl ReadyStateSessionGuard {
-    fn new(backend: Box<dyn SnapshotBackend>, restored: RestoredSession) -> Self {
+    fn new(
+        backend: Box<dyn SnapshotBackend>,
+        restored: RestoredSession,
+        containment: Option<InstalledRestoreContainment>,
+    ) -> Self {
         Self {
             backend,
             restored: Some(restored),
-            lease: None,
-            watchdog: None,
+            containment,
         }
     }
 
@@ -551,24 +556,87 @@ impl ReadyStateSessionGuard {
         self.restored.as_ref().expect("restored session is present")
     }
 
-    fn arm_watchdog(&mut self, pid: u32, identity: &str, overlay: &Path) -> Result<()> {
-        let (lease, watchdog) = spawn_watchdog(pid, 0, identity, Some(overlay))?;
-        self.lease = Some(lease);
-        self.watchdog = Some(watchdog);
-        Ok(())
-    }
-
     fn stop(&mut self) -> Result<()> {
         if let Some(restored) = self.restored.take() {
             self.backend.stop(restored)?;
         }
-        if let Some(mut lease) = self.lease.take() {
-            lease.write_all(WATCHDOG_DISARM)?;
-            lease.flush()?;
+        if let Some(mut containment) = self.containment.take() {
+            containment.lease.write_all(WATCHDOG_DISARM)?;
+            containment.lease.flush()?;
+            containment.watchdog.wait()?;
         }
-        if let Some(mut watchdog) = self.watchdog.take() {
-            watchdog.wait()?;
+        Ok(())
+    }
+}
+
+struct ReadyStateRestoreContainment {
+    overlay_root: PathBuf,
+    installed: Mutex<Option<InstalledRestoreContainment>>,
+}
+
+struct InstalledRestoreContainment {
+    pid: u32,
+    process_start_identity: String,
+    lease: File,
+    watchdog: ProcessChild,
+}
+
+impl ReadyStateRestoreContainment {
+    fn new(overlay_root: PathBuf) -> Self {
+        Self {
+            overlay_root,
+            installed: Mutex::new(None),
         }
+    }
+
+    fn take_for(&self, restored_pid: Option<i32>) -> Result<Option<InstalledRestoreContainment>> {
+        let mut installed = self
+            .installed
+            .lock()
+            .map_err(|_| anyhow!("Ready-State containment lock poisoned"))?;
+        match (restored_pid, installed.as_ref()) {
+            (None, None) => Ok(None),
+            (Some(pid), Some(authority)) if pid > 0 && authority.pid == pid as u32 => {
+                Ok(installed.take())
+            }
+            (Some(_), None) => bail!("backend returned a VMM without installing containment"),
+            (None, Some(_)) => bail!("backend installed containment but returned no VMM"),
+            (Some(pid), Some(authority)) => bail!(
+                "backend returned VMM pid {pid} but installed containment for {}",
+                authority.pid
+            ),
+        }
+    }
+}
+
+impl RestoreContainment for ReadyStateRestoreContainment {
+    fn install(&self, vmm_pid: u32) -> Result<(), SnapshotError> {
+        let identity =
+            workload_process_start_identity(vmm_pid).map_err(|error| SnapshotError::Backend {
+                backend: "restore-containment".to_string(),
+                reason: error.to_string(),
+            })?;
+        let (lease, watchdog) = spawn_watchdog(vmm_pid, 0, &identity, Some(&self.overlay_root))
+            .map_err(|error| SnapshotError::Backend {
+                backend: "restore-containment".to_string(),
+                reason: error.to_string(),
+            })?;
+        let mut installed = self.installed.lock().map_err(|_| SnapshotError::Backend {
+            backend: "restore-containment".to_string(),
+            reason: "containment lock poisoned".to_string(),
+        })?;
+        if installed.is_some() {
+            return Err(SnapshotError::Backend {
+                backend: "restore-containment".to_string(),
+                reason: "containment was installed more than once".to_string(),
+            });
+        }
+        *installed = Some(InstalledRestoreContainment {
+            pid: vmm_pid,
+            process_start_identity: identity,
+            lease,
+            watchdog,
+        });
         Ok(())
     }
 }

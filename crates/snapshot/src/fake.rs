@@ -11,6 +11,7 @@
 
 use std::path::Path;
 
+use capsule::foundation::install_lifecycle::{RunnerClassFacts, RunnerClassId};
 use capsule::snapshot_manifest::{
     PortabilityTier, SNAPSHOT_COMPATIBILITY_V1_SCHEMA, SnapshotBackendKind,
     SnapshotCompatibilityContractV1,
@@ -111,6 +112,10 @@ impl SnapshotBackend for FakeSnapshotBackend {
             portability_tier: PortabilityTier::ClassPortable,
             compatibility_class_identity,
         })
+    }
+
+    fn host_runner_class(&self) -> Result<RunnerClassId, SnapshotError> {
+        Ok(RunnerClassFacts::from_host().id())
     }
 
     fn build_ready_state(
@@ -426,6 +431,7 @@ mod tests {
                 manifest: manifest.clone(),
                 overlay_root: overlay.clone(),
                 host_runner_class: None,
+                containment: None,
                 uffd_preview: false,
             })
             .expect("restore should succeed");
@@ -568,6 +574,7 @@ mod tests {
                 manifest,
                 overlay_root: dir.path().join("ov"),
                 host_runner_class: Some(RunnerClassId::from_hash("blake3:class-B")),
+                containment: None,
                 uffd_preview: false,
             })
             .unwrap_err();
@@ -593,6 +600,7 @@ mod tests {
                 manifest,
                 overlay_root: dir.path().join("ov"),
                 host_runner_class: None,
+                containment: None,
                 uffd_preview: false,
             })
             .unwrap_err();
@@ -619,6 +627,7 @@ mod tests {
             manifest,
             overlay_root: dir.path().join("ov"),
             host_runner_class: Some(class),
+            containment: None,
             uffd_preview: false,
         });
         assert!(ok.is_ok());
@@ -645,6 +654,7 @@ mod tests {
                 manifest,
                 overlay_root: dir.path().join("ov2"),
                 host_runner_class: None,
+                containment: None,
                 uffd_preview: false,
             })
             .unwrap();
