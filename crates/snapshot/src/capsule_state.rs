@@ -251,10 +251,22 @@ pub fn import_ready_state(
         )));
     }
     let mut primary = Vec::with_capacity(primary_metadata.size as usize);
-    objects
-        .open(&state.state_ref)?
+    let mut primary_reader = objects.open(&state.state_ref)?;
+    primary_reader
+        .by_ref()
+        .take(READY_STATE_PRIMARY_OBJECT_MAX_BYTES + 1)
         .read_to_end(&mut primary)
         .map_err(|error| ReadyStateStateError::ObjectSource(ProtocolBundleError::Io(error)))?;
+    if primary.len() as u64 > READY_STATE_PRIMARY_OBJECT_MAX_BYTES {
+        return Err(ReadyStateStateError::Invalid(format!(
+            "primary Ready-State object exceeds the {READY_STATE_PRIMARY_OBJECT_MAX_BYTES}-byte limit"
+        )));
+    }
+    if primary.len() as u64 != primary_metadata.size {
+        return Err(ReadyStateStateError::Invalid(
+            "primary Ready-State object size does not match its metadata".to_string(),
+        ));
+    }
     if content_ref_for_bytes(&primary)? != state.state_ref {
         return Err(ReadyStateStateError::Invalid(
             "primary Ready-State object digest mismatch".to_string(),
