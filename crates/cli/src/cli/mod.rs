@@ -41,8 +41,8 @@ pub(crate) use import_cmd::ImportArgs;
 pub(crate) use inspect::InspectCommands;
 #[allow(unused_imports)]
 pub(crate) use internal::{
-    CapsuleProtocolInternalCommands, ConsentInternalCommands, InternalCommands,
-    RuntimeInternalCommands,
+    CapsuleProtocolInternalCommands, CapsuleSessionInternalCommands, ConsentInternalCommands,
+    InternalCommands, RuntimeInternalCommands,
 };
 #[allow(unused_imports)]
 pub(crate) use ipc::IpcCommands;
