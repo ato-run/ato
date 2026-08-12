@@ -1086,6 +1086,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "capsule-session-runtime"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "capsule-protocol",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "capsulefs"
 version = "0.1.0"
 dependencies = [

@@ -5,6 +5,7 @@ members = [
     "crates/capsule",
     "crates/capsule-codec",
     "crates/capsule-protocol",
+    "crates/capsule-session-runtime",
     "crates/capsulefs",
     "crates/snapshot",
     "crates/snapshot-builder",
