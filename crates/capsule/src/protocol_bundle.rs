@@ -1,6 +1,6 @@
 //! Minimal self-contained bundle for Capsule Protocol State and I/O.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{Cursor, Read};
 use std::path::{Component, Path, PathBuf};
@@ -190,6 +190,27 @@ impl PortableCapsule {
         Ok(())
     }
 
+    /// Removes objects not reachable from the descriptor or remaining Records.
+    pub fn prune_unreachable_objects(&mut self) {
+        let mut reachable = BTreeSet::from([self.descriptor.base_state.state_ref.clone()]);
+        reachable.extend(
+            self.descriptor
+                .connectors
+                .values()
+                .filter_map(|connector| connector.config_ref.clone()),
+        );
+        reachable.extend(
+            self.records
+                .iter()
+                .filter_map(|record| match &record.payload {
+                    capsule_protocol::Payload::Inline(_) => None,
+                    capsule_protocol::Payload::Object(reference) => Some(reference.clone()),
+                }),
+        );
+        self.objects
+            .retain(|reference, _| reachable.contains(reference));
+    }
+
     pub fn write(&self, path: &Path) -> Result<(), ProtocolBundleError> {
         let (descriptor_bytes, record_bytes) = self.validated_wire_members()?;
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
@@ -307,7 +328,7 @@ pub fn capture_workspace_state(
         }
         if metadata.is_dir() {
             limits.accept(0)?;
-            append_directory(&mut archive, &relative)?;
+            append_directory(&mut archive, &relative, file_mode(&metadata))?;
         } else if metadata.is_file() {
             limits.accept(metadata.len())?;
             let capacity = usize::try_from(metadata.len()).map_err(|_| {
@@ -337,7 +358,13 @@ pub fn capture_workspace_state(
                     finding.kind
                 )));
             }
-            append_file(&mut archive, &relative, &metadata, &bytes)?;
+            append_file(
+                &mut archive,
+                &relative,
+                &metadata,
+                &bytes,
+                file_mode(&metadata),
+            )?;
         } else {
             return Err(ProtocolBundleError::UnsupportedWorkspaceEntry(relative));
         }
@@ -385,7 +412,7 @@ pub fn capture_local_workspace_checkpoint(
         snapshot.verify(&metadata)?;
         if metadata.is_dir() {
             limits.accept(0)?;
-            append_directory(&mut archive, &snapshot.relative)?;
+            append_directory(&mut archive, &snapshot.relative, snapshot.mode)?;
         } else if metadata.is_file() {
             limits.accept(metadata.len())?;
             let capacity = usize::try_from(metadata.len()).map_err(|_| {
@@ -405,7 +432,13 @@ pub fn capture_local_workspace_checkpoint(
                 )));
             }
             snapshot.verify(&fs::symlink_metadata(&source)?)?;
-            append_file(&mut archive, &snapshot.relative, &metadata, &bytes)?;
+            append_file(
+                &mut archive,
+                &snapshot.relative,
+                &metadata,
+                &bytes,
+                snapshot.mode,
+            )?;
         } else {
             return Err(ProtocolBundleError::UnsupportedWorkspaceEntry(
                 snapshot.relative.clone(),
@@ -571,7 +604,7 @@ impl LocalWorkspaceEntry {
             kind,
             len: metadata.len(),
             modified: metadata.modified().ok(),
-            mode: file_mode(metadata),
+            mode: local_entry_mode(metadata),
         })
     }
 
@@ -645,9 +678,10 @@ fn append_bytes(
 fn append_directory(
     archive: &mut tar::Builder<Vec<u8>>,
     path: &Path,
+    mode: u32,
 ) -> Result<(), std::io::Error> {
     let mut header = tar::Header::new_gnu();
-    normalize_header(&mut header, 0, 0o755, tar::EntryType::Directory);
+    normalize_header(&mut header, 0, mode, tar::EntryType::Directory);
     archive.append_data(&mut header, path, std::io::empty())
 }
 
@@ -656,11 +690,22 @@ fn append_file(
     relative: &Path,
     metadata: &fs::Metadata,
     bytes: &[u8],
+    mode: u32,
 ) -> Result<(), std::io::Error> {
-    let mode = file_mode(metadata);
     let mut header = tar::Header::new_gnu();
     normalize_header(&mut header, metadata.len(), mode, tar::EntryType::Regular);
     archive.append_data(&mut header, relative, Cursor::new(bytes))
+}
+
+#[cfg(unix)]
+fn local_entry_mode(metadata: &fs::Metadata) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o777
+}
+
+#[cfg(not(unix))]
+fn local_entry_mode(metadata: &fs::Metadata) -> u32 {
+    file_mode(metadata)
 }
 
 fn validate_member_limits(
@@ -822,6 +867,30 @@ mod tests {
             b"local database"
         );
         assert!(destination.join(".git/HEAD").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_workspace_checkpoint_preserves_directory_mode_and_hashes_mode_changes() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let producer = tempfile::tempdir().unwrap();
+        let private = producer.path().join("private");
+        fs::create_dir(&private).unwrap();
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+        let (private_state, object) = capture_local_workspace_checkpoint(producer.path()).unwrap();
+
+        let consumer = tempfile::tempdir().unwrap();
+        let destination = consumer.path().join("restored");
+        restore_workspace_state(&private_state, &object, &destination).unwrap();
+        assert_eq!(
+            fs::metadata(destination.join("private")).unwrap().mode() & 0o777,
+            0o700
+        );
+
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o755)).unwrap();
+        let (public_state, _) = capture_local_workspace_checkpoint(producer.path()).unwrap();
+        assert_ne!(private_state.state_ref, public_state.state_ref);
     }
 
     #[cfg(unix)]

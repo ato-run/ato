@@ -49,6 +49,13 @@ verified against actual output and MUST NOT be journaled again as new Isolated
 history. Any byte difference is `Diverged`; verified history may enter
 Isolated continuation only after the recorded frontier is fully verified.
 
+The current `workspace-posix-host + ato.io.pty@1` Branch profile is
+experimental. Verification covers only the PTY boundary. Host effects outside
+an active Connector can be re-executed while historical terminal input is
+injected, so this profile MUST NOT be described as isolated external-effect
+replay. Its stored verification identifies the PTY Connector and verified
+frontier range rather than asserting a Session-wide verdict.
+
 The detached Supervisor replays the ordered Record stream directly. It injects
 recorded `stdin` and `resize` ingress and consumes the exact recorded payload
 length from a continuously drained actual-output byte stream for each `output`
@@ -62,6 +69,9 @@ During a quiesce barrier the Driver stops releasing new Ingress, drains all
 accepted boundary operations to their durable state, buffers newly arriving
 external input, and reports `Quiesced` only when no partial logical operation
 crosses the cut. Attach state and observer queues are not part of the cut.
+The local PTY checkpoint records the current terminal rows and columns with a
+versioned format and the same durable frontier as the workspace checkpoint.
+Restore applies that size before the boundary becomes Running.
 
 ## Runtime rules
 

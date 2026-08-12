@@ -225,3 +225,17 @@ directory, foreground processes, file descriptors, and heap are not. The
 runtime rebases its active State and base frontier at the suspended frontier;
 pre-suspend Records are not replayed against that State. Workspace drift fails
 closed and is never overwritten implicitly.
+
+The local frontier manifest stores versioned per-Connector checkpoints at the
+same `DurableFrontier` as the workspace State. For `ato.io.pty@1`, the local
+checkpoint currently contains terminal rows and columns. Resume promotes this
+checkpoint to `base_connector_checkpoints`; Branch restores base State and base
+Connector checkpoints before replaying `(C, F]`. A Connector checkpoint whose
+`applied_at` differs from the workspace checkpoint frontier is invalid.
+
+`workspace-posix-host + ato.io.pty@1` Branch is experimental. Only the PTY
+Connector history is verified. External effects not mediated by an active
+Connector may be re-executed during Historical Replay, so this profile MUST NOT
+be treated as isolated external-effect replay. Persisted replay verification is
+scoped to `connector = terminal.main`, `protocol = ato.io.pty@1`, and its exact
+`from`/`through` range; it is not a Session-wide verdict.
