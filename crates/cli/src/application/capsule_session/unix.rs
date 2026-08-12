@@ -501,10 +501,14 @@ fn ready_state_supervisor_loop(
                 store.write(stored)?;
                 session.stop()?;
                 stored.lifecycle = "stopped".to_string();
-                if let StoredRuntimeProfile::ReadyState { vmm_pid, .. } =
-                    &mut stored.runtime_profile
+                if let StoredRuntimeProfile::ReadyState {
+                    vmm_pid,
+                    vmm_process_start_identity,
+                    ..
+                } = &mut stored.runtime_profile
                 {
                     *vmm_pid = None;
+                    *vmm_process_start_identity = None;
                 }
                 store.write(stored)?;
                 let _ = reply.send(ControlMessage::Killed);
@@ -787,6 +791,12 @@ pub(crate) fn resume(session: &str) -> Result<()> {
     let paths = SessionPaths::new(&session_id)?;
     let store = CapsuleProtocolSessionStore::open(&paths.root)?;
     let stored = store.read(&session_id)?;
+    if matches!(
+        &stored.runtime_profile,
+        StoredRuntimeProfile::ReadyState { .. }
+    ) {
+        bail!("ReadyStateResumeUnsupported");
+    }
     if stored.lifecycle != "suspended" {
         bail!("Session is not suspended");
     }

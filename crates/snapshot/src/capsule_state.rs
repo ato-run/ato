@@ -245,6 +245,13 @@ pub fn import_ready_state(
         ));
     }
     let required = required_chunks(&state_object.legacy_manifest)?;
+    for reference in index.keys() {
+        if reference != &state.state_ref && !required.contains_key(reference) {
+            return Err(ReadyStateStateError::Invalid(format!(
+                "unexpected object {reference} is not in the Ready-State closure"
+            )));
+        }
+    }
     for reference in required.keys() {
         if !index.contains_key(reference) {
             return Err(ReadyStateStateError::Invalid(format!(
@@ -574,11 +581,29 @@ mod tests {
         };
         assert!(import_ready_state(&export.state, &filtered, &root.path().join("empty")).is_err());
 
-        let mut primary = export.primary_object;
-        primary[0] ^= 1;
-        assert_ne!(
-            content_ref_for_bytes(&primary).unwrap(),
-            export.state.state_ref
+        let corrupt_primary = CorruptObjectSource {
+            inner: &export.objects,
+            target: export.state.state_ref.clone(),
+        };
+        assert!(
+            import_ready_state(
+                &export.state,
+                &corrupt_primary,
+                &root.path().join("primary-tamper")
+            )
+            .is_err()
+        );
+        let corrupt_chunk = CorruptObjectSource {
+            inner: &export.objects,
+            target: export.adapter_roles.keys().next().unwrap().clone(),
+        };
+        assert!(
+            import_ready_state(
+                &export.state,
+                &corrupt_chunk,
+                &root.path().join("chunk-tamper")
+            )
+            .is_err()
         );
     }
 
@@ -598,6 +623,28 @@ mod tests {
             &self,
             reference: &ContentRef,
         ) -> Result<Box<dyn Read + Send>, ProtocolBundleError> {
+            self.inner.open(reference)
+        }
+    }
+
+    struct CorruptObjectSource<'a> {
+        inner: &'a dyn ObjectSource,
+        target: ContentRef,
+    }
+
+    impl ObjectSource for CorruptObjectSource<'_> {
+        fn index(&self) -> Result<BTreeMap<ContentRef, ObjectMetadata>, ProtocolBundleError> {
+            self.inner.index()
+        }
+
+        fn open(
+            &self,
+            reference: &ContentRef,
+        ) -> Result<Box<dyn Read + Send>, ProtocolBundleError> {
+            if reference == &self.target {
+                let size = self.inner.index()?[reference].size as usize;
+                return Ok(Box::new(Cursor::new(vec![0_u8; size])));
+            }
             self.inner.open(reference)
         }
     }
