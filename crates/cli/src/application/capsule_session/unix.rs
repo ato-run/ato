@@ -1,7 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{IsTerminal, Read, Write};
 use std::os::fd::{FromRawFd, RawFd};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child as ProcessChild, Command, Stdio};
@@ -1043,7 +1043,7 @@ fn read_frame<T: for<'de> Deserialize<'de>>(stream: &mut UnixStream) -> Result<T
     serde_json::from_slice(&bytes).context("malformed control frame")
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct ControlCredentials {
     session_id: SessionId,
     generation: u64,
@@ -1053,13 +1053,13 @@ struct ControlCredentials {
     token: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct ControlEnvelope {
     auth: ControlCredentials,
     action: ControlAction,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "method", content = "params")]
 enum ControlAction {
     Status,
@@ -1258,7 +1258,26 @@ fn short_socket_path(root: &Path, session_id: &SessionId) -> Result<PathBuf> {
         bail!("no safe short runtime directory is available for the control socket");
     }
     let directory = runtime_root.join(format!("ato-cs-{}", unsafe { libc::geteuid() }));
-    fs::create_dir_all(&directory)?;
+    match fs::symlink_metadata(&directory) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            bail!(
+                "unsafe Capsule Session runtime directory: {}",
+                directory.display()
+            )
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(&directory)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    let metadata = fs::metadata(&directory)?;
+    if metadata.uid() != unsafe { libc::geteuid() } {
+        bail!(
+            "Capsule Session runtime directory is not owned by the current user: {}",
+            directory.display()
+        );
+    }
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
     let identity = format!("{}:{}", root.display(), session_id);
     let digest = blake3::hash(identity.as_bytes()).to_hex();
