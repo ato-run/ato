@@ -198,12 +198,11 @@ impl SessionWal {
             if body.is_empty() || body.len() > MAX_WAL_FRAME_BYTES {
                 return Err(WalError::FrameTooLarge(body.len()));
             }
-            if let Some(operation_id) = entry.candidate_operation_id() {
-                if self.operation_ids.contains(operation_id)
-                    || !batch_operation_ids.insert(operation_id.clone())
-                {
-                    return Err(WalError::DuplicateOperation(operation_id.clone()));
-                }
+            if let Some(operation_id) = entry.candidate_operation_id()
+                && (self.operation_ids.contains(operation_id)
+                    || !batch_operation_ids.insert(operation_id.clone()))
+            {
+                return Err(WalError::DuplicateOperation(operation_id.clone()));
             }
             bodies.push(body);
         }
@@ -315,13 +314,13 @@ fn recover_path(path: &Path) -> Result<RecoveredJournal, WalError> {
                 offset: frame_offset,
                 reason: "invalid committed JSON",
             })?;
-        if let Some(operation_id) = entry.candidate_operation_id() {
-            if !operation_ids.insert(operation_id.clone()) {
-                return Err(WalError::CorruptCommittedJournal {
-                    offset: frame_offset,
-                    reason: "duplicate boundary operation",
-                });
-            }
+        if let Some(operation_id) = entry.candidate_operation_id()
+            && !operation_ids.insert(operation_id.clone())
+        {
+            return Err(WalError::CorruptCommittedJournal {
+                offset: frame_offset,
+                reason: "duplicate boundary operation",
+            });
         }
         entries.push(entry);
         journal_through = JournalLsn::new(file.stream_position()?);
