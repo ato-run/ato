@@ -167,6 +167,54 @@ fn detached_session_survives_cli_and_preserves_one_shell_across_reattach() {
         String::from_utf8_lossy(&after_drain.stdout)
     );
 
+    let observer_a_path = root.path().join("observer-a.out");
+    let observer_b_path = root.path().join("observer-b.out");
+    let mut observer_a = ato(root.path())
+        .args([
+            "internal",
+            "capsule-session",
+            "attach",
+            &session_id,
+            "--observe",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(
+            fs::File::create(&observer_a_path).expect("observer A output"),
+        ))
+        .spawn()
+        .expect("spawn observer A");
+    let mut observer_b = ato(root.path())
+        .args([
+            "internal",
+            "capsule-session",
+            "attach",
+            &session_id,
+            "--observe",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(
+            fs::File::create(&observer_b_path).expect("observer B output"),
+        ))
+        .spawn()
+        .expect("spawn observer B");
+    thread::sleep(Duration::from_millis(300));
+    let observed = attach_with_input(root.path(), &session_id, b"echo MULTI-OBSERVER\n");
+    assert!(observed.status.success());
+    thread::sleep(Duration::from_millis(300));
+    let _ = observer_a.kill();
+    let _ = observer_b.kill();
+    let _ = observer_a.wait();
+    let _ = observer_b.wait();
+    for path in [&observer_a_path, &observer_b_path] {
+        assert!(
+            fs::read_to_string(path)
+                .expect("observer output UTF-8")
+                .contains("MULTI-OBSERVER"),
+            "observer did not receive PTY output: {}",
+            path.display()
+        );
+    }
+
     // Hold one writer connection open and verify a second writer fails closed.
     let mut writer = ato(root.path())
         .args(["internal", "capsule-session", "attach", &session_id])
@@ -221,6 +269,21 @@ fn detached_session_survives_cli_and_preserves_one_shell_across_reattach() {
     assert!(!stale_generation.status.success());
     fs::write(&session_path, &original_session).expect("restore Session identity");
     assert_eq!(status(root.path(), &session_id)["lifecycle"], "running");
+
+    let mut stale_nonce: serde_json::Value =
+        serde_json::from_slice(&original_session).expect("Session identity JSON");
+    stale_nonce["supervisor"]["incarnation_nonce"] = serde_json::json!("stale-incarnation");
+    fs::write(
+        &session_path,
+        serde_json::to_vec_pretty(&stale_nonce).expect("stale nonce JSON"),
+    )
+    .expect("write stale nonce");
+    let stale_incarnation = ato(root.path())
+        .args(["internal", "capsule-session", "status", &session_id])
+        .output()
+        .expect("stale-incarnation status");
+    assert!(!stale_incarnation.status.success());
+    fs::write(&session_path, &original_session).expect("restore Session identity");
 
     kill_session(root.path(), &session_id);
     let stored: serde_json::Value = serde_json::from_slice(

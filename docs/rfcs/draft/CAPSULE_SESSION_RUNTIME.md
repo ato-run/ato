@@ -162,3 +162,33 @@ The foundation Session Store and Driver Registry currently implement
 owner-only filesystem storage on Unix. Until a Windows ACL backend is added,
 opening either store on Windows MUST fail closed with an unsupported-platform
 error; this draft does not claim Windows owner-only filesystem storage yet.
+
+## 9. Initial detached PTY profile
+
+The first reference vertical slice is available only through hidden
+`ato internal capsule-session` commands. `start` validates a portable bundle,
+allocates an owner-only Session directory, starts an independent Supervisor,
+waits for authenticated readiness, and then optionally attaches. The client
+process never owns the restored shell or PTY.
+
+The Supervisor restores workspace State, creates the shell computation, binds
+the built-in `ato.io.pty@1` Driver, verifies historical terminal output as a
+raw byte stream, and only then enters Isolated execution. Historical output is
+not appended to the continuation WAL. New stdin, output, resize, and exit
+Records are durably committed; attach, detach, writer leases, authentication,
+and the detach escape remain Control Plane events.
+
+Control IPC uses an owner-only Unix domain socket and a random token stored as
+mode `0600`. `session.json` stores only its digest. Every connection presents
+the logical Session ID, Supervisor generation, incarnation nonce, PID/process
+start identity, and token. One exclusive lock prevents concurrent Supervisors.
+Unix socket pathname limits may require the socket inode to live in an
+owner-only short runtime directory; the owner-only Session control directory
+stores its address.
+
+One interactive writer and zero or more observers may attach. PTY output is
+drained and journaled with no clients attached. Observer queues are bounded;
+slow display clients may be disconnected but cannot cause WAL loss or block
+the computation. A watchdog pipe is the Supervisor lease: EOF after Supervisor
+loss terminates the workload process group. Windows compiles the plumbing but
+returns Unsupported until its current-user ACL and named-pipe backend exists.
