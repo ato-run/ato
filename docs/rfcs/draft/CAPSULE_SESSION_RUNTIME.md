@@ -40,6 +40,11 @@ terminal `Failed`. A verified Replay verdict records its exact `from` and
 `through` frontier. Connector modes are Historical Replay, Isolated, Live, and
 Blocked. `RecordFrontier` is either `Origin` or `Through(seq)`.
 
+The runtime also tracks a non-portable `JournalLsn`. A committed cut is
+represented by `DurableFrontier { records_through, journal_through }`; the
+Record frontier is therefore evidence-backed by one exact durable WAL
+position rather than supplied by a caller.
+
 Isolated execution has no special recording mode: all boundary I/O is always
 journaled. Portable publication is an explicit `encap` operation.
 
@@ -49,6 +54,8 @@ For source frontier `F`, the runtime chooses the newest common recovery
 frontier `C <= F` at which State and every Connector can be restored. Each
 Connector uses Fresh, compatible Checkpoint, or reconstruction-from-Records.
 After every component is at `C`, Replay applies exactly `(C, F]` once.
+Fresh recovery is valid only for a Connector that explicitly declares itself
+frontier-independent. Reconstruction start MUST NOT be after `C`.
 
 A History-preserving Capsule stores an earlier State plus strictly later
 Records. A Rebased Capsule stores frontier State plus only Records strictly
@@ -64,14 +71,29 @@ is paused, final candidates and the local journal become durable, and State and
 Connector checkpoints are committed in one frontier manifest. A timeout or
 frontier mismatch rejects the entire operation.
 
+The barrier API MUST NOT accept a caller-selected Record frontier. After all
+Drivers reach their safe cut, the Supervisor reads the authoritative
+`DurableFrontier` from the Session WAL. Each Driver independently reports the
+Record frontier it reached; the Supervisor compares every report with the
+WAL-backed frontier. A Driver is never given an expected frontier merely to
+echo it.
+
 ## 5. Local journal and effect transactions
 
 The local journal is a recoverable WAL distinct from portable CBOR Sequence.
 An operation becomes durably committed before delivery or external dispatch is
 released. Group commit is permitted; one Record does not imply one `fsync`.
-Recovery accepts only complete committed frames and discards an incomplete or
-corrupt tail. Sequence gaps are valid, but a previously allocated sequence
-number is never reused for different content.
+Recovery accepts complete committed frames and may discard only an incomplete
+EOF tail. A complete frame with invalid magic, length, checksum, commit marker,
+or body is committed-journal corruption and recovery MUST fail closed; it MUST
+NOT silently roll history back. Sequence gaps are valid, but a previously
+allocated sequence number is never reused for different content.
+
+`BoundaryOperationId` uniqueness is checked or atomically reserved before its
+candidate is appended. The WAL preserves this uniqueness across process
+recovery. A duplicate operation MUST NOT add another WAL frame.
+Runtime memory transitions are applied only after the corresponding WAL state
+transition commits, so a failed commit leaves memory at the last durable state.
 
 External effect states are Prepared, Authorized, Dispatching, optionally
 Dispatched, Completed, InDoubt, Reconciled, and Rejected. `Dispatching` is
@@ -87,11 +109,20 @@ namespaces, or vsock endpoints and restores computation paused. Drivers connect
 to the concrete endpoints, and computation resumes only after every boundary
 is ready.
 
+Driver Connector IDs and attachment requirement IDs MUST match and be unique
+before any Driver is prepared or State restore begins. Duplicate active
+Connectors fail closed rather than using map insertion order.
+
 Supervisor or active-Driver loss freezes or terminates computation. A watchdog,
 parent-death facility, heartbeat lease, or VMM control enforces this invariant.
 Recovery does not trust an orphan incarnation; it reconstructs from the latest
 durable common frontier. Same-incarnation Driver reattachment is allowed only
 when no delivery or external effect is uncertain.
+
+Bootstrap failure closes every Driver already prepared or connected and
+terminates any restored computation. Barrier failure invalidates the whole
+runtime incarnation: all Drivers are closed, computation is terminated, and
+recovery starts from a durable common frontier. Driver `close` is idempotent.
 
 ## 7. Portable export
 
@@ -109,3 +140,8 @@ One local Supervisor OS process per Session, owner-only UDS or current-user
 Windows named pipe, session secret, Supervisor generation, incarnation nonce,
 PID, and process start identity define the initial reference implementation.
 They are not requirements on managed multi-Session runners.
+
+The foundation Session Store and Driver Registry currently implement
+owner-only filesystem storage on Unix. Until a Windows ACL backend is added,
+opening either store on Windows MUST fail closed with an unsupported-platform
+error; this draft does not claim Windows owner-only filesystem storage yet.
