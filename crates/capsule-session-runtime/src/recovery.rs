@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use capsule_protocol::{ConnectorId, ContentRef, ProtocolId, StateRef};
 use thiserror::Error;
 
-use crate::RecordFrontier;
+use crate::{DurableFrontier, RecordFrontier};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateRecoveryPoint {
@@ -127,7 +127,7 @@ pub enum ResumeFidelity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionCheckpoint {
     pub state_ref: StateRef,
-    pub captured_through: RecordFrontier,
+    pub captured_at: DurableFrontier,
     pub connector_checkpoints: BTreeMap<ConnectorId, ConnectorCheckpoint>,
     pub resume_fidelity: ResumeFidelity,
 }
@@ -138,10 +138,10 @@ impl SessionCheckpoint {
             if connector_id != &checkpoint.connector_id {
                 return Err(RecoveryPlanError::CheckpointConnectorMismatch);
             }
-            if checkpoint.applied_through != self.captured_through {
+            if checkpoint.applied_through != self.captured_at.records_through {
                 return Err(RecoveryPlanError::CheckpointFrontierMismatch {
                     connector_id: connector_id.clone(),
-                    plan: self.captured_through,
+                    plan: self.captured_at.records_through,
                     checkpoint: checkpoint.applied_through,
                 });
             }
@@ -296,5 +296,35 @@ mod tests {
                 through: RecordFrontier::Through(42),
             })
         );
+    }
+
+    #[test]
+    fn checkpoint_consistency_uses_record_cut_from_durable_frontier() {
+        let connector_id = ConnectorId::parse("terminal.main").expect("connector id");
+        let checkpoint = SessionCheckpoint {
+            state_ref: state(RecordFrontier::Through(8)).state,
+            captured_at: DurableFrontier {
+                records_through: RecordFrontier::Through(8),
+                journal_through: crate::JournalLsn::new(4096),
+            },
+            connector_checkpoints: BTreeMap::from([(
+                connector_id.clone(),
+                ConnectorCheckpoint {
+                    connector_id,
+                    protocol_id: ProtocolId::parse("ato.io.pty@1").expect("protocol"),
+                    implementation_id: "ato.pty".to_owned(),
+                    implementation_version: "1".to_owned(),
+                    checkpoint_format: "none@1".to_owned(),
+                    applied_through: RecordFrontier::Through(8),
+                    opaque_ref: ContentRef::parse(format!("blake3:{}", "b".repeat(64)))
+                        .expect("checkpoint ref"),
+                },
+            )]),
+            resume_fidelity: ResumeFidelity::FilesystemRestart,
+        };
+
+        checkpoint
+            .validate_consistent_cut()
+            .expect("consistent durable checkpoint");
     }
 }
