@@ -238,6 +238,11 @@ fn ready_state_bundle_restores_runs_and_stops_under_supervisor() {
     assert_eq!(stored["runtime_profile"]["kind"], "ready_state");
     assert!(!session_root.join("ready-state-overlay").exists());
     assert!(session_root.join("ready-state-cas/blobs/blake3").is_dir());
+    let resume = ato(root.path())
+        .args(["internal", "capsule-session", "resume", &session_id])
+        .output()
+        .unwrap();
+    assert!(!resume.status.success(), "resume must fail closed");
 
     for invalid in [&bundles.connector, &bundles.record, &bundles.unknown_state] {
         let output = ato(root.path())
