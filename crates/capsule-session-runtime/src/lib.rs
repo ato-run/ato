@@ -10,6 +10,7 @@ pub mod driver_binding;
 pub mod effect;
 pub mod recovery;
 pub mod runtime;
+pub mod session_store;
 pub mod supervisor;
 pub mod wal;
 
@@ -35,6 +36,10 @@ pub use recovery::{
 pub use runtime::{
     ConnectorDriverRuntime, PausedComputationRuntime, RunningSessionRuntime, RuntimeBoundaryError,
     SessionBootstrap, StateRuntime,
+};
+pub use session_store::{
+    CapsuleProtocolSessionStore, ControlAuthorizationError, NewSupervisorIdentity, SessionId,
+    SessionStoreError, StoredProtocolSession, SupervisorIdentity,
 };
 pub use supervisor::{
     BarrierError, BarrierId, BoundaryCoordinator, BoundaryDriver, DriverBoundaryError,
