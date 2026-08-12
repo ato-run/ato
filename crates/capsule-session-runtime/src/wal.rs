@@ -1,12 +1,16 @@
+use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use capsule_protocol::{ConnectorId, ContentRef, Direction, IoRecord, Payload, RecordKindId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{BoundaryOperationId, EffectIntent, EffectState};
+use crate::{
+    BoundaryOperationId, DurableFrontier, EffectIntent, EffectState, JournalLsn, RecordFrontier,
+};
 
 const FRAME_MAGIC: &[u8; 8] = b"ATOWAL1\0";
 const COMMIT_MAGIC: &[u8; 8] = b"COMMIT1\0";
@@ -109,10 +113,24 @@ pub enum WalEntry {
 }
 
 impl WalEntry {
-    fn seq(&self) -> Option<u64> {
+    pub(crate) fn allocated_seq(&self) -> Option<u64> {
         match self {
             Self::RecordCandidate { record, .. } => Some(record.seq),
             Self::HighWaterMark { seq } => Some(*seq),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn record_seq(&self) -> Option<u64> {
+        match self {
+            Self::RecordCandidate { record, .. } => Some(record.seq),
+            _ => None,
+        }
+    }
+
+    fn candidate_operation_id(&self) -> Option<&BoundaryOperationId> {
+        match self {
+            Self::RecordCandidate { operation_id, .. } => Some(operation_id),
             _ => None,
         }
     }
@@ -122,6 +140,32 @@ impl WalEntry {
 pub struct SessionWal {
     path: PathBuf,
     file: File,
+    durable_frontier: DurableFrontier,
+    operation_ids: BTreeSet<BoundaryOperationId>,
+}
+
+/// Cloneable handle used by both the boundary coordinator and barrier logic so
+/// they observe one authoritative WAL instance.
+#[derive(Debug, Clone)]
+pub struct SharedSessionWal(Arc<Mutex<SessionWal>>);
+
+impl SharedSessionWal {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, WalError> {
+        Ok(Self(Arc::new(Mutex::new(SessionWal::open(path)?))))
+    }
+
+    pub(crate) fn with_mut<T>(
+        &self,
+        operation: impl FnOnce(&mut SessionWal) -> Result<T, WalError>,
+    ) -> Result<T, WalError> {
+        let mut wal = self.0.lock().map_err(|_| WalError::LockPoisoned)?;
+        operation(&mut wal)
+    }
+
+    pub fn durable_frontier(&self) -> Result<DurableFrontier, WalError> {
+        let wal = self.0.lock().map_err(|_| WalError::LockPoisoned)?;
+        Ok(wal.durable_frontier())
+    }
 }
 
 impl SessionWal {
@@ -135,31 +179,66 @@ impl SessionWal {
             .read(true)
             .append(true)
             .open(&path)?;
-        Ok(Self { path, file })
+        let recovered = recover_path(&path)?;
+        Ok(Self {
+            path,
+            file,
+            durable_frontier: recovered.durable_frontier,
+            operation_ids: recovered.operation_ids,
+        })
     }
 
     /// Appends a group and makes the entire group durable with one sync.
     /// Callers release delivery/dispatch only after this method returns.
-    pub fn append_batch(&mut self, entries: &[WalEntry]) -> Result<(), WalError> {
+    pub fn append_batch(&mut self, entries: &[WalEntry]) -> Result<DurableFrontier, WalError> {
+        let mut batch_operation_ids = BTreeSet::new();
+        let mut bodies = Vec::with_capacity(entries.len());
         for entry in entries {
             let body = serde_json::to_vec(entry)?;
             if body.is_empty() || body.len() > MAX_WAL_FRAME_BYTES {
                 return Err(WalError::FrameTooLarge(body.len()));
             }
+            if let Some(operation_id) = entry.candidate_operation_id() {
+                if self.operation_ids.contains(operation_id)
+                    || !batch_operation_ids.insert(operation_id.clone())
+                {
+                    return Err(WalError::DuplicateOperation(operation_id.clone()));
+                }
+            }
+            bodies.push(body);
+        }
+        for body in &bodies {
             let length =
                 u32::try_from(body.len()).map_err(|_| WalError::FrameTooLarge(body.len()))?;
             self.file.write_all(FRAME_MAGIC)?;
             self.file.write_all(&length.to_be_bytes())?;
-            self.file.write_all(&body)?;
-            self.file.write_all(blake3::hash(&body).as_bytes())?;
+            self.file.write_all(body)?;
+            self.file.write_all(blake3::hash(body).as_bytes())?;
             self.file.write_all(COMMIT_MAGIC)?;
         }
         self.file.sync_data()?;
-        Ok(())
+        self.operation_ids.extend(batch_operation_ids);
+        let journal_through = JournalLsn::new(self.file.metadata()?.len());
+        let records_through = entries
+            .iter()
+            .filter_map(WalEntry::record_seq)
+            .max()
+            .map(RecordFrontier::Through)
+            .unwrap_or(self.durable_frontier.records_through)
+            .max(self.durable_frontier.records_through);
+        self.durable_frontier = DurableFrontier {
+            records_through,
+            journal_through,
+        };
+        Ok(self.durable_frontier)
     }
 
     pub fn recover(&self) -> Result<RecoveredJournal, WalError> {
         recover_path(&self.path)
+    }
+
+    pub fn durable_frontier(&self) -> DurableFrontier {
+        self.durable_frontier
     }
 }
 
@@ -168,6 +247,8 @@ pub struct RecoveredJournal {
     pub entries: Vec<WalEntry>,
     pub discarded_tail: bool,
     pub durable_high_water_mark: Option<u64>,
+    pub durable_frontier: DurableFrontier,
+    operation_ids: BTreeSet<BoundaryOperationId>,
 }
 
 fn recover_path(path: &Path) -> Result<RecoveredJournal, WalError> {
@@ -175,16 +256,25 @@ fn recover_path(path: &Path) -> Result<RecoveredJournal, WalError> {
     file.seek(SeekFrom::Start(0))?;
     let mut entries = Vec::new();
     let mut discarded_tail = false;
+    let mut journal_through = JournalLsn::ORIGIN;
+    let mut operation_ids = BTreeSet::new();
 
     loop {
+        let frame_offset = file.stream_position()?;
         let mut magic = [0_u8; 8];
         let count = file.read(&mut magic[..1])?;
         if count == 0 {
             break;
         }
-        if file.read_exact(&mut magic[1..]).is_err() || &magic != FRAME_MAGIC {
+        if file.read_exact(&mut magic[1..]).is_err() {
             discarded_tail = true;
             break;
+        }
+        if &magic != FRAME_MAGIC {
+            return Err(WalError::CorruptCommittedJournal {
+                offset: frame_offset,
+                reason: "invalid frame magic",
+            });
         }
         let mut length_bytes = [0_u8; 4];
         if file.read_exact(&mut length_bytes).is_err() {
@@ -193,8 +283,10 @@ fn recover_path(path: &Path) -> Result<RecoveredJournal, WalError> {
         }
         let length = u32::from_be_bytes(length_bytes) as usize;
         if length == 0 || length > MAX_WAL_FRAME_BYTES {
-            discarded_tail = true;
-            break;
+            return Err(WalError::CorruptCommittedJournal {
+                offset: frame_offset,
+                reason: "invalid frame length",
+            });
         }
         let mut body = vec![0_u8; length];
         let mut checksum = [0_u8; CHECKSUM_BYTES];
@@ -206,24 +298,51 @@ fn recover_path(path: &Path) -> Result<RecoveredJournal, WalError> {
             discarded_tail = true;
             break;
         }
-        if checksum != *blake3::hash(&body).as_bytes() || &commit != COMMIT_MAGIC {
-            discarded_tail = true;
-            break;
+        if checksum != *blake3::hash(&body).as_bytes() {
+            return Err(WalError::CorruptCommittedJournal {
+                offset: frame_offset,
+                reason: "checksum mismatch",
+            });
         }
-        match serde_json::from_slice(&body) {
-            Ok(entry) => entries.push(entry),
-            Err(_) => {
-                discarded_tail = true;
-                break;
+        if &commit != COMMIT_MAGIC {
+            return Err(WalError::CorruptCommittedJournal {
+                offset: frame_offset,
+                reason: "invalid commit marker",
+            });
+        }
+        let entry: WalEntry =
+            serde_json::from_slice(&body).map_err(|_| WalError::CorruptCommittedJournal {
+                offset: frame_offset,
+                reason: "invalid committed JSON",
+            })?;
+        if let Some(operation_id) = entry.candidate_operation_id() {
+            if !operation_ids.insert(operation_id.clone()) {
+                return Err(WalError::CorruptCommittedJournal {
+                    offset: frame_offset,
+                    reason: "duplicate boundary operation",
+                });
             }
         }
+        entries.push(entry);
+        journal_through = JournalLsn::new(file.stream_position()?);
     }
 
-    let durable_high_water_mark = entries.iter().filter_map(WalEntry::seq).max();
+    let durable_high_water_mark = entries.iter().filter_map(WalEntry::allocated_seq).max();
+    let records_through = entries
+        .iter()
+        .filter_map(WalEntry::record_seq)
+        .max()
+        .map(RecordFrontier::Through)
+        .unwrap_or(RecordFrontier::Origin);
     Ok(RecoveredJournal {
         entries,
         discarded_tail,
         durable_high_water_mark,
+        durable_frontier: DurableFrontier {
+            records_through,
+            journal_through,
+        },
+        operation_ids,
     })
 }
 
@@ -237,6 +356,12 @@ pub enum WalError {
     FrameTooLarge(usize),
     #[error("session WAL record is invalid: {0}")]
     InvalidRecord(String),
+    #[error("committed session WAL is corrupt at byte {offset}: {reason}")]
+    CorruptCommittedJournal { offset: u64, reason: &'static str },
+    #[error("duplicate boundary operation {0} in session WAL")]
+    DuplicateOperation(BoundaryOperationId),
+    #[error("session WAL lock is poisoned")]
+    LockPoisoned,
 }
 
 #[cfg(test)]
@@ -278,6 +403,11 @@ mod tests {
         let recovered = wal.recover().expect("recover");
         assert_eq!(recovered.entries.len(), 3);
         assert_eq!(recovered.durable_high_water_mark, Some(102));
+        assert_eq!(
+            recovered.durable_frontier.records_through,
+            RecordFrontier::Through(102)
+        );
+        assert!(recovered.durable_frontier.journal_through.get() > 0);
         assert!(!recovered.discarded_tail);
     }
 
@@ -305,5 +435,110 @@ mod tests {
         let expected = record(7);
         let actual = IoRecord::try_from(WalRecord::from(&expected)).expect("decode WAL record");
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn recovery_rejects_complete_frame_with_bad_checksum() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("journal/wal-000001");
+        let mut wal = SessionWal::open(&path).expect("open WAL");
+        wal.append_batch(&[candidate(1)]).expect("append batch");
+        wal.file.flush().expect("flush");
+
+        let body = serde_json::to_vec(&candidate(2)).expect("serialize candidate");
+        wal.file.write_all(FRAME_MAGIC).expect("magic");
+        wal.file
+            .write_all(&(body.len() as u32).to_be_bytes())
+            .expect("length");
+        wal.file.write_all(&body).expect("body");
+        wal.file
+            .write_all(&[0_u8; CHECKSUM_BYTES])
+            .expect("checksum");
+        wal.file.write_all(COMMIT_MAGIC).expect("commit");
+        wal.file.flush().expect("flush corrupt frame");
+
+        assert!(matches!(
+            wal.recover(),
+            Err(WalError::CorruptCommittedJournal {
+                reason: "checksum mismatch",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn recovery_rejects_complete_frame_with_invalid_json() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("journal/wal-000001");
+        let mut wal = SessionWal::open(&path).expect("open WAL");
+        let body = b"not-json";
+        wal.file.write_all(FRAME_MAGIC).expect("magic");
+        wal.file
+            .write_all(&(body.len() as u32).to_be_bytes())
+            .expect("length");
+        wal.file.write_all(body).expect("body");
+        wal.file
+            .write_all(blake3::hash(body).as_bytes())
+            .expect("checksum");
+        wal.file.write_all(COMMIT_MAGIC).expect("commit");
+        wal.file.flush().expect("flush corrupt frame");
+
+        assert!(matches!(
+            wal.recover(),
+            Err(WalError::CorruptCommittedJournal {
+                reason: "invalid committed JSON",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn shared_wal_exposes_the_same_durable_frontier_to_barrier_readers() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let shared = SharedSessionWal::open(directory.path().join("journal/wal-000001"))
+            .expect("open shared WAL");
+        let reader = shared.clone();
+        shared
+            .with_mut(|wal| wal.append_batch(&[candidate(9)]))
+            .expect("commit through shared WAL");
+
+        let frontier = reader.durable_frontier().expect("read durable frontier");
+        assert_eq!(frontier.records_through, RecordFrontier::Through(9));
+        assert!(frontier.journal_through.get() > 0);
+    }
+
+    #[test]
+    fn allocated_high_water_mark_does_not_claim_a_record_frontier() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let mut wal =
+            SessionWal::open(directory.path().join("journal/wal-000001")).expect("open WAL");
+        let frontier = wal
+            .append_batch(&[WalEntry::HighWaterMark { seq: 99 }])
+            .expect("commit allocated sequence");
+
+        assert_eq!(frontier.records_through, RecordFrontier::Origin);
+        let recovered = wal.recover().expect("recover");
+        assert_eq!(recovered.durable_high_water_mark, Some(99));
+        assert_eq!(
+            recovered.durable_frontier.records_through,
+            RecordFrontier::Origin
+        );
+    }
+
+    #[test]
+    fn reopened_wal_rejects_duplicate_operation_before_writing() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("journal/wal-000001");
+        let mut wal = SessionWal::open(&path).expect("open WAL");
+        wal.append_batch(&[candidate(7)]).expect("first candidate");
+        drop(wal);
+
+        let mut reopened = SessionWal::open(&path).expect("reopen WAL");
+        let length_before = fs::metadata(&path).expect("metadata").len();
+        assert!(matches!(
+            reopened.append_batch(&[candidate(7)]),
+            Err(WalError::DuplicateOperation(_))
+        ));
+        assert_eq!(fs::metadata(&path).expect("metadata").len(), length_before);
     }
 }
