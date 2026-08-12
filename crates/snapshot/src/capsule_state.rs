@@ -23,6 +23,7 @@ use crate::{
 
 pub const READY_STATE_STATE_TYPE: &str = "ato.state.ready-state@1";
 pub const READY_STATE_STATE_OBJECT_SCHEMA: &str = "ato.state.ready-state-object/v1";
+pub const READY_STATE_PRIMARY_OBJECT_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -59,6 +60,10 @@ pub struct ImportedReadyState {
 pub enum ReadyStateStateError {
     #[error("unsupported Ready-State State type {0}")]
     UnsupportedStateType(String),
+    #[error("ReadyStateBindingsUnsupported")]
+    ReadyStateBindingsUnsupported,
+    #[error("ReadyStateDurableVolumesUnsupported")]
+    ReadyStateDurableVolumesUnsupported,
     #[error("invalid Ready-State State: {0}")]
     Invalid(String),
     #[error("Ready-State object source failed: {0}")]
@@ -95,6 +100,19 @@ impl ReadyStateStateObjectV1 {
             return Err(ReadyStateStateError::Invalid(
                 "wrong legacy Ready-State schema".to_string(),
             ));
+        }
+        if let Some(supervisor) = &self.legacy_manifest.supervisor_build {
+            if !supervisor.binding_names.is_empty() {
+                return Err(ReadyStateStateError::ReadyStateBindingsUnsupported);
+            }
+            if !supervisor.state_volumes.is_empty() {
+                return Err(ReadyStateStateError::ReadyStateDurableVolumesUnsupported);
+            }
+            if supervisor.state_owner_scope.is_some() {
+                return Err(ReadyStateStateError::Invalid(
+                    "Ready-State state_owner_scope is present without durable volumes".to_string(),
+                ));
+            }
         }
         self.snapshot_manifest
             .validate()
@@ -227,6 +245,11 @@ pub fn import_ready_state(
     let primary_metadata = index.get(&state.state_ref).ok_or_else(|| {
         ReadyStateStateError::Invalid("primary Ready-State object is missing".to_string())
     })?;
+    if primary_metadata.size > READY_STATE_PRIMARY_OBJECT_MAX_BYTES {
+        return Err(ReadyStateStateError::Invalid(format!(
+            "primary Ready-State object exceeds the {READY_STATE_PRIMARY_OBJECT_MAX_BYTES}-byte limit"
+        )));
+    }
     let mut primary = Vec::with_capacity(primary_metadata.size as usize);
     objects
         .open(&state.state_ref)?
@@ -607,6 +630,101 @@ mod tests {
         );
     }
 
+    #[test]
+    fn state_adapter_rejects_f1_unsupported_supervisor_state() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, object) = accepted_fixture(root.path());
+        let mut binding = object.clone();
+        binding.legacy_manifest.supervisor_build = Some(crate::manifest::SupervisorBuildReceipt {
+            binding_names: vec!["api_key".to_string()],
+            page_hygiene_boot_args: false,
+            placeholder_absent_from_seal: None,
+            state_volumes: Vec::new(),
+            state_owner_scope: None,
+        });
+        assert!(matches!(
+            binding.validate(),
+            Err(ReadyStateStateError::ReadyStateBindingsUnsupported)
+        ));
+
+        let mut durable = object.clone();
+        durable.legacy_manifest.supervisor_build = Some(crate::manifest::SupervisorBuildReceipt {
+            binding_names: Vec::new(),
+            page_hygiene_boot_args: false,
+            placeholder_absent_from_seal: None,
+            state_volumes: vec![crate::state_volume::DurableVolumeSpec {
+                state_name: "data".to_string(),
+                size_mb: 64,
+            }],
+            state_owner_scope: Some("owner/capsule".to_string()),
+        });
+        assert!(matches!(
+            durable.validate(),
+            Err(ReadyStateStateError::ReadyStateDurableVolumesUnsupported)
+        ));
+
+        let mut orphan_scope = object;
+        orphan_scope.legacy_manifest.supervisor_build =
+            Some(crate::manifest::SupervisorBuildReceipt {
+                binding_names: Vec::new(),
+                page_hygiene_boot_args: false,
+                placeholder_absent_from_seal: None,
+                state_volumes: Vec::new(),
+                state_owner_scope: Some("owner/capsule".to_string()),
+            });
+        assert!(matches!(
+            orphan_scope.validate(),
+            Err(ReadyStateStateError::Invalid(message))
+                if message.contains("state_owner_scope")
+        ));
+    }
+
+    #[test]
+    fn state_adapter_rejects_oversized_primary_before_open() {
+        let root = tempfile::tempdir().unwrap();
+        let (producer, object) = accepted_fixture(root.path());
+        let export = export_ready_state(object, &producer).unwrap();
+        let oversized = OversizedPrimarySource {
+            inner: &export.objects,
+            primary: export.state.state_ref.clone(),
+        };
+        let error = import_ready_state(
+            &export.state,
+            &oversized,
+            &root.path().join("oversized-primary"),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ReadyStateStateError::Invalid(message) if message.contains("16")
+        ));
+    }
+
+    #[test]
+    fn state_adapter_rejects_noncanonical_primary_json() {
+        let root = tempfile::tempdir().unwrap();
+        let (producer, object) = accepted_fixture(root.path());
+        let export = export_ready_state(object.clone(), &producer).unwrap();
+        let replacement = serde_json::to_vec_pretty(&object).unwrap();
+        let replacement_ref = content_ref_for_bytes(&replacement).unwrap();
+        let state = StateRef {
+            state_type: export.state.state_type.clone(),
+            state_ref: replacement_ref.clone(),
+        };
+        let source = ReplacedPrimarySource {
+            inner: &export.objects,
+            original: export.state.state_ref,
+            replacement_ref,
+            replacement,
+        };
+        let error = import_ready_state(&state, &source, &root.path().join("noncanonical-primary"))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ReadyStateStateError::Invalid(message) if message.contains("JCS canonical")
+        ));
+    }
+
     struct MissingObjectSource<'a> {
         inner: &'a dyn ObjectSource,
         missing: ContentRef,
@@ -630,6 +748,58 @@ mod tests {
     struct CorruptObjectSource<'a> {
         inner: &'a dyn ObjectSource,
         target: ContentRef,
+    }
+
+    struct OversizedPrimarySource<'a> {
+        inner: &'a dyn ObjectSource,
+        primary: ContentRef,
+    }
+
+    impl ObjectSource for OversizedPrimarySource<'_> {
+        fn index(&self) -> Result<BTreeMap<ContentRef, ObjectMetadata>, ProtocolBundleError> {
+            let mut index = self.inner.index()?;
+            index.get_mut(&self.primary).unwrap().size = READY_STATE_PRIMARY_OBJECT_MAX_BYTES + 1;
+            Ok(index)
+        }
+
+        fn open(
+            &self,
+            _reference: &ContentRef,
+        ) -> Result<Box<dyn Read + Send>, ProtocolBundleError> {
+            panic!("oversized primary must be rejected before object open")
+        }
+    }
+
+    struct ReplacedPrimarySource<'a> {
+        inner: &'a dyn ObjectSource,
+        original: ContentRef,
+        replacement_ref: ContentRef,
+        replacement: Vec<u8>,
+    }
+
+    impl ObjectSource for ReplacedPrimarySource<'_> {
+        fn index(&self) -> Result<BTreeMap<ContentRef, ObjectMetadata>, ProtocolBundleError> {
+            let mut index = self.inner.index()?;
+            index.remove(&self.original);
+            index.insert(
+                self.replacement_ref.clone(),
+                ObjectMetadata {
+                    reference: self.replacement_ref.clone(),
+                    size: self.replacement.len() as u64,
+                },
+            );
+            Ok(index)
+        }
+
+        fn open(
+            &self,
+            reference: &ContentRef,
+        ) -> Result<Box<dyn Read + Send>, ProtocolBundleError> {
+            if reference == &self.replacement_ref {
+                return Ok(Box::new(Cursor::new(self.replacement.clone())));
+            }
+            self.inner.open(reference)
+        }
     }
 
     impl ObjectSource for CorruptObjectSource<'_> {
