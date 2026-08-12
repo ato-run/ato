@@ -9,6 +9,7 @@ pub mod domain;
 pub mod driver_binding;
 pub mod effect;
 pub mod recovery;
+pub mod supervisor;
 pub mod wal;
 
 pub use attachment::{
@@ -29,5 +30,9 @@ pub use effect::{
 pub use recovery::{
     ConnectorCheckpoint, ConnectorRecoveryPoint, ConnectorRecoveryStrategy, RecoveryPlan,
     RecoveryPlanError, ResumeFidelity, SessionCheckpoint, StateRecoveryPoint,
+};
+pub use supervisor::{
+    BarrierError, BarrierId, BoundaryCoordinator, BoundaryDriver, DriverBoundaryError,
+    DriverQuiesceReport, FrontierBarrier, JournalCommit,
 };
 pub use wal::{RecoveredJournal, SessionWal, WalEntry, WalError, WalRecord};
