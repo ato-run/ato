@@ -79,7 +79,7 @@ pub use chunk::{
 pub use gc::{EvictedChunk, GcReport, collect_garbage};
 pub use hash::{ContentHash, InvalidContentHash, hash_bytes};
 pub use hotset::{HotsetProfile, HotsetRecorder};
-pub use manifest::{BlobManifest, ChunkingKind, LayerKind};
+pub use manifest::{BlobManifest, ChunkingKind, LayerKind, validate_blob_manifest};
 pub use reader::{LazyBlobReader, MemBackend};
 pub use writer::store_blob;
 
