@@ -12,13 +12,14 @@ use crate::application::preflight::collect_aggregate_requirements;
 use crate::application::runtime_prepare::prepare_tools;
 use crate::application::runtime_setup::{collect_setup_status, install_tools};
 use crate::cli::{
-    CapsuleProtocolInternalCommands, ConsentInternalCommands, InternalCommands,
-    RuntimeInternalCommands,
+    CapsuleProtocolInternalCommands, CapsuleSessionInternalCommands, ConsentInternalCommands,
+    InternalCommands, RuntimeInternalCommands,
 };
 
 pub(crate) fn execute_internal_command(command: InternalCommands) -> Result<()> {
     match command {
         InternalCommands::CapsuleProtocol { command } => execute_capsule_protocol(command),
+        InternalCommands::CapsuleSession { command } => execute_capsule_session(command),
         InternalCommands::Consent { command } => execute_consent_command(command),
         InternalCommands::Preflight {
             target,
@@ -29,6 +30,35 @@ pub(crate) fn execute_internal_command(command: InternalCommands) -> Result<()> 
         InternalCommands::ImportPreviewSweep { force, json } => {
             execute_import_preview_sweep_command(force, json)
         }
+    }
+}
+
+fn execute_capsule_session(command: CapsuleSessionInternalCommands) -> Result<()> {
+    use crate::application::capsule_session;
+
+    match command {
+        CapsuleSessionInternalCommands::Start {
+            bundle,
+            into,
+            no_attach,
+        } => capsule_session::start(&bundle, &into, no_attach),
+        CapsuleSessionInternalCommands::Serve {
+            session,
+            bundle,
+            into,
+        } => capsule_session::serve(&session, &bundle, &into),
+        CapsuleSessionInternalCommands::Attach { session, observe } => {
+            capsule_session::attach(&session, observe)
+        }
+        CapsuleSessionInternalCommands::Status { session } => capsule_session::status(&session),
+        CapsuleSessionInternalCommands::Kill { session } => capsule_session::kill(&session),
+        CapsuleSessionInternalCommands::List => capsule_session::list(),
+        CapsuleSessionInternalCommands::Watchdog {
+            pid,
+            pgid,
+            process_start_identity,
+            lease_fd,
+        } => capsule_session::watchdog(pid, pgid, &process_start_identity, lease_fd),
     }
 }
 

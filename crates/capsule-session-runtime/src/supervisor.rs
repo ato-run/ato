@@ -119,6 +119,38 @@ where
         Ok(())
     }
 
+    /// Durably commits an observed Egress record that has no external effect.
+    ///
+    /// The caller may release the bytes to observers only after this method
+    /// returns. Ordinary terminal output must use this path instead of
+    /// manufacturing an `EffectIntent` with a no-op effect class.
+    pub fn commit_egress(
+        &mut self,
+        operation_id: BoundaryOperationId,
+        record: &IoRecord,
+    ) -> Result<DurableFrontier, DriverBoundaryError> {
+        if record.direction != capsule_protocol::Direction::Egress {
+            return Err(DriverBoundaryError::Protocol(
+                "commit_egress requires an Egress record".to_owned(),
+            ));
+        }
+        self.reserve_operation(&operation_id)?;
+        match self.journal.commit(&[
+            WalEntry::RecordCandidate {
+                operation_id: operation_id.clone(),
+                record: WalRecord::from(record),
+                effect: None,
+            },
+            WalEntry::HighWaterMark { seq: record.seq },
+        ]) {
+            Ok(frontier) => Ok(frontier),
+            Err(error) => {
+                self.operation_ids.remove(&operation_id);
+                Err(journal_error(error))
+            }
+        }
+    }
+
     pub fn prepare_effect(
         &mut self,
         operation_id: BoundaryOperationId,
@@ -445,6 +477,41 @@ mod tests {
             Err(DriverBoundaryError::Protocol(_))
         ));
         assert_eq!(coordinator.journal.durable, durable_before_duplicate);
+    }
+
+    #[test]
+    fn ordinary_egress_is_durable_before_observer_release() {
+        let mut coordinator =
+            BoundaryCoordinator::new(FakeJournal::default(), FakeDriver::default());
+        let frontier = coordinator
+            .commit_egress(
+                BoundaryOperationId::parse("output-1").expect("operation"),
+                &record(7, Direction::Egress),
+            )
+            .expect("commit output");
+
+        assert_eq!(frontier.records_through, RecordFrontier::Through(7));
+        assert!(matches!(
+            coordinator.journal.durable.as_slice(),
+            [
+                WalEntry::RecordCandidate { effect: None, .. },
+                WalEntry::HighWaterMark { seq: 7 }
+            ]
+        ));
+    }
+
+    #[test]
+    fn ordinary_egress_rejects_ingress_without_touching_wal() {
+        let mut coordinator =
+            BoundaryCoordinator::new(FakeJournal::default(), FakeDriver::default());
+        assert!(matches!(
+            coordinator.commit_egress(
+                BoundaryOperationId::parse("wrong-direction").expect("operation"),
+                &record(1, Direction::Ingress),
+            ),
+            Err(DriverBoundaryError::Protocol(_))
+        ));
+        assert!(coordinator.journal.durable.is_empty());
     }
 
     #[test]
