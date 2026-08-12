@@ -11,6 +11,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use capsule::foundation::install_lifecycle::RunnerClassId;
+#[cfg(test)]
+use capsule::snapshot_manifest::CapturePolicyV1;
 use capsule::snapshot_manifest::{
     HostRestoreCapabilityV1, SnapshotBackendKind, SnapshotCompatibilityContractV1,
     SnapshotManifestV1,
