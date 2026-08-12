@@ -113,14 +113,6 @@ pub enum WalEntry {
 }
 
 impl WalEntry {
-    pub(crate) fn allocated_seq(&self) -> Option<u64> {
-        match self {
-            Self::RecordCandidate { record, .. } => Some(record.seq),
-            Self::HighWaterMark { seq } => Some(*seq),
-            _ => None,
-        }
-    }
-
     pub(crate) fn record_seq(&self) -> Option<u64> {
         match self {
             Self::RecordCandidate { record, .. } => Some(record.seq),
@@ -141,6 +133,7 @@ pub struct SessionWal {
     path: PathBuf,
     file: File,
     durable_frontier: DurableFrontier,
+    allocated_high_water_mark: Option<u64>,
     operation_ids: BTreeSet<BoundaryOperationId>,
 }
 
@@ -180,10 +173,15 @@ impl SessionWal {
             .append(true)
             .open(&path)?;
         let recovered = recover_path(&path)?;
+        if recovered.discarded_tail {
+            file.set_len(recovered.durable_frontier.journal_through.get())?;
+            file.sync_data()?;
+        }
         Ok(Self {
             path,
             file,
             durable_frontier: recovered.durable_frontier,
+            allocated_high_water_mark: recovered.durable_high_water_mark,
             operation_ids: recovered.operation_ids,
         })
     }
@@ -192,6 +190,7 @@ impl SessionWal {
     /// Callers release delivery/dispatch only after this method returns.
     pub fn append_batch(&mut self, entries: &[WalEntry]) -> Result<DurableFrontier, WalError> {
         let mut batch_operation_ids = BTreeSet::new();
+        let mut allocated_high_water_mark = self.allocated_high_water_mark;
         let mut bodies = Vec::with_capacity(entries.len());
         for entry in entries {
             let body = serde_json::to_vec(entry)?;
@@ -204,6 +203,7 @@ impl SessionWal {
             {
                 return Err(WalError::DuplicateOperation(operation_id.clone()));
             }
+            validate_seq_entry(entry, &mut allocated_high_water_mark)?;
             bodies.push(body);
         }
         for body in &bodies {
@@ -217,6 +217,7 @@ impl SessionWal {
         }
         self.file.sync_data()?;
         self.operation_ids.extend(batch_operation_ids);
+        self.allocated_high_water_mark = allocated_high_water_mark;
         let journal_through = JournalLsn::new(self.file.metadata()?.len());
         let records_through = entries
             .iter()
@@ -256,6 +257,7 @@ fn recover_path(path: &Path) -> Result<RecoveredJournal, WalError> {
     let mut entries = Vec::new();
     let mut discarded_tail = false;
     let mut journal_through = JournalLsn::ORIGIN;
+    let mut allocated_high_water_mark = None;
     let mut operation_ids = BTreeSet::new();
 
     loop {
@@ -322,11 +324,17 @@ fn recover_path(path: &Path) -> Result<RecoveredJournal, WalError> {
                 reason: "duplicate boundary operation",
             });
         }
+        validate_seq_entry(&entry, &mut allocated_high_water_mark).map_err(|_| {
+            WalError::CorruptCommittedJournal {
+                offset: frame_offset,
+                reason: "non-monotonic Record sequence",
+            }
+        })?;
         entries.push(entry);
         journal_through = JournalLsn::new(file.stream_position()?);
     }
 
-    let durable_high_water_mark = entries.iter().filter_map(WalEntry::allocated_seq).max();
+    let durable_high_water_mark = allocated_high_water_mark;
     let records_through = entries
         .iter()
         .filter_map(WalEntry::record_seq)
@@ -345,6 +353,31 @@ fn recover_path(path: &Path) -> Result<RecoveredJournal, WalError> {
     })
 }
 
+fn validate_seq_entry(entry: &WalEntry, high_water_mark: &mut Option<u64>) -> Result<(), WalError> {
+    match entry {
+        WalEntry::RecordCandidate { record, .. } => {
+            if high_water_mark.is_some_and(|allocated| record.seq <= allocated) {
+                return Err(WalError::NonMonotonicSequence {
+                    seq: record.seq,
+                    allocated_high_water_mark: *high_water_mark,
+                });
+            }
+            *high_water_mark = Some(record.seq);
+        }
+        WalEntry::HighWaterMark { seq } => {
+            if high_water_mark.is_some_and(|allocated| *seq < allocated) {
+                return Err(WalError::NonMonotonicSequence {
+                    seq: *seq,
+                    allocated_high_water_mark: *high_water_mark,
+                });
+            }
+            *high_water_mark = Some(*seq);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 #[derive(Debug, Error)]
 pub enum WalError {
     #[error("session WAL I/O failed: {0}")]
@@ -359,6 +392,13 @@ pub enum WalError {
     CorruptCommittedJournal { offset: u64, reason: &'static str },
     #[error("duplicate boundary operation {0} in session WAL")]
     DuplicateOperation(BoundaryOperationId),
+    #[error(
+        "Record sequence {seq} does not advance allocated high-water mark {allocated_high_water_mark:?}"
+    )]
+    NonMonotonicSequence {
+        seq: u64,
+        allocated_high_water_mark: Option<u64>,
+    },
     #[error("session WAL lock is poisoned")]
     LockPoisoned,
 }
@@ -384,11 +424,26 @@ mod tests {
     }
 
     fn candidate(seq: u64) -> WalEntry {
+        candidate_with_operation(seq, format!("op-{seq}"))
+    }
+
+    fn candidate_with_operation(seq: u64, operation_id: impl Into<String>) -> WalEntry {
         WalEntry::RecordCandidate {
-            operation_id: BoundaryOperationId::parse(format!("op-{seq}")).expect("operation"),
+            operation_id: BoundaryOperationId::parse(operation_id).expect("operation"),
             record: WalRecord::from(&record(seq)),
             effect: None,
         }
+    }
+
+    fn write_raw_frame(file: &mut File, entry: &WalEntry) {
+        let body = serde_json::to_vec(entry).expect("serialize WAL entry");
+        file.write_all(FRAME_MAGIC).expect("magic");
+        file.write_all(&(body.len() as u32).to_be_bytes())
+            .expect("length");
+        file.write_all(&body).expect("body");
+        file.write_all(blake3::hash(&body).as_bytes())
+            .expect("checksum");
+        file.write_all(COMMIT_MAGIC).expect("commit");
     }
 
     #[test]
@@ -427,6 +482,43 @@ mod tests {
         assert_eq!(recovered.entries, vec![candidate(1), candidate(2)]);
         assert!(recovered.discarded_tail);
         assert_eq!(recovered.durable_high_water_mark, Some(2));
+    }
+
+    #[test]
+    fn reopen_truncates_incomplete_tail_before_new_append() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("journal/wal-000001");
+        let mut wal = SessionWal::open(&path).expect("open WAL");
+        wal.append_batch(&[candidate(1), candidate(2)])
+            .expect("append initial records");
+        let committed_length = wal.durable_frontier().journal_through.get();
+        wal.file.write_all(FRAME_MAGIC).expect("partial frame");
+        wal.file.write_all(&100_u32.to_be_bytes()).expect("length");
+        wal.file.write_all(b"partial").expect("partial body");
+        wal.file.sync_data().expect("sync partial tail");
+        drop(wal);
+
+        let mut reopened = SessionWal::open(&path).expect("reopen and repair WAL");
+        assert_eq!(
+            fs::metadata(&path).expect("metadata").len(),
+            committed_length
+        );
+        reopened
+            .append_batch(&[candidate(3)])
+            .expect("append after repaired tail");
+        drop(reopened);
+
+        let final_wal = SessionWal::open(&path).expect("final reopen");
+        let recovered = final_wal.recover().expect("recover all records");
+        assert_eq!(
+            recovered
+                .entries
+                .iter()
+                .filter_map(WalEntry::record_seq)
+                .collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        assert!(!recovered.discarded_tail);
     }
 
     #[test]
@@ -539,5 +631,87 @@ mod tests {
             Err(WalError::DuplicateOperation(_))
         ));
         assert_eq!(fs::metadata(&path).expect("metadata").len(), length_before);
+    }
+
+    #[test]
+    fn wal_rejects_reused_or_regressing_record_sequence_before_writing() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("journal/wal-000001");
+        let mut wal = SessionWal::open(&path).expect("open WAL");
+        wal.append_batch(&[candidate_with_operation(5, "first")])
+            .expect("first record");
+        let length_before = fs::metadata(&path).expect("metadata").len();
+
+        for entry in [
+            candidate_with_operation(5, "reuse"),
+            candidate_with_operation(4, "regress"),
+        ] {
+            assert!(matches!(
+                wal.append_batch(&[entry]),
+                Err(WalError::NonMonotonicSequence { .. })
+            ));
+        }
+        assert_eq!(fs::metadata(&path).expect("metadata").len(), length_before);
+    }
+
+    #[test]
+    fn wal_allows_gaps_and_equal_candidate_high_water_mark() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let mut wal =
+            SessionWal::open(directory.path().join("journal/wal-000001")).expect("open WAL");
+
+        wal.append_batch(&[
+            candidate(1),
+            WalEntry::HighWaterMark { seq: 1 },
+            candidate(10),
+            WalEntry::HighWaterMark { seq: 10 },
+        ])
+        .expect("monotonic sequence with a gap");
+        assert_eq!(
+            wal.durable_frontier().records_through,
+            RecordFrontier::Through(10)
+        );
+    }
+
+    #[test]
+    fn wal_rejects_regressing_high_water_mark_and_preallocated_record() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let mut wal =
+            SessionWal::open(directory.path().join("journal/wal-000001")).expect("open WAL");
+        wal.append_batch(&[WalEntry::HighWaterMark { seq: 10 }])
+            .expect("allocate sequence");
+
+        assert!(matches!(
+            wal.append_batch(&[WalEntry::HighWaterMark { seq: 9 }]),
+            Err(WalError::NonMonotonicSequence { .. })
+        ));
+        assert!(matches!(
+            wal.append_batch(&[candidate_with_operation(10, "already-allocated")]),
+            Err(WalError::NonMonotonicSequence { .. })
+        ));
+    }
+
+    #[test]
+    fn recovery_rejects_committed_non_monotonic_record_sequence() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("journal/wal-000001");
+        fs::create_dir_all(path.parent().expect("journal directory")).expect("create journal");
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+            .expect("create raw WAL");
+        write_raw_frame(&mut file, &candidate_with_operation(2, "later"));
+        write_raw_frame(&mut file, &candidate_with_operation(1, "earlier"));
+        file.sync_data().expect("sync invalid WAL");
+        drop(file);
+
+        assert!(matches!(
+            SessionWal::open(&path),
+            Err(WalError::CorruptCommittedJournal {
+                reason: "non-monotonic Record sequence",
+                ..
+            })
+        ));
     }
 }
