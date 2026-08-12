@@ -612,6 +612,9 @@ pub(crate) fn imported_pack_script(
         tag_init: format!("TAG={}", shell_single_quote(image_tag)),
         acquire: String::new(),
         agent_prep,
+        // Imported terminal ownership is explicit: only Pixel State appends a
+        // fail-closed devpts mount through `extra_mounts` above.
+        mount_supervisor_devpts: false,
         launch,
         init_cwd: "/",
         port: plan.port,
@@ -1311,16 +1314,23 @@ mod tests {
         let plain =
             derive_imported_service_plan(&config(), SecretEnvPolicy::Reject, None, None).unwrap();
         let plain_script = imported_pack_script("docker", "ato-import-x", &plain, &[], 1024, None);
+        let init = plain_script
+            .split("<<'INIT'")
+            .nth(1)
+            .unwrap()
+            .split("INIT")
+            .next()
+            .unwrap();
         assert!(
-            !plain_script.contains("devpts"),
+            !init.contains("devpts"),
             "a Web import must not mount devpts (init byte-stability)"
         );
         assert!(
-            !plain_script.contains("cp -a \"$seed/."),
+            !init.contains("cp -a \"$seed/."),
             "no copy-up when no mounts"
         );
         assert_eq!(
-            plain_script.matches("mount -t tmpfs").count(),
+            init.matches("mount -t tmpfs").count(),
             3,
             "only the standard /tmp /run /var/tmp mounts"
         );

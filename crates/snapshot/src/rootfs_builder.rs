@@ -2761,6 +2761,7 @@ pub(crate) fn build_rootfs_script(spec: &RootfsBuildSpec, size_mib: u64) -> Stri
 
     let (agent_prep, launch) =
         supervisor_prep_and_launch(spec.supervisor.as_ref(), spec.port, &spec.start_cmd);
+    let mount_supervisor_devpts = !agent_prep.trim().is_empty();
     // The legacy acquire step: copy the materialized source into the build dir and
     // assemble the app image from a GENERATED Dockerfile. The Docker-import path
     // (ato#994) replaces exactly this step with an already-built imported image —
@@ -2787,6 +2788,7 @@ docker build -q -t "$TAG" "$BUILD" >/dev/null
         tag_init: "TAG=\"ato-rootfs-$$\"".into(),
         acquire,
         agent_prep,
+        mount_supervisor_devpts,
         launch,
         init_cwd: "/app",
         port: spec.port,
@@ -2916,6 +2918,9 @@ pub(crate) struct PackScriptInputs<'a> {
     /// non-empty — it sits between `trap cleanup EXIT` and `CID=$(… create …)`.
     pub acquire: String,
     pub agent_prep: String,
+    /// Legacy supervisor workloads require PTYs. Docker imports decide PTY
+    /// ownership from their explicit Pixel State semantics instead.
+    pub mount_supervisor_devpts: bool,
     pub launch: String,
     /// Init's working directory before launch: `/app` for legacy builds (the
     /// generated Dockerfile put the app there), `/` for imported images (their
@@ -2944,10 +2949,10 @@ pub(crate) struct PackScriptInputs<'a> {
 /// to the pre-#994 single template) and `docker_import::rootfs` for the import
 /// assembly.
 pub(crate) fn rootfs_pack_script(i: &PackScriptInputs<'_>) -> String {
-    let supervisor_device_mounts = if i.agent_prep.trim().is_empty() {
-        ""
-    } else {
+    let supervisor_device_mounts = if i.mount_supervisor_devpts {
         "mkdir -p /dev/pts\nmount -t devpts devpts /dev/pts 2>/dev/null\nln -sf pts/ptmx /dev/ptmx\n"
+    } else {
+        ""
     };
     format!(
         r#"set -euo pipefail

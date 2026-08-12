@@ -11,10 +11,14 @@ use crate::application::auth::consent_store::approve_execution_plan_consent;
 use crate::application::preflight::collect_aggregate_requirements;
 use crate::application::runtime_prepare::prepare_tools;
 use crate::application::runtime_setup::{collect_setup_status, install_tools};
-use crate::cli::{ConsentInternalCommands, InternalCommands, RuntimeInternalCommands};
+use crate::cli::{
+    CapsuleProtocolInternalCommands, ConsentInternalCommands, InternalCommands,
+    RuntimeInternalCommands,
+};
 
 pub(crate) fn execute_internal_command(command: InternalCommands) -> Result<()> {
     match command {
+        InternalCommands::CapsuleProtocol { command } => execute_capsule_protocol(command),
         InternalCommands::Consent { command } => execute_consent_command(command),
         InternalCommands::Preflight {
             target,
@@ -24,6 +28,85 @@ pub(crate) fn execute_internal_command(command: InternalCommands) -> Result<()> 
         InternalCommands::Runtime { command } => execute_runtime_command(command),
         InternalCommands::ImportPreviewSweep { force, json } => {
             execute_import_preview_sweep_command(force, json)
+        }
+    }
+}
+
+fn execute_capsule_protocol(command: CapsuleProtocolInternalCommands) -> Result<()> {
+    use std::collections::BTreeMap;
+
+    use capsule::protocol_bundle::{PortableCapsule, capture_workspace_state};
+    use capsule::protocol_runtime::{
+        PtyConnector, ReplayEngine, StateRuntime, WorkspaceStateRuntime, pty_descriptor_connector,
+        record_pty_command,
+    };
+    use capsule_protocol::{CURRENT_SCHEMA_VERSION, CapsuleDescriptor};
+
+    match command {
+        CapsuleProtocolInternalCommands::Capture {
+            workspace,
+            output,
+            command,
+        } => {
+            let workspace = workspace.canonicalize().map_err(|error| {
+                anyhow!(
+                    "failed to resolve workspace {}: {error}",
+                    workspace.display()
+                )
+            })?;
+            let (state, object) = capture_workspace_state(&workspace)?;
+            let records = record_pty_command(&workspace, &command)?;
+            let state_ref = state.state_ref.clone();
+            let (connector_id, connector) = pty_descriptor_connector();
+            PortableCapsule {
+                descriptor: CapsuleDescriptor {
+                    schema_version: CURRENT_SCHEMA_VERSION,
+                    base_state: state,
+                    connectors: BTreeMap::from([(connector_id, connector)]),
+                },
+                records,
+                objects: BTreeMap::from([(state_ref, object)]),
+            }
+            .write(&output)?;
+            println!("wrote Capsule Protocol bundle: {}", output.display());
+            Ok(())
+        }
+        CapsuleProtocolInternalCommands::Replay {
+            bundle,
+            into,
+            no_continue,
+        } => {
+            let bundle = PortableCapsule::read(&bundle)?;
+            let object = bundle
+                .objects
+                .get(&bundle.descriptor.base_state.state_ref)
+                .ok_or_else(|| anyhow!("base state object is absent after bundle validation"))?;
+            let state_runtime = WorkspaceStateRuntime {
+                object,
+                destination: &into,
+            };
+            let restored = state_runtime.restore(&bundle.descriptor.base_state)?;
+            let mut connector = PtyConnector::open(&restored)?;
+            let outcome =
+                match ReplayEngine::replay(&bundle.descriptor, &bundle.records, &mut connector) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        let _ = connector.shutdown();
+                        return Err(error.into());
+                    }
+                };
+            eprintln!(
+                "Capsule Protocol replay complete: {} records; workspace={}",
+                outcome.records_processed,
+                restored.display()
+            );
+            if no_continue {
+                connector.shutdown()?;
+                Ok(())
+            } else {
+                connector.continue_interactive()?;
+                Ok(())
+            }
         }
     }
 }

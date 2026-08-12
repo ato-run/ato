@@ -54,7 +54,7 @@ older name `ato.lock.json` is legacy-only: it is still read, never written, and
 never promoted by guessing. A tree carrying **both** `capsule.lock` and
 `ato.lock.json` fails closed rather than picking one — resolve it by deleting
 the legacy file once you have confirmed the canonical lock is the one you want.
-See [the spec's §5](rfcs/accepted/CAPSULE_V1_EXECUTION_MODEL_SPEC.md) for the
+See [the archived model's §5](rfcs/archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md) for the
 full precedence table, including the separate `capsule.lock.json` compatibility
 lock.
 
@@ -127,5 +127,5 @@ These errors require explicit re-resolution, rebuild, migration, or policy
 change. They never rewrite the old lock or issue a new identity implicitly.
 
 See the
-[accepted Capsule v1 model](rfcs/accepted/CAPSULE_V1_EXECUTION_MODEL_SPEC.md)
+[archived Capsule v1 model](rfcs/archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md)
 for normative details.

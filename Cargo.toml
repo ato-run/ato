@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "crates/cli",
     "crates/capsule",
+    "crates/capsule-codec",
+    "crates/capsule-protocol",
     "crates/capsulefs",
     "crates/snapshot",
     "crates/snapshot-builder",

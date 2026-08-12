@@ -60,7 +60,12 @@ const SMART_DEFAULT_EXCLUDES: &[&str] = &[
     "payload.v3.manifest.json",
     "payload.tar",
     "payload.tar.zst",
-    // Secret / config files — never include in capsule archives
+];
+
+/// Security exclusions are evaluated before includes, artifact exceptions, and
+/// normal excludes. No publishing profile may opt these paths back in, except
+/// for the explicit non-secret environment template allowlist.
+const HARD_SECURITY_EXCLUDES: &[&str] = &[
     ".env",
     "**/.env",
     ".env.*",
@@ -79,14 +84,60 @@ const SMART_DEFAULT_EXCLUDES: &[&str] = &[
     "**/.pypirc",
 ];
 
+/// Credential stores and local databases are never portable State. These are
+/// stricter than normal artifact packing because a State transfer captures
+/// live developer-machine contents rather than declared build inputs.
+const PORTABLE_STATE_SECRET_EXCLUDES: &[&str] = &[
+    ".ssh/**",
+    "**/.ssh/**",
+    ".aws/**",
+    "**/.aws/**",
+    ".config/gcloud/**",
+    "**/.config/gcloud/**",
+    ".kube/config",
+    "**/.kube/config",
+    "**/*.db",
+    "**/*.sqlite",
+    "**/*.sqlite3",
+];
+
 #[derive(Debug, Clone)]
 pub struct PackFilter {
+    portable_state_hard_exclude: GlobSet,
+    hard_exclude: GlobSet,
     include: Option<GlobSet>,
     exclude: GlobSet,
     profile: PublishProfile,
 }
 
 impl PackFilter {
+    /// Canonical fail-safe filter for portable State capture.
+    ///
+    /// Portable State has no manifest-level include overrides: it starts from
+    /// the same smart exclusions as capsule packing and cannot opt known
+    /// credential files back in.
+    pub fn for_portable_state() -> Result<Self> {
+        let hard_patterns = HARD_SECURITY_EXCLUDES
+            .iter()
+            .map(|pattern| (*pattern).to_owned())
+            .collect::<Vec<_>>();
+        let portable_state_hard_patterns = PORTABLE_STATE_SECRET_EXCLUDES
+            .iter()
+            .map(|pattern| (*pattern).to_owned())
+            .collect::<Vec<_>>();
+        let exclude_patterns = SMART_DEFAULT_EXCLUDES
+            .iter()
+            .map(|pattern| (*pattern).to_owned())
+            .collect::<Vec<_>>();
+        Ok(Self {
+            portable_state_hard_exclude: build_glob_set(&portable_state_hard_patterns)?,
+            hard_exclude: build_glob_set(&hard_patterns)?,
+            include: None,
+            exclude: build_glob_set(&exclude_patterns)?,
+            profile: PublishProfile::Artifact,
+        })
+    }
+
     pub fn from_manifest_path(manifest_path: &Path) -> Result<Self> {
         let raw = std::fs::read_to_string(manifest_path).map_err(CapsuleError::Io)?;
         let manifest = CapsuleManifest::from_toml(&raw).map_err(|e| {
@@ -132,8 +183,14 @@ impl PackFilter {
         excludes.extend(SMART_DEFAULT_EXCLUDES.iter().map(|v| v.to_string()));
         excludes.extend(exclude_patterns);
 
+        let hard_excludes = HARD_SECURITY_EXCLUDES
+            .iter()
+            .map(|pattern| (*pattern).to_owned())
+            .collect::<Vec<_>>();
         let exclude = build_glob_set(&excludes)?;
         Ok(Self {
+            portable_state_hard_exclude: build_glob_set(&[])?,
+            hard_exclude: build_glob_set(&hard_excludes)?,
             include,
             exclude,
             profile,
@@ -143,6 +200,14 @@ impl PackFilter {
     pub fn should_include_file(&self, relative_path: &Path) -> bool {
         let rel = normalize_rel_path(relative_path);
         if rel.is_empty() {
+            return false;
+        }
+
+        if self.portable_state_hard_exclude.is_match(&rel) {
+            return false;
+        }
+
+        if self.hard_exclude.is_match(&rel) && !is_env_template_file(&rel) {
             return false;
         }
 
@@ -674,6 +739,30 @@ mod tests {
         // Regular JSON files are still included
         assert!(filter.should_include_file(Path::new("src/data.json")));
         assert!(filter.should_include_file(Path::new("package.json")));
+    }
+
+    #[test]
+    fn portable_state_security_excludes_precede_artifact_fast_paths() {
+        let filter = PackFilter::for_portable_state().expect("portable filter");
+
+        assert!(!filter.should_include_file(Path::new(".next/standalone/node_modules/pkg/.env")));
+        assert!(!filter.should_include_file(Path::new(".next/standalone/node_modules/pkg/.npmrc")));
+        assert!(!filter.should_include_file(Path::new(
+            ".next/standalone/node_modules/pkg/.ssh/id_ed25519"
+        )));
+        assert!(
+            filter.should_include_file(Path::new(".next/standalone/node_modules/pkg/index.js"))
+        );
+    }
+
+    #[test]
+    fn portable_state_credential_stores_cannot_use_env_template_exceptions() {
+        let filter = PackFilter::for_portable_state().expect("portable filter");
+
+        assert!(!filter.should_include_file(Path::new(".ssh/.env.example")));
+        assert!(!filter.should_include_file(Path::new(".aws/.env.example")));
+        assert!(!filter.should_include_file(Path::new(".config/gcloud/.env.example")));
+        assert!(filter.should_include_file(Path::new("config/.env.example")));
     }
 
     fn make_manifest_with_pack(include: Vec<String>, exclude: Vec<String>) -> CapsuleManifest {

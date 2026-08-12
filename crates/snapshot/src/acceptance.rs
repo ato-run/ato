@@ -3,7 +3,7 @@
 //! A `running` Snapshot is accepted **only** after an *immutable candidate* is
 //! verified through a **disposable** restored Session, and never by letting the
 //! verification's side effects into the accepted bytes. The RFC
-//! (`docs/rfcs/accepted/CAPSULE_V1_EXECUTION_MODEL_SPEC.md` §8.1) fixes the
+//! (`docs/rfcs/archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md` §8.1) fixes the
 //! pipeline:
 //!
 //! ```text
