@@ -538,6 +538,29 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn schema_v2_workspace_record_decodes_as_workspace_runtime_profile() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let store = CapsuleProtocolSessionStore::open(directory.path()).expect("store");
+        let supervisor = NewSupervisorIdentity::generate(3, 100, "start-100");
+        let expected = stored_session(supervisor.identity);
+        let mut value = serde_json::to_value(&expected).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.insert("schema_version".to_string(), Value::from(2));
+        let profile = object.remove("runtime_profile").unwrap();
+        object.insert("workspace".to_string(), profile["workspace"].clone());
+        let path = directory.path().join("session-1");
+        fs::create_dir(&path).unwrap();
+        fs::write(
+            path.join("session.json"),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(store.read(&expected.session_id).unwrap(), expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn list_skips_legacy_and_future_schema_entries() {
         let directory = tempfile::tempdir().expect("tempdir");
         let store = CapsuleProtocolSessionStore::open(directory.path()).expect("store");

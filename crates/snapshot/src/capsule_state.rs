@@ -558,6 +558,13 @@ mod tests {
         let mut mismatch = object.clone();
         mismatch.legacy_manifest.snapshot_backend.kind = "firecracker".to_string();
         assert!(mismatch.validate().is_err());
+        let mut no_proof = object.clone();
+        no_proof.legacy_manifest.no_secret_proof = None;
+        assert!(no_proof.validate().is_err());
+        let mut envelope_mismatch = object.clone();
+        envelope_mismatch.artifact_envelope.legacy_manifest_id =
+            format!("blake3:{}", "0".repeat(64));
+        assert!(envelope_mismatch.validate().is_err());
 
         let export = export_ready_state(object.clone(), &producer).unwrap();
         let missing = export.adapter_roles.keys().next().unwrap().clone();
