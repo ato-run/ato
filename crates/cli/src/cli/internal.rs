@@ -21,6 +21,13 @@ pub(crate) enum InternalCommands {
         command: CapsuleProtocolInternalCommands,
     },
 
+    /// Detached Capsule Session Supervisor plumbing.
+    #[command(hide = true, about = "Manage detached Capsule terminal sessions")]
+    CapsuleSession {
+        #[command(subcommand)]
+        command: CapsuleSessionInternalCommands,
+    },
+
     /// Consent-store plumbing surface. Currently only carries the
     /// approve-execution-plan endpoint that the desktop's E302 modal
     /// (and the matching `approve_execution_plan_consent` MCP tool)
@@ -103,6 +110,51 @@ pub(crate) enum InternalCommands {
         /// Emit machine-readable JSON output on stdout.
         #[arg(long, default_value_t = false)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum CapsuleSessionInternalCommands {
+    #[command(hide = true)]
+    Start {
+        bundle: PathBuf,
+        #[arg(long)]
+        into: PathBuf,
+        #[arg(long, default_value_t = false)]
+        no_attach: bool,
+    },
+    #[command(hide = true)]
+    Serve {
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        bundle: PathBuf,
+        #[arg(long)]
+        into: PathBuf,
+    },
+    #[command(hide = true)]
+    Attach {
+        session: String,
+        #[arg(long, default_value_t = false)]
+        observe: bool,
+    },
+    #[command(hide = true)]
+    Status { session: String },
+    #[command(hide = true)]
+    Kill { session: String },
+    #[command(hide = true)]
+    List,
+    /// Lease helper. Spawned only by a Supervisor.
+    #[command(hide = true)]
+    Watchdog {
+        #[arg(long)]
+        pid: u32,
+        #[arg(long)]
+        pgid: i32,
+        #[arg(long)]
+        process_start_identity: String,
+        #[arg(long)]
+        lease_fd: i32,
     },
 }
 
