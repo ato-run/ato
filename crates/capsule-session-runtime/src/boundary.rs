@@ -45,16 +45,11 @@ impl BoundaryDeliveryLedger {
         &mut self,
         operation_id: BoundaryOperationId,
     ) -> Result<(), BoundaryProtocolError> {
-        if self
-            .operations
-            .insert(
-                operation_id.clone(),
-                BoundaryDeliveryState::CandidateDurable,
-            )
-            .is_some()
-        {
+        if self.operations.contains_key(&operation_id) {
             return Err(BoundaryProtocolError::DuplicateOperation(operation_id));
         }
+        self.operations
+            .insert(operation_id, BoundaryDeliveryState::CandidateDurable);
         Ok(())
     }
 
@@ -159,5 +154,26 @@ mod tests {
             ledger.release_delivery(&operation_id()),
             Err(BoundaryProtocolError::UnknownOperation(_))
         ));
+    }
+
+    #[test]
+    fn duplicate_candidate_does_not_reset_existing_delivery_state() {
+        let mut ledger = BoundaryDeliveryLedger::default();
+        let operation_id = operation_id();
+        ledger
+            .candidate_durable(operation_id.clone())
+            .expect("candidate");
+        ledger
+            .release_delivery(&operation_id)
+            .expect("release delivery");
+
+        assert!(matches!(
+            ledger.candidate_durable(operation_id.clone()),
+            Err(BoundaryProtocolError::DuplicateOperation(_))
+        ));
+        assert!(ledger.has_uncertain_delivery());
+        ledger
+            .acknowledge_delivery(&operation_id)
+            .expect("existing state was preserved");
     }
 }

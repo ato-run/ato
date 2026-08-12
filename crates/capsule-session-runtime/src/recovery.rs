@@ -24,7 +24,7 @@ pub struct ConnectorCheckpoint {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectorRecoveryStrategy {
-    Fresh,
+    Fresh { frontier_independent: bool },
     Checkpoint { checkpoint: ConnectorCheckpoint },
     ReconstructFromRecords { from: RecordFrontier },
 }
@@ -68,16 +68,36 @@ impl RecoveryPlan {
                     connector: recovery.through,
                 });
             }
-            if let ConnectorRecoveryStrategy::Checkpoint { checkpoint } = &recovery.strategy {
-                if checkpoint.connector_id != recovery.connector_id {
-                    return Err(RecoveryPlanError::CheckpointConnectorMismatch);
+            match &recovery.strategy {
+                ConnectorRecoveryStrategy::Fresh {
+                    frontier_independent,
+                } => {
+                    if !frontier_independent {
+                        return Err(RecoveryPlanError::FreshRequiresFrontierIndependent {
+                            connector_id: recovery.connector_id.clone(),
+                        });
+                    }
                 }
-                if checkpoint.applied_through != self.through {
-                    return Err(RecoveryPlanError::CheckpointFrontierMismatch {
-                        connector_id: recovery.connector_id.clone(),
-                        plan: self.through,
-                        checkpoint: checkpoint.applied_through,
-                    });
+                ConnectorRecoveryStrategy::Checkpoint { checkpoint } => {
+                    if checkpoint.connector_id != recovery.connector_id {
+                        return Err(RecoveryPlanError::CheckpointConnectorMismatch);
+                    }
+                    if checkpoint.applied_through != self.through {
+                        return Err(RecoveryPlanError::CheckpointFrontierMismatch {
+                            connector_id: recovery.connector_id.clone(),
+                            plan: self.through,
+                            checkpoint: checkpoint.applied_through,
+                        });
+                    }
+                }
+                ConnectorRecoveryStrategy::ReconstructFromRecords { from } => {
+                    if from > &self.through {
+                        return Err(RecoveryPlanError::ReconstructionStartsAfterFrontier {
+                            connector_id: recovery.connector_id.clone(),
+                            from: *from,
+                            through: self.through,
+                        });
+                    }
                 }
             }
         }
@@ -158,6 +178,16 @@ pub enum RecoveryPlanError {
         plan: RecordFrontier,
         checkpoint: RecordFrontier,
     },
+    #[error("Connector {connector_id} may use Fresh recovery only when frontier-independent")]
+    FreshRequiresFrontierIndependent { connector_id: ConnectorId },
+    #[error(
+        "Connector {connector_id} reconstruction starts at {from:?}, after recovery frontier {through:?}"
+    )]
+    ReconstructionStartsAfterFrontier {
+        connector_id: ConnectorId,
+        from: RecordFrontier,
+        through: RecordFrontier,
+    },
 }
 
 #[cfg(test)]
@@ -188,7 +218,9 @@ mod tests {
                 ConnectorRecoveryPoint {
                     connector_id,
                     through: RecordFrontier::Through(6),
-                    strategy: ConnectorRecoveryStrategy::Fresh,
+                    strategy: ConnectorRecoveryStrategy::Fresh {
+                        frontier_independent: true,
+                    },
                 },
             )]),
         };
@@ -212,5 +244,57 @@ mod tests {
             .expect("replay range");
 
         assert_eq!(replay.into_iter().copied().collect::<Vec<_>>(), [3, 5]);
+    }
+
+    #[test]
+    fn rejects_fresh_recovery_without_frontier_independence() {
+        let connector_id = ConnectorId::parse("database.main").expect("connector id");
+        let plan = RecoveryPlan {
+            through: RecordFrontier::Through(42),
+            state: state(RecordFrontier::Through(42)),
+            connectors: BTreeMap::from([(
+                connector_id.clone(),
+                ConnectorRecoveryPoint {
+                    connector_id: connector_id.clone(),
+                    through: RecordFrontier::Through(42),
+                    strategy: ConnectorRecoveryStrategy::Fresh {
+                        frontier_independent: false,
+                    },
+                },
+            )]),
+        };
+
+        assert_eq!(
+            plan.validate_for_target(RecordFrontier::Through(42)),
+            Err(RecoveryPlanError::FreshRequiresFrontierIndependent { connector_id })
+        );
+    }
+
+    #[test]
+    fn rejects_reconstruction_start_after_common_frontier() {
+        let connector_id = ConnectorId::parse("database.main").expect("connector id");
+        let plan = RecoveryPlan {
+            through: RecordFrontier::Through(42),
+            state: state(RecordFrontier::Through(42)),
+            connectors: BTreeMap::from([(
+                connector_id.clone(),
+                ConnectorRecoveryPoint {
+                    connector_id: connector_id.clone(),
+                    through: RecordFrontier::Through(42),
+                    strategy: ConnectorRecoveryStrategy::ReconstructFromRecords {
+                        from: RecordFrontier::Through(43),
+                    },
+                },
+            )]),
+        };
+
+        assert_eq!(
+            plan.validate_for_target(RecordFrontier::Through(50)),
+            Err(RecoveryPlanError::ReconstructionStartsAfterFrontier {
+                connector_id,
+                from: RecordFrontier::Through(43),
+                through: RecordFrontier::Through(42),
+            })
+        );
     }
 }

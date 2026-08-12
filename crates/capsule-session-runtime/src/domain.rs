@@ -14,6 +14,35 @@ pub enum RecordFrontier {
     Through(u64),
 }
 
+/// Monotonic byte position of the last durably committed WAL frame.
+///
+/// This is runtime-local evidence and is never serialized into a portable
+/// Capsule.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
+#[serde(transparent)]
+pub struct JournalLsn(u64);
+
+impl JournalLsn {
+    pub const ORIGIN: Self = Self(0);
+
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// A Record frontier backed by a specific durable WAL position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DurableFrontier {
+    pub records_through: RecordFrontier,
+    pub journal_through: JournalLsn,
+}
+
 impl RecordFrontier {
     pub fn contains(self, seq: u64) -> bool {
         match self {
@@ -96,5 +125,16 @@ mod tests {
     #[test]
     fn origin_is_distinct_from_unknown_and_replays_first_record() {
         assert!(RecordFrontier::Origin.replay_contains(RecordFrontier::Through(1), 1));
+    }
+
+    #[test]
+    fn durable_frontier_keeps_record_and_journal_positions_distinct() {
+        let frontier = DurableFrontier {
+            records_through: RecordFrontier::Through(9),
+            journal_through: JournalLsn::new(4096),
+        };
+
+        assert_eq!(frontier.records_through, RecordFrontier::Through(9));
+        assert_eq!(frontier.journal_through.get(), 4096);
     }
 }

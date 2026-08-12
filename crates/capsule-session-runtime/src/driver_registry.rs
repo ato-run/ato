@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::AttachmentMechanism;
-use crate::session_store::{set_directory_owner_only, write_atomic_owner_only};
+use crate::session_store::{
+    ensure_owner_only_store_supported, set_directory_owner_only, write_atomic_owner_only,
+};
 
 const DRIVER_REGISTRY_SCHEMA_VERSION: u16 = 1;
 
@@ -88,6 +90,7 @@ pub struct DriverRegistry {
 impl DriverRegistry {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, DriverRegistryError> {
         let root = root.as_ref();
+        ensure_owner_only_store_supported()?;
         fs::create_dir_all(root)?;
         set_directory_owner_only(root)?;
         let path = root.join("drivers.json");
@@ -167,10 +170,12 @@ pub enum DriverRegistryError {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     fn protocol() -> ProtocolId {
         ProtocolId::parse("com.example.io.echo@1").expect("protocol")
     }
 
+    #[cfg(unix)]
     fn external_registration(path: PathBuf) -> DriverRegistration {
         DriverRegistration {
             protocol_id: protocol().to_string(),
@@ -186,6 +191,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn unknown_protocol_fails_closed_without_path_search() {
         let directory = tempfile::tempdir().expect("tempdir");
@@ -196,6 +202,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn external_driver_requires_explicit_absolute_path_and_round_trips() {
         let directory = tempfile::tempdir().expect("tempdir");
@@ -214,5 +221,16 @@ mod tests {
             reopened.resolve(&protocol()).expect("resolve"),
             &registration
         );
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn registry_fails_closed_without_owner_only_acl_backend() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        assert!(matches!(
+            DriverRegistry::open(directory.path()),
+            Err(DriverRegistryError::Io(error))
+                if error.kind() == std::io::ErrorKind::Unsupported
+        ));
     }
 }
