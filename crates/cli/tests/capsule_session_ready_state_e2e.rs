@@ -8,8 +8,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use capsule::execution_contract::ExecutionId;
-use capsule::protocol_bundle::{ProtocolBundleError, StreamingBundleWriter};
-use capsule_protocol::{CURRENT_SCHEMA_VERSION, CapsuleDescriptor, IoRecord};
+use capsule::protocol_bundle::{
+    AllowAllPortableExportPolicy, PortableObjectRole, ProtocolBundleError, StreamingBundleWriter,
+};
+use capsule_protocol::{
+    CURRENT_SCHEMA_VERSION, CapsuleDescriptor, ConnectorDef, ConnectorId, Direction, IoRecord,
+    Payload, ProtocolId, RecordKindId, StateTypeId,
+};
 use capsulefs::CasStore;
 use snapshot::capsule_state::{
     ReadyStatePortableExportPolicy, ReadyStateStateObjectV1, export_ready_state,
@@ -37,7 +42,14 @@ fn ato(root: &Path) -> Command {
     command
 }
 
-fn make_bundle(root: &Path) -> PathBuf {
+struct BundleFixtures {
+    valid: PathBuf,
+    connector: PathBuf,
+    record: PathBuf,
+    unknown_state: PathBuf,
+}
+
+fn make_bundles(root: &Path) -> BundleFixtures {
     let producer_root = root.join("producer-cas");
     let store = CasStore::open(&producer_root).unwrap();
     let backend = FakeSnapshotBackend::new();
@@ -86,18 +98,86 @@ fn make_bundle(root: &Path) -> PathBuf {
         &mut policy,
     )
     .unwrap();
+
+    let connector_id = ConnectorId::parse("terminal.main").unwrap();
+    let mut connector_descriptor = descriptor.clone();
+    connector_descriptor.connectors.insert(
+        connector_id.clone(),
+        ConnectorDef {
+            protocol: ProtocolId::parse("ato.io.pty@1").unwrap(),
+            config_ref: None,
+        },
+    );
+    let connector = root.join("ready-state-connector.capsule");
+    StreamingBundleWriter::write_with_state_roles(
+        &connector,
+        &connector_descriptor,
+        std::iter::empty::<Result<IoRecord, ProtocolBundleError>>(),
+        &export.objects,
+        &export.adapter_roles,
+        &mut AllowAllPortableExportPolicy,
+    )
+    .unwrap();
+    let record = root.join("ready-state-record.capsule");
+    StreamingBundleWriter::write_with_state_roles(
+        &record,
+        &connector_descriptor,
+        [Ok(IoRecord {
+            seq: 1,
+            offset_ns: None,
+            observed_at_unix_ns: None,
+            connector: connector_id,
+            direction: Direction::Ingress,
+            kind: RecordKindId::parse("stdin").unwrap(),
+            payload: Payload::Inline(b"input".to_vec()),
+        })],
+        &export.objects,
+        &export.adapter_roles,
+        &mut AllowAllPortableExportPolicy,
+    )
+    .unwrap();
+    let mut unknown_descriptor = descriptor;
+    let unknown_type = StateTypeId::parse("ato.state.unknown@1").unwrap();
+    unknown_descriptor.base_state.state_type = unknown_type.clone();
+    let unknown_roles = export
+        .adapter_roles
+        .keys()
+        .map(|reference| {
+            (
+                reference.clone(),
+                vec![PortableObjectRole::StateAdapterObject {
+                    state_type: unknown_type.clone(),
+                }],
+            )
+        })
+        .collect();
+    let unknown_state = root.join("ready-state-unknown.capsule");
+    StreamingBundleWriter::write_with_state_roles(
+        &unknown_state,
+        &unknown_descriptor,
+        std::iter::empty::<Result<IoRecord, ProtocolBundleError>>(),
+        &export.objects,
+        &unknown_roles,
+        &mut AllowAllPortableExportPolicy,
+    )
+    .unwrap();
     drop(store);
     fs::remove_dir_all(producer_root).unwrap();
-    bundle
+    BundleFixtures {
+        valid: bundle,
+        connector,
+        record,
+        unknown_state,
+    }
 }
 
 #[test]
 fn ready_state_bundle_restores_runs_and_stops_under_supervisor() {
     let root = scratch_dir();
-    let bundle = make_bundle(root.path());
+    let bundles = make_bundles(root.path());
     let start = ato(root.path())
         .args(["internal", "capsule-session", "start"])
-        .arg(&bundle)
+        .arg(&bundles.valid)
         .arg("--into")
         .arg(root.path().join("unused-workspace"))
         .arg("--no-attach")
@@ -158,4 +238,20 @@ fn ready_state_bundle_restores_runs_and_stops_under_supervisor() {
     assert_eq!(stored["runtime_profile"]["kind"], "ready_state");
     assert!(!session_root.join("ready-state-overlay").exists());
     assert!(session_root.join("ready-state-cas/blobs/blake3").is_dir());
+
+    for invalid in [&bundles.connector, &bundles.record, &bundles.unknown_state] {
+        let output = ato(root.path())
+            .args(["internal", "capsule-session", "start"])
+            .arg(invalid)
+            .arg("--into")
+            .arg(root.path().join("unused-invalid"))
+            .arg("--no-attach")
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "invalid Ready-State bundle unexpectedly started: {}",
+            invalid.display()
+        );
+    }
 }
