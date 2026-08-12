@@ -10,7 +10,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use capsule::protocol_bundle::capture_local_workspace_checkpoint;
+use capsule::protocol_bundle::{PortableCapsule, capture_local_workspace_checkpoint};
 use capsule_session_runtime::{SessionWal, WalEntry, WalPayload};
 
 fn scratch_dir(prefix: &str) -> tempfile::TempDir {
@@ -70,6 +70,24 @@ fn start_session(root: &Path, bundle: &Path, restore_name: &str) -> String {
         .expect("SessionId UTF-8")
         .trim()
         .to_owned()
+}
+
+fn start_session_with_discovery_failure(root: &Path, bundle: &Path, restore_name: &str) -> String {
+    let output = ato(root)
+        .env("ATO_TEST_FAIL_PROCESS_DISCOVERY", "1")
+        .args(["internal", "capsule-session", "start"])
+        .arg(bundle)
+        .arg("--into")
+        .arg(root.join(restore_name))
+        .arg("--no-attach")
+        .output()
+        .expect("start detached Session");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
 fn attach_with_input(root: &Path, session_id: &str, input: &[u8]) -> std::process::Output {
@@ -157,6 +175,14 @@ fn resume_session(root: &Path, session_id: &str) -> std::process::Output {
         .args(["internal", "capsule-session", "resume", session_id])
         .output()
         .expect("resume Session")
+}
+
+fn resume_session_with_failure(root: &Path, session_id: &str) -> std::process::Output {
+    ato(root)
+        .env("ATO_TEST_FAIL_RESUME_STARTUP", "1")
+        .args(["internal", "capsule-session", "resume", session_id])
+        .output()
+        .expect("resume Session with injected failure")
 }
 
 fn stored_session(root: &Path, session_id: &str) -> serde_json::Value {
@@ -422,6 +448,7 @@ fn detached_session_survives_cli_and_preserves_one_shell_across_reattach() {
     assert!(!stale_incarnation.status.success());
     fs::write(&session_path, &original_session).expect("restore Session identity");
 
+    journal_resize(root.path(), &session_id, 30, 100);
     kill_session(root.path(), &session_id);
     let stored: serde_json::Value = serde_json::from_slice(
         &fs::read(directory.join("session.json")).expect("read stopped Session"),
@@ -573,6 +600,68 @@ fn branch_rejects_workspace_mutation_missing_from_pty_history() {
 }
 
 #[test]
+fn process_discovery_failure_does_not_commit_a_consistent_frontier() {
+    let root = scratch_dir("capsule-session-discovery-failure-");
+    let bundle = make_bundle(root.path());
+    let session_id = start_session_with_discovery_failure(root.path(), &bundle, "discovery-fail");
+    let before = stored_session(root.path(), &session_id)["latest_consistent_frontier"].clone();
+    let branch = ato(root.path())
+        .args([
+            "internal",
+            "capsule-session",
+            "branch",
+            &session_id,
+            "--into",
+        ])
+        .arg(root.path().join("never-created"))
+        .arg("--no-attach")
+        .output()
+        .expect("attempt branch with failed discovery");
+    assert!(!branch.status.success());
+    assert_eq!(
+        stored_session(root.path(), &session_id)["latest_consistent_frontier"],
+        before
+    );
+    kill_session(root.path(), &session_id);
+}
+
+#[test]
+fn suspend_quiesces_fork_churn_and_leaves_no_descendant() {
+    let root = scratch_dir("capsule-session-fork-churn-");
+    let bundle = make_bundle(root.path());
+    let session_id = start_session(root.path(), &bundle, "fork-churn");
+    let started = attach_with_input(
+        root.path(),
+        &session_id,
+        b"sh -c 'while :; do printf x >> churn.txt; sleep 0.01; done' & echo $! > worker.pid\n",
+    );
+    assert!(started.status.success());
+    let worker_path = root.path().join("fork-churn/worker.pid");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !worker_path.is_file() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+    let worker_pid: u32 = fs::read_to_string(worker_path)
+        .expect("worker pid")
+        .trim()
+        .parse()
+        .expect("numeric worker pid");
+    suspend_session(root.path(), &session_id);
+    let suspended = stored_session(root.path(), &session_id);
+    assert_eq!(suspended["lifecycle"], "suspended");
+    assert!(suspended["latest_consistent_frontier"].is_object());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while unsafe { libc::kill(worker_pid as libc::pid_t, 0) } == 0 && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert_ne!(
+        unsafe { libc::kill(worker_pid as libc::pid_t, 0) },
+        0,
+        "suspend left a churn descendant alive"
+    );
+}
+
+#[test]
 fn suspend_resume_rebases_at_filesystem_restart_without_synthetic_exit() {
     let root = scratch_dir("capsule-session-suspend-");
     let bundle = make_bundle(root.path());
@@ -583,6 +672,7 @@ fn suspend_resume_rebases_at_filesystem_restart_without_synthetic_exit() {
         b"export VALUE=42\nprintf durable > resume-file.txt\n",
     );
     assert!(setup.status.success());
+    journal_resize(root.path(), &session_id, 40, 132);
     let before = stored_session(root.path(), &session_id);
     let old_token = fs::read(session_directory(root.path(), &session_id).join("control/token"))
         .expect("read initial token");
@@ -646,11 +736,21 @@ fn suspend_resume_rebases_at_filesystem_restart_without_synthetic_exit() {
     let observed = attach_with_input(
         root.path(),
         &session_id,
-        b"echo VALUE=${VALUE-unset}\ncat resume-file.txt\n",
+        b"echo VALUE=${VALUE-unset}\ncat resume-file.txt\nstty size\n",
     );
     let output = String::from_utf8_lossy(&observed.stdout);
     assert!(output.contains("VALUE=unset"), "{output}");
     assert!(output.contains("durable"), "{output}");
+    assert!(output.contains("40 132"), "{output}");
+
+    let child_id = branch_session(root.path(), &session_id, "resumed-child");
+    let child_size = attach_with_input(root.path(), &child_id, b"stty size\n");
+    assert!(
+        String::from_utf8_lossy(&child_size.stdout).contains("40 132"),
+        "{}",
+        String::from_utf8_lossy(&child_size.stdout)
+    );
+    kill_session(root.path(), &child_id);
     kill_session(root.path(), &session_id);
 }
 
@@ -676,6 +776,50 @@ fn resume_fails_closed_when_suspended_workspace_drifted() {
         stored_session(root.path(), &session_id)["lifecycle"],
         "suspended"
     );
+}
+
+#[test]
+fn failed_resume_rolls_back_to_suspended_and_seed_rebase_prunes_objects() {
+    let root = scratch_dir("capsule-session-resume-rollback-");
+    let bundle = make_bundle(root.path());
+    let session_id = start_session(root.path(), &bundle, "rollback");
+    let changed = attach_with_input(root.path(), &session_id, b"printf one > state.txt\n");
+    assert!(changed.status.success());
+    suspend_session(root.path(), &session_id);
+
+    let failed = resume_session_with_failure(root.path(), &session_id);
+    assert!(!failed.status.success());
+    assert_eq!(
+        stored_session(root.path(), &session_id)["lifecycle"],
+        "suspended"
+    );
+    let resumed = resume_session(root.path(), &session_id);
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+
+    suspend_session(root.path(), &session_id);
+    let seed_path = session_directory(root.path(), &session_id).join("seed/source.capsule.local");
+    let once = PortableCapsule::read(&seed_path).expect("read once-rebased seed");
+    let once_size = fs::metadata(&seed_path).unwrap().len();
+    assert_eq!(
+        once.objects.len(),
+        1,
+        "unreachable seed objects must be pruned"
+    );
+    assert!(resume_session(root.path(), &session_id).status.success());
+    suspend_session(root.path(), &session_id);
+    let twice = PortableCapsule::read(&seed_path).expect("read twice-rebased seed");
+    let twice_size = fs::metadata(&seed_path).unwrap().len();
+    assert_eq!(twice.objects.len(), once.objects.len());
+    assert!(
+        twice_size <= once_size,
+        "repeated rebase must not grow the seed"
+    );
+    assert!(resume_session(root.path(), &session_id).status.success());
+    kill_session(root.path(), &session_id);
 }
 
 #[test]
