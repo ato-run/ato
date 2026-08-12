@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use capsule_codec::{
-    RecordStreamDecoder, RecordStreamEncoder, decode_descriptor, encode_descriptor,
+    RecordStreamDecoder, RecordStreamEncoder, decode_descriptor_reader, encode_descriptor,
 };
 use capsule_protocol::{
     CapsuleDescriptor, ConnectorId, ContentRef, Direction, IoRecord, Payload, ProtocolId,
@@ -19,6 +19,7 @@ use super::{
     BUNDLE_LIMITS, DESCRIPTOR_MEMBER, MAX_ARCHIVE_BYTES, MAX_OBJECT_COUNT, MemberLimitValidator,
     OBJECT_PREFIX, ProtocolBundleError, RECORDS_MEMBER, normalize_header,
 };
+use crate::packers::pack_filter::PackFilter;
 use crate::security::no_secret::{CredentialScanner, scan_credential_material};
 
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
@@ -97,7 +98,7 @@ impl ObjectSource for DirectoryObjectSource {
             }
             for entry in fs::read_dir(&directory)? {
                 let entry = entry?;
-                let metadata = entry.metadata()?;
+                let metadata = fs::symlink_metadata(entry.path())?;
                 if !metadata.is_file() {
                     return Err(ProtocolBundleError::Invalid(format!(
                         "object source entry is not a regular file: {}",
@@ -122,10 +123,37 @@ impl ObjectSource for DirectoryObjectSource {
     }
 
     fn open(&self, reference: &ContentRef) -> Result<Box<dyn Read + Send>, ProtocolBundleError> {
-        Ok(Box::new(BufReader::new(File::open(
-            self.path_for(reference),
-        )?)))
+        let path = self.path_for(reference);
+        let before = fs::symlink_metadata(&path)?;
+        if !before.is_file() {
+            return Err(ProtocolBundleError::Invalid(format!(
+                "object source entry is not a regular file: {}",
+                path.display()
+            )));
+        }
+        let file = open_regular_file(&path)?;
+        if !file.metadata()?.is_file() {
+            return Err(ProtocolBundleError::Invalid(format!(
+                "opened object source is not a regular file: {}",
+                path.display()
+            )));
+        }
+        Ok(Box::new(BufReader::new(file)))
     }
+}
+
+#[cfg(unix)]
+fn open_regular_file(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_regular_file(path: &Path) -> io::Result<File> {
+    File::open(path)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,6 +180,10 @@ pub enum PortableObjectRole {
 pub enum PortableExportError {
     #[error("portable export policy is unavailable for connector protocol {0}")]
     PolicyUnavailable(ProtocolId),
+    #[error("portable export policy is unavailable for State type {0}")]
+    StatePolicyUnavailable(StateTypeId),
+    #[error("portable export rejected unclassified object {0}")]
+    UnclassifiedObject(ContentRef),
     #[error("portable export rejected credential material in {role} ({kind})")]
     CredentialMaterial { role: String, kind: &'static str },
     #[error("portable export policy rejected data: {0}")]
@@ -239,16 +271,16 @@ impl PortableExportPolicy for PtyPortableExportPolicy {
 
     fn inspect_record(&mut self, record: &IoRecord) -> Result<(), PortableExportError> {
         self.ensure_pty(&record.connector)?;
-        match record.kind.as_str() {
-            "stdin" | "output" => {
+        match (record.kind.as_str(), record.direction) {
+            ("stdin", Direction::Ingress) | ("output", Direction::Egress) => {
                 if let Payload::Inline(bytes) = &record.payload {
                     reject_findings(bytes, format!("record {}", record.seq))?;
                 }
             }
-            "resize" | "exit" => {}
-            kind => {
+            ("resize", Direction::Ingress) | ("exit", Direction::Egress) => {}
+            (kind, direction) => {
                 return Err(PortableExportError::Rejected(format!(
-                    "unsupported ato.io.pty@1 record kind {kind}"
+                    "invalid ato.io.pty@1 record kind/direction {kind}/{direction:?}"
                 )));
             }
         }
@@ -299,6 +331,153 @@ impl PortableExportPolicy for PtyPortableExportPolicy {
     }
 }
 
+/// Strict portable boundary policy for the currently supported workspace
+/// State and PTY Connector contracts.
+pub struct StrictPortableExportPolicy {
+    connector_policy: PtyPortableExportPolicy,
+}
+
+impl StrictPortableExportPolicy {
+    pub fn new(descriptor: &CapsuleDescriptor) -> Self {
+        Self {
+            connector_policy: PtyPortableExportPolicy::new(descriptor),
+        }
+    }
+}
+
+impl PortableExportPolicy for StrictPortableExportPolicy {
+    fn inspect_descriptor(
+        &mut self,
+        descriptor: &CapsuleDescriptor,
+    ) -> Result<(), PortableExportError> {
+        ensure_workspace_state_policy(&descriptor.base_state.state_type)?;
+        self.connector_policy.inspect_descriptor(descriptor)
+    }
+
+    fn inspect_record(&mut self, record: &IoRecord) -> Result<(), PortableExportError> {
+        self.connector_policy.inspect_record(record)
+    }
+
+    fn inspect_object(
+        &mut self,
+        metadata: &ObjectMetadata,
+        roles: &[PortableObjectRole],
+        reader: &mut dyn Read,
+    ) -> Result<(), PortableExportError> {
+        if roles.is_empty() {
+            return Err(PortableExportError::UnclassifiedObject(
+                metadata.reference.clone(),
+            ));
+        }
+        let mut workspace_base = false;
+        let mut scan_raw = false;
+        for role in roles {
+            match role {
+                PortableObjectRole::BaseState { state_type } => {
+                    ensure_workspace_state_policy(state_type)?;
+                    workspace_base = true;
+                }
+                PortableObjectRole::StateAdapterObject { state_type } => {
+                    ensure_workspace_state_policy(state_type)?;
+                    scan_raw = true;
+                }
+                PortableObjectRole::ConnectorConfig { .. }
+                | PortableObjectRole::RecordPayload { .. } => scan_raw = true,
+            }
+        }
+        if workspace_base {
+            inspect_workspace_state_archive(reader)?;
+        } else if scan_raw {
+            scan_reader_for_credentials(reader, "object payload")?;
+        }
+        Ok(())
+    }
+}
+
+fn ensure_workspace_state_policy(state_type: &StateTypeId) -> Result<(), PortableExportError> {
+    if state_type.as_str() == "ato.state.workspace-posix-host@1" {
+        Ok(())
+    } else {
+        Err(PortableExportError::StatePolicyUnavailable(
+            state_type.clone(),
+        ))
+    }
+}
+
+fn scan_reader_for_credentials(
+    reader: &mut dyn Read,
+    role: &str,
+) -> Result<(), PortableExportError> {
+    let mut scanner = CredentialScanner::new();
+    let mut chunk = [0_u8; COPY_BUFFER_BYTES];
+    loop {
+        let count = reader.read(&mut chunk)?;
+        if count == 0 {
+            break;
+        }
+        scanner.push(&chunk[..count]);
+    }
+    if let Some(finding) = scanner.finish().first() {
+        return Err(PortableExportError::CredentialMaterial {
+            role: role.to_owned(),
+            kind: finding.kind,
+        });
+    }
+    Ok(())
+}
+
+fn inspect_workspace_state_archive(reader: &mut dyn Read) -> Result<(), PortableExportError> {
+    let filter = PackFilter::for_portable_state()
+        .map_err(|error| PortableExportError::Rejected(error.to_string()))?;
+    let mut archive = tar::Archive::new(reader);
+    for entry in archive.entries()?.raw(true) {
+        let mut entry = entry?;
+        if !matches!(
+            entry.header().entry_type(),
+            tar::EntryType::Regular | tar::EntryType::Directory
+        ) {
+            return Err(PortableExportError::Rejected(
+                "workspace State contains a non-file entry".to_owned(),
+            ));
+        }
+        let path = strict_portable_state_path(entry.header())?;
+        if !filter.should_include_file(&path)
+            || (entry.header().entry_type() == tar::EntryType::Directory
+                && !filter.should_include_file(&path.join("__ato_portable_probe__")))
+        {
+            return Err(PortableExportError::Rejected(format!(
+                "workspace State contains non-portable path `{}`",
+                path.display()
+            )));
+        }
+        if entry.header().entry_type() == tar::EntryType::Regular {
+            scan_reader_for_credentials(
+                &mut entry,
+                &format!("workspace State path `{}`", path.display()),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn strict_portable_state_path(header: &tar::Header) -> Result<PathBuf, PortableExportError> {
+    let bytes = header.path_bytes();
+    let path = std::str::from_utf8(&bytes)
+        .map_err(|_| PortableExportError::Rejected("State path is not UTF-8".to_owned()))?;
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.contains('\\')
+        || path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(PortableExportError::Rejected(format!(
+            "State path is not canonical: `{path}`"
+        )));
+    }
+    Ok(PathBuf::from(path))
+}
+
 fn reject_findings(bytes: &[u8], role: String) -> Result<(), PortableExportError> {
     if let Some(finding) = scan_credential_material(bytes).first() {
         return Err(PortableExportError::CredentialMaterial {
@@ -338,12 +517,36 @@ impl StreamingBundleWriter {
         O: ObjectSource,
         P: PortableExportPolicy,
     {
+        Self::write_with_state_roles(
+            output,
+            descriptor,
+            records,
+            objects,
+            &BTreeMap::new(),
+            policy,
+        )
+    }
+
+    pub fn write_with_state_roles<R, O, P>(
+        output: &Path,
+        descriptor: &CapsuleDescriptor,
+        records: R,
+        objects: &O,
+        state_roles: &BTreeMap<ContentRef, Vec<PortableObjectRole>>,
+        policy: &mut P,
+    ) -> Result<BundleWriteOutcome, ProtocolBundleError>
+    where
+        R: IntoIterator<Item = Result<IoRecord, ProtocolBundleError>>,
+        O: ObjectSource,
+        P: PortableExportPolicy,
+    {
         let descriptor_bytes = encode_descriptor(descriptor)?;
         let parent = output.parent().unwrap_or_else(|| Path::new("."));
         fs::create_dir_all(parent)?;
 
         let mut record_temp = owner_only_tempfile(parent, ".records.cborseq-")?;
         let mut roles = direct_roles(descriptor);
+        merge_state_roles(descriptor, &mut roles, state_roles)?;
         let record_stats = {
             let mut encoder = RecordStreamEncoder::new(descriptor, record_temp.as_file_mut())?;
             for record in records {
@@ -380,6 +583,7 @@ impl StreamingBundleWriter {
             limits.accept(metadata.size)?;
         }
 
+        policy.inspect_descriptor(descriptor)?;
         record_temp.as_file_mut().rewind()?;
         let mut decoder = RecordStreamDecoder::new(
             descriptor,
@@ -397,8 +601,6 @@ impl StreamingBundleWriter {
                 reader.as_mut(),
             )?;
         }
-        policy.inspect_descriptor(descriptor)?;
-
         let prefix = format!(
             ".{}.tmp-",
             output
@@ -600,9 +802,8 @@ impl StreamingBundleReader {
             let member = strict_member_path(entry.header())?;
             match position {
                 0 if member == DESCRIPTOR_MEMBER => {
-                    let mut bytes = Vec::new();
-                    entry.read_to_end(&mut bytes)?;
-                    descriptor = Some(decode_descriptor(&bytes)?);
+                    let size = entry.size();
+                    descriptor = Some(decode_descriptor_reader(&mut entry, size)?);
                 }
                 1 if member == RECORDS_MEMBER => {
                     let descriptor_ref = descriptor.as_ref().ok_or_else(|| {
@@ -683,6 +884,7 @@ impl StreamingBundleReader {
                 }
             }
         }
+        verify_archive_zero_tail(archive.into_inner())?;
 
         let descriptor = descriptor.ok_or_else(|| {
             ProtocolBundleError::Invalid(format!("missing `{DESCRIPTOR_MEMBER}`"))
@@ -721,6 +923,21 @@ impl StreamingBundleReader {
     }
 }
 
+fn verify_archive_zero_tail(mut reader: File) -> Result<(), ProtocolBundleError> {
+    let mut buffer = [0_u8; COPY_BUFFER_BYTES];
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            return Ok(());
+        }
+        if buffer[..count].iter().any(|byte| *byte != 0) {
+            return Err(ProtocolBundleError::Invalid(
+                "nonzero data follows TAR end blocks".to_owned(),
+            ));
+        }
+    }
+}
+
 fn direct_roles(descriptor: &CapsuleDescriptor) -> BTreeMap<ContentRef, Vec<PortableObjectRole>> {
     let mut roles = BTreeMap::new();
     roles.insert(
@@ -741,6 +958,38 @@ fn direct_roles(descriptor: &CapsuleDescriptor) -> BTreeMap<ContentRef, Vec<Port
         }
     }
     roles
+}
+
+fn merge_state_roles(
+    descriptor: &CapsuleDescriptor,
+    roles: &mut BTreeMap<ContentRef, Vec<PortableObjectRole>>,
+    state_roles: &BTreeMap<ContentRef, Vec<PortableObjectRole>>,
+) -> Result<(), ProtocolBundleError> {
+    for (reference, additions) in state_roles {
+        if additions.is_empty() {
+            return Err(ProtocolBundleError::Invalid(format!(
+                "State adapter role list is empty for {reference}"
+            )));
+        }
+        for role in additions {
+            let PortableObjectRole::StateAdapterObject { state_type } = role else {
+                return Err(ProtocolBundleError::Invalid(format!(
+                    "non-State-adapter role supplied for {reference}"
+                )));
+            };
+            if state_type != &descriptor.base_state.state_type {
+                return Err(ProtocolBundleError::Invalid(format!(
+                    "State adapter role type {state_type} does not match base State type {}",
+                    descriptor.base_state.state_type
+                )));
+            }
+        }
+        roles
+            .entry(reference.clone())
+            .or_default()
+            .extend(additions.iter().cloned());
+    }
+    Ok(())
 }
 
 fn validate_index(index: &BTreeMap<ContentRef, ObjectMetadata>) -> Result<(), ProtocolBundleError> {
@@ -1015,7 +1264,10 @@ fn set_owner_only_file(path: &Path) -> io::Result<()> {
 
 #[cfg(not(unix))]
 fn set_owner_only_file(_path: &Path) -> io::Result<()> {
-    Ok(())
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "secure owner-only spool is unsupported on this platform",
+    ))
 }
 
 #[cfg(unix)]
@@ -1026,7 +1278,10 @@ fn set_owner_only_directory(path: &Path) -> io::Result<()> {
 
 #[cfg(not(unix))]
 fn set_owner_only_directory(_path: &Path) -> io::Result<()> {
-    Ok(())
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "secure owner-only spool is unsupported on this platform",
+    ))
 }
 
 #[cfg(unix)]
@@ -1140,17 +1395,26 @@ mod tests {
         let objects_root = fixture.path().join("objects");
         let manifest = write_object(&objects_root, b"ready-state-manifest");
         let mut expected = BTreeSet::from([manifest.clone()]);
+        let mut state_roles = BTreeMap::new();
         for index in 0..50_u8 {
-            expected.insert(write_object(&objects_root, &[index; 1024]));
+            let chunk = write_object(&objects_root, &[index; 1024]);
+            expected.insert(chunk.clone());
+            state_roles.insert(
+                chunk,
+                vec![PortableObjectRole::StateAdapterObject {
+                    state_type: StateTypeId::parse("ato.state.fixture-machine@1").unwrap(),
+                }],
+            );
         }
         let descriptor = descriptor(manifest, "ato.io.pty@1");
         let output = fixture.path().join("ready-state.capsule");
         let mut policy = AllowAllPortableExportPolicy;
-        StreamingBundleWriter::write(
+        StreamingBundleWriter::write_with_state_roles(
             &output,
             &descriptor,
             std::iter::empty(),
             &DirectoryObjectSource::new(&objects_root),
+            &state_roles,
             &mut policy,
         )
         .unwrap();
@@ -1165,6 +1429,24 @@ mod tests {
                 .collect::<BTreeSet<_>>(),
             expected
         );
+
+        let missing = state_roles.keys().next().unwrap().clone();
+        fs::remove_file(
+            objects_root
+                .join(missing.algorithm())
+                .join(missing.digest()),
+        )
+        .unwrap();
+        let error = StreamingBundleWriter::write_with_state_roles(
+            &fixture.path().join("missing-ready-state.capsule"),
+            &descriptor,
+            std::iter::empty(),
+            &DirectoryObjectSource::new(&objects_root),
+            &state_roles,
+            &mut policy,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains(missing.as_str()));
     }
 
     struct MultiRolePolicy {
@@ -1310,6 +1592,116 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("credential material"));
         assert!(!message.contains("ABCDEFGHIJ1234567890abcdef"));
+    }
+
+    #[test]
+    fn strict_policy_rechecks_workspace_state_and_rejects_unclassified_objects() {
+        let fixture = tempfile::tempdir().unwrap();
+        let workspace = fixture.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        fs::write(workspace.join("safe.txt"), b"safe").unwrap();
+        fs::write(workspace.join(".env"), b"TOKEN=local-only-value").unwrap();
+        fs::write(
+            workspace.join("leak.txt"),
+            b"OPENAI_API_KEY=sk-proj-ABCDEFGHIJ1234567890abcdef",
+        )
+        .unwrap();
+        let (state, local_checkpoint) =
+            super::super::capture_local_workspace_checkpoint(&workspace).unwrap();
+        let objects_root = fixture.path().join("objects");
+        let checkpoint_ref = write_object(&objects_root, &local_checkpoint);
+        assert_eq!(checkpoint_ref, state.state_ref);
+        let descriptor = CapsuleDescriptor {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            base_state: state,
+            connectors: BTreeMap::from([(
+                ConnectorId::parse("terminal.main").unwrap(),
+                ConnectorDef {
+                    protocol: ProtocolId::parse("ato.io.pty@1").unwrap(),
+                    config_ref: None,
+                },
+            )]),
+        };
+        let output = fixture.path().join("local-checkpoint.capsule");
+        let mut policy = StrictPortableExportPolicy::new(&descriptor);
+        let error = StreamingBundleWriter::write(
+            &output,
+            &descriptor,
+            std::iter::empty(),
+            &DirectoryObjectSource::new(&objects_root),
+            &mut policy,
+        )
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("credential material") || message.contains("non-portable path"));
+        assert!(!message.contains("ABCDEFGHIJ1234567890abcdef"));
+        assert!(!output.exists());
+
+        fs::remove_file(workspace.join("leak.txt")).unwrap();
+        fs::remove_file(workspace.join(".env")).unwrap();
+        let (safe_state, safe_bytes) = super::super::capture_workspace_state(&workspace).unwrap();
+        let safe_root = fixture.path().join("safe-objects");
+        write_object(&safe_root, &safe_bytes);
+        let unclassified = write_object(
+            &safe_root,
+            b"OPENAI_API_KEY=sk-proj-ZYXWVUTSRQ9876543210abcdef",
+        );
+        let safe_descriptor = CapsuleDescriptor {
+            base_state: safe_state,
+            ..descriptor
+        };
+        let mut policy = StrictPortableExportPolicy::new(&safe_descriptor);
+        let error = StreamingBundleWriter::write(
+            &fixture.path().join("unclassified.capsule"),
+            &safe_descriptor,
+            std::iter::empty(),
+            &DirectoryObjectSource::new(&safe_root),
+            &mut policy,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ProtocolBundleError::PortableExport(PortableExportError::UnclassifiedObject(reference))
+                if reference == unclassified
+        ));
+    }
+
+    #[test]
+    fn strict_policy_rejects_unknown_state_and_invalid_pty_direction() {
+        let fixture = tempfile::tempdir().unwrap();
+        let objects_root = fixture.path().join("objects");
+        let base = write_object(&objects_root, b"base");
+        let unknown = descriptor(base.clone(), "ato.io.pty@1");
+        let mut policy = StrictPortableExportPolicy::new(&unknown);
+        let error = StreamingBundleWriter::write(
+            &fixture.path().join("unknown-state.capsule"),
+            &unknown,
+            std::iter::empty(),
+            &DirectoryObjectSource::new(&objects_root),
+            &mut policy,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("State type"));
+
+        let bad_record = IoRecord {
+            seq: 1,
+            offset_ns: None,
+            observed_at_unix_ns: None,
+            connector: ConnectorId::parse("terminal.main").unwrap(),
+            direction: Direction::Egress,
+            kind: RecordKindId::parse("stdin").unwrap(),
+            payload: Payload::Inline(b"safe".to_vec()),
+        };
+        let mut policy = PtyPortableExportPolicy::new(&unknown);
+        let error = StreamingBundleWriter::write(
+            &fixture.path().join("bad-direction.capsule"),
+            &unknown,
+            [Ok(bad_record)],
+            &DirectoryObjectSource::new(&objects_root),
+            &mut policy,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("kind/direction"));
     }
 
     fn write_raw_bundle(path: &Path, members: &[(&str, &[u8], tar::EntryType)]) {
@@ -1561,5 +1953,48 @@ mod tests {
             StreamingBundleReader::read_into(&truncated, &fixture.path().join("truncated-spool"))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn reader_rejects_nonzero_data_after_tar_end_blocks() {
+        let fixture = tempfile::tempdir().unwrap();
+        let objects_root = fixture.path().join("objects");
+        let base = write_object(&objects_root, b"base");
+        let descriptor = descriptor(base, "ato.io.pty@1");
+        let path = fixture.path().join("trailing.capsule");
+        let mut policy = AllowAllPortableExportPolicy;
+        StreamingBundleWriter::write(
+            &path,
+            &descriptor,
+            std::iter::empty(),
+            &DirectoryObjectSource::new(&objects_root),
+            &mut policy,
+        )
+        .unwrap();
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(b"second-tar-or-junk").unwrap();
+        file.sync_all().unwrap();
+        assert!(
+            StreamingBundleReader::read_into(&path, &fixture.path().join("trailing-spool"))
+                .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_object_source_rejects_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("objects");
+        let reference = super::super::content_ref(b"target");
+        let target = fixture.path().join("target");
+        fs::write(&target, b"target").unwrap();
+        let link = root.join(reference.algorithm()).join(reference.digest());
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        symlink(&target, &link).unwrap();
+        let source = DirectoryObjectSource::new(&root);
+        assert!(source.index().is_err());
+        assert!(source.open(&reference).is_err());
     }
 }
