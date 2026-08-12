@@ -8,6 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use capsule_protocol::{
     CapsuleDescriptor, ConnectorId, Direction, IoRecord, Payload, RecordKindId,
 };
+use capsule_session_runtime::{HistoricalReplayVerdict, RecordFrontier};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use rand::RngCore;
 use thiserror::Error;
@@ -30,6 +31,11 @@ pub enum ProtocolRuntimeError {
     Diverged { seq: u64 },
     #[error("replay timed out waiting for PTY completion marker")]
     Timeout,
+    #[error("replay recovery frontier {from:?} is after target {through:?}")]
+    InvalidReplayRange {
+        from: RecordFrontier,
+        through: RecordFrontier,
+    },
 }
 
 pub trait StateRuntime {
@@ -64,9 +70,10 @@ pub trait ConnectorRuntime {
     fn observe(&mut self, expected: &IoRecord) -> Result<(), ProtocolRuntimeError>;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayOutcome {
     pub records_processed: usize,
+    pub historical_verdict: HistoricalReplayVerdict,
 }
 
 pub struct ReplayEngine;
@@ -77,9 +84,40 @@ impl ReplayEngine {
         records: &[IoRecord],
         connector: &mut impl ConnectorRuntime,
     ) -> Result<ReplayOutcome, ProtocolRuntimeError> {
+        let through = records.last().map_or(RecordFrontier::Origin, |record| {
+            RecordFrontier::Through(record.seq)
+        });
+        Self::replay_between(
+            descriptor,
+            records,
+            RecordFrontier::Origin,
+            through,
+            connector,
+        )
+    }
+
+    /// Replays exactly the records in `(from, through]`.
+    ///
+    /// `from` is the common recovery frontier already represented by State and
+    /// every Connector. Excluding it prevents checkpointed effects from being
+    /// applied twice.
+    pub fn replay_between(
+        descriptor: &CapsuleDescriptor,
+        records: &[IoRecord],
+        from: RecordFrontier,
+        through: RecordFrontier,
+        connector: &mut impl ConnectorRuntime,
+    ) -> Result<ReplayOutcome, ProtocolRuntimeError> {
+        if from > through {
+            return Err(ProtocolRuntimeError::InvalidReplayRange { from, through });
+        }
         let mut validator = capsule_protocol::StreamValidator::new(descriptor)
             .map_err(|error| ProtocolRuntimeError::UnsupportedRecord(error.to_string()))?;
-        for record in records {
+        let mut records_processed = 0;
+        for record in records
+            .iter()
+            .filter(|record| from.replay_contains(through, record.seq))
+        {
             validator
                 .accept(record)
                 .map_err(|error| ProtocolRuntimeError::UnsupportedRecord(error.to_string()))?;
@@ -87,9 +125,11 @@ impl ReplayEngine {
                 Direction::Ingress => connector.inject(record)?,
                 Direction::Egress => connector.observe(record)?,
             }
+            records_processed += 1;
         }
         Ok(ReplayOutcome {
-            records_processed: records.len(),
+            records_processed,
+            historical_verdict: HistoricalReplayVerdict::Verified { from, through },
         })
     }
 }
@@ -519,6 +559,59 @@ mod tests {
         };
         let outcome = ReplayEngine::replay(&descriptor, &records, &mut connector).unwrap();
         assert_eq!(outcome.records_processed, 2);
+        assert_eq!(
+            outcome.historical_verdict,
+            HistoricalReplayVerdict::Verified {
+                from: RecordFrontier::Origin,
+                through: RecordFrontier::Through(8),
+            }
+        );
+        assert_eq!(connector.injected, 1);
+        assert_eq!(connector.observed, 1);
+    }
+
+    #[test]
+    fn replay_from_checkpoint_excludes_records_already_present_in_state() {
+        let descriptor = CapsuleDescriptor {
+            schema_version: 1,
+            base_state: StateRef {
+                state_type: StateTypeId::parse("ato.state.test@1").unwrap(),
+                state_ref: capsule_protocol::ContentRef::parse(format!(
+                    "blake3:{}",
+                    "00".repeat(32)
+                ))
+                .unwrap(),
+            },
+            connectors: BTreeMap::from([(
+                ConnectorId::parse("test.echo").unwrap(),
+                ConnectorDef {
+                    protocol: ProtocolId::parse("ato.io.test.echo@1").unwrap(),
+                    config_ref: None,
+                },
+            )]),
+        };
+        let records = vec![
+            record(5, Direction::Ingress, b"already-applied"),
+            record(8, Direction::Egress, b"ALREADY-APPLIED"),
+            record(10, Direction::Ingress, b"new"),
+            record(12, Direction::Egress, b"NEW"),
+        ];
+        let mut connector = EchoConnector {
+            pending: None,
+            injected: 0,
+            observed: 0,
+        };
+
+        let outcome = ReplayEngine::replay_between(
+            &descriptor,
+            &records,
+            RecordFrontier::Through(8),
+            RecordFrontier::Through(12),
+            &mut connector,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.records_processed, 2);
         assert_eq!(connector.injected, 1);
         assert_eq!(connector.observed, 1);
     }
@@ -552,6 +645,13 @@ mod tests {
         let outcome = ReplayEngine::replay(&descriptor, &[], &mut connector).unwrap();
 
         assert_eq!(outcome.records_processed, 0);
+        assert_eq!(
+            outcome.historical_verdict,
+            HistoricalReplayVerdict::Verified {
+                from: RecordFrontier::Origin,
+                through: RecordFrontier::Origin,
+            }
+        );
         assert_eq!(connector.injected, 0);
         assert_eq!(connector.observed, 0);
     }
