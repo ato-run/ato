@@ -6,7 +6,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
-use std::io::Cursor;
+use std::io::{Cursor, Read, Write};
 
 use capsule_protocol::{
     CapsuleDescriptor, ConnectorDef, ConnectorId, ContentRef, Direction, IoRecord, Payload,
@@ -32,6 +32,148 @@ pub enum CodecError {
     InvalidValue(String),
     #[error("inline payload is {actual} bytes; maximum is {maximum}")]
     InlinePayloadTooLarge { actual: usize, maximum: usize },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordStreamStats {
+    pub record_count: usize,
+    pub encoded_bytes: u64,
+}
+
+pub struct RecordStreamEncoder<W> {
+    validator: StreamValidator,
+    writer: W,
+    count: usize,
+    encoded_bytes: u64,
+}
+
+impl<W: Write> RecordStreamEncoder<W> {
+    pub fn new(descriptor: &CapsuleDescriptor, writer: W) -> Result<Self, CodecError> {
+        Ok(Self {
+            validator: StreamValidator::new(descriptor)
+                .map_err(|error| CodecError::InvalidValue(error.to_string()))?,
+            writer,
+            count: 0,
+            encoded_bytes: 0,
+        })
+    }
+
+    pub fn push(&mut self, record: &IoRecord) -> Result<(), CodecError> {
+        if self.count >= MAX_RECORDS {
+            return Err(record_count_error());
+        }
+        self.validator
+            .accept(record)
+            .map_err(|error| CodecError::InvalidValue(error.to_string()))?;
+        validate_payload(&record.payload)?;
+        let mut writer = CountingWriter {
+            inner: &mut self.writer,
+            written: &mut self.encoded_bytes,
+        };
+        ciborium::ser::into_writer(&WireIoRecordV1::from(record), &mut writer)
+            .map_err(|error| CodecError::Encode(error.to_string()))?;
+        self.count += 1;
+        Ok(())
+    }
+
+    pub fn finish(self) -> Result<RecordStreamStats, CodecError> {
+        Ok(RecordStreamStats {
+            record_count: self.count,
+            encoded_bytes: self.encoded_bytes,
+        })
+    }
+}
+
+pub struct RecordStreamDecoder<R> {
+    validator: StreamValidator,
+    reader: R,
+    remaining_bytes: u64,
+    count: usize,
+    initial_bytes: u64,
+}
+
+impl<R: Read> RecordStreamDecoder<R> {
+    pub fn new(
+        descriptor: &CapsuleDescriptor,
+        reader: R,
+        encoded_bytes: u64,
+    ) -> Result<Self, CodecError> {
+        Ok(Self {
+            validator: StreamValidator::new(descriptor)
+                .map_err(|error| CodecError::InvalidValue(error.to_string()))?,
+            reader,
+            remaining_bytes: encoded_bytes,
+            count: 0,
+            initial_bytes: encoded_bytes,
+        })
+    }
+
+    pub fn next_record(&mut self) -> Result<Option<IoRecord>, CodecError> {
+        if self.remaining_bytes == 0 {
+            return Ok(None);
+        }
+        if self.count >= MAX_RECORDS {
+            return Err(record_count_error());
+        }
+        let mut reader = RemainingReader {
+            inner: &mut self.reader,
+            remaining: &mut self.remaining_bytes,
+        };
+        let wire: WireIoRecordV1 = ciborium::de::from_reader(&mut reader)
+            .map_err(|error| CodecError::Decode(error.to_string()))?;
+        let record = IoRecord::try_from(wire)?;
+        self.validator
+            .accept(&record)
+            .map_err(|error| CodecError::InvalidValue(error.to_string()))?;
+        validate_payload(&record.payload)?;
+        self.count += 1;
+        Ok(Some(record))
+    }
+
+    pub fn stats(&self) -> RecordStreamStats {
+        RecordStreamStats {
+            record_count: self.count,
+            encoded_bytes: self.initial_bytes - self.remaining_bytes,
+        }
+    }
+}
+
+struct CountingWriter<'a, W> {
+    inner: &'a mut W,
+    written: &'a mut u64,
+}
+
+impl<W: Write> Write for CountingWriter<'_, W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let count = self.inner.write(bytes)?;
+        *self.written = self
+            .written
+            .checked_add(count as u64)
+            .ok_or_else(|| std::io::Error::other("record stream size overflow"))?;
+        Ok(count)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+struct RemainingReader<'a, R> {
+    inner: &'a mut R,
+    remaining: &'a mut u64,
+}
+
+impl<R: Read> Read for RemainingReader<'_, R> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        let limit = usize::try_from((*self.remaining).min(bytes.len() as u64))
+            .map_err(|_| std::io::Error::other("record stream size does not fit usize"))?;
+        if limit == 0 {
+            return Ok(0);
+        }
+        let count = self.inner.read(&mut bytes[..limit])?;
+        *self.remaining -= count as u64;
+        Ok(count)
+    }
 }
 
 // Arrays, not CBOR maps: field order and integer representation are explicit.
@@ -76,16 +218,13 @@ pub fn encode_record_stream(
     descriptor: &CapsuleDescriptor,
     records: &[IoRecord],
 ) -> Result<Vec<u8>, CodecError> {
-    let mut validator = StreamValidator::new(descriptor)
-        .map_err(|error| CodecError::InvalidValue(error.to_string()))?;
     let mut output = Vec::new();
-    for record in records {
-        validator
-            .accept(record)
-            .map_err(|error| CodecError::InvalidValue(error.to_string()))?;
-        validate_payload(&record.payload)?;
-        ciborium::ser::into_writer(&WireIoRecordV1::from(record), &mut output)
-            .map_err(|error| CodecError::Encode(error.to_string()))?;
+    {
+        let mut encoder = RecordStreamEncoder::new(descriptor, &mut output)?;
+        for record in records {
+            encoder.push(record)?;
+        }
+        encoder.finish()?;
     }
     Ok(output)
 }
@@ -94,26 +233,16 @@ pub fn decode_record_stream(
     descriptor: &CapsuleDescriptor,
     bytes: &[u8],
 ) -> Result<Vec<IoRecord>, CodecError> {
-    let mut validator = StreamValidator::new(descriptor)
-        .map_err(|error| CodecError::InvalidValue(error.to_string()))?;
-    let mut input = Cursor::new(bytes);
+    let mut decoder = RecordStreamDecoder::new(descriptor, Cursor::new(bytes), bytes.len() as u64)?;
     let mut records = Vec::new();
-    while (input.position() as usize) < bytes.len() {
-        if records.len() >= MAX_RECORDS {
-            return Err(CodecError::InvalidValue(format!(
-                "record count exceeds {MAX_RECORDS}"
-            )));
-        }
-        let wire: WireIoRecordV1 = ciborium::de::from_reader(&mut input)
-            .map_err(|error| CodecError::Decode(error.to_string()))?;
-        let record = IoRecord::try_from(wire)?;
-        validator
-            .accept(&record)
-            .map_err(|error| CodecError::InvalidValue(error.to_string()))?;
-        validate_payload(&record.payload)?;
+    while let Some(record) = decoder.next_record()? {
         records.push(record);
     }
     Ok(records)
+}
+
+fn record_count_error() -> CodecError {
+    CodecError::InvalidValue(format!("record count exceeds {MAX_RECORDS}"))
 }
 
 fn encode_item<T: Serialize>(value: &T) -> Result<Vec<u8>, CodecError> {
@@ -381,6 +510,48 @@ mod tests {
             encode_record_stream(&descriptor(), &decoded).unwrap(),
             bytes
         );
+    }
+
+    #[test]
+    fn streaming_codec_matches_golden_vector_byte_for_byte() {
+        let descriptor = descriptor();
+        let records = records();
+        let golden =
+            hex::decode(include_str!("../tests/vectors/records-pty-v1.cborseq.hex").trim())
+                .unwrap();
+        let mut encoded = Vec::new();
+        let stats = {
+            let mut encoder = RecordStreamEncoder::new(&descriptor, &mut encoded).unwrap();
+            for record in &records {
+                encoder.push(record).unwrap();
+            }
+            encoder.finish().unwrap()
+        };
+        assert_eq!(encoded, golden);
+        assert_eq!(stats.record_count, records.len());
+        assert_eq!(stats.encoded_bytes, golden.len() as u64);
+
+        let mut decoder =
+            RecordStreamDecoder::new(&descriptor, encoded.as_slice(), encoded.len() as u64)
+                .unwrap();
+        let mut decoded = Vec::new();
+        while let Some(record) = decoder.next_record().unwrap() {
+            decoded.push(record);
+        }
+        assert_eq!(decoded, records);
+        assert_eq!(decoder.stats(), stats);
+    }
+
+    #[test]
+    fn streaming_decoder_rejects_trailing_malformed_record() {
+        let descriptor = descriptor();
+        let mut bytes = encode_record_stream(&descriptor, &records()).unwrap();
+        bytes.push(0x9f);
+        let mut decoder =
+            RecordStreamDecoder::new(&descriptor, bytes.as_slice(), bytes.len() as u64).unwrap();
+        assert!(decoder.next_record().unwrap().is_some());
+        assert!(decoder.next_record().unwrap().is_some());
+        assert!(matches!(decoder.next_record(), Err(CodecError::Decode(_))));
     }
 
     #[test]
