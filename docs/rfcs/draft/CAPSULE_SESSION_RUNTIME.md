@@ -172,10 +172,10 @@ waits for authenticated readiness, and then optionally attaches. The client
 process never owns the restored shell or PTY.
 
 The Supervisor restores workspace State, creates the shell computation, binds
-the built-in `ato.io.pty@1` Driver, verifies the legacy one-command fixture
-history as a raw byte stream, and only then enters Isolated execution. This
-compatibility path injects a shell completion marker and is not yet general
-PTY v1 Replay for REPLs or foreground TUIs. Historical output is not appended
+the built-in `ato.io.pty@1` Driver, verifies the ordered historical Record
+stream without injecting completion markers, and only then enters Isolated
+execution. The legacy one-command producer may use private completion framing,
+but those bytes are excluded from PTY Records. Historical output is not appended
 to the continuation WAL. New stdin, output, and resize Records are durably
 committed. A natural child exit is committed once, after final output, with
 its actual status. Attach, detach, kill, writer leases, authentication, and
@@ -197,3 +197,45 @@ Supervisor lease: unexpected EOF terminates the identity-checked workload
 process group, while an explicit `DISARM` makes graceful termination exit
 without signaling. Windows compiles the plumbing but returns Unsupported until
 its current-user ACL and named-pipe backend exists.
+
+## 10. Workspace lifecycle profile
+
+The hidden workspace profile distinguishes the WAL's `durable_frontier` from
+`latest_consistent_frontier`. Only the latter may be used by Branch, Suspend,
+checkpoint, or export. To create it, the Supervisor closes its ingress gate,
+stops the complete shell process tree, drains the master PTY until `poll(2)`
+reports no readable bytes and the bounded reader queue is empty, commits all
+drained output, captures an owner-only local workspace State, and atomically
+commits that State and the WAL `DurableFrontier` in `session.json`.
+
+Every Session imports its input bundle as an owner-only, read-only local seed.
+Branch creates a new self-contained child seed from the active base State and
+committed Records through the source frontier. The child restores into a fresh
+workspace, replays that Record stream exactly once, and compares the resulting
+workspace digest with the source checkpoint before entering Isolated mode.
+Branch creation resumes and does not mutate the source Session.
+
+Suspend commits such a frontier, terminates the shell without synthesizing a
+PTY `exit` Record, disarms the watchdog, and leaves the lifecycle `Suspended`.
+Workspace resume has `FilesystemRestart` fidelity: it verifies both the local
+checkpoint object and the unchanged workspace, rotates the Supervisor token,
+generation, and incarnation, and starts a fresh shell. Files, including local
+credentials and databases, are preserved; shell environment, current working
+directory, foreground processes, file descriptors, and heap are not. The
+runtime rebases its active State and base frontier at the suspended frontier;
+pre-suspend Records are not replayed against that State. Workspace drift fails
+closed and is never overwritten implicitly.
+
+The local frontier manifest stores versioned per-Connector checkpoints at the
+same `DurableFrontier` as the workspace State. For `ato.io.pty@1`, the local
+checkpoint currently contains terminal rows and columns. Resume promotes this
+checkpoint to `base_connector_checkpoints`; Branch restores base State and base
+Connector checkpoints before replaying `(C, F]`. A Connector checkpoint whose
+`applied_at` differs from the workspace checkpoint frontier is invalid.
+
+`workspace-posix-host + ato.io.pty@1` Branch is experimental. Only the PTY
+Connector history is verified. External effects not mediated by an active
+Connector may be re-executed during Historical Replay, so this profile MUST NOT
+be treated as isolated external-effect replay. Persisted replay verification is
+scoped to `connector = terminal.main`, `protocol = ato.io.pty@1`, and its exact
+`from`/`through` range; it is not a Session-wide verdict.

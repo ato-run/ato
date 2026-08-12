@@ -139,6 +139,18 @@ pub(crate) enum CapsuleSessionInternalCommands {
         observe: bool,
     },
     #[command(hide = true)]
+    Branch {
+        session: String,
+        #[arg(long)]
+        into: PathBuf,
+        #[arg(long, default_value_t = false)]
+        no_attach: bool,
+    },
+    #[command(hide = true)]
+    Suspend { session: String },
+    #[command(hide = true)]
+    Resume { session: String },
+    #[command(hide = true)]
     Status { session: String },
     #[command(hide = true)]
     Kill { session: String },

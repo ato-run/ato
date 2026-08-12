@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -9,11 +10,12 @@ use std::fs::File;
 use capsule_protocol::{ContentRef, StateTypeId};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 
-use crate::DurableFrontier;
+use crate::{DurableFrontier, RecordFrontier};
 
-const SESSION_STORE_SCHEMA_VERSION: u16 = 1;
+const SESSION_STORE_SCHEMA_VERSION: u16 = 2;
 const SESSION_SECRET_BYTES: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -104,33 +106,78 @@ impl SupervisorIdentity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredConnectorCheckpoint {
+    pub protocol_id: String,
+    pub applied_at: DurableFrontier,
+    pub format: String,
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredLocalCheckpoint {
+    pub state_ref: String,
+    pub captured_at: DurableFrontier,
+    pub workspace_digest: String,
+    pub resume_fidelity: String,
+    #[serde(default)]
+    pub connector_checkpoints: BTreeMap<String, StoredConnectorCheckpoint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredReplayVerification {
+    pub connector: String,
+    pub protocol: String,
+    pub from: RecordFrontier,
+    pub through: RecordFrontier,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredProtocolSession {
     pub schema_version: u16,
     pub session_id: SessionId,
     pub lifecycle: String,
     pub state_type: String,
-    pub state_ref: String,
-    pub committed_frontier: DurableFrontier,
+    pub durable_frontier: DurableFrontier,
+    pub latest_consistent_frontier: Option<DurableFrontier>,
+    pub base_state: String,
+    pub base_frontier: RecordFrontier,
+    #[serde(default)]
+    pub base_connector_checkpoints: BTreeMap<String, StoredConnectorCheckpoint>,
+    pub active_checkpoint: Option<StoredLocalCheckpoint>,
+    pub historical_replay: Option<StoredReplayVerification>,
+    pub workspace: PathBuf,
+    pub source_session_id: Option<SessionId>,
+    pub supervisor: SupervisorIdentity,
+}
+
+pub struct NewStoredProtocolSession<'a> {
+    pub session_id: SessionId,
+    pub lifecycle: String,
+    pub state_type: &'a StateTypeId,
+    pub base_state: &'a ContentRef,
+    pub base_frontier: RecordFrontier,
+    pub durable_frontier: DurableFrontier,
+    pub workspace: PathBuf,
     pub supervisor: SupervisorIdentity,
 }
 
 impl StoredProtocolSession {
-    pub fn new(
-        session_id: SessionId,
-        lifecycle: impl Into<String>,
-        state_type: &StateTypeId,
-        state_ref: &ContentRef,
-        committed_frontier: DurableFrontier,
-        supervisor: SupervisorIdentity,
-    ) -> Self {
+    pub fn new(input: NewStoredProtocolSession<'_>) -> Self {
         Self {
             schema_version: SESSION_STORE_SCHEMA_VERSION,
-            session_id,
-            lifecycle: lifecycle.into(),
-            state_type: state_type.to_string(),
-            state_ref: state_ref.to_string(),
-            committed_frontier,
-            supervisor,
+            session_id: input.session_id,
+            lifecycle: input.lifecycle,
+            state_type: input.state_type.to_string(),
+            durable_frontier: input.durable_frontier,
+            latest_consistent_frontier: None,
+            base_state: input.base_state.to_string(),
+            base_frontier: input.base_frontier,
+            base_connector_checkpoints: BTreeMap::new(),
+            active_checkpoint: None,
+            historical_replay: None,
+            workspace: input.workspace,
+            source_session_id: None,
+            supervisor: input.supervisor,
         }
     }
 
@@ -141,8 +188,67 @@ impl StoredProtocolSession {
         SessionId::parse(self.session_id.to_string())?;
         StateTypeId::parse(&self.state_type)
             .map_err(|error| SessionStoreError::InvalidRecord(error.to_string()))?;
-        ContentRef::parse(&self.state_ref)
+        ContentRef::parse(&self.base_state)
             .map_err(|error| SessionStoreError::InvalidRecord(error.to_string()))?;
+        if !self.workspace.is_absolute() {
+            return Err(SessionStoreError::InvalidRecord(
+                "workspace path must be absolute".to_owned(),
+            ));
+        }
+        if let Some(checkpoint) = &self.active_checkpoint {
+            ContentRef::parse(&checkpoint.state_ref)
+                .map_err(|error| SessionStoreError::InvalidRecord(error.to_string()))?;
+            ContentRef::parse(&checkpoint.workspace_digest)
+                .map_err(|error| SessionStoreError::InvalidRecord(error.to_string()))?;
+            if checkpoint.resume_fidelity != "filesystem_restart" {
+                return Err(SessionStoreError::InvalidRecord(
+                    "unsupported local checkpoint resume fidelity".to_owned(),
+                ));
+            }
+            if self.latest_consistent_frontier != Some(checkpoint.captured_at) {
+                return Err(SessionStoreError::InvalidRecord(
+                    "active checkpoint must match latest consistent frontier".to_owned(),
+                ));
+            }
+            for (connector, connector_checkpoint) in &checkpoint.connector_checkpoints {
+                if connector.is_empty()
+                    || connector_checkpoint.protocol_id.is_empty()
+                    || connector_checkpoint.format.is_empty()
+                {
+                    return Err(SessionStoreError::InvalidRecord(
+                        "Connector checkpoint identity is empty".to_owned(),
+                    ));
+                }
+                if connector_checkpoint.applied_at != checkpoint.captured_at {
+                    return Err(SessionStoreError::InvalidRecord(
+                        "Connector checkpoint frontier does not match local checkpoint".to_owned(),
+                    ));
+                }
+            }
+        }
+        for (connector, connector_checkpoint) in &self.base_connector_checkpoints {
+            if connector.is_empty()
+                || connector_checkpoint.protocol_id.is_empty()
+                || connector_checkpoint.format.is_empty()
+                || connector_checkpoint.applied_at.records_through != self.base_frontier
+            {
+                return Err(SessionStoreError::InvalidRecord(
+                    "base Connector checkpoint does not match base frontier".to_owned(),
+                ));
+            }
+        }
+        if let Some(verification) = &self.historical_replay
+            && (verification.connector.is_empty()
+                || verification.protocol.is_empty()
+                || matches!(
+                    (verification.from, verification.through),
+                    (RecordFrontier::Through(from), RecordFrontier::Through(through)) if from > through
+                ))
+        {
+            return Err(SessionStoreError::InvalidRecord(
+                "historical replay range is reversed".to_owned(),
+            ));
+        }
         if self.lifecycle.is_empty()
             || self.supervisor.incarnation_nonce.is_empty()
             || self.supervisor.process_start_identity.is_empty()
@@ -182,7 +288,17 @@ impl CapsuleProtocolSessionStore {
 
     pub fn read(&self, session_id: &SessionId) -> Result<StoredProtocolSession, SessionStoreError> {
         let path = self.root.join(session_id.as_str()).join("session.json");
-        let session: StoredProtocolSession = serde_json::from_slice(&fs::read(path)?)?;
+        let bytes = fs::read(path)?;
+        let value: Value = serde_json::from_slice(&bytes)?;
+        let schema_version = value
+            .get("schema_version")
+            .and_then(Value::as_u64)
+            .and_then(|version| u16::try_from(version).ok())
+            .unwrap_or(0);
+        if schema_version != SESSION_STORE_SCHEMA_VERSION {
+            return Err(SessionStoreError::UnsupportedSchema(schema_version));
+        }
+        let session: StoredProtocolSession = serde_json::from_value(value)?;
         session.validate()?;
         if &session.session_id != session_id {
             return Err(SessionStoreError::InvalidRecord(
@@ -209,6 +325,7 @@ impl CapsuleProtocolSessionStore {
                 Ok(session) => sessions.push(session),
                 Err(SessionStoreError::Io(error))
                     if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(SessionStoreError::UnsupportedSchema(_)) => {}
                 Err(error) => return Err(error),
             }
         }
@@ -217,7 +334,7 @@ impl CapsuleProtocolSessionStore {
     }
 }
 
-pub(crate) fn write_atomic_owner_only(path: &Path, bytes: &[u8]) -> Result<(), SessionStoreError> {
+pub fn write_atomic_owner_only(path: &Path, bytes: &[u8]) -> Result<(), SessionStoreError> {
     ensure_owner_only_store_supported()?;
     let parent = path.parent().ok_or(SessionStoreError::InvalidStorePath)?;
     let mut nonce = [0_u8; 8];
@@ -323,17 +440,22 @@ mod tests {
 
     #[cfg(unix)]
     fn stored_session(identity: SupervisorIdentity) -> StoredProtocolSession {
-        StoredProtocolSession::new(
-            SessionId::parse("session-1").expect("session id"),
-            "running",
-            &StateTypeId::parse("ato.state.test@1").expect("state type"),
-            &ContentRef::parse(format!("blake3:{}", "a".repeat(64))).expect("state ref"),
-            DurableFrontier {
+        let state_type = StateTypeId::parse("ato.state.test@1").expect("state type");
+        let base_state =
+            ContentRef::parse(format!("blake3:{}", "a".repeat(64))).expect("state ref");
+        StoredProtocolSession::new(NewStoredProtocolSession {
+            session_id: SessionId::parse("session-1").expect("session id"),
+            lifecycle: "running".to_owned(),
+            state_type: &state_type,
+            base_state: &base_state,
+            base_frontier: crate::RecordFrontier::Origin,
+            durable_frontier: DurableFrontier {
                 records_through: crate::RecordFrontier::Through(42),
                 journal_through: crate::JournalLsn::new(8192),
             },
-            identity,
-        )
+            workspace: std::env::current_dir().expect("absolute current directory"),
+            supervisor: identity,
+        })
     }
 
     #[cfg(unix)]
@@ -347,6 +469,58 @@ mod tests {
         let actual = store.read(&expected.session_id).expect("read session");
         assert_eq!(actual, expected);
         assert_eq!(store.list().expect("list sessions"), [expected]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_skips_legacy_and_future_schema_entries() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let store = CapsuleProtocolSessionStore::open(directory.path()).expect("store");
+        let supervisor = NewSupervisorIdentity::generate(3, 100, "start-100");
+        let expected = stored_session(supervisor.identity);
+        store.write(&expected).expect("write session");
+        for (id, version) in [("legacy", 1), ("future", 99)] {
+            let path = directory.path().join(id);
+            fs::create_dir(&path).expect("create unsupported entry");
+            fs::write(
+                path.join("session.json"),
+                serde_json::to_vec(&serde_json::json!({"schema_version": version})).unwrap(),
+            )
+            .expect("write unsupported entry");
+        }
+        assert_eq!(store.list().expect("list sessions"), [expected]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn connector_checkpoint_must_match_consistent_frontier() {
+        let supervisor = NewSupervisorIdentity::generate(3, 100, "start-100");
+        let mut session = stored_session(supervisor.identity);
+        let captured_at = session.durable_frontier;
+        session.latest_consistent_frontier = Some(captured_at);
+        session.active_checkpoint = Some(StoredLocalCheckpoint {
+            state_ref: format!("blake3:{}", "b".repeat(64)),
+            captured_at,
+            workspace_digest: format!("blake3:{}", "b".repeat(64)),
+            resume_fidelity: "filesystem_restart".to_owned(),
+            connector_checkpoints: BTreeMap::from([(
+                "terminal.main".to_owned(),
+                StoredConnectorCheckpoint {
+                    protocol_id: "ato.io.pty@1".to_owned(),
+                    applied_at: DurableFrontier {
+                        records_through: RecordFrontier::Through(41),
+                        journal_through: captured_at.journal_through,
+                    },
+                    format: "ato.io.pty.local-checkpoint@1".to_owned(),
+                    payload: serde_json::json!({"rows": 40, "cols": 132}),
+                },
+            )]),
+        });
+        assert!(matches!(
+            session.validate(),
+            Err(SessionStoreError::InvalidRecord(message))
+                if message.contains("Connector checkpoint frontier")
+        ));
     }
 
     #[test]
