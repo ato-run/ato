@@ -5736,10 +5736,9 @@ impl snapshot::authoring_evidence::ReadyStateSealAdapter for BuilderReadyStateSe
         let artifact_location =
             persist_and_locate_artifact(&manifest, &seal_dir, &self.work.work_id, &manifest_id)
                 .map_err(|(stage, reason)| format!("{stage}: {reason}"))?;
-        let runner_class = manifest
-            .runner_class_id
-            .clone()
-            .ok_or_else(|| "Seal omitted runner compatibility class".to_string())?;
+        if manifest.runner_class_id.is_none() {
+            return Err("Seal omitted runner compatibility class".to_string());
+        }
         let memory_artifact_ref = manifest
             .layers
             .memory
