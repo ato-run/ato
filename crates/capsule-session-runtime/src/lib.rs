@@ -9,6 +9,7 @@ pub mod domain;
 pub mod driver_binding;
 pub mod effect;
 pub mod recovery;
+pub mod runtime;
 pub mod supervisor;
 pub mod wal;
 
@@ -30,6 +31,10 @@ pub use effect::{
 pub use recovery::{
     ConnectorCheckpoint, ConnectorRecoveryPoint, ConnectorRecoveryStrategy, RecoveryPlan,
     RecoveryPlanError, ResumeFidelity, SessionCheckpoint, StateRecoveryPoint,
+};
+pub use runtime::{
+    ConnectorDriverRuntime, PausedComputationRuntime, RunningSessionRuntime, RuntimeBoundaryError,
+    SessionBootstrap, StateRuntime,
 };
 pub use supervisor::{
     BarrierError, BarrierId, BoundaryCoordinator, BoundaryDriver, DriverBoundaryError,
