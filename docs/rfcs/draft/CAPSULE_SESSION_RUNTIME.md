@@ -172,10 +172,10 @@ waits for authenticated readiness, and then optionally attaches. The client
 process never owns the restored shell or PTY.
 
 The Supervisor restores workspace State, creates the shell computation, binds
-the built-in `ato.io.pty@1` Driver, verifies the legacy one-command fixture
-history as a raw byte stream, and only then enters Isolated execution. This
-compatibility path injects a shell completion marker and is not yet general
-PTY v1 Replay for REPLs or foreground TUIs. Historical output is not appended
+the built-in `ato.io.pty@1` Driver, verifies the ordered historical Record
+stream without injecting completion markers, and only then enters Isolated
+execution. The legacy one-command producer may use private completion framing,
+but those bytes are excluded from PTY Records. Historical output is not appended
 to the continuation WAL. New stdin, output, and resize Records are durably
 committed. A natural child exit is committed once, after final output, with
 its actual status. Attach, detach, kill, writer leases, authentication, and
