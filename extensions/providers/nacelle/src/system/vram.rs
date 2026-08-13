@@ -1,6 +1,4 @@
 use anyhow::Result;
-#[cfg(not(all(target_os = "linux", feature = "cuda")))]
-use tracing::warn;
 
 /// Result of a scrub operation
 #[derive(Debug, Clone)]
@@ -149,7 +147,7 @@ impl VramScrubber {
 
         #[cfg(not(all(target_os = "linux", feature = "cuda")))]
         {
-            warn!("VRAM scrubbing backend not available on this platform; using no-op");
+            tracing::warn!("VRAM scrubbing backend not available on this platform; using no-op");
             return Ok(Self {
                 backend: self::noop_backend::new_backend(gpu_index)?,
             });
@@ -199,7 +197,7 @@ impl VramScrubber {
         }
 
         if let Some(ref msg) = last_err {
-            warn!("Partial VRAM scrub: {}", msg);
+            tracing::warn!("Partial VRAM scrub: {}", msg);
         }
 
         Ok(ScrubStats {
