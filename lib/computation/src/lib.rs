@@ -5,11 +5,18 @@
 
 #![forbid(unsafe_code)]
 
+mod codec;
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
 
 use thiserror::Error;
+
+pub use codec::{
+    CodecError, MAX_COMPUTATION_OBJECT_BYTES, ResolvedComputation, computation_ref,
+    decode_computation_object, encode_computation_object,
+};
 
 /// Maximum UTF-8 byte length of every Core identifier.
 pub const MAX_IDENTIFIER_BYTES: usize = 255;

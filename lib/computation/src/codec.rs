@@ -6,30 +6,16 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
-use std::io::Read;
-
-use capsule_core::{
+use crate::{
     Boundary, ComputationObject, ComputationRef, ContentRef, PortDef, PortId, ProtocolId, RoleId,
     SemanticsId,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use thiserror::Error;
 
 /// Maximum canonical byte length accepted for one computation object.
 pub const MAX_COMPUTATION_OBJECT_BYTES: u64 = 1024 * 1024;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ObjectMetadata {
-    pub size: u64,
-}
-
-/// Storage-independent access to content-addressed bytes.
-pub trait ObjectResolver: Send + Sync {
-    fn metadata(&self, reference: &ContentRef) -> Result<ObjectMetadata, ResolveError>;
-
-    fn open(&self, reference: &ContentRef) -> Result<Box<dyn Read + Send + '_>, ResolveError>;
-}
 
 /// A computation whose canonical encoding and identity have been verified.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,7 +54,7 @@ pub enum CodecError {
     #[error("computation object JSON failed: {0}")]
     Json(#[from] serde_json::Error),
     #[error("computation object identifier failed: {0}")]
-    Identifier(#[from] capsule_core::IdentifierError),
+    Identifier(#[from] crate::IdentifierError),
     #[error("computation object is not in its canonical JCS representation")]
     NonCanonical,
     #[error("computation object identity mismatch: expected {expected}, got {actual}")]
@@ -76,20 +62,6 @@ pub enum CodecError {
         expected: ComputationRef,
         actual: ComputationRef,
     },
-}
-
-#[derive(Debug, Error)]
-pub enum ResolveError {
-    #[error("object resolution I/O failed: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("computation object is {actual} bytes; maximum is {maximum}")]
-    ObjectTooLarge { actual: u64, maximum: u64 },
-    #[error("object metadata reported {expected} bytes but resolver returned {actual}")]
-    SizeMismatch { expected: u64, actual: u64 },
-    #[error(transparent)]
-    Codec(#[from] CodecError),
-    #[error("object resolver failed: {0}")]
-    Storage(String),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -159,32 +131,6 @@ pub fn computation_ref(object: &ComputationObject) -> Result<ComputationRef, Cod
     reference_for_bytes(&encode_computation_object(object)?)
 }
 
-pub fn resolve_computation(
-    objects: &dyn ObjectResolver,
-    reference: &ComputationRef,
-) -> Result<ResolvedComputation, ResolveError> {
-    let metadata = objects.metadata(reference.content_ref())?;
-    if metadata.size > MAX_COMPUTATION_OBJECT_BYTES {
-        return Err(ResolveError::ObjectTooLarge {
-            actual: metadata.size,
-            maximum: MAX_COMPUTATION_OBJECT_BYTES,
-        });
-    }
-    let mut bytes = Vec::new();
-    objects
-        .open(reference.content_ref())?
-        .take(MAX_COMPUTATION_OBJECT_BYTES + 1)
-        .read_to_end(&mut bytes)?;
-    let actual = bytes.len() as u64;
-    if actual != metadata.size {
-        return Err(ResolveError::SizeMismatch {
-            expected: metadata.size,
-            actual,
-        });
-    }
-    Ok(ResolvedComputation::verify(reference.clone(), &bytes)?)
-}
-
 fn decode_boundary(boundary: BTreeMap<String, PortWire>) -> Result<Boundary, CodecError> {
     boundary
         .into_iter()
@@ -209,8 +155,6 @@ fn reference_for_bytes(bytes: &[u8]) -> Result<ComputationRef, CodecError> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
-
     use super::*;
 
     fn fixture() -> ComputationObject {
@@ -282,33 +226,5 @@ mod tests {
             ResolvedComputation::verify(reference, &bytes),
             Err(CodecError::ObjectTooLarge { .. })
         ));
-    }
-
-    struct MemoryResolver {
-        bytes: Vec<u8>,
-    }
-
-    impl ObjectResolver for MemoryResolver {
-        fn metadata(&self, _reference: &ContentRef) -> Result<ObjectMetadata, ResolveError> {
-            Ok(ObjectMetadata {
-                size: self.bytes.len() as u64,
-            })
-        }
-
-        fn open(&self, _reference: &ContentRef) -> Result<Box<dyn Read + Send + '_>, ResolveError> {
-            Ok(Box::new(Cursor::new(self.bytes.as_slice())))
-        }
-    }
-
-    #[test]
-    fn resolver_constructs_verified_computation_from_generic_objects() {
-        let bytes = encode_computation_object(&fixture()).unwrap();
-        let reference = computation_ref(&fixture()).unwrap();
-        let resolver = MemoryResolver { bytes };
-
-        let resolved = resolve_computation(&resolver, &reference).unwrap();
-
-        assert_eq!(resolved.reference(), &reference);
-        assert_eq!(resolved.object(), &fixture());
     }
 }

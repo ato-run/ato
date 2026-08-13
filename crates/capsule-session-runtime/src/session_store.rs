@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::fs::File;
 
-use capsule_core::ComputationRef;
+use ato_computation::ComputationRef;
 use capsule_protocol::{ContentRef as ProtocolContentRef, StateTypeId};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};

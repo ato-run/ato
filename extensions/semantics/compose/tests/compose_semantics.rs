@@ -2,20 +2,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Read};
 use std::sync::Mutex;
 
-use capsule_compose::{
+use ato_computation::{
+    Boundary, ComputationObject, ComputationRef, ContentRef, PortDef, PortId, ProtocolId,
+    ResolvedComputation, RoleId, SemanticsId, computation_ref, encode_computation_object,
+};
+use ato_objects::{ObjectError, ObjectMetadata, ObjectResolver, resolve_computation};
+use ato_semantics_compose::{
     BoundaryVisibility, COMPOSE_SEMANTICS_ID, CompositeResidual, CompositeStepError,
     CompositeValidationError, Connection, Endpoint, NodeId, NodeStep, ProtocolRolePolicy,
     StepLabel, ValidatedComposite, ValidationBudget, ValidationResource, composite_residual_ref,
     encode_composite_residual, lift_exported_step, lift_internal_step, synchronize_connection,
     validate_composite, validate_composite_with_budget,
-};
-use capsule_core::{
-    Boundary, ComputationObject, ComputationRef, ContentRef, PortDef, PortId, ProtocolId, RoleId,
-    SemanticsId,
-};
-use capsule_core_codec::{
-    ObjectMetadata, ObjectResolver, ResolveError, ResolvedComputation, computation_ref,
-    encode_computation_object, resolve_computation,
 };
 
 #[derive(Default)]
@@ -63,11 +60,11 @@ impl MemoryObjects {
 }
 
 impl ObjectResolver for MemoryObjects {
-    fn metadata(&self, reference: &ContentRef) -> Result<ObjectMetadata, ResolveError> {
+    fn metadata(&self, reference: &ContentRef) -> Result<ObjectMetadata, ObjectError> {
         let bytes = self
             .bytes
             .get(reference)
-            .ok_or_else(|| ResolveError::Storage(format!("missing {reference}")))?;
+            .ok_or_else(|| ObjectError::Storage(format!("missing {reference}")))?;
         *self
             .metadata_reads
             .lock()
@@ -79,11 +76,11 @@ impl ObjectResolver for MemoryObjects {
         })
     }
 
-    fn open(&self, reference: &ContentRef) -> Result<Box<dyn Read + Send + '_>, ResolveError> {
+    fn open(&self, reference: &ContentRef) -> Result<Box<dyn Read + Send + '_>, ObjectError> {
         let bytes = self
             .bytes
             .get(reference)
-            .ok_or_else(|| ResolveError::Storage(format!("missing {reference}")))?;
+            .ok_or_else(|| ObjectError::Storage(format!("missing {reference}")))?;
         *self
             .opens
             .lock()
@@ -699,7 +696,7 @@ fn evolve_hello_branch(
 }
 
 #[test]
-fn behavioral_hello_world_forks_from_same_initial_computation() {
+fn reducer_preserves_behavioral_branches_from_same_computation() {
     let mut objects = MemoryObjects::default();
     let provider_boundary = BTreeMap::from([
         (PortId::parse("input").unwrap(), text_port("receiver")),
