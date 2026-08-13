@@ -231,6 +231,7 @@ fn write_envelope(temp_dir: &Path, request: &Value) -> PathBuf {
 // ── P0: Basic startup / shutdown / rejection ─────────────────────────────────
 
 #[test]
+#[serial_test::serial(nacelle_terminal)]
 fn t01_interactive_shell_emits_terminal_data_and_exits() {
     let mut h = TerminalHarness::spawn("/bin/sh", "safe");
 
@@ -250,6 +251,7 @@ fn t01_interactive_shell_emits_terminal_data_and_exits() {
 }
 
 #[test]
+#[serial_test::serial(nacelle_terminal)]
 fn t02_shell_allowlist_rejects_unlisted_binary() {
     let temp_dir = tempfile::tempdir().unwrap();
     let envelope = serde_json::json!({
@@ -285,6 +287,7 @@ fn t02_shell_allowlist_rejects_unlisted_binary() {
 }
 
 #[test]
+#[serial_test::serial(nacelle_terminal)]
 fn t12_shell_workload_requires_interactive_true() {
     let temp_dir = tempfile::tempdir().unwrap();
     let envelope = serde_json::json!({
@@ -313,6 +316,7 @@ fn t12_shell_workload_requires_interactive_true() {
 }
 
 #[test]
+#[serial_test::serial(nacelle_terminal)]
 fn t13_nacelle_exits_after_shell_exit_with_code() {
     let mut h = TerminalHarness::spawn("/bin/sh", "safe");
 
@@ -337,6 +341,7 @@ fn t13_nacelle_exits_after_shell_exit_with_code() {
 // ── P0: Environment variable filtering ───────────────────────────────────────
 
 #[test]
+#[serial_test::serial(nacelle_terminal)]
 fn t03_env_filter_safe_strips_secrets() {
     let mut h =
         TerminalHarness::spawn_with_env("/bin/sh", "safe", &[("FAKE_API_KEY", "LEAKED_VALUE_42")]);
@@ -359,6 +364,7 @@ fn t03_env_filter_safe_strips_secrets() {
 }
 
 #[test]
+#[serial_test::serial(nacelle_terminal)]
 fn t04_env_filter_blocks_dangerous_vars() {
     let mut h =
         TerminalHarness::spawn_with_env("/bin/sh", "safe", &[("LD_PRELOAD", "/tmp/evil.so")]);
@@ -378,6 +384,7 @@ fn t04_env_filter_blocks_dangerous_vars() {
 // ── P1: PTY resize ───────────────────────────────────────────────────────────
 
 #[test]
+#[serial_test::serial(nacelle_terminal)]
 fn t06_terminal_resize_updates_pty_dimensions() {
     let mut h = TerminalHarness::spawn("/bin/sh", "safe");
 
@@ -402,6 +409,7 @@ fn t06_terminal_resize_updates_pty_dimensions() {
 // ── P1: Signal delivery ──────────────────────────────────────────────────────
 
 #[test]
+#[serial_test::serial(nacelle_terminal)]
 fn t10_terminal_signal_sigint_interrupts_child() {
     let mut h = TerminalHarness::spawn("/bin/sh", "safe");
 
@@ -429,6 +437,7 @@ fn t10_terminal_signal_sigint_interrupts_child() {
 // ── P1: Output sanitization ──────────────────────────────────────────────────
 
 #[test]
+#[serial_test::serial(nacelle_terminal)]
 fn t07_output_sanitizer_strips_dcs() {
     let mut h = TerminalHarness::spawn("/bin/sh", "safe");
 
@@ -448,6 +457,7 @@ fn t07_output_sanitizer_strips_dcs() {
 }
 
 #[test]
+#[serial_test::serial(nacelle_terminal)]
 fn t08_output_sanitizer_strips_osc52_clipboard() {
     let mut h = TerminalHarness::spawn("/bin/sh", "safe");
 
@@ -468,6 +478,7 @@ fn t08_output_sanitizer_strips_osc52_clipboard() {
 // ── P2: Minimal env filter mode ──────────────────────────────────────────────
 
 #[test]
+#[serial_test::serial(nacelle_terminal)]
 fn t05_env_filter_minimal_only_allows_safe_vars() {
     let mut h =
         TerminalHarness::spawn_with_env("/bin/sh", "minimal", &[("CUSTOM_SHOULD_VANISH", "gone")]);
@@ -487,6 +498,7 @@ fn t05_env_filter_minimal_only_allows_safe_vars() {
 // ── P2: Session ID mismatch ──────────────────────────────────────────────────
 
 #[test]
+#[serial_test::serial(nacelle_terminal)]
 fn t11_wrong_session_id_is_ignored() {
     let mut h = TerminalHarness::spawn("/bin/sh", "safe");
 

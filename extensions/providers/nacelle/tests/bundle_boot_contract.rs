@@ -50,6 +50,7 @@ mod unix_tests {
     }
 
     #[test]
+    #[serial_test::serial(nacelle_binary)]
     fn bundled_runtime_boots_valid_config() {
         let temp_dir = tempfile::tempdir().unwrap();
         let bundled_path = temp_dir.path().join("nacelle-bundled");
@@ -83,6 +84,7 @@ mod unix_tests {
     }
 
     #[test]
+    #[serial_test::serial(nacelle_binary)]
     fn bundled_runtime_fails_without_config_json() {
         let temp_dir = tempfile::tempdir().unwrap();
         let bundled_path = temp_dir.path().join("nacelle-missing-config");
@@ -99,6 +101,7 @@ mod unix_tests {
     }
 
     #[test]
+    #[serial_test::serial(nacelle_binary)]
     fn bundled_runtime_fails_with_invalid_config_json() {
         let temp_dir = tempfile::tempdir().unwrap();
         let bundled_path = temp_dir.path().join("nacelle-invalid-config");
@@ -115,6 +118,7 @@ mod unix_tests {
     }
 
     #[test]
+    #[serial_test::serial(nacelle_binary)]
     fn bundled_runtime_can_preserve_extracted_dir_for_debugging() {
         let temp_dir = tempfile::tempdir().unwrap();
         let bundled_path = temp_dir.path().join("nacelle-keep-extracted");

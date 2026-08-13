@@ -116,6 +116,7 @@ cuda = []
 base64 = "0.22"
 serde_json = "1.0"
 tempfile = "3.8"
+serial_test = "3.5"
 
 [build-dependencies]
 aya-build = "0.1"
