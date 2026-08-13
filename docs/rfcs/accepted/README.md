@@ -7,11 +7,12 @@ Capsule Protocol.
 
 ## Capsule Protocol authority
 
-The active normative Capsule model and Protocol v1 consist of four documents:
+The active normative Capsule model and Protocol v1 consist of five documents:
 
 | Layer | Authority | Defines |
 |---|---|---|
 | Semantics | [Capsule Semantic Core](protocol/CAPSULE_PROTOCOL_SEMANTIC_CORE.md) | Computation, Boundary, Evolution, and Composition |
+| Identity | [Computation Object Encoding v1](protocol/CAPSULE_COMPUTATION_OBJECT_V1.md) | canonical bytes, hashing, and verified resolution |
 | Compatibility | [Capsule Protocol v1 Compatibility](protocol/CAPSULE_PROTOCOL_V1_COMPATIBILITY.md) | State + Connector + Record semantics and Computation adaptation |
 | Wire | [Capsule Protocol CBOR v1](protocol/CAPSULE_CBOR_V1.cddl) | descriptor and I/O Record bytes |
 | Container | [Capsule Protocol Bundle v1](protocol/CAPSULE_BUNDLE_V1.md) | portable `.capsule` layout, closure, integrity, and limits |

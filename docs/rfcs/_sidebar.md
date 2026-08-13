@@ -7,6 +7,7 @@
 **Capsule Protocol**
 
 - [Semantic Core](accepted/protocol/CAPSULE_PROTOCOL_SEMANTIC_CORE.md)
+- [Computation Object Encoding v1](accepted/protocol/CAPSULE_COMPUTATION_OBJECT_V1.md)
 - [Protocol v1 Compatibility](accepted/protocol/CAPSULE_PROTOCOL_V1_COMPATIBILITY.md)
 - [CBOR v1](accepted/protocol/CAPSULE_CBOR_V1.cddl)
 - [Bundle v1](accepted/protocol/CAPSULE_BUNDLE_V1.md)
@@ -49,6 +50,7 @@
 **Draft**
 
 - [Draft Index](draft/README.md)
+- [Capsule Compose Semantics](draft/CAPSULE_COMPOSE_SEMANTICS.md)
 - [A1 GC](draft/A1_GC.md)
 - [A1 Projection Strategy](draft/A1_PROJECTION_STRATEGY.md)
 - [A1 Source Tree Profile](draft/A1_SOURCE_TREE_PROFILE.md)

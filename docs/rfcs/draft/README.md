@@ -7,6 +7,7 @@ When a draft becomes authoritative, move it into `../accepted/`.
 
 ## Current focus areas
 
+- [`CAPSULE_COMPOSE_SEMANTICS.md`](CAPSULE_COMPOSE_SEMANTICS.md) — composition small-step semantics and residual invariants
 - execution model and materialization
 - engine / workload / provider-toolchain boundaries
 - discovery, identity, and association
