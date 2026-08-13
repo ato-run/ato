@@ -14,7 +14,9 @@ use crate::security::no_secret::CredentialScanner;
 
 mod streaming;
 
-pub use capsule_adapter_state_io_v1::{LEGACY_V1_SEMANTICS, NormalizedLegacyV1Computation};
+pub use capsule_adapter_state_io_v1::{
+    LEGACY_V1_SEMANTICS, LegacyV1OriginMigration, NormalizedLegacyV1Computation,
+};
 pub use streaming::{
     AllowAllPortableExportPolicy, BundleSummary, BundleWriteOutcome, DirectoryObjectSource,
     InMemoryObjectSource, ObjectMetadata, ObjectSource, PortableExportError, PortableExportPolicy,

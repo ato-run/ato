@@ -1130,7 +1130,6 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "capsule-core",
- "capsule-core-codec",
  "capsule-protocol",
  "rand 0.8.6",
  "serde",
