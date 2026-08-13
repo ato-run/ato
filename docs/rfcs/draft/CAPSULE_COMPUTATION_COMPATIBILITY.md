@@ -99,8 +99,10 @@ endpoint. Projection does not make Connector and Port identical.
 ## 6. Migration order
 
 1. Land this native domain and v1 projection while preserving v1 golden bytes.
-2. Route workspace and Ready-State startup through a computation evaluator
-   registry.
+2. Route workspace and Ready-State startup through the exact-type
+   `ComputationEvaluatorRegistry`. Evaluators receive semantic Ports and a
+   per-Run `PortBindingPlan`; existing State runtimes, snapshot backends, and
+   attachment endpoints remain materialization mechanisms below that boundary.
 3. Persist computation origin and lazy Run heads in Session Store v4.
 4. Define an unambiguous dual-reader Protocol and Bundle v2.
 5. Add native atomic computation capture/seal.

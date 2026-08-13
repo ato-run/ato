@@ -9,6 +9,7 @@ pub mod domain;
 pub mod driver_binding;
 pub mod driver_registry;
 pub mod effect;
+pub mod evaluator;
 pub mod recovery;
 pub mod runtime;
 pub mod session_store;
@@ -33,6 +34,10 @@ pub use driver_registry::{
 pub use effect::{
     EffectClass, EffectIntent, EffectOperationDigest, EffectState, EffectTransaction,
     EffectTransitionError,
+};
+pub use evaluator::{
+    ComputationEvaluator, ComputationEvaluatorRegistry, EvaluatorCapabilities,
+    EvaluatorRegistryError, PortBindingPlan,
 };
 pub use recovery::{
     ConnectorCheckpoint, ConnectorRecoveryPoint, ConnectorRecoveryStrategy, RecoveryPlan,
