@@ -22,7 +22,9 @@ pub struct PortBindingPlan {
 }
 
 impl PortBindingPlan {
-    pub fn from_attachment_plan(plan: &AttachmentPlan) -> Self {
+    /// Projects Protocol v1 Connector bindings using the compatibility rule
+    /// `ConnectorId == PortId`. Native computations must bind Ports explicitly.
+    pub fn from_legacy_v1_attachment_plan(plan: &AttachmentPlan) -> Self {
         Self {
             ports: plan
                 .connectors
@@ -180,7 +182,7 @@ mod tests {
             )]),
             environment: BTreeMap::from([("TERM".to_owned(), "xterm".to_owned())]),
         };
-        let projected = PortBindingPlan::from_attachment_plan(&plan);
+        let projected = PortBindingPlan::from_legacy_v1_attachment_plan(&plan);
         assert_eq!(
             projected
                 .ports
