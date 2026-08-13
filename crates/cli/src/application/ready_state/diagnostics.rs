@@ -9,8 +9,8 @@
 //! Not-yet-wired inputs (always the safe value until their phase lands): hotset
 //! profiles (`false` until U12) and remote read-through (`false` until P4).
 
-use capsulefs::CasStore;
 use serde::Serialize;
+use snapshot::layer_store::CasStore;
 use snapshot::mem_backend_selector::{MemBackendInputs, decide_mem_backend};
 use snapshot::{BackendCapabilities, ReadyStateManifest};
 use std::path::Path;

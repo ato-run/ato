@@ -4258,7 +4258,7 @@ async fn handle_restore_snapshot_lease(
         parse_restore_snapshot_command,
     };
     use crate::application::ready_state::secret_resolver::select_resolver;
-    use capsulefs::CasStore;
+    use snapshot::layer_store::CasStore;
 
     let lease_id = lease.id.clone();
 

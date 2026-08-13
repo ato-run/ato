@@ -20,8 +20,8 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use capsule::foundation::types::manifest::CapsuleManifest;
-use capsulefs::CasStore;
 use serde::Serialize;
+use snapshot::layer_store::CasStore;
 use snapshot::rootfs_builder::{SourceProbe, build_rootfs, derive_build_spec};
 use snapshot::{
     BuildLayers, BuildReadyStateInput, FirecrackerBackend, FirecrackerConfig, RestoreContract,
@@ -31,7 +31,7 @@ use snapshot::{
 use super::checks::{resolve_fc_bin, resolve_guest_kernel};
 
 /// The built-in fixture: a public, no-binding, stdlib-python web capsule (the same
-/// shape as `crates/snapshot-builder/fixtures/py-web`).
+/// shape as `tools/snapshot-builder/fixtures/py-web`).
 const FIXTURE_CAPSULE_TOML: &str = r#"schema_version = "0.3"
 name = "runner-smoke-py-web"
 version = "0.1.0"

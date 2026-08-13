@@ -54,12 +54,12 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use capsulefs::CasStore;
 use snapshot::docker_import::build::SystemImportCommandRunner;
 use snapshot::docker_import::{
     DockerImportSpec, DockerImportWarning, DockerfileImportRequest, SecretEnvPolicy,
     import_identity_digest, run_dockerfile_import,
 };
+use snapshot::layer_store::CasStore;
 use snapshot::{
     BuildLayers, BuildReadyStateInput, BuildReadyStateReceipt, FirecrackerBackend,
     FirecrackerConfig, RestoreContract, RestoreReadyStateInput, RestoredSession, SanitizerContract,

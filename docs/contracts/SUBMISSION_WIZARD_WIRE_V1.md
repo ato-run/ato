@@ -18,7 +18,7 @@ wizard. PR-0 lands **types + validation + tests only** on both sides:
   PR-0 nothing is mounted — schemas live in the service so PR-1 routes can
   import them, mirroring `session_surface.ts` → `capsule_snapshots.ts`).
 - ato (Rust): serde types + TOML validation in
-  `crates/snapshot-builder/src/wizard_wire.rs`, declared via `mod wizard_wire;`
+  `tools/snapshot-builder/src/wizard_wire.rs`, declared via `mod wizard_wire;`
   in `main.rs` (the `upload.rs` precedent), with `#[cfg(test)] mod tests`
   inside. No lib target; the crate already depends on serde/serde_json, and
   PR-0 adds `toml` to it (the workspace already pins toml 0.8, so this is a
