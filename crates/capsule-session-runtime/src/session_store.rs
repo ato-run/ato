@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::fs::File;
 
-use capsule_protocol::{ContentRef, StateTypeId};
+use capsule_protocol::{ComputationTypeId, ContentRef, StateTypeId};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -15,7 +15,7 @@ use thiserror::Error;
 
 use crate::{DurableFrontier, RecordFrontier};
 
-const SESSION_STORE_SCHEMA_VERSION: u16 = 3;
+const SESSION_STORE_SCHEMA_VERSION: u16 = 4;
 const SESSION_SECRET_BYTES: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -148,14 +148,26 @@ pub enum StoredRuntimeProfile {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StoredComputationOrigin {
+    Native {
+        computation_type: String,
+        computation_ref: String,
+    },
+    LegacyStateIo {
+        state_type: String,
+        state_ref: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredProtocolSession {
     pub schema_version: u16,
     pub session_id: SessionId,
     pub lifecycle: String,
-    pub state_type: String,
+    pub base_computation: StoredComputationOrigin,
     pub durable_frontier: DurableFrontier,
     pub latest_consistent_frontier: Option<DurableFrontier>,
-    pub base_state: String,
     pub base_frontier: RecordFrontier,
     #[serde(default)]
     pub base_connector_checkpoints: BTreeMap<String, StoredConnectorCheckpoint>,
@@ -166,11 +178,10 @@ pub struct StoredProtocolSession {
     pub supervisor: SupervisorIdentity,
 }
 
-pub struct NewStoredProtocolSession<'a> {
+pub struct NewStoredProtocolSession {
     pub session_id: SessionId,
     pub lifecycle: String,
-    pub state_type: &'a StateTypeId,
-    pub base_state: &'a ContentRef,
+    pub base_computation: StoredComputationOrigin,
     pub base_frontier: RecordFrontier,
     pub durable_frontier: DurableFrontier,
     pub runtime_profile: StoredRuntimeProfile,
@@ -178,15 +189,14 @@ pub struct NewStoredProtocolSession<'a> {
 }
 
 impl StoredProtocolSession {
-    pub fn new(input: NewStoredProtocolSession<'_>) -> Self {
+    pub fn new(input: NewStoredProtocolSession) -> Self {
         Self {
             schema_version: SESSION_STORE_SCHEMA_VERSION,
             session_id: input.session_id,
             lifecycle: input.lifecycle,
-            state_type: input.state_type.to_string(),
+            base_computation: input.base_computation,
             durable_frontier: input.durable_frontier,
             latest_consistent_frontier: None,
-            base_state: input.base_state.to_string(),
             base_frontier: input.base_frontier,
             base_connector_checkpoints: BTreeMap::new(),
             active_checkpoint: None,
@@ -202,10 +212,26 @@ impl StoredProtocolSession {
             return Err(SessionStoreError::UnsupportedSchema(self.schema_version));
         }
         SessionId::parse(self.session_id.to_string())?;
-        StateTypeId::parse(&self.state_type)
-            .map_err(|error| SessionStoreError::InvalidRecord(error.to_string()))?;
-        ContentRef::parse(&self.base_state)
-            .map_err(|error| SessionStoreError::InvalidRecord(error.to_string()))?;
+        match &self.base_computation {
+            StoredComputationOrigin::Native {
+                computation_type,
+                computation_ref,
+            } => {
+                ComputationTypeId::parse(computation_type)
+                    .map_err(|error| SessionStoreError::InvalidRecord(error.to_string()))?;
+                ContentRef::parse(computation_ref)
+                    .map_err(|error| SessionStoreError::InvalidRecord(error.to_string()))?;
+            }
+            StoredComputationOrigin::LegacyStateIo {
+                state_type,
+                state_ref,
+            } => {
+                StateTypeId::parse(state_type)
+                    .map_err(|error| SessionStoreError::InvalidRecord(error.to_string()))?;
+                ContentRef::parse(state_ref)
+                    .map_err(|error| SessionStoreError::InvalidRecord(error.to_string()))?;
+            }
+        }
         match &self.runtime_profile {
             StoredRuntimeProfile::WorkspacePty { workspace } => {
                 if !workspace.is_absolute() {
@@ -312,6 +338,13 @@ impl StoredProtocolSession {
             )),
         }
     }
+
+    pub fn replace_with_legacy_state(&mut self, state_type: &StateTypeId, state_ref: &ContentRef) {
+        self.base_computation = StoredComputationOrigin::LegacyStateIo {
+            state_type: state_type.to_string(),
+            state_ref: state_ref.to_string(),
+        };
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -363,8 +396,31 @@ impl CapsuleProtocolSessionStore {
                 "runtime_profile".to_string(),
                 serde_json::json!({ "kind": "workspace_pty", "workspace": workspace }),
             );
-        } else if schema_version != SESSION_STORE_SCHEMA_VERSION {
+        } else if schema_version != 3 && schema_version != SESSION_STORE_SCHEMA_VERSION {
             return Err(SessionStoreError::UnsupportedSchema(schema_version));
+        }
+        if schema_version == 2 || schema_version == 3 {
+            let object = value.as_object_mut().ok_or_else(|| {
+                SessionStoreError::InvalidRecord("session record is not an object".to_string())
+            })?;
+            let state_type = object.remove("state_type").ok_or_else(|| {
+                SessionStoreError::InvalidRecord("legacy state type is missing".to_string())
+            })?;
+            let state_ref = object.remove("base_state").ok_or_else(|| {
+                SessionStoreError::InvalidRecord("legacy base State is missing".to_string())
+            })?;
+            object.insert(
+                "schema_version".to_string(),
+                Value::from(SESSION_STORE_SCHEMA_VERSION),
+            );
+            object.insert(
+                "base_computation".to_string(),
+                serde_json::json!({
+                    "kind": "legacy_state_io",
+                    "state_type": state_type,
+                    "state_ref": state_ref,
+                }),
+            );
         }
         let session: StoredProtocolSession = serde_json::from_value(value)?;
         session.validate()?;
@@ -508,14 +564,13 @@ mod tests {
 
     #[cfg(unix)]
     fn stored_session(identity: SupervisorIdentity) -> StoredProtocolSession {
-        let state_type = StateTypeId::parse("ato.state.test@1").expect("state type");
-        let base_state =
-            ContentRef::parse(format!("blake3:{}", "a".repeat(64))).expect("state ref");
         StoredProtocolSession::new(NewStoredProtocolSession {
             session_id: SessionId::parse("session-1").expect("session id"),
             lifecycle: "running".to_owned(),
-            state_type: &state_type,
-            base_state: &base_state,
+            base_computation: StoredComputationOrigin::Native {
+                computation_type: "ato.computation.test@1".to_owned(),
+                computation_ref: format!("blake3:{}", "a".repeat(64)),
+            },
             base_frontier: crate::RecordFrontier::Origin,
             durable_frontier: DurableFrontier {
                 records_through: crate::RecordFrontier::Through(42),
@@ -547,10 +602,20 @@ mod tests {
         let directory = tempfile::tempdir().expect("tempdir");
         let store = CapsuleProtocolSessionStore::open(directory.path()).expect("store");
         let supervisor = NewSupervisorIdentity::generate(3, 100, "start-100");
-        let expected = stored_session(supervisor.identity);
+        let mut expected = stored_session(supervisor.identity);
+        expected.base_computation = StoredComputationOrigin::LegacyStateIo {
+            state_type: "ato.state.test@1".to_owned(),
+            state_ref: format!("blake3:{}", "a".repeat(64)),
+        };
         let mut value = serde_json::to_value(&expected).unwrap();
         let object = value.as_object_mut().unwrap();
         object.insert("schema_version".to_string(), Value::from(2));
+        object.remove("base_computation");
+        object.insert("state_type".to_string(), Value::from("ato.state.test@1"));
+        object.insert(
+            "base_state".to_string(),
+            Value::from(format!("blake3:{}", "a".repeat(64))),
+        );
         let profile = object.remove("runtime_profile").unwrap();
         object.insert("workspace".to_string(), profile["workspace"].clone());
         let path = directory.path().join("session-1");
@@ -562,6 +627,40 @@ mod tests {
         .unwrap();
 
         assert_eq!(store.read(&expected.session_id).unwrap(), expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn schema_v3_record_decodes_as_legacy_computation_origin() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let store = CapsuleProtocolSessionStore::open(directory.path()).expect("store");
+        let supervisor = NewSupervisorIdentity::generate(3, 100, "start-100");
+        let expected = stored_session(supervisor.identity);
+        let mut value = serde_json::to_value(&expected).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.insert("schema_version".to_string(), Value::from(3));
+        object.remove("base_computation");
+        object.insert("state_type".to_string(), Value::from("ato.state.test@1"));
+        object.insert(
+            "base_state".to_string(),
+            Value::from(format!("blake3:{}", "b".repeat(64))),
+        );
+        let path = directory.path().join("session-1");
+        fs::create_dir(&path).unwrap();
+        fs::write(
+            path.join("session.json"),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+
+        let actual = store.read(&expected.session_id).unwrap();
+        assert_eq!(
+            actual.base_computation,
+            StoredComputationOrigin::LegacyStateIo {
+                state_type: "ato.state.test@1".to_owned(),
+                state_ref: format!("blake3:{}", "b".repeat(64)),
+            }
+        );
     }
 
     #[cfg(unix)]
