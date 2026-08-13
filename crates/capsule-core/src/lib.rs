@@ -222,7 +222,10 @@ impl FromStr for ContentRef {
     }
 }
 
-/// Exact identity of a sealed canonical [`ComputationObject`].
+/// Syntactically valid persistent reference to a canonical [`ComputationObject`].
+///
+/// A reference may be unresolved or dangling. Resolution and digest
+/// verification produce a `ResolvedComputation` in the codec layer.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ComputationRef(ContentRef);
 
@@ -288,7 +291,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn computation_reference_is_only_a_sealed_object_address() {
+    fn computation_reference_accepts_an_unresolved_sealed_object_address() {
         let reference = ComputationRef::parse(format!("blake3:{}", "ab".repeat(32))).unwrap();
 
         assert_eq!(reference.content_ref().algorithm(), "blake3");

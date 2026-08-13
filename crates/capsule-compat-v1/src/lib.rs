@@ -1,9 +1,10 @@
 //! Opaque adapter from Capsule Protocol v1 to the Computation Core.
 //!
 //! State, Connector, and Record semantics remain v1 concerns. This adapter
-//! stores the exact descriptor and Record member bytes, projects only the open
-//! boundary required for composition, and includes that boundary inside the
-//! content-addressed Computation Object.
+//! stores the exact descriptor and Record member bytes, projects an exposed
+//! compatibility boundary, and includes that boundary inside the
+//! content-addressed Computation Object. Generic role compatibility is not
+//! implied by this projection.
 
 #![forbid(unsafe_code)]
 
@@ -40,7 +41,7 @@ pub struct LegacyV1Spool<'a> {
     pub record_stream_member: SpoolMember<'a>,
 }
 
-/// Opaque type-defined body for the legacy v1 computation evaluator.
+/// Opaque type-defined body for the legacy v1 semantics implementation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LegacyV1Residual {
     pub descriptor_ref: ContentRef,
@@ -50,8 +51,22 @@ pub struct LegacyV1Residual {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NormalizedLegacyV1Computation {
     pub computation: ResolvedComputation,
+    pub origin_migration: LegacyV1OriginMigration,
     pub residual: LegacyV1Residual,
     pub cas_root: PathBuf,
+}
+
+/// Proof that the v1 adapter produced a resolved native computation origin.
+///
+/// The private field prevents ordinary Session runtime code from manufacturing
+/// a legacy-origin upgrade from an arbitrary syntactically valid reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegacyV1OriginMigration(ComputationRef);
+
+impl LegacyV1OriginMigration {
+    pub fn computation_ref(&self) -> &ComputationRef {
+        &self.0
+    }
 }
 
 #[derive(Debug, Error)]
@@ -115,9 +130,11 @@ pub fn normalize_v1_spool(
     }
     let computation = ResolvedComputation::verify(stored_reference, &object_bytes)
         .map_err(|error| CompatibilityError::Invalid(error.to_string()))?;
+    let origin_migration = LegacyV1OriginMigration(computation.reference().clone());
 
     Ok(NormalizedLegacyV1Computation {
         computation,
+        origin_migration,
         residual,
         cas_root: cas_root.to_path_buf(),
     })
@@ -419,6 +436,10 @@ mod tests {
         assert_ne!(
             normalized.computation.reference().content_ref(),
             &normalized.residual.descriptor_ref
+        );
+        assert_eq!(
+            normalized.origin_migration.computation_ref(),
+            normalized.computation.reference()
         );
     }
 

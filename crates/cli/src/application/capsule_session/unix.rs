@@ -14,10 +14,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use capsule::protocol_bundle::{
-    LEGACY_V1_SEMANTICS, PortableCapsule, SpoolBundle, StreamingBundleReader,
-    capture_local_workspace_checkpoint, normalize_v1_spool, restore_workspace_state,
+    LEGACY_V1_SEMANTICS, LegacyV1OriginMigration, PortableCapsule, SpoolBundle,
+    StreamingBundleReader, capture_local_workspace_checkpoint, normalize_v1_spool,
+    restore_workspace_state,
 };
-use capsule_core::{ComputationRef, SemanticsId};
+use capsule_core::SemanticsId;
 use capsule_protocol::{ConnectorId, Direction, IoRecord, Payload, RecordKindId};
 use capsule_session_runtime::{
     BoundaryCoordinator, BoundaryDriver, BoundaryOperationId, CapsuleProtocolSessionStore,
@@ -249,7 +250,7 @@ pub(crate) fn serve(session: &str, bundle: &Path, into: &Path) -> Result<()> {
         .context("failed to read Capsule bundle")?;
     let normalized = normalize_v1_spool(&spool, &paths.directory.join("computation-cas"))
         .context("failed to normalize Capsule v1 as a computation")?;
-    let root = normalized.computation.reference().clone();
+    let origin_migration = normalized.origin_migration;
     match LegacyComputationEvaluator::select(
         &normalized.computation.object().semantics,
         &spool.descriptor.base_state.state_type,
@@ -260,9 +261,11 @@ pub(crate) fn serve(session: &str, bundle: &Path, into: &Path) -> Result<()> {
                 objects: spool.objects.materialize()?,
                 descriptor: spool.descriptor,
             };
-            serve_workspace_pty(session, into, capsule, root)
+            serve_workspace_pty(session, into, capsule, origin_migration)
         }
-        LegacyRuntimeProfile::ReadyState => serve_ready_state(session, into, spool, root),
+        LegacyRuntimeProfile::ReadyState => {
+            serve_ready_state(session, into, spool, origin_migration)
+        }
     }
 }
 
@@ -293,8 +296,9 @@ fn serve_workspace_pty(
     session: &str,
     into: &Path,
     capsule: PortableCapsule,
-    base_computation: ComputationRef,
+    origin_migration: LegacyV1OriginMigration,
 ) -> Result<()> {
+    let base_computation = origin_migration.computation_ref().clone();
     let session_id = SessionId::parse(session)?;
     let paths = SessionPaths::new(&session_id)?;
     paths.create()?;
@@ -361,7 +365,7 @@ fn serve_workspace_pty(
         let store = CapsuleProtocolSessionStore::open(&paths.root)?;
         let mut stored = store.read(&session_id)?;
         stored.lifecycle = "starting".to_owned();
-        stored.upgrade_legacy_origin(&base_computation);
+        apply_legacy_v1_origin_migration(&mut stored, &origin_migration);
         let recovery = stored.recovery_mut();
         recovery.base_frontier = checkpoint.captured_at.records_through;
         recovery.base_connector_checkpoints = checkpoint.connector_checkpoints.clone();
@@ -502,12 +506,27 @@ fn serve_workspace_pty(
     result
 }
 
+fn apply_legacy_v1_origin_migration(
+    session: &mut StoredProtocolSession,
+    migration: &LegacyV1OriginMigration,
+) {
+    if matches!(
+        &session.origin_computation,
+        StoredComputationOrigin::LegacyV3State { .. }
+    ) {
+        session.origin_computation = StoredComputationOrigin::Native {
+            computation_ref: migration.computation_ref().to_string(),
+        };
+    }
+}
+
 fn serve_ready_state(
     session: &str,
     _into: &Path,
     spool: SpoolBundle,
-    base_computation: ComputationRef,
+    origin_migration: LegacyV1OriginMigration,
 ) -> Result<()> {
+    let base_computation = origin_migration.computation_ref().clone();
     if !spool.descriptor.connectors.is_empty() {
         bail!("ReadyStateConnectorAttachmentUnsupported");
     }
