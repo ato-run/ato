@@ -2,11 +2,12 @@
 //!
 //! Composition remains an ordinary semantics over the unchanged Capsule Core.
 //! This crate deliberately contains no evaluator, runtime binding, history, or
-//! materialization model.
+//! materialization model. Its reducer accepts child transition evidence only.
 
 #![forbid(unsafe_code)]
 
 mod codec;
+mod step;
 mod validate;
 
 use std::collections::BTreeMap;
@@ -19,6 +20,10 @@ use thiserror::Error;
 pub use codec::{
     CompositeResidualCodecError, MAX_COMPOSITE_RESIDUAL_BYTES, composite_residual_ref,
     decode_composite_residual, encode_composite_residual,
+};
+pub use step::{
+    CompositeReduction, CompositeStepError, NodeStep, StepLabel, lift_exported_step,
+    lift_internal_step, synchronize_connection,
 };
 pub use validate::{
     BoundaryVisibility, CompositeValidationError, DEFAULT_MAX_RESOLVED_BYTES,
