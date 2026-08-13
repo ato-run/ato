@@ -10,7 +10,7 @@ related:
 ssot:
   - "crates/capsule-protocol/"
   - "crates/capsule-codec/"
-  - "crates/capsule-compat-v1/"
+  - "crates/capsule-compat-v1/" # package: capsule-adapter-state-io-v1
 ---
 
 # Capsule Protocol v1 Compatibility
@@ -71,22 +71,24 @@ recorded through a Connector.
 
 ## 4. Computation adapter
 
-`capsule-compat-v1` adapts a validated Bundle v1 to one opaque computation type:
+`capsule-adapter-state-io-v1` adapts a validated Bundle v1 to one opaque
+semantics:
 
 ```text
 Protocol v1 Bundle
-  -> capsule.computation.legacy-v1@1
+  -> semantics capsule.legacy-v1@1
   -> content-addressed ComputationObject
   -> ComputationRef
 ```
 
-The type-defined legacy body contains content references to the exact v1
+The semantics-defined legacy residual contains content references to the exact v1
 descriptor and Record Sequence bytes. It does not translate State, Connector,
 or `IoRecord` into native Core objects. Only the externally composable boundary
-is projected: each v1 Connector becomes a duplex compatibility Port preserving
-its protocol and configuration reference.
+is projected: each v1 Connector becomes a compatibility Port preserving its
+protocol and using the `legacy-peer` role. Connector configuration remains
+committed by the exact descriptor bytes and is not duplicated into Core.
 
-The `ComputationObject` contains that boundary and the legacy body reference,
+The `ComputationObject` contains the semantics, boundary, and residual reference,
 so changing a projected Port necessarily changes the `ComputationRef`.
 Connector identity equals Port identity only inside this explicit v1
 projection; native binding requires a separate `PortId -> ConnectorId` map.
@@ -96,8 +98,10 @@ projection; native binding requires a separate `PortId -> ConnectorId` map.
 Normalization never rewrites its input Bundle. Descriptor and Record members
 are copied into an owner-only CAS in bounded chunks while computing BLAKE3 and
 verifying copied byte count against the Bundle-validated member size. Existing
-objects are validated by streaming size and hash. CAS publication is atomic,
-content-verified, idempotent, and fails closed on conflict.
+objects are validated by streaming size and hash. CAS publication performs file
+fsync, no-clobber rename, and parent-directory fsync. Existing Unix objects are
+opened without following symlinks. Publication is content-verified, idempotent,
+and fails closed on conflict.
 
 The same exact v1 members and projected boundary produce the same
 `ComputationRef`. Existing objects referenced by the v1 members retain their
@@ -115,11 +119,13 @@ Session Store v2/v3 State identities and the earlier v4 layout remain readable.
 After the seed Bundle is normalized they are upgraded to a native
 `ComputationRef`; new v4 writes require that native origin.
 
-Evaluator registration is exact by `ComputationTypeId`. The evaluator consumes
-a hash-validated `ResolvedComputation`, whose boundary is already inside its
-object, plus an `EvaluationContext` containing an object resolver, explicit
-Port bindings, Session paths, and materialization services. Routing existing
-Workspace PTY and Ready-State startup through this registry is a later change.
+Evaluator registration is exact by `SemanticsId`. The evaluator consumes a
+hash-validated `ResolvedComputation`, whose boundary is already inside its
+object, plus an `EvaluationContext` containing a generic content
+`ObjectResolver`, explicit Port bindings, Session paths, and materialization
+services. Legacy Connector-to-Port projection belongs to this adapter or its
+integration layer, never to the generic binding API. Routing existing Workspace
+PTY and Ready-State startup through this registry is a later change.
 
 ## 7. Wire and container stability
 
