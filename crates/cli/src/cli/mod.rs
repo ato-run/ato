@@ -6,6 +6,7 @@ pub(crate) mod commands;
 pub(crate) mod community;
 mod config;
 mod console;
+mod decap;
 pub(crate) mod dispatch;
 mod import_cmd;
 mod inspect;
@@ -35,6 +36,7 @@ pub(crate) use binding::BindingCommands;
 pub(crate) use config::{
     ConfigCommands, ConfigEngineCommands, ConfigRegistryCommands, EngineCommands,
 };
+pub(crate) use decap::DecapCommands;
 #[allow(unused_imports)]
 pub(crate) use import_cmd::ImportArgs;
 #[allow(unused_imports)]
