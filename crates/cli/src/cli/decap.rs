@@ -29,19 +29,15 @@ pub(crate) enum DecapCommands {
 
     /// Attach to an interactive Capsule Session.
     Attach {
-        /// Session name (or internal Session ID).
+        /// Session name.
         #[arg(value_name = "NAME")]
         name: String,
     },
 
     /// Stop a Capsule Session.
     Stop {
-        /// Session name (or internal Session ID).
+        /// Session name.
         #[arg(value_name = "NAME")]
         name: String,
-
-        /// Force termination. Reserved for runtimes that support graceful stop.
-        #[arg(long, default_value_t = false)]
-        force: bool,
     },
 }
