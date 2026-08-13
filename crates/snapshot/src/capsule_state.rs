@@ -101,18 +101,17 @@ impl ReadyStateStateObjectV1 {
                 "wrong legacy Ready-State schema".to_string(),
             ));
         }
-        if let Some(supervisor) = &self.legacy_manifest.supervisor_build {
-            if !supervisor.binding_names.is_empty() {
-                return Err(ReadyStateStateError::ReadyStateBindingsUnsupported);
-            }
-            if !supervisor.state_volumes.is_empty() {
-                return Err(ReadyStateStateError::ReadyStateDurableVolumesUnsupported);
-            }
-            if supervisor.state_owner_scope.is_some() {
-                return Err(ReadyStateStateError::Invalid(
-                    "Ready-State state_owner_scope is present without durable volumes".to_string(),
-                ));
-            }
+        if self
+            .legacy_manifest
+            .supervisor_build
+            .as_ref()
+            .is_some_and(|supervisor| {
+                supervisor.state_owner_scope.is_some() && supervisor.state_volumes.is_empty()
+            })
+        {
+            return Err(ReadyStateStateError::Invalid(
+                "Ready-State state_owner_scope is present without durable volumes".to_string(),
+            ));
         }
         self.snapshot_manifest
             .validate()
@@ -140,6 +139,20 @@ impl ReadyStateStateObjectV1 {
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, ReadyStateStateError> {
         self.validate()?;
         Ok(serde_jcs::to_vec(self)?)
+    }
+
+    /// F1 Session capability gate. These are valid Ready-State declarations,
+    /// but this Session profile cannot materialize their external dependencies.
+    pub fn validate_f1_session_profile(&self) -> Result<(), ReadyStateStateError> {
+        if let Some(supervisor) = &self.legacy_manifest.supervisor_build {
+            if !supervisor.binding_names.is_empty() {
+                return Err(ReadyStateStateError::ReadyStateBindingsUnsupported);
+            }
+            if !supervisor.state_volumes.is_empty() {
+                return Err(ReadyStateStateError::ReadyStateDurableVolumesUnsupported);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -643,7 +656,7 @@ mod tests {
     }
 
     #[test]
-    fn state_adapter_rejects_f1_unsupported_supervisor_state() {
+    fn f1_session_profile_rejects_unsupported_supervisor_state() {
         let root = tempfile::tempdir().unwrap();
         let (_, object) = accepted_fixture(root.path());
         let mut binding = object.clone();
@@ -655,7 +668,7 @@ mod tests {
             state_owner_scope: None,
         });
         assert!(matches!(
-            binding.validate(),
+            binding.validate_f1_session_profile(),
             Err(ReadyStateStateError::ReadyStateBindingsUnsupported)
         ));
 
@@ -671,7 +684,7 @@ mod tests {
             state_owner_scope: Some("owner/capsule".to_string()),
         });
         assert!(matches!(
-            durable.validate(),
+            durable.validate_f1_session_profile(),
             Err(ReadyStateStateError::ReadyStateDurableVolumesUnsupported)
         ));
 

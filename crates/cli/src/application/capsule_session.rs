@@ -83,7 +83,7 @@ pub(crate) fn list_public(_json: bool) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-pub(crate) fn stop_public(_name: &str, _force: bool) -> Result<()> {
+pub(crate) fn stop_public(_name: &str) -> Result<()> {
     unsupported()
 }
 
