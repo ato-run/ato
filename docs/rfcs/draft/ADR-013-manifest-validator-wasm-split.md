@@ -29,7 +29,7 @@ validator out of WASM.
 
 There is precedent for exactly this kind of extraction: **N2 pulled
 `ConfigField` / `ConfigKind` out into the `protocol` crate**
-(`crates/protocol/src/config.rs`) to share a pure type across boundaries.
+(`lib/ipc/src/config.rs`) to share a pure type across boundaries.
 
 ## Decision
 

@@ -7,8 +7,8 @@
 //! channel. No-binding sessions have no leases, so the gate returns immediately.
 
 use anyhow::{Context, Result, bail};
-use protocol::binding_control::{AgentToHost, HostToAgent};
-use protocol::binding_lease::BindingLease;
+use ato_ipc::binding_control::{AgentToHost, HostToAgent};
+use ato_ipc::binding_lease::BindingLease;
 use serde::Serialize;
 
 /// Phase 8a-RunGate PR D1 (#912): the run-path binding-preview receipt. Records the
@@ -134,11 +134,11 @@ pub(crate) fn ensure_pre_bind_before_seal(session_is_bound: bool) -> Result<()> 
 /// starts (aggregated, actionable grant report); the lease clock
 /// (`issued/expires`) starts here at delivery time.
 pub(crate) fn issue_leases(
-    resolved: Vec<(String, protocol::binding_lease::SecretValue)>,
+    resolved: Vec<(String, ato_ipc::binding_lease::SecretValue)>,
     now_ms: u64,
     ttl_ms: u64,
 ) -> Result<Vec<BindingLease>> {
-    use protocol::binding_lease::{BindingLeaseId, BindingName};
+    use ato_ipc::binding_lease::{BindingLeaseId, BindingName};
     let mut leases = Vec::with_capacity(resolved.len());
     for (name, value) in resolved {
         let bname = BindingName::parse(name.as_str())
@@ -228,7 +228,7 @@ pub(crate) fn bind_before_expose(
 /// Wired into the v1.2 PR 2 renewal loop: a grant revoked mid-session revokes here.
 pub(crate) fn revoke_binding(
     channel: &mut dyn AgentChannel,
-    id: protocol::binding_lease::BindingLeaseId,
+    id: ato_ipc::binding_lease::BindingLeaseId,
 ) -> Result<()> {
     match channel.request(HostToAgent::Revoke { id })? {
         AgentToHost::Scrubbed { .. } => Ok(()),
@@ -327,7 +327,7 @@ fn renewal_tick(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    let mut resolved: Vec<(String, protocol::binding_lease::SecretValue)> = Vec::new();
+    let mut resolved: Vec<(String, ato_ipc::binding_lease::SecretValue)> = Vec::new();
     let mut revoked: Vec<String> = Vec::new();
     for name in names {
         match resolver.resolve(name) {
@@ -342,7 +342,7 @@ fn renewal_tick(
     )
     .context("connect guest-agent for lease renewal")?;
     for name in &revoked {
-        let id = protocol::binding_lease::BindingLeaseId::new(format!("lease-{name}"));
+        let id = ato_ipc::binding_lease::BindingLeaseId::new(format!("lease-{name}"));
         match revoke_binding(&mut channel, id) {
             Ok(()) => tracing::warn!(
                 target: "ato::ready_state",
@@ -423,9 +423,9 @@ pub(crate) fn stop_scrub(channel: &mut dyn AgentChannel) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ato_ipc::binding_lease::{BindingLease, BindingLeaseId, BindingName, SecretValue};
     #[cfg(unix)]
     use guest_agent::{BindingSession, TmpfsBindingSink};
-    use protocol::binding_lease::{BindingLease, BindingLeaseId, BindingName, SecretValue};
 
     /// In-process channel: drives a real guest-agent session + tmpfs sink.
     /// `TmpfsBindingSink` (guest-agent) is unix-only, so every test using this

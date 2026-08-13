@@ -1314,7 +1314,7 @@ profiles = ["ato.pixel-stream.v1"]
         .expect("surface requirement in lock");
     assert_eq!(
         surface.kind,
-        protocol::session_surface::SessionSurfaceKind::PixelStream
+        ato_ipc::session_surface::SessionSurfaceKind::PixelStream
     );
     assert_eq!(
         surface.profiles.as_deref(),

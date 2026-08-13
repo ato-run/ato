@@ -258,8 +258,8 @@ pub fn collect_capabilities() -> Vec<String> {
 
 fn advertised_session_surfaces_for(
     support: crate::application::ready_state::restore_lease::SurfaceRuntimeSupport,
-) -> Vec<protocol::session_surface::SupportedSessionSurface> {
-    use protocol::session_surface::{
+) -> Vec<ato_ipc::session_surface::SupportedSessionSurface> {
+    use ato_ipc::session_surface::{
         PIXEL_STREAM_PROFILE, SessionSurfaceKind, SessionSurfaceTransport, SupportedSessionSurface,
         TERMINAL_SURFACE_PROFILE, WEB_SURFACE_PROFILE,
     };
@@ -2092,20 +2092,20 @@ fn scrub_runner_tokens(text: &str) -> String {
 
 /// Parsed payload of a `CONSENT-REQUIRED: <json>` line from `ato run` (P4-A).
 ///
-/// This is the shared wire type [`protocol::consent::ConsentRequiredLine`]:
-/// the full identity 5-tuple (under [`identity`](protocol::consent::ConsentRequiredLine::identity))
+/// This is the shared wire type [`ato_ipc::consent::ConsentRequiredLine`]:
+/// the full identity 5-tuple (under [`identity`](ato_ipc::consent::ConsentRequiredLine::identity))
 /// is the decision contract; `consent_ref` is its hash
 /// (blake3(JCS(schema + 5-tuple))). The runner reports this as needs_consent
 /// and, only after the owner approves this exact `consent_ref`, calls the
 /// local `approve-execution-plan` primitive and retries.
 ///
 /// All fields are required (no serde defaults) and the line is honored only
-/// when [`is_valid`](protocol::consent::ConsentRequiredLine::is_valid)
+/// when [`is_valid`](ato_ipc::consent::ConsentRequiredLine::is_valid)
 /// holds — an incomplete or ill-formed signal must never reach the control
 /// plane. Validation lives in `protocol` so the producer
 /// (`consent_store`), this consumer, and the desktop stderr consumer can
 /// never drift.
-pub use protocol::consent::ConsentRequiredLine as ConsentRequest;
+pub use ato_ipc::consent::ConsentRequiredLine as ConsentRequest;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChildSignal {
@@ -3418,10 +3418,10 @@ async fn stop_restore_gateway(handle: Option<RestoreGatewayHandle>) -> bool {
 /// can never turn a public or ambiguous artifact endpoint into guest-private
 /// traffic at runtime.
 fn selected_pixel_rfb_port(
-    descriptor: Option<&protocol::session_surface::SessionSurfaceDescriptor>,
-    endpoints: &[protocol::session_surface::EndpointContract],
+    descriptor: Option<&ato_ipc::session_surface::SessionSurfaceDescriptor>,
+    endpoints: &[ato_ipc::session_surface::EndpointContract],
 ) -> Result<Option<u16>> {
-    use protocol::session_surface::{EndpointRole, SessionSurfaceKind};
+    use ato_ipc::session_surface::{EndpointRole, SessionSurfaceKind};
 
     for endpoint in endpoints {
         endpoint
@@ -4334,7 +4334,7 @@ async fn handle_restore_snapshot_lease(
     let pixel_surface_enabled = surface_support.pixel_stream;
     let terminal_surface_enabled = surface_support.terminal;
     let selected_pixel_surface = cmd.session_surface.as_ref().is_some_and(|descriptor| {
-        descriptor.kind() == protocol::session_surface::SessionSurfaceKind::PixelStream
+        descriptor.kind() == ato_ipc::session_surface::SessionSurfaceKind::PixelStream
     });
     if selected_pixel_surface && !pixel_surface_enabled {
         fail(
@@ -4350,7 +4350,7 @@ async fn handle_restore_snapshot_lease(
         return;
     }
     let selected_terminal_surface = cmd.session_surface.as_ref().is_some_and(|descriptor| {
-        descriptor.kind() == protocol::session_surface::SessionSurfaceKind::Terminal
+        descriptor.kind() == ato_ipc::session_surface::SessionSurfaceKind::Terminal
     });
     if selected_terminal_surface && !terminal_surface_enabled {
         fail(
@@ -4594,10 +4594,10 @@ async fn handle_restore_snapshot_lease(
     // own secret store BEFORE the restore — all names are required (3e MVP has no
     // optional-secret semantics), and a missing grant must not boot a VM at all.
     // Values are held in-memory only, for lease issuance below; never logged.
-    let resolved_bindings: Option<Vec<(String, protocol::binding_lease::SecretValue)>> =
+    let resolved_bindings: Option<Vec<(String, ato_ipc::binding_lease::SecretValue)>> =
         match &supervisor_names {
             Some(names) => {
-                let step = || -> Result<Vec<(String, protocol::binding_lease::SecretValue)>> {
+                let step = || -> Result<Vec<(String, ato_ipc::binding_lease::SecretValue)>> {
                     let namespace = binding_namespace(&cmd.capsule_manifest_hash)?;
                     let resolver = select_resolver(&namespace)?;
                     // Layer the fetched AI grant (if any) over the normal chain:
@@ -6717,7 +6717,7 @@ mod tests {
 
     #[test]
     fn pixel_surface_requires_one_valid_private_first_frame_endpoint() {
-        use protocol::session_surface::{
+        use ato_ipc::session_surface::{
             EndpointContract, EndpointExposure, EndpointProtocol, EndpointReadiness, EndpointRole,
             PIXEL_STREAM_PROFILE, PixelStreamViewport, SessionSurfaceDescriptor,
             SessionSurfaceTransport,
@@ -7009,7 +7009,7 @@ mod tests {
 
     /// Regression (#661): the `CONSENT-REQUIRED:` line is the SHARED
     /// `protocol` type, so a payload serialized from
-    /// `protocol::consent::ConsentRequiredLine` — exactly what the CLI
+    /// `ato_ipc::consent::ConsentRequiredLine` — exactly what the CLI
     /// producer emits — round-trips through the runner's `parse_child_line`.
     /// This binds producer and consumer to one type + one validation: a
     /// schema bump or field rename can no longer compile on both sides while
@@ -7018,10 +7018,10 @@ mod tests {
     /// validator checks, so the two cannot disagree.
     #[test]
     fn consent_required_line_uses_shared_wire_type_end_to_end() {
-        let payload = protocol::consent::ConsentRequiredLine {
+        let payload = ato_ipc::consent::ConsentRequiredLine {
             schema: capsule::execution_plan::canonical::CONSENT_REF_SCHEMA.to_string(),
             consent_ref: "blake3:bind".to_string(),
-            identity: protocol::consent::ConsentIdentity {
+            identity: ato_ipc::consent::ConsentIdentity {
                 scoped_id: "community/hello-capsule".to_string(),
                 version: "0.3.0".to_string(),
                 target_label: "main".to_string(),
@@ -8294,7 +8294,7 @@ mod tests {
         ConsentRequest {
             schema: capsule::execution_plan::canonical::CONSENT_REF_SCHEMA.to_string(),
             consent_ref: "blake3:ref".to_string(),
-            identity: protocol::consent::ConsentIdentity {
+            identity: ato_ipc::consent::ConsentIdentity {
                 scoped_id: "community/hello-capsule".to_string(),
                 version: "0.3.0".to_string(),
                 target_label: "main".to_string(),

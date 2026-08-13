@@ -7,12 +7,12 @@ use std::time::{Instant, UNIX_EPOCH};
 
 use chrono::Utc;
 
+use ato_ipc::session_surface::SessionSurfaceRequirement;
 use lock_draft_engine::{
     LockDraft, LockDraftInput, LockDraftReadiness,
     LockDraftRuntimePlatform as DraftRuntimePlatform, ManifestSource as DraftManifestSource,
     RepoFileEntry as DraftRepoFileEntry, RepoFileKind as DraftRepoFileKind, evaluate_lock_draft,
 };
-use protocol::session_surface::SessionSurfaceRequirement;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::form_urlencoded::byte_serialize;

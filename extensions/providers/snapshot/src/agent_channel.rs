@@ -16,7 +16,7 @@
 use anyhow::Result;
 #[cfg(unix)]
 use anyhow::{Context, bail};
-use protocol::binding_control::{AgentToHost, HostToAgent};
+use ato_ipc::binding_control::{AgentToHost, HostToAgent};
 
 /// The guest-agent's AF_VSOCK control port — single source for the port every
 /// host-side connect (build drive, run gate, renewal, stop-scrub) dials.

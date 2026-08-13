@@ -76,14 +76,14 @@ jobs:
         run: |
           set -euxo pipefail
           for capsule in ato-onboarding ato-start ato-dock; do
-            cd crates/desktop/assets/system/$capsule
+            cd apps/desktop/assets/system/$capsule
             npm install
             npm run build
             test -f dist/index.html || { echo "ERROR: $capsule dist/index.html missing after build"; exit 1; }
             cd -
           done
           # ato-store dist is committed; verify it's present
-          test -f crates/desktop/assets/system/ato-store/dist/index.html || { echo "ERROR: ato-store/dist/index.html missing from repo"; exit 1; }
+          test -f apps/desktop/assets/system/ato-store/dist/index.html || { echo "ERROR: ato-store/dist/index.html missing from repo"; exit 1; }
 
       - name: Build ato-cli + nacelle helpers
         # Build helpers once at the top level so ato-desktop/build.rs
@@ -103,7 +103,7 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        working-directory: crates/desktop/xtask
+        working-directory: apps/desktop/xtask
         run: |
           cargo run --release -- bundle \
             --target ${{ matrix.target }} \
@@ -115,7 +115,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ato-desktop-${{ matrix.target }}
-          path: crates/desktop/dist/${{ matrix.target }}/*.zip
+          path: apps/desktop/dist/${{ matrix.target }}/*.zip
           if-no-files-found: error
 
   bundle-windows:
@@ -147,14 +147,14 @@ jobs:
         run: |
           set -euxo pipefail
           for capsule in ato-onboarding ato-start ato-dock; do
-            cd crates/desktop/assets/system/$capsule
+            cd apps/desktop/assets/system/$capsule
             npm install
             npm run build
             test -f dist/index.html || { echo "ERROR: $capsule dist/index.html missing after build"; exit 1; }
             cd -
           done
           # ato-store dist is committed; verify it's present
-          test -f crates/desktop/assets/system/ato-store/dist/index.html || { echo "ERROR: ato-store/dist/index.html missing from repo"; exit 1; }
+          test -f apps/desktop/assets/system/ato-store/dist/index.html || { echo "ERROR: ato-store/dist/index.html missing from repo"; exit 1; }
 
       - name: Install WiX Toolset 3.x
         # candle/light are required by xtask::package_msi. WiX 3.14 is
@@ -185,7 +185,7 @@ jobs:
           ATO_DESKTOP_SKIP_HELPER_BUILD: "1"
           WINDOWS_CODESIGN_PFX: ${{ secrets.WINDOWS_CODESIGN_PFX }}
           WINDOWS_CODESIGN_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PASSWORD }}
-        working-directory: crates/desktop/xtask
+        working-directory: apps/desktop/xtask
         run: cargo run --release -- bundle --target ${{ matrix.target }} --msi --zip
 
       - name: Upload .msi + .zip artifacts
@@ -193,8 +193,8 @@ jobs:
         with:
           name: ato-desktop-${{ matrix.target }}
           path: |
-            crates/desktop/dist/${{ matrix.target }}/*.msi
-            crates/desktop/dist/${{ matrix.target }}/*.zip
+            apps/desktop/dist/${{ matrix.target }}/*.msi
+            apps/desktop/dist/${{ matrix.target }}/*.zip
           if-no-files-found: error
 
   bundle-linux:
@@ -225,14 +225,14 @@ jobs:
         run: |
           set -euxo pipefail
           for capsule in ato-onboarding ato-start ato-dock; do
-            cd crates/desktop/assets/system/$capsule
+            cd apps/desktop/assets/system/$capsule
             npm install
             npm run build
             test -f dist/index.html || { echo "ERROR: $capsule dist/index.html missing after build"; exit 1; }
             cd -
           done
           # ato-store dist is committed; verify it's present
-          test -f crates/desktop/assets/system/ato-store/dist/index.html || { echo "ERROR: ato-store/dist/index.html missing from repo"; exit 1; }
+          test -f apps/desktop/assets/system/ato-store/dist/index.html || { echo "ERROR: ato-store/dist/index.html missing from repo"; exit 1; }
 
       - name: Install AppImage build deps
         # appimagetool is shipped as a single AppImage; we drop it on
@@ -267,14 +267,14 @@ jobs:
       - name: Bundle and package .AppImage
         env:
           ATO_DESKTOP_SKIP_HELPER_BUILD: "1"
-        working-directory: crates/desktop/xtask
+        working-directory: apps/desktop/xtask
         run: cargo run --release -- bundle --target ${{ matrix.target }} --appimage
 
       - name: Upload .AppImage artifact
         uses: actions/upload-artifact@v4
         with:
           name: ato-desktop-${{ matrix.target }}
-          path: crates/desktop/dist/${{ matrix.target }}/*.AppImage
+          path: apps/desktop/dist/${{ matrix.target }}/*.AppImage
           if-no-files-found: error
 
   publish-release:

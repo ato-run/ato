@@ -74,8 +74,8 @@ use crate::manifest::{
 };
 use crate::scanner;
 #[cfg(unix)]
-use protocol::binding_control::{AgentToHost, HostToAgent};
-use protocol::binding_lease::{BindingLease, BindingLeaseId, BindingName, SecretValue};
+use ato_ipc::binding_control::{AgentToHost, HostToAgent};
+use ato_ipc::binding_lease::{BindingLease, BindingLeaseId, BindingName, SecretValue};
 
 pub const FIRECRACKER_BACKEND_ID: &str = "firecracker";
 const KVM_DEVICE: &str = "/dev/kvm";
@@ -98,10 +98,10 @@ const FC_API_READ_TIMEOUT: Duration = Duration::from_secs(15);
 const FC_SNAPSHOT_CREATE_READ_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn should_capture_browser_screenshot(
-    surface: Option<&protocol::session_surface::SessionSurfaceRequirement>,
+    surface: Option<&ato_ipc::session_surface::SessionSurfaceRequirement>,
 ) -> bool {
     !surface.is_some_and(|requirement| {
-        requirement.kind == protocol::session_surface::SessionSurfaceKind::Terminal
+        requirement.kind == ato_ipc::session_surface::SessionSurfaceKind::Terminal
     })
 }
 
@@ -1392,7 +1392,7 @@ fn hc_port(c: &RestoreContract, fallback: u16) -> u16 {
 }
 
 fn network_ports(c: &RestoreContract, health_port: u16) -> Result<Vec<u16>, String> {
-    use protocol::session_surface::EndpointProtocol;
+    use ato_ipc::session_surface::EndpointProtocol;
     let mut ports = vec![health_port];
     if c.endpoints.is_empty() {
         ports.extend(c.ports.iter().copied());
@@ -3877,7 +3877,7 @@ mod tests {
 
     #[test]
     fn network_ports_include_every_declared_endpoint() {
-        use protocol::session_surface::{
+        use ato_ipc::session_surface::{
             EndpointContract, EndpointExposure, EndpointProtocol, EndpointReadiness, EndpointRole,
         };
 
@@ -3912,7 +3912,7 @@ mod tests {
 
     #[test]
     fn network_ports_skip_vsock_endpoints_and_their_u32_port_space() {
-        use protocol::session_surface::{
+        use ato_ipc::session_surface::{
             EndpointContract, EndpointExposure, EndpointProtocol, EndpointReadiness, EndpointRole,
         };
 
@@ -3963,7 +3963,7 @@ mod tests {
 
     #[test]
     fn network_ports_fail_closed_on_out_of_range_endpoint() {
-        use protocol::session_surface::{
+        use ato_ipc::session_surface::{
             EndpointContract, EndpointExposure, EndpointProtocol, EndpointReadiness, EndpointRole,
         };
 
@@ -4340,14 +4340,14 @@ mod tests {
 
     #[test]
     fn terminal_surface_skips_browser_screenshot_probe() {
-        let terminal = protocol::session_surface::SessionSurfaceRequirement {
-            kind: protocol::session_surface::SessionSurfaceKind::Terminal,
+        let terminal = ato_ipc::session_surface::SessionSurfaceRequirement {
+            kind: ato_ipc::session_surface::SessionSurfaceKind::Terminal,
             profiles: Some(vec![
-                protocol::session_surface::TERMINAL_SURFACE_PROFILE.to_string(),
+                ato_ipc::session_surface::TERMINAL_SURFACE_PROFILE.to_string(),
             ]),
         };
-        let web = protocol::session_surface::SessionSurfaceRequirement {
-            kind: protocol::session_surface::SessionSurfaceKind::Web,
+        let web = ato_ipc::session_surface::SessionSurfaceRequirement {
+            kind: ato_ipc::session_surface::SessionSurfaceKind::Web,
             profiles: None,
         };
 

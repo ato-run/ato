@@ -1738,14 +1738,14 @@ fn fc_kvm_binding_lease_live_e2e() {
     );
 
     // 5. Deliver the BindingLease over vsock — the ONLY value-bearing message.
-    let lease = protocol::binding_lease::BindingLease::issue(
-        protocol::binding_lease::BindingLeaseId::new("lease-e2e"),
-        protocol::binding_lease::BindingName::parse("api_key").unwrap(),
-        protocol::binding_lease::SecretValue::new(secret),
+    let lease = ato_ipc::binding_lease::BindingLease::issue(
+        ato_ipc::binding_lease::BindingLeaseId::new("lease-e2e"),
+        ato_ipc::binding_lease::BindingName::parse("api_key").unwrap(),
+        ato_ipc::binding_lease::SecretValue::new(secret),
         0,
         100_000_000_000_000,
     );
-    let deliver = serde_json::to_string(&protocol::binding_control::HostToAgent::Deliver(
+    let deliver = serde_json::to_string(&ato_ipc::binding_control::HostToAgent::Deliver(
         lease.to_delivery(),
     ))
     .unwrap();
@@ -1936,14 +1936,14 @@ fn fc_kvm_supervisor_full_e2e() {
 
     // ③ Deliver the REAL lease → the supervisor restarts the workload with the
     // real env → /health 200 and /keyhash proves WHICH key is live.
-    let lease = protocol::binding_lease::BindingLease::issue(
-        protocol::binding_lease::BindingLeaseId::new("lease-real"),
-        protocol::binding_lease::BindingName::parse("openai_api_key").unwrap(),
-        protocol::binding_lease::SecretValue::new(real_secret),
+    let lease = ato_ipc::binding_lease::BindingLease::issue(
+        ato_ipc::binding_lease::BindingLeaseId::new("lease-real"),
+        ato_ipc::binding_lease::BindingName::parse("openai_api_key").unwrap(),
+        ato_ipc::binding_lease::SecretValue::new(real_secret),
         0,
         100_000_000_000_000,
     );
-    let deliver = serde_json::to_string(&protocol::binding_control::HostToAgent::Deliver(
+    let deliver = serde_json::to_string(&ato_ipc::binding_control::HostToAgent::Deliver(
         lease.to_delivery(),
     ))
     .unwrap();
@@ -2095,14 +2095,14 @@ fn fc_kvm_binding_negative_paths() {
     let port = r.session.guest_port.unwrap_or(8080);
     let gip = FirecrackerConfig::default().guest_ip;
     let deliver = |ttl: u64| {
-        let lease = protocol::binding_lease::BindingLease::issue(
-            protocol::binding_lease::BindingLeaseId::new("l-neg"),
-            protocol::binding_lease::BindingName::parse("api_key").unwrap(),
-            protocol::binding_lease::SecretValue::new("sk-neg-secret"),
+        let lease = ato_ipc::binding_lease::BindingLease::issue(
+            ato_ipc::binding_lease::BindingLeaseId::new("l-neg"),
+            ato_ipc::binding_lease::BindingName::parse("api_key").unwrap(),
+            ato_ipc::binding_lease::SecretValue::new("sk-neg-secret"),
             0,
             ttl,
         );
-        serde_json::to_string(&protocol::binding_control::HostToAgent::Deliver(
+        serde_json::to_string(&ato_ipc::binding_control::HostToAgent::Deliver(
             lease.to_delivery(),
         ))
         .unwrap()

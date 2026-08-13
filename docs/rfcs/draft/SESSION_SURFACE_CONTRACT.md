@@ -4,7 +4,7 @@ status: draft
 date: "2026-07-14"
 author: "@koh0920"
 ssot:
-  - "crates/protocol/src/session_surface.rs"
+  - "lib/ipc/src/session_surface.rs"
   - "crates/capsule/src/foundation/types/manifest.rs"
 related:
   - "docs/rfcs/draft/PIXEL_STREAM_PROFILE_V1.md"

@@ -132,6 +132,7 @@ pub mod state;
 // link the wire surface without pulling in capsule's runtime deps.
 // Re-exported here so existing `capsule::ccp::*` paths in the CLI
 // keep working unchanged. See `docs/monorepo-consolidation-plan.md` §N2.
+pub use ato_ipc::ccp;
 pub use config::bootstrap;
 pub use config::diagnostics;
 pub use config::python_runtime;
@@ -139,7 +140,6 @@ pub use config::runtime_config;
 pub use config::schema_registry;
 pub use config::shell_support;
 pub use config::smoke;
-pub use protocol::ccp;
 
 // ── Re-exports (public API — unchanged) ───────────────────────────────────
 pub use error::{AtoError, AtoErrorPhase, CapsuleError, PendingPermissionGate, Result};

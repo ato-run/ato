@@ -8,7 +8,7 @@
 //! records only [`SecretResolver::kind`] + binding names + statuses — never a value.
 
 use anyhow::Result;
-use protocol::binding_lease::SecretValue;
+use ato_ipc::binding_lease::SecretValue;
 
 /// Resolves a declared binding name to its secret value for vsock delivery.
 pub(crate) trait SecretResolver {

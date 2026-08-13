@@ -15,7 +15,12 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
 
-use ato_computation::{ComputationRef, PortId, ProtocolId, RoleId, SemanticsId};
+use ato_computation::{
+    ComputationRef, PortId, ProtocolId, ResolvedComputation, RoleId, SemanticsId,
+};
+use ato_objects::{
+    BundleError, ComputationReferences, ObjectLink, ObjectResolver, read_exact_object,
+};
 use thiserror::Error;
 
 pub use codec::{
@@ -36,6 +41,48 @@ pub use validate::{
 
 /// The only SemanticsId interpreted by this crate.
 pub const COMPOSE_SEMANTICS_ID: &str = "capsule.compose@1";
+
+pub struct ComposeReferences {
+    id: SemanticsId,
+}
+
+impl Default for ComposeReferences {
+    fn default() -> Self {
+        Self {
+            id: SemanticsId::parse(COMPOSE_SEMANTICS_ID)
+                .expect("static compose semantics id is valid"),
+        }
+    }
+}
+
+impl ComputationReferences for ComposeReferences {
+    fn semantics(&self) -> &SemanticsId {
+        &self.id
+    }
+
+    fn outgoing(
+        &self,
+        computation: &ResolvedComputation,
+        objects: &dyn ObjectResolver,
+    ) -> Result<Vec<ObjectLink>, BundleError> {
+        let residual = &computation.object().residual;
+        let metadata = objects.metadata(residual)?;
+        let bytes = read_exact_object(
+            objects,
+            residual,
+            metadata.size,
+            MAX_COMPOSITE_RESIDUAL_BYTES,
+        )?;
+        let composite = decode_composite_residual(&bytes).map_err(|error| {
+            BundleError::Object(ato_objects::ObjectError::Storage(error.to_string()))
+        })?;
+        Ok(composite
+            .nodes
+            .into_values()
+            .map(ObjectLink::Computation)
+            .collect())
+    }
+}
 
 /// Identifier for a child occurrence within one composite residual.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

@@ -23,6 +23,9 @@
 use std::io::{BufRead, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use ato_ipc::binding_control::AgentToHost;
+use ato_ipc::binding_control::HostToAgent;
+use ato_ipc::binding_lease::BindingName;
 use guest_agent::supervisor::{
     ChildWorkload, StdioMode, Supervisor, SupervisorConfig, Workload, bindings_root, config_path,
 };
@@ -33,9 +36,6 @@ use guest_agent::volume_mount::{
 };
 use guest_agent::vsock::{DEFAULT_VSOCK_PORT, serve_vsock};
 use guest_agent::{BindingSession, BindingSink, TmpfsBindingSink};
-use protocol::binding_control::AgentToHost;
-use protocol::binding_control::HostToAgent;
-use protocol::binding_lease::BindingName;
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -474,8 +474,8 @@ fn main() -> std::io::Result<()> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use ato_ipc::binding_lease::{BindingLease, BindingLeaseId, SecretValue};
     use guest_agent::supervisor::{SpawnPlan, SupervisorConfig};
-    use protocol::binding_lease::{BindingLease, BindingLeaseId, SecretValue};
     use std::cell::RefCell;
     use std::collections::BTreeMap;
     use std::rc::Rc;

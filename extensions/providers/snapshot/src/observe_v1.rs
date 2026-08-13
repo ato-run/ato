@@ -143,7 +143,7 @@ pub fn observe_v1(build: V1BuildObservation<'_>) -> Result<ExecutionObservationV
 
     let guest_surface = match (build.manifest.web.as_ref(), build.manifest.surface.as_ref()) {
         (Some(_), Some(surface))
-            if surface.kind == protocol::session_surface::SessionSurfaceKind::Terminal =>
+            if surface.kind == ato_ipc::session_surface::SessionSurfaceKind::Terminal =>
         {
             Ok(GuestSurfaceContract {
                 bind_address: "vsock".to_string(),

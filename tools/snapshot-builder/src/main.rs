@@ -40,6 +40,10 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
+use ato_ipc::session_surface::{
+    EndpointContract, EndpointExposure, EndpointProtocol, EndpointReadiness, EndpointRole,
+    PIXEL_STREAM_PROFILE, SessionSurfaceKind,
+};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use capsule::engine::execution_graph::{
@@ -54,10 +58,6 @@ use capsule::foundation::types::manifest::{CapsuleManifest, SessionSurfaceRequir
 use capsule::foundation::types::ready_state::SealAtConfig;
 use capsule::foundation::types::ready_state::{
     DEFAULT_STABLE_INTERVAL_MS, DEFAULT_STABLE_SUCCESSES,
-};
-use protocol::session_surface::{
-    EndpointContract, EndpointExposure, EndpointProtocol, EndpointReadiness, EndpointRole,
-    PIXEL_STREAM_PROFILE, SessionSurfaceKind,
 };
 use serde::{Deserialize, Serialize};
 use snapshot::archive_only_build::ArchiveOnlyBuildInput;
@@ -1021,7 +1021,7 @@ fn derive_job_spec(
         .surface
         .as_ref()
         .is_some_and(|surface| {
-            surface.kind == protocol::session_surface::SessionSurfaceKind::Terminal
+            surface.kind == ato_ipc::session_surface::SessionSurfaceKind::Terminal
         });
     if manifest.secrets.is_empty() && manifest.generated_bindings.is_empty() && !terminal_surface {
         // v1 no-binding path, byte-for-byte unchanged (it also rejects any stray
@@ -3206,7 +3206,7 @@ fn produce_pinned_v1_build(
     )
     .map_err(|e| fail("manifest", e.to_string()))?;
     let terminal_surface = manifest.surface.as_ref().is_some_and(|surface| {
-        surface.kind == protocol::session_surface::SessionSurfaceKind::Terminal
+        surface.kind == ato_ipc::session_surface::SessionSurfaceKind::Terminal
     });
     if terminal_surface {
         if !supervisor_builds_enabled() {

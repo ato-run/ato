@@ -36,8 +36,8 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use ato_ipc::binding_lease::SecretValue;
 use capsule::foundation::types::manifest::CapsuleManifest;
-use protocol::binding_lease::SecretValue;
 use snapshot::layer_store::CasStore;
 use snapshot::rootfs_builder::{SourceProbe, build_rootfs, derive_supervisor_build_spec};
 use snapshot::state_volume::DurableVolumeSpec;
