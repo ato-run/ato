@@ -6,7 +6,10 @@
 # if any crate depends on a workspace crate it is forbidden from depending on.
 # This keeps the wire / domain / runtime / shell layering honest:
 #
-#   protocol / capsule-protocol — DAG roots: NO workspace-crate deps.
+#   protocol / capsule-protocol / capsule-core — DAG roots: NO
+#                   workspace-crate deps.
+#   capsule-core-codec — canonical codec: may dep capsule-core only.
+#   capsule-compose — semantics: may dep capsule-core + capsule-core-codec.
 #   capsule       — domain + local state: may dep protocol; NOT
 #                   cli / desktop / netd / nacelle.
 #   netd          — speaks protocol: may dep protocol; NOT
@@ -20,7 +23,7 @@
 #                   as a subprocess instead of linking cli.
 #
 # It also fails if any of the pre-reorg package names are still present as a
-# crate anywhere (capsule-wire, capsule-core, ato-session-core, ato-net,
+# crate anywhere (capsule-wire, ato-session-core, ato-net,
 # ato-cli, ato-desktop, ato-netd, ato-protocol).
 #
 # Note: `lock-draft-engine` (a shared helper under crates/cli/) is an
@@ -126,11 +129,36 @@ check_dag_root() {
   done
 }
 
+check_allowed_workspace_deps() {
+  local label="$1" manifest="$2"
+  shift 2
+  local package allowed
+  for package in "${WORKSPACE_PACKAGES[@]}"; do
+    [ "$package" = "$label" ] && continue
+    if has_dep "$manifest" "$package"; then
+      allowed=0
+      local candidate
+      for candidate in "$@"; do
+        [ "$package" = "$candidate" ] && allowed=1
+      done
+      if [ "$allowed" -eq 0 ]; then
+        err "$label may not depend on workspace package '$package'"
+      fi
+    fi
+  done
+}
+
 echo "Checking workspace dependency direction..."
 
 # Semantic and IPC roots may not depend on any other workspace package.
 check_dag_root "protocol" "crates/protocol/Cargo.toml"
 check_dag_root "capsule-protocol" "crates/capsule-protocol/Cargo.toml"
+check_dag_root "capsule-core" "crates/capsule-core/Cargo.toml"
+
+check_allowed_workspace_deps "capsule-core-codec" \
+  "crates/capsule-core-codec/Cargo.toml" capsule-core
+check_allowed_workspace_deps "capsule-compose" \
+  "crates/capsule-compose/Cargo.toml" capsule-core capsule-core-codec
 
 # capsule: may dep protocol; not the rest.
 check_forbidden "capsule" "crates/capsule/Cargo.toml" \
@@ -155,7 +183,7 @@ check_forbidden "desktop" "crates/desktop/Cargo.toml" \
 # Banned legacy package names: must not appear as a crate dependency or as a
 # crate directory anywhere in the workspace.
 echo "Checking for banned legacy crate names..."
-BANNED=(capsule-wire capsule-core ato-session-core ato-net ato-cli ato-desktop ato-netd ato-protocol)
+BANNED=(capsule-wire ato-session-core ato-net ato-cli ato-desktop ato-netd ato-protocol)
 for name in "${BANNED[@]}"; do
   # As a crate directory.
   if [ -d "crates/$name" ]; then
