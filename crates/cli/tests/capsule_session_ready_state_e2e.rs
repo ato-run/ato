@@ -551,7 +551,11 @@ fn ready_state_bundle_restores_runs_and_stops_under_supervisor() {
     let stored: serde_json::Value =
         serde_json::from_slice(&fs::read(session_root.join("session.json")).unwrap()).unwrap();
     assert_eq!(stored["lifecycle"], "stopped");
-    assert_eq!(stored["runtime_profile"]["kind"], "ready_state");
+    assert_eq!(stored["runtime_profile"]["kind"], "legacy_v1");
+    assert_eq!(
+        stored["runtime_profile"]["materialization"]["kind"],
+        "ready_state"
+    );
     assert!(!session_root.join("ready-state-overlay").exists());
     assert!(session_root.join("ready-state-cas/blobs/blake3").is_dir());
     let resume = ato(root.path())
