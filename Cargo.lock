@@ -1098,6 +1098,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "capsule-compose"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "capsule-core",
+ "capsule-core-codec",
+ "hex",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "capsule-core"
 version = "0.1.0"
 dependencies = [
