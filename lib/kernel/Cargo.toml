@@ -14,9 +14,9 @@ dist = false
 layer = "kernel"
 
 [dependencies]
-ato-computation = { path = "../computation" }
-ato-objects = { path = "../objects" }
+ato-computation = { path = "../computation", version = "0.1.0" }
+ato-objects = { path = "../objects", version = "0.1.0" }
 thiserror = "2.0"
 
 [dev-dependencies]
-ato-semantics-compose = { path = "../../extensions/semantics/compose" }
+ato-semantics-compose = { path = "../../extensions/semantics/compose", version = "0.1.0" }

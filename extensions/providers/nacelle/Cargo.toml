@@ -111,9 +111,6 @@ phase2 = []
 embedded = []
 # Optional CUDA support for VRAM checks
 cuda = []
-legacy-manifest-tests = []
-# Sync runtime support (requires capsule-sync crate)
-sync-runtime = []
 
 [dev-dependencies]
 base64 = "0.22"
@@ -124,12 +121,3 @@ tempfile = "3.8"
 aya-build = "0.1"
 
 # v0.2.0 Optimization: Tauri-inspired build profiles
-[profile.release]
-opt-level = "s"      # Size optimization
-lto = true            # Link-time optimization
-strip = true          # Strip debug symbols
-panic = "abort"       # Smaller binary size
-codegen-units = 1     # Better optimization
-
-[profile.release.package.nacelle-ebpf]
-opt-level = "z"

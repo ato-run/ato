@@ -18,15 +18,15 @@ use std::process::Command;
 use ato_computation::{Boundary, ComputationObject, ContentRef, SemanticsId};
 use ato_objects::{ObjectError, ObjectStore};
 use ato_semantics_workspace::{
-    RealizationConstraint, SourceClosure, SourceEntry, SourceEntryKind, ToolchainConstraint,
-    WORKSPACE_SEMANTICS_ID, WorkspacePhase, WorkspaceResidual, encode_workspace_residual,
+    MAX_SOURCE_CLOSURE_BYTES, RealizationConstraint, SourceClosure, SourceEntry, SourceEntryKind,
+    ToolchainConstraint, WORKSPACE_SEMANTICS_ID, WorkspacePhase, WorkspaceResidual,
+    encode_workspace_residual,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use walkdir::WalkDir;
 
 const MAX_SOURCE_FILE_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_SOURCE_CLOSURE_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepositoryOptions {
@@ -350,6 +350,9 @@ fn ignored(path: &Path, root: &Path) -> bool {
     let Ok(relative) = path.strip_prefix(root) else {
         return true;
     };
+    if relative == Path::new("ato.lock.json") {
+        return true;
+    }
     matches!(
         relative.components().next(),
         Some(Component::Normal(name))
@@ -617,6 +620,57 @@ mod tests {
 
         assert_ne!(alice.source, bob.source);
         assert_ne!(alice.computation.residual, bob.computation.residual);
+    }
+
+    #[test]
+    fn resolution_receipt_does_not_change_source_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("main.py"), "print('stable')").unwrap();
+        let objects = MemoryObjectStore::default();
+        let before =
+            compile_repository(dir.path(), &objects, RepositoryOptions::default()).unwrap();
+        fs::write(dir.path().join("ato.lock.json"), r#"{"evidence":true}"#).unwrap();
+        let after = compile_repository(dir.path(), &objects, RepositoryOptions::default()).unwrap();
+
+        assert_eq!(before.source, after.source);
+        assert_eq!(before.computation.residual, after.computation.residual);
+    }
+
+    #[test]
+    fn fetches_local_git_fixture_into_the_same_repository_path() {
+        let fixture = tempfile::tempdir().unwrap();
+        fs::write(fixture.path().join("main.py"), "print('git')").unwrap();
+        for arguments in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "fixture@ato.run"],
+            vec!["config", "user.name", "Ato Fixture"],
+            vec!["add", "main.py"],
+            vec!["commit", "-qm", "fixture"],
+        ] {
+            assert!(
+                Command::new("git")
+                    .args(arguments)
+                    .current_dir(fixture.path())
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let checkout_parent = tempfile::tempdir().unwrap();
+        let checkout = checkout_parent.path().join("checkout");
+
+        fetch_git_repository(fixture.path().to_str().unwrap(), &checkout).unwrap();
+        let objects = MemoryObjectStore::default();
+        let compiled =
+            compile_repository(&checkout, &objects, RepositoryOptions::default()).unwrap();
+
+        assert_eq!(compiled.evidence.selected_toolchain, "python");
+        assert!(
+            compiled
+                .evidence
+                .observed_files
+                .contains(&"main.py".to_owned())
+        );
     }
 
     #[cfg(unix)]

@@ -14,7 +14,7 @@ dist = false
 layer = "objects"
 
 [dependencies]
-ato-computation = { path = "../computation" }
+ato-computation = { path = "../computation", version = "0.1.0" }
 blake3 = "1.5"
 base64 = "0.22"
 ed25519-dalek = "2.0"

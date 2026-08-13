@@ -15,9 +15,9 @@ layer = "semantics"
 
 [dependencies]
 blake3 = "1.5"
-ato-computation = { path = "../../../lib/computation" }
-ato-kernel = { path = "../../../lib/kernel" }
-ato-objects = { path = "../../../lib/objects" }
+ato-computation = { path = "../../../lib/computation", version = "0.1.0" }
+ato-kernel = { path = "../../../lib/kernel", version = "0.1.0" }
+ato-objects = { path = "../../../lib/objects", version = "0.1.0" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_jcs = "0.1"
