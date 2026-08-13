@@ -42,6 +42,25 @@ fn ato(root: &Path) -> Command {
     command
 }
 
+struct PublicSessionCleanup(PathBuf);
+
+impl Drop for PublicSessionCleanup {
+    fn drop(&mut self) {
+        let Ok(output) = ato(&self.0).args(["decap", "list", "--json"]).output() else {
+            return;
+        };
+        let Ok(rows) = serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout) else {
+            return;
+        };
+        for row in rows {
+            let Some(name) = row["name"].as_str() else {
+                continue;
+            };
+            let _ = ato(&self.0).args(["decap", "stop", name]).output();
+        }
+    }
+}
+
 struct BundleFixtures {
     valid: PathBuf,
     connector: PathBuf,
@@ -88,7 +107,7 @@ fn make_bundles(root: &Path) -> BundleFixtures {
         base_state: export.state,
         connectors: BTreeMap::new(),
     };
-    let bundle = root.join("ready-state.capsule");
+    let bundle = root.join("login-refresh-bug.capsule");
     let mut policy = ReadyStatePortableExportPolicy::new(&state_object).unwrap();
     StreamingBundleWriter::write_with_state_roles(
         &bundle,
@@ -169,6 +188,92 @@ fn make_bundles(root: &Path) -> BundleFixtures {
         connector,
         record,
         unknown_state,
+    }
+}
+
+#[test]
+fn developer_opens_lists_and_stops_a_shared_bug_reproduction_capsule() {
+    let root = scratch_dir();
+    let bundles = make_bundles(root.path());
+    let _cleanup = PublicSessionCleanup(root.path().to_path_buf());
+
+    let first = ato(root.path())
+        .args(["decap", "start"])
+        .arg(&bundles.valid)
+        .output()
+        .unwrap();
+    assert!(
+        first.status.success(),
+        "public start failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_stdout = String::from_utf8(first.stdout).unwrap();
+    assert_eq!(first_stdout, "Starting login-refresh-bug...\nReady.\n");
+    assert!(!first_stdout.contains("session-"));
+
+    let second = ato(root.path())
+        .args(["decap", "start"])
+        .arg(&bundles.valid)
+        .arg("--detach")
+        .output()
+        .unwrap();
+    assert!(second.status.success());
+    assert_eq!(
+        String::from_utf8(second.stdout).unwrap(),
+        "Starting login-refresh-bug-2...\nReady.\n"
+    );
+
+    let list = ato(root.path()).args(["decap", "list"]).output().unwrap();
+    assert!(list.status.success());
+    let list = String::from_utf8(list.stdout).unwrap();
+    assert!(list.starts_with("NAME\tSTATE\tAGE\tSOURCE\n"));
+    assert!(list.contains("login-refresh-bug\trunning\t"));
+    assert!(list.contains("login-refresh-bug-2\trunning\t"));
+    assert!(list.contains("login-refresh-bug.capsule"));
+    assert!(!list.contains("session-"));
+
+    let list_json = ato(root.path())
+        .args(["decap", "list", "--json"])
+        .output()
+        .unwrap();
+    assert!(list_json.status.success());
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&list_json.stdout).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["name"], "login-refresh-bug");
+    assert_eq!(rows[0]["state"], "running");
+    assert!(
+        rows[0]["session_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("session-")
+    );
+
+    let attach = ato(root.path())
+        .args(["decap", "attach", "login-refresh-bug"])
+        .output()
+        .unwrap();
+    assert!(!attach.status.success());
+    assert!(
+        String::from_utf8_lossy(&attach.stderr)
+            .contains("ReadyStateConnectorAttachmentUnsupported"),
+        "unexpected attach error: {}",
+        String::from_utf8_lossy(&attach.stderr)
+    );
+
+    for name in ["login-refresh-bug", "login-refresh-bug-2"] {
+        let stop = ato(root.path())
+            .args(["decap", "stop", name])
+            .output()
+            .unwrap();
+        assert!(
+            stop.status.success(),
+            "public stop failed for {name}: {}",
+            String::from_utf8_lossy(&stop.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(stop.stdout).unwrap(),
+            format!("Stopped {name}.\n")
+        );
     }
 }
 

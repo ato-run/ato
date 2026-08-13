@@ -165,8 +165,9 @@ error; this draft does not claim Windows owner-only filesystem storage yet.
 
 ## 9. Initial detached PTY profile
 
-The first reference vertical slice is available only through hidden
-`ato internal capsule-session` commands. `start` validates a portable bundle,
+The reference plumbing remains available through hidden
+`ato internal capsule-session` commands. Public commands in §11 delegate to
+this boundary. Internal `start` validates a portable bundle,
 allocates an owner-only Session directory, starts an independent Supervisor,
 waits for authenticated readiness, and then optionally attaches. The client
 process never owns the restored shell or PTY.
@@ -239,3 +240,28 @@ Connector may be re-executed during Historical Replay, so this profile MUST NOT
 be treated as isolated external-effect replay. Persisted replay verification is
 scoped to `connector = terminal.main`, `protocol = ato.io.pty@1`, and its exact
 `from`/`through` range; it is not a Session-wide verdict.
+
+## 11. Initial public CLI profile
+
+The first user-facing surface is intentionally smaller than the Supervisor
+plumbing:
+
+```text
+ato decap start <CAPSULE> [--detach] [--name <NAME>]
+ato decap list [--json]
+ato decap attach <NAME>
+ato decap stop <NAME> [--force]
+```
+
+`start` owns the destination workspace and internal `SessionId`. The default
+display name is derived from the local `.capsule` filename; a collision receives
+the first available numeric suffix (`name-2`, `name-3`, ...). Display names are
+local aliases only. Authentication and control continue to use the random
+128-bit `SessionId`.
+
+When the descriptor exposes `ato.io.pty@1`, `start` attaches after Supervisor
+readiness unless `--detach` was requested. A profile without an attachable
+Connector remains running in the background. `list` is the human status surface;
+only its JSON form exposes the internal Session ID for automation. Public
+display metadata is stored owner-only beside, but outside, the validated
+Session Store record so it cannot weaken runtime identity validation.
