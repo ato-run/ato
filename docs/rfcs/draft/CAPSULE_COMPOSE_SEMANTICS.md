@@ -213,27 +213,36 @@ NameProvider.name <── internal connection ──> Greeter.name
 ```
 
 The structural conformance scenario remains valid as written. Behavioral
-conformance extends `NameProvider` with an externally exported `input` Port and
-proves this evolution using test-only leaf semantics:
+conformance extends `NameProvider` with an externally exported `input` Port.
+The same sealed and validated initial Computation can evolve into distinct
+futures according to the input interaction:
 
 ```text
-C0 --name?"Bob"---------------> C1
-C1 --tau----------------------> C2
-C2 --greeting!"Hello, Bob!"---> C3
+C_init
+  |-- name?"Alice" --> C_A1 --tau--> C_A2 --greeting!"Hello, Alice!"--> C_A3
+  `-- name?"Bob" ----> C_B1 --tau--> C_B2 --greeting!"Hello, Bob!"----> C_B3
 ```
 
 Each successor is canonical-encoded, content-addressed, sealed into an
-ordinary `ComputationObject`, and revalidated. Their ComputationRefs differ,
-while all four boundaries remain exactly `{ name, greeting }`. The first step
-lifts the exported input from `NameProvider.input`; the second synchronizes
-`NameProvider.name` with `Greeter.name` and preserves `Bob`; the third lifts
-the exported output from `Greeter.greeting`.
+ordinary `ComputationObject`, and revalidated. All seven ComputationRefs differ,
+while every boundary remains exactly `{ name, greeting }`. In each branch, the
+first step lifts the exported input from `NameProvider.input`; the second
+synchronizes `NameProvider.name` with `Greeter.name` and preserves the input
+value; the third lifts the exported output from `Greeter.greeting`.
+
+The post-input leaf residuals are `ReadyName(Alice)` and `ReadyName(Bob)`. The
+post-synchronization Greeter residuals are `ReadyGreeting(Hello, Alice!)` and
+`ReadyGreeting(Hello, Bob!)`. There is no missing-input or default-name
+transition: resuming `C_A1` without another input continues a computation that
+already contains the earlier `Alice` interaction.
 
 ### Draft PR acceptance criterion
 
 Without changing Capsule Core, the test-only `Greeter + NameProvider` scenario
-must execute, reseal, and revalidate:
+must fork from one sealed and valid `C_init`, then execute, reseal, and
+revalidate both branches:
 
 ```text
-C0 --name?"Bob"--> C1 --tau--> C2 --greeting!"Hello, Bob!"--> C3
+C_init --name?"Alice"--> C_A1 --tau--> C_A2 --greeting!"Hello, Alice!"--> C_A3
+C_init --name?"Bob"----> C_B1 --tau--> C_B2 --greeting!"Hello, Bob!"----> C_B3
 ```
