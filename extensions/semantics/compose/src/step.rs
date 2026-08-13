@@ -3,19 +3,14 @@
 //! These functions consume verified child transition evidence but deliberately
 //! do not evaluate child semantics or persist a successor computation.
 
-use capsule_core::PortId;
-use capsule_core_codec::ResolvedComputation;
+use ato_computation::{PortId, ResolvedComputation};
+use ato_kernel::Action;
 use thiserror::Error;
 
 use crate::{CompositeResidual, Endpoint, NodeId, ValidatedComposite};
 
 /// The label on one semantic transition; it is neither a record nor a wire format.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StepLabel<V> {
-    Tau,
-    Input { port: PortId, value: V },
-    Output { port: PortId, value: V },
-}
+pub type StepLabel<V> = Action<V>;
 
 /// Transition evidence supplied by a child semantics.
 ///

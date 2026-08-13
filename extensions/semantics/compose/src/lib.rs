@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 mod codec;
+mod semantics;
 mod step;
 mod validate;
 
@@ -14,13 +15,14 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
 
-use capsule_core::{ComputationRef, PortId, ProtocolId, RoleId, SemanticsId};
+use ato_computation::{ComputationRef, PortId, ProtocolId, RoleId, SemanticsId};
 use thiserror::Error;
 
 pub use codec::{
     CompositeResidualCodecError, MAX_COMPOSITE_RESIDUAL_BYTES, composite_residual_ref,
     decode_composite_residual, encode_composite_residual,
 };
+pub use semantics::ComposeSemantics;
 pub use step::{
     CompositeReduction, CompositeStepError, NodeStep, StepLabel, lift_exported_step,
     lift_internal_step, synchronize_connection,
@@ -73,7 +75,7 @@ pub struct NodeIdError {
 }
 
 fn validate_node_id(value: &str) -> Result<(), NodeIdError> {
-    if value.is_empty() || value.len() > capsule_core::MAX_IDENTIFIER_BYTES {
+    if value.is_empty() || value.len() > ato_computation::MAX_IDENTIFIER_BYTES {
         return Err(NodeIdError {
             value: value.to_owned(),
             reason: "length must be between 1 and 255 bytes",

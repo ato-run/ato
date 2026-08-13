@@ -12,7 +12,7 @@ dist = false
 
 [dependencies]
 blake3 = "1.5"
-capsule-core = { path = "../capsule-core" }
+ato-computation = { path = "../../lib/computation" }
 capsule-protocol = { path = "../capsule-protocol" }
 rand = "0.8"
 serde = { version = "1.0", features = ["derive"] }

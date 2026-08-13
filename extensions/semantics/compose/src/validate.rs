@@ -2,13 +2,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::sync::Arc;
 
-use capsule_core::{
-    ComputationObject, ComputationRef, ContentRef, PortDef, PortId, ProtocolId, RoleId,
+use ato_computation::{
+    CodecError, ComputationObject, ComputationRef, ContentRef, MAX_COMPUTATION_OBJECT_BYTES,
+    PortDef, PortId, ProtocolId, ResolvedComputation, RoleId, encode_computation_object,
 };
-use capsule_core_codec::{
-    CodecError, MAX_COMPUTATION_OBJECT_BYTES, ObjectResolver, ResolveError, ResolvedComputation,
-    encode_computation_object,
-};
+use ato_objects::{ObjectError, ObjectResolver};
 use thiserror::Error;
 
 use crate::{
@@ -113,7 +111,7 @@ pub enum CompositeValidationError {
     #[error("compose residual must use a blake3 ContentRef, got {0}")]
     UnsupportedResidualReference(ContentRef),
     #[error("compose residual resolution failed: {0}")]
-    ResidualResolution(#[source] ResolveError),
+    ResidualResolution(#[source] ObjectError),
     #[error("compose residual is {actual} bytes; maximum is {maximum}")]
     ResidualTooLarge { actual: u64, maximum: u64 },
     #[error("compose residual metadata reported {expected} bytes but resolver returned {actual}")]
@@ -133,7 +131,7 @@ pub enum CompositeValidationError {
     ChildResolution {
         node: NodeId,
         #[source]
-        source: ResolveError,
+        source: ObjectError,
     },
     #[error("recursive computation reference cycle includes {0}")]
     ReferenceCycle(ComputationRef),
@@ -315,7 +313,7 @@ impl<'a> ValidationState<'a> {
             if metadata.size > MAX_COMPUTATION_OBJECT_BYTES {
                 return Err(CompositeValidationError::ChildResolution {
                     node: node.clone(),
-                    source: ResolveError::ObjectTooLarge {
+                    source: ObjectError::ObjectTooLarge {
                         actual: metadata.size,
                         maximum: MAX_COMPUTATION_OBJECT_BYTES,
                     },
@@ -548,9 +546,9 @@ fn resolve_verified_computation(
     resolver: &dyn ObjectResolver,
     reference: &ComputationRef,
     expected_size: u64,
-) -> Result<ResolvedComputation, ResolveError> {
+) -> Result<ResolvedComputation, ObjectError> {
     if expected_size > MAX_COMPUTATION_OBJECT_BYTES {
-        return Err(ResolveError::ObjectTooLarge {
+        return Err(ObjectError::ObjectTooLarge {
             actual: expected_size,
             maximum: MAX_COMPUTATION_OBJECT_BYTES,
         });
@@ -562,7 +560,7 @@ fn resolve_verified_computation(
         .read_to_end(&mut bytes)?;
     let actual = bytes.len() as u64;
     if actual != expected_size {
-        return Err(ResolveError::SizeMismatch {
+        return Err(ObjectError::SizeMismatch {
             expected: expected_size,
             actual,
         });
