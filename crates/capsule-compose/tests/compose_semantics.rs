@@ -817,6 +817,21 @@ fn reducer_rejects_invalid_transition_evidence() {
         ),
         Err(CompositeStepError::UnexportedPort { .. })
     ));
+    let lifted_input = lift_exported_step(
+        &current,
+        &greeter_step(StepLabel::Input {
+            port: PortId::parse("greeting").unwrap(),
+            value: "Hello, Alice",
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        lifted_input.label,
+        StepLabel::Input {
+            port: PortId::parse("greeting").unwrap(),
+            value: "Hello, Alice",
+        }
+    );
 }
 
 #[test]
