@@ -9,7 +9,7 @@ name: State-Layer Purity Lint
 # offending code into the UI / webview layer and abstract through a
 # trait if shared logic is required.
 #
-# (Monorepo M6: paths now carry the `crates/desktop/` prefix.)
+# (Monorepo M6: paths now carry the `apps/desktop/` prefix.)
 
 on:
   push:
@@ -33,11 +33,11 @@ jobs:
         run: |
           set -euo pipefail
           paths=(
-            crates/desktop/src/state/mod.rs
-            crates/desktop/src/orchestrator.rs
-            crates/desktop/src/bridge.rs
-            crates/desktop/src/config.rs
-            crates/desktop/src/cli_envelope.rs
+            apps/desktop/src/state/mod.rs
+            apps/desktop/src/orchestrator.rs
+            apps/desktop/src/bridge.rs
+            apps/desktop/src/config.rs
+            apps/desktop/src/cli_envelope.rs
           )
           forbidden_pattern='^use (gpui|wry|objc2|windows)([:; ]|$)'
           violations=0

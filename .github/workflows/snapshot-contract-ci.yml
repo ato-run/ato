@@ -28,7 +28,7 @@ on:
       # crates/snapshot/Cargo.toml [dependencies]).
       - "crates/capsule/**"
       - "crates/capsulefs/**"
-      - "crates/protocol/**"
+      - "lib/ipc/**"
       # ...and the workspace pins that determine how it builds.
       - "Cargo.toml"
       - "Cargo.lock"
@@ -41,7 +41,7 @@ on:
       - "tools/snapshot-builder/**"
       - "crates/capsule/**"
       - "crates/capsulefs/**"
-      - "crates/protocol/**"
+      - "lib/ipc/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"

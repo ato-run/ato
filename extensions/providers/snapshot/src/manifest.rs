@@ -12,12 +12,12 @@
 //! `runner_class_id` and carries no secret.
 
 use crate::layer_store::{BlobManifest, HotsetProfile};
+use ato_ipc::session_surface::{
+    EndpointContract, EndpointContractError, SessionSurfaceRequirement,
+};
 use capsule::foundation::install_lifecycle::RunnerClassId;
 use capsule::foundation::types::ready_state::{
     DEFAULT_STABLE_INTERVAL_MS, DEFAULT_STABLE_SUCCESSES, SnapshotConfig,
-};
-use protocol::session_surface::{
-    EndpointContract, EndpointContractError, SessionSurfaceRequirement,
 };
 use serde::{Deserialize, Serialize};
 
@@ -501,7 +501,7 @@ mod tests {
 
     #[test]
     fn surface_requirement_is_artifact_identity_and_legacy_absence_is_supported() {
-        use protocol::session_surface::{
+        use ato_ipc::session_surface::{
             PIXEL_STREAM_PROFILE, SessionSurfaceKind, SessionSurfaceRequirement,
         };
 
@@ -537,7 +537,7 @@ mod tests {
 
     #[test]
     fn restore_contract_round_trips_explicit_private_rfb_endpoint() {
-        use protocol::session_surface::{
+        use ato_ipc::session_surface::{
             EndpointContract, EndpointExposure, EndpointProtocol, EndpointReadiness, EndpointRole,
         };
 

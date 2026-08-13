@@ -7,8 +7,11 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use ato_computation::{ComputationObject, ResolvedComputation, SemanticsId};
+use ato_computation::{ComputationObject, ContentRef, ResolvedComputation, SemanticsId};
 use ato_kernel::{Action, SemanticError, SemanticHost, SemanticStep, Semantics};
+use ato_objects::{
+    BundleError, ComputationReferences, ObjectLink, ObjectResolver, read_exact_object,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -27,6 +30,76 @@ pub struct WorkspaceResidual {
     pub secret_bindings: BTreeMap<String, String>,
     pub realization: RealizationConstraint,
     pub phase: WorkspacePhase,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceClosure {
+    pub entries: Vec<SourceEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceEntry {
+    pub path: String,
+    pub content: String,
+    pub executable: bool,
+}
+
+pub struct WorkspaceReferences {
+    id: SemanticsId,
+}
+
+impl Default for WorkspaceReferences {
+    fn default() -> Self {
+        Self {
+            id: SemanticsId::parse(WORKSPACE_SEMANTICS_ID)
+                .expect("static workspace semantics id is valid"),
+        }
+    }
+}
+
+impl ComputationReferences for WorkspaceReferences {
+    fn semantics(&self) -> &SemanticsId {
+        &self.id
+    }
+
+    fn outgoing(
+        &self,
+        computation: &ResolvedComputation,
+        objects: &dyn ObjectResolver,
+    ) -> Result<Vec<ObjectLink>, BundleError> {
+        let residual_ref = &computation.object().residual;
+        let residual_metadata = objects.metadata(residual_ref)?;
+        let residual_bytes = read_exact_object(
+            objects,
+            residual_ref,
+            residual_metadata.size,
+            MAX_WORKSPACE_RESIDUAL_BYTES,
+        )?;
+        let residual = decode_workspace_residual(&residual_bytes).map_err(|error| {
+            BundleError::Object(ato_objects::ObjectError::Storage(error.to_string()))
+        })?;
+        let source = ContentRef::parse(&residual.source).map_err(|error| {
+            BundleError::Object(ato_objects::ObjectError::Storage(error.to_string()))
+        })?;
+        let source_metadata = objects.metadata(&source)?;
+        let source_bytes = read_exact_object(
+            objects,
+            &source,
+            source_metadata.size,
+            MAX_WORKSPACE_RESIDUAL_BYTES,
+        )?;
+        let closure: SourceClosure = serde_json::from_slice(&source_bytes)?;
+        let mut links = vec![ObjectLink::Content(source)];
+        for entry in closure.entries {
+            let reference = ContentRef::parse(entry.content).map_err(|error| {
+                BundleError::Object(ato_objects::ObjectError::Storage(error.to_string()))
+            })?;
+            links.push(ObjectLink::Content(reference));
+        }
+        Ok(links)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

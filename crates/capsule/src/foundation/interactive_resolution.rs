@@ -111,7 +111,7 @@ pub struct ResolutionDisplay {
 mod tests {
     use super::*;
     use crate::error::AtoError;
-    use protocol::config::{ConfigField, ConfigKind};
+    use ato_ipc::config::{ConfigField, ConfigKind};
 
     fn sample_config_field(name: &str) -> ConfigField {
         ConfigField {

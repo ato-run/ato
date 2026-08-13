@@ -3822,7 +3822,7 @@ where
             // with the aggregated, actionable report (name + description + the exact
             // `ato secrets set … --namespace …` command). Values stay in memory only
             // until lease delivery; never logged or recorded.
-            let mut preflight_resolved: Vec<(String, protocol::binding_lease::SecretValue)> =
+            let mut preflight_resolved: Vec<(String, ato_ipc::binding_lease::SecretValue)> =
                 Vec::new();
             let mut resolver_kind: Option<String> = None;
             let mut grant_namespace: Option<String> = None;

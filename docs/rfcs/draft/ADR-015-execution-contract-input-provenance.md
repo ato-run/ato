@@ -29,7 +29,7 @@ is already frozen:
 | facet | v0.3 state |
 |---|---|
 | `guest_surface.bind_address` | not declarable anywhere; every occurrence in the tree is a `"0.0.0.0"` test fixture |
-| `guest_surface.protocol` / `features` | not declarable; the real vocabulary lives in `protocol::session_surface`, unconnected to the manifest |
+| `guest_surface.protocol` / `features` | not declarable; the real vocabulary lives in `ato_ipc::session_surface`, unconnected to the manifest |
 | `external_state.access` | no field exists; `ServiceStateBinding.mode` is an octal permission string, and the one real `BindingMode{ReadOnly,ReadWrite}` sits on `[bindings.*]`, which `derive_build_spec` rejects outright |
 
 Defining payload schemas on top of that would fix `execution_id` — permanently —

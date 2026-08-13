@@ -15,8 +15,8 @@ use super::command_spec::CommandSpec;
 // `capsule::types::{ConfigField, ConfigKind}` import paths
 // (`error.rs`, `manifest_tests.rs`, the CLI diagnostics tests) keep
 // compiling unchanged.
-pub use protocol::config::{ConfigField, ConfigKind};
-pub use protocol::session_surface::SessionSurfaceRequirement;
+pub use ato_ipc::config::{ConfigField, ConfigKind};
+pub use ato_ipc::session_surface::SessionSurfaceRequirement;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;

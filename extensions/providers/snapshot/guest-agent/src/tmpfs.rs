@@ -8,7 +8,7 @@
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-use protocol::binding_lease::BindingName;
+use ato_ipc::binding_lease::BindingName;
 
 use crate::BindingSink;
 

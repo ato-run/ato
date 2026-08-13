@@ -416,7 +416,7 @@ ato/
 └── .github/workflows/    # CI
 ```
 
-Most users should use the installer. Contributors usually work in `crates/cli`, `crates/desktop`, `crates/capsule`, and the runtime sidecars. `crates/desktop` and `sidecars/ato-tsnetd` are kept out of the cargo workspace (see `Cargo.toml`).
+Most users should use the installer. Contributors usually work in `crates/cli`, `apps/desktop`, `crates/capsule`, and the runtime sidecars. `apps/desktop` and `sidecars/ato-tsnetd` are kept out of the cargo workspace (see `Cargo.toml`).
 
 > Crate names dropped the `ato-` prefix (`cli`/`desktop`/`netd`); the produced
 > binaries keep their stable names (`ato`, `ato-desktop`, `ato-netd`).
@@ -455,7 +455,7 @@ cargo run -p cli -- --help
 Desktop bundle examples:
 
 ```bash
-cd crates/desktop
+cd apps/desktop
 cargo xtask bundle darwin-arm64
 cargo xtask bundle windows-x86_64
 cargo xtask bundle linux-x86_64

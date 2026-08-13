@@ -23,11 +23,11 @@ use capsule::foundation::types::manifest::{
     StateSharing, validate_and_normalize_state_mount_target, validate_state_volume_size_mb,
 };
 // Only referenced from #[cfg(test)] assertions below; unused in the non-test build.
+use ato_ipc::binding_lease::BindingName;
+use ato_ipc::session_surface::SessionSurfaceKind;
 #[allow(unused_imports)]
 use capsule::foundation::types::manifest::DEFAULT_STATE_VOLUME_SIZE_MB;
 use capsule::foundation::types::ready_state::SecretDelivery;
-use protocol::binding_lease::BindingName;
-use protocol::session_surface::SessionSurfaceKind;
 use serde::Serialize;
 
 use crate::state_volume::{drive_id as state_drive_id, volume_label};

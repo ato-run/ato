@@ -21,8 +21,8 @@ use capsule::snapshot_manifest::{SnapshotBackendKind, SnapshotCompatibilityContr
 // The single shared GpuMode lives in capsule (snapshot depends on capsule), so the
 // placement contract and the manifest-level GPU judgment agree on one type.
 use crate::layer_store::CasStore;
+use ato_ipc::session_surface::SessionSurfaceRequirement;
 pub use capsule::foundation::types::ready_state::GpuMode;
-use protocol::session_surface::SessionSurfaceRequirement;
 use serde::{Deserialize, Serialize};
 
 use crate::manifest::{NoSecretProof, ReadyStateManifest, RestoreContract, SanitizerContract};

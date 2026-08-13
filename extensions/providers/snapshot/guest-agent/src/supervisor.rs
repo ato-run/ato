@@ -6,7 +6,7 @@
 //!
 //! - **Build:** boot → agent supervisor starts the workload with PLACEHOLDER
 //!   bindings delivered over vsock → boot-verify health → host sends
-//!   [`StopWorkload`](protocol::binding_control::HostToAgent::StopWorkload) → agent
+//!   [`StopWorkload`](ato_ipc::binding_control::HostToAgent::StopWorkload) → agent
 //!   stops the app + the session scrubs the tmpfs → snapshot a workload-idle,
 //!   secret-free image.
 //! - **Restore:** deliver the REAL bindings → bound-ready → the agent (re)starts
@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use protocol::binding_lease::BindingName;
+use ato_ipc::binding_lease::BindingName;
 use serde::{Deserialize, Serialize};
 
 use crate::BindingSink;

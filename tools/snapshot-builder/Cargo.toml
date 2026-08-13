@@ -16,7 +16,7 @@ path = "src/main.rs"
 [dependencies]
 snapshot = { package = "ato-provider-snapshot", path = "../../extensions/providers/snapshot" }
 capsule = { path = "../../crates/capsule" }
-protocol = { path = "../../crates/protocol" }
+ato-ipc = { path = "../../lib/ipc" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -2,7 +2,7 @@
 //! `docs/ready-state/binding-lease.md`).
 //!
 //! The pure [`BindingSession`] state machine consumes the host↔agent control messages
-//! ([`protocol::binding_control`]), computes the **bound-ready** gate, and — via a
+//! ([`ato_ipc::binding_control`]), computes the **bound-ready** gate, and — via a
 //! [`BindingSink`] — materializes the secret **inside the guest**:
 //!
 //! - PR 2 (skeleton): control flow + bound-ready, value dropped.
@@ -17,8 +17,8 @@
 
 use std::collections::HashMap;
 
-use protocol::binding_control::{AgentToHost, HostToAgent};
-use protocol::binding_lease::{BindingLeaseId, BindingName};
+use ato_ipc::binding_control::{AgentToHost, HostToAgent};
+use ato_ipc::binding_lease::{BindingLeaseId, BindingName};
 
 /// ato#1026: app-agnostic localhost→guest-IP TCP relay subcommand for apps
 /// that bind `127.0.0.1` inside the guest.
@@ -189,7 +189,7 @@ impl<S: BindingSink> BindingSession<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::binding_lease::{BindingLease, BindingLeaseId, BindingName, SecretValue};
+    use ato_ipc::binding_lease::{BindingLease, BindingLeaseId, BindingName, SecretValue};
     use std::cell::RefCell;
     use std::collections::HashMap as Map;
 
