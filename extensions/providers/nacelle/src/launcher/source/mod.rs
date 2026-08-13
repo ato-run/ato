@@ -55,7 +55,7 @@ pub struct NativeSandboxCapabilityReport {
 pub enum SourceRuntimeMode {
     /// Native execution with platform sandbox (fast, dev-friendly)
     Native,
-    /// Interactive PTY session (shell spawned inside sandbox)
+    /// Interactive PTY session managed by the terminal provider.
     Interactive,
 }
 
@@ -270,14 +270,17 @@ impl SourceRuntime {
             );
         }
 
+        // Interactive sessions use the dedicated PTY provider below. They do
+        // not enter the platform-native sandbox launcher, so availability of
+        // bwrap/Seatbelt/Windows Sandbox must not gate PTY startup.
+        if target.interactive {
+            return Ok(SourceRuntimeMode::Interactive);
+        }
+
         if !Self::is_native_sandbox_available() {
             return Err(RuntimeError::SandboxSetupFailed(
                 "Native sandbox not supported on this platform; OCI fallback removed".to_string(),
             ));
-        }
-
-        if target.interactive {
-            return Ok(SourceRuntimeMode::Interactive);
         }
 
         Ok(SourceRuntimeMode::Native)
@@ -920,6 +923,22 @@ mod tests {
                 "python".to_string(),
             ])
         );
+    }
+
+    #[test]
+    fn interactive_mode_does_not_require_a_native_sandbox_backend() {
+        let runtime = SourceRuntime::new(SourceRuntimeConfig::default());
+        let target = SourceTarget {
+            language: "shell".to_string(),
+            entrypoint: "/bin/sh".to_string(),
+            interactive: true,
+            ..SourceTarget::default()
+        };
+
+        assert!(matches!(
+            runtime.determine_mode(&target).unwrap(),
+            SourceRuntimeMode::Interactive
+        ));
     }
 
     #[test]
