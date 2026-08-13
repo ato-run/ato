@@ -356,6 +356,7 @@ fn restore_and_verify(
             manifest: sealed.manifest.clone(),
             overlay_root: workdir.join(format!("ov-{}", slug.replace('/', "-"))),
             host_runner_class: None,
+            containment: None,
             uffd_preview: false,
         })
         .map_err(|e| anyhow::anyhow!("restore({slug}): {e}"))?;

@@ -301,6 +301,7 @@ fn main() {
                 manifest: manifest.clone(),
                 overlay_root: ov,
                 host_runner_class: None,
+                containment: None,
                 uffd_preview: false,
             }) {
                 let _ = backend.stop(r.session);
@@ -319,6 +320,7 @@ fn main() {
                 manifest: manifest.clone(),
                 overlay_root: ov,
                 host_runner_class: None,
+                containment: None,
                 uffd_preview: false,
             }) {
                 Ok(r) => r,

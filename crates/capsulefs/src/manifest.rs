@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::chunk::Chunk;
 use crate::hash::ContentHash;
+use crate::{CapsuleFsError, Result};
 
 /// Which Ready-State layer a blob holds. Mirrors the manifest layer refs in the
 /// Ready-State plan §2.1.
@@ -86,6 +87,52 @@ impl BlobManifest {
     }
 }
 
+/// Validate an untrusted blob layout without reading or materializing bytes.
+pub fn validate_blob_manifest(manifest: &BlobManifest) -> Result<()> {
+    let mut expected_offset = 0_u64;
+    for chunk in &manifest.chunks {
+        if chunk.offset != expected_offset {
+            return Err(CapsuleFsError::MalformedManifest(format!(
+                "chunk {} starts at {} but expected contiguous offset {expected_offset}",
+                chunk.hash, chunk.offset
+            )));
+        }
+        expected_offset = chunk.offset.checked_add(chunk.length).ok_or_else(|| {
+            CapsuleFsError::MalformedManifest(format!(
+                "chunk offset {} + length {} overflows u64",
+                chunk.offset, chunk.length
+            ))
+        })?;
+    }
+    if expected_offset != manifest.total_len {
+        return Err(CapsuleFsError::MalformedManifest(format!(
+            "chunk layout ends at {expected_offset} but total_len is {}",
+            manifest.total_len
+        )));
+    }
+    if let ChunkingKind::PageAligned { page_size } = manifest.chunking {
+        if page_size == 0 {
+            return Err(CapsuleFsError::MalformedManifest(
+                "page-aligned chunking requires a non-zero page size".to_string(),
+            ));
+        }
+        for (index, chunk) in manifest.chunks.iter().enumerate() {
+            let is_last = index + 1 == manifest.chunks.len();
+            if chunk.offset % page_size != 0
+                || chunk.length == 0
+                || chunk.length > page_size
+                || (!is_last && chunk.length != page_size)
+            {
+                return Err(CapsuleFsError::MalformedManifest(format!(
+                    "chunk {} violates page-aligned layout with page size {page_size}",
+                    chunk.hash
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,12 +151,7 @@ mod tests {
                 length: 2,
             },
         ];
-        BlobManifest::new(
-            LayerKind::Memory,
-            3,
-            ChunkingKind::PageAligned { page_size: 2 },
-            chunks,
-        )
+        BlobManifest::new(LayerKind::Memory, 3, ChunkingKind::ContentDefined, chunks)
     }
 
     #[test]
@@ -148,5 +190,19 @@ mod tests {
         );
         let json = serde_json::to_string(&m.layer).unwrap();
         assert!(json.contains("model_weights"), "{json}");
+    }
+
+    #[test]
+    fn structural_validation_requires_contiguous_page_aligned_layout() {
+        let manifest = sample();
+        assert!(validate_blob_manifest(&manifest).is_ok());
+
+        let mut gap = manifest.clone();
+        gap.chunks[1].offset += 1;
+        assert!(validate_blob_manifest(&gap).is_err());
+
+        let mut bad_page = manifest;
+        bad_page.chunking = ChunkingKind::PageAligned { page_size: 2 };
+        assert!(validate_blob_manifest(&bad_page).is_err());
     }
 }

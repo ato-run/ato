@@ -6,6 +6,7 @@ use super::app::AppCommands;
 use super::binding::BindingCommands;
 use super::config::{ConfigCommands, EngineCommands};
 use super::console::ConsoleCommands;
+use super::decap::DecapCommands;
 use super::import_cmd::ImportArgs;
 use super::inspect::InspectCommands;
 use super::ipc::IpcCommands;
@@ -35,6 +36,7 @@ Usage: {usage}
 
 Primary Commands:
   run                 Run a local project, source repo, or published recipe
+  decap               Open and manage portable Capsule Sessions
   workspace share     Share a local workspace
   workspace setup     Set up a shared workspace locally
 
@@ -67,6 +69,15 @@ pub(crate) struct Cli {
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub(crate) enum Commands {
+    #[command(
+        next_help_heading = "Primary Commands",
+        about = "Open and manage portable Capsule Sessions"
+    )]
+    Decap {
+        #[command(subcommand)]
+        command: DecapCommands,
+    },
+
     #[command(
         next_help_heading = "Primary Commands",
         about = "Run a local project, source repo, or published recipe",

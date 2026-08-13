@@ -5,7 +5,8 @@
 //! re-hashes and fails closed on mismatch — a corrupt or tampered chunk is
 //! never returned.
 
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 use crate::hash::{ContentHash, hash_bytes};
@@ -116,6 +117,94 @@ impl CasStore {
         Ok(bytes)
     }
 
+    /// Open a verified chunk as a streaming reader.
+    pub fn open_chunk_reader(&self, hash: &ContentHash) -> Result<File> {
+        let path = self.chunk_path(hash);
+        let mut file = File::open(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                CapsuleFsError::MissingChunk(hash.clone())
+            } else {
+                error.into()
+            }
+        })?;
+        verify_reader(hash, None, &mut file)?;
+        file.rewind()?;
+        Ok(file)
+    }
+
+    /// Import one untrusted stream under an expected content address atomically.
+    pub fn import_verified_chunk(
+        &self,
+        expected: &ContentHash,
+        expected_size: u64,
+        reader: &mut dyn Read,
+    ) -> Result<()> {
+        let path = self.chunk_path(expected);
+        if path.exists() {
+            let mut existing = File::open(&path)?;
+            verify_reader(expected, Some(expected_size), &mut existing)?;
+            return Ok(());
+        }
+        let temporary = path.with_extension(crate::unique_tmp_suffix());
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let result = (|| {
+            let mut output = options.open(&temporary)?;
+            let mut hasher = blake3::Hasher::new();
+            let mut copied = 0_u64;
+            let mut buffer = [0_u8; 64 * 1024];
+            loop {
+                let count = reader.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                copied = copied.checked_add(count as u64).ok_or_else(|| {
+                    CapsuleFsError::MalformedManifest("chunk size overflow".to_string())
+                })?;
+                if copied > expected_size {
+                    return Err(CapsuleFsError::MalformedManifest(format!(
+                        "chunk {expected} exceeds declared length {expected_size}"
+                    )));
+                }
+                hasher.update(&buffer[..count]);
+                output.write_all(&buffer[..count])?;
+            }
+            if copied != expected_size {
+                return Err(CapsuleFsError::MalformedManifest(format!(
+                    "chunk {expected} has length {copied}, expected {expected_size}"
+                )));
+            }
+            let actual = ContentHash::parse(&format!("blake3:{}", hasher.finalize().to_hex()))
+                .expect("BLAKE3 output is a valid ContentHash");
+            if &actual != expected {
+                return Err(CapsuleFsError::IntegrityMismatch {
+                    expected: expected.clone(),
+                    actual,
+                });
+            }
+            output.sync_all()?;
+            match fs::rename(&temporary, &path) {
+                Ok(()) => {}
+                Err(_) if path.exists() => {
+                    let mut existing = File::open(&path)?;
+                    verify_reader(expected, Some(expected_size), &mut existing)?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+            File::open(path.parent().expect("chunk path has a parent"))?.sync_all()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
+    }
+
     /// All chunk hashes currently resident in the store. Used by GC to compute
     /// the unreferenced set.
     pub fn list_chunks(&self) -> Result<Vec<ContentHash>> {
@@ -156,6 +245,37 @@ impl CasStore {
             Err(e) => Err(e.into()),
         }
     }
+}
+
+fn verify_reader(hash: &ContentHash, size: Option<u64>, reader: &mut dyn Read) -> Result<()> {
+    let mut hasher = blake3::Hasher::new();
+    let mut bytes = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        bytes = bytes
+            .checked_add(count as u64)
+            .ok_or_else(|| CapsuleFsError::MalformedManifest("chunk size overflow".to_string()))?;
+        hasher.update(&buffer[..count]);
+    }
+    if size.is_some_and(|expected| expected != bytes) {
+        return Err(CapsuleFsError::MalformedManifest(format!(
+            "chunk {hash} has length {bytes}, expected {}",
+            size.expect("checked as some")
+        )));
+    }
+    let actual = ContentHash::parse(&format!("blake3:{}", hasher.finalize().to_hex()))
+        .expect("BLAKE3 output is a valid ContentHash");
+    if &actual != hash {
+        return Err(CapsuleFsError::IntegrityMismatch {
+            expected: hash.clone(),
+            actual,
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -248,6 +368,38 @@ mod tests {
         assert!(matches!(
             store.get_chunk(&h),
             Err(CapsuleFsError::IntegrityMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn verified_stream_import_rejects_wrong_size_hash_and_corrupt_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path()).unwrap();
+        let expected = hash_bytes(b"streamed bytes");
+        store
+            .import_verified_chunk(&expected, 14, &mut &b"streamed bytes"[..])
+            .unwrap();
+        let mut opened = store.open_chunk_reader(&expected).unwrap();
+        let mut bytes = Vec::new();
+        opened.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"streamed bytes");
+
+        let wrong = hash_bytes(b"different");
+        assert!(matches!(
+            store.import_verified_chunk(&wrong, 14, &mut &b"streamed bytes"[..]),
+            Err(CapsuleFsError::IntegrityMismatch { .. })
+        ));
+        assert!(
+            store
+                .import_verified_chunk(&expected, 13, &mut &b"streamed bytes"[..])
+                .is_err()
+        );
+
+        fs::write(store.chunk_path(&expected), b"corrupt").unwrap();
+        assert!(matches!(
+            store.import_verified_chunk(&expected, 14, &mut &b"streamed bytes"[..]),
+            Err(CapsuleFsError::MalformedManifest(_))
+                | Err(CapsuleFsError::IntegrityMismatch { .. })
         ));
     }
 }
