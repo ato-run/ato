@@ -50,6 +50,7 @@ const READY_MARKER: &[u8] = b"__ATO_SESSION_READY__";
 const WATCHDOG_DISARM: &[u8] = b"DISARM\n";
 const PUBLIC_METADATA_SCHEMA_VERSION: u16 = 1;
 const PUBLIC_NAME_MAX_LEN: usize = 64;
+const CONTAINMENT_RECEIPT: &[u8] = b"revoked\n";
 
 pub(crate) fn start(bundle: &Path, into: &Path, no_attach: bool) -> Result<()> {
     let bundle = bundle
@@ -113,8 +114,13 @@ pub(crate) fn start_public(
     println!("Starting {name}...");
     let workspace = paths.directory.join("workspace");
     if let Err(error) = launch_session(&session_id, &paths, &workspace, true, false) {
-        release_public_reservation(&paths);
+        release_public_reservation_if_reclaimable(&session_id, &paths)?;
         return Err(error);
+    }
+    if std::env::var_os("ATO_TEST_PAUSE_BEFORE_PUBLIC_METADATA_COMMIT").is_some() {
+        loop {
+            thread::sleep(Duration::from_secs(1));
+        }
     }
     let active = PublicSessionMetadata {
         state: PublicMetadataState::Active,
@@ -123,9 +129,9 @@ pub(crate) fn start_public(
     };
     if let Err(error) = write_public_metadata(&paths, &active) {
         let cleanup = stop_started_session_after_metadata_failure(&session_id, &paths);
-        release_public_reservation(&paths);
         return match cleanup {
             Ok(()) => {
+                release_public_reservation(&paths);
                 Err(error.context("failed to commit public Session metadata; Session stopped"))
             }
             Err(cleanup) => Err(error.context(format!(
@@ -145,6 +151,9 @@ fn stop_started_session_after_metadata_failure(
     session_id: &SessionId,
     paths: &SessionPaths,
 ) -> Result<()> {
+    if std::env::var_os("ATO_TEST_FAIL_PUBLIC_METADATA_CLEANUP").is_some() {
+        bail!("injected public Session cleanup failure");
+    }
     match kill(session_id.as_str()) {
         Ok(()) => Ok(()),
         Err(error) => {
@@ -276,7 +285,7 @@ fn serve_workspace_pty(session: &str, into: &Path, capsule: PortableCapsule) -> 
             .context("failed to restore workspace State")?;
     }
 
-    let mut computation = PtyComputation::spawn(into)?;
+    let mut computation = PtyComputation::spawn(into, &paths.containment_receipt)?;
     initialize_terminal(&mut computation.reader, &computation.writer)?;
     if let Some(checkpoint) = bootstrap.base_connector_checkpoints.get(PTY_CONNECTOR_ID) {
         restore_pty_checkpoint(&computation, checkpoint)?;
@@ -478,6 +487,7 @@ fn serve_ready_state(session: &str, _into: &Path, spool: SpoolBundle) -> Result<
     let cas_root = paths.directory.join("ready-state-cas");
     let imported = import_ready_state(&state, &spool.objects, &cas_root)
         .context("failed to import Ready-State State")?;
+    drop(spool);
     let state_object = ReadyStateStateObjectV1 {
         schema: snapshot::capsule_state::READY_STATE_STATE_OBJECT_SCHEMA.to_string(),
         legacy_manifest: imported.legacy_manifest.clone(),
@@ -495,7 +505,8 @@ fn serve_ready_state(session: &str, _into: &Path, spool: SpoolBundle) -> Result<
     let overlay_root = paths.directory.join("ready-state-overlay");
     fs::create_dir_all(&overlay_root)?;
     fs::set_permissions(&overlay_root, fs::Permissions::from_mode(0o700))?;
-    let containment = ReadyStateRestoreContainment::new(overlay_root.clone());
+    let containment =
+        ReadyStateRestoreContainment::new(overlay_root.clone(), paths.containment_receipt.clone());
     let restore = backend
         .restore(RestoreReadyStateInput {
             store: &imported.cas_store,
@@ -674,6 +685,7 @@ impl ReadyStateSessionGuard {
 
 struct ReadyStateRestoreContainment {
     overlay_root: PathBuf,
+    receipt: PathBuf,
     installed: Mutex<Option<InstalledRestoreContainment>>,
 }
 
@@ -685,9 +697,10 @@ struct InstalledRestoreContainment {
 }
 
 impl ReadyStateRestoreContainment {
-    fn new(overlay_root: PathBuf) -> Self {
+    fn new(overlay_root: PathBuf, receipt: PathBuf) -> Self {
         Self {
             overlay_root,
+            receipt,
             installed: Mutex::new(None),
         }
     }
@@ -719,11 +732,17 @@ impl RestoreContainment for ReadyStateRestoreContainment {
                 backend: "restore-containment".to_string(),
                 reason: error.to_string(),
             })?;
-        let (lease, watchdog) = spawn_watchdog(vmm_pid, 0, &identity, Some(&self.overlay_root))
-            .map_err(|error| SnapshotError::Backend {
-                backend: "restore-containment".to_string(),
-                reason: error.to_string(),
-            })?;
+        let (lease, watchdog) = spawn_watchdog(
+            vmm_pid,
+            0,
+            &identity,
+            Some(&self.overlay_root),
+            Some(&self.receipt),
+        )
+        .map_err(|error| SnapshotError::Backend {
+            backend: "restore-containment".to_string(),
+            reason: error.to_string(),
+        })?;
         let mut installed = self.installed.lock().map_err(|_| SnapshotError::Backend {
             backend: "restore-containment".to_string(),
             reason: "containment lock poisoned".to_string(),
@@ -904,10 +923,82 @@ pub(crate) fn stop_public(name: &str) -> Result<()> {
     let session = resolve_public_session(name)?;
     let metadata = public_metadata_for(&session.session_id)?;
     if session.lifecycle != "stopped" {
-        kill(session.session_id.as_str())?;
+        if supervisor_identity_is_live(&session.supervisor) {
+            kill(session.session_id.as_str())?;
+        } else {
+            reconcile_orphaned_session(session)?;
+        }
     }
     println!("Stopped {}.", metadata.name);
     Ok(())
+}
+
+fn reconcile_orphaned_session(mut session: StoredProtocolSession) -> Result<()> {
+    let paths = SessionPaths::new(&session.session_id)?;
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&paths.lock)
+        .context("failed to open orphaned Supervisor lock")?;
+    lock.try_lock_exclusive()
+        .context("Session Supervisor is still releasing its authority")?;
+    if supervisor_identity_is_live(&session.supervisor) {
+        bail!("Session Supervisor became live during reconciliation");
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let containment_complete = match &session.runtime_profile {
+            StoredRuntimeProfile::WorkspacePty { .. } => {
+                has_containment_receipt(&paths.containment_receipt)
+            }
+            StoredRuntimeProfile::ReadyState {
+                vmm_pid,
+                vmm_process_start_identity,
+                ..
+            } => match (vmm_pid, vmm_process_start_identity) {
+                (Some(pid), Some(identity)) => match workload_process_start_identity(*pid as u32) {
+                    Ok(actual) => actual != *identity,
+                    Err(_) => !capsule::state::session::process::pid_is_alive(*pid as u32),
+                },
+                (None, None) => true,
+                _ => false,
+            },
+        };
+        if containment_complete {
+            break;
+        }
+        if Instant::now() >= deadline {
+            bail!("orphaned Session containment has not proven computation termination");
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    if let StoredRuntimeProfile::ReadyState {
+        vmm_pid,
+        vmm_process_start_identity,
+        overlay_root,
+        ..
+    } = &mut session.runtime_profile
+    {
+        *vmm_pid = None;
+        *vmm_process_start_identity = None;
+        let _ = fs::remove_dir_all(overlay_root);
+    }
+    session.lifecycle = "stopped".to_owned();
+    let store = CapsuleProtocolSessionStore::open(&paths.root)?;
+    store.write(&session)?;
+    let _ = fs::remove_file(&paths.socket);
+    let _ = fs::remove_file(&paths.socket_address);
+    FileExt::unlock(&lock)?;
+    Ok(())
+}
+
+fn has_containment_receipt(path: &Path) -> bool {
+    fs::read(path).is_ok_and(|bytes| bytes == CONTAINMENT_RECEIPT)
 }
 
 pub(crate) fn branch(session: &str, into: &Path, no_attach: bool) -> Result<()> {
@@ -1095,7 +1186,7 @@ pub(crate) fn list_public(json: bool) -> Result<()> {
         if session.lifecycle == "stopped" {
             continue;
         }
-        let Ok(metadata) = public_metadata_for(&session.session_id) else {
+        let Ok(metadata) = reconciled_public_metadata(&session.session_id, &store) else {
             continue;
         };
         if metadata.state != PublicMetadataState::Active {
@@ -1134,6 +1225,7 @@ pub(crate) fn watchdog(
     expected_start_identity: &str,
     lease_fd: i32,
     overlay_root: Option<&Path>,
+    receipt: Option<&Path>,
 ) -> Result<()> {
     if lease_fd < 0 {
         bail!("invalid watchdog lease fd");
@@ -1144,16 +1236,15 @@ pub(crate) fn watchdog(
     if message == WATCHDOG_DISARM {
         return Ok(());
     }
-    if pgid > 0 {
-        if !workload_identity_matches(pid, pgid, expected_start_identity) {
-            return Ok(());
-        }
+    let targets = if pgid > 0 && workload_identity_matches(pid, pgid, expected_start_identity) {
         let targets = workload_tree(pid, pgid, expected_start_identity);
         signal_workload_tree(&targets, libc::SIGTERM);
         thread::sleep(Duration::from_millis(500));
         signal_workload_tree(&targets, libc::SIGKILL);
-    } else if workload_process_start_identity(pid)
-        .is_ok_and(|identity| identity == expected_start_identity)
+        targets
+    } else if pgid <= 0
+        && workload_process_start_identity(pid)
+            .is_ok_and(|identity| identity == expected_start_identity)
     {
         unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
         thread::sleep(Duration::from_millis(500));
@@ -1162,9 +1253,32 @@ pub(crate) fn watchdog(
         {
             unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
         }
+        vec![ProcessTarget {
+            pid,
+            pgid,
+            process_start_identity: expected_start_identity.to_owned(),
+        }]
+    } else {
+        Vec::new()
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while targets.iter().any(|target| {
+        workload_process_start_identity(target.pid)
+            .is_ok_and(|identity| identity == target.process_start_identity)
+    }) {
+        if Instant::now() >= deadline {
+            bail!("containment could not prove workload termination");
+        }
+        thread::sleep(Duration::from_millis(25));
     }
     if let Some(overlay_root) = overlay_root {
         let _ = fs::remove_dir_all(overlay_root);
+    }
+    if let Some(receipt) = receipt {
+        capsule_session_runtime::session_store::write_atomic_owner_only(
+            receipt,
+            CONTAINMENT_RECEIPT,
+        )?;
     }
     Ok(())
 }
@@ -1699,7 +1813,7 @@ struct PtyComputation {
 }
 
 impl PtyComputation {
-    fn spawn(workspace: &Path) -> Result<Self> {
+    fn spawn(workspace: &Path, containment_receipt: &Path) -> Result<Self> {
         let pair = native_pty_system()
             .openpty(PtySize {
                 rows: 24,
@@ -1737,7 +1851,13 @@ impl PtyComputation {
         }
         let process_start_identity = workload_process_start_identity(pid)?;
         let killer = child.clone_killer();
-        let (lease, watchdog) = spawn_watchdog(pid, pgid, &process_start_identity, None)?;
+        let (lease, watchdog) = spawn_watchdog(
+            pid,
+            pgid,
+            &process_start_identity,
+            None,
+            Some(containment_receipt),
+        )?;
         Ok(Self {
             master: Arc::new(Mutex::new(pair.master)),
             child,
@@ -1878,6 +1998,7 @@ fn spawn_watchdog(
     pgid: i32,
     process_start_identity: &str,
     overlay_root: Option<&Path>,
+    receipt: Option<&Path>,
 ) -> Result<(File, ProcessChild)> {
     let mut fds = [0_i32; 2];
     if unsafe { libc::pipe(fds.as_mut_ptr()) } == -1 {
@@ -1908,6 +2029,14 @@ fn spawn_watchdog(
     ]);
     if let Some(overlay_root) = overlay_root {
         command.arg("--overlay-root").arg(overlay_root);
+    }
+    if let Some(receipt) = receipt {
+        match fs::remove_file(receipt) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("failed to clear containment receipt"),
+        }
+        command.arg("--receipt").arg(receipt);
     }
     let child = command
         .stdin(Stdio::null())
@@ -2553,6 +2682,7 @@ struct SessionPaths {
     seed_capsule: PathBuf,
     bootstrap: PathBuf,
     supervisor_log: PathBuf,
+    containment_receipt: PathBuf,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -2608,6 +2738,7 @@ impl SessionPaths {
             seed_capsule: directory.join("seed").join("source.capsule.local"),
             bootstrap: control.join("bootstrap.json"),
             supervisor_log: directory.join("logs").join("supervisor.log"),
+            containment_receipt: control.join("containment-revoked"),
             directory,
             control,
         })
@@ -2735,19 +2866,17 @@ fn available_public_name(base: &str) -> Result<String> {
         else {
             continue;
         };
-        if let Ok(metadata) = public_metadata_for(&session_id) {
-            let owns_alias = match metadata.state {
-                PublicMetadataState::Reserved => metadata
-                    .reservation_owner
-                    .as_ref()
-                    .is_some_and(process_identity_is_live),
-                PublicMetadataState::Active => store
-                    .read(&session_id)
-                    .is_ok_and(|session| session.lifecycle != "stopped"),
-            };
-            if owns_alias {
-                used.insert(metadata.name);
-            }
+        let display_path = entry.path().join("display.json");
+        if !display_path.exists() {
+            continue;
+        }
+        let metadata = reconciled_public_metadata(&session_id, &store)
+            .with_context(|| format!("invalid public Session metadata for {session_id}"))?;
+        let owns_alias = store
+            .read(&session_id)
+            .map_or(true, |session| session.lifecycle != "stopped");
+        if owns_alias {
+            used.insert(metadata.name);
         }
     }
     if !used.contains(base) {
@@ -2785,7 +2914,7 @@ fn resolve_public_session(name: &str) -> Result<StoredProtocolSession> {
         if session.lifecycle == "stopped" {
             continue;
         }
-        if public_metadata_for(&session.session_id).is_ok_and(|metadata| {
+        if reconciled_public_metadata(&session.session_id, &store).is_ok_and(|metadata| {
             metadata.state == PublicMetadataState::Active && metadata.name == name
         }) {
             return Ok(session);
@@ -2842,13 +2971,58 @@ fn sanitize_terminal_text(value: &str) -> String {
     sanitized
 }
 
-fn process_identity_is_live(identity: &ProcessIdentity) -> bool {
-    capsule::state::session::process::process_start_time_unix_ms(identity.pid)
-        .is_some_and(|value| value.to_string() == identity.start_identity)
+fn reconciled_public_metadata(
+    session_id: &SessionId,
+    store: &CapsuleProtocolSessionStore,
+) -> Result<PublicSessionMetadata> {
+    let metadata = public_metadata_for(session_id)?;
+    if metadata.state != PublicMetadataState::Reserved {
+        return Ok(metadata);
+    }
+    let Ok(session) = store.read(session_id) else {
+        // A dead launcher does not prove that a detached Supervisor was never
+        // spawned. Preserve uncertain reservations until terminal state is
+        // positively established.
+        return Ok(metadata);
+    };
+    if session.lifecycle == "stopped" {
+        return Ok(metadata);
+    }
+    let active = PublicSessionMetadata {
+        state: PublicMetadataState::Active,
+        reservation_owner: None,
+        ..metadata
+    };
+    let paths = SessionPaths::new(session_id)?;
+    // Recovery remains usable when the durable promotion cannot be written:
+    // the on-disk Reserved record still owns the alias fail-closed, while
+    // list/stop may expose and recover the associated non-terminal Session.
+    let _ = write_public_metadata(&paths, &active);
+    Ok(active)
 }
 
 fn release_public_reservation(paths: &SessionPaths) {
     let _ = fs::remove_file(paths.directory.join("display.json"));
+}
+
+fn release_public_reservation_if_reclaimable(
+    session_id: &SessionId,
+    paths: &SessionPaths,
+) -> Result<()> {
+    let store = CapsuleProtocolSessionStore::open(&paths.root)?;
+    match store.read(session_id) {
+        Ok(session) if session.lifecycle != "stopped" => {}
+        Ok(_) => {
+            release_public_reservation(paths);
+        }
+        Err(capsule_session_runtime::SessionStoreError::Io(error))
+            if error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            release_public_reservation(paths);
+        }
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize)]
