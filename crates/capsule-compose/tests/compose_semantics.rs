@@ -601,7 +601,8 @@ fn behavioral_hello_world_evolves_reseals_and_revalidates() {
     };
     let parent_boundary =
         BTreeMap::from([(PortId::parse("greeting").unwrap(), text_port("sender"))]);
-    let c0 = seal_composite(&mut objects, parent_boundary.clone(), c0_residual.clone());
+    let c0 = seal_composite(&mut objects, parent_boundary.clone(), c0_residual);
+    let c0_validated = validate_composite(&objects.resolve(&c0), &objects, &TextProtocol).unwrap();
 
     // Test-only leaf semantics: Ready("Alice") -> Done and WaitingName -> ReadyGreeting.
     let np1 = seal_leaf(
@@ -617,7 +618,7 @@ fn behavioral_hello_world_evolves_reseals_and_revalidates() {
         b"ReadyGreeting(Hello, Alice)",
     );
     let c1_reduction = synchronize_connection(
-        &c0_residual,
+        &c0_validated,
         &NodeStep {
             node: NodeId::parse("name-provider").unwrap(),
             from: objects.resolve(&np0),
@@ -644,11 +645,11 @@ fn behavioral_hello_world_evolves_reseals_and_revalidates() {
         parent_boundary.clone(),
         c1_reduction.successor.clone(),
     );
-    validate_composite(&objects.resolve(&c1), &objects, &TextProtocol).unwrap();
+    let c1_validated = validate_composite(&objects.resolve(&c1), &objects, &TextProtocol).unwrap();
 
     let g2 = seal_leaf(&mut objects, "example.greeter@1", greeter_boundary, b"Done");
     let c2_reduction = lift_exported_step(
-        &c1_reduction.successor,
+        &c1_validated,
         &NodeStep {
             node: NodeId::parse("greeter").unwrap(),
             from: objects.resolve(&g1),
@@ -684,12 +685,10 @@ fn behavioral_hello_world_evolves_reseals_and_revalidates() {
 #[test]
 fn reducer_rejects_invalid_transition_evidence() {
     let (mut objects, parent_ref, _, _) = hello_world_fixture();
-    let current = validate_composite(&objects.resolve(&parent_ref), &objects, &TextProtocol)
-        .unwrap()
-        .residual()
-        .clone();
-    let provider = current.nodes[&NodeId::parse("name-provider").unwrap()].clone();
-    let greeter = current.nodes[&NodeId::parse("greeter").unwrap()].clone();
+    let current =
+        validate_composite(&objects.resolve(&parent_ref), &objects, &TextProtocol).unwrap();
+    let provider = current.residual().nodes[&NodeId::parse("name-provider").unwrap()].clone();
+    let greeter = current.residual().nodes[&NodeId::parse("greeter").unwrap()].clone();
     let alternate = seal_leaf(
         &mut objects,
         "example.other@1",
@@ -862,11 +861,9 @@ fn validator_rejects_same_node_connection_and_successor_without_exported_port() 
     ));
 
     let (mut objects, parent_ref, _, _) = hello_world_fixture();
-    let current = validate_composite(&objects.resolve(&parent_ref), &objects, &TextProtocol)
-        .unwrap()
-        .residual()
-        .clone();
-    let greeter = current.nodes[&NodeId::parse("greeter").unwrap()].clone();
+    let current =
+        validate_composite(&objects.resolve(&parent_ref), &objects, &TextProtocol).unwrap();
+    let greeter = current.residual().nodes[&NodeId::parse("greeter").unwrap()].clone();
     let broken = objects.insert_computation(&leaf("example.greeter@1", BTreeMap::new(), 0x88));
     let reduction = lift_internal_step(
         &current,
