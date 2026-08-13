@@ -21,7 +21,10 @@ pub use codec::{
     decode_composite_residual, encode_composite_residual,
 };
 pub use validate::{
-    CompositeLabel, CompositeValidationError, ValidatedComposite, validate_composite,
+    BoundaryVisibility, CompositeValidationError, DEFAULT_MAX_RESOLVED_BYTES,
+    DEFAULT_MAX_UNIQUE_COMPUTATIONS, DEFAULT_MAX_VALIDATION_DEPTH, ValidatedComposite,
+    ValidationBudget, ValidationResource, ValidationResourceLimitExceeded, validate_composite,
+    validate_composite_with_budget,
 };
 
 /// The only SemanticsId interpreted by this crate.
