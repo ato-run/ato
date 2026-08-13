@@ -269,5 +269,11 @@ Session Store record so it cannot weaken runtime identity validation. Start
 durably reserves the alias before launching the Supervisor, releases the name
 lock before waiting for readiness, and commits the reservation as active only
 after readiness. If that final commit fails, start stops the Session before
-returning an error. Human-readable fields are terminal-escaped; JSON preserves
-their structured string values.
+returning an error. A launcher loss never releases an alias by itself: a
+non-terminal Session record promotes the reservation to active, a terminal
+record releases it, and an uncertain reservation remains reserved. Supervisor
+lease watchdogs durably record successful computation revocation so
+`ato decap stop` can reconcile an orphaned Session to stopped without trusting
+a stale PID. Human-readable fields are terminal-escaped; JSON preserves their
+structured string values. Ready-State import releases the temporary Bundle
+spool after closure verification and before restore enters the Supervisor loop.
