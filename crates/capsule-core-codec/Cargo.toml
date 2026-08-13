@@ -3,7 +3,7 @@ name = "capsule-core-codec"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0 OR MPL-2.0"
-description = "Canonical identity codec and verified resolver for sealed Ato computations"
+description = "Canonical identity codec and resolver for sealed Ato computations"
 homepage = "https://ato.run"
 repository = "https://github.com/ato-run/ato"
 

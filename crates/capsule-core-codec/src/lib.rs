@@ -63,6 +63,8 @@ impl ResolvedComputation {
 
 #[derive(Debug, Error)]
 pub enum CodecError {
+    #[error("computation object is {actual} bytes; maximum is {maximum}")]
+    ObjectTooLarge { actual: u64, maximum: u64 },
     #[error("computation object JSON failed: {0}")]
     Json(#[from] serde_json::Error),
     #[error("computation object identifier failed: {0}")]
@@ -119,14 +121,17 @@ pub fn encode_computation_object(object: &ComputationObject) -> Result<Vec<u8>, 
             )
         })
         .collect();
-    Ok(serde_jcs::to_vec(&ComputationObjectWire {
+    let bytes = serde_jcs::to_vec(&ComputationObjectWire {
         semantics: object.semantics.as_str().to_owned(),
         boundary,
         residual: object.residual.as_str().to_owned(),
-    })?)
+    })?;
+    ensure_object_size(&bytes)?;
+    Ok(bytes)
 }
 
 pub fn decode_computation_object(bytes: &[u8]) -> Result<ComputationObject, CodecError> {
+    ensure_object_size(bytes)?;
     let wire: ComputationObjectWire = serde_json::from_slice(bytes)?;
     let object = ComputationObject {
         semantics: SemanticsId::parse(wire.semantics)?,
@@ -137,6 +142,17 @@ pub fn decode_computation_object(bytes: &[u8]) -> Result<ComputationObject, Code
         return Err(CodecError::NonCanonical);
     }
     Ok(object)
+}
+
+fn ensure_object_size(bytes: &[u8]) -> Result<(), CodecError> {
+    let actual = bytes.len() as u64;
+    if actual > MAX_COMPUTATION_OBJECT_BYTES {
+        return Err(CodecError::ObjectTooLarge {
+            actual,
+            maximum: MAX_COMPUTATION_OBJECT_BYTES,
+        });
+    }
+    Ok(())
 }
 
 pub fn computation_ref(object: &ComputationObject) -> Result<ComputationRef, CodecError> {
@@ -244,6 +260,27 @@ mod tests {
         assert!(matches!(
             ResolvedComputation::verify(unrelated, &bytes),
             Err(CodecError::IdentityMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_bytes_above_the_codec_limit_before_parsing() {
+        let bytes = vec![b' '; MAX_COMPUTATION_OBJECT_BYTES as usize + 1];
+
+        assert!(matches!(
+            decode_computation_object(&bytes),
+            Err(CodecError::ObjectTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn resolved_computation_rejects_bytes_above_the_codec_limit() {
+        let reference = ComputationRef::parse(format!("blake3:{}", "cd".repeat(32))).unwrap();
+        let bytes = vec![b' '; MAX_COMPUTATION_OBJECT_BYTES as usize + 1];
+
+        assert!(matches!(
+            ResolvedComputation::verify(reference, &bytes),
+            Err(CodecError::ObjectTooLarge { .. })
         ));
     }
 

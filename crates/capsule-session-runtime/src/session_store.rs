@@ -345,17 +345,6 @@ impl StoredProtocolSession {
         }
     }
 
-    pub fn upgrade_legacy_origin(&mut self, computation: &ComputationRef) {
-        if matches!(
-            &self.origin_computation,
-            StoredComputationOrigin::LegacyV3State { .. }
-        ) {
-            self.origin_computation = StoredComputationOrigin::Native {
-                computation_ref: computation.to_string(),
-            };
-        }
-    }
-
     pub fn materialization(&self) -> &StoredLegacyV1Materialization {
         self.legacy_v1().0
     }
@@ -912,29 +901,6 @@ mod tests {
         let error = store.write(&session).unwrap_err();
 
         assert!(error.to_string().contains("native computation origin"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn legacy_origin_upgrades_once_without_replacing_native_identity() {
-        let supervisor = NewSupervisorIdentity::generate(3, 100, "start-100");
-        let mut session = stored_session(supervisor.identity);
-        session.origin_computation = StoredComputationOrigin::LegacyV3State {
-            state_type: "ato.state.test@1".to_owned(),
-            state_ref: format!("blake3:{}", "b".repeat(64)),
-        };
-        let first = ComputationRef::parse(format!("blake3:{}", "c".repeat(64))).unwrap();
-        let second = ComputationRef::parse(format!("blake3:{}", "d".repeat(64))).unwrap();
-
-        session.upgrade_legacy_origin(&first);
-        session.upgrade_legacy_origin(&second);
-
-        assert_eq!(
-            session.origin_computation,
-            StoredComputationOrigin::Native {
-                computation_ref: first.to_string(),
-            }
-        );
     }
 
     #[cfg(unix)]
