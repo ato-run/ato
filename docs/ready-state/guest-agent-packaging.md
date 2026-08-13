@@ -1,6 +1,6 @@
 # Guest-agent rootfs packaging (Phase 8a-HW PR A — #912)
 
-How the Ready-State **guest-agent** (`crates/guest-agent`) is included in a Firecracker
+How the Ready-State **guest-agent** (`extensions/providers/snapshot/guest-agent`) is included in a Firecracker
 guest rootfs so it can receive `BindingLease` values over vsock after restore. **PR A is
 packaging only** — no host↔guest vsock delivery yet (that is PR B), no `ato run` behavior
 change, and the default no-binding restore is unchanged.

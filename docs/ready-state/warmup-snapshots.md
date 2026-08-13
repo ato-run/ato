@@ -236,7 +236,7 @@ no longer aborts the run — it silently downgrades to File.
   local CAS residency is a **precondition** (`memory image not in local CAS →
   File`), binding-required → File, remote read-through never auto-selected. It is
   consulted on the CLI auto lane only, **not** on the runner path (see §4).
-- `crates/snapshot-builder/src/main.rs` — `warmup_from_manifest` /
+- `tools/snapshot-builder/src/main.rs` — `warmup_from_manifest` /
   `warmup_from_env` (the two lanes).
 - `crates/cli/src/application/runner_agent.rs` — the `RESTORE_PROF` line.
 

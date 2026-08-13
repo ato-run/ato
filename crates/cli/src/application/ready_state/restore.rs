@@ -17,7 +17,7 @@ use capsule::snapshot_manifest::{
     HostRestoreCapabilityV1, SnapshotBackendKind, SnapshotCompatibilityContractV1,
     SnapshotManifestV1,
 };
-use capsulefs::CasStore;
+use snapshot::layer_store::CasStore;
 use snapshot::{
     ArtifactEnvelopeV1, ReadyStateManifest, RestoreReadyStateInput, RestoreReceipt,
     RestoredSession, SnapshotBackend, TeardownReceipt,

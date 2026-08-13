@@ -22,11 +22,11 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use capsule::execution_contract::{ExecutionContractEnvelopeV1, ExecutionId};
 use capsule::types::CapsuleManifest;
-use capsulefs::CasStore;
 use snapshot::acceptance::{
     AcceptanceCancellation, AcceptanceConfig, AcceptanceDisposition, RunningSnapshotAcceptance,
     SystemClock, VerifiedRunningSnapshotEligibility,
 };
+use snapshot::layer_store::CasStore;
 use snapshot::{
     ArtifactEnvelopeV1, BuildLayers, BuildReadyStateInput, BuildReadyStateReceipt, RestoreContract,
     SanitizerContract, SanitizerLayer, SanitizerStep, SnapshotBackend, WarmupRecipe,
@@ -524,7 +524,7 @@ content_ready_path=\"/\"\n",
         }
         fn inspect(
             &self,
-            store: &capsulefs::CasStore,
+            store: &snapshot::layer_store::CasStore,
             manifest: &snapshot::ReadyStateManifest,
         ) -> Result<snapshot::SnapshotInspection, snapshot::SnapshotError> {
             self.inner.inspect(store, manifest)

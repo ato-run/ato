@@ -37,8 +37,8 @@ use std::net::TcpStream;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use capsule::foundation::types::manifest::CapsuleManifest;
-use capsulefs::CasStore;
 use protocol::binding_lease::SecretValue;
+use snapshot::layer_store::CasStore;
 use snapshot::rootfs_builder::{SourceProbe, build_rootfs, derive_supervisor_build_spec};
 use snapshot::state_volume::DurableVolumeSpec;
 use snapshot::{

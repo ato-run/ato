@@ -18,7 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use capsule::execution_contract::ExecutionId;
 use capsule::snapshot_manifest::SnapshotManifestV1;
-use capsulefs::CasStore;
+use snapshot::layer_store::CasStore;
 use snapshot::{
     ARTIFACT_ENVELOPE_V1_FILENAME, ArtifactEnvelopeV1, ReadyStateManifest,
     SNAPSHOT_MANIFEST_V1_FILENAME,
@@ -679,11 +679,11 @@ mod tests {
     fn save_then_load_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let store = CasStore::open(dir.path().join("seed")).unwrap();
-        let rootfs = capsulefs::store_blob(
+        let rootfs = snapshot::layer_store::store_blob(
             &store,
-            capsulefs::LayerKind::Rootfs,
+            snapshot::layer_store::LayerKind::Rootfs,
             b"rootfs-bytes",
-            capsulefs::ChunkingKind::ContentDefined,
+            snapshot::layer_store::ChunkingKind::ContentDefined,
         )
         .unwrap();
         let manifest = ReadyStateManifest {
