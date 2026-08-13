@@ -7,6 +7,7 @@
 **Capsule Protocol**
 
 - [Semantic Core](accepted/protocol/CAPSULE_PROTOCOL_SEMANTIC_CORE.md)
+- [Protocol v1 Compatibility](accepted/protocol/CAPSULE_PROTOCOL_V1_COMPATIBILITY.md)
 - [CBOR v1](accepted/protocol/CAPSULE_CBOR_V1.cddl)
 - [Bundle v1](accepted/protocol/CAPSULE_BUNDLE_V1.md)
 

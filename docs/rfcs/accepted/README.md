@@ -7,11 +7,12 @@ Capsule Protocol.
 
 ## Capsule Protocol authority
 
-The active normative Capsule Protocol consists of exactly three documents:
+The active normative Capsule model and Protocol v1 consist of four documents:
 
 | Layer | Authority | Defines |
 |---|---|---|
-| Semantics | [Capsule Protocol Semantic Core](protocol/CAPSULE_PROTOCOL_SEMANTIC_CORE.md) | Computation + typed Ports; Protocol v1 compatibility semantics |
+| Semantics | [Capsule Semantic Core](protocol/CAPSULE_PROTOCOL_SEMANTIC_CORE.md) | Computation, Boundary, Evolution, and Composition |
+| Compatibility | [Capsule Protocol v1 Compatibility](protocol/CAPSULE_PROTOCOL_V1_COMPATIBILITY.md) | State + Connector + Record semantics and Computation adaptation |
 | Wire | [Capsule Protocol CBOR v1](protocol/CAPSULE_CBOR_V1.cddl) | descriptor and I/O Record bytes |
 | Container | [Capsule Protocol Bundle v1](protocol/CAPSULE_BUNDLE_V1.md) | portable `.capsule` layout, closure, integrity, and limits |
 
@@ -25,11 +26,11 @@ The other accepted SPECs and ADRs in this directory describe Ato authoring,
 resolution, build, runtime, isolation, CLI, and service behavior. They may use
 manifests, execution contracts, snapshots, materializations, or bindings as
 implementation strategies and derived views. Those concepts are not Capsule
-Protocol Semantic Core primitives.
+Semantic Core primitives.
 
 `CAPSULE_IPC_SPEC.md` defines Ato's JSON-RPC IPC and Broker behavior. It is not
-the Capsule Protocol Semantic Core or its State + I/O Protocol v1 compatibility
-representation. Its legacy filename is retained until that implementation
+the Capsule Semantic Core or the Protocol v1 compatibility representation. Its
+legacy filename is retained until that implementation
 specification is separately renamed and re-audited.
 
 ## Archived Capsule documents
