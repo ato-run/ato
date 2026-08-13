@@ -264,6 +264,7 @@ impl SandboxPolicy {
                 PathBuf::from("/bin"),
                 PathBuf::from("/sbin"),
                 PathBuf::from("/private/var/db"),
+                PathBuf::from("/opt"),
             ])
             .with_network(true)
     }

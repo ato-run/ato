@@ -492,7 +492,7 @@ fn infer_workspace(
             "python",
             version_file(root, ".python-version"),
             Some("pip".to_owned()),
-            ["python", main],
+            ["python3", main],
         ));
     }
     if root.join("Cargo.toml").is_file() {
