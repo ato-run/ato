@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::fs::File;
 
-use capsule_protocol::{ComputationTypeId, ContentRef, StateTypeId};
+use capsule_protocol::{ComputationRef, ComputationTypeId, ContentRef, StateTypeId};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -154,7 +154,8 @@ pub enum StoredComputationOrigin {
         computation_type: String,
         computation_ref: String,
     },
-    LegacyStateIo {
+    #[serde(rename = "legacy_v3_state", alias = "legacy_state_io")]
+    LegacyV3State {
         state_type: String,
         state_ref: String,
     },
@@ -222,7 +223,7 @@ impl StoredProtocolSession {
                 ContentRef::parse(computation_ref)
                     .map_err(|error| SessionStoreError::InvalidRecord(error.to_string()))?;
             }
-            StoredComputationOrigin::LegacyStateIo {
+            StoredComputationOrigin::LegacyV3State {
                 state_type,
                 state_ref,
             } => {
@@ -339,11 +340,16 @@ impl StoredProtocolSession {
         }
     }
 
-    pub fn replace_with_legacy_state(&mut self, state_type: &StateTypeId, state_ref: &ContentRef) {
-        self.base_computation = StoredComputationOrigin::LegacyStateIo {
-            state_type: state_type.to_string(),
-            state_ref: state_ref.to_string(),
-        };
+    pub fn upgrade_legacy_origin(&mut self, computation: &ComputationRef) {
+        if matches!(
+            &self.base_computation,
+            StoredComputationOrigin::LegacyV3State { .. }
+        ) {
+            self.base_computation = StoredComputationOrigin::Native {
+                computation_type: computation.computation_type.to_string(),
+                computation_ref: computation.computation_ref.to_string(),
+            };
+        }
     }
 }
 
@@ -363,6 +369,14 @@ impl CapsuleProtocolSessionStore {
 
     pub fn write(&self, session: &StoredProtocolSession) -> Result<(), SessionStoreError> {
         session.validate()?;
+        if matches!(
+            &session.base_computation,
+            StoredComputationOrigin::LegacyV3State { .. }
+        ) {
+            return Err(SessionStoreError::InvalidRecord(
+                "Session Store v4 writes require a native computation origin".to_owned(),
+            ));
+        }
         let directory = self.root.join(session.session_id.as_str());
         fs::create_dir_all(&directory)?;
         set_directory_owner_only(&directory)?;
@@ -416,7 +430,7 @@ impl CapsuleProtocolSessionStore {
             object.insert(
                 "base_computation".to_string(),
                 serde_json::json!({
-                    "kind": "legacy_state_io",
+                    "kind": "legacy_v3_state",
                     "state_type": state_type,
                     "state_ref": state_ref,
                 }),
@@ -603,7 +617,7 @@ mod tests {
         let store = CapsuleProtocolSessionStore::open(directory.path()).expect("store");
         let supervisor = NewSupervisorIdentity::generate(3, 100, "start-100");
         let mut expected = stored_session(supervisor.identity);
-        expected.base_computation = StoredComputationOrigin::LegacyStateIo {
+        expected.base_computation = StoredComputationOrigin::LegacyV3State {
             state_type: "ato.state.test@1".to_owned(),
             state_ref: format!("blake3:{}", "a".repeat(64)),
         };
@@ -656,9 +670,56 @@ mod tests {
         let actual = store.read(&expected.session_id).unwrap();
         assert_eq!(
             actual.base_computation,
-            StoredComputationOrigin::LegacyStateIo {
+            StoredComputationOrigin::LegacyV3State {
                 state_type: "ato.state.test@1".to_owned(),
                 state_ref: format!("blake3:{}", "b".repeat(64)),
+            }
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn v4_write_rejects_legacy_state_origin() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let store = CapsuleProtocolSessionStore::open(directory.path()).expect("store");
+        let supervisor = NewSupervisorIdentity::generate(3, 100, "start-100");
+        let mut session = stored_session(supervisor.identity);
+        session.base_computation = StoredComputationOrigin::LegacyV3State {
+            state_type: "ato.state.test@1".to_owned(),
+            state_ref: format!("blake3:{}", "b".repeat(64)),
+        };
+
+        let error = store.write(&session).unwrap_err();
+
+        assert!(error.to_string().contains("native computation origin"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_origin_upgrades_once_without_replacing_native_identity() {
+        let supervisor = NewSupervisorIdentity::generate(3, 100, "start-100");
+        let mut session = stored_session(supervisor.identity);
+        session.base_computation = StoredComputationOrigin::LegacyV3State {
+            state_type: "ato.state.test@1".to_owned(),
+            state_ref: format!("blake3:{}", "b".repeat(64)),
+        };
+        let first = ComputationRef {
+            computation_type: ComputationTypeId::parse("ato.computation.first@1").unwrap(),
+            computation_ref: ContentRef::parse(format!("blake3:{}", "c".repeat(64))).unwrap(),
+        };
+        let second = ComputationRef {
+            computation_type: ComputationTypeId::parse("ato.computation.second@1").unwrap(),
+            computation_ref: ContentRef::parse(format!("blake3:{}", "d".repeat(64))).unwrap(),
+        };
+
+        session.upgrade_legacy_origin(&first);
+        session.upgrade_legacy_origin(&second);
+
+        assert_eq!(
+            session.base_computation,
+            StoredComputationOrigin::Native {
+                computation_type: first.computation_type.to_string(),
+                computation_ref: first.computation_ref.to_string(),
             }
         );
     }
