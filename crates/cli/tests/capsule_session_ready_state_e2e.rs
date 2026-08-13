@@ -5,7 +5,9 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use capsule::execution_contract::ExecutionId;
 use capsule::protocol_bundle::{
@@ -350,6 +352,131 @@ fn public_metadata_commit_failure_stops_the_started_session() {
 }
 
 #[test]
+fn metadata_commit_and_cleanup_failure_preserves_recoverable_alias() {
+    let root = scratch_dir();
+    let bundles = make_bundles(root.path());
+    let _cleanup = PublicSessionCleanup(root.path().to_path_buf());
+    let output = ato(root.path())
+        .env("ATO_TEST_FAIL_PUBLIC_METADATA_COMMIT", "1")
+        .env("ATO_TEST_FAIL_PUBLIC_METADATA_CLEANUP", "1")
+        .args(["decap", "start"])
+        .arg(&bundles.valid)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("failed to stop Session"),
+        "unexpected cleanup failure: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let list = ato(root.path())
+        .args(["decap", "list", "--json"])
+        .output()
+        .unwrap();
+    assert!(list.status.success());
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&list.stdout).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["name"], "prepared-ready-state");
+    assert_eq!(rows[0]["state"], "running");
+
+    let stopped = ato(root.path())
+        .args(["decap", "stop", "prepared-ready-state"])
+        .output()
+        .unwrap();
+    assert!(
+        stopped.status.success(),
+        "preserved Session was not recoverable: {}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+}
+
+#[test]
+fn launcher_sigkill_recovers_reserved_alias_without_hiding_running_session() {
+    let root = scratch_dir();
+    let bundles = make_bundles(root.path());
+    let _cleanup = PublicSessionCleanup(root.path().to_path_buf());
+    let mut launcher = ato(root.path())
+        .env("ATO_TEST_PAUSE_BEFORE_PUBLIC_METADATA_COMMIT", "1")
+        .args(["decap", "start"])
+        .arg(&bundles.valid)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let sessions_root = root.path().join("ato-home/capsule-protocol-sessions");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let ready = fs::read_dir(&sessions_root).is_ok_and(|entries| {
+            entries.filter_map(Result::ok).any(|entry| {
+                let display = fs::read(entry.path().join("display.json"))
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+                let session = fs::read(entry.path().join("session.json"))
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+                display.is_some_and(|value| value["state"] == "reserved")
+                    && session.is_some_and(|value| value["lifecycle"] == "running")
+            })
+        });
+        if ready {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "launcher did not reach the reserved/running crash window"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    assert_eq!(
+        unsafe { libc::kill(launcher.id() as libc::pid_t, libc::SIGKILL) },
+        0
+    );
+    let _ = launcher.wait().unwrap();
+
+    let second = ato(root.path())
+        .args(["decap", "start"])
+        .arg(&bundles.valid)
+        .output()
+        .unwrap();
+    assert!(second.status.success());
+    assert_eq!(
+        String::from_utf8(second.stdout).unwrap(),
+        "Starting prepared-ready-state-2...\nReady.\n"
+    );
+
+    let list = ato(root.path())
+        .args(["decap", "list", "--json"])
+        .output()
+        .unwrap();
+    assert!(list.status.success());
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&list.stdout).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows.iter()
+            .any(|row| { row["name"] == "prepared-ready-state" && row["state"] == "running" })
+    );
+    assert!(
+        rows.iter()
+            .any(|row| { row["name"] == "prepared-ready-state-2" && row["state"] == "running" })
+    );
+
+    for name in ["prepared-ready-state", "prepared-ready-state-2"] {
+        let stopped = ato(root.path())
+            .args(["decap", "stop", name])
+            .output()
+            .unwrap();
+        assert!(
+            stopped.status.success(),
+            "failed to stop recovered {name}: {}",
+            String::from_utf8_lossy(&stopped.stderr)
+        );
+    }
+}
+
+#[test]
 fn ready_state_bundle_restores_runs_and_stops_under_supervisor() {
     let root = scratch_dir();
     let bundles = make_bundles(root.path());
@@ -375,6 +502,17 @@ fn ready_state_bundle_restores_runs_and_stops_under_supervisor() {
     assert!(status.status.success());
     let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
     assert_eq!(status["lifecycle"], "running");
+    let bundle_spool = root
+        .path()
+        .join("ato-home/capsule-protocol-sessions/bundle-spool");
+    assert!(
+        fs::read_dir(bundle_spool)
+            .unwrap()
+            .filter_map(Result::ok)
+            .next()
+            .is_none(),
+        "Ready-State import must release its Bundle spool before the Supervisor loop"
+    );
 
     for action in ["attach", "suspend"] {
         let output = ato(root.path())

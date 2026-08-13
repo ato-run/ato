@@ -169,6 +169,8 @@ pub(crate) enum CapsuleSessionInternalCommands {
         lease_fd: i32,
         #[arg(long)]
         overlay_root: Option<PathBuf>,
+        #[arg(long)]
+        receipt: Option<PathBuf>,
     },
 }
 

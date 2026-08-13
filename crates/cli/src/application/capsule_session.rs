@@ -1,6 +1,7 @@
 //! Detached local Capsule Session Supervisor and built-in PTY Driver.
 //!
-//! This is intentionally exposed only through `ato internal capsule-session`.
+//! `ato decap` is the public F1 facade. `ato internal capsule-session` retains
+//! Session-ID-oriented plumbing for tests and lower-level orchestration.
 
 #[cfg(not(unix))]
 use std::path::Path;
@@ -94,6 +95,7 @@ pub(crate) fn watchdog(
     _process_start_identity: &str,
     _lease_fd: i32,
     _overlay_root: Option<&Path>,
+    _receipt: Option<&Path>,
 ) -> Result<()> {
     unsupported()
 }

@@ -66,12 +66,14 @@ fn execute_capsule_session(command: CapsuleSessionInternalCommands) -> Result<()
             process_start_identity,
             lease_fd,
             overlay_root,
+            receipt,
         } => capsule_session::watchdog(
             pid,
             pgid,
             &process_start_identity,
             lease_fd,
             overlay_root.as_deref(),
+            receipt.as_deref(),
         ),
     }
 }

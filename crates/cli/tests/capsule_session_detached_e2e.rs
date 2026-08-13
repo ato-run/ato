@@ -867,6 +867,87 @@ fn supervisor_sigkill_revokes_workload_lease() {
 }
 
 #[test]
+fn public_stop_reconciles_orphaned_workspace_session_and_releases_alias() {
+    let root = scratch_dir("capsule-session-public-orphan-");
+    let bundle = make_bundle(root.path());
+    let started = ato(root.path())
+        .args(["decap", "start", "--detach"])
+        .arg(&bundle)
+        .output()
+        .expect("start public workspace Session");
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(started.stdout).unwrap(),
+        "Starting terminal...\nReady.\n"
+    );
+
+    let listed = ato(root.path())
+        .args(["decap", "list", "--json"])
+        .output()
+        .expect("list public Session");
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&listed.stdout).unwrap();
+    let session_id = rows[0]["session_id"].as_str().unwrap();
+    let directory = session_directory(root.path(), session_id);
+    let stored: serde_json::Value =
+        serde_json::from_slice(&fs::read(directory.join("session.json")).unwrap()).unwrap();
+    let supervisor_pid = stored["supervisor"]["pid"].as_u64().unwrap() as u32;
+    let shell_pid = wait_for_shell_child(supervisor_pid);
+
+    assert_eq!(
+        unsafe { libc::kill(supervisor_pid as libc::pid_t, libc::SIGKILL) },
+        0
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while (!directory.join("control/containment-revoked").is_file() || process_alive(shell_pid))
+        && Instant::now() < deadline
+    {
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(!process_alive(shell_pid));
+    assert!(directory.join("control/containment-revoked").is_file());
+
+    let orphaned = ato(root.path())
+        .args(["decap", "list", "--json"])
+        .output()
+        .expect("list orphaned public Session");
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&orphaned.stdout).unwrap();
+    assert_eq!(rows[0]["state"], "orphaned");
+
+    let stopped = ato(root.path())
+        .args(["decap", "stop", "terminal"])
+        .output()
+        .expect("reconcile public orphan");
+    assert!(
+        stopped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    wait_for_stored_lifecycle(&directory, "stopped");
+
+    let reused = ato(root.path())
+        .args(["decap", "start", "--detach"])
+        .arg(&bundle)
+        .output()
+        .expect("reuse reconciled alias");
+    assert!(reused.status.success());
+    assert_eq!(
+        String::from_utf8(reused.stdout).unwrap(),
+        "Starting terminal...\nReady.\n"
+    );
+    assert!(
+        ato(root.path())
+            .args(["decap", "stop", "terminal"])
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[test]
 fn natural_exit_is_committed_once_after_final_output_with_actual_status() {
     let root = scratch_dir("capsule-session-natural-exit-");
     let bundle = make_bundle(root.path());
