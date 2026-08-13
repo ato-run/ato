@@ -21,19 +21,45 @@ Existing manifests, execution contracts, and Ready-State artifacts remain
 supported implementation inputs; they are no longer primitives of the Capsule
 Protocol Semantic Core.
 
-## 2. Core
+## 2. Native Core
 
-A Capsule has exactly these semantic elements:
+The native semantic primitive of a Capsule is an immutable, content-addressed
+`Computation`:
 
 ```text
-Capsule
+Computation
+├── typed Ports
+├── Evolution
+└── Composition
+```
+
+A `ComputationRef` identifies both the versioned continuation semantics and the
+immutable content that defines the current residual computation. A typed Port
+is a semantic boundary for interaction. It declares protocol and direction;
+physical endpoints, transports, file descriptors, and runtime adapters are not
+part of Port identity.
+
+Evolution produces a new immutable computation head from an earlier
+computation and ordered interactions. Composition constructs a computation
+from computations and validated Port wiring. Hiding, exporting, and wiring
+operate on Ports; they do not turn Connectors or physical endpoints into Core
+primitives. A portable Protocol v2 encoding for these operations is not defined
+by this specification.
+
+## 3. Protocol v1 compatibility representation
+
+Protocol v1 represents a Capsule as:
+
+```text
+Protocol v1 Capsule
 ├── State
 └── I/O
     ├── Connector definitions
     └── Record stream
 ```
 
-The governing invariant is:
+This is the exact legacy compatibility representation of a Computation, not
+the native semantic decomposition. Its governing invariant is:
 
 > **State type defines the continuation semantics. Every replay-relevant
 > influence not owned by State must cross an I/O Connector. Uncaptured
@@ -54,7 +80,12 @@ An I/O Record is canonical ingress or egress observed at that boundary. `seq`
 is the recorder-established serialization order. Wall time is audit metadata;
 monotonic offset is pacing metadata. Neither changes order.
 
-## 3. Replay semantics
+The normalization from Protocol v1 to a Computation compatibility object
+preserves the accepted descriptor and Record stream bytes. A v1 Connector may
+be projected one-for-one to a compatibility Port, but Connector identity and
+Port identity are not generally equivalent.
+
+## 4. Protocol v1 replay semantics
 
 Ingress and egress are intentionally asymmetric:
 
@@ -75,11 +106,11 @@ to continuation, not historical replay. A State type that requires an implicit
 clock, scheduler step, or other influence to reproduce history must model that
 influence as recorded I/O rather than adding another Core primitive.
 
-## 4. Domain and encoding boundary
+## 5. Domain and encoding boundary
 
-`capsule-protocol` defines validated semantic values and incremental stream
-validation. It contains no serializer, filesystem, network, async runtime, or
-workspace-crate dependency.
+`capsule-protocol` defines validated native Computation values, typed Ports,
+interaction records, and the Protocol v1 compatibility domain. It contains no
+serializer, filesystem, network, async runtime, or workspace-crate dependency.
 
 Portable encoding is a separate layer. Semantic records are not encoded frames;
 wire DTOs must convert explicitly to and from domain values. Large payloads use
@@ -102,7 +133,8 @@ schema but are not the specification.
 The normative portable container is `CAPSULE_BUNDLE_V1.md`. It defines how the
 descriptor, record sequence, and content-addressed objects are carried in one
 deterministic `.capsule` file. Bundle versioning is independent from CBOR wire
-versioning.
+versioning. This change in semantic authority does not modify any CBOR v1 or
+Bundle v1 byte.
 
 `ato.state.workspace-posix-host@1` is explicitly host-bound and best-effort. It
 owns workspace bytes only; host shell, runtime, toolchain, libraries, `PATH`,
@@ -119,13 +151,15 @@ validated `.capsule`, replay compares actual egress, and the restored machine
 accepts new input after replay. The PTY/rustc test remains a separate
 host-bound integration smoke and makes no cross-environment portability claim.
 
-## 5. Compatibility surface
+## 6. Compatibility surface
 
-The initial schema version is 1. Valid streams may be empty, start at any
+The Protocol v1 schema version is 1. Valid streams may be empty, start at any
 sequence number, contain sequence gaps, omit pacing/audit timestamps, and have
 wall-clock timestamps that move backwards. Sequence numbers must be strictly
-increasing and every record must name a declared connector.
+increasing and every record must name a declared Connector.
 
 Build, Runtime, Launch, Snapshot, Materialization, Binding, Surface, Ledger,
 Cursor, Contract, and Lineage may exist as implementation strategies or derived
-views. They are not Semantic Core primitives.
+views. They are not Semantic Core primitives. Protocol v1 State, Connector
+definitions, and Record streams remain normative compatibility values, but are
+not native Core primitives.

@@ -11,7 +11,7 @@ The active normative Capsule Protocol consists of exactly three documents:
 
 | Layer | Authority | Defines |
 |---|---|---|
-| Semantics | [Capsule Protocol Semantic Core](protocol/CAPSULE_PROTOCOL_SEMANTIC_CORE.md) | State + I/O |
+| Semantics | [Capsule Protocol Semantic Core](protocol/CAPSULE_PROTOCOL_SEMANTIC_CORE.md) | Computation + typed Ports; Protocol v1 compatibility semantics |
 | Wire | [Capsule Protocol CBOR v1](protocol/CAPSULE_CBOR_V1.cddl) | descriptor and I/O Record bytes |
 | Container | [Capsule Protocol Bundle v1](protocol/CAPSULE_BUNDLE_V1.md) | portable `.capsule` layout, closure, integrity, and limits |
 
@@ -28,8 +28,9 @@ implementation strategies and derived views. Those concepts are not Capsule
 Protocol Semantic Core primitives.
 
 `CAPSULE_IPC_SPEC.md` defines Ato's JSON-RPC IPC and Broker behavior. It is not
-the State + I/O Capsule Protocol. Its legacy filename is retained until that
-implementation specification is separately renamed and re-audited.
+the Capsule Protocol Semantic Core or its State + I/O Protocol v1 compatibility
+representation. Its legacy filename is retained until that implementation
+specification is separately renamed and re-audited.
 
 ## Archived Capsule documents
 
