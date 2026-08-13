@@ -44,7 +44,8 @@ pub use runtime::{
 };
 pub use session_store::{
     CapsuleProtocolSessionStore, ControlAuthorizationError, NewStoredProtocolSession,
-    NewSupervisorIdentity, SessionId, SessionStoreError, StoredConnectorCheckpoint,
+    NewSupervisorIdentity, SessionId, SessionStoreError, StoredComputationOrigin,
+    StoredConnectorCheckpoint, StoredLegacyV1Materialization, StoredLegacyV1Recovery,
     StoredLocalCheckpoint, StoredProtocolSession, StoredReplayVerification, StoredRuntimeProfile,
     SupervisorIdentity,
 };

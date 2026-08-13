@@ -667,6 +667,23 @@ impl Drop for SpoolGuard {
 }
 
 #[derive(Debug, Clone)]
+pub struct ProtocolMemberSpool {
+    path: PathBuf,
+    size: u64,
+    _guard: Arc<SpoolGuard>,
+}
+
+impl ProtocolMemberSpool {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct RecordSpool {
     path: PathBuf,
     size: u64,
@@ -749,6 +766,7 @@ impl ObjectSource for SpoolObjectStore {
 #[derive(Debug)]
 pub struct SpoolBundle {
     pub descriptor: CapsuleDescriptor,
+    pub descriptor_member: ProtocolMemberSpool,
     pub records: RecordSpool,
     pub objects: SpoolObjectStore,
     pub summary: BundleSummary,
@@ -803,12 +821,21 @@ impl StreamingBundleReader {
             match position {
                 0 if member == DESCRIPTOR_MEMBER => {
                     let size = entry.size();
-                    descriptor = Some(decode_descriptor_reader(&mut entry, size)?);
+                    let path = root.join("descriptor.cbor");
+                    let copied = copy_exact(&mut entry, &mut owner_only_file(&path)?)?;
+                    if copied != size {
+                        return Err(ProtocolBundleError::Invalid(
+                            "truncated descriptor member".to_owned(),
+                        ));
+                    }
+                    let value = decode_descriptor_reader(BufReader::new(File::open(&path)?), size)?;
+                    descriptor = Some((value, path, size));
                 }
                 1 if member == RECORDS_MEMBER => {
-                    let descriptor_ref = descriptor.as_ref().ok_or_else(|| {
-                        ProtocolBundleError::Invalid("records precede descriptor".to_owned())
-                    })?;
+                    let descriptor_ref =
+                        descriptor.as_ref().map(|value| &value.0).ok_or_else(|| {
+                            ProtocolBundleError::Invalid("records precede descriptor".to_owned())
+                        })?;
                     let path = root.join("records.cborseq");
                     let copied = copy_exact(&mut entry, &mut owner_only_file(&path)?)?;
                     if copied != entry.size() {
@@ -886,7 +913,7 @@ impl StreamingBundleReader {
         }
         verify_archive_zero_tail(archive.into_inner())?;
 
-        let descriptor = descriptor.ok_or_else(|| {
+        let (descriptor, descriptor_path, descriptor_size) = descriptor.ok_or_else(|| {
             ProtocolBundleError::Invalid(format!("missing `{DESCRIPTOR_MEMBER}`"))
         })?;
         let (record_path, record_stats) = record_spool
@@ -902,6 +929,11 @@ impl StreamingBundleReader {
         })?;
         Ok(SpoolBundle {
             descriptor,
+            descriptor_member: ProtocolMemberSpool {
+                path: descriptor_path,
+                size: descriptor_size,
+                _guard: guard.clone(),
+            },
             records: RecordSpool {
                 path: record_path,
                 size: record_stats.encoded_bytes,

@@ -7,6 +7,7 @@ ssot:
   - "crates/capsule/src/protocol_bundle.rs"
 related:
   - "CAPSULE_PROTOCOL_SEMANTIC_CORE.md"
+  - "CAPSULE_PROTOCOL_V1_COMPATIBILITY.md"
   - "CAPSULE_CBOR_V1.cddl"
 ---
 
@@ -18,12 +19,13 @@ This specification defines Bundle v1, the portable single-file container for
 Capsule Protocol State and I/O. It is the authority for the outer `.capsule`
 layout produced and consumed by `PortableCapsule`.
 
-The three normative Capsule Protocol layers are:
+The relevant normative authorities are:
 
 ```text
-CAPSULE_PROTOCOL_SEMANTIC_CORE.md  State + I/O semantics
-CAPSULE_CBOR_V1.cddl               descriptor and record bytes
-CAPSULE_BUNDLE_V1.md               portable single-file container
+CAPSULE_PROTOCOL_SEMANTIC_CORE.md       Computation semantics
+CAPSULE_PROTOCOL_V1_COMPATIBILITY.md    State + I/O compatibility semantics
+CAPSULE_CBOR_V1.cddl                    descriptor and record bytes
+CAPSULE_BUNDLE_V1.md                    portable single-file container
 ```
 
 The archived Capsule Artifact Format v2 is a different legacy distribution
@@ -163,8 +165,8 @@ unknown members. Bundle validation is a boundary check over untrusted input.
 Bundle version and CBOR wire version are independent compatibility surfaces.
 This document defines Bundle v1 and CBOR v1 happens to be its required logical
 encoding. A future CBOR version does not implicitly create a new Bundle
-version, and a future Bundle version does not implicitly change State + I/O
-semantics.
+version, and a future Bundle version does not implicitly change the Semantic
+Core or the Protocol v1 compatibility semantics.
 
 Bundle v1 has no separate version member. Readers recognize it by its exact
 required member layout and the Descriptor v1 wire value. An incompatible

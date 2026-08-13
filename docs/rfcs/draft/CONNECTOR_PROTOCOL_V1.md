@@ -15,7 +15,7 @@ related:
 
 A Connector Protocol specifies the logical meaning of one boundary between
 Capsule-owned computation and the outside world. It extends, but does not add
-primitives to, the Capsule Protocol Semantic Core.
+primitives to, the Capsule Semantic Core.
 
 Each versioned Connector Protocol specification MUST define:
 

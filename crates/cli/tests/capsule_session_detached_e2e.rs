@@ -498,7 +498,8 @@ fn branch_replays_to_a_verified_independent_workspace_and_shell() {
 
     let child_id = branch_session(root.path(), &source_id, "child-restored");
     assert!(
-        stored_session(root.path(), &child_id)["historical_replay"].is_object(),
+        stored_session(root.path(), &child_id)["runtime_profile"]["recovery"]["historical_replay"]
+            .is_object(),
         "child must persist its verified historical replay range"
     );
     let source_state = capture_local_workspace_checkpoint(&root.path().join("source-restored"))
@@ -649,7 +650,7 @@ fn suspend_quiesces_fork_churn_and_leaves_no_descendant() {
     suspend_session(root.path(), &session_id);
     let suspended = stored_session(root.path(), &session_id);
     assert_eq!(suspended["lifecycle"], "suspended");
-    assert!(suspended["latest_consistent_frontier"].is_object());
+    assert!(suspended["runtime_profile"]["recovery"]["latest_consistent_frontier"].is_object());
     let deadline = Instant::now() + Duration::from_secs(5);
     while unsafe { libc::kill(worker_pid as libc::pid_t, 0) } == 0 && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(25));
@@ -684,7 +685,7 @@ fn suspend_resume_rebases_at_filesystem_restart_without_synthetic_exit() {
     suspend_session(root.path(), &session_id);
     let suspended = stored_session(root.path(), &session_id);
     assert_eq!(suspended["lifecycle"], "suspended");
-    assert!(suspended["active_checkpoint"].is_object());
+    assert!(suspended["runtime_profile"]["recovery"]["active_checkpoint"].is_object());
     assert_eq!(
         wal_record_kinds(root.path(), &session_id)
             .into_iter()
@@ -708,13 +709,11 @@ fn suspend_resume_rebases_at_filesystem_restart_without_synthetic_exit() {
             .as_u64()
             .map(|generation| generation + 1)
     );
+    assert_eq!(after["origin_computation"], before["origin_computation"]);
+    assert_eq!(after["origin_computation"]["kind"], "native");
     assert_eq!(
-        after["base_state"],
-        suspended["active_checkpoint"]["state_ref"]
-    );
-    assert_eq!(
-        after["base_frontier"],
-        suspended["active_checkpoint"]["captured_at"]["records_through"]
+        after["runtime_profile"]["recovery"]["base_frontier"],
+        suspended["runtime_profile"]["recovery"]["active_checkpoint"]["captured_at"]["records_through"]
     );
     let token_path = session_directory(root.path(), &session_id).join("control/token");
     let current_token = fs::read(&token_path).expect("read resumed token");

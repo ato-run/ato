@@ -30,6 +30,7 @@ path = "src/main.rs"
 
 [dependencies]
 capsule = { path = "../capsule", version = "0.11.0" }
+capsule-core = { path = "../capsule-core", version = "0.1.0" }
 capsule-protocol = { path = "../capsule-protocol", version = "0.1.0" }
 capsule-session-runtime = { path = "../capsule-session-runtime", version = "0.1.0" }
 snapshot = { path = "../snapshot", version = "0.1.0" }
