@@ -79,8 +79,9 @@ Validation resolves the residual and every referenced child through the generic
 7. both connection endpoints have the same protocol and roles accepted by that
    protocol's connection policy;
 8. every child endpoint is linear and therefore appears in at most one
-   connection or export, no endpoint is connected to itself, and no undirected
-   connection is duplicated; and
+   connection or export, no endpoint is connected to itself, no connection has
+   both endpoints on the same NodeId, and no undirected connection is
+   duplicated; and
 9. recursively referenced compose objects pass the same validation.
 
 Role compatibility belongs to Protocol semantics. Compose receives an explicit
@@ -132,15 +133,65 @@ resolved object-graph closure without forbidding communication topologies.
 An endpoint listed in `exports` is structurally visible at the mapped parent
 Port. An endpoint used by a connection is structurally internal to the parent.
 This version validates topology only; it does not observe child transitions or
-claim that synchronization has occurred.
+claim that synchronization has occurred. `BoundaryVisibility::Internal` is a
+structural fact, whereas `tau` below is an actual transition label.
 
-A future small-step evaluator may combine complementary child actions across a
-validated connection, hide the resulting parent transition as `tau`, evolve
-the children, and reseal the composite. That transition relation, action
-complement rules, generic event history, and Trace are outside this structural
-conformance specification.
+## 6. Small-step reduction
 
-## 6. Hello World conformance scenario
+The compose crate accepts verified child transition evidence, but does not
+dispatch or evaluate child Semantics. For generic value type `V`, a label is:
+
+```text
+alpha ::= tau | p ? V | p ! V
+```
+
+`StepLabel<V>` is semantic transition metadata, not a Record, Trace, or wire
+format; it has no serialization requirement. A `NodeStep<V>` names a node and
+contains verified `from` and `to` `ResolvedComputation` values. This proves
+their canonical bytes and digest correspondence, while the truth of the child
+transition remains the child Semantics' responsibility.
+
+The reducer produces a candidate `CompositeResidual`, which callers must seal
+and validate before treating it as a valid successor Computation.
+
+### 6.1 Internal child step
+
+```text
+Ci --tau--> Ci'
+
+-----------------------------
+Compose(... Ci ...) --tau--> Compose(... Ci' ...)
+```
+
+The supplied `from` reference must equal the current node reference.
+
+### 6.2 Connected synchronization
+
+```text
+Ci --p!v--> Ci'     Cj --q?v--> Cj'     (i,p) <-> (j,q)
+
+------------------------------------------------
+Compose(... Ci, Cj ...) --tau--> Compose(... Ci', Cj' ...)
+```
+
+The actions must be complementary, have equal values, and name exactly the two
+endpoints of one declared connection. v1 rejects connections whose endpoints
+share a NodeId (`SameNodeConnectionUnsupported`): synchronizing two ports of
+one child would require multi-action child semantics and is outside this model.
+
+### 6.3 Exported action
+
+```text
+Ci --p!v--> Ci'      export x = (i,p)
+
+-----------------------------------
+Compose(... Ci ...) --x!v--> Compose(... Ci' ...)
+```
+
+Input is symmetric. An unexported or internally connected child port cannot be
+lifted as a parent action.
+
+## 7. Hello World conformance scenario
 
 The minimum conformance graph contains a `Greeter` child and a `NameProvider`
 child. Their `name` Ports are connected and are not exported. The Greeter's
@@ -155,7 +206,23 @@ NameProvider.name <── internal connection ──> Greeter.name
                                               parent boundary: greeting
 ```
 
-Validation must produce one ordinary `ComputationObject`, preserve exactly the
-external `greeting` Port, classify the `name` connection as structurally
-internal, and do so without changing the Semantic Core. It does not execute the
-two children or prove a `tau` transition.
+The structural conformance scenario remains valid as written. Behavioral
+conformance additionally proves this evolution using test-only leaf semantics:
+
+```text
+C0 --tau------------------> C1
+C1 --greeting!"Hello, Alice"--> C2
+```
+
+Each successor is canonical-encoded, content-addressed, sealed into an
+ordinary `ComputationObject`, and revalidated. Their ComputationRefs differ,
+while all three boundaries remain exactly `{ greeting }`.
+
+### Draft PR acceptance criterion
+
+Without changing Capsule Core, the test-only `Greeter + NameProvider` scenario
+must execute, reseal, and revalidate:
+
+```text
+C0 --tau--> C1 --greeting!"Hello, Alice"--> C2
+```

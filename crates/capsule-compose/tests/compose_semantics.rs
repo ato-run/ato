@@ -3,10 +3,11 @@ use std::io::{Cursor, Read};
 use std::sync::Mutex;
 
 use capsule_compose::{
-    BoundaryVisibility, COMPOSE_SEMANTICS_ID, CompositeResidual, CompositeValidationError,
-    Connection, Endpoint, NodeId, ProtocolRolePolicy, ValidationBudget, ValidationResource,
-    composite_residual_ref, encode_composite_residual, validate_composite,
-    validate_composite_with_budget,
+    BoundaryVisibility, COMPOSE_SEMANTICS_ID, CompositeResidual, CompositeStepError,
+    CompositeValidationError, Connection, Endpoint, NodeId, NodeStep, ProtocolRolePolicy,
+    StepLabel, ValidationBudget, ValidationResource, composite_residual_ref,
+    encode_composite_residual, lift_exported_step, lift_internal_step, synchronize_connection,
+    validate_composite, validate_composite_with_budget,
 };
 use capsule_core::{
     Boundary, ComputationObject, ComputationRef, ContentRef, PortDef, PortId, ProtocolId, RoleId,
@@ -142,6 +143,20 @@ fn leaf(semantics: &str, boundary: Boundary, marker: u8) -> ComputationObject {
     }
 }
 
+fn seal_leaf(
+    objects: &mut MemoryObjects,
+    semantics: &str,
+    boundary: Boundary,
+    residual_bytes: &[u8],
+) -> ComputationRef {
+    let residual = objects.insert_content(residual_bytes.to_vec());
+    objects.insert_computation(&ComputationObject {
+        semantics: SemanticsId::parse(semantics).unwrap(),
+        boundary,
+        residual,
+    })
+}
+
 fn seal_composite(
     objects: &mut MemoryObjects,
     boundary: Boundary,
@@ -256,10 +271,18 @@ fn validator_enforces_linear_single_binding_and_rejects_missing_endpoints() {
         0x33,
     );
     let child_ref = objects.insert_computation(&child);
+    let peer_ref = objects.insert_computation(&leaf(
+        "example.peer@1",
+        BTreeMap::from([(PortId::parse("two").unwrap(), text_port("receiver"))]),
+        0x34,
+    ));
     let shared = endpoint("worker", "one");
     let residual = CompositeResidual {
-        nodes: BTreeMap::from([(NodeId::parse("worker").unwrap(), child_ref)]),
-        connections: vec![Connection::new(shared.clone(), endpoint("worker", "two")).unwrap()],
+        nodes: BTreeMap::from([
+            (NodeId::parse("worker").unwrap(), child_ref),
+            (NodeId::parse("peer").unwrap(), peer_ref),
+        ]),
+        connections: vec![Connection::new(shared.clone(), endpoint("peer", "two")).unwrap()],
         exports: BTreeMap::from([(PortId::parse("out").unwrap(), shared.clone())]),
     };
     let parent_ref = seal_composite(
@@ -537,4 +560,316 @@ fn repeated_node_references_resolve_one_computation_once() {
 
     assert_eq!(objects.metadata_count(child_ref.content_ref()), 1);
     assert_eq!(objects.open_count(child_ref.content_ref()), 1);
+}
+
+#[test]
+fn behavioral_hello_world_evolves_reseals_and_revalidates() {
+    let mut objects = MemoryObjects::default();
+    let provider_boundary = BTreeMap::from([(PortId::parse("name").unwrap(), text_port("sender"))]);
+    let greeter_boundary = BTreeMap::from([
+        (PortId::parse("name").unwrap(), text_port("receiver")),
+        (PortId::parse("greeting").unwrap(), text_port("sender")),
+    ]);
+    let np0 = seal_leaf(
+        &mut objects,
+        "example.name-provider@1",
+        provider_boundary.clone(),
+        b"Ready(Alice)",
+    );
+    let g0 = seal_leaf(
+        &mut objects,
+        "example.greeter@1",
+        greeter_boundary.clone(),
+        b"WaitingName",
+    );
+    let c0_residual = CompositeResidual {
+        nodes: BTreeMap::from([
+            (NodeId::parse("name-provider").unwrap(), np0.clone()),
+            (NodeId::parse("greeter").unwrap(), g0.clone()),
+        ]),
+        connections: vec![
+            Connection::new(
+                endpoint("name-provider", "name"),
+                endpoint("greeter", "name"),
+            )
+            .unwrap(),
+        ],
+        exports: BTreeMap::from([(
+            PortId::parse("greeting").unwrap(),
+            endpoint("greeter", "greeting"),
+        )]),
+    };
+    let parent_boundary =
+        BTreeMap::from([(PortId::parse("greeting").unwrap(), text_port("sender"))]);
+    let c0 = seal_composite(&mut objects, parent_boundary.clone(), c0_residual.clone());
+
+    // Test-only leaf semantics: Ready("Alice") -> Done and WaitingName -> ReadyGreeting.
+    let np1 = seal_leaf(
+        &mut objects,
+        "example.name-provider@1",
+        provider_boundary,
+        b"Done",
+    );
+    let g1 = seal_leaf(
+        &mut objects,
+        "example.greeter@1",
+        greeter_boundary.clone(),
+        b"ReadyGreeting(Hello, Alice)",
+    );
+    let c1_reduction = synchronize_connection(
+        &c0_residual,
+        &NodeStep {
+            node: NodeId::parse("name-provider").unwrap(),
+            from: objects.resolve(&np0),
+            label: StepLabel::Output {
+                port: PortId::parse("name").unwrap(),
+                value: "Alice",
+            },
+            to: objects.resolve(&np1),
+        },
+        &NodeStep {
+            node: NodeId::parse("greeter").unwrap(),
+            from: objects.resolve(&g0),
+            label: StepLabel::Input {
+                port: PortId::parse("name").unwrap(),
+                value: "Alice",
+            },
+            to: objects.resolve(&g1),
+        },
+    )
+    .unwrap();
+    assert_eq!(c1_reduction.label, StepLabel::Tau);
+    let c1 = seal_composite(
+        &mut objects,
+        parent_boundary.clone(),
+        c1_reduction.successor.clone(),
+    );
+    validate_composite(&objects.resolve(&c1), &objects, &TextProtocol).unwrap();
+
+    let g2 = seal_leaf(&mut objects, "example.greeter@1", greeter_boundary, b"Done");
+    let c2_reduction = lift_exported_step(
+        &c1_reduction.successor,
+        &NodeStep {
+            node: NodeId::parse("greeter").unwrap(),
+            from: objects.resolve(&g1),
+            label: StepLabel::Output {
+                port: PortId::parse("greeting").unwrap(),
+                value: "Hello, Alice",
+            },
+            to: objects.resolve(&g2),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        c2_reduction.label,
+        StepLabel::Output {
+            port: PortId::parse("greeting").unwrap(),
+            value: "Hello, Alice",
+        }
+    );
+    let c2 = seal_composite(
+        &mut objects,
+        parent_boundary.clone(),
+        c2_reduction.successor,
+    );
+    validate_composite(&objects.resolve(&c2), &objects, &TextProtocol).unwrap();
+
+    assert_ne!(c0, c1);
+    assert_ne!(c1, c2);
+    assert_eq!(objects.resolve(&c0).object().boundary, parent_boundary);
+    assert_eq!(objects.resolve(&c1).object().boundary, parent_boundary);
+    assert_eq!(objects.resolve(&c2).object().boundary, parent_boundary);
+}
+
+#[test]
+fn reducer_rejects_invalid_transition_evidence() {
+    let (mut objects, parent_ref, _, _) = hello_world_fixture();
+    let current = validate_composite(&objects.resolve(&parent_ref), &objects, &TextProtocol)
+        .unwrap()
+        .residual()
+        .clone();
+    let provider = current.nodes[&NodeId::parse("name-provider").unwrap()].clone();
+    let greeter = current.nodes[&NodeId::parse("greeter").unwrap()].clone();
+    let alternate = seal_leaf(
+        &mut objects,
+        "example.other@1",
+        BTreeMap::new(),
+        b"alternate",
+    );
+    let provider_step = |from: &ComputationRef, label| NodeStep {
+        node: NodeId::parse("name-provider").unwrap(),
+        from: objects.resolve(from),
+        label,
+        to: objects.resolve(&alternate),
+    };
+    let greeter_step = |label| NodeStep {
+        node: NodeId::parse("greeter").unwrap(),
+        from: objects.resolve(&greeter),
+        label,
+        to: objects.resolve(&alternate),
+    };
+
+    assert!(matches!(
+        lift_internal_step(&current, &provider_step(&alternate, StepLabel::<&str>::Tau)),
+        Err(CompositeStepError::StaleFrom { .. })
+    ));
+    assert!(matches!(
+        synchronize_connection(
+            &current,
+            &provider_step(
+                &provider,
+                StepLabel::Output {
+                    port: PortId::parse("name").unwrap(),
+                    value: "Alice"
+                }
+            ),
+            &greeter_step(StepLabel::Output {
+                port: PortId::parse("name").unwrap(),
+                value: "Alice"
+            })
+        ),
+        Err(CompositeStepError::ComplementaryActionsRequired)
+    ));
+    assert!(matches!(
+        synchronize_connection(
+            &current,
+            &provider_step(
+                &provider,
+                StepLabel::Input {
+                    port: PortId::parse("name").unwrap(),
+                    value: "Alice"
+                }
+            ),
+            &greeter_step(StepLabel::Input {
+                port: PortId::parse("name").unwrap(),
+                value: "Alice"
+            })
+        ),
+        Err(CompositeStepError::ComplementaryActionsRequired)
+    ));
+    assert!(matches!(
+        synchronize_connection(
+            &current,
+            &provider_step(
+                &provider,
+                StepLabel::Output {
+                    port: PortId::parse("name").unwrap(),
+                    value: "Alice"
+                }
+            ),
+            &greeter_step(StepLabel::Input {
+                port: PortId::parse("name").unwrap(),
+                value: "Bob"
+            })
+        ),
+        Err(CompositeStepError::ValueMismatch)
+    ));
+    assert!(matches!(
+        synchronize_connection(
+            &current,
+            &provider_step(
+                &provider,
+                StepLabel::Output {
+                    port: PortId::parse("wrong").unwrap(),
+                    value: "Alice"
+                }
+            ),
+            &greeter_step(StepLabel::Input {
+                port: PortId::parse("name").unwrap(),
+                value: "Alice"
+            })
+        ),
+        Err(CompositeStepError::ConnectionEndpointMismatch)
+    ));
+    assert!(matches!(
+        lift_exported_step(
+            &current,
+            &provider_step(
+                &provider,
+                StepLabel::Output {
+                    port: PortId::parse("name").unwrap(),
+                    value: "Alice"
+                }
+            )
+        ),
+        Err(CompositeStepError::ConnectedPortCannotBeExported { .. })
+    ));
+    assert!(matches!(
+        lift_exported_step(
+            &current,
+            &greeter_step(StepLabel::Output {
+                port: PortId::parse("name").unwrap(),
+                value: "Alice"
+            })
+        ),
+        Err(CompositeStepError::ConnectedPortCannotBeExported { .. })
+    ));
+    assert!(matches!(
+        lift_exported_step(
+            &current,
+            &provider_step(
+                &provider,
+                StepLabel::Output {
+                    port: PortId::parse("other").unwrap(),
+                    value: "Alice"
+                }
+            )
+        ),
+        Err(CompositeStepError::UnexportedPort { .. })
+    ));
+}
+
+#[test]
+fn validator_rejects_same_node_connection_and_successor_without_exported_port() {
+    let mut objects = MemoryObjects::default();
+    let child = objects.insert_computation(&leaf(
+        "example.worker@1",
+        BTreeMap::from([
+            (PortId::parse("left").unwrap(), text_port("sender")),
+            (PortId::parse("right").unwrap(), text_port("receiver")),
+        ]),
+        0x77,
+    ));
+    let invalid_ref = seal_composite(
+        &mut objects,
+        BTreeMap::new(),
+        CompositeResidual {
+            nodes: BTreeMap::from([(NodeId::parse("worker").unwrap(), child)]),
+            connections: vec![
+                Connection::new(endpoint("worker", "left"), endpoint("worker", "right")).unwrap(),
+            ],
+            exports: BTreeMap::new(),
+        },
+    );
+    assert!(matches!(
+        validate_composite(&objects.resolve(&invalid_ref), &objects, &TextProtocol),
+        Err(CompositeValidationError::SameNodeConnectionUnsupported { .. })
+    ));
+
+    let (mut objects, parent_ref, _, _) = hello_world_fixture();
+    let current = validate_composite(&objects.resolve(&parent_ref), &objects, &TextProtocol)
+        .unwrap()
+        .residual()
+        .clone();
+    let greeter = current.nodes[&NodeId::parse("greeter").unwrap()].clone();
+    let broken = objects.insert_computation(&leaf("example.greeter@1", BTreeMap::new(), 0x88));
+    let reduction = lift_internal_step(
+        &current,
+        &NodeStep {
+            node: NodeId::parse("greeter").unwrap(),
+            from: objects.resolve(&greeter),
+            label: StepLabel::<&str>::Tau,
+            to: objects.resolve(&broken),
+        },
+    )
+    .unwrap();
+    let successor = seal_composite(
+        &mut objects,
+        BTreeMap::from([(PortId::parse("greeting").unwrap(), text_port("sender"))]),
+        reduction.successor,
+    );
+    assert!(matches!(
+        validate_composite(&objects.resolve(&successor), &objects, &TextProtocol),
+        Err(CompositeValidationError::MissingPort { .. })
+    ));
 }
