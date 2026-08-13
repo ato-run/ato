@@ -48,6 +48,8 @@ const PTY_PROTOCOL_ID: &str = "ato.io.pty@1";
 const PTY_CHECKPOINT_FORMAT: &str = "ato.io.pty.local-checkpoint@1";
 const READY_MARKER: &[u8] = b"__ATO_SESSION_READY__";
 const WATCHDOG_DISARM: &[u8] = b"DISARM\n";
+const PUBLIC_METADATA_SCHEMA_VERSION: u16 = 1;
+const PUBLIC_NAME_MAX_LEN: usize = 64;
 
 pub(crate) fn start(bundle: &Path, into: &Path, no_attach: bool) -> Result<()> {
     let bundle = bundle
@@ -57,11 +59,60 @@ pub(crate) fn start(bundle: &Path, into: &Path, no_attach: bool) -> Result<()> {
     let session_id = random_session_id()?;
     let paths = SessionPaths::new(&session_id)?;
     paths.create()?;
-    StreamingBundleReader::read_into(&bundle, &paths.root.join("validation-spool"))
+    StreamingBundleReader::read_into(&bundle, &paths.directory.join("validation-spool"))
         .context("invalid Capsule bundle")?;
     import_session_seed(&bundle, &paths.seed_capsule)?;
     write_bootstrap_metadata(&paths, &SessionBootstrapMetadata::default())?;
-    launch_session(&session_id, &paths, &into, no_attach)
+    launch_session(&session_id, &paths, &into, no_attach, true)
+}
+
+pub(crate) fn start_public(
+    bundle: &Path,
+    requested_name: Option<&str>,
+    detach: bool,
+) -> Result<()> {
+    let bundle = bundle
+        .canonicalize()
+        .with_context(|| format!("failed to resolve {}", bundle.display()))?;
+    let requested_name = requested_name
+        .map(validate_public_name)
+        .transpose()?
+        .unwrap_or_else(|| public_name_from_bundle(&bundle));
+    let name_lock = public_name_lock()?;
+    let name = available_public_name(&requested_name)?;
+    let session_id = random_session_id()?;
+    let paths = SessionPaths::new(&session_id)?;
+    paths.create()?;
+    let spool =
+        StreamingBundleReader::read_into(&bundle, &paths.directory.join("validation-spool"))
+            .context("invalid Capsule bundle")?;
+    let attachable = spool
+        .descriptor
+        .connectors
+        .values()
+        .any(|connector| connector.protocol.as_str() == PTY_PROTOCOL_ID);
+    import_session_seed(&bundle, &paths.seed_capsule)?;
+    write_bootstrap_metadata(&paths, &SessionBootstrapMetadata::default())?;
+
+    println!("Starting {name}...");
+    let workspace = paths.directory.join("workspace");
+    launch_session(&session_id, &paths, &workspace, true, false)?;
+    write_public_metadata(
+        &paths,
+        &PublicSessionMetadata {
+            schema_version: PUBLIC_METADATA_SCHEMA_VERSION,
+            name: name.clone(),
+            source: bundle.to_string_lossy().into_owned(),
+            created_at_unix_ms: now_unix_ms(),
+        },
+    )?;
+    FileExt::unlock(&name_lock)?;
+    println!("Ready.");
+    if attachable && !detach {
+        attach(session_id.as_str(), false)
+    } else {
+        Ok(())
+    }
 }
 
 fn launch_session(
@@ -69,6 +120,7 @@ fn launch_session(
     paths: &SessionPaths,
     into: &Path,
     no_attach: bool,
+    announce_id: bool,
 ) -> Result<()> {
     let executable = std::env::current_exe().context("failed to locate ato executable")?;
     let log = owner_only_log(&paths.supervisor_log)?;
@@ -122,7 +174,9 @@ fn launch_session(
         }
     }
 
-    println!("{session_id}");
+    if announce_id {
+        println!("{session_id}");
+    }
     if no_attach {
         Ok(())
     } else {
@@ -792,6 +846,21 @@ pub(crate) fn kill(session: &str) -> Result<()> {
     }
 }
 
+pub(crate) fn attach_public(name: &str) -> Result<()> {
+    let session = resolve_public_session(name)?;
+    attach(session.session_id.as_str(), false)
+}
+
+pub(crate) fn stop_public(name: &str, _force: bool) -> Result<()> {
+    let session = resolve_public_session(name)?;
+    let metadata = public_metadata_for(&session.session_id)?;
+    if session.lifecycle != "stopped" {
+        kill(session.session_id.as_str())?;
+    }
+    println!("Stopped {}.", metadata.name);
+    Ok(())
+}
+
 pub(crate) fn branch(session: &str, into: &Path, no_attach: bool) -> Result<()> {
     eprintln!(
         "warning: workspace-posix-host + ato.io.pty@1 branch is experimental; only PTY boundary history is verified, and unmediated host external effects may be re-executed"
@@ -842,7 +911,13 @@ pub(crate) fn branch(session: &str, into: &Path, no_attach: bool) -> Result<()> 
             ..SessionBootstrapMetadata::default()
         },
     )?;
-    launch_session(&child_id, &child_paths, &absolute_path(into)?, no_attach)
+    launch_session(
+        &child_id,
+        &child_paths,
+        &absolute_path(into)?,
+        no_attach,
+        true,
+    )
 }
 
 pub(crate) fn suspend(session: &str) -> Result<()> {
@@ -915,7 +990,7 @@ pub(crate) fn resume(session: &str) -> Result<()> {
             resume_checkpoint: Some(checkpoint),
         },
     )?;
-    match launch_session(&session_id, &paths, stored.workspace()?, true) {
+    match launch_session(&session_id, &paths, stored.workspace()?, true, true) {
         Ok(()) => Ok(()),
         Err(error) => {
             capsule_session_runtime::session_store::write_atomic_owner_only(
@@ -957,6 +1032,42 @@ pub(crate) fn list() -> Result<()> {
         println!(
             "{}\t{}\t{}",
             session.session_id, lifecycle, session.supervisor.pid
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn list_public(json: bool) -> Result<()> {
+    let root = session_root()?;
+    let store = CapsuleProtocolSessionStore::open(root)?;
+    let now = now_unix_ms();
+    let mut rows = Vec::new();
+    for session in store.list()? {
+        let Ok(metadata) = public_metadata_for(&session.session_id) else {
+            continue;
+        };
+        let lifecycle = displayed_lifecycle(&session);
+        rows.push(PublicSessionRow {
+            name: metadata.name,
+            state: lifecycle.to_owned(),
+            age_seconds: now.saturating_sub(metadata.created_at_unix_ms) / 1_000,
+            source: metadata.source,
+            session_id: session.session_id.to_string(),
+        });
+    }
+    rows.sort_by(|left, right| left.name.cmp(&right.name));
+    if json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+    println!("NAME\tSTATE\tAGE\tSOURCE");
+    for row in rows {
+        println!(
+            "{}\t{}\t{}\t{}",
+            row.name,
+            row.state,
+            format_age(row.age_seconds),
+            display_source(&row.source)
         );
     }
     Ok(())
@@ -2389,6 +2500,23 @@ struct SessionPaths {
     supervisor_log: PathBuf,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+struct PublicSessionMetadata {
+    schema_version: u16,
+    name: String,
+    source: String,
+    created_at_unix_ms: u64,
+}
+
+#[derive(Serialize)]
+struct PublicSessionRow {
+    name: String,
+    state: String,
+    age_seconds: u64,
+    source: String,
+    session_id: String,
+}
+
 impl SessionPaths {
     fn new(session_id: &SessionId) -> Result<Self> {
         let root = session_root()?;
@@ -2430,6 +2558,185 @@ impl SessionPaths {
         }
         Ok(())
     }
+}
+
+fn write_public_metadata(paths: &SessionPaths, metadata: &PublicSessionMetadata) -> Result<()> {
+    validate_public_metadata(metadata)?;
+    capsule_session_runtime::session_store::write_atomic_owner_only(
+        &paths.directory.join("display.json"),
+        &serde_json::to_vec_pretty(metadata)?,
+    )?;
+    Ok(())
+}
+
+fn public_metadata_for(session_id: &SessionId) -> Result<PublicSessionMetadata> {
+    let paths = SessionPaths::new(session_id)?;
+    let metadata: PublicSessionMetadata = serde_json::from_slice(
+        &fs::read(paths.directory.join("display.json"))
+            .context("failed to read public Session metadata")?,
+    )
+    .context("invalid public Session metadata")?;
+    validate_public_metadata(&metadata)?;
+    Ok(metadata)
+}
+
+fn validate_public_metadata(metadata: &PublicSessionMetadata) -> Result<()> {
+    if metadata.schema_version != PUBLIC_METADATA_SCHEMA_VERSION {
+        bail!(
+            "unsupported public Session metadata schema {}",
+            metadata.schema_version
+        );
+    }
+    validate_public_name(&metadata.name)?;
+    if metadata.source.trim().is_empty() {
+        bail!("public Session source is empty");
+    }
+    Ok(())
+}
+
+fn validate_public_name(name: &str) -> Result<String> {
+    if name.is_empty()
+        || name.len() > PUBLIC_NAME_MAX_LEN
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        bail!("Session name must be 1..={PUBLIC_NAME_MAX_LEN} ASCII alphanumeric, '-' or '_'");
+    }
+    Ok(name.to_owned())
+}
+
+fn public_name_from_bundle(bundle: &Path) -> String {
+    let stem = bundle
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("capsule");
+    let mut name = String::new();
+    let mut separator = false;
+    for byte in stem.bytes() {
+        let byte = byte.to_ascii_lowercase();
+        if byte.is_ascii_alphanumeric() || byte == b'_' {
+            if separator && !name.is_empty() {
+                name.push('-');
+            }
+            separator = false;
+            name.push(char::from(byte));
+        } else {
+            separator = true;
+        }
+        if name.len() == PUBLIC_NAME_MAX_LEN {
+            break;
+        }
+    }
+    while name.ends_with('-') {
+        name.pop();
+    }
+    if name.is_empty() {
+        "capsule".to_owned()
+    } else {
+        name
+    }
+}
+
+fn available_public_name(base: &str) -> Result<String> {
+    let root = session_root()?;
+    CapsuleProtocolSessionStore::open(&root)?;
+    let mut used = BTreeSet::new();
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let Some(session_id) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| SessionId::parse(name).ok())
+        else {
+            continue;
+        };
+        if let Ok(metadata) = public_metadata_for(&session_id) {
+            used.insert(metadata.name);
+        }
+    }
+    if !used.contains(base) {
+        return Ok(base.to_owned());
+    }
+    for suffix in 2_u64.. {
+        let suffix = format!("-{suffix}");
+        let keep = PUBLIC_NAME_MAX_LEN.saturating_sub(suffix.len());
+        let candidate = format!("{}{}", &base[..base.len().min(keep)], suffix);
+        if !used.contains(&candidate) {
+            return Ok(candidate);
+        }
+    }
+    unreachable!("the numeric Session name suffix space is unbounded")
+}
+
+fn public_name_lock() -> Result<File> {
+    let root = session_root()?;
+    CapsuleProtocolSessionStore::open(&root)?;
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(root.join("public-names.lock"))?;
+    lock.lock_exclusive()?;
+    Ok(lock)
+}
+
+fn resolve_public_session(name: &str) -> Result<StoredProtocolSession> {
+    let root = session_root()?;
+    let store = CapsuleProtocolSessionStore::open(root)?;
+    if let Ok(session_id) = SessionId::parse(name)
+        && let Ok(session) = store.read(&session_id)
+        && public_metadata_for(&session_id).is_ok()
+    {
+        return Ok(session);
+    }
+    for session in store.list()? {
+        if public_metadata_for(&session.session_id).is_ok_and(|metadata| metadata.name == name) {
+            return Ok(session);
+        }
+    }
+    bail!("Capsule Session not found: {name}")
+}
+
+fn displayed_lifecycle(session: &StoredProtocolSession) -> &str {
+    if matches!(
+        session.lifecycle.as_str(),
+        "starting" | "running" | "terminating"
+    ) && !supervisor_identity_is_live(&session.supervisor)
+    {
+        "orphaned"
+    } else {
+        &session.lifecycle
+    }
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+        .unwrap_or(0)
+}
+
+fn format_age(seconds: u64) -> String {
+    match seconds {
+        0..=59 => format!("{seconds}s"),
+        60..=3_599 => format!("{}m", seconds / 60),
+        3_600..=86_399 => format!("{}h", seconds / 3_600),
+        _ => format!("{}d", seconds / 86_400),
+    }
+}
+
+fn display_source(source: &str) -> &str {
+    Path::new(source)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(source)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -2999,5 +3306,36 @@ mod tests {
         for kind in ["stdin", "output", "resize", "exit"] {
             assert_ne!(kind, "detach");
         }
+    }
+
+    #[test]
+    fn public_name_is_derived_from_a_human_bundle_filename() {
+        assert_eq!(
+            public_name_from_bundle(Path::new("/issues/Login Refresh BUG.capsule")),
+            "login-refresh-bug"
+        );
+        assert_eq!(
+            public_name_from_bundle(Path::new("/issues/バグ再現.capsule")),
+            "capsule"
+        );
+    }
+
+    #[test]
+    fn explicit_public_name_rejects_control_and_path_characters() {
+        assert!(validate_public_name("login-bug").is_ok());
+        for invalid in ["", "../login-bug", "login bug", "login\tbug"] {
+            assert!(
+                validate_public_name(invalid).is_err(),
+                "accepted {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn public_age_uses_compact_units() {
+        assert_eq!(format_age(12), "12s");
+        assert_eq!(format_age(120), "2m");
+        assert_eq!(format_age(7_200), "2h");
+        assert_eq!(format_age(172_800), "2d");
     }
 }
