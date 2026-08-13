@@ -1,0 +1,22 @@
+[package]
+name = "ato-kernel"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MPL-2.0"
+description = "Minimal transition kernel for addressable Ato computations"
+homepage = "https://ato.run"
+repository = "https://github.com/ato-run/ato"
+
+[package.metadata.dist]
+dist = false
+
+[package.metadata.ato-architecture]
+layer = "kernel"
+
+[dependencies]
+ato-computation = { path = "../computation" }
+ato-objects = { path = "../objects" }
+thiserror = "2.0"
+
+[dev-dependencies]
+ato-semantics-compose = { path = "../../extensions/semantics/compose" }

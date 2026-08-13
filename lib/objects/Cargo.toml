@@ -1,0 +1,20 @@
+[package]
+name = "ato-objects"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MPL-2.0"
+description = "Verified persistence and transport for addressable Ato objects"
+homepage = "https://ato.run"
+repository = "https://github.com/ato-run/ato"
+
+[package.metadata.dist]
+dist = false
+
+[package.metadata.ato-architecture]
+layer = "objects"
+
+[dependencies]
+ato-computation = { path = "../computation" }
+blake3 = "1.5"
+sha2 = "0.10"
+thiserror = "2.0"

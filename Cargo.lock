@@ -390,6 +390,53 @@ dependencies = [
 ]
 
 [[package]]
+name = "ato-computation"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "hex",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ato-kernel"
+version = "0.1.0"
+dependencies = [
+ "ato-computation",
+ "ato-objects",
+ "ato-semantics-compose",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ato-objects"
+version = "0.1.0"
+dependencies = [
+ "ato-computation",
+ "blake3",
+ "sha2",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ato-semantics-compose"
+version = "0.1.0"
+dependencies = [
+ "ato-computation",
+ "ato-kernel",
+ "ato-objects",
+ "blake3",
+ "hex",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "atomic"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1008,13 +1055,13 @@ version = "0.11.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "ato-computation",
  "axum 0.7.9",
  "base64 0.22.1",
  "blake3",
  "bollard",
  "capsule-adapter-state-io-v1",
  "capsule-codec",
- "capsule-core",
  "capsule-protocol",
  "capsule-session-runtime",
  "chrono",
@@ -1073,10 +1120,10 @@ dependencies = [
 name = "capsule-adapter-state-io-v1"
 version = "0.1.0"
 dependencies = [
+ "ato-computation",
+ "ato-objects",
  "blake3",
  "capsule-codec",
- "capsule-core",
- "capsule-core-codec",
  "capsule-protocol",
  "libc",
  "serde",
@@ -1098,40 +1145,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "capsule-compose"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "capsule-core",
- "capsule-core-codec",
- "hex",
- "serde",
- "serde_jcs",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "capsule-core"
-version = "0.1.0"
-dependencies = [
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "capsule-core-codec"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "capsule-core",
- "hex",
- "serde",
- "serde_jcs",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "capsule-protocol"
 version = "0.1.0"
 dependencies = [
@@ -1142,8 +1155,8 @@ dependencies = [
 name = "capsule-session-runtime"
 version = "0.1.0"
 dependencies = [
+ "ato-computation",
  "blake3",
- "capsule-core",
  "capsule-protocol",
  "rand 0.8.6",
  "serde",
@@ -1362,13 +1375,13 @@ dependencies = [
  "anyhow",
  "assert_cmd",
  "async-trait",
+ "ato-computation",
  "axoupdater",
  "axum 0.7.9",
  "axum-server",
  "base64 0.22.1",
  "blake3",
  "capsule",
- "capsule-core",
  "capsule-protocol",
  "capsule-session-runtime",
  "capsulefs",

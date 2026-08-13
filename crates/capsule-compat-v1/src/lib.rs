@@ -12,11 +12,10 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use capsule_core::{
-    Boundary, ComputationObject, ComputationRef, ContentRef, PortDef, PortId, ProtocolId, RoleId,
-    SemanticsId,
+use ato_computation::{
+    Boundary, ComputationObject, ComputationRef, ContentRef, PortDef, PortId, ProtocolId,
+    ResolvedComputation, RoleId, SemanticsId, computation_ref, encode_computation_object,
 };
-use capsule_core_codec::{ResolvedComputation, computation_ref, encode_computation_object};
 use capsule_protocol::CapsuleDescriptor;
 use serde::Serialize;
 use thiserror::Error;

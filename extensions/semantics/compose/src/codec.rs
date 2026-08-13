@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use capsule_core::{ComputationRef, ContentRef, PortId};
+use ato_computation::{ComputationRef, ContentRef, PortId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -16,7 +16,7 @@ pub enum CompositeResidualCodecError {
     #[error("compose residual JSON failed: {0}")]
     Json(#[from] serde_json::Error),
     #[error("compose residual identifier failed: {0}")]
-    CoreIdentifier(#[from] capsule_core::IdentifierError),
+    CoreIdentifier(#[from] ato_computation::IdentifierError),
     #[error(transparent)]
     NodeIdentifier(#[from] NodeIdError),
     #[error(transparent)]

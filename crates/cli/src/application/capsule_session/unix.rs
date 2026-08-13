@@ -13,12 +13,12 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
+use ato_computation::SemanticsId;
 use capsule::protocol_bundle::{
     LEGACY_V1_SEMANTICS, LegacyV1OriginMigration, PortableCapsule, SpoolBundle,
     StreamingBundleReader, capture_local_workspace_checkpoint, normalize_v1_spool,
     restore_workspace_state,
 };
-use capsule_core::SemanticsId;
 use capsule_protocol::{ConnectorId, Direction, IoRecord, Payload, RecordKindId};
 use capsule_session_runtime::{
     BoundaryCoordinator, BoundaryDriver, BoundaryOperationId, CapsuleProtocolSessionStore,
