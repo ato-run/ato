@@ -1,10 +1,10 @@
 [package]
-name = "nacelle"
+name = "ato-provider-nacelle"
 version = "0.7.9"
 edition = "2024"
 rust-version = "1.96"
 license = "MPL-2.0"
-description = "The Source Runtime for Capsules"
+description = "Nacelle physical realization provider for Ato computations"
 repository = "https://github.com/ato-run/ato"
 homepage = "https://ato.run"
 authors = ["Koh0920"]
@@ -21,11 +21,16 @@ path-guid    = "1542D7C5-8FF8-445B-BB8F-53DD7BFF4CF9"
 license = false
 eula = false
 
+[package.metadata.ato-architecture]
+layer = "provider"
+
 [lib]
 name = "nacelle"
 path = "src/lib.rs"
 
 [dependencies]
+ato-computation = { path = "../../../lib/computation" }
+ato-semantics-workspace = { path = "../../semantics/workspace" }
 tokio = { version = "1", features = ["full"] }
 
 # Shared libraries
