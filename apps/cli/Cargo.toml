@@ -24,15 +24,15 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-ato-adapter-repository = { path = "../../extensions/adapters/repository" }
-ato-computation = { path = "../../lib/computation" }
-ato-ipc = { path = "../../lib/ipc" }
-ato-kernel = { path = "../../lib/kernel" }
-ato-objects = { path = "../../lib/objects" }
-ato-provider-nacelle = { path = "../../extensions/providers/nacelle" }
-ato-provider-snapshot = { path = "../../extensions/providers/snapshot" }
-ato-semantics-compose = { path = "../../extensions/semantics/compose" }
-ato-semantics-workspace = { path = "../../extensions/semantics/workspace" }
+ato-adapter-repository = { path = "../../extensions/adapters/repository", version = "0.1.0" }
+ato-computation = { path = "../../lib/computation", version = "0.1.0" }
+ato-ipc = { path = "../../lib/ipc", version = "0.1.0" }
+ato-kernel = { path = "../../lib/kernel", version = "0.1.0" }
+ato-objects = { path = "../../lib/objects", version = "0.1.0" }
+ato-provider-nacelle = { path = "../../extensions/providers/nacelle", version = "0.7.9" }
+ato-provider-snapshot = { path = "../../extensions/providers/snapshot", version = "0.1.0" }
+ato-semantics-compose = { path = "../../extensions/semantics/compose", version = "0.1.0" }
+ato-semantics-workspace = { path = "../../extensions/semantics/workspace", version = "0.1.0" }
 blake3 = "1"
 clap = { version = "4.5", features = ["derive", "env"] }
 dirs = "5"

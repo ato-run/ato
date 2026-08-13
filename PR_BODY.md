@@ -1,132 +1,90 @@
-# desktop: finalize external-browser login (#1077) for promotion toward main
+# Rebuild Ato around addressable computations
 
-Finalizes **Auth Phase 1c** — Desktop login opens the OS default browser for the
-auth_bridge OAuth flow instead of rendering it in an app-embedded Wry WebView
-(RFC 8252: native apps must use the system browser). Builds directly on the core
-that merged to `nightly` in **#1078**; this branch adds the remaining
-platform-specific and credential-safety test coverage and records the
-release-sequencing gate so the feature can move `nightly → dev → main` safely.
+## Goal
 
-- **Canonical RFC**: ato-api#261 (Ato Authentication design), Phase 1c.
-- **Tracker**: ato-run/ato#1077.
-- **Core implementation**: ato-run/ato#1078 (already merged to `nightly`).
+This migration rebuilds Ato around one principle: **Ato advances addressable computations**. `ComputationObject` is the canonical semantic value, `ComputationRef` is its immutable address and Capsule identity, and a `Run` is only a mutable cursor to the current ref. History remains optional evidence and does not participate in computation identity.
 
-## ⚠️ Ships inert — do not cut a desktop release yet
+## Semantic model
 
-This feature is **fail-closed** and stays inert until a separate, human-gated
-step. Two independent, in-code gates enforce that:
+- `ato-computation` owns semantic identifiers, boundaries, canonical encoding, BLAKE3 identity, and verification.
+- `ato-kernel` resolves a ref, dispatches its registered semantics, persists a successor, and advances `Run.head`.
+- `ato-objects` owns verified CAS persistence, closure traversal, signatures, garbage collection, and `.capsule` bundles.
+- Concrete semantics own evolution; adapters compile authoring inputs away; providers own physical realization.
+- Ports are typed, boundary-relative interactions. Internal composition synchronizes as `Tau`.
+- Goals and contracts remain application concerns; snapshots are provider materializations.
 
-1. **Runtime gate.** `EXTERNAL_BROWSER_LOGIN_HARDENING_LANDED`
-   (`crates/cli/src/application/auth/store.rs`) is `false`. While false,
-   `login_with_store_device_flow_desktop` refuses to open the browser or touch
-   the network and instead emits a `desktop_login_failed` event whose
-   user-facing message points at `ato login`. It must stay `false` until
-   **ato-api#275** (Phase 1b: auth_bridge explicit device confirmation +
-   exchange-time device credential) is not just merged but **deployed to
-   ato-api production** — merge and deploy are distinct events and this
-   depends on both.
+## What was removed
 
-2. **Flip-evidence gate (CI-enforced).**
-   `hardening_flag_requires_recorded_evidence_when_enabled` (`tests.rs`) fails
-   the suite if the flag is ever `true` while
-   `EXTERNAL_BROWSER_LOGIN_HARDENING_EVIDENCE` is still the `PENDING` sentinel.
-   Flipping the flag therefore *requires* recording real merge+deploy evidence
-   in the same commit — it is not a bare boolean a future contributor can flip
-   on discipline alone.
+The migration removes the old State/I/O model, LockDraft engine and WASM compatibility layer, the `capsule` monolith, application execution plans/contracts, old protocol/artifact formats, generic snapshot filesystem package, and all compatibility facade packages. The forbidden legacy package names no longer occur in Cargo metadata or the lockfile.
 
-3. **Release-publish gate (CI-enforced).** `.github/workflows/desktop-release.yml`'s
-   publish job **fails on a release tag** while the flag is still `false`. Since
-   #1078 removed the embedded-WebView login, a desktop build cut today would
-   have *no* in-app sign-in; this gate makes such a login-less build
-   unpublishable. Normal branch CI is unaffected (the gate only runs on release
-   tags).
+## Capability preservation
 
-**Go-live sequence (human-gated, later):**
-`land ato-api#275 → deploy ato-api to production → flip
-EXTERNAL_BROWSER_LOGIN_HARDENING_LANDED to true with recorded evidence in the
-same commit → then a desktop release can be cut.`
+| Capability | New owner |
+| --- | --- |
+| Local and Git repository ingestion, detection, ambiguity evidence | `ato-adapter-repository` |
+| Workspace logical behavior and version-bearing runtime constraints | `ato-semantics-workspace` |
+| Composition and boundary-relative synchronization | `ato-semantics-compose` |
+| Process launch, dependency installation, sandbox, filesystem, network, env and secret binding | `ato-provider-nacelle` |
+| Snapshot capture/restore and host compatibility | `ato-provider-snapshot` |
+| CAS, verified loading, closure, GC, signing and `.capsule` transport | `ato-objects` |
+| Process wire DTOs for CLI, Desktop, guest and netd | `ato-ipc` |
+| `run`, `lock`, `encap`, `decap`, `ps`, `logs`, `stop` product workflows | `apps/cli` |
+| Desktop launcher and process-boundary integration | `apps/desktop` |
 
-## Safety properties
+Secrets are represented in computation identity only by safe binding identifiers; plaintext values stay in provider-owned resolution. Resolution evidence produced by `ato lock` is a derived repository cache, not a semantic primitive.
 
-- **No browser session token ever reaches the desktop/CLI.** The desktop
-  process never reads a browser cookie or session. Its *only* token input is
-  `access_token` from the PKCE `/v1/auth/bridge/exchange` response, obtained by
-  exchanging a one-time `auth_code` + `code_verifier`. The device credential
-  minted server-side (per ato-api#275) is what gets persisted — the browser's
-  own session token is never copied across the boundary.
-- **No token on stdout or in logs.** The success signal crossing the
-  CLI→Dock boundary (`desktop_login_completed`) carries only the publisher
-  handle and a storage-location label. Failure diagnostics from ato-api are
-  split by `sanitize_bridge_failure` into a generic user-facing `message` and a
-  logs-only `detail`; the Dock forwards only `message` into toasts.
-- **Fail-closed by default** (see gates above).
-- **URL passed as a discrete argument on every OS** — the login URL carries a
-  server-chosen `next` parameter and is handed to the browser as one argument,
-  never spliced into a shell string.
+## Canonical scenario
 
-## What this branch adds on top of #1078
+The canonical integration test branches Alice and Bob from the same computation. The name-provider and greeter test semantics derive transitions from their own residuals, the Kernel persists every successor, Compose turns their connected name exchange into `Tau`, and the exported `{name, greeting}` boundary stays invariant. All seven computation refs are distinct. Existing invalid-transition coverage remains, including stale sources, polarity/value mismatches, invalid endpoints/exports, same-node links, and successor-boundary drift.
 
-- **Per-OS browser-open argv is now pure and unit-tested.**
-  `try_open_browser` (`crates/cli/src/application/auth/prompt.rs`) was refactored
-  to build its command via a pure `browser_open_command(os, url)` that takes the
-  OS explicitly, so the argv for macOS / Linux / Windows is testable from a
-  single host build (behavior unchanged: macOS `open <url>`, Linux
-  `xdg-open <url>`, Windows `cmd /C start "" <url>`).
-- **Completion-event token invariant is now pinned by a test.** The
-  `desktop_login_completed` NDJSON payload is built by a pure
-  `desktop_login_completed_event`, guarded by a test asserting it can never
-  carry a token field.
+## Repository layout
 
-## Test coverage
+```text
+lib/{computation,kernel,objects,ipc}
+extensions/semantics/{compose,workspace}
+extensions/adapters/repository
+extensions/providers/{nacelle,snapshot}
+apps/{cli,desktop}
+services/{netd,ato-tsnetd}
+tools/{snapshot-builder,arch-check}
+```
 
-Rust workspace only (no JS tooling). Pure, gate-independent unit tests — the
-runtime gate keeps the full desktop poll loop unreachable in tests, so the
-logic is covered by extracting and directly testing each pure piece rather than
-by flipping the gate or mocking the whole flow:
+No primary workspace package remains under `crates/`.
 
-**OS-specific (macOS / Windows / Linux), `crates/cli/src/application/auth/tests.rs`:**
-- `browser_open_command_macos_uses_open_with_url_as_a_single_arg`
-- `browser_open_command_linux_uses_xdg_open_with_url_as_a_single_arg`
-- `browser_open_command_windows_uses_cmd_start_with_empty_title_and_url_as_a_single_arg`
-- `browser_open_command_keeps_a_url_with_shell_metacharacters_as_one_argument`
-  (all three OSes; proves the `next`-carrying URL is never shell-spliced)
+## Dependency architecture
 
-**Credential / token safety:**
-- `desktop_login_completed_event_never_carries_a_token` (+ `_has_expected_shape`,
-  `_allows_absent_handle`)
-- `persist_session_token_headless_uses_canonical_file_with_0600`,
-  `persist_session_token_interactive_falls_back_to_memory_without_identity`,
-  `persist_session_token_interactive_writes_to_age_when_identity_loaded`
-  (credential save)
+```text
+ato-computation
+  ├─ ato-objects ─ ato-kernel
+  ├─ concrete semantics
+  ├─ adapters
+  └─ providers
 
-**Bridge flow / gate (already present from #1078):**
-- `desktop_device_flow_fails_closed_pending_bridge_hardening` (fail-closed)
-- `hardening_flag_requires_recorded_evidence_when_enabled` (CI flip gate)
-- `desktop_login_gate_user_message_has_no_internal_jargon`,
-  `..._does_not_imply_terminal_fallback_is_safe`
-- `compute_poll_timing_*` (poll timeout cap / interval floor — the expiry
-  arithmetic)
-- `browser_launch_failed_event_carries_login_url_and_sanitized_message`
-  (browser-open failure → actionable fallback payload)
-- `sanitize_bridge_failure_keeps_raw_detail_out_of_the_user_message`
-  (poll / exchange / init failure sanitization)
+ato-ipc ─ providers/services/apps
+apps assemble semantics + adapters + providers
+```
 
-**Dock side, `apps/desktop/src/system_capsule/ato_dock/mod.rs`:**
-- `classify_ndjson_line` cases: completed (poll success), failed (timeout /
-  rejected), `detail`-not-forwarded (exchange failure), browser-launch-failed
-  forwards `login_url` as its own field, malformed/unrecognized ignored
-- `login_guard_rejects_concurrent_acquire_until_released` (single-flight)
+The Kernel has no dependency on Compose, Workspace, Repository, Nacelle, Snapshot, CLI, or Desktop. `tools/arch-check` reads the actual `cargo metadata` graph and enforces layer rules and forbidden-package absence.
 
-## Rollout / rollback
+## Breaking changes
 
-- Ships inert (flag `false`); no user-visible behavior change until the
-  human-gated flip described above.
-- Rollback: revert this branch's commits (the #1078 core reverts independently).
+Compatibility with old State/I/O schemas, LockDraft JSON/WASM APIs, manifest schemas, execution-plan types, wire types, package names, and legacy artifact bytes is intentionally not retained. `capsule.toml` is repository-adapter syntax and compiles away; `.capsule` now transports a root `ComputationRef` plus its verified object closure.
 
-## Human verification required before the flag is flipped
+## Validation
 
-Real interactive browser-opening cannot be automated in a sandbox. Before
-flipping the flag, a human must, on a real machine: trigger Desktop login,
-confirm the OS default browser opens (not an embedded window) at the auth_bridge
-activation URL, and confirm the desktop app keeps polling and completes login
-exactly as `ato login` does. Attach a short screen recording to the flip PR.
+- `cargo fmt --all -- --check`
+- `cargo check --workspace --all-targets --locked`
+- `cargo test --workspace --no-fail-fast`
+- `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`
+- `cargo metadata --format-version 1 --locked`
+- `cargo run -p arch-check --locked`
+- `cargo check --manifest-path apps/desktop/Cargo.toml --all-targets`
+- `cargo test --manifest-path apps/desktop/Cargo.toml`
+- `cargo test --manifest-path apps/desktop/xtask/Cargo.toml`
+- `go test ./...` in `services/ato-tsnetd`
+- `dist plan --output-format=json`
+- local repository run, lock, `.capsule` export/import, sandboxed rematerialization, and Git fixture execution
+
+## Migration notes
+
+Downstream code must consume `ato-computation`, `ato-objects`, `ato-kernel`, or the appropriate extension rather than importing former capsule packages. Producers of old artifact bundles must re-export them through the new object-bundle path. Repository authoring should target the concrete `ato.workspace@1` adapter input instead of relying on legacy manifest compatibility.
