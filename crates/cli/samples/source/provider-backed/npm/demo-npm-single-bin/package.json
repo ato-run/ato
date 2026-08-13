@@ -1,5 +1,0 @@
-{
-  "name": "demo-npm-single-bin",
-  "version": "1.0.0",
-  "bin": "bin/cli.mjs"
-}

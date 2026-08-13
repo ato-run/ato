@@ -6,8 +6,7 @@ name: Release dry-run
 # Motivation (ato-run/ato#758): v0.7.0 shipped 5 build blockers that the normal
 # feature-PR gate never ran — all crate-rename leftovers (`ato-cli->cli`,
 # `ato-netd->netd`) in release tooling:
-#   - crates/cli/wix/main.wxs still said Name='ato-cli'  -> cargo-dist plan failed
-#   - ato-desktop-xtask built crates/ato-cli / crates/ato-netd (gone) -> bundles failed
+#   - package and bundle paths drifted after repository layout changes
 # rust-ci runs clippy/fmt/test but excludes the desktop/xtask packages and never
 # runs cargo-dist, so these only surfaced when the real release.yml /
 # desktop-release.yml ran on the tag. This workflow closes that gap.
