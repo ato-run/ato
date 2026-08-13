@@ -5,29 +5,10 @@
 //! are weaker than the public CLI: arguments may evolve in lockstep
 //! with the calling shell.
 
-use std::path::PathBuf;
-
 use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub(crate) enum InternalCommands {
-    /// Experimental vertical slice for Capsule Protocol State + PTY I/O.
-    #[command(
-        hide = true,
-        about = "Capture or replay a portable Capsule Protocol bundle"
-    )]
-    CapsuleProtocol {
-        #[command(subcommand)]
-        command: CapsuleProtocolInternalCommands,
-    },
-
-    /// Detached Capsule Session Supervisor plumbing.
-    #[command(hide = true, about = "Manage detached Capsule terminal sessions")]
-    CapsuleSession {
-        #[command(subcommand)]
-        command: CapsuleSessionInternalCommands,
-    },
-
     /// Consent-store plumbing surface. Currently only carries the
     /// approve-execution-plan endpoint that the desktop's E302 modal
     /// (and the matching `approve_execution_plan_consent` MCP tool)
@@ -110,91 +91,6 @@ pub(crate) enum InternalCommands {
         /// Emit machine-readable JSON output on stdout.
         #[arg(long, default_value_t = false)]
         json: bool,
-    },
-}
-
-#[derive(Subcommand)]
-pub(crate) enum CapsuleSessionInternalCommands {
-    #[command(hide = true)]
-    Start {
-        bundle: PathBuf,
-        #[arg(long)]
-        into: PathBuf,
-        #[arg(long, default_value_t = false)]
-        no_attach: bool,
-    },
-    #[command(hide = true)]
-    Serve {
-        #[arg(long)]
-        session: String,
-        #[arg(long)]
-        bundle: PathBuf,
-        #[arg(long)]
-        into: PathBuf,
-    },
-    #[command(hide = true)]
-    Attach {
-        session: String,
-        #[arg(long, default_value_t = false)]
-        observe: bool,
-    },
-    #[command(hide = true)]
-    Branch {
-        session: String,
-        #[arg(long)]
-        into: PathBuf,
-        #[arg(long, default_value_t = false)]
-        no_attach: bool,
-    },
-    #[command(hide = true)]
-    Suspend { session: String },
-    #[command(hide = true)]
-    Resume { session: String },
-    #[command(hide = true)]
-    Status { session: String },
-    #[command(hide = true)]
-    Kill { session: String },
-    #[command(hide = true)]
-    List,
-    /// Lease helper. Spawned only by a Supervisor.
-    #[command(hide = true)]
-    Watchdog {
-        #[arg(long)]
-        pid: u32,
-        #[arg(long)]
-        pgid: i32,
-        #[arg(long)]
-        process_start_identity: String,
-        #[arg(long)]
-        lease_fd: i32,
-        #[arg(long)]
-        overlay_root: Option<PathBuf>,
-        #[arg(long)]
-        receipt: Option<PathBuf>,
-    },
-}
-
-#[derive(Subcommand)]
-pub(crate) enum CapsuleProtocolInternalCommands {
-    /// Capture workspace State before running a command and record its PTY I/O.
-    #[command(hide = true, trailing_var_arg = true)]
-    Capture {
-        #[arg(long, default_value = ".")]
-        workspace: PathBuf,
-        #[arg(long)]
-        output: PathBuf,
-        #[arg(required = true, allow_hyphen_values = true)]
-        command: Vec<String>,
-    },
-
-    /// Restore, replay with observed egress, then keep the PTY interactive.
-    #[command(hide = true)]
-    Replay {
-        bundle: PathBuf,
-        #[arg(long)]
-        into: PathBuf,
-        #[arg(long, default_value_t = false)]
-        no_continue: bool,
     },
 }
 
