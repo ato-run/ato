@@ -29,20 +29,16 @@ impl ValidatedComposite {
         &self.residual
     }
 
-    /// Classifies the visibility of an action at a child endpoint.
-    ///
-    /// Connected endpoints synchronize as `tau`; exported endpoints are mapped
-    /// to their parent Port. `None` means the endpoint is neither connected nor
-    /// externally visible.
-    pub fn classify_endpoint(&self, endpoint: &Endpoint) -> Option<CompositeLabel> {
-        if self
-            .residual
+    /// Classifies a validated synchronization across one internal connection.
+    pub fn connection_label(&self, connection: &Connection) -> Option<CompositeLabel> {
+        self.residual
             .connections
-            .iter()
-            .any(|connection| connection.first() == endpoint || connection.second() == endpoint)
-        {
-            return Some(CompositeLabel::Tau);
-        }
+            .contains(connection)
+            .then_some(CompositeLabel::Tau)
+    }
+
+    /// Maps an exported child endpoint to its observable parent Port.
+    pub fn export_label(&self, endpoint: &Endpoint) -> Option<CompositeLabel> {
         self.residual.exports.iter().find_map(|(parent, child)| {
             (child == endpoint).then(|| CompositeLabel::External(parent.clone()))
         })
