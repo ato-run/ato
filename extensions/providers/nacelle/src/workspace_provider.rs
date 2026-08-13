@@ -1,6 +1,7 @@
 //! Physical realization of `ato.workspace@1` computations.
 
 use std::collections::BTreeMap;
+#[cfg(target_os = "linux")]
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitStatus};
@@ -88,7 +89,10 @@ impl NacelleWorkspaceProvider {
             .split_first()
             .ok_or_else(|| ProviderError::new("empty workspace entrypoint"))?;
         let cwd = safe_working_directory(root, &workspace.working_directory)?;
-        let mut command = Command::new(program);
+        let executable = which::which(program).map_err(|error| {
+            ProviderError::new(format!("runtime `{program}` is unavailable: {error}"))
+        })?;
+        let mut command = provider_command(executable, workspace, root)?;
         command.args(args).current_dir(cwd);
         for (name, value) in &workspace.environment {
             command.env(name, value);
@@ -201,7 +205,70 @@ fn require_success(operation: &str, status: ExitStatus) -> Result<(), ProviderEr
     }
 }
 
-#[cfg(unix)]
+fn sandbox_policy(
+    workspace: &WorkspaceResidual,
+    root: &Path,
+) -> Result<SandboxPolicy, ProviderError> {
+    let writable = workspace
+        .realization
+        .writable_paths
+        .iter()
+        .map(|path| materialize_writable_path(root, path))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(SandboxPolicy::for_capsule(root)
+        .allow_read_write(writable)
+        .with_network(!workspace.realization.network_allow.is_empty()))
+}
+
+fn materialize_writable_path(root: &Path, requested: &str) -> Result<PathBuf, ProviderError> {
+    let requested = Path::new(requested);
+    if requested.as_os_str().is_empty()
+        || requested.is_absolute()
+        || requested.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(ProviderError::new("writable path escapes source root"));
+    }
+    let path = root.join(requested);
+    std::fs::create_dir_all(&path).map_err(|error| ProviderError::new(error.to_string()))?;
+    let canonical =
+        std::fs::canonicalize(path).map_err(|error| ProviderError::new(error.to_string()))?;
+    if !canonical.starts_with(root) {
+        return Err(ProviderError::new("writable path escapes source root"));
+    }
+    Ok(canonical)
+}
+
+#[cfg(target_os = "macos")]
+fn provider_command(
+    executable: PathBuf,
+    workspace: &WorkspaceResidual,
+    root: &Path,
+) -> Result<Command, ProviderError> {
+    if !workspace.realization.sandbox_required {
+        return Ok(Command::new(executable));
+    }
+    let profile =
+        crate::system::sandbox::macos::generate_sbpl_profile(&sandbox_policy(workspace, root)?);
+    let mut command = Command::new("/usr/bin/sandbox-exec");
+    command.args(["-p", &profile]).arg(executable);
+    Ok(command)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn provider_command(
+    executable: PathBuf,
+    _workspace: &WorkspaceResidual,
+    _root: &Path,
+) -> Result<Command, ProviderError> {
+    Ok(Command::new(executable))
+}
+
+#[cfg(target_os = "linux")]
 fn configure_sandbox(
     command: &mut Command,
     workspace: &WorkspaceResidual,
@@ -212,15 +279,7 @@ fn configure_sandbox(
     if !workspace.realization.sandbox_required {
         return Ok(());
     }
-    let writable = workspace
-        .realization
-        .writable_paths
-        .iter()
-        .map(|path| safe_working_directory(root, path))
-        .collect::<Result<Vec<_>, _>>()?;
-    let policy = SandboxPolicy::for_capsule(root)
-        .allow_read_write(writable)
-        .with_network(!workspace.realization.network_allow.is_empty());
+    let policy = sandbox_policy(workspace, root)?;
     unsafe {
         command.pre_exec(move || {
             let result = crate::system::sandbox::apply_sandbox(&policy)
@@ -234,13 +293,13 @@ fn configure_sandbox(
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn configure_sandbox(
     _command: &mut Command,
     workspace: &WorkspaceResidual,
     _root: &Path,
 ) -> Result<(), ProviderError> {
-    if workspace.realization.sandbox_required {
+    if workspace.realization.sandbox_required && !cfg!(target_os = "macos") {
         return Err(ProviderError::new(
             "required workspace sandbox is unavailable on this platform",
         ));

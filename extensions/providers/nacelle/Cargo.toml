@@ -28,6 +28,10 @@ layer = "provider"
 name = "nacelle"
 path = "src/lib.rs"
 
+[[bin]]
+name = "nacelle"
+path = "src/main.rs"
+
 [dependencies]
 ato-computation = { path = "../../../lib/computation" }
 ato-semantics-workspace = { path = "../../semantics/workspace" }

@@ -1606,9 +1606,6 @@ struct WorkspacePaths {
     nacelle_manifest: PathBuf,
     netd_manifest: PathBuf,
     target_root: PathBuf,
-    store_root: PathBuf,
-    store_dist_source: PathBuf,
-    store_dist_dest: PathBuf,
 }
 
 impl WorkspacePaths {
@@ -1622,49 +1619,14 @@ impl WorkspacePaths {
             .parent()
             .and_then(Path::parent)
             .map(Path::to_path_buf)
-            .context("failed to resolve repository root from crates/ato-desktop")?;
-        // Layouts probed in priority order:
-        //   1. monorepo:           <repo>/crates/cli (current canonical)
-        //   2. legacy split-repo:  <repo>/apps/ato-cli (pre-M1)
-        //   3. CI sibling clone:   <repo>/../ato-cli (legacy release workflow)
-        // The fallback chain lets a single xtask binary build correctly
-        // in both the monorepo and any leftover mirror checkout while M7
-        // archives the old repos.
-        let ato_root = {
-            let monorepo = repo_root.join("crates").join("cli");
-            if monorepo.exists() {
-                monorepo
-            } else {
-                let legacy_apps = repo_root.join("apps").join("ato-cli");
-                if legacy_apps.exists() {
-                    legacy_apps
-                } else {
-                    desktop_root
-                        .parent()
-                        .map(|p| p.join("ato-cli"))
-                        .unwrap_or_else(|| repo_root.join("ato-cli"))
-                }
-            }
-        };
+            .context("failed to resolve repository root from apps/desktop")?;
+        let ato_root = repo_root.join("apps").join("cli");
         let desktop_manifest = desktop_root.join("Cargo.toml");
         let ato_manifest = ato_root.join("Cargo.toml");
-        // nacelle lives at <repo>/crates/nacelle in the monorepo.
-        let nacelle_manifest = repo_root.join("crates").join("nacelle").join("Cargo.toml");
-        let netd_manifest = repo_root.join("crates").join("netd").join("Cargo.toml");
+        let nacelle_manifest = repo_root
+            .join("extensions/providers/nacelle/Cargo.toml");
+        let netd_manifest = repo_root.join("services/netd/Cargo.toml");
         let target_root = repo_root.join("target");
-        // ato-web lives as a sibling of the ato repo root
-        // (apps/ato-web alongside apps/ato).
-        let store_root = repo_root
-            .parent()
-            .map(|p| p.join("ato-web"))
-            .unwrap_or_else(|| repo_root.join("..").join("ato-web"));
-        let store_dist_source = store_root.join("dist-desktop");
-        let store_dist_dest = desktop_root
-            .join("assets")
-            .join("system")
-            .join("ato-store")
-            .join("dist");
-
         Ok(Self {
             desktop_root,
             desktop_manifest,
@@ -1672,9 +1634,6 @@ impl WorkspacePaths {
             nacelle_manifest,
             netd_manifest,
             target_root,
-            store_root,
-            store_dist_source,
-            store_dist_dest,
         })
     }
 }
@@ -1889,7 +1848,7 @@ mod tests {
     /// Every build manifest the desktop bundler resolves must actually exist.
     /// This is the gate the v0.7.0 release lacked: the `ato-cli->cli` and
     /// `ato-netd->netd` crate renames left `WorkspacePaths::discover` pointing at
-    /// `crates/ato-cli` / `crates/ato-netd`, which no longer exist — and because the
+    /// stale package paths, which no longer exist — and because the
     /// xtask is excluded from `rust-ci`, that only surfaced at tag time when the
     /// desktop bundles failed. An existence check (not a path-string match) catches
     /// any future rename regardless of the new name. See ato-run/ato#758.

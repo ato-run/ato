@@ -14,7 +14,9 @@ pub use bundle::{
 };
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::io::{Cursor, Read};
+use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
 use ato_computation::{
@@ -63,6 +65,24 @@ pub enum ObjectError {
     Computation(#[from] CodecError),
     #[error("object store failed: {0}")]
     Storage(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GcReport {
+    pub retained: usize,
+    pub removed: usize,
+}
+
+#[derive(Debug, Error)]
+pub enum GcError {
+    #[error(transparent)]
+    Bundle(#[from] BundleError),
+    #[error(transparent)]
+    Objects(#[from] ObjectError),
+    #[error("object GC I/O failed: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("object store contains an invalid object filename: {0}")]
+    InvalidReference(String),
 }
 
 pub fn resolve_computation(
@@ -195,6 +215,126 @@ impl ObjectStore for MemoryObjectStore {
     }
 }
 
+/// Filesystem-backed content-addressed object store.
+///
+/// Parsed references map to `<root>/<algorithm>/<digest>`; caller-controlled
+/// paths are never joined directly into the store root.
+#[derive(Debug, Clone)]
+pub struct FsObjectStore {
+    root: PathBuf,
+}
+
+impl FsObjectStore {
+    pub fn open(root: impl Into<PathBuf>) -> Result<Self, ObjectError> {
+        let root = root.into();
+        fs::create_dir_all(&root)?;
+        Ok(Self { root })
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    fn path(&self, reference: &ContentRef) -> PathBuf {
+        let (_, digest) = reference
+            .as_str()
+            .split_once(':')
+            .expect("ContentRef always contains an algorithm separator");
+        self.root.join(reference.algorithm()).join(digest)
+    }
+
+    /// Removes objects outside the closure of the supplied computation roots
+    /// and explicitly retained provider materializations.
+    pub fn gc(
+        &self,
+        roots: &[ComputationRef],
+        retained_materializations: &[ContentRef],
+        references: &ReferenceRegistry,
+    ) -> Result<GcReport, GcError> {
+        let mut retained: std::collections::BTreeSet<ContentRef> =
+            retained_materializations.iter().cloned().collect();
+        for root in roots {
+            retained.extend(bundle::closure(root, self, references)?.into_keys());
+        }
+        let mut removed = 0;
+        for algorithm in ["blake3", "sha256"] {
+            let directory = self.root.join(algorithm);
+            if !directory.is_dir() {
+                continue;
+            }
+            for entry in fs::read_dir(directory)? {
+                let entry = entry?;
+                if !entry.file_type()?.is_file() {
+                    continue;
+                }
+                let reference = ContentRef::parse(format!(
+                    "{algorithm}:{}",
+                    entry.file_name().to_string_lossy()
+                ))
+                .map_err(|error| GcError::InvalidReference(error.to_string()))?;
+                if !retained.contains(&reference) {
+                    fs::remove_file(entry.path())?;
+                    removed += 1;
+                }
+            }
+        }
+        Ok(GcReport {
+            retained: retained.len(),
+            removed,
+        })
+    }
+}
+
+impl ObjectResolver for FsObjectStore {
+    fn metadata(&self, reference: &ContentRef) -> Result<ObjectMetadata, ObjectError> {
+        let metadata = fs::metadata(self.path(reference)).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                ObjectError::NotFound(reference.clone())
+            } else {
+                ObjectError::Io(error)
+            }
+        })?;
+        Ok(ObjectMetadata {
+            size: metadata.len(),
+        })
+    }
+
+    fn open(&self, reference: &ContentRef) -> Result<Box<dyn Read + Send + '_>, ObjectError> {
+        let file = fs::File::open(self.path(reference)).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                ObjectError::NotFound(reference.clone())
+            } else {
+                ObjectError::Io(error)
+            }
+        })?;
+        Ok(Box::new(file))
+    }
+}
+
+impl ObjectStore for FsObjectStore {
+    fn insert(&self, reference: &ContentRef, bytes: &[u8]) -> Result<(), ObjectError> {
+        verify_content(reference, bytes)?;
+        let path = self.path(reference);
+        if path.is_file() {
+            return verify_content(reference, &fs::read(path)?);
+        }
+        fs::create_dir_all(path.parent().expect("object path has a parent"))?;
+        let temporary = path.with_extension(format!("new-{}", std::process::id()));
+        fs::write(&temporary, bytes)?;
+        match fs::rename(&temporary, &path) {
+            Ok(()) => Ok(()),
+            Err(_error) if path.is_file() => {
+                let _ = fs::remove_file(&temporary);
+                verify_content(reference, &fs::read(path)?)
+            }
+            Err(error) => {
+                let _ = fs::remove_file(&temporary);
+                Err(ObjectError::Io(error))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -233,5 +373,62 @@ mod tests {
         let resolved = resolve_computation(&store, &reference).unwrap();
 
         assert_eq!(resolved.object(), &object);
+    }
+
+    #[test]
+    fn filesystem_store_round_trips_verified_objects() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = FsObjectStore::open(directory.path()).unwrap();
+        let reference = store.put(b"persistent").unwrap();
+
+        assert_eq!(
+            read_exact_object(&store, &reference, 10, 10).unwrap(),
+            b"persistent"
+        );
+        assert!(store.path(&reference).starts_with(directory.path()));
+    }
+
+    #[test]
+    fn filesystem_gc_keeps_roots_and_removes_unreachable_objects() {
+        struct NoReferences(SemanticsId);
+        impl ComputationReferences for NoReferences {
+            fn semantics(&self) -> &SemanticsId {
+                &self.0
+            }
+
+            fn outgoing(
+                &self,
+                _computation: &ResolvedComputation,
+                _objects: &dyn ObjectResolver,
+            ) -> Result<Vec<ObjectLink>, BundleError> {
+                Ok(Vec::new())
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let store = FsObjectStore::open(directory.path()).unwrap();
+        let residual = store.put(b"kept residual").unwrap();
+        let semantics = SemanticsId::parse("example.gc@1").unwrap();
+        let object = ComputationObject {
+            semantics: semantics.clone(),
+            boundary: BTreeMap::new(),
+            residual,
+        };
+        let bytes = encode_computation_object(&object).unwrap();
+        let root = computation_ref(&object).unwrap();
+        store.insert(root.content_ref(), &bytes).unwrap();
+        let unreachable = store.put(b"remove me").unwrap();
+        let mut registry = ReferenceRegistry::default();
+        registry
+            .register(std::sync::Arc::new(NoReferences(semantics)))
+            .unwrap();
+
+        let report = store.gc(&[root], &[], &registry).unwrap();
+
+        assert_eq!(report.removed, 1);
+        assert!(matches!(
+            store.metadata(&unreachable),
+            Err(ObjectError::NotFound(_))
+        ));
     }
 }

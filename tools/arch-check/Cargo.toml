@@ -1,0 +1,17 @@
+[package]
+name = "arch-check"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Validate Ato package dependency architecture from cargo metadata"
+
+[package.metadata.ato-architecture]
+layer = "tool"
+
+[[bin]]
+name = "arch-check"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+cargo_metadata = "0.23"
