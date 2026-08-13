@@ -646,14 +646,16 @@ impl SourceRuntime {
                             });
                         }
                     }
-                    TerminalCommand::TerminalSignal { session_id, signal }
-                        if session_id == session_id_b =>
+                    TerminalCommand::TerminalSignal {
+                        session_id,
+                        signal: _requested_signal,
+                    } if session_id == session_id_b =>
                     {
                         #[cfg(unix)]
                         if let Some(pid) = child_pid {
                             use nix::sys::signal::{Signal, kill};
                             use nix::unistd::Pid;
-                            let sig = match signal.as_str() {
+                            let sig = match _requested_signal.as_str() {
                                 "SIGINT" => Some(Signal::SIGINT),
                                 "SIGTERM" => Some(Signal::SIGTERM),
                                 "SIGHUP" => Some(Signal::SIGHUP),
