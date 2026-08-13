@@ -54,10 +54,11 @@ where
 mod cuda_backend {
     use super::VramBackend;
     use anyhow::Result;
-    use cudarc::driver::CudaDevice;
+    use cudarc::driver::{CudaDevice, result};
+    use std::sync::Arc;
 
     pub struct CudaVramBackend {
-        device: CudaDevice,
+        device: Arc<CudaDevice>,
         index: usize,
     }
 
@@ -74,11 +75,13 @@ mod cuda_backend {
         }
 
         fn total_bytes(&self) -> Result<u64> {
-            Ok(self.device.memory_info()?.total)
+            let (_, total) = result::mem_get_info()?;
+            Ok(total as u64)
         }
 
         fn free_bytes(&self) -> Result<u64> {
-            Ok(self.device.memory_info()?.free)
+            let (free, _) = result::mem_get_info()?;
+            Ok(free as u64)
         }
 
         fn zero_chunk(&self, bytes: usize) -> Result<()> {

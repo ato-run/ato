@@ -99,6 +99,7 @@ shell-words = "1.1.1"
 # Phase 3: Sandbox (Linux Landlock LSM)
 landlock = "0.4"
 aya = "0.13"
+cudarc = { version = "0.12.1", optional = true, default-features = false, features = ["std", "driver", "cuda-12000"] }
 
 [features]
 default = ["engine"]
@@ -110,7 +111,7 @@ phase2 = []
 # Embedded mode: minimal dependencies for ato-cli integration
 embedded = []
 # Optional CUDA support for VRAM checks
-cuda = []
+cuda = ["dep:cudarc"]
 
 [dev-dependencies]
 base64 = "0.22"
