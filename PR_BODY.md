@@ -1,14 +1,5 @@
 # Rebuild Ato around addressable computations
 
-## Stack order
-
-1. Foundation: computation, kernel, objects, compose, and the first repository run slice.
-2. Providers and repository inference: snapshot/provider boundaries, object bundles, IPC, and LockDraft removal.
-3. Legacy removal and final layout: State/I/O removal and capsule-monolith dismantling.
-4. This PR: final validation, release metadata, and stack-wide migration notes.
-
-Review and merge the stack in order. The semantic and behavioral description below covers the completed stack as a whole.
-
 ## Goal
 
 This migration rebuilds Ato around one principle: **Ato advances addressable computations**. `ComputationObject` is the canonical semantic value, `ComputationRef` is its immutable address and Capsule identity, and a `Run` is only a mutable cursor to the current ref. History remains optional evidence and does not participate in computation identity.
