@@ -8,10 +8,10 @@
 //! - Windows Sandbox: https://learn.microsoft.com/en-us/windows/security/application-security/application-isolation/windows-sandbox/
 //! - Sandboxie Plus: https://github.com/sandboxie-plus/Sandboxie
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::launcher::{LaunchRequest, LaunchResult, RuntimeError, SourceTarget};
 
@@ -99,11 +99,6 @@ pub fn is_sandboxie_available() -> bool {
     which::which("Start.exe")
         .map(|p| p.to_string_lossy().contains("Sandboxie"))
         .unwrap_or(false)
-}
-
-/// Check if native sandbox is available on Windows
-pub fn is_native_available() -> bool {
-    is_windows_sandbox_available() || is_sandboxie_available()
 }
 
 /// Get Sandboxie Start.exe path
@@ -229,7 +224,7 @@ async fn launch_with_windows_sandbox(
 /// - vGPU: Disable (not needed for scripts)
 fn generate_wsb_config(
     target: &SourceTarget,
-    toolchain_path: &PathBuf,
+    toolchain_path: &Path,
     source_read_only: bool,
 ) -> String {
     let source_dir = target.source_dir.to_string_lossy();
@@ -403,31 +398,6 @@ async fn launch_with_sandboxie(
         log_path: Some(log_path),
         port: None,
     })
-}
-
-/// Stop a Sandboxie sandbox by name
-pub fn stop_sandboxie_box(workload_id: &str) -> Result<(), RuntimeError> {
-    let start_exe = match get_sandboxie_start_path() {
-        Some(p) => p,
-        None => return Ok(()), // Not installed, nothing to stop
-    };
-
-    let box_name = format!("nacelle_{}", &workload_id[..8.min(workload_id.len())]);
-
-    let output = Command::new(&start_exe)
-        .args([&format!("/box:{}", box_name), "/terminate"])
-        .output()
-        .map_err(|e| RuntimeError::CommandExecution {
-            operation: "Sandboxie terminate".to_string(),
-            source: e,
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        warn!("Failed to terminate Sandboxie box {}: {}", box_name, stderr);
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]

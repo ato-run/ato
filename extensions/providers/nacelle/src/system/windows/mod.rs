@@ -21,6 +21,12 @@ impl WindowsSandbox {
     }
 }
 
+impl Default for WindowsSandbox {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl NetworkSandbox for WindowsSandbox {
     async fn prepare(&mut self, _rule: IsolationRule) -> Result<(), SystemError> {
@@ -33,7 +39,7 @@ impl NetworkSandbox for WindowsSandbox {
 
     fn apply_to_child(&self, _cmd: &mut Command) -> Result<(), SystemError> {
         if let Some(container) = &self.app_container {
-            let _ = container.apply_to_child()?;
+            container.apply_to_child()?;
         }
         Err(SystemError::Unsupported(
             "Windows network sandbox not implemented".to_string(),

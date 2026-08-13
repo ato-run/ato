@@ -12,6 +12,7 @@ use ato_semantics_workspace::{
     ProviderError, WorkspaceOutcome, WorkspaceProvider, WorkspaceResidual,
 };
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::system::sandbox::SandboxPolicy;
 
 pub trait SecretBackend: Send + Sync {
@@ -205,6 +206,7 @@ fn require_success(operation: &str, status: ExitStatus) -> Result<(), ProviderEr
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn sandbox_policy(
     workspace: &WorkspaceResidual,
     root: &Path,
@@ -220,6 +222,7 @@ fn sandbox_policy(
         .with_network(!workspace.realization.network_allow.is_empty()))
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn materialize_writable_path(root: &Path, requested: &str) -> Result<PathBuf, ProviderError> {
     let requested = Path::new(requested);
     if requested.as_os_str().is_empty()

@@ -97,7 +97,8 @@ struct SupervisorActor {
     children: HashMap<String, Child>,
     /// Channel to receive messages from handles
     receiver: mpsc::UnboundedReceiver<SupervisorMessage>,
-    /// Shutdown timeout in seconds
+    /// Shutdown timeout in seconds (Unix process-group termination only).
+    #[cfg(unix)]
     shutdown_timeout_secs: u64,
 }
 
@@ -107,6 +108,7 @@ impl SupervisorActor {
         Self {
             children: HashMap::new(),
             receiver,
+            #[cfg(unix)]
             shutdown_timeout_secs: 5,
         }
     }
