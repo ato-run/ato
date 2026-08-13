@@ -18,8 +18,8 @@ use std::process::Command;
 use ato_computation::{Boundary, ComputationObject, ContentRef, SemanticsId};
 use ato_objects::{ObjectError, ObjectStore};
 use ato_semantics_workspace::{
-    RealizationConstraint, SourceClosure, SourceEntry, ToolchainConstraint, WORKSPACE_SEMANTICS_ID,
-    WorkspacePhase, WorkspaceResidual, encode_workspace_residual,
+    RealizationConstraint, SourceClosure, SourceEntry, SourceEntryKind, ToolchainConstraint,
+    WORKSPACE_SEMANTICS_ID, WorkspacePhase, WorkspaceResidual, encode_workspace_residual,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -249,6 +249,11 @@ fn seal_source(
             path,
             content: content.as_str().to_owned(),
             executable: executable(&metadata),
+            kind: if metadata.file_type().is_symlink() {
+                SourceEntryKind::Symlink
+            } else {
+                SourceEntryKind::File
+            },
         });
     }
     entries.sort_by(|left, right| left.path.cmp(&right.path));
@@ -256,6 +261,89 @@ fn seal_source(
     let closure = serde_jcs::to_vec(&SourceClosure { entries })?;
     let source = objects.put(&closure)?;
     Ok((source, observed))
+}
+
+pub fn materialize_source(
+    source: &ContentRef,
+    objects: &dyn ato_objects::ObjectResolver,
+    destination: &Path,
+) -> Result<(), RepositoryError> {
+    if destination.exists() {
+        return Err(RepositoryError::Authoring(format!(
+            "materialization destination already exists: {}",
+            destination.display()
+        )));
+    }
+    let metadata = objects.metadata(source)?;
+    let bytes =
+        ato_objects::read_exact_object(objects, source, metadata.size, MAX_SOURCE_FILE_BYTES)?;
+    let closure: SourceClosure = serde_json::from_slice(&bytes)?;
+    fs::create_dir_all(destination)?;
+    for entry in closure.entries {
+        let relative = Path::new(&entry.path);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err(RepositoryError::Authoring(format!(
+                "source closure path escapes destination: {}",
+                entry.path
+            )));
+        }
+        let reference = ContentRef::parse(entry.content)
+            .map_err(|error| RepositoryError::Authoring(error.to_string()))?;
+        let metadata = objects.metadata(&reference)?;
+        let content = ato_objects::read_exact_object(
+            objects,
+            &reference,
+            metadata.size,
+            MAX_SOURCE_FILE_BYTES,
+        )?;
+        let output = destination.join(relative);
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        match entry.kind {
+            SourceEntryKind::File => {
+                fs::write(&output, content)?;
+                set_executable(&output, entry.executable)?;
+            }
+            SourceEntryKind::Symlink => materialize_symlink(&output, &content)?,
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_executable(path: &Path, executable: bool) -> Result<(), RepositoryError> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = if executable { 0o755 } else { 0o644 };
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_executable(_path: &Path, _executable: bool) -> Result<(), RepositoryError> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn materialize_symlink(path: &Path, content: &[u8]) -> Result<(), RepositoryError> {
+    use std::os::unix::fs::symlink;
+    let target = std::str::from_utf8(content)
+        .map_err(|_| RepositoryError::Authoring("non-UTF-8 symlink target".to_owned()))?;
+    let target = Path::new(target);
+    validate_symlink(target, path)?;
+    symlink(target, path)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn materialize_symlink(_path: &Path, _content: &[u8]) -> Result<(), RepositoryError> {
+    Err(RepositoryError::Authoring(
+        "symlink source entries are unavailable on this platform".to_owned(),
+    ))
 }
 
 fn ignored(path: &Path, root: &Path) -> bool {

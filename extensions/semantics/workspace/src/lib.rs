@@ -44,6 +44,14 @@ pub struct SourceEntry {
     pub path: String,
     pub content: String,
     pub executable: bool,
+    pub kind: SourceEntryKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceEntryKind {
+    File,
+    Symlink,
 }
 
 pub struct WorkspaceReferences {

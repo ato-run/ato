@@ -18,6 +18,10 @@ pub(crate) enum DecapCommands {
         /// Friendly local name. Defaults to the Capsule filename.
         #[arg(long, value_name = "NAME")]
         name: Option<String>,
+
+        /// Internal detached worker marker.
+        #[arg(long, hide = true, default_value_t = false)]
+        worker: bool,
     },
 
     /// List local Capsule Sessions.
@@ -27,14 +31,14 @@ pub(crate) enum DecapCommands {
         json: bool,
     },
 
-    /// Attach to an interactive Capsule Session.
+    /// Read output from a local Capsule run.
     Attach {
         /// Session name.
         #[arg(value_name = "NAME")]
         name: String,
     },
 
-    /// Stop a Capsule Session.
+    /// Stop a local Capsule run.
     Stop {
         /// Session name.
         #[arg(value_name = "NAME")]

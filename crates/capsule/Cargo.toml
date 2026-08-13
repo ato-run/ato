@@ -15,11 +15,7 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = "1.0"
-capsule-codec = { path = "../capsule-codec", version = "0.1.0" }
-capsule-adapter-state-io-v1 = { path = "../capsule-compat-v1", version = "0.1.0" }
 ato-computation = { path = "../../lib/computation", version = "0.1.0" }
-capsule-protocol = { path = "../capsule-protocol", version = "0.1.0" }
-capsule-session-runtime = { path = "../capsule-session-runtime", version = "0.1.0" }
 ato-ipc = { path = "../../lib/ipc", version = "0.1.0" }
 ato-adapter-repository = { path = "../../extensions/adapters/repository", version = "0.1.0" }
 libc = "0.2"
