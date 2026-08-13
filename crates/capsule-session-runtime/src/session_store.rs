@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::fs::File;
 
-use capsule_core::{ComputationRef, ComputationTypeId, ContentRef as ComputationObjectRef};
+use capsule_core::ComputationRef;
 use capsule_protocol::{ContentRef as ProtocolContentRef, StateTypeId};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -172,9 +172,8 @@ pub enum StoredRuntimeProfile {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StoredComputationOrigin {
     Native {
-        computation_type: String,
-        #[serde(alias = "computation_ref")]
-        object_ref: String,
+        #[serde(alias = "object_ref")]
+        computation_ref: String,
     },
     #[serde(rename = "legacy_v3_state", alias = "legacy_state_io")]
     LegacyV3State {
@@ -222,13 +221,8 @@ impl StoredProtocolSession {
         }
         SessionId::parse(self.session_id.to_string())?;
         match &self.origin_computation {
-            StoredComputationOrigin::Native {
-                computation_type,
-                object_ref,
-            } => {
-                ComputationTypeId::parse(computation_type)
-                    .map_err(|error| SessionStoreError::InvalidRecord(error.to_string()))?;
-                ComputationObjectRef::parse(object_ref)
+            StoredComputationOrigin::Native { computation_ref } => {
+                ComputationRef::parse(computation_ref)
                     .map_err(|error| SessionStoreError::InvalidRecord(error.to_string()))?;
             }
             StoredComputationOrigin::LegacyV3State {
@@ -357,8 +351,7 @@ impl StoredProtocolSession {
             StoredComputationOrigin::LegacyV3State { .. }
         ) {
             self.origin_computation = StoredComputationOrigin::Native {
-                computation_type: computation.computation_type.to_string(),
-                object_ref: computation.object_ref.to_string(),
+                computation_ref: computation.to_string(),
             };
         }
     }
@@ -544,6 +537,18 @@ fn migrate_legacy_v4_shape(value: &mut Value) -> Result<(), SessionStoreError> {
     {
         object.insert("origin_computation".to_owned(), origin);
     }
+    if let Some(origin) = object
+        .get_mut("origin_computation")
+        .and_then(Value::as_object_mut)
+        && origin.get("kind").and_then(Value::as_str) == Some("native")
+    {
+        if !origin.contains_key("computation_ref")
+            && let Some(reference) = origin.remove("object_ref")
+        {
+            origin.insert("computation_ref".to_owned(), reference);
+        }
+        origin.remove("computation_type");
+    }
 
     let needs_nesting = object
         .get("runtime_profile")
@@ -698,8 +703,7 @@ mod tests {
             session_id: SessionId::parse("session-1").expect("session id"),
             lifecycle: "running".to_owned(),
             origin_computation: StoredComputationOrigin::Native {
-                computation_type: "ato.computation.test@1".to_owned(),
-                object_ref: format!("blake3:{}", "a".repeat(64)),
+                computation_ref: format!("blake3:{}", "a".repeat(64)),
             },
             runtime_profile: StoredRuntimeProfile::legacy_v1(
                 StoredLegacyV1Materialization::WorkspacePty {
@@ -762,6 +766,13 @@ mod tests {
         let object = value.as_object().unwrap();
 
         assert!(object.contains_key("origin_computation"));
+        assert_eq!(
+            value["origin_computation"],
+            serde_json::json!({
+                "kind": "native",
+                "computation_ref": format!("blake3:{}", "a".repeat(64)),
+            })
+        );
         for legacy_field in [
             "base_computation",
             "durable_frontier",
@@ -784,6 +795,30 @@ mod tests {
         let supervisor = NewSupervisorIdentity::generate(3, 100, "start-100");
         let expected = stored_session(supervisor.identity);
         let value = legacy_v4_value(&expected);
+        let path = directory.path().join("session-1");
+        fs::create_dir(&path).unwrap();
+        fs::write(
+            path.join("session.json"),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(store.read(&expected.session_id).unwrap(), expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prior_v4_native_identity_migrates_to_computation_ref_only() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let store = CapsuleProtocolSessionStore::open(directory.path()).expect("store");
+        let supervisor = NewSupervisorIdentity::generate(3, 100, "start-100");
+        let expected = stored_session(supervisor.identity);
+        let mut value = serde_json::to_value(&expected).unwrap();
+        value["origin_computation"] = serde_json::json!({
+            "kind": "native",
+            "computation_type": "ato.computation.test@1",
+            "object_ref": format!("blake3:{}", "a".repeat(64)),
+        });
         let path = directory.path().join("session-1");
         fs::create_dir(&path).unwrap();
         fs::write(
@@ -888,14 +923,8 @@ mod tests {
             state_type: "ato.state.test@1".to_owned(),
             state_ref: format!("blake3:{}", "b".repeat(64)),
         };
-        let first = ComputationRef {
-            computation_type: ComputationTypeId::parse("ato.computation.first@1").unwrap(),
-            object_ref: ComputationObjectRef::parse(format!("blake3:{}", "c".repeat(64))).unwrap(),
-        };
-        let second = ComputationRef {
-            computation_type: ComputationTypeId::parse("ato.computation.second@1").unwrap(),
-            object_ref: ComputationObjectRef::parse(format!("blake3:{}", "d".repeat(64))).unwrap(),
-        };
+        let first = ComputationRef::parse(format!("blake3:{}", "c".repeat(64))).unwrap();
+        let second = ComputationRef::parse(format!("blake3:{}", "d".repeat(64))).unwrap();
 
         session.upgrade_legacy_origin(&first);
         session.upgrade_legacy_origin(&second);
@@ -903,8 +932,7 @@ mod tests {
         assert_eq!(
             session.origin_computation,
             StoredComputationOrigin::Native {
-                computation_type: first.computation_type.to_string(),
-                object_ref: first.object_ref.to_string(),
+                computation_ref: first.to_string(),
             }
         );
     }

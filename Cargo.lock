@@ -1012,8 +1012,8 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "bollard",
+ "capsule-adapter-state-io-v1",
  "capsule-codec",
- "capsule-compat-v1",
  "capsule-core",
  "capsule-protocol",
  "capsule-session-runtime",
@@ -1070,6 +1070,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "capsule-adapter-state-io-v1"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "capsule-codec",
+ "capsule-core",
+ "capsule-core-codec",
+ "capsule-protocol",
+ "libc",
+ "serde",
+ "serde_jcs",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "capsule-codec"
 version = "0.1.0"
 dependencies = [
@@ -1082,23 +1098,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "capsule-compat-v1"
+name = "capsule-core"
 version = "0.1.0"
 dependencies = [
- "blake3",
- "capsule-codec",
- "capsule-core",
- "capsule-protocol",
- "serde",
- "serde_jcs",
- "tempfile",
  "thiserror 2.0.18",
 ]
 
 [[package]]
-name = "capsule-core"
+name = "capsule-core-codec"
 version = "0.1.0"
 dependencies = [
+ "blake3",
+ "capsule-core",
+ "hex",
+ "serde",
+ "serde_jcs",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 
@@ -1115,6 +1130,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "capsule-core",
+ "capsule-core-codec",
  "capsule-protocol",
  "rand 0.8.6",
  "serde",

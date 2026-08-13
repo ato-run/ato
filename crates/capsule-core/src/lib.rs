@@ -1,8 +1,7 @@
-//! Protocol-independent semantic model for immutable Ato computations.
+//! Protocol-independent semantic representation of sealed Ato computations.
 //!
-//! A computation's typed boundary is stored inside the content-addressed
-//! [`ComputationObject`]. Protocol records, runtime materializations, traces,
-//! evaluators, and Connectors intentionally live outside this crate.
+//! Runtime process states, calculus names, codecs, evaluators, persistence,
+//! traces, and materializations intentionally live outside this crate.
 
 #![forbid(unsafe_code)]
 
@@ -14,13 +13,6 @@ use thiserror::Error;
 
 /// Maximum UTF-8 byte length of every Core identifier.
 pub const MAX_IDENTIFIER_BYTES: usize = 255;
-
-/// Generic schema for a computation object whose body schema is type-defined.
-pub const COMPUTATION_OBJECT_SCHEMA: &str = "capsule.computation.object@1";
-
-/// Composition is represented as an ordinary computation type, not a second
-/// semantic primitive.
-pub const COMPOSITE_COMPUTATION_TYPE: &str = "capsule.computation.compose@1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("invalid {kind} `{value}`: {reason}")]
@@ -169,8 +161,8 @@ macro_rules! versioned_id {
 }
 
 component_id!(PortId, "port id");
-versioned_id!(ComputationSchemaId, "computation schema id");
-versioned_id!(ComputationTypeId, "computation type id");
+component_id!(RoleId, "role id");
+versioned_id!(SemanticsId, "semantics id");
 versioned_id!(ProtocolId, "protocol id");
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -230,49 +222,65 @@ impl FromStr for ContentRef {
     }
 }
 
-/// An immutable residual computation. `object_ref` addresses an object that
-/// includes the computation's boundary.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ComputationRef {
-    pub computation_type: ComputationTypeId,
-    pub object_ref: ContentRef,
+/// Exact identity of a sealed canonical [`ComputationObject`].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ComputationRef(ContentRef);
+
+impl ComputationRef {
+    pub fn parse(value: impl Into<String>) -> Result<Self, IdentifierError> {
+        let reference = ContentRef::parse(value)?;
+        if reference.algorithm() != "blake3" {
+            return Err(invalid(
+                "computation ref",
+                reference.as_str(),
+                "canonical computation objects use blake3",
+            ));
+        }
+        Ok(Self(reference))
+    }
+
+    pub fn content_ref(&self) -> &ContentRef {
+        &self.0
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PortMode {
-    IngressOnly,
-    EgressOnly,
-    Duplex,
+impl fmt::Display for ComputationRef {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
 }
 
-/// One typed opening in a computation boundary.
+impl FromStr for ComputationRef {
+    type Err = IdentifierError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
+    }
+}
+
+/// One typed opening in a sealed computation boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortDef {
     pub protocol: ProtocolId,
-    pub mode: PortMode,
-    pub config_ref: Option<ContentRef>,
+    pub role: RoleId,
 }
 
-/// The complete open boundary of a computation.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Boundary {
-    pub ports: BTreeMap<PortId, PortDef>,
-}
+/// Interface signature exposed by a sealed computation.
+pub type Boundary = BTreeMap<PortId, PortDef>;
 
-/// Content-addressed computation value. The computation type defines the body
-/// schema; the boundary remains part of this object's identity.
+/// Canonicalizable sealed representation of a residual computation.
+///
+/// The semantics module interprets `residual`, including any mapping from
+/// stable boundary Port IDs to runtime calculus names or child Ports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComputationObject {
-    pub schema: ComputationSchemaId,
+    pub semantics: SemanticsId,
     pub boundary: Boundary,
-    pub body: ContentRef,
-}
-
-/// A computation reference resolved to its hash-validated object.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedComputation {
-    pub reference: ComputationRef,
-    pub object: ComputationObject,
+    pub residual: ContentRef,
 }
 
 #[cfg(test)]
@@ -280,37 +288,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn computation_reference_names_only_type_and_complete_object() {
-        let reference = ComputationRef {
-            computation_type: ComputationTypeId::parse("capsule.computation.test@1").unwrap(),
-            object_ref: ContentRef::parse(format!("blake3:{}", "ab".repeat(32))).unwrap(),
-        };
+    fn computation_reference_is_only_a_sealed_object_address() {
+        let reference = ComputationRef::parse(format!("blake3:{}", "ab".repeat(32))).unwrap();
 
-        assert_eq!(
-            reference.computation_type.as_str(),
-            "capsule.computation.test@1"
-        );
-        assert_eq!(reference.object_ref.algorithm(), "blake3");
+        assert_eq!(reference.content_ref().algorithm(), "blake3");
     }
 
     #[test]
-    fn boundary_is_inside_the_resolved_computation_object() {
+    fn computation_reference_rejects_noncanonical_hash_algorithm() {
+        let result = ComputationRef::parse(format!("sha256:{}", "ab".repeat(32)));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn boundary_declares_protocol_and_role_without_runtime_direction() {
         let port = PortId::parse("greeter.name").unwrap();
         let object = ComputationObject {
-            schema: ComputationSchemaId::parse(COMPUTATION_OBJECT_SCHEMA).unwrap(),
-            boundary: Boundary {
-                ports: BTreeMap::from([(
-                    port.clone(),
-                    PortDef {
-                        protocol: ProtocolId::parse("example.greeter.text@1").unwrap(),
-                        mode: PortMode::IngressOnly,
-                        config_ref: None,
-                    },
-                )]),
-            },
-            body: ContentRef::parse(format!("blake3:{}", "cd".repeat(32))).unwrap(),
+            semantics: SemanticsId::parse("example.greeter@1").unwrap(),
+            boundary: BTreeMap::from([(
+                port.clone(),
+                PortDef {
+                    protocol: ProtocolId::parse("example.text@1").unwrap(),
+                    role: RoleId::parse("server").unwrap(),
+                },
+            )]),
+            residual: ContentRef::parse(format!("blake3:{}", "cd".repeat(32))).unwrap(),
         };
 
-        assert_eq!(object.boundary.ports[&port].mode, PortMode::IngressOnly);
+        assert_eq!(object.boundary[&port].role.as_str(), "server");
     }
 }
