@@ -7,8 +7,8 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use protocol::binding_control::HostToAgent;
-use protocol::binding_lease::{BindingLease, BindingLeaseId, BindingName, SecretValue};
+use ato_ipc::binding_control::HostToAgent;
+use ato_ipc::binding_lease::{BindingLease, BindingLeaseId, BindingName, SecretValue};
 
 #[test]
 fn agent_binary_delivers_to_tmpfs_reports_ready_and_scrubs_on_stop() {

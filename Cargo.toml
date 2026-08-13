@@ -15,11 +15,11 @@ members = [
     "crates/capsule-session-runtime",
     "extensions/providers/snapshot",
     "tools/snapshot-builder",
-    "crates/protocol",
+    "lib/ipc",
     "extensions/providers/snapshot/guest-agent",
     "crates/cli/lock-draft-engine",
     "extensions/providers/nacelle",
-    "crates/netd",
+    "services/netd",
 ]
 
 # `desktop` (and its xtask) are kept OUT of the workspace because their
@@ -27,13 +27,13 @@ members = [
 # and cause `cargo package --workspace` to fail. release-plz invokes
 # `cargo package` to compute version diffs even for crates marked
 # `release = false`, so excluding them entirely is the only reliable fix.
-# Builds inside `crates/desktop/` still work — the directory just has its
+# Builds inside `apps/desktop/` still work — the directory just has its
 # own Cargo.lock instead of sharing the workspace lockfile.
 exclude = [
-    "crates/desktop",
-    "crates/desktop/xtask",
-    "crates/desktop/.tmp",
-    "crates/desktop/vendor",
+    "apps/desktop",
+    "apps/desktop/xtask",
+    "apps/desktop/.tmp",
+    "apps/desktop/vendor",
     "sidecars/ato-tsnetd",
 ]
 

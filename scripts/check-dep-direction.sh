@@ -151,7 +151,7 @@ check_allowed_workspace_deps() {
 echo "Checking workspace dependency direction..."
 
 # Semantic and IPC roots may not depend on any other workspace package.
-check_dag_root "protocol" "crates/protocol/Cargo.toml"
+check_dag_root "protocol" "lib/ipc/Cargo.toml"
 check_dag_root "capsule-protocol" "crates/capsule-protocol/Cargo.toml"
 check_dag_root "capsule-core" "crates/capsule-core/Cargo.toml"
 
@@ -165,7 +165,7 @@ check_forbidden "capsule" "crates/capsule/Cargo.toml" \
   cli desktop netd nacelle
 
 # netd: may dep protocol; not the rest.
-check_forbidden "netd" "crates/netd/Cargo.toml" \
+check_forbidden "netd" "services/netd/Cargo.toml" \
   capsule cli desktop nacelle
 
 # nacelle: may dep protocol; not the rest.
@@ -177,7 +177,7 @@ check_forbidden "cli" "crates/cli/Cargo.toml" \
   desktop
 
 # desktop: may dep protocol / capsule; not the rest.
-check_forbidden "desktop" "crates/desktop/Cargo.toml" \
+check_forbidden "desktop" "apps/desktop/Cargo.toml" \
   cli netd nacelle
 
 # Banned legacy package names: must not appear as a crate dependency or as a

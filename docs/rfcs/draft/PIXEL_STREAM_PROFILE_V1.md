@@ -4,7 +4,7 @@ status: draft
 date: "2026-07-14"
 author: "@koh0920"
 ssot:
-  - "crates/protocol/src/session_surface.rs"
+  - "lib/ipc/src/session_surface.rs"
 related:
   - "docs/rfcs/draft/SESSION_SURFACE_CONTRACT.md"
   - "docs/snapshot.md"

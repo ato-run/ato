@@ -70,7 +70,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use url::Url;
 
-use protocol::session_surface::{SessionSurfaceKind, SessionSurfaceRequirement};
+use ato_ipc::session_surface::{SessionSurfaceKind, SessionSurfaceRequirement};
 
 /// The only schema version that may mint an Execution Identity.
 pub const MANIFEST_SCHEMA_V1: &str = "1";

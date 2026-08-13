@@ -986,7 +986,7 @@ fn runtime_session_summary_keeps_legacy_process_origin_unknown() {
     );
     assert_eq!(
         summary.session.placement.placement_provider,
-        protocol::placement::PlacementProviderKind::Desktop
+        ato_ipc::placement::PlacementProviderKind::Desktop
     );
 }
 
@@ -1442,7 +1442,7 @@ async fn runtime_launch_unknown_key_returns_404() {
 fn launch_response_user_visible_url_is_never_loopback() {
     // Construct a LaunchSessionResponse as the handler would build it after a
     // successful session start with a local runtime URL.
-    use protocol::placement::{
+    use ato_ipc::placement::{
         PlacementFacets, PlacementIdentity, PlacementProviderId, PlacementProviderKind,
     };
     let resp = super::LaunchSessionResponse {

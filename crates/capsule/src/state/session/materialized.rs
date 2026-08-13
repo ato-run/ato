@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use crate::common::paths::ato_path;
 use anyhow::{Context, Result};
+use ato_ipc::handle::{ResolvedSnapshot, TrustState};
 use blake3::Hasher;
-use protocol::handle::{ResolvedSnapshot, TrustState};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
@@ -245,7 +245,7 @@ pub fn validate_materialized_launch_record(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::handle::TrustState;
+    use ato_ipc::handle::TrustState;
     use tempfile::tempdir;
 
     fn sample_record(dir: &Path) -> MaterializedLaunchRecord {

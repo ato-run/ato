@@ -111,7 +111,7 @@ by flipping the gate or mocking the whole flow:
 - `sanitize_bridge_failure_keeps_raw_detail_out_of_the_user_message`
   (poll / exchange / init failure sanitization)
 
-**Dock side, `crates/desktop/src/system_capsule/ato_dock/mod.rs`:**
+**Dock side, `apps/desktop/src/system_capsule/ato_dock/mod.rs`:**
 - `classify_ndjson_line` cases: completed (poll success), failed (timeout /
   rejected), `detail`-not-forwarded (exchange failure), browser-launch-failed
   forwards `login_url` as its own field, malformed/unrecognized ignored

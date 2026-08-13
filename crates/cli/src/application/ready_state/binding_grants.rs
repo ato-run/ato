@@ -12,7 +12,7 @@
 //! per-app grant requirement.
 
 use anyhow::Result;
-use protocol::binding_lease::SecretValue;
+use ato_ipc::binding_lease::SecretValue;
 
 use super::secret_resolver::SecretResolver;
 
@@ -194,9 +194,9 @@ mod tests {
         // capsule.toml on a runner) — same all-required, aggregate-missing semantics.
         struct Fake;
         impl crate::application::ready_state::secret_resolver::SecretResolver for Fake {
-            fn resolve(&self, name: &str) -> Result<protocol::binding_lease::SecretValue> {
+            fn resolve(&self, name: &str) -> Result<ato_ipc::binding_lease::SecretValue> {
                 if name == "present" {
-                    Ok(protocol::binding_lease::SecretValue::new("v"))
+                    Ok(ato_ipc::binding_lease::SecretValue::new("v"))
                 } else {
                     anyhow::bail!("no grant")
                 }

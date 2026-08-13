@@ -5,7 +5,7 @@
 //! Path resolution reuses the canonical resolvers rather than hardcoding
 //! `~/.ato/...` strings:
 //! - desktop logs: same dir as [`capsule::common::paths::ato_path_or_workspace_tmp`]
-//!   `("logs")` used by `crates/desktop/src/logging.rs`.
+//!   `("logs")` used by `apps/desktop/src/logging.rs`.
 //! - session logs: [`capsule::state::session::store::session_root`].
 //! - engine/run logs: `ato_path_or_workspace_tmp("run")`, where the run
 //!   pipeline writes `engine-*.log` (see `pipeline/phases/run.rs`).

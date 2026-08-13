@@ -39,8 +39,8 @@ ato-computation = { path = "../../lib/computation", version = "0.1.0" }
 capsule-protocol = { path = "../capsule-protocol", version = "0.1.0" }
 capsule-session-runtime = { path = "../capsule-session-runtime", version = "0.1.0" }
 snapshot = { package = "ato-provider-snapshot", path = "../../extensions/providers/snapshot", version = "0.1.0" }
-protocol = { path = "../protocol", version = "0.1.0" }
-netd = { path = "../netd" }
+ato-ipc = { path = "../../lib/ipc", version = "0.1.0" }
+netd = { path = "../../services/netd" }
 lock-draft-engine = { path = "lock-draft-engine", version = "0.1.0" }
 anyhow = "1.0"
 blake3 = "1.5"

@@ -14,10 +14,10 @@ use std::process::Command;
 use ato_computation::{Boundary, ComputationObject, ContentRef, SemanticsId};
 use ato_objects::{ObjectError, ObjectStore};
 use ato_semantics_workspace::{
-    RealizationConstraint, ToolchainConstraint, WORKSPACE_SEMANTICS_ID, WorkspacePhase,
-    WorkspaceResidual, encode_workspace_residual,
+    RealizationConstraint, SourceClosure, SourceEntry, ToolchainConstraint, WORKSPACE_SEMANTICS_ID,
+    WorkspacePhase, WorkspaceResidual, encode_workspace_residual,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use thiserror::Error;
 use walkdir::WalkDir;
 
@@ -61,20 +61,6 @@ pub struct InferenceEvidence {
     pub selected_toolchain: String,
     pub selected_entrypoint: Vec<String>,
     pub authoring_manifest_used: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SourceClosure {
-    pub entries: Vec<SourceEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SourceEntry {
-    pub path: String,
-    pub content: String,
-    pub executable: bool,
 }
 
 #[derive(Debug, Error)]

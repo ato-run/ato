@@ -7,7 +7,7 @@ The core of the Ato implementation is split across four layers:
 - `crates/cli`: the human-facing CLI surface (also hosts the Connected Runner agent)
 - `crates/capsule`: manifest, lock, routing, engine bridge, and execution identity
 - `crates/nacelle`: the machine-oriented execution engine
-- `crates/desktop`: the GPUI/Wry desktop shell that consumes session metadata
+- `apps/desktop`: the GPUI/Wry desktop shell that consumes session metadata
 
 Around that core, the workspace carries the **Ready-State snapshot subsystem**
 and shared plumbing:
@@ -21,12 +21,12 @@ and shared plumbing:
   tool, not shipped to end users)
 - `extensions/providers/snapshot/guest-agent`: the in-guest agent — vsock binding-lease control plane
   and v1.2 supervisor mode
-- `crates/protocol`: capsule wire types shared by `cli` (producer) and
+- `lib/ipc`: capsule wire types shared by `cli` (producer) and
   `desktop` (consumer)
-- `crates/netd`: the session-scoped network broker daemon
+- `services/netd`: the session-scoped network broker daemon
 - `crates/cli/lock-draft-engine`: the LEIP lock-draft hashing engine
 - `sidecars/ato-tsnetd`: Go tailnet sidecar (kept outside the cargo workspace,
-  like `crates/desktop`)
+  like `apps/desktop`)
 
 If you want to understand how Ato behaves today, start from `cli`, then
 follow the handoff into `capsule`, and only then drop into `nacelle`. Visit the
@@ -38,7 +38,7 @@ snapshot crates only when working on the Ready-State path.
 
 - `crates/cli/src/main.rs` -> `ato_cli::main_entry()`
 - `crates/nacelle/src/main.rs` -> `cli::execute().await`
-- `crates/desktop/src/main.rs` -> `app::run()`
+- `apps/desktop/src/main.rs` -> `app::run()`
 
 ### Main execution path
 

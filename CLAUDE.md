@@ -1,7 +1,7 @@
 # CLAUDE.md
 
 Repo-wide guidance for Claude Code (and humans). Crate-specific notes live in
-each crate's own `CLAUDE.md` (currently: `crates/desktop/CLAUDE.md`).
+each crate's own `CLAUDE.md` (currently: `apps/desktop/CLAUDE.md`).
 
 ## Branching model
 
