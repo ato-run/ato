@@ -9,7 +9,6 @@ pub mod domain;
 pub mod driver_binding;
 pub mod driver_registry;
 pub mod effect;
-pub mod evaluator;
 pub mod recovery;
 pub mod runtime;
 pub mod session_store;
@@ -35,10 +34,6 @@ pub use effect::{
     EffectClass, EffectIntent, EffectOperationDigest, EffectState, EffectTransaction,
     EffectTransitionError,
 };
-pub use evaluator::{
-    ComputationEvaluator, ComputationEvaluatorRegistry, EvaluatorCapabilities,
-    EvaluatorRegistryError, PortBindingPlan,
-};
 pub use recovery::{
     ConnectorCheckpoint, ConnectorRecoveryPoint, ConnectorRecoveryStrategy, RecoveryPlan,
     RecoveryPlanError, ResumeFidelity, SessionCheckpoint, StateRecoveryPoint,
@@ -50,8 +45,9 @@ pub use runtime::{
 pub use session_store::{
     CapsuleProtocolSessionStore, ControlAuthorizationError, NewStoredProtocolSession,
     NewSupervisorIdentity, SessionId, SessionStoreError, StoredComputationOrigin,
-    StoredConnectorCheckpoint, StoredLocalCheckpoint, StoredProtocolSession,
-    StoredReplayVerification, StoredRuntimeProfile, SupervisorIdentity,
+    StoredConnectorCheckpoint, StoredLegacyV1Materialization, StoredLegacyV1Recovery,
+    StoredLocalCheckpoint, StoredProtocolSession, StoredReplayVerification, StoredRuntimeProfile,
+    SupervisorIdentity,
 };
 pub use supervisor::{
     BarrierError, BarrierId, BoundaryCoordinator, BoundaryDriver, DriverBoundaryError,

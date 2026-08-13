@@ -1,9 +1,9 @@
 [package]
-name = "capsule-session-runtime"
+name = "capsule-compose"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0 OR MPL-2.0"
-description = "Ato runtime domain for durable Capsule sessions and Connector Drivers"
+description = "Canonical residual and validator for capsule.compose@1"
 homepage = "https://ato.run"
 repository = "https://github.com/ato-run/ato"
 
@@ -13,11 +13,11 @@ dist = false
 [dependencies]
 blake3 = "1.5"
 capsule-core = { path = "../capsule-core" }
-capsule-protocol = { path = "../capsule-protocol" }
-rand = "0.8"
+capsule-core-codec = { path = "../capsule-core-codec" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde_jcs = "0.1"
 thiserror = "2.0"
 
 [dev-dependencies]
-tempfile = "3"
+hex = "0.4"

@@ -2,9 +2,10 @@
 
 > **Ato implementation specification:** Despite the legacy filename, this
 > document defines Ato's JSON-RPC IPC Broker and workload communication APIs.
-> It is not part of the State + I/O Capsule Protocol normative set. See the
-> [accepted RFC authority index](README.md) for that boundary. Rename and
-> protocol re-audit are intentionally deferred to a separate change.
+> It is not part of the Capsule Semantic Core or the Protocol v1 compatibility
+> contract. See the [accepted RFC authority index](README.md) for that
+> boundary. Rename and protocol re-audit are intentionally deferred to a
+> separate change.
 
 **Document ID:** `CAPSULE_IPC_SPEC`
 **Status:** Accepted v1.1
