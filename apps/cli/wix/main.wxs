@@ -60,7 +60,7 @@
 
     <Product
         Id='*'
-        Name='cli'
+        Name='ato-cli'
         UpgradeCode='91E1EDBC-3923-4EB3-8AD9-02239A1537BA'
         Manufacturer='ato-run'
         Language='1033'
@@ -69,7 +69,7 @@
 
         <Package Id='*'
             Keywords='Installer'
-            Description='ato CLI (meta-runtime)'
+            Description='Ato command line interface for addressable computations'
             Manufacturer='ato-run'
             InstallerVersion='450'
             Languages='1033'
@@ -83,11 +83,11 @@
             DowngradeErrorMessage='A newer version of [ProductName] is already installed. Setup will now exit.'/>
 
         <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' DiskPrompt='CD-ROM #1'/>
-        <Property Id='DiskPrompt' Value='cli Installation'/>
+        <Property Id='DiskPrompt' Value='ato-cli Installation'/>
 
         <Directory Id='TARGETDIR' Name='SourceDir'>
             <Directory Id='$(var.PlatformProgramFilesFolder)' Name='PFiles'>
-                <Directory Id='APPLICATIONFOLDER' Name='cli'>
+                <Directory Id='APPLICATIONFOLDER' Name='ato-cli'>
                     
                     <!--
                       Enabling the license sidecar file in the installer is a four step process:
