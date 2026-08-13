@@ -9,6 +9,8 @@ members = [
     "lib/kernel",
     "lib/objects",
     "extensions/semantics/compose",
+    "extensions/semantics/workspace",
+    "extensions/adapters/repository",
     "crates/capsule-protocol",
     "crates/capsule-session-runtime",
     "crates/capsulefs",
@@ -17,7 +19,7 @@ members = [
     "crates/protocol",
     "crates/guest-agent",
     "crates/cli/lock-draft-engine",
-    "crates/nacelle",
+    "extensions/providers/nacelle",
     "crates/netd",
 ]
 
