@@ -12,8 +12,8 @@ dist = false
 
 [dependencies]
 blake3 = "1.5"
-capsule-core = { path = "../capsule-core" }
-capsule-core-codec = { path = "../capsule-core-codec" }
+ato-computation = { path = "../../lib/computation" }
+ato-objects = { path = "../../lib/objects" }
 capsule-protocol = { path = "../capsule-protocol" }
 serde = { version = "1.0", features = ["derive"] }
 serde_jcs = "0.1"
