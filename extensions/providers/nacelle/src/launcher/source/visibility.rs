@@ -53,6 +53,7 @@ pub(super) struct SandboxVenv {
 /// backend. Holds the chosen interpreter (when a venv applies) plus the set of
 /// host paths the workload needs read access to.
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub(super) struct WorkloadVisibilityPlan {
     /// Resolved project virtualenv interpreter, when the build phase produced a
     /// `.venv`. `None` falls back to the managed base toolchain interpreter.
@@ -89,7 +90,7 @@ impl WorkloadVisibilityPlan {
     /// Windows). `None` falls back to the base toolchain interpreter.
     // Host-exec backends (seatbelt/Windows) only; the Linux bwrap backend reads
     // `self.venv` directly, so on Linux this accessor would be dead code.
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
     pub(super) fn venv_host_python(&self) -> Option<PathBuf> {
         self.venv.as_ref().map(|v| v.host_python.clone())
     }
