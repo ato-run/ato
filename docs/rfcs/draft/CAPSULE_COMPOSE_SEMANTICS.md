@@ -213,16 +213,21 @@ NameProvider.name <── internal connection ──> Greeter.name
 ```
 
 The structural conformance scenario remains valid as written. Behavioral
-conformance additionally proves this evolution using test-only leaf semantics:
+conformance extends `NameProvider` with an externally exported `input` Port and
+proves this evolution using test-only leaf semantics:
 
 ```text
-C0 --tau------------------> C1
-C1 --greeting!"Hello, Alice"--> C2
+C0 --name?"Bob"---------------> C1
+C1 --tau----------------------> C2
+C2 --greeting!"Hello, Bob!"---> C3
 ```
 
 Each successor is canonical-encoded, content-addressed, sealed into an
 ordinary `ComputationObject`, and revalidated. Their ComputationRefs differ,
-while all three boundaries remain exactly `{ greeting }`.
+while all four boundaries remain exactly `{ name, greeting }`. The first step
+lifts the exported input from `NameProvider.input`; the second synchronizes
+`NameProvider.name` with `Greeter.name` and preserves `Bob`; the third lifts
+the exported output from `Greeter.greeting`.
 
 ### Draft PR acceptance criterion
 
@@ -230,5 +235,5 @@ Without changing Capsule Core, the test-only `Greeter + NameProvider` scenario
 must execute, reseal, and revalidate:
 
 ```text
-C0 --tau--> C1 --greeting!"Hello, Alice"--> C2
+C0 --name?"Bob"--> C1 --tau--> C2 --greeting!"Hello, Bob!"--> C3
 ```

@@ -565,7 +565,10 @@ fn repeated_node_references_resolve_one_computation_once() {
 #[test]
 fn behavioral_hello_world_evolves_reseals_and_revalidates() {
     let mut objects = MemoryObjects::default();
-    let provider_boundary = BTreeMap::from([(PortId::parse("name").unwrap(), text_port("sender"))]);
+    let provider_boundary = BTreeMap::from([
+        (PortId::parse("input").unwrap(), text_port("receiver")),
+        (PortId::parse("name").unwrap(), text_port("sender")),
+    ]);
     let greeter_boundary = BTreeMap::from([
         (PortId::parse("name").unwrap(), text_port("receiver")),
         (PortId::parse("greeting").unwrap(), text_port("sender")),
@@ -574,7 +577,7 @@ fn behavioral_hello_world_evolves_reseals_and_revalidates() {
         &mut objects,
         "example.name-provider@1",
         provider_boundary.clone(),
-        b"Ready(Alice)",
+        b"WaitingInput",
     );
     let g0 = seal_leaf(
         &mut objects,
@@ -594,92 +597,154 @@ fn behavioral_hello_world_evolves_reseals_and_revalidates() {
             )
             .unwrap(),
         ],
-        exports: BTreeMap::from([(
-            PortId::parse("greeting").unwrap(),
-            endpoint("greeter", "greeting"),
-        )]),
+        exports: BTreeMap::from([
+            (
+                PortId::parse("name").unwrap(),
+                endpoint("name-provider", "input"),
+            ),
+            (
+                PortId::parse("greeting").unwrap(),
+                endpoint("greeter", "greeting"),
+            ),
+        ]),
     };
-    let parent_boundary =
-        BTreeMap::from([(PortId::parse("greeting").unwrap(), text_port("sender"))]);
+    let parent_boundary = BTreeMap::from([
+        (PortId::parse("name").unwrap(), text_port("receiver")),
+        (PortId::parse("greeting").unwrap(), text_port("sender")),
+    ]);
     let c0 = seal_composite(&mut objects, parent_boundary.clone(), c0_residual);
     let c0_validated = validate_composite(&objects.resolve(&c0), &objects, &TextProtocol).unwrap();
 
-    // Test-only leaf semantics: Ready("Alice") -> Done and WaitingName -> ReadyGreeting.
+    let bob = "Bob";
     let np1 = seal_leaf(
         &mut objects,
         "example.name-provider@1",
+        provider_boundary.clone(),
+        b"ReadyName(Bob)",
+    );
+    let c1_reduction = lift_exported_step(
+        &c0_validated,
+        &NodeStep {
+            node: NodeId::parse("name-provider").unwrap(),
+            from: objects.resolve(&np0),
+            label: StepLabel::Input {
+                port: PortId::parse("input").unwrap(),
+                value: bob,
+            },
+            to: objects.resolve(&np1),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        c1_reduction.label,
+        StepLabel::Input {
+            port: PortId::parse("name").unwrap(),
+            value: bob,
+        }
+    );
+    let c1 = seal_composite(
+        &mut objects,
+        parent_boundary.clone(),
+        c1_reduction.successor,
+    );
+    let c1_validated = validate_composite(&objects.resolve(&c1), &objects, &TextProtocol).unwrap();
+    assert_eq!(
+        c1_validated.residual().nodes[&NodeId::parse("name-provider").unwrap()],
+        np1
+    );
+    assert_eq!(
+        objects.bytes[&objects.resolve(&np1).object().residual].as_slice(),
+        b"ReadyName(Bob)"
+    );
+
+    let np2 = seal_leaf(
+        &mut objects,
+        "example.name-provider@1",
         provider_boundary,
-        b"Done",
+        b"Done(Bob)",
     );
     let g1 = seal_leaf(
         &mut objects,
         "example.greeter@1",
         greeter_boundary.clone(),
-        b"ReadyGreeting(Hello, Alice)",
+        b"ReadyGreeting(Hello, Bob!)",
     );
-    let c1_reduction = synchronize_connection(
-        &c0_validated,
+    let c2_reduction = synchronize_connection(
+        &c1_validated,
         &NodeStep {
             node: NodeId::parse("name-provider").unwrap(),
-            from: objects.resolve(&np0),
+            from: objects.resolve(&np1),
             label: StepLabel::Output {
                 port: PortId::parse("name").unwrap(),
-                value: "Alice",
+                value: bob,
             },
-            to: objects.resolve(&np1),
+            to: objects.resolve(&np2),
         },
         &NodeStep {
             node: NodeId::parse("greeter").unwrap(),
             from: objects.resolve(&g0),
             label: StepLabel::Input {
                 port: PortId::parse("name").unwrap(),
-                value: "Alice",
+                value: bob,
             },
             to: objects.resolve(&g1),
         },
     )
     .unwrap();
-    assert_eq!(c1_reduction.label, StepLabel::Tau);
-    let c1 = seal_composite(
+    assert_eq!(c2_reduction.label, StepLabel::Tau);
+    let c2 = seal_composite(
         &mut objects,
         parent_boundary.clone(),
-        c1_reduction.successor.clone(),
+        c2_reduction.successor,
     );
-    let c1_validated = validate_composite(&objects.resolve(&c1), &objects, &TextProtocol).unwrap();
+    let c2_validated = validate_composite(&objects.resolve(&c2), &objects, &TextProtocol).unwrap();
+    assert_eq!(
+        c2_validated.residual().nodes[&NodeId::parse("name-provider").unwrap()],
+        np2
+    );
 
     let g2 = seal_leaf(&mut objects, "example.greeter@1", greeter_boundary, b"Done");
-    let c2_reduction = lift_exported_step(
-        &c1_validated,
+    let c3_reduction = lift_exported_step(
+        &c2_validated,
         &NodeStep {
             node: NodeId::parse("greeter").unwrap(),
             from: objects.resolve(&g1),
             label: StepLabel::Output {
                 port: PortId::parse("greeting").unwrap(),
-                value: "Hello, Alice",
+                value: "Hello, Bob!",
             },
             to: objects.resolve(&g2),
         },
     )
     .unwrap();
     assert_eq!(
-        c2_reduction.label,
+        c3_reduction.label,
         StepLabel::Output {
             port: PortId::parse("greeting").unwrap(),
-            value: "Hello, Alice",
+            value: "Hello, Bob!",
         }
     );
-    let c2 = seal_composite(
+    let c3 = seal_composite(
         &mut objects,
         parent_boundary.clone(),
-        c2_reduction.successor,
+        c3_reduction.successor,
     );
-    validate_composite(&objects.resolve(&c2), &objects, &TextProtocol).unwrap();
+    let c3_validated = validate_composite(&objects.resolve(&c3), &objects, &TextProtocol).unwrap();
+    assert_eq!(
+        c3_validated.residual().nodes[&NodeId::parse("greeter").unwrap()],
+        g2
+    );
 
     assert_ne!(c0, c1);
+    assert_ne!(c0, c2);
+    assert_ne!(c0, c3);
     assert_ne!(c1, c2);
+    assert_ne!(c1, c3);
+    assert_ne!(c2, c3);
     assert_eq!(objects.resolve(&c0).object().boundary, parent_boundary);
     assert_eq!(objects.resolve(&c1).object().boundary, parent_boundary);
     assert_eq!(objects.resolve(&c2).object().boundary, parent_boundary);
+    assert_eq!(objects.resolve(&c3).object().boundary, parent_boundary);
 }
 
 #[test]
