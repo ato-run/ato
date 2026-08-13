@@ -283,7 +283,7 @@ pub fn import_bundle(
     Ok(root)
 }
 
-fn closure(
+pub(crate) fn closure(
     root: &ComputationRef,
     objects: &dyn ObjectResolver,
     references: &ReferenceRegistry,

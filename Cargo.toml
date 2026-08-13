@@ -1,8 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/cli",
-    "crates/capsule",
+    "apps/cli",
     "lib/computation",
     "lib/kernel",
     "lib/objects",
@@ -11,6 +10,7 @@ members = [
     "extensions/adapters/repository",
     "extensions/providers/snapshot",
     "tools/snapshot-builder",
+    "tools/arch-check",
     "lib/ipc",
     "extensions/providers/snapshot/guest-agent",
     "extensions/providers/nacelle",
@@ -29,7 +29,7 @@ exclude = [
     "apps/desktop/xtask",
     "apps/desktop/.tmp",
     "apps/desktop/vendor",
-    "sidecars/ato-tsnetd",
+    "services/ato-tsnetd",
 ]
 
 [workspace.package]
@@ -43,8 +43,7 @@ authors = ["ato-run"]
 # is verified in the new monorepo (per the reordered M2→verify→bump plan).
 
 # The `dist` profile drives cargo-dist's CLI release builds. Mirrors what
-# `crates/cli/Cargo.toml` declared as a single-crate workspace before
-# the merge. Lifted to the root so cargo-dist sees one canonical profile.
+# The root profile is the canonical cargo-dist build profile.
 [profile.dist]
 inherits = "release"
 lto = "thin"

@@ -24,7 +24,7 @@ struct RelayArgs {
 }
 
 /// The guest's own configured IPv4, parsed from the kernel `ip=<ip>::…` cmdline
-/// param (`crates/snapshot/src/firecracker.rs` sets `ip={guest_ip}::{host_ip}:…`).
+/// parameter supplied by the snapshot provider (`ip={guest_ip}::{host_ip}:…`).
 /// `/proc/cmdline` is always present in the guest and needs no `iproute2` in the
 /// (arbitrary) app image. Returns None if the param is absent/malformed.
 fn guest_ipv4_from_cmdline(cmdline: &str) -> Option<std::net::Ipv4Addr> {
