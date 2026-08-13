@@ -36,8 +36,9 @@ pub use effect::{
     EffectTransitionError,
 };
 pub use evaluator::{
-    ComputationEvaluator, ComputationEvaluatorRegistry, EvaluatorCapabilities,
-    EvaluatorRegistryError, PortBindingPlan,
+    ComputationEvaluator, ComputationEvaluatorRegistry, ComputationObjectResolver,
+    EvaluationContext, EvaluatorCapabilities, EvaluatorRegistryError, MaterializationServices,
+    PortBindingPlan,
 };
 pub use recovery::{
     ConnectorCheckpoint, ConnectorRecoveryPoint, ConnectorRecoveryStrategy, RecoveryPlan,
@@ -50,8 +51,9 @@ pub use runtime::{
 pub use session_store::{
     CapsuleProtocolSessionStore, ControlAuthorizationError, NewStoredProtocolSession,
     NewSupervisorIdentity, SessionId, SessionStoreError, StoredComputationOrigin,
-    StoredConnectorCheckpoint, StoredLocalCheckpoint, StoredProtocolSession,
-    StoredReplayVerification, StoredRuntimeProfile, SupervisorIdentity,
+    StoredConnectorCheckpoint, StoredLegacyV1Materialization, StoredLegacyV1Recovery,
+    StoredLocalCheckpoint, StoredProtocolSession, StoredReplayVerification, StoredRuntimeProfile,
+    SupervisorIdentity,
 };
 pub use supervisor::{
     BarrierError, BarrierId, BoundaryCoordinator, BoundaryDriver, DriverBoundaryError,

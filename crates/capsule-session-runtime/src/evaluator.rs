@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
+use std::path::Path;
 
-use capsule_protocol::{ComputationRef, ComputationTypeId, PortDef, PortId};
+use capsule_core::{ComputationRef, ComputationTypeId, PortId, ResolvedComputation};
 use thiserror::Error;
 
 use crate::{
@@ -19,6 +20,28 @@ pub struct EvaluatorCapabilities {
 pub struct PortBindingPlan {
     pub ports: BTreeMap<PortId, AttachmentEndpoint>,
     pub environment: BTreeMap<String, String>,
+}
+
+/// Resolves and hash-validates a complete computation object.
+pub trait ComputationObjectResolver: Send + Sync {
+    fn resolve(
+        &self,
+        reference: &ComputationRef,
+    ) -> Result<ResolvedComputation, RuntimeBoundaryError>;
+}
+
+/// Runtime-specific materializers exposed to an evaluator without making them
+/// part of the Computation Core.
+pub trait MaterializationServices: Send + Sync {
+    fn materialization_root(&self) -> &Path;
+}
+
+/// Dependencies and bindings for one materialization attempt.
+pub struct EvaluationContext<'a> {
+    pub object_resolver: &'a dyn ComputationObjectResolver,
+    pub port_bindings: &'a PortBindingPlan,
+    pub session_root: &'a Path,
+    pub materialization_services: &'a dyn MaterializationServices,
 }
 
 impl PortBindingPlan {
@@ -44,16 +67,15 @@ impl PortBindingPlan {
 
 /// Restores the current head of one computation while keeping State and
 /// snapshot machinery below the semantic computation boundary.
-pub trait ComputationEvaluator {
-    fn computation_type(&self) -> &ComputationTypeId;
+pub trait ComputationEvaluator: Send + Sync {
+    fn type_id(&self) -> &ComputationTypeId;
 
     fn capabilities(&self) -> EvaluatorCapabilities;
 
-    fn restore_paused(
-        &mut self,
-        computation: &ComputationRef,
-        ports: &BTreeMap<PortId, PortDef>,
-        plan: &PortBindingPlan,
+    fn materialize(
+        &self,
+        computation: ResolvedComputation,
+        context: &EvaluationContext<'_>,
     ) -> Result<Box<dyn PausedComputationRuntime>, RuntimeBoundaryError>;
 }
 
@@ -77,7 +99,7 @@ impl ComputationEvaluatorRegistry {
         &mut self,
         evaluator: Box<dyn ComputationEvaluator>,
     ) -> Result<(), EvaluatorRegistryError> {
-        let computation_type = evaluator.computation_type().clone();
+        let computation_type = evaluator.type_id().clone();
         if self.evaluators.contains_key(&computation_type) {
             return Err(EvaluatorRegistryError::Duplicate(computation_type));
         }
@@ -85,12 +107,12 @@ impl ComputationEvaluatorRegistry {
         Ok(())
     }
 
-    pub fn get_mut(
-        &mut self,
+    pub fn get(
+        &self,
         computation_type: &ComputationTypeId,
-    ) -> Result<&mut (dyn ComputationEvaluator + '_), EvaluatorRegistryError> {
-        match self.evaluators.get_mut(computation_type) {
-            Some(evaluator) => Ok(evaluator.as_mut()),
+    ) -> Result<&(dyn ComputationEvaluator + '_), EvaluatorRegistryError> {
+        match self.evaluators.get(computation_type) {
+            Some(evaluator) => Ok(evaluator.as_ref()),
             None => Err(EvaluatorRegistryError::Unsupported(
                 computation_type.clone(),
             )),
@@ -102,13 +124,17 @@ impl ComputationEvaluatorRegistry {
 mod tests {
     use super::*;
     use crate::AttachmentMechanism;
+    use capsule_core::{
+        Boundary, COMPUTATION_OBJECT_SCHEMA, ComputationObject, ComputationSchemaId, ContentRef,
+    };
+    use std::path::PathBuf;
 
     struct FakeEvaluator {
         computation_type: ComputationTypeId,
     }
 
     impl ComputationEvaluator for FakeEvaluator {
-        fn computation_type(&self) -> &ComputationTypeId {
+        fn type_id(&self) -> &ComputationTypeId {
             &self.computation_type
         }
 
@@ -125,11 +151,10 @@ mod tests {
             }
         }
 
-        fn restore_paused(
-            &mut self,
-            _computation: &ComputationRef,
-            _ports: &BTreeMap<PortId, PortDef>,
-            _plan: &PortBindingPlan,
+        fn materialize(
+            &self,
+            _computation: ResolvedComputation,
+            _context: &EvaluationContext<'_>,
         ) -> Result<Box<dyn PausedComputationRuntime>, RuntimeBoundaryError> {
             Err(RuntimeBoundaryError::State(
                 "not used by registry test".to_owned(),
@@ -138,7 +163,7 @@ mod tests {
     }
 
     fn computation_type() -> ComputationTypeId {
-        ComputationTypeId::parse("capsule.computation.legacy-state-io@1").unwrap()
+        ComputationTypeId::parse("capsule.computation.legacy-v1@1").unwrap()
     }
 
     #[test]
@@ -150,10 +175,7 @@ mod tests {
             }))
             .unwrap();
         assert_eq!(
-            registry
-                .get_mut(&computation_type())
-                .unwrap()
-                .computation_type(),
+            registry.get(&computation_type()).unwrap().type_id(),
             &computation_type()
         );
         assert!(matches!(
@@ -164,9 +186,66 @@ mod tests {
         ));
         let unknown = ComputationTypeId::parse("example.computation.unknown@1").unwrap();
         assert!(matches!(
-            registry.get_mut(&unknown),
+            registry.get(&unknown),
             Err(EvaluatorRegistryError::Unsupported(_))
         ));
+    }
+
+    struct FakeResolver {
+        resolved: ResolvedComputation,
+    }
+
+    impl ComputationObjectResolver for FakeResolver {
+        fn resolve(
+            &self,
+            reference: &ComputationRef,
+        ) -> Result<ResolvedComputation, RuntimeBoundaryError> {
+            if reference != &self.resolved.reference {
+                return Err(RuntimeBoundaryError::State(
+                    "unexpected computation reference".to_owned(),
+                ));
+            }
+            Ok(self.resolved.clone())
+        }
+    }
+
+    struct FakeMaterializationServices(PathBuf);
+
+    impl MaterializationServices for FakeMaterializationServices {
+        fn materialization_root(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    #[test]
+    fn resolver_returns_boundary_as_part_of_computation_object() {
+        let reference = ComputationRef {
+            computation_type: computation_type(),
+            object_ref: ContentRef::parse(format!("blake3:{}", "a".repeat(64))).unwrap(),
+        };
+        let resolved = ResolvedComputation {
+            reference: reference.clone(),
+            object: ComputationObject {
+                schema: ComputationSchemaId::parse(COMPUTATION_OBJECT_SCHEMA).unwrap(),
+                boundary: Boundary::default(),
+                body: ContentRef::parse(format!("blake3:{}", "b".repeat(64))).unwrap(),
+            },
+        };
+        let resolver = FakeResolver {
+            resolved: resolved.clone(),
+        };
+        let bindings = PortBindingPlan::default();
+        let services = FakeMaterializationServices(PathBuf::from("/materialization"));
+        let context = EvaluationContext {
+            object_resolver: &resolver,
+            port_bindings: &bindings,
+            session_root: Path::new("/session"),
+            materialization_services: &services,
+        };
+
+        let actual = context.object_resolver.resolve(&reference).unwrap();
+
+        assert_eq!(actual, resolved);
     }
 
     #[test]

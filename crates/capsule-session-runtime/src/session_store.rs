@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::fs::File;
 
-use capsule_protocol::{ComputationRef, ComputationTypeId, ContentRef, StateTypeId};
+use capsule_core::{ComputationRef, ComputationTypeId, ContentRef as ComputationObjectRef};
+use capsule_protocol::{ContentRef as ProtocolContentRef, StateTypeId};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -133,7 +134,7 @@ pub struct StoredReplayVerification {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum StoredRuntimeProfile {
+pub enum StoredLegacyV1Materialization {
     WorkspacePty {
         workspace: PathBuf,
     },
@@ -148,11 +149,32 @@ pub enum StoredRuntimeProfile {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredLegacyV1Recovery {
+    pub durable_frontier: DurableFrontier,
+    pub latest_consistent_frontier: Option<DurableFrontier>,
+    pub base_frontier: RecordFrontier,
+    #[serde(default)]
+    pub base_connector_checkpoints: BTreeMap<String, StoredConnectorCheckpoint>,
+    pub active_checkpoint: Option<StoredLocalCheckpoint>,
+    pub historical_replay: Option<StoredReplayVerification>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StoredRuntimeProfile {
+    LegacyV1 {
+        materialization: StoredLegacyV1Materialization,
+        recovery: StoredLegacyV1Recovery,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StoredComputationOrigin {
     Native {
         computation_type: String,
-        computation_ref: String,
+        #[serde(alias = "computation_ref")]
+        object_ref: String,
     },
     #[serde(rename = "legacy_v3_state", alias = "legacy_state_io")]
     LegacyV3State {
@@ -166,14 +188,8 @@ pub struct StoredProtocolSession {
     pub schema_version: u16,
     pub session_id: SessionId,
     pub lifecycle: String,
-    pub base_computation: StoredComputationOrigin,
-    pub durable_frontier: DurableFrontier,
-    pub latest_consistent_frontier: Option<DurableFrontier>,
-    pub base_frontier: RecordFrontier,
-    #[serde(default)]
-    pub base_connector_checkpoints: BTreeMap<String, StoredConnectorCheckpoint>,
-    pub active_checkpoint: Option<StoredLocalCheckpoint>,
-    pub historical_replay: Option<StoredReplayVerification>,
+    #[serde(alias = "base_computation")]
+    pub origin_computation: StoredComputationOrigin,
     pub runtime_profile: StoredRuntimeProfile,
     pub source_session_id: Option<SessionId>,
     pub supervisor: SupervisorIdentity,
@@ -182,9 +198,7 @@ pub struct StoredProtocolSession {
 pub struct NewStoredProtocolSession {
     pub session_id: SessionId,
     pub lifecycle: String,
-    pub base_computation: StoredComputationOrigin,
-    pub base_frontier: RecordFrontier,
-    pub durable_frontier: DurableFrontier,
+    pub origin_computation: StoredComputationOrigin,
     pub runtime_profile: StoredRuntimeProfile,
     pub supervisor: SupervisorIdentity,
 }
@@ -195,13 +209,7 @@ impl StoredProtocolSession {
             schema_version: SESSION_STORE_SCHEMA_VERSION,
             session_id: input.session_id,
             lifecycle: input.lifecycle,
-            base_computation: input.base_computation,
-            durable_frontier: input.durable_frontier,
-            latest_consistent_frontier: None,
-            base_frontier: input.base_frontier,
-            base_connector_checkpoints: BTreeMap::new(),
-            active_checkpoint: None,
-            historical_replay: None,
+            origin_computation: input.origin_computation,
             runtime_profile: input.runtime_profile,
             source_session_id: None,
             supervisor: input.supervisor,
@@ -213,14 +221,14 @@ impl StoredProtocolSession {
             return Err(SessionStoreError::UnsupportedSchema(self.schema_version));
         }
         SessionId::parse(self.session_id.to_string())?;
-        match &self.base_computation {
+        match &self.origin_computation {
             StoredComputationOrigin::Native {
                 computation_type,
-                computation_ref,
+                object_ref,
             } => {
                 ComputationTypeId::parse(computation_type)
                     .map_err(|error| SessionStoreError::InvalidRecord(error.to_string()))?;
-                ContentRef::parse(computation_ref)
+                ComputationObjectRef::parse(object_ref)
                     .map_err(|error| SessionStoreError::InvalidRecord(error.to_string()))?;
             }
             StoredComputationOrigin::LegacyV3State {
@@ -229,19 +237,20 @@ impl StoredProtocolSession {
             } => {
                 StateTypeId::parse(state_type)
                     .map_err(|error| SessionStoreError::InvalidRecord(error.to_string()))?;
-                ContentRef::parse(state_ref)
+                ProtocolContentRef::parse(state_ref)
                     .map_err(|error| SessionStoreError::InvalidRecord(error.to_string()))?;
             }
         }
-        match &self.runtime_profile {
-            StoredRuntimeProfile::WorkspacePty { workspace } => {
+        let (materialization, recovery) = self.legacy_v1();
+        match materialization {
+            StoredLegacyV1Materialization::WorkspacePty { workspace } => {
                 if !workspace.is_absolute() {
                     return Err(SessionStoreError::InvalidRecord(
                         "workspace path must be absolute".to_owned(),
                     ));
                 }
             }
-            StoredRuntimeProfile::ReadyState {
+            StoredLegacyV1Materialization::ReadyState {
                 backend_id,
                 ready_state_manifest_id,
                 cas_root,
@@ -249,7 +258,7 @@ impl StoredProtocolSession {
                 vmm_pid,
                 vmm_process_start_identity,
             } => {
-                let manifest_id_valid = ContentRef::parse(ready_state_manifest_id).is_ok();
+                let manifest_id_valid = ProtocolContentRef::parse(ready_state_manifest_id).is_ok();
                 if backend_id.trim().is_empty()
                     || !manifest_id_valid
                     || !cas_root.is_absolute()
@@ -266,17 +275,17 @@ impl StoredProtocolSession {
                 }
             }
         }
-        if let Some(checkpoint) = &self.active_checkpoint {
-            ContentRef::parse(&checkpoint.state_ref)
+        if let Some(checkpoint) = &recovery.active_checkpoint {
+            ProtocolContentRef::parse(&checkpoint.state_ref)
                 .map_err(|error| SessionStoreError::InvalidRecord(error.to_string()))?;
-            ContentRef::parse(&checkpoint.workspace_digest)
+            ProtocolContentRef::parse(&checkpoint.workspace_digest)
                 .map_err(|error| SessionStoreError::InvalidRecord(error.to_string()))?;
             if checkpoint.resume_fidelity != "filesystem_restart" {
                 return Err(SessionStoreError::InvalidRecord(
                     "unsupported local checkpoint resume fidelity".to_owned(),
                 ));
             }
-            if self.latest_consistent_frontier != Some(checkpoint.captured_at) {
+            if recovery.latest_consistent_frontier != Some(checkpoint.captured_at) {
                 return Err(SessionStoreError::InvalidRecord(
                     "active checkpoint must match latest consistent frontier".to_owned(),
                 ));
@@ -297,18 +306,18 @@ impl StoredProtocolSession {
                 }
             }
         }
-        for (connector, connector_checkpoint) in &self.base_connector_checkpoints {
+        for (connector, connector_checkpoint) in &recovery.base_connector_checkpoints {
             if connector.is_empty()
                 || connector_checkpoint.protocol_id.is_empty()
                 || connector_checkpoint.format.is_empty()
-                || connector_checkpoint.applied_at.records_through != self.base_frontier
+                || connector_checkpoint.applied_at.records_through != recovery.base_frontier
             {
                 return Err(SessionStoreError::InvalidRecord(
                     "base Connector checkpoint does not match base frontier".to_owned(),
                 ));
             }
         }
-        if let Some(verification) = &self.historical_replay
+        if let Some(verification) = &recovery.historical_replay
             && (verification.connector.is_empty()
                 || verification.protocol.is_empty()
                 || matches!(
@@ -332,23 +341,76 @@ impl StoredProtocolSession {
     }
 
     pub fn workspace(&self) -> Result<&Path, SessionStoreError> {
-        match &self.runtime_profile {
-            StoredRuntimeProfile::WorkspacePty { workspace } => Ok(workspace),
-            StoredRuntimeProfile::ReadyState { .. } => Err(SessionStoreError::InvalidRecord(
-                "Ready-State Session has no host workspace".to_string(),
-            )),
+        match self.materialization() {
+            StoredLegacyV1Materialization::WorkspacePty { workspace } => Ok(workspace),
+            StoredLegacyV1Materialization::ReadyState { .. } => {
+                Err(SessionStoreError::InvalidRecord(
+                    "Ready-State Session has no host workspace".to_string(),
+                ))
+            }
         }
     }
 
     pub fn upgrade_legacy_origin(&mut self, computation: &ComputationRef) {
         if matches!(
-            &self.base_computation,
+            &self.origin_computation,
             StoredComputationOrigin::LegacyV3State { .. }
         ) {
-            self.base_computation = StoredComputationOrigin::Native {
+            self.origin_computation = StoredComputationOrigin::Native {
                 computation_type: computation.computation_type.to_string(),
-                computation_ref: computation.computation_ref.to_string(),
+                object_ref: computation.object_ref.to_string(),
             };
+        }
+    }
+
+    pub fn materialization(&self) -> &StoredLegacyV1Materialization {
+        self.legacy_v1().0
+    }
+
+    pub fn materialization_mut(&mut self) -> &mut StoredLegacyV1Materialization {
+        match &mut self.runtime_profile {
+            StoredRuntimeProfile::LegacyV1 {
+                materialization, ..
+            } => materialization,
+        }
+    }
+
+    pub fn recovery(&self) -> &StoredLegacyV1Recovery {
+        self.legacy_v1().1
+    }
+
+    pub fn recovery_mut(&mut self) -> &mut StoredLegacyV1Recovery {
+        match &mut self.runtime_profile {
+            StoredRuntimeProfile::LegacyV1 { recovery, .. } => recovery,
+        }
+    }
+
+    fn legacy_v1(&self) -> (&StoredLegacyV1Materialization, &StoredLegacyV1Recovery) {
+        match &self.runtime_profile {
+            StoredRuntimeProfile::LegacyV1 {
+                materialization,
+                recovery,
+            } => (materialization, recovery),
+        }
+    }
+}
+
+impl StoredRuntimeProfile {
+    pub fn legacy_v1(
+        materialization: StoredLegacyV1Materialization,
+        base_frontier: RecordFrontier,
+        durable_frontier: DurableFrontier,
+    ) -> Self {
+        Self::LegacyV1 {
+            materialization,
+            recovery: StoredLegacyV1Recovery {
+                durable_frontier,
+                latest_consistent_frontier: None,
+                base_frontier,
+                base_connector_checkpoints: BTreeMap::new(),
+                active_checkpoint: None,
+                historical_replay: None,
+            },
         }
     }
 }
@@ -370,7 +432,7 @@ impl CapsuleProtocolSessionStore {
     pub fn write(&self, session: &StoredProtocolSession) -> Result<(), SessionStoreError> {
         session.validate()?;
         if matches!(
-            &session.base_computation,
+            &session.origin_computation,
             StoredComputationOrigin::LegacyV3State { .. }
         ) {
             return Err(SessionStoreError::InvalidRecord(
@@ -428,7 +490,7 @@ impl CapsuleProtocolSessionStore {
                 Value::from(SESSION_STORE_SCHEMA_VERSION),
             );
             object.insert(
-                "base_computation".to_string(),
+                "origin_computation".to_string(),
                 serde_json::json!({
                     "kind": "legacy_v3_state",
                     "state_type": state_type,
@@ -436,6 +498,7 @@ impl CapsuleProtocolSessionStore {
                 }),
             );
         }
+        migrate_legacy_v4_shape(&mut value)?;
         let session: StoredProtocolSession = serde_json::from_value(value)?;
         session.validate()?;
         if &session.session_id != session_id {
@@ -470,6 +533,59 @@ impl CapsuleProtocolSessionStore {
         sessions.sort_by(|left, right| left.session_id.cmp(&right.session_id));
         Ok(sessions)
     }
+}
+
+fn migrate_legacy_v4_shape(value: &mut Value) -> Result<(), SessionStoreError> {
+    let object = value.as_object_mut().ok_or_else(|| {
+        SessionStoreError::InvalidRecord("session record is not an object".to_owned())
+    })?;
+    if !object.contains_key("origin_computation")
+        && let Some(origin) = object.remove("base_computation")
+    {
+        object.insert("origin_computation".to_owned(), origin);
+    }
+
+    let needs_nesting = object
+        .get("runtime_profile")
+        .and_then(|profile| profile.get("kind"))
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind != "legacy_v1");
+    if !needs_nesting {
+        return Ok(());
+    }
+
+    let materialization = object.remove("runtime_profile").ok_or_else(|| {
+        SessionStoreError::InvalidRecord("legacy runtime profile is missing".to_owned())
+    })?;
+    let mut take_required = |field: &str| {
+        object.remove(field).ok_or_else(|| {
+            SessionStoreError::InvalidRecord(format!("legacy recovery field {field} is missing"))
+        })
+    };
+    let durable_frontier = take_required("durable_frontier")?;
+    let latest_consistent_frontier = take_required("latest_consistent_frontier")?;
+    let base_frontier = take_required("base_frontier")?;
+    let active_checkpoint = take_required("active_checkpoint")?;
+    let historical_replay = take_required("historical_replay")?;
+    let base_connector_checkpoints = object
+        .remove("base_connector_checkpoints")
+        .unwrap_or_else(|| serde_json::json!({}));
+    object.insert(
+        "runtime_profile".to_owned(),
+        serde_json::json!({
+            "kind": "legacy_v1",
+            "materialization": materialization,
+            "recovery": {
+                "durable_frontier": durable_frontier,
+                "latest_consistent_frontier": latest_consistent_frontier,
+                "base_frontier": base_frontier,
+                "base_connector_checkpoints": base_connector_checkpoints,
+                "active_checkpoint": active_checkpoint,
+                "historical_replay": historical_replay,
+            }
+        }),
+    );
+    Ok(())
 }
 
 pub fn write_atomic_owner_only(path: &Path, bytes: &[u8]) -> Result<(), SessionStoreError> {
@@ -581,20 +697,47 @@ mod tests {
         StoredProtocolSession::new(NewStoredProtocolSession {
             session_id: SessionId::parse("session-1").expect("session id"),
             lifecycle: "running".to_owned(),
-            base_computation: StoredComputationOrigin::Native {
+            origin_computation: StoredComputationOrigin::Native {
                 computation_type: "ato.computation.test@1".to_owned(),
-                computation_ref: format!("blake3:{}", "a".repeat(64)),
+                object_ref: format!("blake3:{}", "a".repeat(64)),
             },
-            base_frontier: crate::RecordFrontier::Origin,
-            durable_frontier: DurableFrontier {
-                records_through: crate::RecordFrontier::Through(42),
-                journal_through: crate::JournalLsn::new(8192),
-            },
-            runtime_profile: StoredRuntimeProfile::WorkspacePty {
-                workspace: std::env::current_dir().expect("absolute current directory"),
-            },
+            runtime_profile: StoredRuntimeProfile::legacy_v1(
+                StoredLegacyV1Materialization::WorkspacePty {
+                    workspace: std::env::current_dir().expect("absolute current directory"),
+                },
+                crate::RecordFrontier::Origin,
+                DurableFrontier {
+                    records_through: crate::RecordFrontier::Through(42),
+                    journal_through: crate::JournalLsn::new(8192),
+                },
+            ),
             supervisor: identity,
         })
+    }
+
+    #[cfg(unix)]
+    fn legacy_v4_value(session: &StoredProtocolSession) -> Value {
+        let mut value = serde_json::to_value(session).unwrap();
+        let object = value.as_object_mut().unwrap();
+        let origin = object.remove("origin_computation").unwrap();
+        object.insert("base_computation".to_owned(), origin);
+        let profile = object.remove("runtime_profile").unwrap();
+        let profile = profile.as_object().unwrap();
+        object.insert(
+            "runtime_profile".to_owned(),
+            profile["materialization"].clone(),
+        );
+        for field in [
+            "durable_frontier",
+            "latest_consistent_frontier",
+            "base_frontier",
+            "base_connector_checkpoints",
+            "active_checkpoint",
+            "historical_replay",
+        ] {
+            object.insert(field.to_owned(), profile["recovery"][field].clone());
+        }
+        value
     }
 
     #[cfg(unix)]
@@ -612,16 +755,58 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn v4_record_keeps_protocol_v1_recovery_out_of_generic_run_fields() {
+        let supervisor = NewSupervisorIdentity::generate(3, 100, "start-100");
+        let session = stored_session(supervisor.identity);
+        let value = serde_json::to_value(session).unwrap();
+        let object = value.as_object().unwrap();
+
+        assert!(object.contains_key("origin_computation"));
+        for legacy_field in [
+            "base_computation",
+            "durable_frontier",
+            "latest_consistent_frontier",
+            "base_frontier",
+            "base_connector_checkpoints",
+            "active_checkpoint",
+            "historical_replay",
+        ] {
+            assert!(!object.contains_key(legacy_field));
+        }
+        assert_eq!(value["runtime_profile"]["kind"], "legacy_v1");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pre_separation_v4_record_migrates_to_legacy_v1_profile() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let store = CapsuleProtocolSessionStore::open(directory.path()).expect("store");
+        let supervisor = NewSupervisorIdentity::generate(3, 100, "start-100");
+        let expected = stored_session(supervisor.identity);
+        let value = legacy_v4_value(&expected);
+        let path = directory.path().join("session-1");
+        fs::create_dir(&path).unwrap();
+        fs::write(
+            path.join("session.json"),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(store.read(&expected.session_id).unwrap(), expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn schema_v2_workspace_record_decodes_as_workspace_runtime_profile() {
         let directory = tempfile::tempdir().expect("tempdir");
         let store = CapsuleProtocolSessionStore::open(directory.path()).expect("store");
         let supervisor = NewSupervisorIdentity::generate(3, 100, "start-100");
         let mut expected = stored_session(supervisor.identity);
-        expected.base_computation = StoredComputationOrigin::LegacyV3State {
+        expected.origin_computation = StoredComputationOrigin::LegacyV3State {
             state_type: "ato.state.test@1".to_owned(),
             state_ref: format!("blake3:{}", "a".repeat(64)),
         };
-        let mut value = serde_json::to_value(&expected).unwrap();
+        let mut value = legacy_v4_value(&expected);
         let object = value.as_object_mut().unwrap();
         object.insert("schema_version".to_string(), Value::from(2));
         object.remove("base_computation");
@@ -650,7 +835,7 @@ mod tests {
         let store = CapsuleProtocolSessionStore::open(directory.path()).expect("store");
         let supervisor = NewSupervisorIdentity::generate(3, 100, "start-100");
         let expected = stored_session(supervisor.identity);
-        let mut value = serde_json::to_value(&expected).unwrap();
+        let mut value = legacy_v4_value(&expected);
         let object = value.as_object_mut().unwrap();
         object.insert("schema_version".to_string(), Value::from(3));
         object.remove("base_computation");
@@ -669,7 +854,7 @@ mod tests {
 
         let actual = store.read(&expected.session_id).unwrap();
         assert_eq!(
-            actual.base_computation,
+            actual.origin_computation,
             StoredComputationOrigin::LegacyV3State {
                 state_type: "ato.state.test@1".to_owned(),
                 state_ref: format!("blake3:{}", "b".repeat(64)),
@@ -684,7 +869,7 @@ mod tests {
         let store = CapsuleProtocolSessionStore::open(directory.path()).expect("store");
         let supervisor = NewSupervisorIdentity::generate(3, 100, "start-100");
         let mut session = stored_session(supervisor.identity);
-        session.base_computation = StoredComputationOrigin::LegacyV3State {
+        session.origin_computation = StoredComputationOrigin::LegacyV3State {
             state_type: "ato.state.test@1".to_owned(),
             state_ref: format!("blake3:{}", "b".repeat(64)),
         };
@@ -699,27 +884,27 @@ mod tests {
     fn legacy_origin_upgrades_once_without_replacing_native_identity() {
         let supervisor = NewSupervisorIdentity::generate(3, 100, "start-100");
         let mut session = stored_session(supervisor.identity);
-        session.base_computation = StoredComputationOrigin::LegacyV3State {
+        session.origin_computation = StoredComputationOrigin::LegacyV3State {
             state_type: "ato.state.test@1".to_owned(),
             state_ref: format!("blake3:{}", "b".repeat(64)),
         };
         let first = ComputationRef {
             computation_type: ComputationTypeId::parse("ato.computation.first@1").unwrap(),
-            computation_ref: ContentRef::parse(format!("blake3:{}", "c".repeat(64))).unwrap(),
+            object_ref: ComputationObjectRef::parse(format!("blake3:{}", "c".repeat(64))).unwrap(),
         };
         let second = ComputationRef {
             computation_type: ComputationTypeId::parse("ato.computation.second@1").unwrap(),
-            computation_ref: ContentRef::parse(format!("blake3:{}", "d".repeat(64))).unwrap(),
+            object_ref: ComputationObjectRef::parse(format!("blake3:{}", "d".repeat(64))).unwrap(),
         };
 
         session.upgrade_legacy_origin(&first);
         session.upgrade_legacy_origin(&second);
 
         assert_eq!(
-            session.base_computation,
+            session.origin_computation,
             StoredComputationOrigin::Native {
                 computation_type: first.computation_type.to_string(),
-                computation_ref: first.computation_ref.to_string(),
+                object_ref: first.object_ref.to_string(),
             }
         );
     }
@@ -749,9 +934,9 @@ mod tests {
     fn connector_checkpoint_must_match_consistent_frontier() {
         let supervisor = NewSupervisorIdentity::generate(3, 100, "start-100");
         let mut session = stored_session(supervisor.identity);
-        let captured_at = session.durable_frontier;
-        session.latest_consistent_frontier = Some(captured_at);
-        session.active_checkpoint = Some(StoredLocalCheckpoint {
+        let captured_at = session.recovery().durable_frontier;
+        session.recovery_mut().latest_consistent_frontier = Some(captured_at);
+        session.recovery_mut().active_checkpoint = Some(StoredLocalCheckpoint {
             state_ref: format!("blake3:{}", "b".repeat(64)),
             captured_at,
             workspace_digest: format!("blake3:{}", "b".repeat(64)),
@@ -781,7 +966,7 @@ mod tests {
     fn ready_state_runtime_profile_validation_fails_closed() {
         let supervisor = NewSupervisorIdentity::generate(3, 100, "start-100");
         let mut session = stored_session(supervisor.identity);
-        let valid = || StoredRuntimeProfile::ReadyState {
+        let valid = || StoredLegacyV1Materialization::ReadyState {
             backend_id: "fake".to_string(),
             ready_state_manifest_id: format!("blake3:{}", "b".repeat(64)),
             cas_root: std::env::current_dir().unwrap().join("cas"),
@@ -789,7 +974,7 @@ mod tests {
             vmm_pid: Some(42),
             vmm_process_start_identity: Some("start-42".to_string()),
         };
-        session.runtime_profile = valid();
+        *session.materialization_mut() = valid();
         assert!(session.validate().is_ok());
 
         let invalid_profiles = [
@@ -809,7 +994,7 @@ mod tests {
             }),
         ];
         for profile in invalid_profiles {
-            session.runtime_profile = profile;
+            *session.materialization_mut() = profile;
             assert!(matches!(
                 session.validate(),
                 Err(SessionStoreError::InvalidRecord(message))
@@ -820,7 +1005,7 @@ mod tests {
 
     #[cfg(unix)]
     fn mutate_ready_state_profile(
-        mut profile: StoredRuntimeProfile,
+        mut profile: StoredLegacyV1Materialization,
         mutate: impl FnOnce(
             &mut Option<i32>,
             &mut Option<String>,
@@ -829,8 +1014,8 @@ mod tests {
             &mut PathBuf,
             &mut PathBuf,
         ),
-    ) -> StoredRuntimeProfile {
-        let StoredRuntimeProfile::ReadyState {
+    ) -> StoredLegacyV1Materialization {
+        let StoredLegacyV1Materialization::ReadyState {
             backend_id,
             ready_state_manifest_id,
             cas_root,
