@@ -15,7 +15,7 @@ use thiserror::Error;
 
 use crate::{DurableFrontier, RecordFrontier};
 
-const SESSION_STORE_SCHEMA_VERSION: u16 = 2;
+const SESSION_STORE_SCHEMA_VERSION: u16 = 3;
 const SESSION_SECRET_BYTES: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -132,6 +132,22 @@ pub struct StoredReplayVerification {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StoredRuntimeProfile {
+    WorkspacePty {
+        workspace: PathBuf,
+    },
+    ReadyState {
+        backend_id: String,
+        ready_state_manifest_id: String,
+        cas_root: PathBuf,
+        overlay_root: PathBuf,
+        vmm_pid: Option<i32>,
+        vmm_process_start_identity: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredProtocolSession {
     pub schema_version: u16,
     pub session_id: SessionId,
@@ -145,7 +161,7 @@ pub struct StoredProtocolSession {
     pub base_connector_checkpoints: BTreeMap<String, StoredConnectorCheckpoint>,
     pub active_checkpoint: Option<StoredLocalCheckpoint>,
     pub historical_replay: Option<StoredReplayVerification>,
-    pub workspace: PathBuf,
+    pub runtime_profile: StoredRuntimeProfile,
     pub source_session_id: Option<SessionId>,
     pub supervisor: SupervisorIdentity,
 }
@@ -157,7 +173,7 @@ pub struct NewStoredProtocolSession<'a> {
     pub base_state: &'a ContentRef,
     pub base_frontier: RecordFrontier,
     pub durable_frontier: DurableFrontier,
-    pub workspace: PathBuf,
+    pub runtime_profile: StoredRuntimeProfile,
     pub supervisor: SupervisorIdentity,
 }
 
@@ -175,7 +191,7 @@ impl StoredProtocolSession {
             base_connector_checkpoints: BTreeMap::new(),
             active_checkpoint: None,
             historical_replay: None,
-            workspace: input.workspace,
+            runtime_profile: input.runtime_profile,
             source_session_id: None,
             supervisor: input.supervisor,
         }
@@ -190,10 +206,38 @@ impl StoredProtocolSession {
             .map_err(|error| SessionStoreError::InvalidRecord(error.to_string()))?;
         ContentRef::parse(&self.base_state)
             .map_err(|error| SessionStoreError::InvalidRecord(error.to_string()))?;
-        if !self.workspace.is_absolute() {
-            return Err(SessionStoreError::InvalidRecord(
-                "workspace path must be absolute".to_owned(),
-            ));
+        match &self.runtime_profile {
+            StoredRuntimeProfile::WorkspacePty { workspace } => {
+                if !workspace.is_absolute() {
+                    return Err(SessionStoreError::InvalidRecord(
+                        "workspace path must be absolute".to_owned(),
+                    ));
+                }
+            }
+            StoredRuntimeProfile::ReadyState {
+                backend_id,
+                ready_state_manifest_id,
+                cas_root,
+                overlay_root,
+                vmm_pid,
+                vmm_process_start_identity,
+            } => {
+                let manifest_id_valid = ContentRef::parse(ready_state_manifest_id).is_ok();
+                if backend_id.trim().is_empty()
+                    || !manifest_id_valid
+                    || !cas_root.is_absolute()
+                    || !overlay_root.is_absolute()
+                    || vmm_pid.is_some() != vmm_process_start_identity.is_some()
+                    || vmm_pid.is_some_and(|pid| pid <= 0)
+                    || vmm_process_start_identity
+                        .as_ref()
+                        .is_some_and(|identity| identity.trim().is_empty())
+                {
+                    return Err(SessionStoreError::InvalidRecord(
+                        "invalid Ready-State runtime profile".to_owned(),
+                    ));
+                }
+            }
         }
         if let Some(checkpoint) = &self.active_checkpoint {
             ContentRef::parse(&checkpoint.state_ref)
@@ -259,6 +303,15 @@ impl StoredProtocolSession {
         }
         Ok(())
     }
+
+    pub fn workspace(&self) -> Result<&Path, SessionStoreError> {
+        match &self.runtime_profile {
+            StoredRuntimeProfile::WorkspacePty { workspace } => Ok(workspace),
+            StoredRuntimeProfile::ReadyState { .. } => Err(SessionStoreError::InvalidRecord(
+                "Ready-State Session has no host workspace".to_string(),
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -289,13 +342,28 @@ impl CapsuleProtocolSessionStore {
     pub fn read(&self, session_id: &SessionId) -> Result<StoredProtocolSession, SessionStoreError> {
         let path = self.root.join(session_id.as_str()).join("session.json");
         let bytes = fs::read(path)?;
-        let value: Value = serde_json::from_slice(&bytes)?;
+        let mut value: Value = serde_json::from_slice(&bytes)?;
         let schema_version = value
             .get("schema_version")
             .and_then(Value::as_u64)
             .and_then(|version| u16::try_from(version).ok())
             .unwrap_or(0);
-        if schema_version != SESSION_STORE_SCHEMA_VERSION {
+        if schema_version == 2 {
+            let object = value.as_object_mut().ok_or_else(|| {
+                SessionStoreError::InvalidRecord("session record is not an object".to_string())
+            })?;
+            let workspace = object.remove("workspace").ok_or_else(|| {
+                SessionStoreError::InvalidRecord("legacy session workspace is missing".to_string())
+            })?;
+            object.insert(
+                "schema_version".to_string(),
+                Value::from(SESSION_STORE_SCHEMA_VERSION),
+            );
+            object.insert(
+                "runtime_profile".to_string(),
+                serde_json::json!({ "kind": "workspace_pty", "workspace": workspace }),
+            );
+        } else if schema_version != SESSION_STORE_SCHEMA_VERSION {
             return Err(SessionStoreError::UnsupportedSchema(schema_version));
         }
         let session: StoredProtocolSession = serde_json::from_value(value)?;
@@ -453,7 +521,9 @@ mod tests {
                 records_through: crate::RecordFrontier::Through(42),
                 journal_through: crate::JournalLsn::new(8192),
             },
-            workspace: std::env::current_dir().expect("absolute current directory"),
+            runtime_profile: StoredRuntimeProfile::WorkspacePty {
+                workspace: std::env::current_dir().expect("absolute current directory"),
+            },
             supervisor: identity,
         })
     }
@@ -469,6 +539,29 @@ mod tests {
         let actual = store.read(&expected.session_id).expect("read session");
         assert_eq!(actual, expected);
         assert_eq!(store.list().expect("list sessions"), [expected]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn schema_v2_workspace_record_decodes_as_workspace_runtime_profile() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let store = CapsuleProtocolSessionStore::open(directory.path()).expect("store");
+        let supervisor = NewSupervisorIdentity::generate(3, 100, "start-100");
+        let expected = stored_session(supervisor.identity);
+        let mut value = serde_json::to_value(&expected).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.insert("schema_version".to_string(), Value::from(2));
+        let profile = object.remove("runtime_profile").unwrap();
+        object.insert("workspace".to_string(), profile["workspace"].clone());
+        let path = directory.path().join("session-1");
+        fs::create_dir(&path).unwrap();
+        fs::write(
+            path.join("session.json"),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(store.read(&expected.session_id).unwrap(), expected);
     }
 
     #[cfg(unix)]
@@ -521,6 +614,82 @@ mod tests {
             Err(SessionStoreError::InvalidRecord(message))
                 if message.contains("Connector checkpoint frontier")
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ready_state_runtime_profile_validation_fails_closed() {
+        let supervisor = NewSupervisorIdentity::generate(3, 100, "start-100");
+        let mut session = stored_session(supervisor.identity);
+        let valid = || StoredRuntimeProfile::ReadyState {
+            backend_id: "fake".to_string(),
+            ready_state_manifest_id: format!("blake3:{}", "b".repeat(64)),
+            cas_root: std::env::current_dir().unwrap().join("cas"),
+            overlay_root: std::env::current_dir().unwrap().join("overlay"),
+            vmm_pid: Some(42),
+            vmm_process_start_identity: Some("start-42".to_string()),
+        };
+        session.runtime_profile = valid();
+        assert!(session.validate().is_ok());
+
+        let invalid_profiles = [
+            mutate_ready_state_profile(valid(), |vmm_pid, _, _, _, _, _| *vmm_pid = Some(0)),
+            mutate_ready_state_profile(valid(), |_, identity, _, _, _, _| *identity = None),
+            mutate_ready_state_profile(valid(), |_, _, manifest_id, _, _, _| {
+                *manifest_id = "not-a-content-ref".to_string()
+            }),
+            mutate_ready_state_profile(valid(), |_, _, _, backend_id, _, _| {
+                *backend_id = " ".to_string()
+            }),
+            mutate_ready_state_profile(valid(), |_, _, _, _, cas_root, _| {
+                *cas_root = PathBuf::from("relative-cas")
+            }),
+            mutate_ready_state_profile(valid(), |_, _, _, _, _, overlay_root| {
+                *overlay_root = PathBuf::from("relative-overlay")
+            }),
+        ];
+        for profile in invalid_profiles {
+            session.runtime_profile = profile;
+            assert!(matches!(
+                session.validate(),
+                Err(SessionStoreError::InvalidRecord(message))
+                    if message.contains("Ready-State runtime profile")
+            ));
+        }
+    }
+
+    #[cfg(unix)]
+    fn mutate_ready_state_profile(
+        mut profile: StoredRuntimeProfile,
+        mutate: impl FnOnce(
+            &mut Option<i32>,
+            &mut Option<String>,
+            &mut String,
+            &mut String,
+            &mut PathBuf,
+            &mut PathBuf,
+        ),
+    ) -> StoredRuntimeProfile {
+        let StoredRuntimeProfile::ReadyState {
+            backend_id,
+            ready_state_manifest_id,
+            cas_root,
+            overlay_root,
+            vmm_pid,
+            vmm_process_start_identity,
+        } = &mut profile
+        else {
+            unreachable!()
+        };
+        mutate(
+            vmm_pid,
+            vmm_process_start_identity,
+            ready_state_manifest_id,
+            backend_id,
+            cas_root,
+            overlay_root,
+        );
+        profile
     }
 
     #[test]

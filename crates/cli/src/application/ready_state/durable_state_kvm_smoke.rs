@@ -334,6 +334,7 @@ fn restore_and_bind(
             manifest: sealed.manifest.clone(),
             overlay_root: workdir.join(format!("ov-{label}")),
             host_runner_class: None,
+            containment: None,
             uffd_preview: false,
         })
         .map_err(|e| anyhow::anyhow!("restore({label}): {e}"))?;

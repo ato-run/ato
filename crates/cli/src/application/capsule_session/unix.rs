@@ -14,14 +14,15 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use capsule::protocol_bundle::{
-    PortableCapsule, capture_local_workspace_checkpoint, restore_workspace_state,
+    PortableCapsule, SpoolBundle, StreamingBundleReader, capture_local_workspace_checkpoint,
+    restore_workspace_state,
 };
 use capsule_protocol::{ConnectorId, Direction, IoRecord, Payload, RecordKindId};
 use capsule_session_runtime::{
     BoundaryCoordinator, BoundaryDriver, BoundaryOperationId, CapsuleProtocolSessionStore,
     DurableFrontier, JournalLsn, NewStoredProtocolSession, NewSupervisorIdentity, RecordFrontier,
     SessionId, SharedSessionWal, StoredConnectorCheckpoint, StoredLocalCheckpoint,
-    StoredProtocolSession, StoredReplayVerification, SupervisorIdentity,
+    StoredProtocolSession, StoredReplayVerification, StoredRuntimeProfile, SupervisorIdentity,
 };
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size as terminal_size};
 use fs2::FileExt;
@@ -30,6 +31,13 @@ use portable_pty::{
 };
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use snapshot::capsule_state::{
+    READY_STATE_STATE_TYPE, ReadyStateStateObjectV1, import_ready_state,
+    select_backend_for_ready_state,
+};
+use snapshot::{
+    RestoreContainment, RestoreReadyStateInput, RestoredSession, SnapshotBackend, SnapshotError,
+};
 
 const CONTROL_FRAME_LIMIT: usize = 16 * 1024 * 1024;
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -40,9 +48,11 @@ const PTY_PROTOCOL_ID: &str = "ato.io.pty@1";
 const PTY_CHECKPOINT_FORMAT: &str = "ato.io.pty.local-checkpoint@1";
 const READY_MARKER: &[u8] = b"__ATO_SESSION_READY__";
 const WATCHDOG_DISARM: &[u8] = b"DISARM\n";
+const PUBLIC_METADATA_SCHEMA_VERSION: u16 = 1;
+const PUBLIC_NAME_MAX_LEN: usize = 64;
+const CONTAINMENT_RECEIPT: &[u8] = b"revoked\n";
 
 pub(crate) fn start(bundle: &Path, into: &Path, no_attach: bool) -> Result<()> {
-    PortableCapsule::read(bundle).context("invalid Capsule bundle")?;
     let bundle = bundle
         .canonicalize()
         .with_context(|| format!("failed to resolve {}", bundle.display()))?;
@@ -50,9 +60,114 @@ pub(crate) fn start(bundle: &Path, into: &Path, no_attach: bool) -> Result<()> {
     let session_id = random_session_id()?;
     let paths = SessionPaths::new(&session_id)?;
     paths.create()?;
+    StreamingBundleReader::read_into(&bundle, &paths.directory.join("validation-spool"))
+        .context("invalid Capsule bundle")?;
     import_session_seed(&bundle, &paths.seed_capsule)?;
     write_bootstrap_metadata(&paths, &SessionBootstrapMetadata::default())?;
-    launch_session(&session_id, &paths, &into, no_attach)
+    launch_session(&session_id, &paths, &into, no_attach, true)
+}
+
+pub(crate) fn start_public(
+    bundle: &Path,
+    requested_name: Option<&str>,
+    detach: bool,
+) -> Result<()> {
+    let bundle = bundle
+        .canonicalize()
+        .with_context(|| format!("failed to resolve {}", bundle.display()))?;
+    let requested_name = requested_name
+        .map(validate_public_name)
+        .transpose()?
+        .unwrap_or_else(|| public_name_from_bundle(&bundle));
+    let session_id = random_session_id()?;
+    let paths = SessionPaths::new(&session_id)?;
+    paths.create()?;
+    let spool =
+        StreamingBundleReader::read_into(&bundle, &paths.directory.join("validation-spool"))
+            .context("invalid Capsule bundle")?;
+    let attachable = spool
+        .descriptor
+        .connectors
+        .values()
+        .any(|connector| connector.protocol.as_str() == PTY_PROTOCOL_ID);
+    import_session_seed(&bundle, &paths.seed_capsule)?;
+    write_bootstrap_metadata(&paths, &SessionBootstrapMetadata::default())?;
+
+    let name_lock = public_name_lock()?;
+    let name = available_public_name(&requested_name)?;
+    let reservation_owner_pid = std::process::id();
+    let reservation = PublicSessionMetadata {
+        schema_version: PUBLIC_METADATA_SCHEMA_VERSION,
+        name: name.clone(),
+        source: bundle.to_string_lossy().into_owned(),
+        created_at_unix_ms: now_unix_ms(),
+        state: PublicMetadataState::Reserved,
+        reservation_owner: Some(ProcessIdentity {
+            pid: reservation_owner_pid,
+            start_identity: workload_process_start_identity(reservation_owner_pid)
+                .context("failed to establish public Session alias reservation identity")?,
+        }),
+    };
+    write_public_metadata(&paths, &reservation)?;
+    FileExt::unlock(&name_lock)?;
+
+    println!("Starting {name}...");
+    let workspace = paths.directory.join("workspace");
+    if let Err(error) = launch_session(&session_id, &paths, &workspace, true, false) {
+        release_public_reservation_if_reclaimable(&session_id, &paths)?;
+        return Err(error);
+    }
+    if std::env::var_os("ATO_TEST_PAUSE_BEFORE_PUBLIC_METADATA_COMMIT").is_some() {
+        loop {
+            thread::sleep(Duration::from_secs(1));
+        }
+    }
+    let active = PublicSessionMetadata {
+        state: PublicMetadataState::Active,
+        reservation_owner: None,
+        ..reservation
+    };
+    if let Err(error) = write_public_metadata(&paths, &active) {
+        let cleanup = stop_started_session_after_metadata_failure(&session_id, &paths);
+        return match cleanup {
+            Ok(()) => {
+                release_public_reservation(&paths);
+                Err(error.context("failed to commit public Session metadata; Session stopped"))
+            }
+            Err(cleanup) => Err(error.context(format!(
+                "failed to commit public Session metadata and failed to stop Session: {cleanup}"
+            ))),
+        };
+    }
+    println!("Ready.");
+    if attachable && !detach {
+        attach(session_id.as_str(), false)
+    } else {
+        Ok(())
+    }
+}
+
+fn stop_started_session_after_metadata_failure(
+    session_id: &SessionId,
+    paths: &SessionPaths,
+) -> Result<()> {
+    if std::env::var_os("ATO_TEST_FAIL_PUBLIC_METADATA_CLEANUP").is_some() {
+        bail!("injected public Session cleanup failure");
+    }
+    match kill(session_id.as_str()) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let store = CapsuleProtocolSessionStore::open(&paths.root)?;
+            let stored = store.read(session_id)?;
+            if stored.lifecycle == "stopped"
+                && !paths.directory.join("ready-state-overlay").exists()
+            {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }
+    }
 }
 
 fn launch_session(
@@ -60,6 +175,7 @@ fn launch_session(
     paths: &SessionPaths,
     into: &Path,
     no_attach: bool,
+    announce_id: bool,
 ) -> Result<()> {
     let executable = std::env::current_exe().context("failed to locate ato executable")?;
     let log = owner_only_log(&paths.supervisor_log)?;
@@ -113,7 +229,9 @@ fn launch_session(
         }
     }
 
-    println!("{session_id}");
+    if announce_id {
+        println!("{session_id}");
+    }
     if no_attach {
         Ok(())
     } else {
@@ -122,6 +240,26 @@ fn launch_session(
 }
 
 pub(crate) fn serve(session: &str, bundle: &Path, into: &Path) -> Result<()> {
+    let session_id = SessionId::parse(session)?;
+    let paths = SessionPaths::new(&session_id)?;
+    paths.create()?;
+    let spool = StreamingBundleReader::read_into(bundle, &paths.root.join("bundle-spool"))
+        .context("failed to read Capsule bundle")?;
+    match spool.descriptor.base_state.state_type.as_str() {
+        "ato.state.workspace-posix-host@1" => {
+            let capsule = PortableCapsule {
+                records: spool.records.materialize(&spool.descriptor)?,
+                objects: spool.objects.materialize()?,
+                descriptor: spool.descriptor,
+            };
+            serve_workspace_pty(session, into, capsule)
+        }
+        READY_STATE_STATE_TYPE => serve_ready_state(session, into, spool),
+        other => bail!("UnsupportedStateType: {other}"),
+    }
+}
+
+fn serve_workspace_pty(session: &str, into: &Path, capsule: PortableCapsule) -> Result<()> {
     let session_id = SessionId::parse(session)?;
     let paths = SessionPaths::new(&session_id)?;
     paths.create()?;
@@ -137,7 +275,6 @@ pub(crate) fn serve(session: &str, bundle: &Path, into: &Path) -> Result<()> {
     lock.try_lock_exclusive()
         .context("another Supervisor already owns this Session")?;
 
-    let capsule = PortableCapsule::read(bundle).context("failed to read Capsule bundle")?;
     let state = &capsule.descriptor.base_state;
     if bootstrap.resume_checkpoint.is_none() {
         let object = capsule
@@ -148,7 +285,7 @@ pub(crate) fn serve(session: &str, bundle: &Path, into: &Path) -> Result<()> {
             .context("failed to restore workspace State")?;
     }
 
-    let mut computation = PtyComputation::spawn(into)?;
+    let mut computation = PtyComputation::spawn(into, &paths.containment_receipt)?;
     initialize_terminal(&mut computation.reader, &computation.writer)?;
     if let Some(checkpoint) = bootstrap.base_connector_checkpoints.get(PTY_CONNECTOR_ID) {
         restore_pty_checkpoint(&computation, checkpoint)?;
@@ -209,7 +346,9 @@ pub(crate) fn serve(session: &str, bundle: &Path, into: &Path) -> Result<()> {
                 records_through: historical_frontier,
                 journal_through: JournalLsn::ORIGIN,
             },
-            workspace: into.to_path_buf(),
+            runtime_profile: StoredRuntimeProfile::WorkspacePty {
+                workspace: into.to_path_buf(),
+            },
             supervisor: identity.clone(),
         });
         stored.base_connector_checkpoints = bootstrap.base_connector_checkpoints.clone();
@@ -321,6 +460,315 @@ pub(crate) fn serve(session: &str, bundle: &Path, into: &Path) -> Result<()> {
     let _ = fs::remove_file(&paths.socket);
     let _ = lock.unlock();
     result
+}
+
+fn serve_ready_state(session: &str, _into: &Path, spool: SpoolBundle) -> Result<()> {
+    if !spool.descriptor.connectors.is_empty() {
+        bail!("ReadyStateConnectorAttachmentUnsupported");
+    }
+    if spool.records.count() != 0 {
+        bail!("ReadyStateHistoricalReplayUnsupported");
+    }
+
+    let session_id = SessionId::parse(session)?;
+    let paths = SessionPaths::new(&session_id)?;
+    paths.create()?;
+    let lock = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&paths.lock)
+        .context("failed to open Supervisor lock")?;
+    lock.try_lock_exclusive()
+        .context("another Supervisor already owns this Session")?;
+
+    let state = spool.descriptor.base_state.clone();
+    let cas_root = paths.directory.join("ready-state-cas");
+    let imported = import_ready_state(&state, &spool.objects, &cas_root)
+        .context("failed to import Ready-State State")?;
+    drop(spool);
+    let state_object = ReadyStateStateObjectV1 {
+        schema: snapshot::capsule_state::READY_STATE_STATE_OBJECT_SCHEMA.to_string(),
+        legacy_manifest: imported.legacy_manifest.clone(),
+        snapshot_manifest: imported.snapshot_manifest.clone(),
+        artifact_envelope: imported.artifact_envelope.clone(),
+    };
+    state_object
+        .validate_f1_session_profile()
+        .context("Ready-State is unsupported by the F1 Session profile")?;
+    let backend = select_backend_for_ready_state(&state_object)
+        .context("failed to select exact Ready-State backend")?;
+    let host_runner_class = backend
+        .host_runner_class()
+        .context("failed to resolve actual host runner class")?;
+    let overlay_root = paths.directory.join("ready-state-overlay");
+    fs::create_dir_all(&overlay_root)?;
+    fs::set_permissions(&overlay_root, fs::Permissions::from_mode(0o700))?;
+    let containment =
+        ReadyStateRestoreContainment::new(overlay_root.clone(), paths.containment_receipt.clone());
+    let restore = backend
+        .restore(RestoreReadyStateInput {
+            store: &imported.cas_store,
+            manifest: imported.legacy_manifest,
+            overlay_root: overlay_root.clone(),
+            host_runner_class: Some(host_runner_class),
+            containment: Some(&containment),
+            uffd_preview: false,
+        })
+        .context("Ready-State backend restore failed")?;
+    let manifest_id = restore.ready_state_manifest_id.clone();
+    let installed_containment = containment
+        .take_for(restore.session.vmm_pid)
+        .context("Ready-State restore containment mismatch")?;
+    let vmm_identity = installed_containment
+        .as_ref()
+        .map(|installed| installed.process_start_identity.clone());
+    let mut session_guard =
+        ReadyStateSessionGuard::new(backend, restore.session, installed_containment);
+
+    let generated = NewSupervisorIdentity::generate(
+        1,
+        std::process::id(),
+        process_start_identity(std::process::id()),
+    );
+    replace_secret(&paths.token, generated.secret())?;
+    let identity = generated.identity;
+    let store = CapsuleProtocolSessionStore::open(&paths.root)?;
+    let mut stored = StoredProtocolSession::new(NewStoredProtocolSession {
+        session_id: session_id.clone(),
+        lifecycle: "starting".to_string(),
+        state_type: &state.state_type,
+        base_state: &state.state_ref,
+        base_frontier: RecordFrontier::Origin,
+        durable_frontier: DurableFrontier {
+            records_through: RecordFrontier::Origin,
+            journal_through: JournalLsn::ORIGIN,
+        },
+        runtime_profile: StoredRuntimeProfile::ReadyState {
+            backend_id: session_guard.session().backend_id.clone(),
+            ready_state_manifest_id: manifest_id,
+            cas_root,
+            overlay_root: overlay_root.clone(),
+            vmm_pid: session_guard.session().vmm_pid,
+            vmm_process_start_identity: vmm_identity,
+        },
+        supervisor: identity.clone(),
+    });
+    store.write(&stored)?;
+
+    if paths.socket.exists() {
+        fs::remove_file(&paths.socket).context("failed to remove stale control socket")?;
+    }
+    let listener = UnixListener::bind(&paths.socket).context("failed to bind control socket")?;
+    fs::set_permissions(&paths.socket, fs::Permissions::from_mode(0o600))?;
+    capsule_session_runtime::session_store::write_atomic_owner_only(
+        &paths.socket_address,
+        paths.socket.as_os_str().as_encoded_bytes(),
+    )?;
+    let (command_tx, command_rx) = mpsc::channel();
+    let auth = ControlAuth {
+        session_id: session_id.clone(),
+        identity,
+    };
+    thread::Builder::new()
+        .name(format!("capsule-control-{session_id}"))
+        .spawn(move || accept_control(listener, auth, command_tx))
+        .context("failed to start control listener")?;
+
+    stored.lifecycle = "running".to_string();
+    store.write(&stored)?;
+    let result = ready_state_supervisor_loop(
+        &session_id,
+        &store,
+        &mut stored,
+        &mut session_guard,
+        command_rx,
+    );
+    if result.is_err() {
+        stored.lifecycle = "failed".to_string();
+        let _ = store.write(&stored);
+    }
+    let _ = fs::remove_file(&paths.socket);
+    let _ = lock.unlock();
+    result
+}
+
+fn ready_state_supervisor_loop(
+    session_id: &SessionId,
+    store: &CapsuleProtocolSessionStore,
+    stored: &mut StoredProtocolSession,
+    session: &mut ReadyStateSessionGuard,
+    commands: Receiver<SupervisorCommand>,
+) -> Result<()> {
+    loop {
+        match commands.recv()? {
+            SupervisorCommand::Status { reply } => {
+                let _ = reply.send(ControlMessage::Status {
+                    session_id: session_id.to_string(),
+                    lifecycle: stored.lifecycle.clone(),
+                    pid: stored.supervisor.pid,
+                    writer_attached: false,
+                    observers: 0,
+                    frontier: stored.durable_frontier,
+                });
+            }
+            SupervisorCommand::Kill { reply } => {
+                stored.lifecycle = "terminating".to_string();
+                store.write(stored)?;
+                session.stop()?;
+                stored.lifecycle = "stopped".to_string();
+                if let StoredRuntimeProfile::ReadyState {
+                    vmm_pid,
+                    vmm_process_start_identity,
+                    ..
+                } = &mut stored.runtime_profile
+                {
+                    *vmm_pid = None;
+                    *vmm_process_start_identity = None;
+                }
+                store.write(stored)?;
+                let _ = reply.send(ControlMessage::Killed);
+                return Ok(());
+            }
+            SupervisorCommand::Attach { reply, .. } => {
+                let _ = reply.send(Err("ReadyStateConnectorAttachmentUnsupported".to_string()));
+            }
+            SupervisorCommand::CreateFrontier { reply } => {
+                let _ = reply.send(Err("ReadyStateBranchUnsupported".to_string()));
+            }
+            SupervisorCommand::Suspend { reply } => {
+                let _ = reply.send(Err("ReadyStateSuspendUnsupported".to_string()));
+            }
+            SupervisorCommand::Input { .. }
+            | SupervisorCommand::Resize { .. }
+            | SupervisorCommand::Detach { .. } => {}
+        }
+    }
+}
+
+struct ReadyStateSessionGuard {
+    backend: Box<dyn SnapshotBackend>,
+    restored: Option<RestoredSession>,
+    containment: Option<InstalledRestoreContainment>,
+}
+
+impl ReadyStateSessionGuard {
+    fn new(
+        backend: Box<dyn SnapshotBackend>,
+        restored: RestoredSession,
+        containment: Option<InstalledRestoreContainment>,
+    ) -> Self {
+        Self {
+            backend,
+            restored: Some(restored),
+            containment,
+        }
+    }
+
+    fn session(&self) -> &RestoredSession {
+        self.restored.as_ref().expect("restored session is present")
+    }
+
+    fn stop(&mut self) -> Result<()> {
+        if let Some(restored) = self.restored.take() {
+            self.backend.stop(restored)?;
+        }
+        if let Some(mut containment) = self.containment.take() {
+            containment.lease.write_all(WATCHDOG_DISARM)?;
+            containment.lease.flush()?;
+            containment.watchdog.wait()?;
+        }
+        Ok(())
+    }
+}
+
+struct ReadyStateRestoreContainment {
+    overlay_root: PathBuf,
+    receipt: PathBuf,
+    installed: Mutex<Option<InstalledRestoreContainment>>,
+}
+
+struct InstalledRestoreContainment {
+    pid: u32,
+    process_start_identity: String,
+    lease: File,
+    watchdog: ProcessChild,
+}
+
+impl ReadyStateRestoreContainment {
+    fn new(overlay_root: PathBuf, receipt: PathBuf) -> Self {
+        Self {
+            overlay_root,
+            receipt,
+            installed: Mutex::new(None),
+        }
+    }
+
+    fn take_for(&self, restored_pid: Option<i32>) -> Result<Option<InstalledRestoreContainment>> {
+        let mut installed = self
+            .installed
+            .lock()
+            .map_err(|_| anyhow!("Ready-State containment lock poisoned"))?;
+        match (restored_pid, installed.as_ref()) {
+            (None, None) => Ok(None),
+            (Some(pid), Some(authority)) if pid > 0 && authority.pid == pid as u32 => {
+                Ok(installed.take())
+            }
+            (Some(_), None) => bail!("backend returned a VMM without installing containment"),
+            (None, Some(_)) => bail!("backend installed containment but returned no VMM"),
+            (Some(pid), Some(authority)) => bail!(
+                "backend returned VMM pid {pid} but installed containment for {}",
+                authority.pid
+            ),
+        }
+    }
+}
+
+impl RestoreContainment for ReadyStateRestoreContainment {
+    fn install(&self, vmm_pid: u32) -> Result<(), SnapshotError> {
+        let identity =
+            workload_process_start_identity(vmm_pid).map_err(|error| SnapshotError::Backend {
+                backend: "restore-containment".to_string(),
+                reason: error.to_string(),
+            })?;
+        let (lease, watchdog) = spawn_watchdog(
+            vmm_pid,
+            0,
+            &identity,
+            Some(&self.overlay_root),
+            Some(&self.receipt),
+        )
+        .map_err(|error| SnapshotError::Backend {
+            backend: "restore-containment".to_string(),
+            reason: error.to_string(),
+        })?;
+        let mut installed = self.installed.lock().map_err(|_| SnapshotError::Backend {
+            backend: "restore-containment".to_string(),
+            reason: "containment lock poisoned".to_string(),
+        })?;
+        if installed.is_some() {
+            return Err(SnapshotError::Backend {
+                backend: "restore-containment".to_string(),
+                reason: "containment was installed more than once".to_string(),
+            });
+        }
+        *installed = Some(InstalledRestoreContainment {
+            pid: vmm_pid,
+            process_start_identity: identity,
+            lease,
+            watchdog,
+        });
+        Ok(())
+    }
+}
+
+impl Drop for ReadyStateSessionGuard {
+    fn drop(&mut self) {
+        if self.restored.is_some() {
+            let _ = self.stop();
+        }
+    }
 }
 
 struct ResumeStartupRollback {
@@ -466,6 +914,93 @@ pub(crate) fn kill(session: &str) -> Result<()> {
     }
 }
 
+pub(crate) fn attach_public(name: &str) -> Result<()> {
+    let session = resolve_public_session(name)?;
+    attach(session.session_id.as_str(), false)
+}
+
+pub(crate) fn stop_public(name: &str) -> Result<()> {
+    let session = resolve_public_session(name)?;
+    let metadata = public_metadata_for(&session.session_id)?;
+    if session.lifecycle != "stopped" {
+        if supervisor_identity_is_live(&session.supervisor) {
+            kill(session.session_id.as_str())?;
+        } else {
+            reconcile_orphaned_session(session)?;
+        }
+    }
+    println!("Stopped {}.", metadata.name);
+    Ok(())
+}
+
+fn reconcile_orphaned_session(mut session: StoredProtocolSession) -> Result<()> {
+    let paths = SessionPaths::new(&session.session_id)?;
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&paths.lock)
+        .context("failed to open orphaned Supervisor lock")?;
+    lock.try_lock_exclusive()
+        .context("Session Supervisor is still releasing its authority")?;
+    if supervisor_identity_is_live(&session.supervisor) {
+        bail!("Session Supervisor became live during reconciliation");
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let containment_complete = match &session.runtime_profile {
+            StoredRuntimeProfile::WorkspacePty { .. } => {
+                has_containment_receipt(&paths.containment_receipt)
+            }
+            StoredRuntimeProfile::ReadyState {
+                vmm_pid,
+                vmm_process_start_identity,
+                ..
+            } => match (vmm_pid, vmm_process_start_identity) {
+                (Some(pid), Some(identity)) => match workload_process_start_identity(*pid as u32) {
+                    Ok(actual) => actual != *identity,
+                    Err(_) => !capsule::state::session::process::pid_is_alive(*pid as u32),
+                },
+                (None, None) => true,
+                _ => false,
+            },
+        };
+        if containment_complete {
+            break;
+        }
+        if Instant::now() >= deadline {
+            bail!("orphaned Session containment has not proven computation termination");
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    if let StoredRuntimeProfile::ReadyState {
+        vmm_pid,
+        vmm_process_start_identity,
+        overlay_root,
+        ..
+    } = &mut session.runtime_profile
+    {
+        *vmm_pid = None;
+        *vmm_process_start_identity = None;
+        let _ = fs::remove_dir_all(overlay_root);
+    }
+    session.lifecycle = "stopped".to_owned();
+    let store = CapsuleProtocolSessionStore::open(&paths.root)?;
+    store.write(&session)?;
+    let _ = fs::remove_file(&paths.socket);
+    let _ = fs::remove_file(&paths.socket_address);
+    FileExt::unlock(&lock)?;
+    Ok(())
+}
+
+fn has_containment_receipt(path: &Path) -> bool {
+    fs::read(path).is_ok_and(|bytes| bytes == CONTAINMENT_RECEIPT)
+}
+
 pub(crate) fn branch(session: &str, into: &Path, no_attach: bool) -> Result<()> {
     eprintln!(
         "warning: workspace-posix-host + ato.io.pty@1 branch is experimental; only PTY boundary history is verified, and unmediated host external effects may be re-executed"
@@ -516,7 +1051,13 @@ pub(crate) fn branch(session: &str, into: &Path, no_attach: bool) -> Result<()> 
             ..SessionBootstrapMetadata::default()
         },
     )?;
-    launch_session(&child_id, &child_paths, &absolute_path(into)?, no_attach)
+    launch_session(
+        &child_id,
+        &child_paths,
+        &absolute_path(into)?,
+        no_attach,
+        true,
+    )
 }
 
 pub(crate) fn suspend(session: &str) -> Result<()> {
@@ -533,6 +1074,12 @@ pub(crate) fn resume(session: &str) -> Result<()> {
     let paths = SessionPaths::new(&session_id)?;
     let store = CapsuleProtocolSessionStore::open(&paths.root)?;
     let stored = store.read(&session_id)?;
+    if matches!(
+        &stored.runtime_profile,
+        StoredRuntimeProfile::ReadyState { .. }
+    ) {
+        bail!("ReadyStateResumeUnsupported");
+    }
     if stored.lifecycle != "suspended" {
         bail!("Session is not suspended");
     }
@@ -543,7 +1090,7 @@ pub(crate) fn resume(session: &str) -> Result<()> {
     if stored.latest_consistent_frontier != Some(checkpoint.captured_at) {
         bail!("suspended Session checkpoint is not a consistent frontier");
     }
-    let (current_state, current_object) = capture_local_workspace_checkpoint(&stored.workspace)
+    let (current_state, current_object) = capture_local_workspace_checkpoint(stored.workspace()?)
         .context("failed to hash suspended workspace")?;
     if current_state.state_ref.to_string() != checkpoint.workspace_digest {
         bail!("WorkspaceDrift: suspended workspace differs from its checkpoint");
@@ -583,7 +1130,7 @@ pub(crate) fn resume(session: &str) -> Result<()> {
             resume_checkpoint: Some(checkpoint),
         },
     )?;
-    match launch_session(&session_id, &paths, &stored.workspace, true) {
+    match launch_session(&session_id, &paths, stored.workspace()?, true, true) {
         Ok(()) => Ok(()),
         Err(error) => {
             capsule_session_runtime::session_store::write_atomic_owner_only(
@@ -630,11 +1177,55 @@ pub(crate) fn list() -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn list_public(json: bool) -> Result<()> {
+    let root = session_root()?;
+    let store = CapsuleProtocolSessionStore::open(root)?;
+    let now = now_unix_ms();
+    let mut rows = Vec::new();
+    for session in store.list()? {
+        if session.lifecycle == "stopped" {
+            continue;
+        }
+        let Ok(metadata) = reconciled_public_metadata(&session.session_id, &store) else {
+            continue;
+        };
+        if metadata.state != PublicMetadataState::Active {
+            continue;
+        }
+        let lifecycle = displayed_lifecycle(&session);
+        rows.push(PublicSessionRow {
+            name: metadata.name,
+            state: lifecycle.to_owned(),
+            age_seconds: now.saturating_sub(metadata.created_at_unix_ms) / 1_000,
+            source: metadata.source,
+            session_id: session.session_id.to_string(),
+        });
+    }
+    rows.sort_by(|left, right| left.name.cmp(&right.name));
+    if json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+    println!("NAME\tSTATE\tAGE\tSOURCE");
+    for row in rows {
+        println!(
+            "{}\t{}\t{}\t{}",
+            sanitize_terminal_text(&row.name),
+            row.state,
+            format_age(row.age_seconds),
+            sanitize_terminal_text(display_source(&row.source))
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn watchdog(
     pid: u32,
     pgid: i32,
     expected_start_identity: &str,
     lease_fd: i32,
+    overlay_root: Option<&Path>,
+    receipt: Option<&Path>,
 ) -> Result<()> {
     if lease_fd < 0 {
         bail!("invalid watchdog lease fd");
@@ -645,13 +1236,50 @@ pub(crate) fn watchdog(
     if message == WATCHDOG_DISARM {
         return Ok(());
     }
-    if !workload_identity_matches(pid, pgid, expected_start_identity) {
-        return Ok(());
+    let targets = if pgid > 0 && workload_identity_matches(pid, pgid, expected_start_identity) {
+        let targets = workload_tree(pid, pgid, expected_start_identity);
+        signal_workload_tree(&targets, libc::SIGTERM);
+        thread::sleep(Duration::from_millis(500));
+        signal_workload_tree(&targets, libc::SIGKILL);
+        targets
+    } else if pgid <= 0
+        && workload_process_start_identity(pid)
+            .is_ok_and(|identity| identity == expected_start_identity)
+    {
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        thread::sleep(Duration::from_millis(500));
+        if workload_process_start_identity(pid)
+            .is_ok_and(|identity| identity == expected_start_identity)
+        {
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        }
+        vec![ProcessTarget {
+            pid,
+            pgid,
+            process_start_identity: expected_start_identity.to_owned(),
+        }]
+    } else {
+        Vec::new()
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while targets.iter().any(|target| {
+        workload_process_start_identity(target.pid)
+            .is_ok_and(|identity| identity == target.process_start_identity)
+    }) {
+        if Instant::now() >= deadline {
+            bail!("containment could not prove workload termination");
+        }
+        thread::sleep(Duration::from_millis(25));
     }
-    let targets = workload_tree(pid, pgid, expected_start_identity);
-    signal_workload_tree(&targets, libc::SIGTERM);
-    thread::sleep(Duration::from_millis(500));
-    signal_workload_tree(&targets, libc::SIGKILL);
+    if let Some(overlay_root) = overlay_root {
+        let _ = fs::remove_dir_all(overlay_root);
+    }
+    if let Some(receipt) = receipt {
+        capsule_session_runtime::session_store::write_atomic_owner_only(
+            receipt,
+            CONTAINMENT_RECEIPT,
+        )?;
+    }
     Ok(())
 }
 
@@ -1029,7 +1657,7 @@ where
         }
 
         let frontier = wal.durable_frontier()?;
-        let (state, object) = capture_local_workspace_checkpoint(&stored.workspace)
+        let (state, object) = capture_local_workspace_checkpoint(stored.workspace()?)
             .context("failed to capture local workspace checkpoint")?;
         frozen.verify_root()?;
         persist_checkpoint_object(session_id, &state.state_ref.to_string(), &object)?;
@@ -1185,7 +1813,7 @@ struct PtyComputation {
 }
 
 impl PtyComputation {
-    fn spawn(workspace: &Path) -> Result<Self> {
+    fn spawn(workspace: &Path, containment_receipt: &Path) -> Result<Self> {
         let pair = native_pty_system()
             .openpty(PtySize {
                 rows: 24,
@@ -1223,7 +1851,13 @@ impl PtyComputation {
         }
         let process_start_identity = workload_process_start_identity(pid)?;
         let killer = child.clone_killer();
-        let (lease, watchdog) = spawn_watchdog(pid, pgid, &process_start_identity)?;
+        let (lease, watchdog) = spawn_watchdog(
+            pid,
+            pgid,
+            &process_start_identity,
+            None,
+            Some(containment_receipt),
+        )?;
         Ok(Self {
             master: Arc::new(Mutex::new(pair.master)),
             child,
@@ -1363,6 +1997,8 @@ fn spawn_watchdog(
     pid: u32,
     pgid: i32,
     process_start_identity: &str,
+    overlay_root: Option<&Path>,
+    receipt: Option<&Path>,
 ) -> Result<(File, ProcessChild)> {
     let mut fds = [0_i32; 2];
     if unsafe { libc::pipe(fds.as_mut_ptr()) } == -1 {
@@ -1377,20 +2013,32 @@ fn spawn_watchdog(
         }
         return Err(std::io::Error::last_os_error()).context("failed to protect watchdog lease");
     }
-    let child = Command::new(std::env::current_exe()?)
-        .args([
-            "internal",
-            "capsule-session",
-            "watchdog",
-            "--pid",
-            &pid.to_string(),
-            "--pgid",
-            &pgid.to_string(),
-            "--process-start-identity",
-            process_start_identity,
-            "--lease-fd",
-            &read_fd.to_string(),
-        ])
+    let mut command = Command::new(std::env::current_exe()?);
+    command.args([
+        "internal",
+        "capsule-session",
+        "watchdog",
+        "--pid",
+        &pid.to_string(),
+        "--pgid",
+        &pgid.to_string(),
+        "--process-start-identity",
+        process_start_identity,
+        "--lease-fd",
+        &read_fd.to_string(),
+    ]);
+    if let Some(overlay_root) = overlay_root {
+        command.arg("--overlay-root").arg(overlay_root);
+    }
+    if let Some(receipt) = receipt {
+        match fs::remove_file(receipt) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("failed to clear containment receipt"),
+        }
+        command.arg("--receipt").arg(receipt);
+    }
+    let child = command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -2034,6 +2682,39 @@ struct SessionPaths {
     seed_capsule: PathBuf,
     bootstrap: PathBuf,
     supervisor_log: PathBuf,
+    containment_receipt: PathBuf,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct PublicSessionMetadata {
+    schema_version: u16,
+    name: String,
+    source: String,
+    created_at_unix_ms: u64,
+    state: PublicMetadataState,
+    reservation_owner: Option<ProcessIdentity>,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum PublicMetadataState {
+    Reserved,
+    Active,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct ProcessIdentity {
+    pid: u32,
+    start_identity: String,
+}
+
+#[derive(Serialize)]
+struct PublicSessionRow {
+    name: String,
+    state: String,
+    age_seconds: u64,
+    source: String,
+    session_id: String,
 }
 
 impl SessionPaths {
@@ -2057,6 +2738,7 @@ impl SessionPaths {
             seed_capsule: directory.join("seed").join("source.capsule.local"),
             bootstrap: control.join("bootstrap.json"),
             supervisor_log: directory.join("logs").join("supervisor.log"),
+            containment_receipt: control.join("containment-revoked"),
             directory,
             control,
         })
@@ -2077,6 +2759,270 @@ impl SessionPaths {
         }
         Ok(())
     }
+}
+
+fn write_public_metadata(paths: &SessionPaths, metadata: &PublicSessionMetadata) -> Result<()> {
+    validate_public_metadata(metadata)?;
+    if metadata.state == PublicMetadataState::Active
+        && std::env::var_os("ATO_TEST_FAIL_PUBLIC_METADATA_COMMIT").is_some()
+    {
+        bail!("injected public Session metadata commit failure");
+    }
+    capsule_session_runtime::session_store::write_atomic_owner_only(
+        &paths.directory.join("display.json"),
+        &serde_json::to_vec_pretty(metadata)?,
+    )?;
+    Ok(())
+}
+
+fn public_metadata_for(session_id: &SessionId) -> Result<PublicSessionMetadata> {
+    let paths = SessionPaths::new(session_id)?;
+    let metadata: PublicSessionMetadata = serde_json::from_slice(
+        &fs::read(paths.directory.join("display.json"))
+            .context("failed to read public Session metadata")?,
+    )
+    .context("invalid public Session metadata")?;
+    validate_public_metadata(&metadata)?;
+    Ok(metadata)
+}
+
+fn validate_public_metadata(metadata: &PublicSessionMetadata) -> Result<()> {
+    if metadata.schema_version != PUBLIC_METADATA_SCHEMA_VERSION {
+        bail!(
+            "unsupported public Session metadata schema {}",
+            metadata.schema_version
+        );
+    }
+    validate_public_name(&metadata.name)?;
+    if metadata.source.trim().is_empty() {
+        bail!("public Session source is empty");
+    }
+    match (metadata.state, &metadata.reservation_owner) {
+        (PublicMetadataState::Reserved, Some(owner))
+            if owner.pid > 0 && !owner.start_identity.is_empty() => {}
+        (PublicMetadataState::Active, None) => {}
+        _ => bail!("public Session reservation state is invalid"),
+    }
+    Ok(())
+}
+
+fn validate_public_name(name: &str) -> Result<String> {
+    if name.is_empty()
+        || name.len() > PUBLIC_NAME_MAX_LEN
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        bail!("Session name must be 1..={PUBLIC_NAME_MAX_LEN} ASCII alphanumeric, '-' or '_'");
+    }
+    Ok(name.to_owned())
+}
+
+fn public_name_from_bundle(bundle: &Path) -> String {
+    let stem = bundle
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("capsule");
+    let mut name = String::new();
+    let mut separator = false;
+    for byte in stem.bytes() {
+        let byte = byte.to_ascii_lowercase();
+        if byte.is_ascii_alphanumeric() || byte == b'_' {
+            if separator && !name.is_empty() {
+                name.push('-');
+            }
+            separator = false;
+            name.push(char::from(byte));
+        } else {
+            separator = true;
+        }
+        if name.len() == PUBLIC_NAME_MAX_LEN {
+            break;
+        }
+    }
+    while name.ends_with('-') {
+        name.pop();
+    }
+    if name.is_empty() {
+        "capsule".to_owned()
+    } else {
+        name
+    }
+}
+
+fn available_public_name(base: &str) -> Result<String> {
+    let root = session_root()?;
+    let store = CapsuleProtocolSessionStore::open(&root)?;
+    let mut used = BTreeSet::new();
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let Some(session_id) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| SessionId::parse(name).ok())
+        else {
+            continue;
+        };
+        let display_path = entry.path().join("display.json");
+        if !display_path.exists() {
+            continue;
+        }
+        let metadata = reconciled_public_metadata(&session_id, &store)
+            .with_context(|| format!("invalid public Session metadata for {session_id}"))?;
+        let owns_alias = store
+            .read(&session_id)
+            .map_or(true, |session| session.lifecycle != "stopped");
+        if owns_alias {
+            used.insert(metadata.name);
+        }
+    }
+    if !used.contains(base) {
+        return Ok(base.to_owned());
+    }
+    for suffix in 2_u64.. {
+        let suffix = format!("-{suffix}");
+        let keep = PUBLIC_NAME_MAX_LEN.saturating_sub(suffix.len());
+        let candidate = format!("{}{}", &base[..base.len().min(keep)], suffix);
+        if !used.contains(&candidate) {
+            return Ok(candidate);
+        }
+    }
+    unreachable!("the numeric Session name suffix space is unbounded")
+}
+
+fn public_name_lock() -> Result<File> {
+    let root = session_root()?;
+    CapsuleProtocolSessionStore::open(&root)?;
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(root.join("public-names.lock"))?;
+    lock.lock_exclusive()?;
+    Ok(lock)
+}
+
+fn resolve_public_session(name: &str) -> Result<StoredProtocolSession> {
+    let root = session_root()?;
+    let store = CapsuleProtocolSessionStore::open(root)?;
+    for session in store.list()? {
+        if session.lifecycle == "stopped" {
+            continue;
+        }
+        if reconciled_public_metadata(&session.session_id, &store).is_ok_and(|metadata| {
+            metadata.state == PublicMetadataState::Active && metadata.name == name
+        }) {
+            return Ok(session);
+        }
+    }
+    bail!("Capsule Session not found: {name}")
+}
+
+fn displayed_lifecycle(session: &StoredProtocolSession) -> &str {
+    if matches!(
+        session.lifecycle.as_str(),
+        "starting" | "running" | "terminating"
+    ) && !supervisor_identity_is_live(&session.supervisor)
+    {
+        "orphaned"
+    } else {
+        &session.lifecycle
+    }
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+        .unwrap_or(0)
+}
+
+fn format_age(seconds: u64) -> String {
+    match seconds {
+        0..=59 => format!("{seconds}s"),
+        60..=3_599 => format!("{}m", seconds / 60),
+        3_600..=86_399 => format!("{}h", seconds / 3_600),
+        _ => format!("{}d", seconds / 86_400),
+    }
+}
+
+fn display_source(source: &str) -> &str {
+    Path::new(source)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(source)
+}
+
+fn sanitize_terminal_text(value: &str) -> String {
+    let mut sanitized = String::with_capacity(value.len());
+    for character in value.chars() {
+        if matches!(character as u32, 0x00..=0x1f | 0x7f..=0x9f) {
+            sanitized.extend(character.escape_default());
+        } else {
+            sanitized.push(character);
+        }
+    }
+    sanitized
+}
+
+fn reconciled_public_metadata(
+    session_id: &SessionId,
+    store: &CapsuleProtocolSessionStore,
+) -> Result<PublicSessionMetadata> {
+    let metadata = public_metadata_for(session_id)?;
+    if metadata.state != PublicMetadataState::Reserved {
+        return Ok(metadata);
+    }
+    let Ok(session) = store.read(session_id) else {
+        // A dead launcher does not prove that a detached Supervisor was never
+        // spawned. Preserve uncertain reservations until terminal state is
+        // positively established.
+        return Ok(metadata);
+    };
+    if session.lifecycle == "stopped" {
+        return Ok(metadata);
+    }
+    let active = PublicSessionMetadata {
+        state: PublicMetadataState::Active,
+        reservation_owner: None,
+        ..metadata
+    };
+    let paths = SessionPaths::new(session_id)?;
+    // Recovery remains usable when the durable promotion cannot be written:
+    // the on-disk Reserved record still owns the alias fail-closed, while
+    // list/stop may expose and recover the associated non-terminal Session.
+    let _ = write_public_metadata(&paths, &active);
+    Ok(active)
+}
+
+fn release_public_reservation(paths: &SessionPaths) {
+    let _ = fs::remove_file(paths.directory.join("display.json"));
+}
+
+fn release_public_reservation_if_reclaimable(
+    session_id: &SessionId,
+    paths: &SessionPaths,
+) -> Result<()> {
+    let store = CapsuleProtocolSessionStore::open(&paths.root)?;
+    match store.read(session_id) {
+        Ok(session) if session.lifecycle != "stopped" => {}
+        Ok(_) => {
+            release_public_reservation(paths);
+        }
+        Err(capsule_session_runtime::SessionStoreError::Io(error))
+            if error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            release_public_reservation(paths);
+        }
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize)]
@@ -2646,5 +3592,44 @@ mod tests {
         for kind in ["stdin", "output", "resize", "exit"] {
             assert_ne!(kind, "detach");
         }
+    }
+
+    #[test]
+    fn public_name_is_derived_from_a_human_bundle_filename() {
+        assert_eq!(
+            public_name_from_bundle(Path::new("/issues/Login Refresh BUG.capsule")),
+            "login-refresh-bug"
+        );
+        assert_eq!(
+            public_name_from_bundle(Path::new("/issues/バグ再現.capsule")),
+            "capsule"
+        );
+    }
+
+    #[test]
+    fn explicit_public_name_rejects_control_and_path_characters() {
+        assert!(validate_public_name("login-bug").is_ok());
+        for invalid in ["", "../login-bug", "login bug", "login\tbug"] {
+            assert!(
+                validate_public_name(invalid).is_err(),
+                "accepted {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn public_age_uses_compact_units() {
+        assert_eq!(format_age(12), "12s");
+        assert_eq!(format_age(120), "2m");
+        assert_eq!(format_age(7_200), "2h");
+        assert_eq!(format_age(172_800), "2d");
+    }
+
+    #[test]
+    fn human_output_escapes_terminal_control_sequences() {
+        assert_eq!(
+            sanitize_terminal_text("ログイン\n\u{1b}[31m\u{0085}.capsule"),
+            "ログイン\\n\\u{1b}[31m\\u{85}.capsule"
+        );
     }
 }

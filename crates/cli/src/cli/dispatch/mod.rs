@@ -5,6 +5,7 @@ mod binding;
 mod cache;
 mod config;
 mod console;
+mod decap;
 mod engine;
 mod explain_hash;
 mod fetch;
@@ -76,6 +77,8 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
     } = cli;
 
     match command {
+        Commands::Decap { command } => decap::execute_decap_command(command),
+
         Commands::Run {
             path,
             target,

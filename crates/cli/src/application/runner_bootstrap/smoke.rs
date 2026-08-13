@@ -468,6 +468,7 @@ async fn smoke_pipeline(
         manifest: sealed.manifest.clone(),
         overlay_root: workdir.join("restore-ov"),
         host_runner_class: None,
+        containment: None,
         uffd_preview: false,
     });
     let session = match restored {

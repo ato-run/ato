@@ -3464,12 +3464,16 @@ fn process_job(
     // wait, no binding needed; a ZERO-binding supervisor artifact (import) sealed
     // its workload RUNNING, so the backend health-waits like any no-binding
     // artifact (ato#1002 D4).
+    let host_runner_class = backend
+        .host_runner_class()
+        .map_err(|e| fail("restore_verify", e.to_string()))?;
     let restored = backend
         .restore(RestoreReadyStateInput {
             store: &store,
             manifest: manifest_out.clone(),
             overlay_root: jobdir.join("verify-ov"),
-            host_runner_class: None,
+            host_runner_class: Some(host_runner_class),
+            containment: None,
             uffd_preview: false,
         })
         .map_err(|e| fail("restore_verify", e.to_string()))?;
@@ -5732,23 +5736,27 @@ impl snapshot::authoring_evidence::ReadyStateSealAdapter for BuilderReadyStateSe
         let artifact_location =
             persist_and_locate_artifact(&manifest, &seal_dir, &self.work.work_id, &manifest_id)
                 .map_err(|(stage, reason)| format!("{stage}: {reason}"))?;
-        let runner_class = manifest
-            .runner_class_id
-            .clone()
-            .ok_or_else(|| "Seal omitted runner compatibility class".to_string())?;
+        if manifest.runner_class_id.is_none() {
+            return Err("Seal omitted runner compatibility class".to_string());
+        }
         let memory_artifact_ref = manifest
             .layers
             .memory
             .as_ref()
             .map(|layer| layer.id().to_string())
             .ok_or_else(|| "Seal omitted memory artifact".to_string())?;
+        let host_runner_class = self
+            .backend
+            .host_runner_class()
+            .map_err(|error| format!("resolve host runner class: {error}"))?;
         let restored = self
             .backend
             .restore(RestoreReadyStateInput {
                 store: &store,
                 manifest,
                 overlay_root: seal_dir.join("restore-verify-overlay"),
-                host_runner_class: Some(runner_class.clone()),
+                host_runner_class: Some(host_runner_class),
+                containment: None,
                 uffd_preview: false,
             })
             .map_err(|error| format!("restore Ready-State Seal: {error}"))?;
