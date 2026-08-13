@@ -25,10 +25,12 @@ portable Protocol v2 is defined:
 Bundle v1 (State + Connectors + Records)
   -> LegacyStateIoComputationV1
   -> ComputationRef + Ports
-  -> evaluator-selected Run
+  -> computation evaluator boundary
 ```
 
 The accepted v1 CBOR and Bundle specifications remain unchanged.
+This milestone introduces the exact-type evaluator registry but deliberately
+leaves runtime routing through that registry to the next milestone.
 
 ## 2. Native domain
 
@@ -91,22 +93,30 @@ endpoint. Projection does not make Connector and Port identical.
 3. The same exact v1 members produce the same compatibility ComputationRef.
 4. CAS writes are owner-only, atomic, content-verified, and idempotent.
 5. A conflicting object at an existing content address fails closed.
-6. Native interaction validation rejects undefined Ports, non-increasing
+6. Protocol members are copied and hashed in bounded chunks, and their copied
+   byte counts must equal the sizes validated during Bundle spooling.
+7. Native interaction validation rejects undefined Ports, non-increasing
    sequence numbers, and direction/Port-mode mismatches.
-7. Ready-State containment and State-specific restoration remain runtime
+8. Ready-State containment and State-specific restoration remain runtime
    materialization policies below the computation evaluator boundary.
+
+Session Store v4 persists the immutable origin as a native `ComputationRef`.
+An active checkpoint and its frontier are runtime recovery information and do
+not replace that origin. Protocol Session Store v2/v3 State origins may be read
+as `LegacyV3State`, then must be upgraded after their seed Bundle is normalized;
+new v4 writes require a native computation origin.
 
 ## 6. Migration order
 
-1. Land this native domain and v1 projection while preserving v1 golden bytes.
-2. Route workspace and Ready-State startup through the exact-type
+1. Land the native domain, streaming v1 projection, native Session origin, and
+   exact-type evaluator registry while preserving v1 golden bytes.
+2. Route workspace and Ready-State startup through the
    `ComputationEvaluatorRegistry`. Evaluators receive semantic Ports and a
    per-Run `PortBindingPlan`; existing State runtimes, snapshot backends, and
    attachment endpoints remain materialization mechanisms below that boundary.
-3. Persist computation origin and lazy Run heads in Session Store v4.
-4. Define an unambiguous dual-reader Protocol and Bundle v2.
-5. Add native atomic computation capture/seal.
-6. Add validated composition, wiring, hiding, and export, with Hello World as
+3. Define an unambiguous dual-reader Protocol and Bundle v2.
+4. Add native atomic computation capture/seal.
+5. Add validated composition, wiring, hiding, and export, with Hello World as
    the conformance fixture.
 
 Protocol v2 MUST NOT precede the internal evaluator migration.
