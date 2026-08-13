@@ -1728,7 +1728,7 @@ mod tests {
     #[test]
     fn verify_rejects_a_tampered_or_binding_manifest() {
         // Build a real sealed manifest via the Fake backend, persist it, and verify.
-        use capsulefs::CasStore;
+        use snapshot::layer_store::CasStore;
         use snapshot::{
             BuildLayers, BuildReadyStateInput, FakeSnapshotBackend, RestoreContract,
             SanitizerContract, SnapshotBackend,
@@ -1934,7 +1934,7 @@ mod tests {
             SecretScanAttestationV1, SnapshotBackendKind, SnapshotCaptureProvenance,
             SnapshotCompatibilityContractV1,
         };
-        use capsulefs::CasStore;
+        use snapshot::layer_store::CasStore;
         use snapshot::{
             BuildLayers, BuildReadyStateInput, FakeSnapshotBackend, RestoreContract,
             SanitizerContract, SnapshotBackend,

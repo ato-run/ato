@@ -1,4 +1,4 @@
-//! Ready-State use-case layer (E7): orchestrates the snapshot + capsulefs crates
+//! Ready-State use-case layer (E7): orchestrates the snapshot + layer store crates
 //! behind the `ATO_READY_STATE_ENABLED` flag. The build seal branch
 //! ([`build::seal`]) and the run restore sub-mode ([`restore::restore_and_expose`]
 //! with [`runtime_adapter::RestoredRuntimeHandle`]) are wired from

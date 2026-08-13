@@ -30,7 +30,7 @@ fixtures), and which fail closed with which reason.
 
 ### Build: seal before bind
 
-The builder daemon (`crates/snapshot-builder`) claims capsule-snapshot jobs
+The builder daemon (`tools/snapshot-builder`) claims capsule-snapshot jobs
 from the control plane, materializes source from the *server-approved* recipe,
 derives a rootfs (Docker → ext4), boots the app under Firecracker, verifies it
 against its readiness probe, snapshots it, seals the result, scans every layer
@@ -64,7 +64,7 @@ leak between sessions.
 On a runner, restore rehydrates the microVM from `vmstate` + `memory`. A
 no-binding capsule resumes serving directly. A capsule with required bindings
 first receives the *real* bindings — secrets, durable state, per-session
-configuration — via the in-guest agent (`crates/guest-agent`) over a vsock
+configuration — via the in-guest agent (`extensions/providers/snapshot/guest-agent`) over a vsock
 control channel, and only then restarts the workload (bound-ready). Anything
 session- or user-specific is a **restore-time binding, never build-time
 state**.
@@ -108,8 +108,8 @@ References:
 - [Snapshot v1 Compatibility Contract](snapshot-v1-compatibility.md) — the
   supported-surface contract and fixture matrix
 - `crates/snapshot` (backend seam, seal, no-secret scan, rootfs builder,
-  Docker import), `crates/capsulefs`, `crates/snapshot-builder`,
-  `crates/guest-agent`
+  Docker import), `crates/capsulefs`, `tools/snapshot-builder`,
+  `extensions/providers/snapshot/guest-agent`
 - [`api/snapshot-run-control.md`](api/snapshot-run-control.md) — control-plane
   API contract for the build/run pipeline
 - [`ready-state/`](https://github.com/ato-run/ato/tree/main/docs/ready-state)

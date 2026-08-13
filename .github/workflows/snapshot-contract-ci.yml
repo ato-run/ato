@@ -21,7 +21,7 @@ on:
       # orchestration + interactive_capture lane ride here, and it otherwise had
       # NO nightly test/clippy gate — the workspace rust-ci only runs on PRs to
       # main/dev, and this gate previously path-filtered crates/snapshot only).
-      - "crates/snapshot-builder/**"
+      - "tools/snapshot-builder/**"
       # ...and the crates it depends on: a change to capsule / capsulefs /
       # protocol can break the acceptance API without touching crates/snapshot,
       # so the gate must fire on those too (verified against
@@ -38,7 +38,7 @@ on:
     branches: [main, dev, nightly]
     paths:
       - "crates/snapshot/**"
-      - "crates/snapshot-builder/**"
+      - "tools/snapshot-builder/**"
       - "crates/capsule/**"
       - "crates/capsulefs/**"
       - "crates/protocol/**"
@@ -124,7 +124,7 @@ jobs:
       # snapshot's `test-support` feature exposes the eligibility TEST constructors
       # (`for_test` / `analyze_for_test`) that BYPASS the running-capture
       # eligibility gate. It is activated only under [dev-dependencies] (see
-      # crates/snapshot-builder/Cargo.toml), so it can never reach a release build.
+      # tools/snapshot-builder/Cargo.toml), so it can never reach a release build.
       # But Cargo feature unification is global: if ANY crate ever lists a
       # dependency with `features = [ ... "test-support" ... ]` in a NORMAL (non-dev)
       # dependency table — [dependencies], [dependencies.*], [build-dependencies],
