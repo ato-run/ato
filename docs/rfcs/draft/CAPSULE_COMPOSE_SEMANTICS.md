@@ -151,8 +151,14 @@ contains verified `from` and `to` `ResolvedComputation` values. This proves
 their canonical bytes and digest correspondence, while the truth of the child
 transition remains the child Semantics' responsibility.
 
-The reducer produces a candidate `CompositeResidual`, which callers must seal
-and validate before treating it as a valid successor Computation.
+The reducer accepts a `ValidatedComposite`, so a semantic transition always
+starts from a structurally valid Composite. It produces a candidate
+`CompositeResidual`, which callers must seal and validate before treating it
+as a valid successor Computation:
+
+```text
+valid Composite -> transition -> candidate residual -> seal -> validate -> valid successor
+```
 
 ### 6.1 Internal child step
 
