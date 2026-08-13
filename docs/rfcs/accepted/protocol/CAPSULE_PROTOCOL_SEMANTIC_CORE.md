@@ -1,131 +1,125 @@
 ---
-title: "Capsule Protocol Semantic Core"
+title: "Capsule Semantic Core"
 status: accepted
-date: 2026-08-12
+date: 2026-08-13
 author: "@egamikohsuke"
 supersedes:
   - "../../archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md"
 ssot:
-  - "crates/capsule-protocol/"
-  - "CAPSULE_CBOR_V1.cddl"
-  - "CAPSULE_BUNDLE_V1.md"
+  - "crates/capsule-core/"
+related:
+  - "CAPSULE_COMPUTATION_OBJECT_V1.md"
+  - "CAPSULE_PROTOCOL_V1_COMPATIBILITY.md"
+  - "../../draft/CAPSULE_COMPOSE_SEMANTICS.md"
 ---
 
-# Capsule Protocol Semantic Core
+# Capsule Semantic Core
 
 ## 1. Authority
 
+The semantic primitive is `Computation`: a residual process governed by one
+versioned semantics. A running semantic state need not be serialized or
+content-addressed. A Capsule is a sealed, addressable Computation; it is not a
+second Core primitive.
+
 This specification supersedes the five-element semantic model in
 [`CAPSULE_V1_EXECUTION_MODEL_SPEC.md`](../../archived/CAPSULE_V1_EXECUTION_MODEL_SPEC.md).
-Existing manifests, execution contracts, and Ready-State artifacts remain
-supported implementation inputs; they are no longer primitives of the Capsule
-Protocol Semantic Core.
 
-## 2. Core
-
-A Capsule has exactly these semantic elements:
+## 2. Sealing and identity
 
 ```text
-Capsule
-├── State
-└── I/O
-    ├── Connector definitions
-    └── Record stream
+runtime semantic state C
+        | seal
+        v
+ComputationObject
+        | canonical encode + BLAKE3
+        v
+ComputationRef
 ```
 
-The governing invariant is:
+`ComputationRef` is a syntactically valid persistent reference in the sealed
+Computation Object v1 reference domain. Like a Git object ID, the reference may
+be unresolved or dangling; parsing it does not prove that bytes exist or match
+the digest. `ResolvedComputation` is the separate value obtained after
+canonical decoding and exact digest verification. A future
+`SemanticallyValidComputation` boundary may additionally attest that the
+selected Semantics accepts the residual and boundary.
 
-> **State type defines the continuation semantics. Every replay-relevant
-> influence not owned by State must cross an I/O Connector. Uncaptured
-> influence is outside the replay guarantee.**
+The reference addresses the complete `ComputationObject`. Interpretation
+authority is therefore inside the addressed object: changing its semantics,
+boundary, or residual changes its identity.
 
-State is Capsule-owned computation state plus a versioned state type. The state
-type identifies the continuation semantics; the Core does not prescribe how a
-runtime restores or captures it. A Ready-State manifest can therefore be
-referenced as `ato.state.ready-state@1` while Firecracker, QEMU, and fake
-backends remain physical implementation details.
-
-An I/O Connector is a versioned boundary transducer between Capsule-owned state
-and the external world. Connector adapters own payload interpretation and any
-record/live/sandbox/redirect/blocked policy. Terminal, HTTP, browser, and future
-record kinds do not become Core enum variants.
-
-An I/O Record is canonical ingress or egress observed at that boundary. `seq`
-is the recorder-established serialization order. Wall time is audit metadata;
-monotonic offset is pacing metadata. Neither changes order.
-
-## 3. Replay semantics
-
-Ingress and egress are intentionally asymmetric:
+The sealed object is exactly:
 
 ```text
-recorded ingress -> inject into computation
-actual egress    -> observe and compare with recorded egress
+ComputationObject {
+  semantics: SemanticsId,
+  boundary:  PortId -> PortDef,
+  residual:  ContentRef
+}
+
+PortDef {
+  protocol: ProtocolId,
+  role:     RoleId
+}
 ```
 
-Recorded egress must never be injected as if computation produced it. A replay
-may report divergence when actual and recorded observations disagree. Replay
-may leave the connector attached and return control to a user, producing
-interactive continuation without introducing another semantic primitive.
+`SemanticsId` and `ProtocolId` are immutable, versioned identifiers. Optional
+specification references and registry attestations are outside Core identity.
+Canonical encoding and hashing are governed by
+[`CAPSULE_COMPUTATION_OBJECT_V1.md`](CAPSULE_COMPUTATION_OBJECT_V1.md).
 
-Historical replay advances State only as required to process the recorded I/O
-sequence. An empty record stream is a zero-step replay: State is unchanged and
-no Connector is invoked. Autonomous evolution after historical replay belongs
-to continuation, not historical replay. A State type that requires an implicit
-clock, scheduler step, or other influence to reproduce history must model that
-influence as recorded I/O rather than adding another Core primitive.
+## 3. Boundary and names
 
-## 4. Domain and encoding boundary
+A boundary is an interface signature: it declares stable `PortId` values and
+their protocol and role. Protocol semantics determine which actions each role
+may send or receive; Core does not reduce this to ingress, egress, or duplex.
 
-`capsule-protocol` defines validated semantic values and incremental stream
-validation. It contains no serializer, filesystem, network, async runtime, or
-workspace-crate dependency.
+Three identities must remain distinct:
 
-Portable encoding is a separate layer. Semantic records are not encoded frames;
-wire DTOs must convert explicitly to and from domain values. Large payloads use
-algorithm-tagged content references rather than unbounded inline bytes.
+```text
+Name     runtime calculus channel; may be mobile
+PortId   stable name within one sealed boundary
+PortRef  persistent reference to (ComputationRef, PortId), defined above Core
+```
 
-All component identifiers use lowercase ASCII namespace segments separated by
-`.`. A segment starts and ends with a lowercase letter or digit and may contain
-`-` or `_` internally. Versioned identifiers contain at least two segments and
-end in `@<positive-decimal-version>` without a leading zero. The 255-byte limit
-applies to the complete identifier, including `@version`. Descriptor connector
-entries are encoded in strictly ascending `ConnectorId` byte order.
+The mapping from a boundary `PortId` to an internal runtime `Name`, child Port,
+or other realization belongs to the semantics-specific residual. It is not a
+Core field. Physical endpoints, bindings, grants, transports, file
+descriptors, runtime adapters, and Connectors are also outside Core.
 
-The normative v1 wire schema is `CAPSULE_CBOR_V1.cddl`. A descriptor is one
-CBOR item and its record stream is an RFC 8742 CBOR Sequence. Tuple positions,
-null semantics, numeric bounds, payload tags, and `ContentRef` spelling are
-fixed there. Exact tuple arity is required: decoders reject unknown/trailing
-fields. Golden vectors under `crates/capsule-codec/tests/vectors/` test this
-schema but are not the specification.
+## 4. Evolution
 
-The normative portable container is `CAPSULE_BUNDLE_V1.md`. It defines how the
-descriptor, record sequence, and content-addressed objects are carried in one
-deterministic `.capsule` file. Bundle versioning is independent from CBOR wire
-versioning.
+Evolution is a semantics-defined relation:
 
-`ato.state.workspace-posix-host@1` is explicitly host-bound and best-effort. It
-owns workspace bytes only; host shell, runtime, toolchain, libraries, `PATH`,
-and environment are outside its continuation guarantee. It MUST NOT be used as
-evidence of cross-environment portability. Portable acceptance requires a
-State type such as `ato.state.ready-state@1` whose restore contract owns every
-replay-relevant runtime influence, or an equivalently pinned Ato-managed
-runtime.
+```text
+C --alpha--> C'
+```
 
-CI's normative portability acceptance uses the Ato-managed
-`ato.state.fixture-machine@1` runtime in two separate jobs. Its versioned State
-semantics close computation inside Ato, the only transferred input is the
-validated `.capsule`, replay compares actual egress, and the restored machine
-accepts new input after replay. The PTY/rustc test remains a separate
-host-bound integration smoke and makes no cross-environment portability claim.
+Neither side is required to have a `ComputationRef`. Sealing a state produces
+an immutable representation when persistence, transfer, or persistent Port
+identity is required. Observations, histories, records, traces, clocks, replay
+evidence, and causal metadata are outside Core unless the selected residual
+semantics explicitly commits to them.
 
-## 5. Compatibility surface
+## 5. Composition
 
-The initial schema version is 1. Valid streams may be empty, start at any
-sequence number, contain sequence gaps, omit pacing/audit timestamps, and have
-wall-clock timestamps that move backwards. Sequence numbers must be strictly
-increasing and every record must name a declared connector.
+Composition is an ordinary semantics, `capsule.compose@1`, whose residual may
+reference child `ComputationRef` values, connections, and exports. A composed
+result has the same `ComputationObject` shape as every other sealed
+Computation. Core has no `Atomic | Composite` distinction.
 
-Build, Runtime, Launch, Snapshot, Materialization, Binding, Surface, Ledger,
-Cursor, Contract, and Lineage may exist as implementation strategies or derived
-views. They are not Semantic Core primitives.
+The small-step model and residual invariants are developed in
+[`CAPSULE_COMPOSE_SEMANTICS.md`](../../draft/CAPSULE_COMPOSE_SEMANTICS.md).
+
+## 6. Core exclusions
+
+State, Record, Interaction, Trace, Snapshot, Materialization, Connector, Run,
+Evaluator, Session, calculus `Name`, `PortRef`, and wire/container formats are
+outside the Semantic Core. New workloads are added by defining a versioned
+semantics, its residual representation, and its evaluator/seal/resume
+behavior—not by extending a Core category enum.
+
+Protocol v1 is governed separately by
+[`CAPSULE_PROTOCOL_V1_COMPATIBILITY.md`](CAPSULE_PROTOCOL_V1_COMPATIBILITY.md).
+No portable Protocol v2 encoding is defined here.
