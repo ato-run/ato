@@ -1,7 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-pub mod leip;
-
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -12,8 +10,8 @@ const DEFAULT_DENO_RUNTIME_VERSION: &str = "2.6.8";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum LockDraftReadiness {
-    Draft,
+pub enum RepositoryReadiness {
+    NeedsEvidence,
     ReadyToFinalize,
     FinalizedLocally,
     PreviewVerified,
@@ -22,7 +20,7 @@ pub enum LockDraftReadiness {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum LockDraftConfidence {
+pub enum RepositoryConfidence {
     Low,
     Medium,
     High,
@@ -90,7 +88,7 @@ pub struct ExistingCapsuleLockSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct LockDraftExternalDependency {
+pub struct ResolvedExternalDependency {
     pub name: String,
     pub source: String,
     pub source_type: String,
@@ -99,14 +97,14 @@ pub struct LockDraftExternalDependency {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct LockDraftRuntimePlatform {
+pub struct ResolvedRuntimePlatform {
     pub os: String,
     pub arch: String,
     pub target_triple: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct LockDraftInput {
+pub struct RepositoryResolutionInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_target: Option<SelectedTarget>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -123,11 +121,11 @@ pub struct LockDraftInput {
     )]
     pub existing_capsule_lock_summary: Option<ExistingCapsuleLockSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub external_dependency_hints: Vec<LockDraftExternalDependency>,
+    pub external_dependency_hints: Vec<ResolvedExternalDependency>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct LockDraft {
+pub struct RepositoryResolution {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -137,29 +135,29 @@ pub struct LockDraft {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub runtime_tools: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub runtime_platforms: Vec<LockDraftRuntimePlatform>,
+    pub runtime_platforms: Vec<ResolvedRuntimePlatform>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_native_lockfiles: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing_native_lockfiles: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub external_capsule_dependencies: Vec<LockDraftExternalDependency>,
+    pub external_capsule_dependencies: Vec<ResolvedExternalDependency>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocking_issues: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub suggested_commands: Vec<String>,
-    pub readiness: LockDraftReadiness,
-    pub confidence: LockDraftConfidence,
-    pub draft_hash: String,
+    pub readiness: RepositoryReadiness,
+    pub confidence: RepositoryConfidence,
+    pub resolution_hash: String,
 }
 
 #[derive(Debug, Error)]
-pub enum LockDraftError {
+pub enum RepositoryResolutionError {
     #[error("failed to parse manifest source: {0}")]
     ManifestParse(String),
-    #[error("failed to serialize lock draft: {0}")]
+    #[error("failed to serialize lock resolution: {0}")]
     Serialize(String),
 }
 
@@ -182,7 +180,9 @@ struct ManifestView {
     selected_target: ResolvedTarget,
 }
 
-pub fn evaluate_lock_draft(input: &LockDraftInput) -> Result<LockDraft, LockDraftError> {
+pub fn resolve_repository_evidence(
+    input: &RepositoryResolutionInput,
+) -> Result<RepositoryResolution, RepositoryResolutionError> {
     let manifest = parse_manifest_view(input.manifest_source.as_ref())?;
     let target = resolve_target(input.selected_target.as_ref(), manifest.as_ref());
 
@@ -215,7 +215,7 @@ pub fn evaluate_lock_draft(input: &LockDraftInput) -> Result<LockDraft, LockDraf
 
     if runtime.is_none() {
         blocking_issues.push(
-            "LockDraft could not resolve a primary runtime from the manifest or host hints."
+            "RepositoryResolution could not resolve a primary runtime from the manifest or host hints."
                 .to_string(),
         );
     }
@@ -226,7 +226,7 @@ pub fn evaluate_lock_draft(input: &LockDraftInput) -> Result<LockDraft, LockDraf
         && required_runtime_version.is_some()
     {
         warnings.push(
-            "runtime_version was inferred by the shared LockDraft engine. Pin it in the manifest to make local finalize explicit."
+            "runtime_version was inferred by the shared RepositoryResolution engine. Pin it in the manifest to make local finalize explicit."
                 .to_string(),
         );
     }
@@ -254,14 +254,14 @@ pub fn evaluate_lock_draft(input: &LockDraftInput) -> Result<LockDraft, LockDraf
     );
 
     let readiness = if blocking_issues.is_empty() && missing_native_lockfiles.is_empty() {
-        LockDraftReadiness::ReadyToFinalize
+        RepositoryReadiness::ReadyToFinalize
     } else {
-        LockDraftReadiness::Draft
+        RepositoryReadiness::NeedsEvidence
     };
 
     let confidence = confidence(&runtime, &driver, &target, &blocking_issues, &warnings);
 
-    let mut draft = LockDraft {
+    let mut resolution = RepositoryResolution {
         runtime,
         driver,
         required_runtime_version,
@@ -275,24 +275,25 @@ pub fn evaluate_lock_draft(input: &LockDraftInput) -> Result<LockDraft, LockDraf
         suggested_commands,
         readiness,
         confidence,
-        draft_hash: String::new(),
+        resolution_hash: String::new(),
     };
 
-    draft.draft_hash = draft_hash(&draft)?;
-    Ok(draft)
+    resolution.resolution_hash = resolution_hash(&resolution)?;
+    Ok(resolution)
 }
 
-pub fn evaluate_lock_draft_json(input_json: &str) -> Result<String, LockDraftError> {
-    let input: LockDraftInput = serde_json::from_str(input_json)
-        .map_err(|err| LockDraftError::Serialize(err.to_string()))?;
-    let draft = evaluate_lock_draft(&input)?;
-    serde_json::to_string(&draft).map_err(|err| LockDraftError::Serialize(err.to_string()))
+pub fn resolve_repository_json(input_json: &str) -> Result<String, RepositoryResolutionError> {
+    let input: RepositoryResolutionInput = serde_json::from_str(input_json)
+        .map_err(|err| RepositoryResolutionError::Serialize(err.to_string()))?;
+    let resolution = resolve_repository_evidence(&input)?;
+    serde_json::to_string(&resolution)
+        .map_err(|err| RepositoryResolutionError::Serialize(err.to_string()))
 }
 
-pub fn lock_draft_schema_json() -> String {
+pub fn repository_resolution_schema_json() -> String {
     serde_json::json!({
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "LockDraft Contract",
+        "$schema": "https://json-schema.org/resolution/2020-12/schema",
+        "title": "RepositoryResolution Contract",
         "type": "object",
         "properties": {
             "input": {
@@ -309,7 +310,7 @@ pub fn lock_draft_schema_json() -> String {
             },
             "output": {
                 "type": "object",
-                "required": ["runtime_tools", "runtime_platforms", "required_native_lockfiles", "missing_native_lockfiles", "external_capsule_dependencies", "blocking_issues", "warnings", "suggested_commands", "readiness", "confidence", "draft_hash"],
+                "required": ["runtime_tools", "runtime_platforms", "required_native_lockfiles", "missing_native_lockfiles", "external_capsule_dependencies", "blocking_issues", "warnings", "suggested_commands", "readiness", "confidence", "resolution_hash"],
                 "properties": {
                     "runtime": { "type": ["string", "null"] },
                     "driver": { "type": ["string", "null"] },
@@ -322,47 +323,14 @@ pub fn lock_draft_schema_json() -> String {
                     "blocking_issues": { "type": "array" },
                     "warnings": { "type": "array" },
                     "suggested_commands": { "type": "array" },
-                    "readiness": { "enum": ["draft", "ready_to_finalize", "finalized_locally", "preview_verified", "publishable"] },
+                    "readiness": { "enum": ["needs_evidence", "ready_to_finalize", "finalized_locally", "preview_verified", "publishable"] },
                     "confidence": { "enum": ["low", "medium", "high"] },
-                    "draft_hash": { "type": "string" }
+                    "resolution_hash": { "type": "string" }
                 }
             }
         }
     })
     .to_string()
-}
-
-#[cfg(feature = "wasm")]
-mod wasm_exports {
-    use super::*;
-    use wasm_bindgen::prelude::*;
-
-    #[wasm_bindgen(js_name = evaluateLockDraftJson)]
-    pub fn evaluate_lock_draft_json_wasm(input_json: &str) -> Result<String, JsValue> {
-        evaluate_lock_draft_json(input_json).map_err(|err| JsValue::from_str(&err.to_string()))
-    }
-
-    #[wasm_bindgen(js_name = lockDraftSchemaJson)]
-    pub fn lock_draft_schema_json_wasm() -> String {
-        lock_draft_schema_json()
-    }
-
-    /// Primary LEIP v1 inference API.
-    /// Accepts a `LeipInput` JSON string and returns a `LeipResult` JSON string.
-    #[wasm_bindgen(js_name = evaluateLaunchGraphsJson)]
-    pub fn evaluate_launch_graphs_json_wasm(input_json: &str) -> Result<String, JsValue> {
-        leip::evaluate_launch_graphs_json(input_json)
-            .map_err(|err| JsValue::from_str(&err.to_string()))
-    }
-
-    /// Compatibility LEIP wrapper.
-    /// Accepts a `LockDraftInput` JSON string (maps `selected_target` → `target_hint`)
-    /// and returns a `LeipResult` JSON string.
-    #[wasm_bindgen(js_name = evaluateLaunchEnvelopesJson)]
-    pub fn evaluate_launch_envelopes_json_wasm(input_json: &str) -> Result<String, JsValue> {
-        leip::evaluate_launch_envelopes_json(input_json)
-            .map_err(|err| JsValue::from_str(&err.to_string()))
-    }
 }
 
 fn confidence(
@@ -371,31 +339,31 @@ fn confidence(
     target: &ResolvedTarget,
     blocking_issues: &[String],
     warnings: &[String],
-) -> LockDraftConfidence {
+) -> RepositoryConfidence {
     if runtime.is_none()
         || blocking_issues
             .iter()
             .any(|issue| issue.contains("could not resolve"))
     {
-        return LockDraftConfidence::Low;
+        return RepositoryConfidence::Low;
     }
     if !blocking_issues.is_empty() {
-        return LockDraftConfidence::Low;
+        return RepositoryConfidence::Low;
     }
     if driver.is_some()
         && (target.entrypoint.is_some() || target.run_command.is_some() || !target.cmd.is_empty())
         && warnings.is_empty()
     {
-        return LockDraftConfidence::High;
+        return RepositoryConfidence::High;
     }
-    LockDraftConfidence::Medium
+    RepositoryConfidence::Medium
 }
 
-fn draft_hash(draft: &LockDraft) -> Result<String, LockDraftError> {
-    let mut cloned = draft.clone();
-    cloned.draft_hash.clear();
-    let bytes =
-        serde_json::to_vec(&cloned).map_err(|err| LockDraftError::Serialize(err.to_string()))?;
+fn resolution_hash(resolution: &RepositoryResolution) -> Result<String, RepositoryResolutionError> {
+    let mut cloned = resolution.clone();
+    cloned.resolution_hash.clear();
+    let bytes = serde_json::to_vec(&cloned)
+        .map_err(|err| RepositoryResolutionError::Serialize(err.to_string()))?;
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
@@ -409,9 +377,9 @@ fn effective_lock_driver(runtime: Option<&str>, driver: Option<&str>) -> Option<
 }
 
 fn external_capsule_dependencies(
-    input: &LockDraftInput,
+    input: &RepositoryResolutionInput,
     manifest: Option<&ManifestView>,
-) -> Result<Vec<LockDraftExternalDependency>, LockDraftError> {
+) -> Result<Vec<ResolvedExternalDependency>, RepositoryResolutionError> {
     if let Some(manifest) = manifest
         && let Some(targets) = manifest.raw.get("targets").and_then(toml::Value::as_table)
     {
@@ -453,7 +421,7 @@ fn external_capsule_dependencies(
                     .unwrap_or("store");
                 if let Some(existing) = seen.get(alias) {
                     if existing != source {
-                        return Err(LockDraftError::ManifestParse(format!(
+                        return Err(RepositoryResolutionError::ManifestParse(format!(
                             "external dependency alias '{}' maps to multiple sources in target '{}'",
                             alias, target_label
                         )));
@@ -475,7 +443,7 @@ fn external_capsule_dependencies(
                     })
                     .unwrap_or_default();
                 seen.insert(alias.to_string(), source.to_string());
-                collected.push(LockDraftExternalDependency {
+                collected.push(ResolvedExternalDependency {
                     name: alias.to_string(),
                     source: source.to_string(),
                     source_type: source_type.to_string(),
@@ -492,7 +460,7 @@ fn external_capsule_dependencies(
     Ok(dependencies)
 }
 
-fn file_exists(input: &LockDraftInput, path: &str) -> bool {
+fn file_exists(input: &RepositoryResolutionInput, path: &str) -> bool {
     let normalized = normalize_path(path);
     if input
         .repo_file_index
@@ -507,7 +475,7 @@ fn file_exists(input: &LockDraftInput, path: &str) -> bool {
         .any(|entry| normalize_path(entry) == normalized)
 }
 
-fn file_text<'a>(input: &'a LockDraftInput, path: &str) -> Option<&'a str> {
+fn file_text<'a>(input: &'a RepositoryResolutionInput, path: &str) -> Option<&'a str> {
     let normalized = normalize_path(path);
     input
         .file_text_map
@@ -515,7 +483,10 @@ fn file_text<'a>(input: &'a LockDraftInput, path: &str) -> Option<&'a str> {
         .find_map(|(key, value)| (normalize_path(key) == normalized).then_some(value.as_str()))
 }
 
-fn infer_driver_from_repo(target: &ResolvedTarget, input: &LockDraftInput) -> Option<String> {
+fn infer_driver_from_repo(
+    target: &ResolvedTarget,
+    input: &RepositoryResolutionInput,
+) -> Option<String> {
     if let Some(driver) = infer_driver_from_cmd(&target.cmd) {
         return Some(driver);
     }
@@ -598,7 +569,7 @@ fn infer_driver_from_run_command(run_command: Option<&str>) -> Option<String> {
     }
 }
 
-fn missing_native_lockfiles(required: &[String], input: &LockDraftInput) -> Vec<String> {
+fn missing_native_lockfiles(required: &[String], input: &RepositoryResolutionInput) -> Vec<String> {
     if required.is_empty() {
         return Vec::new();
     }
@@ -634,14 +605,16 @@ fn normalize_scalar(value: Option<String>) -> Option<String> {
 
 fn parse_manifest_view(
     manifest_source: Option<&ManifestSource>,
-) -> Result<Option<ManifestView>, LockDraftError> {
+) -> Result<Option<ManifestView>, RepositoryResolutionError> {
     let Some(manifest_source) = manifest_source else {
         return Ok(None);
     };
     let raw: toml::Value = manifest_source
         .text
         .parse()
-        .map_err(|err: toml::de::Error| LockDraftError::ManifestParse(err.to_string()))?;
+        .map_err(|err: toml::de::Error| {
+            RepositoryResolutionError::ManifestParse(err.to_string())
+        })?;
     let selected_target =
         parse_selected_target_from_manifest(&raw, manifest_source.selected_target_label.as_deref());
     Ok(Some(ManifestView {
@@ -707,7 +680,7 @@ fn parse_runtime_selector(
 fn required_native_lockfiles(
     runtime: Option<&str>,
     effective_driver: Option<&str>,
-    input: &LockDraftInput,
+    input: &RepositoryResolutionInput,
     target: &ResolvedTarget,
 ) -> Vec<String> {
     match effective_driver {
@@ -753,7 +726,7 @@ fn required_runtime_version(
     }
 }
 
-fn resolve_driver(target: &ResolvedTarget, input: &LockDraftInput) -> Option<String> {
+fn resolve_driver(target: &ResolvedTarget, input: &RepositoryResolutionInput) -> Option<String> {
     let explicit = normalize_scalar(target.driver.clone());
     if explicit.is_some() {
         return explicit;
@@ -860,7 +833,7 @@ fn runtime_platforms(
     runtime: Option<&str>,
     effective_driver: Option<&str>,
     runtime_tools: &BTreeMap<String, String>,
-) -> Vec<LockDraftRuntimePlatform> {
+) -> Vec<ResolvedRuntimePlatform> {
     let needs_universal_lock = runtime == Some("web")
         || (runtime == Some("source")
             && (matches!(
@@ -874,7 +847,7 @@ fn runtime_platforms(
 
     SUPPORTED_RUNTIME_PLATFORMS
         .iter()
-        .map(|platform| LockDraftRuntimePlatform {
+        .map(|platform| ResolvedRuntimePlatform {
             os: platform.0.to_string(),
             arch: platform.1.to_string(),
             target_triple: platform.2.to_string(),
@@ -894,7 +867,7 @@ fn runtime_version_is_required(runtime: Option<&str>, effective_driver: Option<&
 fn suggested_commands(
     runtime: Option<&str>,
     effective_driver: Option<&str>,
-    input: &LockDraftInput,
+    input: &RepositoryResolutionInput,
     target: &ResolvedTarget,
     missing_native_lockfiles: &[String],
 ) -> Vec<String> {
@@ -953,7 +926,7 @@ fn cmd_contains_no_lock(target: &ResolvedTarget) -> bool {
         .unwrap_or(false)
 }
 
-fn deno_project_present(input: &LockDraftInput, target: &ResolvedTarget) -> bool {
+fn deno_project_present(input: &RepositoryResolutionInput, target: &ResolvedTarget) -> bool {
     target
         .entrypoint
         .as_deref()
@@ -969,7 +942,7 @@ fn deno_project_present(input: &LockDraftInput, target: &ResolvedTarget) -> bool
         || file_exists(input, "deno.lock")
 }
 
-fn detect_node_package_manager(input: &LockDraftInput) -> Option<String> {
+fn detect_node_package_manager(input: &RepositoryResolutionInput) -> Option<String> {
     if file_exists(input, "pnpm-lock.yaml") {
         return Some("pnpm".to_string());
     }
@@ -1001,7 +974,7 @@ fn detect_node_package_manager(input: &LockDraftInput) -> Option<String> {
     None
 }
 
-fn go_project_present(input: &LockDraftInput, target: &ResolvedTarget) -> bool {
+fn go_project_present(input: &RepositoryResolutionInput, target: &ResolvedTarget) -> bool {
     file_exists(input, "go.mod")
         || target
             .entrypoint
@@ -1032,7 +1005,7 @@ fn merge_target(base: ResolvedTarget, override_target: ResolvedTarget) -> Resolv
     }
 }
 
-fn node_project_present(input: &LockDraftInput, target: &ResolvedTarget) -> bool {
+fn node_project_present(input: &RepositoryResolutionInput, target: &ResolvedTarget) -> bool {
     file_exists(input, "package.json")
         || target
             .dependencies_path
@@ -1054,7 +1027,7 @@ fn node_project_present(input: &LockDraftInput, target: &ResolvedTarget) -> bool
             .unwrap_or(false)
 }
 
-fn python_project_present(input: &LockDraftInput, target: &ResolvedTarget) -> bool {
+fn python_project_present(input: &RepositoryResolutionInput, target: &ResolvedTarget) -> bool {
     file_exists(input, "pyproject.toml")
         || file_exists(input, "requirements.txt")
         || target
@@ -1072,7 +1045,7 @@ fn python_project_present(input: &LockDraftInput, target: &ResolvedTarget) -> bo
             .unwrap_or(false)
 }
 
-fn rust_project_present(input: &LockDraftInput, target: &ResolvedTarget) -> bool {
+fn rust_project_present(input: &RepositoryResolutionInput, target: &ResolvedTarget) -> bool {
     file_exists(input, "Cargo.toml")
         || target
             .entrypoint
@@ -1094,8 +1067,8 @@ const SUPPORTED_RUNTIME_PLATFORMS: &[(&str, &str, &str)] = &[
 mod tests {
     use super::*;
 
-    fn node_input() -> LockDraftInput {
-        LockDraftInput {
+    fn node_input() -> RepositoryResolutionInput {
+        RepositoryResolutionInput {
             selected_target: Some(SelectedTarget {
                 runtime: Some("source".to_string()),
                 driver: Some("node".to_string()),
@@ -1120,12 +1093,12 @@ mod tests {
     }
 
     #[test]
-    fn node_lock_draft_requires_a_native_lockfile() {
-        let draft = evaluate_lock_draft(&node_input()).expect("node draft");
-        assert_eq!(draft.runtime.as_deref(), Some("source"));
-        assert_eq!(draft.driver.as_deref(), Some("node"));
+    fn node_repository_resolution_requires_a_native_lockfile() {
+        let resolution = resolve_repository_evidence(&node_input()).expect("node resolution");
+        assert_eq!(resolution.runtime.as_deref(), Some("source"));
+        assert_eq!(resolution.driver.as_deref(), Some("node"));
         assert_eq!(
-            draft.missing_native_lockfiles,
+            resolution.missing_native_lockfiles,
             vec![
                 "package-lock.json".to_string(),
                 "pnpm-lock.yaml".to_string(),
@@ -1134,33 +1107,36 @@ mod tests {
                 "bun.lockb".to_string(),
             ]
         );
-        assert_eq!(draft.readiness, LockDraftReadiness::Draft);
+        assert_eq!(resolution.readiness, RepositoryReadiness::NeedsEvidence);
         assert_eq!(
-            draft.suggested_commands,
+            resolution.suggested_commands,
             vec!["npm install --package-lock-only".to_string()]
         );
     }
 
     #[test]
-    fn node_lock_draft_is_ready_when_lockfile_exists() {
+    fn node_repository_resolution_is_ready_when_lockfile_exists() {
         let mut input = node_input();
         input.repo_file_index.push(RepoFileEntry {
             path: "package-lock.json".to_string(),
             kind: RepoFileKind::File,
             size: None,
         });
-        let draft = evaluate_lock_draft(&input).expect("node draft");
-        assert_eq!(draft.missing_native_lockfiles, Vec::<String>::new());
-        assert_eq!(draft.readiness, LockDraftReadiness::ReadyToFinalize);
-        assert_eq!(draft.required_runtime_version.as_deref(), Some("20.12.0"));
+        let resolution = resolve_repository_evidence(&input).expect("node resolution");
+        assert_eq!(resolution.missing_native_lockfiles, Vec::<String>::new());
+        assert_eq!(resolution.readiness, RepositoryReadiness::ReadyToFinalize);
         assert_eq!(
-            draft.runtime_platforms.len(),
+            resolution.required_runtime_version.as_deref(),
+            Some("20.12.0")
+        );
+        assert_eq!(
+            resolution.runtime_platforms.len(),
             SUPPORTED_RUNTIME_PLATFORMS.len()
         );
     }
 
     #[test]
-    fn node_lock_draft_can_finalize_with_inferred_runtime_version() {
+    fn node_repository_resolution_can_finalize_with_inferred_runtime_version() {
         let mut input = node_input();
         input.selected_target = Some(SelectedTarget {
             runtime_version: None,
@@ -1176,14 +1152,14 @@ mod tests {
             r#"{"name":"demo","packageManager":"pnpm@10.0.0"}"#.to_string(),
         );
 
-        let draft = evaluate_lock_draft(&input).expect("node draft");
-        assert_eq!(draft.readiness, LockDraftReadiness::ReadyToFinalize);
+        let resolution = resolve_repository_evidence(&input).expect("node resolution");
+        assert_eq!(resolution.readiness, RepositoryReadiness::ReadyToFinalize);
         assert_eq!(
-            draft.required_runtime_version.as_deref(),
+            resolution.required_runtime_version.as_deref(),
             Some(DEFAULT_NODE_RUNTIME_VERSION)
         );
         assert!(
-            draft
+            resolution
                 .warnings
                 .iter()
                 .any(|warning| warning.contains("runtime_version was inferred"))
@@ -1192,7 +1168,7 @@ mod tests {
 
     #[test]
     fn python_requirements_prefers_uv_compile_hint() {
-        let input = LockDraftInput {
+        let input = RepositoryResolutionInput {
             selected_target: Some(SelectedTarget {
                 runtime: Some("source".to_string()),
                 driver: Some("python".to_string()),
@@ -1214,17 +1190,20 @@ mod tests {
             ],
             ..Default::default()
         };
-        let draft = evaluate_lock_draft(&input).expect("python draft");
-        assert_eq!(draft.missing_native_lockfiles, vec!["uv.lock".to_string()]);
+        let resolution = resolve_repository_evidence(&input).expect("python resolution");
         assert_eq!(
-            draft.suggested_commands,
+            resolution.missing_native_lockfiles,
+            vec!["uv.lock".to_string()]
+        );
+        assert_eq!(
+            resolution.suggested_commands,
             vec!["uv pip compile requirements.txt -o uv.lock".to_string()]
         );
     }
 
     #[test]
     fn manifest_source_can_supply_external_dependencies() {
-        let input = LockDraftInput {
+        let input = RepositoryResolutionInput {
             manifest_source: Some(ManifestSource {
                 text: r#"
 default_target = "web"
@@ -1243,16 +1222,16 @@ source_type = "store"
             }),
             ..Default::default()
         };
-        let draft = evaluate_lock_draft(&input).expect("manifest draft");
-        assert_eq!(draft.external_capsule_dependencies.len(), 1);
-        assert_eq!(draft.external_capsule_dependencies[0].name, "auth");
-        assert_eq!(draft.runtime.as_deref(), Some("web"));
-        assert_eq!(draft.driver.as_deref(), Some("static"));
+        let resolution = resolve_repository_evidence(&input).expect("manifest resolution");
+        assert_eq!(resolution.external_capsule_dependencies.len(), 1);
+        assert_eq!(resolution.external_capsule_dependencies[0].name, "auth");
+        assert_eq!(resolution.runtime.as_deref(), Some("web"));
+        assert_eq!(resolution.driver.as_deref(), Some("static"));
     }
 
     #[test]
     fn json_entrypoint_and_lock_hash_are_stable() {
-        let input = LockDraftInput {
+        let input = RepositoryResolutionInput {
             selected_target: Some(SelectedTarget {
                 runtime: Some("source/deno".to_string()),
                 entrypoint: Some("main.ts".to_string()),
@@ -1273,9 +1252,9 @@ source_type = "store"
             ],
             ..Default::default()
         };
-        let left = evaluate_lock_draft(&input).expect("left");
-        let right = evaluate_lock_draft(&input).expect("right");
+        let left = resolve_repository_evidence(&input).expect("left");
+        let right = resolve_repository_evidence(&input).expect("right");
         assert_eq!(left, right);
-        assert!(left.draft_hash.starts_with("sha256:"));
+        assert!(left.resolution_hash.starts_with("sha256:"));
     }
 }

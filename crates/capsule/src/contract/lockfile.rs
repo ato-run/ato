@@ -7,12 +7,13 @@ use std::time::{Instant, UNIX_EPOCH};
 
 use chrono::Utc;
 
-use ato_ipc::session_surface::SessionSurfaceRequirement;
-use lock_draft_engine::{
-    LockDraft, LockDraftInput, LockDraftReadiness,
-    LockDraftRuntimePlatform as DraftRuntimePlatform, ManifestSource as DraftManifestSource,
-    RepoFileEntry as DraftRepoFileEntry, RepoFileKind as DraftRepoFileKind, evaluate_lock_draft,
+use ato_adapter_repository::{
+    ManifestSource as ResolutionManifestSource, RepoFileEntry as ResolutionRepoFileEntry,
+    RepoFileKind as ResolutionRepoFileKind, RepositoryReadiness, RepositoryResolution,
+    RepositoryResolutionInput, ResolvedRuntimePlatform as ResolutionRuntimePlatform,
+    resolve_repository_evidence,
 };
+use ato_ipc::session_surface::SessionSurfaceRequirement;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::form_urlencoded::byte_serialize;
@@ -1064,12 +1065,12 @@ fn collect_lockfile_input_paths(
     paths
 }
 
-fn build_lock_draft_input(
+fn build_repository_resolution_input(
     manifest_raw: &toml::Value,
     manifest_text: &str,
     manifest_dir: Option<&Path>,
     manifest_path: Option<&Path>,
-) -> Result<LockDraftInput> {
+) -> Result<RepositoryResolutionInput> {
     let mut repo_file_index = Vec::new();
     let mut file_text_map = std::collections::BTreeMap::new();
 
@@ -1084,9 +1085,9 @@ fn build_lock_draft_input(
                 .to_string_lossy()
                 .replace('\\', "/");
             let size = path.metadata().ok().map(|metadata| metadata.len());
-            repo_file_index.push(DraftRepoFileEntry {
+            repo_file_index.push(ResolutionRepoFileEntry {
                 path: relative_path.clone(),
-                kind: DraftRepoFileKind::File,
+                kind: ResolutionRepoFileKind::File,
                 size,
             });
 
@@ -1096,11 +1097,11 @@ fn build_lock_draft_input(
         }
     }
 
-    Ok(LockDraftInput {
+    Ok(RepositoryResolutionInput {
         selected_target: None,
         repo_file_index,
         file_text_map,
-        manifest_source: Some(DraftManifestSource {
+        manifest_source: Some(ResolutionManifestSource {
             text: manifest_text.to_string(),
             selected_target_label: selected_target_label(manifest_raw),
         }),
@@ -1109,43 +1110,50 @@ fn build_lock_draft_input(
     })
 }
 
-fn evaluate_lock_draft_for_manifest(
+fn resolve_repository_evidence_for_manifest(
     manifest_raw: &toml::Value,
     manifest_text: &str,
     manifest_dir: &Path,
     manifest_path: &Path,
-) -> Result<LockDraft> {
-    let input = build_lock_draft_input(
+) -> Result<RepositoryResolution> {
+    let input = build_repository_resolution_input(
         manifest_raw,
         manifest_text,
         Some(manifest_dir),
         Some(manifest_path),
     )?;
-    evaluate_lock_draft(&input)
-        .map_err(|err| CapsuleError::Config(format!("Failed to evaluate LockDraft: {}", err)))
+    resolve_repository_evidence(&input).map_err(|err| {
+        CapsuleError::Config(format!("Failed to evaluate RepositoryResolution: {}", err))
+    })
 }
 
-fn evaluate_lock_draft_for_compat_input(compat_input: &CompatProjectInput) -> Result<LockDraft> {
-    let input = build_lock_draft_input(
+fn resolve_repository_evidence_for_compat_input(
+    compat_input: &CompatProjectInput,
+) -> Result<RepositoryResolution> {
+    let input = build_repository_resolution_input(
         compat_input.manifest_value(),
         compat_input.manifest_text(),
         Some(compat_input.workspace_root()),
         None,
     )?;
-    evaluate_lock_draft(&input)
-        .map_err(|err| CapsuleError::Config(format!("Failed to evaluate LockDraft: {}", err)))
+    resolve_repository_evidence(&input).map_err(|err| {
+        CapsuleError::Config(format!("Failed to evaluate RepositoryResolution: {}", err))
+    })
 }
 
-fn evaluate_lock_draft_with_minimal_host(manifest_raw: &toml::Value) -> Result<LockDraft> {
+fn resolve_repository_evidence_with_minimal_host(
+    manifest_raw: &toml::Value,
+) -> Result<RepositoryResolution> {
     let manifest_text = toml::to_string(manifest_raw)
         .map_err(|err| CapsuleError::Config(format!("Failed to serialize manifest: {}", err)))?;
-    let input = build_lock_draft_input(manifest_raw, &manifest_text, None, None)?;
-    evaluate_lock_draft(&input)
-        .map_err(|err| CapsuleError::Config(format!("Failed to evaluate LockDraft: {}", err)))
+    let input = build_repository_resolution_input(manifest_raw, &manifest_text, None, None)?;
+    resolve_repository_evidence(&input).map_err(|err| {
+        CapsuleError::Config(format!("Failed to evaluate RepositoryResolution: {}", err))
+    })
 }
 
-fn detect_language_from_draft(draft: &LockDraft) -> Option<String> {
-    match (draft.runtime.as_deref(), draft.driver.as_deref()) {
+fn detect_language_from_resolution(resolution: &RepositoryResolution) -> Option<String> {
+    match (resolution.runtime.as_deref(), resolution.driver.as_deref()) {
         (Some("web"), Some("static")) => Some("deno".to_string()),
         (_, Some("node")) => Some("node".to_string()),
         (_, Some("python")) => Some("python".to_string()),
@@ -1154,8 +1162,10 @@ fn detect_language_from_draft(draft: &LockDraft) -> Option<String> {
     }
 }
 
-fn required_runtime_version_from_draft(draft: &LockDraft) -> Result<Option<String>> {
-    if draft
+fn required_runtime_version_from_resolution(
+    resolution: &RepositoryResolution,
+) -> Result<Option<String>> {
+    if resolution
         .blocking_issues
         .iter()
         .any(|issue| issue.contains("runtime_version is required"))
@@ -1164,27 +1174,31 @@ fn required_runtime_version_from_draft(draft: &LockDraft) -> Result<Option<Strin
             "targets.<default_target>.runtime_version is required for source driver deno/node/python and web driver deno".to_string(),
         ));
     }
-    Ok(draft.required_runtime_version.clone())
+    Ok(resolution.required_runtime_version.clone())
 }
 
-fn runtime_platforms_from_draft(draft: &LockDraft) -> Result<Vec<RuntimePlatform>> {
-    if draft.runtime_platforms.is_empty() {
+fn runtime_platforms_from_resolution(
+    resolution: &RepositoryResolution,
+) -> Result<Vec<RuntimePlatform>> {
+    if resolution.runtime_platforms.is_empty() {
         return Ok(vec![current_runtime_platform()?]);
     }
 
-    draft
+    resolution
         .runtime_platforms
         .iter()
-        .map(runtime_platform_from_draft)
+        .map(runtime_platform_from_resolution)
         .collect()
 }
 
-fn runtime_platform_from_draft(platform: &DraftRuntimePlatform) -> Result<RuntimePlatform> {
+fn runtime_platform_from_resolution(
+    platform: &ResolutionRuntimePlatform,
+) -> Result<RuntimePlatform> {
     runtime_platform(&platform.os, &platform.arch)
 }
 
-fn runtime_tools_from_draft(draft: &LockDraft) -> HashMap<String, String> {
-    draft
+fn runtime_tools_from_resolution(resolution: &RepositoryResolution) -> HashMap<String, String> {
+    resolution
         .runtime_tools
         .iter()
         .map(|(key, value)| (key.clone(), value.clone()))
@@ -1194,8 +1208,8 @@ fn runtime_tools_from_draft(draft: &LockDraft) -> HashMap<String, String> {
 pub fn manifest_external_capsule_dependencies(
     manifest_raw: &toml::Value,
 ) -> Result<Vec<ExternalCapsuleDependency>> {
-    let draft = evaluate_lock_draft_with_minimal_host(manifest_raw)?;
-    let mut dependencies = draft
+    let resolution = resolve_repository_evidence_with_minimal_host(manifest_raw)?;
+    let mut dependencies = resolution
         .external_capsule_dependencies
         .into_iter()
         .map(|dependency| ExternalCapsuleDependency {
@@ -1627,14 +1641,14 @@ async fn generate_lockfile(
     reporter: Arc<dyn CapsuleReporter + 'static>,
     timings: bool,
 ) -> Result<LegacyCapsuleLock> {
-    let draft = validate_ready_lock_draft(evaluate_lock_draft_for_manifest(
+    let resolution = validate_repository_resolution(resolve_repository_evidence_for_manifest(
         manifest_raw,
         manifest_text,
         manifest_dir,
         manifest_path,
     )?)?;
-    finalize_lockfile_from_draft(
-        draft,
+    finalize_lockfile_from_resolution(
+        resolution,
         manifest_raw,
         manifest_text,
         manifest_dir,
@@ -1649,9 +1663,11 @@ async fn generate_lockfile_for_compat_input(
     reporter: Arc<dyn CapsuleReporter + 'static>,
     timings: bool,
 ) -> Result<LegacyCapsuleLock> {
-    let draft = validate_ready_lock_draft(evaluate_lock_draft_for_compat_input(compat_input)?)?;
-    finalize_lockfile_from_draft(
-        draft,
+    let resolution = validate_repository_resolution(resolve_repository_evidence_for_compat_input(
+        compat_input,
+    )?)?;
+    finalize_lockfile_from_resolution(
+        resolution,
         compat_input.manifest_value(),
         compat_input.manifest_text(),
         compat_input.workspace_root(),
@@ -1661,35 +1677,37 @@ async fn generate_lockfile_for_compat_input(
     .await
 }
 
-fn validate_ready_lock_draft(draft: LockDraft) -> Result<LockDraft> {
-    if draft.readiness == LockDraftReadiness::ReadyToFinalize {
-        return Ok(draft);
+fn validate_repository_resolution(
+    resolution: RepositoryResolution,
+) -> Result<RepositoryResolution> {
+    if resolution.readiness == RepositoryReadiness::ReadyToFinalize {
+        return Ok(resolution);
     }
 
-    let mut reasons = draft.blocking_issues.clone();
-    if !draft.missing_native_lockfiles.is_empty() {
+    let mut reasons = resolution.blocking_issues.clone();
+    if !resolution.missing_native_lockfiles.is_empty() {
         reasons.push(format!(
             "Missing native lockfile(s): {}",
-            draft.missing_native_lockfiles.join(", ")
+            resolution.missing_native_lockfiles.join(", ")
         ));
     }
     let mut message = if reasons.is_empty() {
-        "LockDraft is not ready to finalize locally.".to_string()
+        "RepositoryResolution is not ready to finalize locally.".to_string()
     } else {
         format!(
-            "LockDraft is not ready to finalize locally: {}",
+            "RepositoryResolution is not ready to finalize locally: {}",
             reasons.join(" ")
         )
     };
-    if !draft.suggested_commands.is_empty() {
+    if !resolution.suggested_commands.is_empty() {
         message.push_str(" Suggested remediation: ");
-        message.push_str(&draft.suggested_commands.join(" ; "));
+        message.push_str(&resolution.suggested_commands.join(" ; "));
     }
     Err(CapsuleError::Pack(message))
 }
 
-async fn finalize_lockfile_from_draft(
-    draft: LockDraft,
+async fn finalize_lockfile_from_resolution(
+    resolution: RepositoryResolution,
     manifest_raw: &toml::Value,
     manifest_text: &str,
     manifest_dir: &Path,
@@ -1698,9 +1716,9 @@ async fn finalize_lockfile_from_draft(
 ) -> Result<LegacyCapsuleLock> {
     let allowlist = read_allowlist(manifest_raw);
     let target_key = platform_target_key()?;
-    let runtime_platforms = runtime_platforms_from_draft(&draft)?;
-    let required_runtime_version = required_runtime_version_from_draft(&draft)?;
-    let runtime_tools = runtime_tools_from_draft(&draft);
+    let runtime_platforms = runtime_platforms_from_resolution(&resolution)?;
+    let required_runtime_version = required_runtime_version_from_resolution(&resolution)?;
+    let runtime_tools = runtime_tools_from_resolution(&resolution);
 
     // P3 bridge (consumer-only). Run the subset of dependency-contract
     // lock-time verifications (RFC §9.1) that do not require provider
@@ -1733,7 +1751,7 @@ async fn finalize_lockfile_from_draft(
         dotnet: None,
     };
 
-    let language = detect_language_from_draft(&draft);
+    let language = detect_language_from_resolution(&resolution);
     if let Some(lang) = language.as_deref() {
         let ctx = LockfileConfigContext {
             manifest_raw,
@@ -2417,8 +2435,8 @@ fn read_runtime_version(manifest: &toml::Value) -> Option<String> {
 
 #[cfg(test)]
 fn read_runtime_tools(manifest: &toml::Value) -> HashMap<String, String> {
-    evaluate_lock_draft_with_minimal_host(manifest)
-        .map(|draft| runtime_tools_from_draft(&draft))
+    resolve_repository_evidence_with_minimal_host(manifest)
+        .map(|resolution| runtime_tools_from_resolution(&resolution))
         .unwrap_or_default()
 }
 
@@ -2573,8 +2591,8 @@ fn selected_target_cmd_driver(manifest: &toml::Value) -> Option<String> {
 
 #[cfg(test)]
 fn required_runtime_version(manifest: &toml::Value) -> Result<Option<String>> {
-    let draft = evaluate_lock_draft_with_minimal_host(manifest)?;
-    required_runtime_version_from_draft(&draft)
+    let resolution = resolve_repository_evidence_with_minimal_host(manifest)?;
+    required_runtime_version_from_resolution(&resolution)
 }
 
 fn selected_target_table(manifest: &toml::Value) -> Option<&toml::Value> {
@@ -2590,8 +2608,8 @@ fn selected_target_table(manifest: &toml::Value) -> Option<&toml::Value> {
 }
 
 fn lockfile_runtime_platforms(manifest: &toml::Value) -> Result<Vec<RuntimePlatform>> {
-    let draft = evaluate_lock_draft_with_minimal_host(manifest)?;
-    runtime_platforms_from_draft(&draft)
+    let resolution = resolve_repository_evidence_with_minimal_host(manifest)?;
+    runtime_platforms_from_resolution(&resolution)
 }
 
 fn current_runtime_platform() -> Result<RuntimePlatform> {
