@@ -1,7 +1,7 @@
 # Firecracker supervisor-mode spike (v1.2)
 
 Hardware proof, on real Firecracker, of the **guest-agent supervisor mode** the
-v1.2 `delivery = "env"` secret binding needs (`crates/guest-agent/src/supervisor.rs`).
+v1.2 `delivery = "env"` secret binding needs (`extensions/providers/snapshot/guest-agent/src/supervisor.rs`).
 This validates the mechanism before the Rust `rootfs_builder` / `FirecrackerBackend`
 wiring (the follow-up) — the same "bash spike before the backend" pattern the M0
 Firecracker spike used.

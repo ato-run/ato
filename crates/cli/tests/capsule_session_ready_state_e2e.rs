@@ -17,10 +17,10 @@ use capsule_protocol::{
     CURRENT_SCHEMA_VERSION, CapsuleDescriptor, ConnectorDef, ConnectorId, Direction, IoRecord,
     Payload, ProtocolId, RecordKindId, StateTypeId,
 };
-use capsulefs::CasStore;
 use snapshot::capsule_state::{
     ReadyStatePortableExportPolicy, ReadyStateStateObjectV1, export_ready_state,
 };
+use snapshot::layer_store::CasStore;
 use snapshot::{
     ArtifactEnvelopeV1, BuildLayers, BuildReadyStateInput, FakeSnapshotBackend, RestoreContract,
     SanitizerContract, SnapshotBackend,

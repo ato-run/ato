@@ -1,0 +1,404 @@
+//! Local content-addressed store: immutable chunk blobs on the filesystem.
+//!
+//! Layout: `<root>/blobs/blake3/<hex>`. A chunk is written once (its content
+//! address is its name); re-putting identical bytes is a no-op. Every read
+//! re-hashes and fails closed on mismatch — a corrupt or tampered chunk is
+//! never returned.
+
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Seek, Write};
+use std::path::{Path, PathBuf};
+
+use super::hash::{ContentHash, hash_bytes};
+use super::manifest::BlobManifest;
+use super::{LayerStoreError, Result};
+
+/// A filesystem-backed content-addressed chunk store.
+#[derive(Debug, Clone)]
+pub struct CasStore {
+    root: PathBuf,
+}
+
+impl CasStore {
+    /// Open (creating if needed) a store rooted at `root`. The `blobs/blake3`
+    /// directory is created eagerly so callers never race on first write.
+    pub fn open(root: impl AsRef<Path>) -> Result<Self> {
+        let root = root.as_ref().to_path_buf();
+        fs::create_dir_all(root.join("blobs").join("blake3"))?;
+        Ok(Self { root })
+    }
+
+    /// The store root.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// On-disk path for a content hash (whether or not it exists).
+    ///
+    /// Safe against path traversal by construction: [`ContentHash`] is a
+    /// validated type whose `hex()` is always exactly 64 lowercase-hex
+    /// characters — a single path component with no separators or `..`. A
+    /// hostile manifest can never produce a `ContentHash` that escapes the CAS
+    /// root, so this join cannot leave `<root>/blobs/blake3/`.
+    fn chunk_path(&self, hash: &ContentHash) -> PathBuf {
+        self.root.join("blobs").join("blake3").join(hash.hex())
+    }
+
+    /// Whether a chunk is present.
+    pub fn has_chunk(&self, hash: &ContentHash) -> bool {
+        self.chunk_path(hash).exists()
+    }
+
+    /// Whether this store holds **every** chunk `blob` references — i.e. the blob
+    /// can be served entirely from local bytes with no fetch.
+    ///
+    /// This is the residency predicate. [`CasStore::open`] is NOT one: it
+    /// `create_dir_all`s the layout and therefore succeeds on any writable path,
+    /// including an empty store. A caller that must know "are the bytes here?"
+    /// (a UFFD demand-paging restore, which has no fetch path once the guest is
+    /// running) has to ask this, not `open`.
+    ///
+    /// Checks the whole chunk list, not just the first: a partially-resident blob
+    /// (interrupted fetch, an archive that extracted without its `cas/` entries,
+    /// or a chunk deduped in from an unrelated artifact) has chunk 0 present and a
+    /// later chunk missing. Uses the deduplicated
+    /// [`BlobManifest::referenced_chunks`], so a blob whose chunks repeat is
+    /// stat()ed once per distinct hash.
+    pub fn has_all_chunks(&self, blob: &BlobManifest) -> bool {
+        blob.referenced_chunks().all(|h| self.has_chunk(h))
+    }
+
+    /// Store chunk bytes, returning their content address. Idempotent: if the
+    /// chunk already exists it is not rewritten. The write is atomic (write to a
+    /// temp sibling then rename) so a concurrent reader never sees a partial
+    /// chunk.
+    pub fn put_chunk(&self, bytes: &[u8]) -> Result<ContentHash> {
+        let hash = hash_bytes(bytes);
+        let path = self.chunk_path(&hash);
+        if path.exists() {
+            return Ok(hash);
+        }
+        // Temp name is content-derived + pid to avoid collisions without needing
+        // a random source (kept dependency-free).
+        let tmp = path.with_extension(crate::unique_tmp_suffix());
+        fs::write(&tmp, bytes)?;
+        // rename is atomic on the same filesystem; if another writer won the
+        // race the destination already exists and rename still yields the
+        // correct content (identical bytes), so ignore AlreadyExists.
+        match fs::rename(&tmp, &path) {
+            Ok(()) => {}
+            Err(_) if path.exists() => {
+                let _ = fs::remove_file(&tmp);
+            }
+            Err(e) => {
+                let _ = fs::remove_file(&tmp);
+                return Err(e.into());
+            }
+        }
+        Ok(hash)
+    }
+
+    /// Read chunk bytes, verifying integrity. Errors with [`LayerStoreError::MissingChunk`]
+    /// if absent, or [`LayerStoreError::IntegrityMismatch`] if the stored bytes no
+    /// longer hash to `hash`.
+    pub fn get_chunk(&self, hash: &ContentHash) -> Result<Vec<u8>> {
+        let path = self.chunk_path(hash);
+        if !path.exists() {
+            return Err(LayerStoreError::MissingChunk(hash.clone()));
+        }
+        let bytes = fs::read(&path)?;
+        let actual = hash_bytes(&bytes);
+        if &actual != hash {
+            return Err(LayerStoreError::IntegrityMismatch {
+                expected: hash.clone(),
+                actual,
+            });
+        }
+        Ok(bytes)
+    }
+
+    /// Open a verified chunk as a streaming reader.
+    pub fn open_chunk_reader(&self, hash: &ContentHash) -> Result<File> {
+        let path = self.chunk_path(hash);
+        let mut file = File::open(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                LayerStoreError::MissingChunk(hash.clone())
+            } else {
+                error.into()
+            }
+        })?;
+        verify_reader(hash, None, &mut file)?;
+        file.rewind()?;
+        Ok(file)
+    }
+
+    /// Import one untrusted stream under an expected content address atomically.
+    pub fn import_verified_chunk(
+        &self,
+        expected: &ContentHash,
+        expected_size: u64,
+        reader: &mut dyn Read,
+    ) -> Result<()> {
+        let path = self.chunk_path(expected);
+        if path.exists() {
+            let mut existing = File::open(&path)?;
+            verify_reader(expected, Some(expected_size), &mut existing)?;
+            return Ok(());
+        }
+        let temporary = path.with_extension(crate::unique_tmp_suffix());
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let result = (|| {
+            let mut output = options.open(&temporary)?;
+            let mut hasher = blake3::Hasher::new();
+            let mut copied = 0_u64;
+            let mut buffer = [0_u8; 64 * 1024];
+            loop {
+                let count = reader.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                copied = copied.checked_add(count as u64).ok_or_else(|| {
+                    LayerStoreError::MalformedManifest("chunk size overflow".to_string())
+                })?;
+                if copied > expected_size {
+                    return Err(LayerStoreError::MalformedManifest(format!(
+                        "chunk {expected} exceeds declared length {expected_size}"
+                    )));
+                }
+                hasher.update(&buffer[..count]);
+                output.write_all(&buffer[..count])?;
+            }
+            if copied != expected_size {
+                return Err(LayerStoreError::MalformedManifest(format!(
+                    "chunk {expected} has length {copied}, expected {expected_size}"
+                )));
+            }
+            let actual = ContentHash::parse(&format!("blake3:{}", hasher.finalize().to_hex()))
+                .expect("BLAKE3 output is a valid ContentHash");
+            if &actual != expected {
+                return Err(LayerStoreError::IntegrityMismatch {
+                    expected: expected.clone(),
+                    actual,
+                });
+            }
+            output.sync_all()?;
+            match fs::rename(&temporary, &path) {
+                Ok(()) => {}
+                Err(_) if path.exists() => {
+                    let mut existing = File::open(&path)?;
+                    verify_reader(expected, Some(expected_size), &mut existing)?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+            File::open(path.parent().expect("chunk path has a parent"))?.sync_all()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
+    }
+
+    /// All chunk hashes currently resident in the store. Used by GC to compute
+    /// the unreferenced set.
+    pub fn list_chunks(&self) -> Result<Vec<ContentHash>> {
+        let dir = self.root.join("blobs").join("blake3");
+        let mut out = Vec::new();
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            // Skip in-flight temp files (`<hex>.tmp.<pid>`).
+            if name.contains(".tmp.") {
+                continue;
+            }
+            // Validate before admitting: a stray non-chunk file in the CAS dir
+            // must never become a ContentHash the rest of the system trusts.
+            match ContentHash::parse(&format!("blake3:{name}")) {
+                Ok(h) => out.push(h),
+                Err(_) => continue,
+            }
+        }
+        Ok(out)
+    }
+
+    /// Remove a chunk. Returns the number of bytes reclaimed (0 if absent).
+    /// Used only by GC.
+    pub(crate) fn remove_chunk(&self, hash: &ContentHash) -> Result<u64> {
+        let path = self.chunk_path(hash);
+        match fs::metadata(&path) {
+            Ok(meta) => {
+                let len = meta.len();
+                fs::remove_file(&path)?;
+                Ok(len)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
+fn verify_reader(hash: &ContentHash, size: Option<u64>, reader: &mut dyn Read) -> Result<()> {
+    let mut hasher = blake3::Hasher::new();
+    let mut bytes = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        bytes = bytes
+            .checked_add(count as u64)
+            .ok_or_else(|| LayerStoreError::MalformedManifest("chunk size overflow".to_string()))?;
+        hasher.update(&buffer[..count]);
+    }
+    if size.is_some_and(|expected| expected != bytes) {
+        return Err(LayerStoreError::MalformedManifest(format!(
+            "chunk {hash} has length {bytes}, expected {}",
+            size.expect("checked as some")
+        )));
+    }
+    let actual = ContentHash::parse(&format!("blake3:{}", hasher.finalize().to_hex()))
+        .expect("BLAKE3 output is a valid ContentHash");
+    if &actual != hash {
+        return Err(LayerStoreError::IntegrityMismatch {
+            expected: hash.clone(),
+            actual,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn put_get_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path()).unwrap();
+        let h = store.put_chunk(b"hello layer store").unwrap();
+        assert!(store.has_chunk(&h));
+        assert_eq!(store.get_chunk(&h).unwrap(), b"hello layer store");
+    }
+
+    #[test]
+    fn put_is_idempotent_and_content_addressed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path()).unwrap();
+        let h1 = store.put_chunk(b"same").unwrap();
+        let h2 = store.put_chunk(b"same").unwrap();
+        assert_eq!(h1, h2);
+        assert_eq!(store.list_chunks().unwrap().len(), 1);
+    }
+
+    /// `open` is not a residency check and `has_all_chunks` is: an empty store
+    /// opens fine, and a blob missing any single chunk — first, middle, or last —
+    /// is not resident.
+    #[test]
+    fn has_all_chunks_is_residency_not_openability() {
+        use crate::layer_store::{ChunkingKind, LayerKind, store_blob};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path()).unwrap();
+        let payload: Vec<u8> = (0..64u8).collect();
+        let blob = store_blob(
+            &store,
+            LayerKind::Memory,
+            &payload,
+            ChunkingKind::PageAligned { page_size: 8 },
+        )
+        .unwrap();
+        assert!(blob.chunks.len() > 1, "need a multi-chunk blob");
+        assert!(
+            store.has_all_chunks(&blob),
+            "freshly stored blob is resident"
+        );
+
+        // An empty store still opens — openability says nothing about residency.
+        let empty_root = dir.path().join("empty");
+        let empty = CasStore::open(&empty_root).unwrap();
+        assert!(!empty.has_all_chunks(&blob));
+
+        // Removing ANY one chunk breaks residency, including a non-first one
+        // (which a first-chunk probe would miss).
+        for idx in [0usize, blob.chunks.len() / 2, blob.chunks.len() - 1] {
+            let victim = blob.chunks[idx].hash.clone();
+            let path = store.chunk_path(&victim);
+            let bytes = fs::read(&path).unwrap();
+            fs::remove_file(&path).unwrap();
+            assert!(
+                !store.has_all_chunks(&blob),
+                "chunk {idx} missing ⇒ blob is not resident"
+            );
+            fs::write(&path, &bytes).unwrap();
+            assert!(store.has_all_chunks(&blob), "restored ⇒ resident again");
+        }
+    }
+
+    #[test]
+    fn missing_chunk_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path()).unwrap();
+        let absent = hash_bytes(b"never stored");
+        assert!(matches!(
+            store.get_chunk(&absent),
+            Err(LayerStoreError::MissingChunk(_))
+        ));
+    }
+
+    #[test]
+    fn corrupted_chunk_fails_integrity() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path()).unwrap();
+        let h = store.put_chunk(b"original").unwrap();
+        // Corrupt the on-disk bytes behind the content address.
+        let path = store.chunk_path(&h);
+        std::fs::write(&path, b"tampered").unwrap();
+        assert!(matches!(
+            store.get_chunk(&h),
+            Err(LayerStoreError::IntegrityMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn verified_stream_import_rejects_wrong_size_hash_and_corrupt_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path()).unwrap();
+        let expected = hash_bytes(b"streamed bytes");
+        store
+            .import_verified_chunk(&expected, 14, &mut &b"streamed bytes"[..])
+            .unwrap();
+        let mut opened = store.open_chunk_reader(&expected).unwrap();
+        let mut bytes = Vec::new();
+        opened.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"streamed bytes");
+
+        let wrong = hash_bytes(b"different");
+        assert!(matches!(
+            store.import_verified_chunk(&wrong, 14, &mut &b"streamed bytes"[..]),
+            Err(LayerStoreError::IntegrityMismatch { .. })
+        ));
+        assert!(
+            store
+                .import_verified_chunk(&expected, 13, &mut &b"streamed bytes"[..])
+                .is_err()
+        );
+
+        fs::write(store.chunk_path(&expected), b"corrupt").unwrap();
+        assert!(matches!(
+            store.import_verified_chunk(&expected, 14, &mut &b"streamed bytes"[..]),
+            Err(LayerStoreError::MalformedManifest(_))
+                | Err(LayerStoreError::IntegrityMismatch { .. })
+        ));
+    }
+}

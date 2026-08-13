@@ -2,7 +2,7 @@
 # Snapshot v1 Compatibility Suite — API E2E (step 5 of the v1 compat order).
 #
 # Drives the registry API end-to-end for every fixture in
-# crates/snapshot-builder/fixtures/compat/: enqueue → poll to terminal →
+# tools/snapshot-builder/fixtures/compat/: enqueue → poll to terminal →
 # assert the seal-side half of each fixture's expected.json (the eligibility
 # half is enforced KVM-free by crates/snapshot/tests/compat_fixtures.rs).
 #
@@ -23,7 +23,7 @@
 set -euo pipefail
 
 API="https://staging.api.ato.run"
-FIXTURES="crates/snapshot-builder/fixtures/compat"
+FIXTURES="tools/snapshot-builder/fixtures/compat"
 OUT=""
 TIMEOUT_MIN=45
 ONLY=""

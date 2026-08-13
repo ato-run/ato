@@ -16,10 +16,10 @@ and shared plumbing:
   (real Firecracker/KVM backend; QEMU and Kata stubs; seal + no-secret scan)
 - `crates/capsulefs`: content-addressed, chunked local store for Ready-State
   capsule layers (rootfs / runtime / deps / app / vmstate / memory)
-- `crates/snapshot-builder`: the builder daemon that claims capsule-snapshot
+- `tools/snapshot-builder`: the builder daemon that claims capsule-snapshot
   jobs from the control plane, builds and seals artifacts, and acks (dev/ops
   tool, not shipped to end users)
-- `crates/guest-agent`: the in-guest agent — vsock binding-lease control plane
+- `extensions/providers/snapshot/guest-agent`: the in-guest agent — vsock binding-lease control plane
   and v1.2 supervisor mode
 - `crates/protocol`: capsule wire types shared by `cli` (producer) and
   `desktop` (consumer)
