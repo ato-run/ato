@@ -173,12 +173,17 @@ fn hello_world_is_one_core_object_with_internal_tau_and_only_external_greeting()
         parent.object().boundary.keys().collect::<Vec<_>>(),
         vec![&PortId::parse("greeting").unwrap()]
     );
+    let internal_connection = &validated.residual().connections[0];
+    assert!(
+        internal_connection.first() == &internal_name
+            || internal_connection.second() == &internal_name
+    );
     assert_eq!(
-        validated.classify_endpoint(&internal_name),
+        validated.connection_label(internal_connection),
         Some(CompositeLabel::Tau)
     );
     assert_eq!(
-        validated.classify_endpoint(&greeting),
+        validated.export_label(&greeting),
         Some(CompositeLabel::External(PortId::parse("greeting").unwrap()))
     );
     assert_eq!(validated.residual().nodes.len(), 2);
