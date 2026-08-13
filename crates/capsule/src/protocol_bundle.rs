@@ -14,7 +14,7 @@ use crate::security::no_secret::CredentialScanner;
 
 mod streaming;
 
-pub use capsule_compat_v1::{LEGACY_V1_COMPUTATION_TYPE, NormalizedLegacyV1Computation};
+pub use capsule_adapter_state_io_v1::{LEGACY_V1_SEMANTICS, NormalizedLegacyV1Computation};
 pub use streaming::{
     AllowAllPortableExportPolicy, BundleSummary, BundleWriteOutcome, DirectoryObjectSource,
     InMemoryObjectSource, ObjectMetadata, ObjectSource, PortableExportError, PortableExportPolicy,
@@ -25,15 +25,15 @@ pub use streaming::{
 pub fn normalize_v1_spool(
     spool: &SpoolBundle,
     cas_root: &Path,
-) -> Result<NormalizedLegacyV1Computation, capsule_compat_v1::CompatibilityError> {
-    capsule_compat_v1::normalize_v1_spool(
-        capsule_compat_v1::LegacyV1Spool {
+) -> Result<NormalizedLegacyV1Computation, capsule_adapter_state_io_v1::CompatibilityError> {
+    capsule_adapter_state_io_v1::normalize_v1_spool(
+        capsule_adapter_state_io_v1::LegacyV1Spool {
             descriptor: &spool.descriptor,
-            descriptor_member: capsule_compat_v1::SpoolMember {
+            descriptor_member: capsule_adapter_state_io_v1::SpoolMember {
                 path: spool.descriptor_member.path(),
                 size: spool.descriptor_member.size(),
             },
-            record_stream_member: capsule_compat_v1::SpoolMember {
+            record_stream_member: capsule_adapter_state_io_v1::SpoolMember {
                 path: spool.records.path(),
                 size: spool.records.size(),
             },

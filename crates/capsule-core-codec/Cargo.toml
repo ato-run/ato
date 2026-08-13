@@ -1,9 +1,9 @@
 [package]
-name = "capsule-adapter-state-io-v1"
+name = "capsule-core-codec"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0 OR MPL-2.0"
-description = "Adapter from Capsule Protocol v1 State and I/O to sealed Ato computations"
+description = "Canonical identity codec and verified resolver for sealed Ato computations"
 homepage = "https://ato.run"
 repository = "https://github.com/ato-run/ato"
 
@@ -13,15 +13,10 @@ dist = false
 [dependencies]
 blake3 = "1.5"
 capsule-core = { path = "../capsule-core" }
-capsule-core-codec = { path = "../capsule-core-codec" }
-capsule-protocol = { path = "../capsule-protocol" }
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 serde_jcs = "0.1"
-tempfile = "3"
 thiserror = "2.0"
 
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
 [dev-dependencies]
-capsule-codec = { path = "../capsule-codec" }
+hex = "0.4"

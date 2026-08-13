@@ -23,6 +23,7 @@ pub use attachment::{
 pub use boundary::{
     BoundaryDeliveryLedger, BoundaryDeliveryState, BoundaryOperationId, BoundaryProtocolError,
 };
+pub use capsule_core_codec::{ObjectMetadata, ObjectResolver, ResolvedComputation};
 pub use domain::{
     ConnectorMode, DurableFrontier, HistoricalReplayVerdict, JournalLsn, RecordFrontier,
     SessionBlockReason, SessionFailure, SessionLifecycle,
@@ -36,9 +37,8 @@ pub use effect::{
     EffectTransitionError,
 };
 pub use evaluator::{
-    ComputationEvaluator, ComputationEvaluatorRegistry, ComputationObjectResolver,
-    EvaluationContext, EvaluatorCapabilities, EvaluatorRegistryError, MaterializationServices,
-    PortBindingPlan,
+    ComputationEvaluator, ComputationEvaluatorRegistry, EvaluationContext, EvaluatorRegistryError,
+    MaterializationServices, PortBindingPlan,
 };
 pub use recovery::{
     ConnectorCheckpoint, ConnectorRecoveryPoint, ConnectorRecoveryStrategy, RecoveryPlan,

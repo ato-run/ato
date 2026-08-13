@@ -7,23 +7,23 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use capsule_core::{
-    Boundary, COMPUTATION_OBJECT_SCHEMA, ComputationObject, ComputationRef, ComputationSchemaId,
-    ComputationTypeId, ContentRef, PortDef, PortId, PortMode, ProtocolId, ResolvedComputation,
+    Boundary, ComputationObject, ComputationRef, ContentRef, PortDef, PortId, ProtocolId, RoleId,
+    SemanticsId,
 };
+use capsule_core_codec::{ResolvedComputation, computation_ref, encode_computation_object};
 use capsule_protocol::CapsuleDescriptor;
 use serde::Serialize;
 use thiserror::Error;
 
 const CAS_COPY_BUFFER_BYTES: usize = 64 * 1024;
 
-pub const LEGACY_V1_COMPUTATION_TYPE: &str = "capsule.computation.legacy-v1@1";
-pub const LEGACY_V1_BODY_SCHEMA: &str = "capsule.computation.legacy-v1.body@1";
+pub const LEGACY_V1_SEMANTICS: &str = "capsule.legacy-v1@1";
+pub const LEGACY_V1_PORT_ROLE: &str = "legacy-peer";
 
 #[derive(Debug, Clone, Copy)]
 pub struct SpoolMember<'a> {
@@ -42,8 +42,7 @@ pub struct LegacyV1Spool<'a> {
 
 /// Opaque type-defined body for the legacy v1 computation evaluator.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LegacyV1ComputationBody {
-    pub schema: ComputationSchemaId,
+pub struct LegacyV1Residual {
     pub descriptor_ref: ContentRef,
     pub record_stream_ref: ContentRef,
 }
@@ -51,7 +50,7 @@ pub struct LegacyV1ComputationBody {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NormalizedLegacyV1Computation {
     pub computation: ResolvedComputation,
-    pub body: LegacyV1ComputationBody,
+    pub residual: LegacyV1Residual,
     pub cas_root: PathBuf,
 }
 
@@ -64,30 +63,9 @@ pub enum CompatibilityError {
 }
 
 #[derive(Serialize)]
-struct LegacyV1BodyWire<'a> {
-    schema: &'a str,
+struct LegacyV1ResidualWire<'a> {
     descriptor_ref: &'a str,
     record_stream_ref: &'a str,
-}
-
-#[derive(Serialize)]
-struct ComputationObjectWire<'a> {
-    schema: &'a str,
-    boundary: BoundaryWire<'a>,
-    body: &'a str,
-}
-
-#[derive(Serialize)]
-struct BoundaryWire<'a> {
-    ports: BTreeMap<&'a str, PortWire<'a>>,
-}
-
-#[derive(Serialize)]
-struct PortWire<'a> {
-    protocol: &'a str,
-    mode: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    config_ref: Option<&'a str>,
 }
 
 pub fn normalize_v1_spool(
@@ -104,43 +82,49 @@ pub fn normalize_v1_spool(
         spool.record_stream_member.path,
         spool.record_stream_member.size,
     )?;
-    let body = LegacyV1ComputationBody {
-        schema: ComputationSchemaId::parse(LEGACY_V1_BODY_SCHEMA)
-            .map_err(|error| CompatibilityError::Invalid(error.to_string()))?,
+    let residual = LegacyV1Residual {
         descriptor_ref,
         record_stream_ref,
     };
-    let body_bytes = serde_jcs::to_vec(&LegacyV1BodyWire {
-        schema: body.schema.as_str(),
-        descriptor_ref: body.descriptor_ref.as_str(),
-        record_stream_ref: body.record_stream_ref.as_str(),
+    let residual_bytes = serde_jcs::to_vec(&LegacyV1ResidualWire {
+        descriptor_ref: residual.descriptor_ref.as_str(),
+        record_stream_ref: residual.record_stream_ref.as_str(),
     })
-    .map_err(|error| CompatibilityError::Invalid(format!("failed to encode v1 body: {error}")))?;
-    let body_ref = store_bytes(cas_root, &body_bytes)?;
+    .map_err(|error| {
+        CompatibilityError::Invalid(format!("failed to encode v1 residual: {error}"))
+    })?;
+    let residual_ref = store_bytes(cas_root, &residual_bytes)?;
 
     let boundary = project_boundary(spool.descriptor)?;
     let object = ComputationObject {
-        schema: ComputationSchemaId::parse(COMPUTATION_OBJECT_SCHEMA)
+        semantics: SemanticsId::parse(LEGACY_V1_SEMANTICS)
             .map_err(|error| CompatibilityError::Invalid(error.to_string()))?,
         boundary,
-        body: body_ref,
+        residual: residual_ref,
     };
-    let object_ref = store_computation_object(cas_root, &object)?;
-    let reference = ComputationRef {
-        computation_type: ComputationTypeId::parse(LEGACY_V1_COMPUTATION_TYPE)
-            .map_err(|error| CompatibilityError::Invalid(error.to_string()))?,
-        object_ref,
-    };
+    let object_bytes = encode_computation_object(&object)
+        .map_err(|error| CompatibilityError::Invalid(error.to_string()))?;
+    let expected_reference =
+        computation_ref(&object).map_err(|error| CompatibilityError::Invalid(error.to_string()))?;
+    let stored_reference = ComputationRef::parse(store_bytes(cas_root, &object_bytes)?.to_string())
+        .map_err(|error| CompatibilityError::Invalid(error.to_string()))?;
+    if stored_reference != expected_reference {
+        return Err(CompatibilityError::Invalid(
+            "canonical computation identity differs from stored object".to_owned(),
+        ));
+    }
+    let computation = ResolvedComputation::verify(stored_reference, &object_bytes)
+        .map_err(|error| CompatibilityError::Invalid(error.to_string()))?;
 
     Ok(NormalizedLegacyV1Computation {
-        computation: ResolvedComputation { reference, object },
-        body,
+        computation,
+        residual,
         cas_root: cas_root.to_path_buf(),
     })
 }
 
 fn project_boundary(descriptor: &CapsuleDescriptor) -> Result<Boundary, CompatibilityError> {
-    let ports = descriptor
+    descriptor
         .connectors
         .iter()
         .map(|(connector_id, connector)| {
@@ -148,58 +132,16 @@ fn project_boundary(descriptor: &CapsuleDescriptor) -> Result<Boundary, Compatib
                 .map_err(|error| CompatibilityError::Invalid(error.to_string()))?;
             let protocol = ProtocolId::parse(connector.protocol.as_str())
                 .map_err(|error| CompatibilityError::Invalid(error.to_string()))?;
-            let config_ref = connector
-                .config_ref
-                .as_ref()
-                .map(|reference| ContentRef::parse(reference.as_str()))
-                .transpose()
-                .map_err(|error| CompatibilityError::Invalid(error.to_string()))?;
             Ok((
                 port_id,
                 PortDef {
                     protocol,
-                    mode: PortMode::Duplex,
-                    config_ref,
+                    role: RoleId::parse(LEGACY_V1_PORT_ROLE)
+                        .map_err(|error| CompatibilityError::Invalid(error.to_string()))?,
                 },
             ))
         })
-        .collect::<Result<BTreeMap<_, _>, CompatibilityError>>()?;
-    Ok(Boundary { ports })
-}
-
-fn store_computation_object(
-    cas_root: &Path,
-    object: &ComputationObject,
-) -> Result<ContentRef, CompatibilityError> {
-    let ports = object
-        .boundary
-        .ports
-        .iter()
-        .map(|(port_id, definition)| {
-            let mode = match definition.mode {
-                PortMode::IngressOnly => "ingress_only",
-                PortMode::EgressOnly => "egress_only",
-                PortMode::Duplex => "duplex",
-            };
-            (
-                port_id.as_str(),
-                PortWire {
-                    protocol: definition.protocol.as_str(),
-                    mode,
-                    config_ref: definition.config_ref.as_ref().map(ContentRef::as_str),
-                },
-            )
-        })
-        .collect();
-    let bytes = serde_jcs::to_vec(&ComputationObjectWire {
-        schema: object.schema.as_str(),
-        boundary: BoundaryWire { ports },
-        body: object.body.as_str(),
-    })
-    .map_err(|error| {
-        CompatibilityError::Invalid(format!("failed to encode computation object: {error}"))
-    })?;
-    store_bytes(cas_root, &bytes)
+        .collect::<Result<Boundary, CompatibilityError>>()
 }
 
 fn store_file(
@@ -284,7 +226,7 @@ fn persist_verified(
     expected_size: u64,
 ) -> Result<(), CompatibilityError> {
     match temporary.persist_noclobber(destination) {
-        Ok(_) => Ok(()),
+        Ok(_) => sync_parent_directory(destination),
         Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
             validate_existing_object(destination, reference, expected_size)
         }
@@ -304,7 +246,7 @@ fn validate_existing_object(
         )));
     }
 
-    let mut file = File::open(path)?;
+    let mut file = open_existing_object(path)?;
     let mut hasher = blake3::Hasher::new();
     let mut read = 0_u64;
     let mut chunk = [0_u8; CAS_COPY_BUFFER_BYTES];
@@ -323,6 +265,29 @@ fn validate_existing_object(
             "CAS object {reference} has conflicting content"
         )));
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn open_existing_object(path: &Path) -> Result<File, CompatibilityError> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    Ok(fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?)
+}
+
+#[cfg(not(unix))]
+fn open_existing_object(path: &Path) -> Result<File, CompatibilityError> {
+    Ok(File::open(path)?)
+}
+
+fn sync_parent_directory(path: &Path) -> Result<(), CompatibilityError> {
+    let parent = path.parent().ok_or_else(|| {
+        CompatibilityError::Invalid("CAS object has no parent directory".to_owned())
+    })?;
+    File::open(parent)?.sync_all()?;
     Ok(())
 }
 
@@ -356,6 +321,7 @@ fn set_owner_only_file(_file: &File) -> Result<(), CompatibilityError> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::io;
 
     use capsule_codec::{encode_descriptor, encode_record_stream};
@@ -436,23 +402,23 @@ mod tests {
         let normalized = normalize_fixture(root.path());
 
         assert_eq!(
-            normalized.computation.reference.computation_type.as_str(),
-            LEGACY_V1_COMPUTATION_TYPE
+            normalized.computation.object().semantics.as_str(),
+            LEGACY_V1_SEMANTICS
         );
         assert_eq!(
             normalized
                 .computation
-                .object
+                .object()
                 .boundary
-                .ports
                 .get(&PortId::parse("terminal.main").unwrap())
                 .unwrap()
-                .mode,
-            PortMode::Duplex
+                .role
+                .as_str(),
+            LEGACY_V1_PORT_ROLE
         );
         assert_ne!(
-            normalized.computation.reference.object_ref,
-            normalized.body.descriptor_ref
+            normalized.computation.reference().content_ref(),
+            &normalized.residual.descriptor_ref
         );
     }
 
@@ -463,28 +429,26 @@ mod tests {
         let second = normalize_fixture(root.path());
 
         assert_eq!(first.computation, second.computation);
-        assert_eq!(first.body, second.body);
+        assert_eq!(first.residual, second.residual);
     }
 
     #[test]
     fn changing_boundary_changes_computation_identity() {
-        let root = tempfile::tempdir().unwrap();
-        let body = ContentRef::parse(format!("blake3:{}", "aa".repeat(32))).unwrap();
+        let residual = ContentRef::parse(format!("blake3:{}", "aa".repeat(32))).unwrap();
         let mut first = ComputationObject {
-            schema: ComputationSchemaId::parse(COMPUTATION_OBJECT_SCHEMA).unwrap(),
+            semantics: SemanticsId::parse("example.greeter@1").unwrap(),
             boundary: Boundary::default(),
-            body,
+            residual,
         };
-        let first_ref = store_computation_object(root.path(), &first).unwrap();
-        first.boundary.ports.insert(
+        let first_ref = computation_ref(&first).unwrap();
+        first.boundary.insert(
             PortId::parse("greeter.name").unwrap(),
             PortDef {
                 protocol: ProtocolId::parse("example.greeter.text@1").unwrap(),
-                mode: PortMode::IngressOnly,
-                config_ref: None,
+                role: RoleId::parse("server").unwrap(),
             },
         );
-        let second_ref = store_computation_object(root.path(), &first).unwrap();
+        let second_ref = computation_ref(&first).unwrap();
 
         assert_ne!(first_ref, second_ref);
     }

@@ -14,10 +14,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use capsule::protocol_bundle::{
-    LEGACY_V1_COMPUTATION_TYPE, PortableCapsule, SpoolBundle, StreamingBundleReader,
+    LEGACY_V1_SEMANTICS, PortableCapsule, SpoolBundle, StreamingBundleReader,
     capture_local_workspace_checkpoint, normalize_v1_spool, restore_workspace_state,
 };
-use capsule_core::ComputationRef;
+use capsule_core::{ComputationRef, SemanticsId};
 use capsule_protocol::{ConnectorId, Direction, IoRecord, Payload, RecordKindId};
 use capsule_session_runtime::{
     BoundaryCoordinator, BoundaryDriver, BoundaryOperationId, CapsuleProtocolSessionStore,
@@ -249,8 +249,11 @@ pub(crate) fn serve(session: &str, bundle: &Path, into: &Path) -> Result<()> {
         .context("failed to read Capsule bundle")?;
     let normalized = normalize_v1_spool(&spool, &paths.directory.join("computation-cas"))
         .context("failed to normalize Capsule v1 as a computation")?;
-    let root = normalized.computation.reference;
-    match LegacyComputationEvaluator::select(&root, &spool.descriptor.base_state.state_type)? {
+    let root = normalized.computation.reference().clone();
+    match LegacyComputationEvaluator::select(
+        &normalized.computation.object().semantics,
+        &spool.descriptor.base_state.state_type,
+    )? {
         LegacyRuntimeProfile::WorkspacePty => {
             let capsule = PortableCapsule {
                 records: spool.records.materialize(&spool.descriptor)?,
@@ -272,14 +275,11 @@ struct LegacyComputationEvaluator;
 
 impl LegacyComputationEvaluator {
     fn select(
-        computation: &ComputationRef,
+        semantics: &SemanticsId,
         state_type: &capsule_protocol::StateTypeId,
     ) -> Result<LegacyRuntimeProfile> {
-        if computation.computation_type.as_str() != LEGACY_V1_COMPUTATION_TYPE {
-            bail!(
-                "UnsupportedComputationType: {}",
-                computation.computation_type
-            );
+        if semantics.as_str() != LEGACY_V1_SEMANTICS {
+            bail!("UnsupportedComputationSemantics: {semantics}");
         }
         match state_type.as_str() {
             "ato.state.workspace-posix-host@1" => Ok(LegacyRuntimeProfile::WorkspacePty),
@@ -376,8 +376,7 @@ fn serve_workspace_pty(
             session_id: session_id.clone(),
             lifecycle: "starting".to_owned(),
             origin_computation: StoredComputationOrigin::Native {
-                computation_type: base_computation.computation_type.to_string(),
-                object_ref: base_computation.object_ref.to_string(),
+                computation_ref: base_computation.to_string(),
             },
             runtime_profile: StoredRuntimeProfile::legacy_v1(
                 StoredLegacyV1Materialization::WorkspacePty {
@@ -585,8 +584,7 @@ fn serve_ready_state(
         session_id: session_id.clone(),
         lifecycle: "starting".to_string(),
         origin_computation: StoredComputationOrigin::Native {
-            computation_type: base_computation.computation_type.to_string(),
-            object_ref: base_computation.object_ref.to_string(),
+            computation_ref: base_computation.to_string(),
         },
         runtime_profile: StoredRuntimeProfile::legacy_v1(
             StoredLegacyV1Materialization::ReadyState {
