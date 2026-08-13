@@ -12,6 +12,6 @@ pub(crate) fn execute_decap_command(command: DecapCommands) -> Result<()> {
         } => capsule_session::start_public(&capsule, name.as_deref(), detach),
         DecapCommands::List { json } => capsule_session::list_public(json),
         DecapCommands::Attach { name } => capsule_session::attach_public(&name),
-        DecapCommands::Stop { name, force } => capsule_session::stop_public(&name, force),
+        DecapCommands::Stop { name } => capsule_session::stop_public(&name),
     }
 }

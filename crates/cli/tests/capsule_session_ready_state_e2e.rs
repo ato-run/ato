@@ -107,7 +107,7 @@ fn make_bundles(root: &Path) -> BundleFixtures {
         base_state: export.state,
         connectors: BTreeMap::new(),
     };
-    let bundle = root.join("login-refresh-bug.capsule");
+    let bundle = root.join("prepared-ready-state.capsule");
     let mut policy = ReadyStatePortableExportPolicy::new(&state_object).unwrap();
     StreamingBundleWriter::write_with_state_roles(
         &bundle,
@@ -192,7 +192,7 @@ fn make_bundles(root: &Path) -> BundleFixtures {
 }
 
 #[test]
-fn developer_opens_lists_and_stops_a_shared_bug_reproduction_capsule() {
+fn developer_opens_lists_and_stops_a_shared_prepared_ready_state_capsule() {
     let root = scratch_dir();
     let bundles = make_bundles(root.path());
     let _cleanup = PublicSessionCleanup(root.path().to_path_buf());
@@ -208,7 +208,7 @@ fn developer_opens_lists_and_stops_a_shared_bug_reproduction_capsule() {
         String::from_utf8_lossy(&first.stderr)
     );
     let first_stdout = String::from_utf8(first.stdout).unwrap();
-    assert_eq!(first_stdout, "Starting login-refresh-bug...\nReady.\n");
+    assert_eq!(first_stdout, "Starting prepared-ready-state...\nReady.\n");
     assert!(!first_stdout.contains("session-"));
 
     let second = ato(root.path())
@@ -220,16 +220,16 @@ fn developer_opens_lists_and_stops_a_shared_bug_reproduction_capsule() {
     assert!(second.status.success());
     assert_eq!(
         String::from_utf8(second.stdout).unwrap(),
-        "Starting login-refresh-bug-2...\nReady.\n"
+        "Starting prepared-ready-state-2...\nReady.\n"
     );
 
     let list = ato(root.path()).args(["decap", "list"]).output().unwrap();
     assert!(list.status.success());
     let list = String::from_utf8(list.stdout).unwrap();
     assert!(list.starts_with("NAME\tSTATE\tAGE\tSOURCE\n"));
-    assert!(list.contains("login-refresh-bug\trunning\t"));
-    assert!(list.contains("login-refresh-bug-2\trunning\t"));
-    assert!(list.contains("login-refresh-bug.capsule"));
+    assert!(list.contains("prepared-ready-state\trunning\t"));
+    assert!(list.contains("prepared-ready-state-2\trunning\t"));
+    assert!(list.contains("prepared-ready-state.capsule"));
     assert!(!list.contains("session-"));
 
     let list_json = ato(root.path())
@@ -239,7 +239,7 @@ fn developer_opens_lists_and_stops_a_shared_bug_reproduction_capsule() {
     assert!(list_json.status.success());
     let rows: Vec<serde_json::Value> = serde_json::from_slice(&list_json.stdout).unwrap();
     assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0]["name"], "login-refresh-bug");
+    assert_eq!(rows[0]["name"], "prepared-ready-state");
     assert_eq!(rows[0]["state"], "running");
     assert!(
         rows[0]["session_id"]
@@ -249,7 +249,7 @@ fn developer_opens_lists_and_stops_a_shared_bug_reproduction_capsule() {
     );
 
     let attach = ato(root.path())
-        .args(["decap", "attach", "login-refresh-bug"])
+        .args(["decap", "attach", "prepared-ready-state"])
         .output()
         .unwrap();
     assert!(!attach.status.success());
@@ -260,7 +260,40 @@ fn developer_opens_lists_and_stops_a_shared_bug_reproduction_capsule() {
         String::from_utf8_lossy(&attach.stderr)
     );
 
-    for name in ["login-refresh-bug", "login-refresh-bug-2"] {
+    let internal_id = rows[0]["session_id"].as_str().unwrap();
+    let internal_id_stop = ato(root.path())
+        .args(["decap", "stop", internal_id])
+        .output()
+        .unwrap();
+    assert!(!internal_id_stop.status.success());
+
+    let force = ato(root.path())
+        .args(["decap", "stop", "prepared-ready-state", "--force"])
+        .output()
+        .unwrap();
+    assert!(
+        !force.status.success(),
+        "unsupported --force must not parse"
+    );
+
+    let stop = ato(root.path())
+        .args(["decap", "stop", "prepared-ready-state"])
+        .output()
+        .unwrap();
+    assert!(stop.status.success());
+
+    let reused = ato(root.path())
+        .args(["decap", "start"])
+        .arg(&bundles.valid)
+        .output()
+        .unwrap();
+    assert!(reused.status.success());
+    assert_eq!(
+        String::from_utf8(reused.stdout).unwrap(),
+        "Starting prepared-ready-state...\nReady.\n"
+    );
+
+    for name in ["prepared-ready-state", "prepared-ready-state-2"] {
         let stop = ato(root.path())
             .args(["decap", "stop", name])
             .output()
@@ -275,6 +308,45 @@ fn developer_opens_lists_and_stops_a_shared_bug_reproduction_capsule() {
             format!("Stopped {name}.\n")
         );
     }
+}
+
+#[test]
+fn public_metadata_commit_failure_stops_the_started_session() {
+    let root = scratch_dir();
+    let bundles = make_bundles(root.path());
+    let output = ato(root.path())
+        .env("ATO_TEST_FAIL_PUBLIC_METADATA_COMMIT", "1")
+        .args(["decap", "start"])
+        .arg(&bundles.valid)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Session stopped"),
+        "unexpected metadata failure: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let list = ato(root.path())
+        .args(["decap", "list", "--json"])
+        .output()
+        .unwrap();
+    assert!(list.status.success());
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&list.stdout).unwrap();
+    assert!(
+        rows.is_empty(),
+        "failed start must not leave a public Session"
+    );
+
+    let sessions_root = root.path().join("ato-home/capsule-protocol-sessions");
+    let records: Vec<serde_json::Value> = fs::read_dir(sessions_root)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter_map(|entry| fs::read(entry.path().join("session.json")).ok())
+        .map(|bytes| serde_json::from_slice(&bytes).unwrap())
+        .collect();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["lifecycle"], "stopped");
 }
 
 #[test]
