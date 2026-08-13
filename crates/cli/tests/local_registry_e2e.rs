@@ -1934,7 +1934,8 @@ run = "main.py""#,
     let node_no_lock_build_stderr = String::from_utf8_lossy(&node_no_lock_build.stderr);
     assert!(
         node_no_lock_build_stderr.contains("E102")
-            || node_no_lock_build_stderr.contains("LockDraft is not ready to finalize locally"),
+            || node_no_lock_build_stderr
+                .contains("Repository resolution is not ready to materialize"),
         "expected node no lock build to report lockdraft failure; stderr={}",
         node_no_lock_build_stderr
     );
@@ -1965,7 +1966,8 @@ run = "main.py""#,
         python_no_lock_build_stderr.contains("E102")
             || python_no_lock_build_stderr.contains("E104")
             || python_no_lock_build_stderr.contains("ATO_ERR_PROVISIONING_LOCK_INCOMPLETE")
-            || python_no_lock_build_stderr.contains("LockDraft is not ready to finalize locally"),
+            || python_no_lock_build_stderr
+                .contains("Repository resolution is not ready to materialize"),
         "expected python no lock build to report lockdraft failure; stderr={}",
         python_no_lock_build_stderr
     );
@@ -2003,7 +2005,7 @@ run = "main.py""#,
         node_no_lock_stderr.contains("ATO_ERR_PROVISIONING_LOCK_INCOMPLETE")
             || node_no_lock_stderr.contains("E104")
             || node_no_lock_stderr.contains("E102")
-            || node_no_lock_stderr.contains("LockDraft is not ready to finalize locally"),
+            || node_no_lock_stderr.contains("Repository resolution is not ready to materialize"),
         "expected lock incomplete JSONL for node no lock; stderr={}",
         node_no_lock_stderr
     );
@@ -2082,7 +2084,7 @@ run = "main.py""#,
         python_no_lock_stderr.contains("ATO_ERR_PROVISIONING_LOCK_INCOMPLETE")
             || python_no_lock_stderr.contains("E104")
             || python_no_lock_stderr.contains("E102")
-            || python_no_lock_stderr.contains("LockDraft is not ready to finalize locally"),
+            || python_no_lock_stderr.contains("Repository resolution is not ready to materialize"),
         "expected lock incomplete JSONL for python no lock; stderr={}",
         python_no_lock_stderr
     );

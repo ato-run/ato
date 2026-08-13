@@ -18,9 +18,12 @@ ato-computation = { path = "../../../lib/computation" }
 ato-objects = { path = "../../../lib/objects" }
 ato-semantics-workspace = { path = "../../semantics/workspace" }
 blake3 = "1.5"
+hex = "0.4"
+regex = "1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_jcs = "0.1"
+sha2 = "0.10"
 thiserror = "2.0"
 toml = "0.8"
 walkdir = "2"
