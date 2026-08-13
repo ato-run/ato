@@ -236,6 +236,11 @@ fn store_reader(
         copied = copied
             .checked_add(count as u64)
             .ok_or_else(|| CompatibilityError::Invalid("protocol member size overflow".into()))?;
+        if copied > expected_size {
+            return Err(CompatibilityError::Invalid(format!(
+                "protocol member size mismatch: validated {expected_size} bytes, imported more than {expected_size}"
+            )));
+        }
     }
     if copied != expected_size {
         return Err(CompatibilityError::Invalid(format!(
@@ -524,6 +529,10 @@ mod tests {
     fn protocol_member_import_rejects_validated_size_mismatch() {
         let root = tempfile::tempdir().unwrap();
         let mut records = io::Cursor::new(vec![0_u8; 17]);
+        let error = store_reader(root.path(), &mut records, 18).unwrap_err();
+        assert!(error.to_string().contains("size mismatch"));
+
+        let mut records = io::Cursor::new(vec![0_u8; 19]);
         let error = store_reader(root.path(), &mut records, 18).unwrap_err();
         assert!(error.to_string().contains("size mismatch"));
     }
