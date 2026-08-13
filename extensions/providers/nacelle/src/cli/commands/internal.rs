@@ -355,7 +355,7 @@ struct FeatureCapabilityReport {
 
 #[derive(Debug)]
 enum ManagedChild {
-    Async(tokio::process::Child),
+    Async(Box<tokio::process::Child>),
     Sync(std::process::Child),
 }
 
@@ -1417,7 +1417,7 @@ async fn execute_prepared_launch(
         );
 
         let mut child = if let Some(child) = runtime.take_async_child(&prepared.run_id).await {
-            ManagedChild::Async(child)
+            ManagedChild::Async(Box::new(child))
         } else if let Some(child) = runtime.take_child(&prepared.run_id) {
             ManagedChild::Sync(child)
         } else {

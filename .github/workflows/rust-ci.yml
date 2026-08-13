@@ -34,7 +34,24 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
       - run: cargo fmt --all -- --check
-      - run: cargo check --workspace --all-targets --locked
-      - run: cargo test --workspace --no-fail-fast
-      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Check workspace
+        if: runner.os != 'Windows'
+        run: cargo check --workspace --all-targets --locked
+      - name: Check host workspace (Windows)
+        if: runner.os == 'Windows'
+        # guest-agent is built into the Linux snapshot guest rootfs and has no
+        # Windows host target. Every host-side package remains in this check.
+        run: cargo check --workspace --exclude guest-agent --all-targets --locked
+      - name: Test workspace
+        if: runner.os != 'Windows'
+        run: cargo test --workspace --no-fail-fast
+      - name: Test host workspace (Windows)
+        if: runner.os == 'Windows'
+        run: cargo test --workspace --exclude guest-agent --no-fail-fast
+      - name: Clippy workspace
+        if: runner.os != 'Windows'
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Clippy host workspace (Windows)
+        if: runner.os == 'Windows'
+        run: cargo clippy --workspace --exclude guest-agent --all-targets --all-features --locked -- -D warnings
       - run: cargo run --locked -p arch-check
