@@ -41,7 +41,6 @@ capsule-session-runtime = { path = "../capsule-session-runtime", version = "0.1.
 snapshot = { package = "ato-provider-snapshot", path = "../../extensions/providers/snapshot", version = "0.1.0" }
 ato-ipc = { path = "../../lib/ipc", version = "0.1.0" }
 netd = { path = "../../services/netd" }
-lock-draft-engine = { path = "lock-draft-engine", version = "0.1.0" }
 anyhow = "1.0"
 blake3 = "1.5"
 clap = { version = "4.5", features = ["derive", "env"] }

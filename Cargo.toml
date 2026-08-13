@@ -17,7 +17,6 @@ members = [
     "tools/snapshot-builder",
     "lib/ipc",
     "extensions/providers/snapshot/guest-agent",
-    "crates/cli/lock-draft-engine",
     "extensions/providers/nacelle",
     "services/netd",
 ]

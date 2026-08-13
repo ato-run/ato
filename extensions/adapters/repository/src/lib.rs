@@ -6,6 +6,10 @@
 
 #![forbid(unsafe_code)]
 
+mod resolution;
+
+pub use resolution::*;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -17,7 +21,7 @@ use ato_semantics_workspace::{
     RealizationConstraint, SourceClosure, SourceEntry, ToolchainConstraint, WORKSPACE_SEMANTICS_ID,
     WorkspacePhase, WorkspaceResidual, encode_workspace_residual,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use walkdir::WalkDir;
 
@@ -61,6 +65,46 @@ pub struct InferenceEvidence {
     pub selected_toolchain: String,
     pub selected_entrypoint: Vec<String>,
     pub authoring_manifest_used: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryInference {
+    pub toolchain: ToolchainConstraint,
+    pub entrypoint: Vec<String>,
+    pub package_manager: Option<String>,
+    pub candidate_id: String,
+    pub authoring_manifest_used: bool,
+}
+
+/// Inspect repository authoring evidence without producing an execution plan.
+/// The returned candidate is the same concrete workspace choice used by
+/// [`compile_repository`].
+pub fn inspect_repository(root: &Path) -> Result<RepositoryInference, RepositoryError> {
+    if !root.is_dir() {
+        return Err(RepositoryError::NotDirectory(root.to_path_buf()));
+    }
+    let authoring = load_authoring(root)?;
+    let inferred = infer_workspace(root, authoring.as_ref())?;
+    #[derive(Serialize)]
+    struct CandidateIdentity<'a> {
+        toolchain: &'a ToolchainConstraint,
+        entrypoint: &'a [String],
+        package_manager: &'a Option<String>,
+        working_directory: &'a str,
+    }
+    let canonical = serde_jcs::to_vec(&CandidateIdentity {
+        toolchain: &inferred.toolchain,
+        entrypoint: &inferred.entrypoint,
+        package_manager: &inferred.package_manager,
+        working_directory: &inferred.working_directory,
+    })?;
+    Ok(RepositoryInference {
+        toolchain: inferred.toolchain,
+        entrypoint: inferred.entrypoint,
+        package_manager: inferred.package_manager,
+        candidate_id: format!("blake3:{}", blake3::hash(&canonical).to_hex()),
+        authoring_manifest_used: authoring.is_some(),
+    })
 }
 
 #[derive(Debug, Error)]

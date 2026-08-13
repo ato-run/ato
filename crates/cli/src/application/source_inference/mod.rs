@@ -1054,7 +1054,7 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
     )?;
 
     // Handle Electron/desktop apps that require a build step before running.
-    // Return early with an actionable diagnostic instead of proceeding to LEIP,
+    // Return early with an actionable diagnostic instead of proceeding to Repository Adapter,
     // which would fall through to `pnpm start` and produce a confusing runtime error.
     if let Some(DesktopOverrideResult::Unsupported(msg)) = &desktop_override {
         let msg = msg.clone();
@@ -1130,23 +1130,23 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
         DesktopOverrideResult::Unsupported(_) => None,
     });
 
-    // LEIP v1 inference — runs only when no explicit desktop_execution override is
+    // Repository Adapter inference — runs only when no explicit desktop_execution override is
     // present (desktop_execution takes highest precedence).
-    // LaunchGraphDraft is the canonical inference object; the legacy contract below
+    // repository candidate is the canonical inference object; the legacy contract below
     // is a lossy projection of it.  Canonical-lock (capsule.lock) existence is checked before this
     // function is ever reached (lock-first invariant upstream).
-    let leip_projection = if desktop_execution.is_none() {
-        leip_projection_from_root(&input.project_root)
+    let repository_projection = if desktop_execution.is_none() {
+        repository_projection_from_root(&input.project_root)
     } else {
         None
     };
 
-    // Pre-compute LEIP Unresolved hints (e.g. Go, Rust unsupported messages).
-    // When hints are present, LEIP already identified the runtime but cannot generate a
+    // Pre-compute Repository Adapter Unresolved hints (e.g. Go, Rust unsupported messages).
+    // When hints are present, Repository Adapter already identified the runtime but cannot generate a
     // candidate — skip legacy candidate generation so we emit an actionable hint instead
     // of falling through to a `driver="go"` / `driver="rust"` resolved target (E301).
-    let leip_hints = if leip_projection.is_none() && desktop_execution.is_none() {
-        leip_unresolved_hints(&input.project_root)
+    let repository_hints = if repository_projection.is_none() && desktop_execution.is_none() {
+        repository_unresolved_hints(&input.project_root)
     } else {
         Vec::new()
     };
@@ -1167,17 +1167,23 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
                 .get("driver")
                 .and_then(Value::as_str)
         })
-        // LEIP AutoAccept driver overrides the legacy detect_project heuristic.
-        .or_else(|| leip_projection.as_ref().and_then(|p| p.driver.as_deref()))
+        // Repository Adapter AutoAccept driver overrides the legacy detect_project heuristic.
+        .or_else(|| {
+            repository_projection
+                .as_ref()
+                .and_then(|p| p.driver.as_deref())
+        })
         .unwrap_or_else(|| runtime_kind_from_project(&detected));
-    let process_candidates =
-        if desktop_execution.is_some() || leip_projection.is_some() || !leip_hints.is_empty() {
-            // Desktop execution override, LEIP AutoAccept, and LEIP Unresolved-with-hint all
-            // skip legacy candidate generation to avoid a spurious unsupported-driver error.
-            Vec::new()
-        } else {
-            process_candidates_for_source(&detected, &info)
-        };
+    let process_candidates = if desktop_execution.is_some()
+        || repository_projection.is_some()
+        || !repository_hints.is_empty()
+    {
+        // Desktop execution override, Repository Adapter AutoAccept, and Repository Adapter Unresolved-with-hint all
+        // skip legacy candidate generation to avoid a spurious unsupported-driver error.
+        Vec::new()
+    } else {
+        process_candidates_for_source(&detected, &info)
+    };
     let runtime_kind = if inferred_runtime_kind == "source" {
         runtime_kind_from_process_candidates(&process_candidates).unwrap_or(inferred_runtime_kind)
     } else {
@@ -1215,12 +1221,14 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
         "filesystem".to_string(),
         inferred_filesystem_contract(&detected),
     );
-    let leip_driver = leip_projection.as_ref().and_then(|p| p.driver.as_deref());
+    let repository_driver = repository_projection
+        .as_ref()
+        .and_then(|p| p.driver.as_deref());
     let runtime_resolution = desktop_execution
         .as_ref()
         .map(|override_contract| override_contract.runtime.clone())
         .unwrap_or_else(|| {
-            inferred_runtime_resolution(&detected, &input.project_root, leip_driver)
+            inferred_runtime_resolution(&detected, &input.project_root, repository_driver)
         });
     lock.resolution
         .entries
@@ -1231,8 +1239,8 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
             .as_ref()
             .map(|override_contract| Value::Array(vec![override_contract.resolved_target.clone()]))
             .or_else(|| {
-                // LEIP AutoAccept: build a single-target entry from the inferred cmd + driver.
-                leip_projection.as_ref().map(|p| {
+                // Repository Adapter AutoAccept: build a single-target entry from the inferred cmd + driver.
+                repository_projection.as_ref().map(|p| {
                     let mut target = serde_json::Map::new();
                     target.insert("label".to_string(), Value::String("default".to_string()));
                     // Static sites are web-served content, not source-executed processes.
@@ -1378,8 +1386,8 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
                     .to_string(),
             ),
         });
-    } else if let Some(leip) = leip_projection {
-        // LEIP AutoAccept: project the top LaunchGraphDraft candidate into the
+    } else if let Some(repository_candidate) = repository_projection {
+        // Repository Adapter AutoAccept: project the top repository candidate candidate into the
         // legacy contract.  This is a lossy projection — only cmd, driver, and
         // workload name are preserved; graph edges and non-primary nodes are not
         // represented in the legacy schema.
@@ -1387,8 +1395,8 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
         // Static sites (driver="static"): insert a process entry with the static driver so that
         // the RunAttempt contract check passes and the static executor can serve files directly
         // from the project root without a subprocess.
-        if leip.driver.as_deref() != Some("static") {
-            let process_val = process_value_from_leip_cmd(&leip.cmd);
+        if repository_candidate.driver.as_deref() != Some("static") {
+            let process_val = process_value_from_repository_cmd(&repository_candidate.cmd);
             lock.contract.entries.insert(
                 "workloads".to_string(),
                 Value::Array(vec![json!({
@@ -1417,12 +1425,13 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
             kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
             source_path: Some(input.project_root.clone()),
             importer_id: None,
-            evidence_kind: Some("leip_graph_inference".to_string()),
-            source_field: Some(leip.candidate_id.clone()),
+            evidence_kind: Some("repository_inference".to_string()),
+            source_field: Some(repository_candidate.candidate_id.clone()),
             note: Some(format!(
-                "LEIP v1 AutoAccept: cmd={} (candidate {})",
-                leip.cmd.join(" "),
-                &leip.candidate_id[..leip.candidate_id.len().min(16)],
+                "Repository Adapter AutoAccept: cmd={} (candidate {})",
+                repository_candidate.cmd.join(" "),
+                &repository_candidate.candidate_id
+                    [..repository_candidate.candidate_id.len().min(16)],
             )),
         });
         provenance.push(SourceInferenceProvenance {
@@ -1430,10 +1439,10 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
             kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
             source_path: Some(input.project_root.clone()),
             importer_id: None,
-            evidence_kind: Some("leip_graph_inference".to_string()),
-            source_field: Some(leip.candidate_id),
+            evidence_kind: Some("repository_inference".to_string()),
+            source_field: Some(repository_candidate.candidate_id),
             note: Some(
-                "LEIP v1 AutoAccept projects a single default target with inferred driver and cmd"
+                "Repository Adapter AutoAccept projects a single default target with inferred driver and cmd"
                     .to_string(),
             ),
         });
@@ -1455,10 +1464,10 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
                 packages,
             )
         } else {
-            // Use the pre-computed LEIP Unresolved hints (e.g. Go, Rust unsupported messages).
-            // leip_hints was computed earlier and is empty only when LEIP had no opinion.
-            let detail = if !leip_hints.is_empty() {
-                leip_hints.join("; ")
+            // Use the pre-computed Repository Adapter Unresolved hints (e.g. Go, Rust unsupported messages).
+            // repository_hints was computed earlier and is empty only when Repository Adapter had no opinion.
+            let detail = if !repository_hints.is_empty() {
+                repository_hints.join("; ")
             } else {
                 "could not infer a primary process from source evidence".to_string()
             };
@@ -3451,14 +3460,15 @@ fn runtime_kind_from_process_candidates(candidates: &[RankedCandidate]) -> Optio
 fn inferred_runtime_resolution(
     detected: &DetectedProject,
     project_root: &Path,
-    // LEIP driver takes precedence: for bun-managed Node.js projects LEIP reports
+    // Repository Adapter driver takes precedence: for bun-managed Node.js projects Repository Adapter reports
     // driver="node", but runtime_kind_from_project() returns "bun".  Without the
     // override, inferred_runtime_version() would store the bun version (e.g. "1.1")
     // as runtime.version, which resolved_target_string_from_lock() then uses as the
     // Node.js runtime version — causing "Could not resolve Node version for hint: 1.1".
-    leip_driver_override: Option<&str>,
+    repository_driver_override: Option<&str>,
 ) -> Value {
-    let runtime_kind = leip_driver_override.unwrap_or_else(|| runtime_kind_from_project(detected));
+    let runtime_kind =
+        repository_driver_override.unwrap_or_else(|| runtime_kind_from_project(detected));
     let mut runtime = serde_json::Map::new();
     runtime.insert("kind".to_string(), Value::String(runtime_kind.to_string()));
     runtime.insert(
@@ -4143,21 +4153,21 @@ fn extract_pyproject_dependencies(content: &str) -> Vec<String> {
     out
 }
 
-// ─── LEIP v1 adapter ──────────────────────────────────────────────────────────
+// ─── Repository Adapter adapter ──────────────────────────────────────────────────────────
 //
 // Terminology used inside this block:
-//   LaunchGraphDraft   = canonical inference object produced by lock-draft-engine
-//   LaunchEnvelopeDraft = payload of an AppTarget node in the graph
+//   Repository candidate = concrete inference produced by the repository adapter
+//   concrete candidate payload = payload of an AppTarget node in the graph
 //   legacy source_inference contract = compatibility projection from top candidate
 //   capsule.toml       = export/import projection of the contract
 //   capsule.lock       = resolved execution state (lock-first when present)
 //
-// LEIP sits between desktop_execution (explicit native) and legacy detect_project
+// Repository Adapter sits between desktop_execution (explicit native) and legacy detect_project
 // heuristics.  Only AutoAccept decisions override the legacy path.
 
-/// Carries the parts of a LEIP AutoAccept result that are projected into the
+/// Carries the parts of a Repository Adapter AutoAccept result that are projected into the
 /// legacy source_inference contract.
-struct LeipProjection {
+struct RepositoryProjection {
     /// Runtime driver (e.g., "node", "python") from the top candidate's envelope.
     driver: Option<String>,
     /// Full command vector from the top candidate's primary AppTarget envelope.
@@ -4209,139 +4219,34 @@ fn detect_workspace_packages(root: &Path) -> Option<Vec<String>> {
 
     None
 }
-fn build_leip_input_from_root(root: &Path) -> lock_draft_engine::leip::LeipInput {
-    use lock_draft_engine::{RepoFileEntry, RepoFileKind};
-
-    // Walk up to 4 levels deep; skip hidden directories.
-    let repo_file_index: Vec<RepoFileEntry> = WalkDir::new(root)
-        .min_depth(1)
-        .max_depth(4)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter_map(|entry| {
-            let rel = entry.path().strip_prefix(root).ok()?;
-            let rel_str = rel.to_string_lossy().replace('\\', "/");
-            // Skip hidden dirs/files (e.g., .git, .venv, node_modules)
-            if rel_str.starts_with('.') || rel_str.contains("/.") {
-                return None;
-            }
-            if rel_str.starts_with("node_modules")
-                || rel_str.contains("/node_modules/")
-                || rel_str.starts_with("target/")
-                || rel_str.starts_with(".venv/")
-                || rel_str.starts_with("venv/")
-            {
-                return None;
-            }
-            let kind = if entry.file_type().is_dir() {
-                RepoFileKind::Dir
-            } else {
-                RepoFileKind::File
-            };
-            let size = entry.metadata().ok().map(|m| m.len());
-            Some(RepoFileEntry {
-                path: rel_str,
-                kind,
-                size,
-            })
-        })
-        .collect();
-
-    // Eagerly read key manifest and docs files used by evidence extractors.
-    let key_files = [
-        "package.json",
-        "package-lock.json",
-        "yarn.lock",
-        "pnpm-lock.yaml",
-        "pyproject.toml",
-        "requirements.txt",
-        "setup.py",
-        "Pipfile",
-        "README.md",
-        "README.rst",
-        "Makefile",
-    ];
-    let mut file_text_map = std::collections::BTreeMap::new();
-    for name in &key_files {
-        let path = root.join(name);
-        if let Ok(text) = fs::read_to_string(&path) {
-            // Cap individual file reads at 512 KB to avoid blowing the heap.
-            if text.len() <= 512 * 1024 {
-                file_text_map.insert((*name).to_string(), text);
-            }
-        }
-    }
-
-    lock_draft_engine::leip::LeipInput {
-        repo_file_index,
-        file_text_map,
-        target_hint: None,
-        manifest_source: None,
-        existing_capsule_lock_summary: None,
-    }
-}
-
-/// Run LEIP inference and return an [`LeipProjection`] only when the engine
-/// reaches an `AutoAccept` decision.  Returns `None` for any other decision
-/// (NeedsSelection, Unresolved, Rejected) so the caller falls through to the
-/// legacy detect_project path.
-fn leip_projection_from_root(root: &Path) -> Option<LeipProjection> {
-    use lock_draft_engine::leip::{LeipDecision, evaluate_launch_graphs};
-
-    let leip_input = build_leip_input_from_root(root);
-    let result = evaluate_launch_graphs(&leip_input);
-
-    let candidate_id = match &result.decision {
-        LeipDecision::AutoAccept { candidate_id } => candidate_id.clone(),
-        _ => return None,
+fn repository_projection_from_root(root: &Path) -> Option<RepositoryProjection> {
+    let inferred = ato_adapter_repository::inspect_repository(root).ok()?;
+    let driver = match inferred.toolchain.family.as_str() {
+        "node" | "python" | "deno" => Some(inferred.toolchain.family),
+        "static" => Some("static".to_owned()),
+        _ => None,
     };
-
-    // Locate the accepted candidate and extract its primary AppTarget node.
-    let top = result.candidates.first()?;
-    // Primary node is the one whose id matches the graph's primary_node_id.
-    let primary_node_id = &top.graph.primary_node_id;
-    let primary_node = top.graph.nodes.iter().find(|n| &n.id == primary_node_id)?;
-    let envelope = primary_node.envelope.as_ref()?;
-
-    // Static-site candidates have an empty cmd — allow them through so the projection
-    // path can emit a web/static resolved target without a process contract.
-    let is_static = envelope.driver.as_deref() == Some("static");
-    if envelope.cmd.is_empty() && !is_static {
-        return None;
-    }
-
-    Some(LeipProjection {
-        driver: envelope.driver.clone(),
-        cmd: envelope.cmd.clone(),
-        candidate_id,
+    Some(RepositoryProjection {
+        driver,
+        cmd: inferred.entrypoint,
+        candidate_id: inferred.candidate_id,
     })
 }
 
-/// When LEIP returns `Unresolved`, extract its diagnostic messages.
-/// These provide actionable hints (e.g. Go/Rust unsupported runtime messages) that should
-/// be surfaced to the user instead of the generic "could not infer" fallback.
-fn leip_unresolved_hints(root: &Path) -> Vec<String> {
-    use lock_draft_engine::leip::{LeipDecision, evaluate_launch_graphs};
-    let leip_input = build_leip_input_from_root(root);
-    let result = evaluate_launch_graphs(&leip_input);
-    if matches!(&result.decision, LeipDecision::Unresolved { .. }) {
-        result
-            .diagnostics
-            .iter()
-            .map(|d| d.message.clone())
-            .collect()
-    } else {
-        Vec::new()
-    }
+fn repository_unresolved_hints(root: &Path) -> Vec<String> {
+    ato_adapter_repository::inspect_repository(root)
+        .err()
+        .map(|error| vec![error.to_string()])
+        .unwrap_or_default()
 }
 
-/// Build a `contract.process` JSON value from a LEIP cmd vector.
+/// Build a `contract.process` JSON value from a Repository Adapter cmd vector.
 ///
 /// Multi-token commands (e.g. `npm run start`, `uvicorn main:app --host 0.0.0.0`) are
 /// encoded as `run_command` so the compat bridge routes them through `sh -c` rather than
 /// treating the first token as a bare language entrypoint.  Single-token commands (e.g.
 /// `node`, `python`) are encoded as `entrypoint` only.
-fn process_value_from_leip_cmd(cmd: &[String]) -> Value {
+fn process_value_from_repository_cmd(cmd: &[String]) -> Value {
     let entrypoint = cmd[0].clone();
     if cmd.len() == 1 {
         return json!({ "entrypoint": entrypoint });
@@ -4516,7 +4421,7 @@ mod tests {
         )
         .expect("run engine");
 
-        // LEIP infers `npm run dev` directly — resolution of the script body
+        // Repository Adapter infers `npm run dev` directly — resolution of the script body
         // is deferred to runtime (the capsule runner invokes npm).
         assert_eq!(
             result.lock.contract.entries.get("process"),
@@ -4571,7 +4476,7 @@ mod tests {
         );
     }
 
-    // Regression: `scripts.dev = "node dist/server"` — LEIP treats this as a package-manager
+    // Regression: `scripts.dev = "node dist/server"` — Repository Adapter treats this as a package-manager
     // script command and emits `npm run dev`; bare-node resolution is deferred to runtime.
     #[test]
     fn node_dev_script_with_direct_node_call_uses_npm_run_dev() {
@@ -4599,7 +4504,7 @@ mod tests {
         .expect("run engine");
 
         let process = result.lock.contract.entries.get("process");
-        // LEIP produces `npm run dev` — the dev script's body is not inlined.
+        // Repository Adapter produces `npm run dev` — the dev script's body is not inlined.
         assert_eq!(
             process,
             Some(&json!({
@@ -4609,7 +4514,7 @@ mod tests {
         );
     }
 
-    // LEIP detects FastAPI and emits `uvicorn main:app --host 0.0.0.0` as the launch command.
+    // Repository Adapter detects FastAPI and emits `uvicorn main:app --host 0.0.0.0` as the launch command.
     #[test]
     fn source_only_fastapi_project_uses_uvicorn_entrypoint() {
         let dir = tempdir().expect("tempdir");
@@ -5101,7 +5006,7 @@ mod tests {
         assert!(!dir.path().join(".ato.run.generated.capsule.toml").exists());
     }
 
-    // LEIP emits `npm run dev`; the resolved script body is not inlined into run_command.
+    // Repository Adapter emits `npm run dev`; the resolved script body is not inlined into run_command.
     #[test]
     fn run_materialization_resolves_dev_script_as_npm_run_dev() {
         let dir = tempdir().expect("tempdir");
@@ -5131,7 +5036,7 @@ mod tests {
         )
         .expect("route lock");
 
-        // LEIP resolves to `npm run dev`; run_command is set for sh -c wrapping.
+        // Repository Adapter resolves to `npm run dev`; run_command is set for sh -c wrapping.
         assert_eq!(routed.plan.execution_entrypoint().as_deref(), Some("npm"));
         assert_eq!(
             routed.plan.execution_run_command().as_deref(),
@@ -5169,7 +5074,7 @@ mod tests {
         assert!(!dir.path().join(".ato.run.generated.capsule.toml").exists());
     }
 
-    // LEIP resolves `index.js` over `main.js` by convention priority — the project is no longer
+    // Repository Adapter resolves `index.js` over `main.js` by convention priority — the project is no longer
     // ambiguous; process is set and the lock is valid after init.
     #[test]
     fn init_resolves_index_js_over_main_js_by_convention() {
@@ -5184,7 +5089,7 @@ mod tests {
         let lock = capsule::capsule_lock::load_unvalidated_from_path(&materialized.lock_path)
             .expect("read materialized lock");
 
-        // LEIP picks index.js (conventional Node.js entry) — process is resolved.
+        // Repository Adapter picks index.js (conventional Node.js entry) — process is resolved.
         assert!(lock.contract.entries.contains_key("process"));
         assert_eq!(
             lock.contract.entries.get("process"),
@@ -5223,7 +5128,7 @@ mod tests {
         assert!(is_equal_ranked(&candidates));
     }
 
-    // LEIP resolves `index.js` over `main.js` by convention — run succeeds.
+    // Repository Adapter resolves `index.js` over `main.js` by convention — run succeeds.
     #[test]
     fn run_resolves_index_js_over_main_js_by_convention() {
         let dir = tempdir().expect("tempdir");
@@ -5243,7 +5148,7 @@ mod tests {
             true,
             reporter(),
         )
-        .expect("run should succeed with LEIP resolution");
+        .expect("run should succeed with Repository Adapter resolution");
 
         assert_eq!(
             result.lock.contract.entries.get("process"),
