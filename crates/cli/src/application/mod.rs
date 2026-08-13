@@ -7,6 +7,7 @@ pub(crate) mod build_materialization;
 pub(crate) mod cache_admin;
 pub(crate) mod capsule_session;
 pub(crate) mod compat_import;
+pub(crate) mod computation_run;
 pub(crate) mod credential;
 /// CRIU container checkpoint — Linux spike (#839). Unwired; see the module docs.
 pub(crate) mod criu_spike;

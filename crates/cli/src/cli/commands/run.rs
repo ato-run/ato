@@ -134,6 +134,10 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         return execute_plan_only(args).await;
     }
 
+    if crate::application::computation_run::supports(&args) {
+        return crate::application::computation_run::execute(&args);
+    }
+
     // Boundary-level receipt emission (refs #74, #99). Wraps the inner
     // pipeline so that on the recoverable-failure / aborted path a
     // *partial* execution receipt is emitted to

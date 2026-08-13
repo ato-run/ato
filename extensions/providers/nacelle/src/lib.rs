@@ -40,6 +40,7 @@ pub mod manager;
 #[cfg(feature = "sync-runtime")]
 pub mod sync;
 pub mod system;
+pub mod workspace_provider;
 
 // =============================================================================
 // Backward Compatibility Re-exports
