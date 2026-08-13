@@ -14,15 +14,18 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use capsule::protocol_bundle::{
-    PortableCapsule, SpoolBundle, StreamingBundleReader, capture_local_workspace_checkpoint,
+    LEGACY_V1_SEMANTICS, LegacyV1OriginMigration, PortableCapsule, SpoolBundle,
+    StreamingBundleReader, capture_local_workspace_checkpoint, normalize_v1_spool,
     restore_workspace_state,
 };
+use capsule_core::SemanticsId;
 use capsule_protocol::{ConnectorId, Direction, IoRecord, Payload, RecordKindId};
 use capsule_session_runtime::{
     BoundaryCoordinator, BoundaryDriver, BoundaryOperationId, CapsuleProtocolSessionStore,
     DurableFrontier, JournalLsn, NewStoredProtocolSession, NewSupervisorIdentity, RecordFrontier,
-    SessionId, SharedSessionWal, StoredConnectorCheckpoint, StoredLocalCheckpoint,
-    StoredProtocolSession, StoredReplayVerification, StoredRuntimeProfile, SupervisorIdentity,
+    SessionId, SharedSessionWal, StoredComputationOrigin, StoredConnectorCheckpoint,
+    StoredLegacyV1Materialization, StoredLocalCheckpoint, StoredProtocolSession,
+    StoredReplayVerification, StoredRuntimeProfile, SupervisorIdentity,
 };
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size as terminal_size};
 use fs2::FileExt;
@@ -245,21 +248,57 @@ pub(crate) fn serve(session: &str, bundle: &Path, into: &Path) -> Result<()> {
     paths.create()?;
     let spool = StreamingBundleReader::read_into(bundle, &paths.root.join("bundle-spool"))
         .context("failed to read Capsule bundle")?;
-    match spool.descriptor.base_state.state_type.as_str() {
-        "ato.state.workspace-posix-host@1" => {
+    let normalized = normalize_v1_spool(&spool, &paths.directory.join("computation-cas"))
+        .context("failed to normalize Capsule v1 as a computation")?;
+    let origin_migration = normalized.origin_migration;
+    match LegacyComputationEvaluator::select(
+        &normalized.computation.object().semantics,
+        &spool.descriptor.base_state.state_type,
+    )? {
+        LegacyRuntimeProfile::WorkspacePty => {
             let capsule = PortableCapsule {
                 records: spool.records.materialize(&spool.descriptor)?,
                 objects: spool.objects.materialize()?,
                 descriptor: spool.descriptor,
             };
-            serve_workspace_pty(session, into, capsule)
+            serve_workspace_pty(session, into, capsule, origin_migration)
         }
-        READY_STATE_STATE_TYPE => serve_ready_state(session, into, spool),
-        other => bail!("UnsupportedStateType: {other}"),
+        LegacyRuntimeProfile::ReadyState => {
+            serve_ready_state(session, into, spool, origin_migration)
+        }
     }
 }
 
-fn serve_workspace_pty(session: &str, into: &Path, capsule: PortableCapsule) -> Result<()> {
+enum LegacyRuntimeProfile {
+    WorkspacePty,
+    ReadyState,
+}
+
+struct LegacyComputationEvaluator;
+
+impl LegacyComputationEvaluator {
+    fn select(
+        semantics: &SemanticsId,
+        state_type: &capsule_protocol::StateTypeId,
+    ) -> Result<LegacyRuntimeProfile> {
+        if semantics.as_str() != LEGACY_V1_SEMANTICS {
+            bail!("UnsupportedComputationSemantics: {semantics}");
+        }
+        match state_type.as_str() {
+            "ato.state.workspace-posix-host@1" => Ok(LegacyRuntimeProfile::WorkspacePty),
+            READY_STATE_STATE_TYPE => Ok(LegacyRuntimeProfile::ReadyState),
+            other => bail!("UnsupportedStateType: {other}"),
+        }
+    }
+}
+
+fn serve_workspace_pty(
+    session: &str,
+    into: &Path,
+    capsule: PortableCapsule,
+    origin_migration: LegacyV1OriginMigration,
+) -> Result<()> {
+    let base_computation = origin_migration.computation_ref().clone();
     let session_id = SessionId::parse(session)?;
     let paths = SessionPaths::new(&session_id)?;
     paths.create()?;
@@ -326,32 +365,37 @@ fn serve_workspace_pty(session: &str, into: &Path, capsule: PortableCapsule) -> 
         let store = CapsuleProtocolSessionStore::open(&paths.root)?;
         let mut stored = store.read(&session_id)?;
         stored.lifecycle = "starting".to_owned();
-        stored.base_state = checkpoint.state_ref.clone();
-        stored.base_frontier = checkpoint.captured_at.records_through;
-        stored.base_connector_checkpoints = checkpoint.connector_checkpoints.clone();
-        stored.durable_frontier = SharedSessionWal::open(&paths.wal)?.durable_frontier()?;
-        stored.latest_consistent_frontier = Some(checkpoint.captured_at);
-        stored.active_checkpoint = Some(checkpoint.clone());
-        stored.historical_replay = None;
+        apply_legacy_v1_origin_migration(&mut stored, &origin_migration);
+        let recovery = stored.recovery_mut();
+        recovery.base_frontier = checkpoint.captured_at.records_through;
+        recovery.base_connector_checkpoints = checkpoint.connector_checkpoints.clone();
+        recovery.durable_frontier = SharedSessionWal::open(&paths.wal)?.durable_frontier()?;
+        recovery.latest_consistent_frontier = Some(checkpoint.captured_at);
+        recovery.active_checkpoint = Some(checkpoint.clone());
+        recovery.historical_replay = None;
         stored.supervisor = identity.clone();
         stored
     } else {
         let mut stored = StoredProtocolSession::new(NewStoredProtocolSession {
             session_id: session_id.clone(),
             lifecycle: "starting".to_owned(),
-            state_type: &state.state_type,
-            base_state: &state.state_ref,
-            base_frontier: bootstrap.base_frontier,
-            durable_frontier: DurableFrontier {
-                records_through: historical_frontier,
-                journal_through: JournalLsn::ORIGIN,
+            origin_computation: StoredComputationOrigin::Native {
+                computation_ref: base_computation.to_string(),
             },
-            runtime_profile: StoredRuntimeProfile::WorkspacePty {
-                workspace: into.to_path_buf(),
-            },
+            runtime_profile: StoredRuntimeProfile::legacy_v1(
+                StoredLegacyV1Materialization::WorkspacePty {
+                    workspace: into.to_path_buf(),
+                },
+                bootstrap.base_frontier,
+                DurableFrontier {
+                    records_through: historical_frontier,
+                    journal_through: JournalLsn::ORIGIN,
+                },
+            ),
             supervisor: identity.clone(),
         });
-        stored.base_connector_checkpoints = bootstrap.base_connector_checkpoints.clone();
+        stored.recovery_mut().base_connector_checkpoints =
+            bootstrap.base_connector_checkpoints.clone();
         stored.source_session_id = bootstrap.source_session_id.clone();
         stored
     };
@@ -387,7 +431,7 @@ fn serve_workspace_pty(session: &str, into: &Path, capsule: PortableCapsule) -> 
             bootstrap.base_frontier,
             historical_frontier,
         )?;
-        stored.historical_replay = Some(StoredReplayVerification {
+        stored.recovery_mut().historical_replay = Some(StoredReplayVerification {
             connector: PTY_CONNECTOR_ID.to_owned(),
             protocol: PTY_PROTOCOL_ID.to_owned(),
             from: bootstrap.base_frontier,
@@ -462,7 +506,27 @@ fn serve_workspace_pty(session: &str, into: &Path, capsule: PortableCapsule) -> 
     result
 }
 
-fn serve_ready_state(session: &str, _into: &Path, spool: SpoolBundle) -> Result<()> {
+fn apply_legacy_v1_origin_migration(
+    session: &mut StoredProtocolSession,
+    migration: &LegacyV1OriginMigration,
+) {
+    if matches!(
+        &session.origin_computation,
+        StoredComputationOrigin::LegacyV3State { .. }
+    ) {
+        session.origin_computation = StoredComputationOrigin::Native {
+            computation_ref: migration.computation_ref().to_string(),
+        };
+    }
+}
+
+fn serve_ready_state(
+    session: &str,
+    _into: &Path,
+    spool: SpoolBundle,
+    origin_migration: LegacyV1OriginMigration,
+) -> Result<()> {
+    let base_computation = origin_migration.computation_ref().clone();
     if !spool.descriptor.connectors.is_empty() {
         bail!("ReadyStateConnectorAttachmentUnsupported");
     }
@@ -538,21 +602,24 @@ fn serve_ready_state(session: &str, _into: &Path, spool: SpoolBundle) -> Result<
     let mut stored = StoredProtocolSession::new(NewStoredProtocolSession {
         session_id: session_id.clone(),
         lifecycle: "starting".to_string(),
-        state_type: &state.state_type,
-        base_state: &state.state_ref,
-        base_frontier: RecordFrontier::Origin,
-        durable_frontier: DurableFrontier {
-            records_through: RecordFrontier::Origin,
-            journal_through: JournalLsn::ORIGIN,
+        origin_computation: StoredComputationOrigin::Native {
+            computation_ref: base_computation.to_string(),
         },
-        runtime_profile: StoredRuntimeProfile::ReadyState {
-            backend_id: session_guard.session().backend_id.clone(),
-            ready_state_manifest_id: manifest_id,
-            cas_root,
-            overlay_root: overlay_root.clone(),
-            vmm_pid: session_guard.session().vmm_pid,
-            vmm_process_start_identity: vmm_identity,
-        },
+        runtime_profile: StoredRuntimeProfile::legacy_v1(
+            StoredLegacyV1Materialization::ReadyState {
+                backend_id: session_guard.session().backend_id.clone(),
+                ready_state_manifest_id: manifest_id,
+                cas_root,
+                overlay_root: overlay_root.clone(),
+                vmm_pid: session_guard.session().vmm_pid,
+                vmm_process_start_identity: vmm_identity,
+            },
+            RecordFrontier::Origin,
+            DurableFrontier {
+                records_through: RecordFrontier::Origin,
+                journal_through: JournalLsn::ORIGIN,
+            },
+        ),
         supervisor: identity.clone(),
     });
     store.write(&stored)?;
@@ -610,7 +677,7 @@ fn ready_state_supervisor_loop(
                     pid: stored.supervisor.pid,
                     writer_attached: false,
                     observers: 0,
-                    frontier: stored.durable_frontier,
+                    frontier: stored.recovery().durable_frontier,
                 });
             }
             SupervisorCommand::Kill { reply } => {
@@ -618,11 +685,11 @@ fn ready_state_supervisor_loop(
                 store.write(stored)?;
                 session.stop()?;
                 stored.lifecycle = "stopped".to_string();
-                if let StoredRuntimeProfile::ReadyState {
+                if let StoredLegacyV1Materialization::ReadyState {
                     vmm_pid,
                     vmm_process_start_identity,
                     ..
-                } = &mut stored.runtime_profile
+                } = stored.materialization_mut()
                 {
                     *vmm_pid = None;
                     *vmm_process_start_identity = None;
@@ -951,11 +1018,11 @@ fn reconcile_orphaned_session(mut session: StoredProtocolSession) -> Result<()> 
 
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let containment_complete = match &session.runtime_profile {
-            StoredRuntimeProfile::WorkspacePty { .. } => {
+        let containment_complete = match session.materialization() {
+            StoredLegacyV1Materialization::WorkspacePty { .. } => {
                 has_containment_receipt(&paths.containment_receipt)
             }
-            StoredRuntimeProfile::ReadyState {
+            StoredLegacyV1Materialization::ReadyState {
                 vmm_pid,
                 vmm_process_start_identity,
                 ..
@@ -977,12 +1044,12 @@ fn reconcile_orphaned_session(mut session: StoredProtocolSession) -> Result<()> 
         thread::sleep(Duration::from_millis(25));
     }
 
-    if let StoredRuntimeProfile::ReadyState {
+    if let StoredLegacyV1Materialization::ReadyState {
         vmm_pid,
         vmm_process_start_identity,
         overlay_root,
         ..
-    } = &mut session.runtime_profile
+    } = session.materialization_mut()
     {
         *vmm_pid = None;
         *vmm_process_start_identity = None;
@@ -1014,7 +1081,7 @@ pub(crate) fn branch(session: &str, into: &Path, no_attach: bool) -> Result<()> 
     let source_paths = SessionPaths::new(&source_id)?;
     let store = CapsuleProtocolSessionStore::open(&source_paths.root)?;
     let source = store.read(&source_id)?;
-    if source.latest_consistent_frontier != Some(checkpoint.captured_at) {
+    if source.recovery().latest_consistent_frontier != Some(checkpoint.captured_at) {
         bail!("source Session did not commit the requested consistent frontier");
     }
 
@@ -1028,7 +1095,7 @@ pub(crate) fn branch(session: &str, into: &Path, no_attach: bool) -> Result<()> 
             continue;
         };
         if record.seq > existing_through
-            && !source.base_frontier.contains(record.seq)
+            && !source.recovery().base_frontier.contains(record.seq)
             && through.contains(record.seq)
         {
             seed.records.push(record.try_into()?);
@@ -1046,8 +1113,8 @@ pub(crate) fn branch(session: &str, into: &Path, no_attach: bool) -> Result<()> 
         &SessionBootstrapMetadata {
             source_session_id: Some(source_id),
             expected_workspace_digest: Some(checkpoint.workspace_digest),
-            base_frontier: source.base_frontier,
-            base_connector_checkpoints: source.base_connector_checkpoints,
+            base_frontier: source.recovery().base_frontier,
+            base_connector_checkpoints: source.recovery().base_connector_checkpoints.clone(),
             ..SessionBootstrapMetadata::default()
         },
     )?;
@@ -1075,8 +1142,8 @@ pub(crate) fn resume(session: &str) -> Result<()> {
     let store = CapsuleProtocolSessionStore::open(&paths.root)?;
     let stored = store.read(&session_id)?;
     if matches!(
-        &stored.runtime_profile,
-        StoredRuntimeProfile::ReadyState { .. }
+        stored.materialization(),
+        StoredLegacyV1Materialization::ReadyState { .. }
     ) {
         bail!("ReadyStateResumeUnsupported");
     }
@@ -1084,10 +1151,11 @@ pub(crate) fn resume(session: &str) -> Result<()> {
         bail!("Session is not suspended");
     }
     let checkpoint = stored
+        .recovery()
         .active_checkpoint
         .clone()
         .ok_or_else(|| anyhow!("suspended Session has no active checkpoint"))?;
-    if stored.latest_consistent_frontier != Some(checkpoint.captured_at) {
+    if stored.recovery().latest_consistent_frontier != Some(checkpoint.captured_at) {
         bail!("suspended Session checkpoint is not a consistent frontier");
     }
     let (current_state, current_object) = capture_local_workspace_checkpoint(stored.workspace()?)
@@ -1384,7 +1452,7 @@ where
                 coordinator
                     .deliver_ingress(random_operation_id("pty-input")?, &record)
                     .map_err(|error| anyhow!(error.to_string()))?;
-                stored.durable_frontier = wal.durable_frontier()?;
+                stored.recovery_mut().durable_frontier = wal.durable_frontier()?;
                 next_seq = next_seq
                     .checked_add(1)
                     .ok_or_else(|| anyhow!("seq exhausted"))?;
@@ -1404,7 +1472,7 @@ where
                 coordinator
                     .deliver_ingress(operation_id, &record)
                     .map_err(|error| anyhow!(error.to_string()))?;
-                stored.durable_frontier = wal.durable_frontier()?;
+                stored.recovery_mut().durable_frontier = wal.durable_frontier()?;
                 next_seq = next_seq
                     .checked_add(1)
                     .ok_or_else(|| anyhow!("seq exhausted"))?;
@@ -1423,7 +1491,7 @@ where
                     pid: stored.supervisor.pid,
                     writer_attached: writer_client.is_some(),
                     observers: clients.len(),
-                    frontier: stored.durable_frontier,
+                    frontier: stored.recovery().durable_frontier,
                 });
             }
             Ok(SupervisorCommand::Kill { reply }) => {
@@ -1557,7 +1625,7 @@ where
     D: BoundaryDriver,
 {
     let record = pty_record(*next_seq, Direction::Egress, "output", bytes.clone());
-    stored.durable_frontier = coordinator
+    stored.recovery_mut().durable_frontier = coordinator
         .commit_egress(random_operation_id("pty-output")?, &record)
         .map_err(|error| anyhow!(error.to_string()))?;
     *next_seq = (*next_seq)
@@ -1671,9 +1739,10 @@ where
                 pty_connector_checkpoint(frontier, computation.current_terminal_size()?),
             )]),
         };
-        stored.durable_frontier = frontier;
-        stored.latest_consistent_frontier = Some(frontier);
-        stored.active_checkpoint = Some(checkpoint.clone());
+        let recovery = stored.recovery_mut();
+        recovery.durable_frontier = frontier;
+        recovery.latest_consistent_frontier = Some(frontier);
+        recovery.active_checkpoint = Some(checkpoint.clone());
         store.write(stored)?;
         Ok(checkpoint)
     })();
@@ -1731,7 +1800,7 @@ where
     coordinator
         .commit_egress(random_operation_id("pty-exit")?, &record)
         .map_err(|error| anyhow!(error.to_string()))?;
-    stored.durable_frontier = wal.durable_frontier()?;
+    stored.recovery_mut().durable_frontier = wal.durable_frontier()?;
     store.write(stored)?;
     Ok(())
 }

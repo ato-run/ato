@@ -1,8 +1,8 @@
-//! Capsule Protocol Semantic Core.
+//! Exact semantic domain for Capsule Protocol v1.
 //!
-//! This crate defines only continuable [`StateRef`]s, versioned
-//! [`ConnectorDef`]s, and ordered [`IoRecord`]s. Encoding, storage, process
-//! execution, and connector adapters deliberately live in higher layers.
+//! State, Connector definitions, and ordered I/O Records remain isolated here
+//! as the accepted v1 compatibility contract. The protocol-independent
+//! Computation model lives in `capsule-core`.
 
 #![forbid(unsafe_code)]
 
