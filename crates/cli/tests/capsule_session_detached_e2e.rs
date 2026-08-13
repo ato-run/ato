@@ -708,11 +708,8 @@ fn suspend_resume_rebases_at_filesystem_restart_without_synthetic_exit() {
             .as_u64()
             .map(|generation| generation + 1)
     );
-    assert_eq!(
-        after["base_computation"]["state_ref"],
-        suspended["active_checkpoint"]["state_ref"]
-    );
-    assert_eq!(after["base_computation"]["kind"], "legacy_state_io");
+    assert_eq!(after["base_computation"], before["base_computation"]);
+    assert_eq!(after["base_computation"]["kind"], "native");
     assert_eq!(
         after["base_frontier"],
         suspended["active_checkpoint"]["captured_at"]["records_through"]

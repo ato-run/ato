@@ -18,8 +18,8 @@ use capsule::protocol_bundle::{
     normalize_v1_spool, restore_workspace_state,
 };
 use capsule_protocol::{
-    ComputationRef, ConnectorId, ContentRef, Direction, IoRecord, LEGACY_STATE_IO_COMPUTATION_TYPE,
-    Payload, RecordKindId,
+    ComputationRef, ConnectorId, Direction, IoRecord, LEGACY_STATE_IO_COMPUTATION_TYPE, Payload,
+    RecordKindId,
 };
 use capsule_session_runtime::{
     BoundaryCoordinator, BoundaryDriver, BoundaryOperationId, CapsuleProtocolSessionStore,
@@ -363,9 +363,7 @@ fn serve_workspace_pty(
         let store = CapsuleProtocolSessionStore::open(&paths.root)?;
         let mut stored = store.read(&session_id)?;
         stored.lifecycle = "starting".to_owned();
-        let checkpoint_state = ContentRef::parse(&checkpoint.state_ref)
-            .map_err(|error| anyhow!("invalid checkpoint State: {error}"))?;
-        stored.replace_with_legacy_state(&state.state_type, &checkpoint_state);
+        stored.upgrade_legacy_origin(&base_computation);
         stored.base_frontier = checkpoint.captured_at.records_through;
         stored.base_connector_checkpoints = checkpoint.connector_checkpoints.clone();
         stored.durable_frontier = SharedSessionWal::open(&paths.wal)?.durable_frontier()?;
