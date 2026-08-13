@@ -1,18 +1,26 @@
+//! Protocol-independent semantic model for immutable Ato computations.
+//!
+//! A computation's typed boundary is stored inside the content-addressed
+//! [`ComputationObject`]. Protocol records, runtime materializations, traces,
+//! evaluators, and Connectors intentionally live outside this crate.
+
+#![forbid(unsafe_code)]
+
+use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
 
 use thiserror::Error;
 
-/// Maximum UTF-8 byte length of every Capsule Protocol identifier.
+/// Maximum UTF-8 byte length of every Core identifier.
 pub const MAX_IDENTIFIER_BYTES: usize = 255;
 
-/// Normative regular-expression pattern for connector and record-kind identifiers.
-pub const COMPONENT_ID_PATTERN: &str =
-    r"[a-z0-9]([a-z0-9_-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9_-]*[a-z0-9])?)*";
+/// Generic schema for a computation object whose body schema is type-defined.
+pub const COMPUTATION_OBJECT_SCHEMA: &str = "capsule.computation.object@1";
 
-/// Normative regular-expression pattern for state-type and protocol identifiers.
-pub const VERSIONED_ID_PATTERN: &str =
-    r"[a-z0-9]([a-z0-9_-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9_-]*[a-z0-9])?)+@[1-9][0-9]*";
+/// Composition is represented as an ordinary computation type, not a second
+/// semantic primitive.
+pub const COMPOSITE_COMPUTATION_TYPE: &str = "capsule.computation.compose@1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("invalid {kind} `{value}`: {reason}")]
@@ -160,10 +168,10 @@ macro_rules! versioned_id {
     };
 }
 
-component_id!(ConnectorId, "connector id");
-component_id!(RecordKindId, "record kind id");
+component_id!(PortId, "port id");
+versioned_id!(ComputationSchemaId, "computation schema id");
+versioned_id!(ComputationTypeId, "computation type id");
 versioned_id!(ProtocolId, "protocol id");
-versioned_id!(StateTypeId, "state type id");
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContentRef(String);
@@ -222,59 +230,87 @@ impl FromStr for ContentRef {
     }
 }
 
+/// An immutable residual computation. `object_ref` addresses an object that
+/// includes the computation's boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComputationRef {
+    pub computation_type: ComputationTypeId,
+    pub object_ref: ContentRef,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortMode {
+    IngressOnly,
+    EgressOnly,
+    Duplex,
+}
+
+/// One typed opening in a computation boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortDef {
+    pub protocol: ProtocolId,
+    pub mode: PortMode,
+    pub config_ref: Option<ContentRef>,
+}
+
+/// The complete open boundary of a computation.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Boundary {
+    pub ports: BTreeMap<PortId, PortDef>,
+}
+
+/// Content-addressed computation value. The computation type defines the body
+/// schema; the boundary remains part of this object's identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComputationObject {
+    pub schema: ComputationSchemaId,
+    pub boundary: Boundary,
+    pub body: ContentRef,
+}
+
+/// A computation reference resolved to its hash-validated object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedComputation {
+    pub reference: ComputationRef,
+    pub object: ComputationObject,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn accepts_adapter_defined_identifiers() {
+    fn computation_reference_names_only_type_and_complete_object() {
+        let reference = ComputationRef {
+            computation_type: ComputationTypeId::parse("capsule.computation.test@1").unwrap(),
+            object_ref: ContentRef::parse(format!("blake3:{}", "ab".repeat(32))).unwrap(),
+        };
+
         assert_eq!(
-            ConnectorId::parse("terminal.main").unwrap().as_str(),
-            "terminal.main"
+            reference.computation_type.as_str(),
+            "capsule.computation.test@1"
         );
-        assert_eq!(
-            ProtocolId::parse("ato.io.pty@1").unwrap().as_str(),
-            "ato.io.pty@1"
-        );
-        assert_eq!(
-            StateTypeId::parse("ato.state.ready-state@1")
-                .unwrap()
-                .as_str(),
-            "ato.state.ready-state@1"
-        );
-        assert_eq!(
-            RecordKindId::parse("vendor.pointer_move").unwrap().as_str(),
-            "vendor.pointer_move"
-        );
+        assert_eq!(reference.object_ref.algorithm(), "blake3");
     }
 
     #[test]
-    fn rejects_malformed_identifiers() {
-        assert!(ConnectorId::parse("Terminal Main").is_err());
-        assert!(ProtocolId::parse("pty").is_err());
-        assert!(ProtocolId::parse("ato.io.pty@0").is_err());
-        assert!(RecordKindId::parse("stdin/").is_err());
-        assert!(ConnectorId::parse("terminal.-main").is_err());
-        assert!(ConnectorId::parse("terminal.main_").is_err());
-    }
+    fn boundary_is_inside_the_resolved_computation_object() {
+        let port = PortId::parse("greeter.name").unwrap();
+        let object = ComputationObject {
+            schema: ComputationSchemaId::parse(COMPUTATION_OBJECT_SCHEMA).unwrap(),
+            boundary: Boundary {
+                ports: BTreeMap::from([(
+                    port.clone(),
+                    PortDef {
+                        protocol: ProtocolId::parse("example.greeter.text@1").unwrap(),
+                        mode: PortMode::IngressOnly,
+                        config_ref: None,
+                    },
+                )]),
+            },
+            body: ContentRef::parse(format!("blake3:{}", "cd".repeat(32))).unwrap(),
+        };
 
-    #[test]
-    fn identifier_byte_limit_applies_to_the_complete_versioned_id() {
-        let name = format!("ato.{}", "a".repeat(249));
-        let maximum = format!("{name}@1");
-        assert_eq!(maximum.len(), MAX_IDENTIFIER_BYTES);
-        assert!(ProtocolId::parse(maximum).is_ok());
-
-        let too_long = format!("{name}@12");
-        assert_eq!(too_long.len(), MAX_IDENTIFIER_BYTES + 1);
-        assert!(ProtocolId::parse(too_long).is_err());
-    }
-
-    #[test]
-    fn content_refs_are_algorithm_tagged_lowercase_hex() {
-        let digest = "ab".repeat(32);
-        assert!(ContentRef::parse(format!("blake3:{digest}")).is_ok());
-        assert!(ContentRef::parse(format!("md5:{digest}")).is_err());
-        assert!(ContentRef::parse(format!("sha256:{}", digest.to_uppercase())).is_err());
+        assert_eq!(object.boundary.ports[&port].mode, PortMode::IngressOnly);
     }
 }
