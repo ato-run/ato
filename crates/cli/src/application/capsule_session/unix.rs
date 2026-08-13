@@ -15,14 +15,18 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, anyhow, bail};
 use capsule::protocol_bundle::{
     PortableCapsule, SpoolBundle, StreamingBundleReader, capture_local_workspace_checkpoint,
-    restore_workspace_state,
+    normalize_v1_spool, restore_workspace_state,
 };
-use capsule_protocol::{ConnectorId, Direction, IoRecord, Payload, RecordKindId};
+use capsule_protocol::{
+    ComputationRef, ConnectorId, ContentRef, Direction, IoRecord, LEGACY_STATE_IO_COMPUTATION_TYPE,
+    Payload, RecordKindId,
+};
 use capsule_session_runtime::{
     BoundaryCoordinator, BoundaryDriver, BoundaryOperationId, CapsuleProtocolSessionStore,
     DurableFrontier, JournalLsn, NewStoredProtocolSession, NewSupervisorIdentity, RecordFrontier,
-    SessionId, SharedSessionWal, StoredConnectorCheckpoint, StoredLocalCheckpoint,
-    StoredProtocolSession, StoredReplayVerification, StoredRuntimeProfile, SupervisorIdentity,
+    SessionId, SharedSessionWal, StoredComputationOrigin, StoredConnectorCheckpoint,
+    StoredLocalCheckpoint, StoredProtocolSession, StoredReplayVerification, StoredRuntimeProfile,
+    SupervisorIdentity,
 };
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size as terminal_size};
 use fs2::FileExt;
@@ -245,21 +249,54 @@ pub(crate) fn serve(session: &str, bundle: &Path, into: &Path) -> Result<()> {
     paths.create()?;
     let spool = StreamingBundleReader::read_into(bundle, &paths.root.join("bundle-spool"))
         .context("failed to read Capsule bundle")?;
-    match spool.descriptor.base_state.state_type.as_str() {
-        "ato.state.workspace-posix-host@1" => {
+    let normalized = normalize_v1_spool(&spool, &paths.directory.join("computation-cas"))
+        .context("failed to normalize Capsule v1 as a computation")?;
+    let root = normalized.descriptor.root;
+    match LegacyComputationEvaluator::select(&root, &spool.descriptor.base_state.state_type)? {
+        LegacyRuntimeProfile::WorkspacePty => {
             let capsule = PortableCapsule {
                 records: spool.records.materialize(&spool.descriptor)?,
                 objects: spool.objects.materialize()?,
                 descriptor: spool.descriptor,
             };
-            serve_workspace_pty(session, into, capsule)
+            serve_workspace_pty(session, into, capsule, root)
         }
-        READY_STATE_STATE_TYPE => serve_ready_state(session, into, spool),
-        other => bail!("UnsupportedStateType: {other}"),
+        LegacyRuntimeProfile::ReadyState => serve_ready_state(session, into, spool, root),
     }
 }
 
-fn serve_workspace_pty(session: &str, into: &Path, capsule: PortableCapsule) -> Result<()> {
+enum LegacyRuntimeProfile {
+    WorkspacePty,
+    ReadyState,
+}
+
+struct LegacyComputationEvaluator;
+
+impl LegacyComputationEvaluator {
+    fn select(
+        computation: &ComputationRef,
+        state_type: &capsule_protocol::StateTypeId,
+    ) -> Result<LegacyRuntimeProfile> {
+        if computation.computation_type.as_str() != LEGACY_STATE_IO_COMPUTATION_TYPE {
+            bail!(
+                "UnsupportedComputationType: {}",
+                computation.computation_type
+            );
+        }
+        match state_type.as_str() {
+            "ato.state.workspace-posix-host@1" => Ok(LegacyRuntimeProfile::WorkspacePty),
+            READY_STATE_STATE_TYPE => Ok(LegacyRuntimeProfile::ReadyState),
+            other => bail!("UnsupportedStateType: {other}"),
+        }
+    }
+}
+
+fn serve_workspace_pty(
+    session: &str,
+    into: &Path,
+    capsule: PortableCapsule,
+    base_computation: ComputationRef,
+) -> Result<()> {
     let session_id = SessionId::parse(session)?;
     let paths = SessionPaths::new(&session_id)?;
     paths.create()?;
@@ -326,7 +363,9 @@ fn serve_workspace_pty(session: &str, into: &Path, capsule: PortableCapsule) -> 
         let store = CapsuleProtocolSessionStore::open(&paths.root)?;
         let mut stored = store.read(&session_id)?;
         stored.lifecycle = "starting".to_owned();
-        stored.base_state = checkpoint.state_ref.clone();
+        let checkpoint_state = ContentRef::parse(&checkpoint.state_ref)
+            .map_err(|error| anyhow!("invalid checkpoint State: {error}"))?;
+        stored.replace_with_legacy_state(&state.state_type, &checkpoint_state);
         stored.base_frontier = checkpoint.captured_at.records_through;
         stored.base_connector_checkpoints = checkpoint.connector_checkpoints.clone();
         stored.durable_frontier = SharedSessionWal::open(&paths.wal)?.durable_frontier()?;
@@ -339,8 +378,10 @@ fn serve_workspace_pty(session: &str, into: &Path, capsule: PortableCapsule) -> 
         let mut stored = StoredProtocolSession::new(NewStoredProtocolSession {
             session_id: session_id.clone(),
             lifecycle: "starting".to_owned(),
-            state_type: &state.state_type,
-            base_state: &state.state_ref,
+            base_computation: StoredComputationOrigin::Native {
+                computation_type: base_computation.computation_type.to_string(),
+                computation_ref: base_computation.computation_ref.to_string(),
+            },
             base_frontier: bootstrap.base_frontier,
             durable_frontier: DurableFrontier {
                 records_through: historical_frontier,
@@ -462,7 +503,12 @@ fn serve_workspace_pty(session: &str, into: &Path, capsule: PortableCapsule) -> 
     result
 }
 
-fn serve_ready_state(session: &str, _into: &Path, spool: SpoolBundle) -> Result<()> {
+fn serve_ready_state(
+    session: &str,
+    _into: &Path,
+    spool: SpoolBundle,
+    base_computation: ComputationRef,
+) -> Result<()> {
     if !spool.descriptor.connectors.is_empty() {
         bail!("ReadyStateConnectorAttachmentUnsupported");
     }
@@ -538,8 +584,10 @@ fn serve_ready_state(session: &str, _into: &Path, spool: SpoolBundle) -> Result<
     let mut stored = StoredProtocolSession::new(NewStoredProtocolSession {
         session_id: session_id.clone(),
         lifecycle: "starting".to_string(),
-        state_type: &state.state_type,
-        base_state: &state.state_ref,
+        base_computation: StoredComputationOrigin::Native {
+            computation_type: base_computation.computation_type.to_string(),
+            computation_ref: base_computation.computation_ref.to_string(),
+        },
         base_frontier: RecordFrontier::Origin,
         durable_frontier: DurableFrontier {
             records_through: RecordFrontier::Origin,
