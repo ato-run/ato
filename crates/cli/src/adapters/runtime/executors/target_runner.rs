@@ -480,7 +480,7 @@ mod tests {
         compute_policy_segment_hash, compute_provisioning_policy_hash,
     };
     use capsule::launch_spec::derive_launch_spec;
-    use capsule::lockfile::{LegacyCapsuleLock, LockMeta};
+    use capsule::lockfile::{LegacyCapsuleLock, LockMeta, TargetEntry};
     use capsule::router::{self, ExecutionProfile};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
@@ -726,8 +726,8 @@ from = "./missing-service"
             .expect("workspace tempdir")
     }
 
-    #[tokio::test]
-    async fn prepare_target_execution_accepts_compatibility_lock_for_source_node_tier1() {
+    #[test]
+    fn prepare_target_execution_accepts_compatibility_lock_for_source_node_tier1() {
         let temp_dir = workspace_tempdir("source-node-tier1-");
         let manifest_path = temp_dir.path().join("capsule.toml");
         let web_dir = temp_dir.path().join("web");
@@ -758,16 +758,35 @@ run = "node server.js"
         let compat_input =
             capsule::router::CompatProjectInput::from_bridge(temp_dir.path().to_path_buf(), bridge)
                 .expect("compat input");
-        let lock_path = capsule::contract::lockfile::ensure_lockfile_for_compat_input(
-            &compat_input,
-            Arc::new(CliReporter::new(false)),
-            false,
+        let lock = LegacyCapsuleLock {
+            version: "1".to_string(),
+            meta: LockMeta {
+                created_at: "2026-08-13T00:00:00Z".to_string(),
+                manifest_hash: capsule::packers::payload::compute_manifest_hash_without_signatures(
+                    compat_input.manifest(),
+                )
+                .expect("manifest hash"),
+            },
+            allowlist: None,
+            capsule_dependencies: Vec::new(),
+            tool_capsules: Default::default(),
+            injected_data: HashMap::new(),
+            tools: None,
+            runtimes: None,
+            targets: HashMap::from([(
+                "web".to_string(),
+                TargetEntry {
+                    node_lockfile: Some("web/package-lock.json".to_string()),
+                    ..TargetEntry::default()
+                },
+            )]),
+        };
+        let lock_path = temp_dir.path().join("capsule.lock.json");
+        std::fs::write(
+            &lock_path,
+            serde_json::to_vec(&lock).expect("serialize compatibility lock"),
         )
-        .await
-        .expect("ensure compatibility lock");
-        let lock: LegacyCapsuleLock =
-            serde_json::from_slice(&std::fs::read(&lock_path).expect("read compatibility lock"))
-                .expect("parse compatibility lock");
+        .expect("write compatibility lock");
 
         let decision = router::route_manifest_with_state_overrides_and_validation_mode(
             &manifest_path,
