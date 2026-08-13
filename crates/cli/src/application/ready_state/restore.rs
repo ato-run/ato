@@ -11,8 +11,10 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use capsule::foundation::install_lifecycle::RunnerClassId;
+#[cfg(test)]
+use capsule::snapshot_manifest::CapturePolicyV1;
 use capsule::snapshot_manifest::{
-    CapturePolicyV1, HostRestoreCapabilityV1, SnapshotBackendKind, SnapshotCompatibilityContractV1,
+    HostRestoreCapabilityV1, SnapshotBackendKind, SnapshotCompatibilityContractV1,
     SnapshotManifestV1,
 };
 use capsulefs::CasStore;
@@ -74,6 +76,7 @@ pub(crate) fn restore_and_expose(
             manifest,
             overlay_root,
             host_runner_class,
+            containment: None,
             uffd_preview,
         })
         .context("snapshot backend restore failed")?;
@@ -90,20 +93,7 @@ pub(crate) fn restore_and_expose(
 pub(crate) fn exact_host_capability(
     contract: &SnapshotCompatibilityContractV1,
 ) -> HostRestoreCapabilityV1 {
-    HostRestoreCapabilityV1 {
-        backend: contract.backend,
-        supported_format_versions: vec![contract.format_version],
-        vmm_identity: contract.vmm_identity.clone(),
-        state_codec: contract.state_codec.clone(),
-        guest_kernel_identity: contract.guest_kernel_identity.clone(),
-        cpu_templates: vec![contract.cpu_template.clone()],
-        runner_restore_contract: contract.runner_restore_contract.clone(),
-        compatibility_class_identity: Some(contract.compatibility_class_identity),
-        // Both v1 capture policies are accepted here: which one a given
-        // candidate actually used is enforced by `is_satisfied_by` matching
-        // `candidate.capture_policy` against this list, not by this helper.
-        supported_capture_policies: vec![CapturePolicyV1::Running, CapturePolicyV1::WorkloadIdle],
-    }
+    snapshot::capsule_state::exact_host_restore_capability(contract)
 }
 
 /// Verify an explicit Capsule v1 restore candidate: the Artifact Envelope
@@ -120,22 +110,8 @@ fn verify_v1_candidate(
     candidate: &SnapshotManifestV1,
     envelope: &ArtifactEnvelopeV1,
 ) -> Result<()> {
-    envelope
-        .verify(legacy, candidate)
-        .context("verify Snapshot Artifact Envelope")?;
-    if legacy.execution_id.as_deref() != Some(candidate.execution_id.as_str()) {
-        anyhow::bail!("legacy/v1 Snapshot execution_id mismatch");
-    }
-    let host_contract = backend
-        .snapshot_compatibility_contract()
-        .context("resolve restore host Snapshot compatibility")?;
-    if !candidate
-        .compatibility_contract
-        .is_satisfied_by(&exact_host_capability(&host_contract))
-    {
-        anyhow::bail!("no exact compatible Snapshot for the requested execution_id");
-    }
-    Ok(())
+    snapshot::capsule_state::verify_accepted_restore_candidate(backend, legacy, candidate, envelope)
+        .context("verify accepted Snapshot restore candidate")
 }
 
 /// Verify a legacy-only runner-lease restore: the manifest's opaque
@@ -403,9 +379,10 @@ mod tests {
         let other_envelope = ArtifactEnvelopeV1::accepted(&legacy, &other_identity).unwrap();
         let error =
             verify_v1_candidate(&backend, &legacy, &other_identity, &other_envelope).unwrap_err();
+        let error_chain = format!("{error:#}");
         assert!(
-            error.to_string().contains("execution_id mismatch"),
-            "{error}"
+            error_chain.contains("execution_id mismatch"),
+            "{error_chain}"
         );
     }
 }

@@ -8,7 +8,7 @@
 use crate::cas::CasStore;
 use crate::hash::ContentHash;
 use crate::hotset::HotsetProfile;
-use crate::manifest::BlobManifest;
+use crate::manifest::{BlobManifest, validate_blob_manifest};
 use crate::{CapsuleFsError, Result};
 
 /// Which memory backend realizes a blob's bytes (plan §7).
@@ -75,19 +75,7 @@ impl<'a> LazyBlobReader<'a> {
     /// that lies about either is rejected with [`CapsuleFsError::MalformedManifest`]
     /// rather than silently returning truncated/oversized data.
     pub fn read_all(&self) -> Result<Vec<u8>> {
-        // Structural check: declared lengths sum to total_len (overflow-safe).
-        let mut declared_sum: u64 = 0;
-        for chunk in &self.manifest.chunks {
-            declared_sum = declared_sum.checked_add(chunk.length).ok_or_else(|| {
-                CapsuleFsError::MalformedManifest("sum of chunk lengths overflows u64".to_string())
-            })?;
-        }
-        if declared_sum != self.manifest.total_len {
-            return Err(CapsuleFsError::MalformedManifest(format!(
-                "chunk lengths sum to {declared_sum} but total_len is {}",
-                self.manifest.total_len
-            )));
-        }
+        validate_blob_manifest(self.manifest)?;
 
         let mut out = Vec::with_capacity(self.manifest.total_len as usize);
         for chunk in &self.manifest.chunks {

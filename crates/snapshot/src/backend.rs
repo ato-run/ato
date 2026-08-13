@@ -312,12 +312,22 @@ pub struct RestoreReadyStateInput<'a> {
     /// manifest pins no class (e.g. host detection has not landed yet), the gate
     /// is a no-op.
     pub host_runner_class: Option<RunnerClassId>,
+    /// Supervisor-owned authority that must be installed immediately after a
+    /// backend spawns its serving process and before any guest can resume.
+    /// Backends without a serving process may leave this unused.
+    pub containment: Option<&'a dyn RestoreContainment>,
     /// U11 (#878): opt-in UFFD **local** preview. When `true`, a backend that
     /// supports it restores memory via the UFFD local-CAS demand path instead of
     /// the eager File rehydrate. Default `false` = the unchanged File path. The
     /// caller only sets this on a supported host for a no-binding capsule (else
     /// the backend fails closed).
     pub uffd_preview: bool,
+}
+
+/// Authority supplied by the Session Supervisor to contain a VMM across an
+/// abrupt Supervisor death. Installation must complete before snapshot resume.
+pub trait RestoreContainment: Send + Sync {
+    fn install(&self, vmm_pid: u32) -> Result<(), SnapshotError>;
 }
 
 /// A restored, running (or restorable) session. The data a later adapter wraps
@@ -498,6 +508,15 @@ pub trait SnapshotBackend: Send + Sync {
     fn snapshot_compatibility_contract(
         &self,
     ) -> Result<SnapshotCompatibilityContractV1, SnapshotError>;
+
+    /// Resolve this backend's actual runner class on the current host. The
+    /// result is backend-observed capability, never copied from an artifact.
+    fn host_runner_class(&self) -> Result<RunnerClassId, SnapshotError> {
+        Err(SnapshotError::Unsupported {
+            backend: self.id().to_string(),
+            reason: "backend does not expose an actual host runner class".to_string(),
+        })
+    }
 
     /// Boot-capture-seal: chunk the layers into CapsuleFS, scan for secrets,
     /// and produce a [`ReadyStateManifest`] + receipt. The caller guarantees the

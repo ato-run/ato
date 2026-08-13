@@ -23,12 +23,15 @@ name: cli unit tests
 #    rust-ci.yml's elaborate `test` job). They are integration tests, not
 #    `--lib` unit tests, and stay covered by rust-ci.yml on main/dev.
 #
-# Exception: `share_run_local_e2e` IS gated here. It pins the local-file share
+# Exceptions: `share_run_local_e2e` pins the local-file share
 # contract (the capsule ShareExecutor must materialize via `ato workspace setup
 # --dev`, not the removed `decap`), runs with `--compatibility-fallback host`,
 # and is hermetic (no nacelle, no network) — cheap and CI-stable. The executor
 # it exercises lives in `crates/capsule/src/engine/share/`, so that path is in
 # the filter to trigger this workflow for executor-only PRs.
+# `capsule_entropy_replay_e2e` is also hermetic: it records fresh OS entropy as
+# PTY boundary input, deletes the producer environment, and verifies identical
+# consumer State without network or live consumer entropy.
 
 on:
   pull_request:
@@ -90,6 +93,7 @@ jobs:
       # content-bound cache identity, digest fail-closed). Hermetic: uses
       # `--compatibility-fallback host` and never needs nacelle or network.
       - run: cargo test -p cli --test share_run_local_e2e
+      - run: cargo test -p cli --test capsule_entropy_replay_e2e -- --nocapture
       # The capsule share executor's unit tests (identity / envelope / entry).
       - run: cargo test -p capsule --lib share
       # The interactive capture path (PTY) and the run dispatch semantics.
