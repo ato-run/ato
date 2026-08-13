@@ -61,9 +61,9 @@ use crate::agent_channel::{AgentChannel, FirecrackerAgentChannel, GUEST_AGENT_VS
 use crate::backend::BuildLayers;
 use crate::backend::{
     BackendCapabilities, BuildReadyStateInput, BuildReadyStateReceipt, DeviceProfile,
-    FilesystemModel, GpuMode, IsolationBoundary, RestoreReadyStateInput, RestoreReceipt,
-    RestoredSession, SnapshotBackend, SnapshotError, SnapshotInspection, SnapshotKind,
-    SupervisorBindings, TeardownReceipt, compatibility_class_identity,
+    FilesystemModel, GpuMode, IsolationBoundary, RestoreContainment, RestoreReadyStateInput,
+    RestoreReceipt, RestoredSession, SnapshotBackend, SnapshotError, SnapshotInspection,
+    SnapshotKind, SupervisorBindings, TeardownReceipt, compatibility_class_identity,
 };
 use crate::bench;
 #[cfg(test)]
@@ -778,7 +778,7 @@ impl FirecrackerBackend {
     }
 
     fn start_fc(&self, sock: &Path, console_log: &Path) -> Result<FcProcess, SnapshotError> {
-        self.start_fc_with(sock, console_log, false)
+        self.start_fc_with(sock, console_log, false, ParentDeathPolicy::None)
     }
 
     fn start_fc_with(
@@ -786,7 +786,10 @@ impl FirecrackerBackend {
         sock: &Path,
         console_log: &Path,
         vsock_isolation: bool,
+        parent_death_policy: ParentDeathPolicy,
     ) -> Result<FcProcess, SnapshotError> {
+        #[cfg(not(target_os = "linux"))]
+        let _ = parent_death_policy;
         let _ = std::fs::remove_file(sock);
         let log = std::fs::File::create(console_log)
             .map_err(|e| self.backend_err(format!("create console log: {e}")))?;
@@ -800,10 +803,12 @@ impl FirecrackerBackend {
             ))
             .stderr(Stdio::from(log));
         #[cfg(target_os = "linux")]
-        unsafe {
-            use std::os::unix::process::CommandExt;
-            let expected_parent = libc::getpid();
-            command.pre_exec(move || install_parent_death_containment(expected_parent));
+        if parent_death_policy == ParentDeathPolicy::KillWithParent {
+            unsafe {
+                use std::os::unix::process::CommandExt;
+                let expected_parent = libc::getpid();
+                command.pre_exec(move || install_parent_death_containment(expected_parent));
+            }
         }
         let child = command
             .spawn()
@@ -1352,6 +1357,20 @@ impl FirecrackerBackend {
         }
         std::fs::write(path, bytes)
             .map_err(|e| self.backend_err(format!("write {}: {e}", path.display())))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ParentDeathPolicy {
+    None,
+    KillWithParent,
+}
+
+fn restore_parent_death_policy(containment: Option<&dyn RestoreContainment>) -> ParentDeathPolicy {
+    if containment.is_some() {
+        ParentDeathPolicy::KillWithParent
+    } else {
+        ParentDeathPolicy::None
     }
 }
 
@@ -3201,7 +3220,12 @@ impl SnapshotBackend for FirecrackerBackend {
                     .map_err(|e| self.backend_err(format!("vsock dir: {e}")))?;
             }
             let fc = bench::time("restore.start_fc", || {
-                self.start_fc_with(&input.overlay_root.join("api.sock"), &input.overlay_root.join("console.log"), vsock_isolation)
+                self.start_fc_with(
+                    &input.overlay_root.join("api.sock"),
+                    &input.overlay_root.join("console.log"),
+                    vsock_isolation,
+                    restore_parent_death_policy(input.containment),
+                )
             })?;
             if let Some(containment) = input.containment {
                 containment.install(fc.pid())?;
@@ -4909,6 +4933,62 @@ mod tests {
             .stop(session)
             .expect("stop must not fail on a missing fsync target");
         assert!(receipt.overlay_removed);
+    }
+
+    #[test]
+    fn ordinary_restore_does_not_install_parent_death_policy() {
+        struct TestContainment;
+
+        impl RestoreContainment for TestContainment {
+            fn install(&self, _vmm_pid: u32) -> Result<(), SnapshotError> {
+                Ok(())
+            }
+        }
+
+        assert_eq!(restore_parent_death_policy(None), ParentDeathPolicy::None);
+        assert_eq!(
+            restore_parent_death_policy(Some(&TestContainment)),
+            ParentDeathPolicy::KillWithParent
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ordinary_background_vmm_outlives_restore_parent() {
+        let mut pipe = [0_i32; 2];
+        assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
+        let restore_parent = unsafe { libc::fork() };
+        assert!(restore_parent >= 0);
+        if restore_parent == 0 {
+            unsafe { libc::close(pipe[0]) };
+            let vmm = unsafe { libc::fork() };
+            if vmm == 0 {
+                loop {
+                    unsafe { libc::pause() };
+                }
+            }
+            if vmm < 0 {
+                unsafe { libc::_exit(122) };
+            }
+            let bytes = vmm.to_ne_bytes();
+            unsafe {
+                libc::write(pipe[1], bytes.as_ptr().cast(), bytes.len());
+                libc::close(pipe[1]);
+                libc::_exit(0);
+            }
+        }
+
+        unsafe { libc::close(pipe[1]) };
+        let mut bytes = [0_u8; std::mem::size_of::<libc::pid_t>()];
+        let count = unsafe { libc::read(pipe[0], bytes.as_mut_ptr().cast(), bytes.len()) };
+        unsafe { libc::close(pipe[0]) };
+        assert_eq!(count as usize, bytes.len());
+        let vmm = libc::pid_t::from_ne_bytes(bytes);
+        assert!(vmm > 0);
+        unsafe { libc::waitpid(restore_parent, std::ptr::null_mut(), 0) };
+
+        assert_eq!(unsafe { libc::kill(vmm, 0) }, 0);
+        assert_eq!(unsafe { libc::kill(vmm, libc::SIGKILL) }, 0);
     }
 
     #[cfg(target_os = "linux")]
