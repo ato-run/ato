@@ -161,9 +161,12 @@ macro_rules! versioned_id {
 }
 
 component_id!(ConnectorId, "connector id");
+component_id!(PortId, "port id");
 component_id!(RecordKindId, "record kind id");
+component_id!(InteractionKindId, "interaction kind id");
 versioned_id!(ProtocolId, "protocol id");
 versioned_id!(StateTypeId, "state type id");
+versioned_id!(ComputationTypeId, "computation type id");
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContentRef(String);
@@ -245,6 +248,16 @@ mod tests {
         assert_eq!(
             RecordKindId::parse("vendor.pointer_move").unwrap().as_str(),
             "vendor.pointer_move"
+        );
+        assert_eq!(
+            PortId::parse("terminal.stdin").unwrap().as_str(),
+            "terminal.stdin"
+        );
+        assert_eq!(
+            ComputationTypeId::parse("ato.computation.workspace-pty@1")
+                .unwrap()
+                .as_str(),
+            "ato.computation.workspace-pty@1"
         );
     }
 

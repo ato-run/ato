@@ -12,13 +12,15 @@ use thiserror::Error;
 use crate::packers::pack_filter::PackFilter;
 use crate::security::no_secret::CredentialScanner;
 
+mod normalize;
 mod streaming;
 
+pub use normalize::{NormalizedLegacyComputation, normalize_v1_spool};
 pub use streaming::{
     AllowAllPortableExportPolicy, BundleSummary, BundleWriteOutcome, DirectoryObjectSource,
     InMemoryObjectSource, ObjectMetadata, ObjectSource, PortableExportError, PortableExportPolicy,
-    PortableObjectRole, PtyPortableExportPolicy, RecordSpool, SpoolBundle, SpoolObjectStore,
-    StreamingBundleReader, StreamingBundleWriter, StrictPortableExportPolicy,
+    PortableObjectRole, ProtocolMemberSpool, PtyPortableExportPolicy, RecordSpool, SpoolBundle,
+    SpoolObjectStore, StreamingBundleReader, StreamingBundleWriter, StrictPortableExportPolicy,
 };
 
 const DESCRIPTOR_MEMBER: &str = "protocol/descriptor.cbor";
