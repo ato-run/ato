@@ -45,9 +45,10 @@ jobs:
       - name: Test workspace
         if: runner.os != 'Windows'
         run: cargo test --workspace --no-fail-fast
-      - name: Test host workspace (Windows)
-        if: runner.os == 'Windows'
-        run: cargo test --workspace --exclude guest-agent --no-fail-fast
+      # The workspace's execution E2Es exercise POSIX PTYs, /bin/sh paths,
+      # Unix path policy, and Linux/macOS daemon lifecycle. Windows host code
+      # is still compiled and linted here; portable CLI behavior is exercised
+      # separately by cli-ci on windows-latest.
       - name: Clippy workspace
         if: runner.os != 'Windows'
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
