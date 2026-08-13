@@ -1,10 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
+use std::sync::Arc;
 
 use capsule_core::{
     ComputationObject, ComputationRef, ContentRef, PortDef, PortId, ProtocolId, RoleId,
 };
-use capsule_core_codec::{ObjectResolver, ResolveError, ResolvedComputation, resolve_computation};
+use capsule_core_codec::{
+    CodecError, MAX_COMPUTATION_OBJECT_BYTES, ObjectResolver, ResolveError, ResolvedComputation,
+    encode_computation_object,
+};
 use thiserror::Error;
 
 use crate::{
@@ -13,9 +17,66 @@ use crate::{
     decode_composite_residual,
 };
 
+pub const DEFAULT_MAX_VALIDATION_DEPTH: usize = 64;
+pub const DEFAULT_MAX_UNIQUE_COMPUTATIONS: usize = 4_096;
+pub const DEFAULT_MAX_RESOLVED_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Resource limits for transitive compose validation.
+///
+/// Depth counts the root as depth zero. Unique computations include the root
+/// and every leaf or compose child. Resolved bytes include canonical
+/// Computation Object bytes and each distinct compose residual.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ValidationBudget {
+    pub max_depth: usize,
+    pub max_unique_computations: usize,
+    pub max_resolved_bytes: u64,
+}
+
+impl Default for ValidationBudget {
+    fn default() -> Self {
+        Self {
+            max_depth: DEFAULT_MAX_VALIDATION_DEPTH,
+            max_unique_computations: DEFAULT_MAX_UNIQUE_COMPUTATIONS,
+            max_resolved_bytes: DEFAULT_MAX_RESOLVED_BYTES,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidationResource {
+    Depth,
+    UniqueComputations,
+    ResolvedBytes,
+}
+
+impl std::fmt::Display for ValidationResource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Depth => "compose depth",
+            Self::UniqueComputations => "unique computations",
+            Self::ResolvedBytes => "resolved bytes",
+        })
+    }
+}
+
+/// A valid or invalid answer could not be produced within the caller's budget.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("validation resource limit exceeded for {resource}: attempted {attempted}, limit {limit}")]
+pub struct ValidationResourceLimitExceeded {
+    pub resource: ValidationResource,
+    pub attempted: u64,
+    pub limit: u64,
+}
+
+/// Structural visibility at the parent boundary.
+///
+/// `Internal` does not claim that a small-step synchronization occurred. A
+/// future evaluator must observe complementary child actions before producing
+/// a semantic `tau` transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CompositeLabel {
-    Tau,
+pub enum BoundaryVisibility {
+    Internal,
     External(PortId),
 }
 
@@ -29,24 +90,24 @@ impl ValidatedComposite {
         &self.residual
     }
 
-    /// Classifies a validated synchronization across one internal connection.
-    pub fn connection_label(&self, connection: &Connection) -> Option<CompositeLabel> {
+    pub fn connection_visibility(&self, connection: &Connection) -> Option<BoundaryVisibility> {
         self.residual
             .connections
             .contains(connection)
-            .then_some(CompositeLabel::Tau)
+            .then_some(BoundaryVisibility::Internal)
     }
 
-    /// Maps an exported child endpoint to its observable parent Port.
-    pub fn export_label(&self, endpoint: &Endpoint) -> Option<CompositeLabel> {
+    pub fn export_visibility(&self, endpoint: &Endpoint) -> Option<BoundaryVisibility> {
         self.residual.exports.iter().find_map(|(parent, child)| {
-            (child == endpoint).then(|| CompositeLabel::External(parent.clone()))
+            (child == endpoint).then(|| BoundaryVisibility::External(parent.clone()))
         })
     }
 }
 
 #[derive(Debug, Error)]
 pub enum CompositeValidationError {
+    #[error(transparent)]
+    ResourceLimitExceeded(#[from] ValidationResourceLimitExceeded),
     #[error("expected capsule.compose@1, got {actual}")]
     WrongSemantics { actual: String },
     #[error("compose residual must use a blake3 ContentRef, got {0}")]
@@ -64,6 +125,10 @@ pub enum CompositeValidationError {
     },
     #[error(transparent)]
     ResidualCodec(#[from] CompositeResidualCodecError),
+    #[error("root computation encoding failed: {0}")]
+    RootEncoding(#[source] CodecError),
+    #[error("iterative validation completed without the root residual")]
+    RootResidualUnavailable,
     #[error("child node {node} failed to resolve: {source}")]
     ChildResolution {
         node: NodeId,
@@ -78,8 +143,8 @@ pub enum CompositeValidationError {
     MissingNode { endpoint: Endpoint, node: NodeId },
     #[error("endpoint {endpoint:?} names missing child port {port}")]
     MissingPort { endpoint: Endpoint, port: PortId },
-    #[error("endpoint {endpoint:?} is used more than once")]
-    DuplicateEndpoint { endpoint: Endpoint },
+    #[error("linear endpoint {endpoint:?} is bound more than once")]
+    EndpointBoundMoreThanOnce { endpoint: Endpoint },
     #[error("connection is duplicated: {0:?}")]
     DuplicateConnection(Connection),
     #[error("connection protocols differ: {first} and {second}")]
@@ -113,82 +178,215 @@ pub fn validate_composite(
     resolver: &dyn ObjectResolver,
     roles: &dyn ProtocolRolePolicy,
 ) -> Result<ValidatedComposite, CompositeValidationError> {
-    let mut state = ValidationState {
-        resolver,
-        roles,
-        active: BTreeSet::new(),
-        validated: BTreeSet::new(),
-    };
-    state.active.insert(parent.reference().clone());
-    let residual = state.validate_object(parent.object())?;
-    state.active.remove(parent.reference());
+    validate_composite_with_budget(parent, resolver, roles, ValidationBudget::default())
+}
+
+pub fn validate_composite_with_budget(
+    parent: &ResolvedComputation,
+    resolver: &dyn ObjectResolver,
+    roles: &dyn ProtocolRolePolicy,
+    budget: ValidationBudget,
+) -> Result<ValidatedComposite, CompositeValidationError> {
+    let parent_bytes = encode_computation_object(parent.object())
+        .map_err(CompositeValidationError::RootEncoding)?
+        .len() as u64;
+    let mut state = ValidationState::new(resolver, roles, budget);
+    state.reserve_unique_computation()?;
+    state.reserve_bytes(parent_bytes)?;
+    state
+        .computations
+        .insert(parent.reference().clone(), parent.clone());
+    let residual = state.validate_iteratively(parent.reference())?;
     Ok(ValidatedComposite { residual })
+}
+
+enum Visit {
+    Enter {
+        reference: ComputationRef,
+        depth: usize,
+    },
+    Exit(ComputationRef),
 }
 
 struct ValidationState<'a> {
     resolver: &'a dyn ObjectResolver,
     roles: &'a dyn ProtocolRolePolicy,
+    budget: ValidationBudget,
+    resolved_bytes: u64,
+    computations: BTreeMap<ComputationRef, ResolvedComputation>,
+    residuals: BTreeMap<ContentRef, Arc<CompositeResidual>>,
     active: BTreeSet<ComputationRef>,
     validated: BTreeSet<ComputationRef>,
 }
 
-impl ValidationState<'_> {
-    fn validate_object(
-        &mut self,
-        object: &ComputationObject,
-    ) -> Result<CompositeResidual, CompositeValidationError> {
-        if object.semantics != compose_semantics_id() {
-            return Err(CompositeValidationError::WrongSemantics {
-                actual: object.semantics.to_string(),
-            });
+impl<'a> ValidationState<'a> {
+    fn new(
+        resolver: &'a dyn ObjectResolver,
+        roles: &'a dyn ProtocolRolePolicy,
+        budget: ValidationBudget,
+    ) -> Self {
+        Self {
+            resolver,
+            roles,
+            budget,
+            resolved_bytes: 0,
+            computations: BTreeMap::new(),
+            residuals: BTreeMap::new(),
+            active: BTreeSet::new(),
+            validated: BTreeSet::new(),
         }
-        let bytes = resolve_residual(self.resolver, &object.residual)?;
-        let residual = decode_composite_residual(&bytes)?;
-        let children = self.resolve_children(&residual)?;
+    }
 
-        validate_local(object, &residual, &children, self.roles)?;
+    fn validate_iteratively(
+        &mut self,
+        root: &ComputationRef,
+    ) -> Result<CompositeResidual, CompositeValidationError> {
+        let mut root_residual = None;
+        let mut visits = vec![Visit::Enter {
+            reference: root.clone(),
+            depth: 0,
+        }];
 
-        for child in children.values() {
-            if child.object().semantics == compose_semantics_id() {
-                let reference = child.reference().clone();
-                if self.active.contains(&reference) {
-                    return Err(CompositeValidationError::ReferenceCycle(reference));
-                }
-                if self.validated.insert(reference.clone()) {
-                    self.active.insert(reference.clone());
-                    let result = self.validate_object(child.object());
+        while let Some(visit) = visits.pop() {
+            match visit {
+                Visit::Exit(reference) => {
                     self.active.remove(&reference);
-                    result?;
+                    self.validated.insert(reference);
+                }
+                Visit::Enter { reference, depth } => {
+                    self.check_depth(depth)?;
+                    if self.validated.contains(&reference) {
+                        continue;
+                    }
+                    if !self.active.insert(reference.clone()) {
+                        return Err(CompositeValidationError::ReferenceCycle(reference));
+                    }
+
+                    let object = self.computations[&reference].object().clone();
+                    if object.semantics != compose_semantics_id() {
+                        if reference != *root {
+                            self.active.remove(&reference);
+                            self.validated.insert(reference);
+                            continue;
+                        }
+                        return Err(CompositeValidationError::WrongSemantics {
+                            actual: object.semantics.to_string(),
+                        });
+                    }
+                    let residual = self.resolve_residual_cached(&object.residual)?;
+                    self.resolve_children(&residual)?;
+                    validate_local(&object, &residual, &self.computations, self.roles)?;
+
+                    if reference == *root {
+                        root_residual = Some((*residual).clone());
+                    }
+                    visits.push(Visit::Exit(reference));
+                    for child in residual.nodes.values().rev() {
+                        visits.push(Visit::Enter {
+                            reference: child.clone(),
+                            depth: depth.saturating_add(1),
+                        });
+                    }
                 }
             }
         }
-        Ok(residual)
+
+        root_residual.ok_or(CompositeValidationError::RootResidualUnavailable)
     }
 
     fn resolve_children(
-        &self,
+        &mut self,
         residual: &CompositeResidual,
-    ) -> Result<BTreeMap<NodeId, ResolvedComputation>, CompositeValidationError> {
-        residual
-            .nodes
-            .iter()
-            .map(|(node, reference)| {
-                let child = resolve_computation(self.resolver, reference).map_err(|source| {
-                    CompositeValidationError::ChildResolution {
-                        node: node.clone(),
-                        source,
-                    }
+    ) -> Result<(), CompositeValidationError> {
+        for (node, reference) in &residual.nodes {
+            if self.computations.contains_key(reference) {
+                continue;
+            }
+            self.reserve_unique_computation()?;
+            let metadata = self
+                .resolver
+                .metadata(reference.content_ref())
+                .map_err(|source| CompositeValidationError::ChildResolution {
+                    node: node.clone(),
+                    source,
                 })?;
-                Ok((node.clone(), child))
-            })
-            .collect()
+            if metadata.size > MAX_COMPUTATION_OBJECT_BYTES {
+                return Err(CompositeValidationError::ChildResolution {
+                    node: node.clone(),
+                    source: ResolveError::ObjectTooLarge {
+                        actual: metadata.size,
+                        maximum: MAX_COMPUTATION_OBJECT_BYTES,
+                    },
+                });
+            }
+            self.reserve_bytes(metadata.size)?;
+            let child = resolve_verified_computation(self.resolver, reference, metadata.size)
+                .map_err(|source| CompositeValidationError::ChildResolution {
+                    node: node.clone(),
+                    source,
+                })?;
+            self.computations.insert(reference.clone(), child);
+        }
+        Ok(())
+    }
+
+    fn resolve_residual_cached(
+        &mut self,
+        reference: &ContentRef,
+    ) -> Result<Arc<CompositeResidual>, CompositeValidationError> {
+        if let Some(residual) = self.residuals.get(reference) {
+            return Ok(Arc::clone(residual));
+        }
+        let size = residual_size(self.resolver, reference)?;
+        self.reserve_bytes(size)?;
+        let bytes = resolve_residual_bytes(self.resolver, reference, size)?;
+        let residual = Arc::new(decode_composite_residual(&bytes)?);
+        self.residuals
+            .insert(reference.clone(), Arc::clone(&residual));
+        Ok(residual)
+    }
+
+    fn check_depth(&self, depth: usize) -> Result<(), ValidationResourceLimitExceeded> {
+        if depth > self.budget.max_depth {
+            return Err(ValidationResourceLimitExceeded {
+                resource: ValidationResource::Depth,
+                attempted: depth as u64,
+                limit: self.budget.max_depth as u64,
+            });
+        }
+        Ok(())
+    }
+
+    fn reserve_unique_computation(&self) -> Result<(), ValidationResourceLimitExceeded> {
+        let attempted = self.computations.len().saturating_add(1);
+        if attempted > self.budget.max_unique_computations {
+            return Err(ValidationResourceLimitExceeded {
+                resource: ValidationResource::UniqueComputations,
+                attempted: attempted as u64,
+                limit: self.budget.max_unique_computations as u64,
+            });
+        }
+        Ok(())
+    }
+
+    fn reserve_bytes(&mut self, additional: u64) -> Result<(), ValidationResourceLimitExceeded> {
+        let attempted = self.resolved_bytes.saturating_add(additional);
+        if attempted > self.budget.max_resolved_bytes {
+            return Err(ValidationResourceLimitExceeded {
+                resource: ValidationResource::ResolvedBytes,
+                attempted,
+                limit: self.budget.max_resolved_bytes,
+            });
+        }
+        self.resolved_bytes = attempted;
+        Ok(())
     }
 }
 
 fn validate_local(
     parent: &ComputationObject,
     residual: &CompositeResidual,
-    children: &BTreeMap<NodeId, ResolvedComputation>,
+    computations: &BTreeMap<ComputationRef, ResolvedComputation>,
     roles: &dyn ProtocolRolePolicy,
 ) -> Result<(), CompositeValidationError> {
     if !parent.boundary.keys().eq(residual.exports.keys()) {
@@ -196,17 +394,17 @@ fn validate_local(
     }
 
     let mut connections = BTreeSet::new();
-    let mut used_endpoints = BTreeSet::new();
+    let mut bound_endpoints = BTreeSet::new();
     for connection in &residual.connections {
         if !connections.insert(connection.clone()) {
             return Err(CompositeValidationError::DuplicateConnection(
                 connection.clone(),
             ));
         }
-        claim_endpoint(connection.first(), &mut used_endpoints)?;
-        claim_endpoint(connection.second(), &mut used_endpoints)?;
-        let first = endpoint_definition(connection.first(), children)?;
-        let second = endpoint_definition(connection.second(), children)?;
+        bind_linear_endpoint(connection.first(), &mut bound_endpoints)?;
+        bind_linear_endpoint(connection.second(), &mut bound_endpoints)?;
+        let first = endpoint_definition(connection.first(), residual, computations)?;
+        let second = endpoint_definition(connection.second(), residual, computations)?;
         if first.protocol != second.protocol {
             return Err(CompositeValidationError::ConnectionProtocolMismatch {
                 first: first.protocol.clone(),
@@ -223,8 +421,8 @@ fn validate_local(
     }
 
     for (parent_port, endpoint) in &residual.exports {
-        claim_endpoint(endpoint, &mut used_endpoints)?;
-        let child = endpoint_definition(endpoint, children)?;
+        bind_linear_endpoint(endpoint, &mut bound_endpoints)?;
+        let child = endpoint_definition(endpoint, residual, computations)?;
         let parent_definition = &parent.boundary[parent_port];
         validate_export(parent_port, parent_definition, child, roles)?;
     }
@@ -233,29 +431,31 @@ fn validate_local(
 
 fn endpoint_definition<'a>(
     endpoint: &Endpoint,
-    children: &'a BTreeMap<NodeId, ResolvedComputation>,
+    residual: &CompositeResidual,
+    computations: &'a BTreeMap<ComputationRef, ResolvedComputation>,
 ) -> Result<&'a PortDef, CompositeValidationError> {
-    let child =
-        children
-            .get(&endpoint.node)
-            .ok_or_else(|| CompositeValidationError::MissingNode {
-                endpoint: endpoint.clone(),
-                node: endpoint.node.clone(),
-            })?;
-    child.object().boundary.get(&endpoint.port).ok_or_else(|| {
-        CompositeValidationError::MissingPort {
+    let reference = residual.nodes.get(&endpoint.node).ok_or_else(|| {
+        CompositeValidationError::MissingNode {
+            endpoint: endpoint.clone(),
+            node: endpoint.node.clone(),
+        }
+    })?;
+    computations[reference]
+        .object()
+        .boundary
+        .get(&endpoint.port)
+        .ok_or_else(|| CompositeValidationError::MissingPort {
             endpoint: endpoint.clone(),
             port: endpoint.port.clone(),
-        }
-    })
+        })
 }
 
-fn claim_endpoint(
+fn bind_linear_endpoint(
     endpoint: &Endpoint,
-    used: &mut BTreeSet<Endpoint>,
+    bound: &mut BTreeSet<Endpoint>,
 ) -> Result<(), CompositeValidationError> {
-    if !used.insert(endpoint.clone()) {
-        return Err(CompositeValidationError::DuplicateEndpoint {
+    if !bound.insert(endpoint.clone()) {
+        return Err(CompositeValidationError::EndpointBoundMoreThanOnce {
             endpoint: endpoint.clone(),
         });
     }
@@ -286,10 +486,10 @@ fn validate_export(
     Ok(())
 }
 
-fn resolve_residual(
+fn residual_size(
     resolver: &dyn ObjectResolver,
     reference: &ContentRef,
-) -> Result<Vec<u8>, CompositeValidationError> {
+) -> Result<u64, CompositeValidationError> {
     if reference.algorithm() != "blake3" {
         return Err(CompositeValidationError::UnsupportedResidualReference(
             reference.clone(),
@@ -304,17 +504,25 @@ fn resolve_residual(
             maximum: MAX_COMPOSITE_RESIDUAL_BYTES,
         });
     }
+    Ok(metadata.size)
+}
+
+fn resolve_residual_bytes(
+    resolver: &dyn ObjectResolver,
+    reference: &ContentRef,
+    expected_size: u64,
+) -> Result<Vec<u8>, CompositeValidationError> {
     let mut bytes = Vec::new();
     resolver
         .open(reference)
         .map_err(CompositeValidationError::ResidualResolution)?
-        .take(MAX_COMPOSITE_RESIDUAL_BYTES + 1)
+        .take(expected_size.saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(|error| CompositeValidationError::ResidualResolution(error.into()))?;
     let actual_size = bytes.len() as u64;
-    if actual_size != metadata.size {
+    if actual_size != expected_size {
         return Err(CompositeValidationError::ResidualSizeMismatch {
-            expected: metadata.size,
+            expected: expected_size,
             actual: actual_size,
         });
     }
@@ -327,4 +535,30 @@ fn resolve_residual(
         });
     }
     Ok(bytes)
+}
+
+fn resolve_verified_computation(
+    resolver: &dyn ObjectResolver,
+    reference: &ComputationRef,
+    expected_size: u64,
+) -> Result<ResolvedComputation, ResolveError> {
+    if expected_size > MAX_COMPUTATION_OBJECT_BYTES {
+        return Err(ResolveError::ObjectTooLarge {
+            actual: expected_size,
+            maximum: MAX_COMPUTATION_OBJECT_BYTES,
+        });
+    }
+    let mut bytes = Vec::new();
+    resolver
+        .open(reference.content_ref())?
+        .take(expected_size.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    let actual = bytes.len() as u64;
+    if actual != expected_size {
+        return Err(ResolveError::SizeMismatch {
+            expected: expected_size,
+            actual,
+        });
+    }
+    Ok(ResolvedComputation::verify(reference.clone(), &bytes)?)
 }
