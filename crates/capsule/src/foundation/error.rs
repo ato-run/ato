@@ -840,15 +840,15 @@ impl std::error::Error for AtoError {}
 
 pub type Result<T> = std::result::Result<T, CapsuleError>;
 
-/// Bridge `protocol::WireError` into the richer `CapsuleError` so
+/// Bridge `ato_ipc::WireError` into the richer `CapsuleError` so
 /// `?` at internal call sites that consume the handle parser keeps
 /// working unchanged. `WireError::Config(s)` is the only variant today;
 /// it maps onto `CapsuleError::Config(s)` since the parser semantics are
 /// "configuration / input was malformed".
-impl From<protocol::WireError> for CapsuleError {
-    fn from(err: protocol::WireError) -> Self {
+impl From<ato_ipc::WireError> for CapsuleError {
+    fn from(err: ato_ipc::WireError) -> Self {
         match err {
-            protocol::WireError::Config(msg) => CapsuleError::Config(msg),
+            ato_ipc::WireError::Config(msg) => CapsuleError::Config(msg),
         }
     }
 }

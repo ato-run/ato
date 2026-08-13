@@ -57,4 +57,4 @@ jobs:
       # asserts each one exists, catching crate-rename leftovers that previously only
       # failed when desktop-release ran on the tag.
       - name: xtask path tests
-        run: cargo test --manifest-path crates/desktop/xtask/Cargo.toml
+        run: cargo test --manifest-path apps/desktop/xtask/Cargo.toml

@@ -131,7 +131,7 @@ pub fn write_session_record_atomic(root: &Path, session: &StoredSessionInfo) -> 
 mod tests {
     use super::*;
     use crate::state::session::record::{GuestSessionDisplay, SCHEMA_VERSION_V2};
-    use protocol::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
+    use ato_ipc::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
     use std::ffi::OsString;
     use std::sync::{Mutex, MutexGuard, OnceLock};
     use tempfile::tempdir;

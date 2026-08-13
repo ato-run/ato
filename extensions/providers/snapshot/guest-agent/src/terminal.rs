@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use protocol::terminal_surface::{MAX_TERMINAL_COLS, MAX_TERMINAL_ROWS};
+use ato_ipc::terminal_surface::{MAX_TERMINAL_COLS, MAX_TERMINAL_ROWS};
 
 use crate::supervisor::{ChildWorkload, SpawnPlan, Workload, spawn_script_for_workload};
 
@@ -100,7 +100,7 @@ impl TerminalBrokerState {
                 "terminal size exceeds v1 bounds",
             ));
         }
-        protocol::terminal_surface::validate_terminal_size(cols, rows)
+        ato_ipc::terminal_surface::validate_terminal_size(cols, rows)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         let mut state = self.inner.lock().map_err(poisoned)?;
         if state.generation != generation || !state.running {

@@ -29,7 +29,7 @@
 
 use std::collections::BTreeMap;
 
-use protocol::binding_lease::BindingName;
+use ato_ipc::binding_lease::BindingName;
 use serde::Serialize;
 
 /// Build-tool probe + Dockerfile build execution (the importer's build stage).

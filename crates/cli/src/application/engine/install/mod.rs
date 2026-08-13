@@ -230,8 +230,8 @@ impl GitHubCheckout {
     pub fn materialized_source_identity(
         &self,
         commit_oid: impl Into<String>,
-    ) -> protocol::handle::MaterializedSourceIdentity {
-        protocol::handle::MaterializedSourceIdentity {
+    ) -> ato_ipc::handle::MaterializedSourceIdentity {
+        ato_ipc::handle::MaterializedSourceIdentity {
             commit_oid: commit_oid.into(),
             source_archive_hash: self.source_archive_hash.clone(),
             materialized_tree_hash: self.materialized_tree_hash.clone(),

@@ -23,14 +23,14 @@
 
 use std::path::{Path, PathBuf};
 
-use capsule::execution_contract::{EXECUTION_CONTRACT_V1_SCHEMA, ExecutionId};
-use capsule::snapshot_manifest::{SNAPSHOT_MANIFEST_V1_SCHEMA, SnapshotManifestV1};
-use protocol::session_surface::{
+use ato_ipc::session_surface::{
     AcceptedSessionSurface, ClientSessionSurfaceCapabilities, PIXEL_STREAM_PROFILE,
     RunnerSessionSurfaceCapabilities, SESSION_SURFACE_CONTRACT_VERSION, SessionSurfaceDescriptor,
     SessionSurfaceKind, SessionSurfaceRequirement, SessionSurfaceTransport,
     SupportedSessionSurface, WEB_SURFACE_PROFILE, negotiate_session_surface,
 };
+use capsule::execution_contract::{EXECUTION_CONTRACT_V1_SCHEMA, ExecutionId};
+use capsule::snapshot_manifest::{SNAPSHOT_MANIFEST_V1_SCHEMA, SnapshotManifestV1};
 use snapshot::{
     ARTIFACT_ENVELOPE_V1_FILENAME, ARTIFACT_ENVELOPE_V1_SCHEMA, ArtifactEnvelopeV1,
     ReadyStateManifest, SNAPSHOT_MANIFEST_V1_FILENAME,
@@ -370,7 +370,7 @@ fn local_runner_surface_capabilities(
         supported.push(SupportedSessionSurface {
             kind: SessionSurfaceKind::Terminal,
             profiles: Some(vec![
-                protocol::session_surface::TERMINAL_SURFACE_PROFILE.to_string(),
+                ato_ipc::session_surface::TERMINAL_SURFACE_PROFILE.to_string(),
             ]),
             transports: Some(vec![SessionSurfaceTransport::TerminalWebsocket]),
         });
@@ -878,7 +878,7 @@ pub(crate) fn classify_restore_artifact(
                 ));
             }
             for name in &sup.binding_names {
-                if let Err(e) = protocol::binding_lease::BindingName::parse(name.as_str()) {
+                if let Err(e) = ato_ipc::binding_lease::BindingName::parse(name.as_str()) {
                     return Err(err(format!(
                         "supervisor artifact binding name {name:?}: {e}"
                     )));
@@ -1301,7 +1301,7 @@ mod tests {
         manifest.surface_requirement = Some(SessionSurfaceRequirement {
             kind: SessionSurfaceKind::Terminal,
             profiles: Some(vec![
-                protocol::session_surface::TERMINAL_SURFACE_PROFILE.to_string(),
+                ato_ipc::session_surface::TERMINAL_SURFACE_PROFILE.to_string(),
             ]),
         });
         let command = explicit_terminal_surface_command();
@@ -1824,7 +1824,7 @@ mod tests {
         // this runner, then compared with the descriptor selected by the API.
         let mut pixel_manifest = m.clone();
         pixel_manifest.surface_requirement =
-            Some(protocol::session_surface::SessionSurfaceRequirement {
+            Some(ato_ipc::session_surface::SessionSurfaceRequirement {
                 kind: SessionSurfaceKind::PixelStream,
                 profiles: Some(vec![PIXEL_STREAM_PROFILE.to_string()]),
             });
@@ -1845,7 +1845,7 @@ mod tests {
             profile: PIXEL_STREAM_PROFILE.to_string(),
             surface_id: "surface-pixel-1".to_string(),
             transport: SessionSurfaceTransport::RfbWebsocket,
-            viewport: protocol::session_surface::PixelStreamViewport {
+            viewport: ato_ipc::session_surface::PixelStreamViewport {
                 width: 1280,
                 height: 720,
             },

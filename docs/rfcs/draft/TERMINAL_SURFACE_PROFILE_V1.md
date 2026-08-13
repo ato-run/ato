@@ -4,8 +4,8 @@ status: draft
 date: "2026-08-09"
 author: "@koh0920"
 ssot:
-  - "crates/protocol/src/session_surface.rs"
-  - "crates/protocol/src/terminal_surface.rs"
+  - "lib/ipc/src/session_surface.rs"
+  - "lib/ipc/src/terminal_surface.rs"
 related:
   - "docs/rfcs/draft/SESSION_SURFACE_CONTRACT.md"
   - "docs/rfcs/draft/PIXEL_STREAM_PROFILE_V1.md"

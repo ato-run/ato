@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(target_os = "linux")]
-use protocol::terminal_surface::{
+use ato_ipc::terminal_surface::{
     MAX_TERMINAL_CONTROL_FRAME_BYTES, MAX_TERMINAL_INPUT_FRAME_BYTES, TerminalClientControl,
     TerminalServerControl,
 };
@@ -93,7 +93,7 @@ fn serve_terminal_stream(mut stream: File, state: Arc<TerminalBrokerState>) -> i
     let connection_alive = Arc::new(AtomicBool::new(true));
     let output_alive = Arc::clone(&connection_alive);
     let output_thread = std::thread::spawn(move || {
-        let mut buffer = vec![0u8; protocol::terminal_surface::MAX_TERMINAL_OUTPUT_CHUNK_BYTES];
+        let mut buffer = vec![0u8; ato_ipc::terminal_surface::MAX_TERMINAL_OUTPUT_CHUNK_BYTES];
         while output_alive.load(Ordering::Acquire) {
             let mut ready = libc::pollfd {
                 fd: output.as_raw_fd(),

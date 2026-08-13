@@ -21,7 +21,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use protocol::binding_lease::SecretValue;
+use ato_ipc::binding_lease::SecretValue;
 
 use super::secret_resolver::SecretResolver;
 
