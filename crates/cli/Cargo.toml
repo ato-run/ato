@@ -29,6 +29,11 @@ name = "ato"
 path = "src/main.rs"
 
 [dependencies]
+ato-adapter-repository = { path = "../../extensions/adapters/repository" }
+ato-kernel = { path = "../../lib/kernel", version = "0.1.0" }
+ato-objects = { path = "../../lib/objects", version = "0.1.0" }
+ato-provider-nacelle = { path = "../../extensions/providers/nacelle", version = "0.7.9" }
+ato-semantics-workspace = { path = "../../extensions/semantics/workspace", version = "0.1.0" }
 capsule = { path = "../capsule", version = "0.11.0" }
 ato-computation = { path = "../../lib/computation", version = "0.1.0" }
 capsule-protocol = { path = "../capsule-protocol", version = "0.1.0" }
