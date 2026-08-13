@@ -83,10 +83,12 @@ Protocol v1 Bundle
 
 The semantics-defined legacy residual contains content references to the exact v1
 descriptor and Record Sequence bytes. It does not translate State, Connector,
-or `IoRecord` into native Core objects. Only the externally composable boundary
+or `IoRecord` into native Core objects. Only an exposed compatibility boundary
 is projected: each v1 Connector becomes a compatibility Port preserving its
-protocol and using the `legacy-peer` role. Connector configuration remains
-committed by the exact descriptor bytes and is not duplicated into Core.
+protocol and using the `legacy-peer` role. `legacy-peer` is not generically
+composable until the corresponding Protocol v1 role-compatibility rule is
+defined. Connector configuration remains committed by the exact descriptor
+bytes and is not duplicated into Core.
 
 The `ComputationObject` contains the semantics, boundary, and residual reference,
 so changing a projected Port necessarily changes the `ComputationRef`.
@@ -117,15 +119,17 @@ never replace the origin Computation.
 
 Session Store v2/v3 State identities and the earlier v4 layout remain readable.
 After the seed Bundle is normalized they are upgraded to a native
-`ComputationRef`; new v4 writes require that native origin.
+`ComputationRef`; new v4 writes require that native origin. The ordinary
+Session mutation API exposes no arbitrary legacy-origin replacement operation.
+The compatibility integration accepts only the opaque migration value minted
+alongside a resolved computation by `capsule-adapter-state-io-v1`.
 
-Evaluator registration is exact by `SemanticsId`. The evaluator consumes a
-hash-validated `ResolvedComputation`, whose boundary is already inside its
-object, plus an `EvaluationContext` containing a generic content
-`ObjectResolver`, explicit Port bindings, Session paths, and materialization
-services. Legacy Connector-to-Port projection belongs to this adapter or its
-integration layer, never to the generic binding API. Routing existing Workspace
-PTY and Ready-State startup through this registry is a later change.
+The generic evaluator API and registry are deliberately deferred. The current
+runtime still selects the existing v1 materialization after normalization. A
+future evaluator boundary must be derived from concrete Semantics use cases and
+must not require local filesystem paths, environment maps, or the v1
+`AttachmentEndpoint` ontology. Legacy Connector-to-Port projection belongs to
+this adapter or its integration layer, never to a generic binding API.
 
 ## 7. Wire and container stability
 

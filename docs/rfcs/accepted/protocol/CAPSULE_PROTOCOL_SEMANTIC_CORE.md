@@ -37,8 +37,15 @@ ComputationObject
 ComputationRef
 ```
 
-`ComputationRef` exists only for a sealed representation and is a newtype over
-the content address of the complete `ComputationObject`. Interpretation
+`ComputationRef` is a syntactically valid persistent reference in the sealed
+Computation Object v1 reference domain. Like a Git object ID, the reference may
+be unresolved or dangling; parsing it does not prove that bytes exist or match
+the digest. `ResolvedComputation` is the separate value obtained after
+canonical decoding and exact digest verification. A future
+`SemanticallyValidComputation` boundary may additionally attest that the
+selected Semantics accepts the residual and boundary.
+
+The reference addresses the complete `ComputationObject`. Interpretation
 authority is therefore inside the addressed object: changing its semantics,
 boundary, or residual changes its identity.
 

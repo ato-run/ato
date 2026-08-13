@@ -41,23 +41,28 @@ digest          = BLAKE3-256(canonical_bytes)
 ComputationRef  = "blake3:" + lowercase_hex(digest)
 ```
 
-Decoders must re-encode the parsed value and require byte equality with the
-input. Valid but non-canonical JSON is rejected. A verified
-`ResolvedComputation` may be constructed only after canonical decoding and an
-exact digest comparison with the supplied `ComputationRef`.
+Decoders must reject inputs larger than 1 MiB before parsing, re-encode the
+parsed value, and require byte equality with the input. Valid but non-canonical
+JSON is rejected. `ComputationRef` parsing checks syntax only and does not
+resolve an object. A `ResolvedComputation` may be constructed only after
+canonical decoding and an exact digest comparison with the supplied reference.
 
 ## 3. Resolution boundary
 
 Storage is abstracted by an `ObjectResolver` that exposes metadata and a byte
 stream for any `ContentRef`. Computation resolution is derived by opening the
 referenced bytes, enforcing the bounded object size, checking the observed
-size, applying this codec, and verifying the digest. Evaluators receive the
-same generic resolver so residual and transitive objects do not require a
-physical CAS path convention.
+size, applying this codec, and verifying the digest. Future semantics consumers
+may reuse this resolver boundary so residual and transitive objects do not
+require a physical CAS path convention.
 
 ## 4. Stability
 
 The field set, JCS representation, identifier spelling, and hash algorithm are
-identity-bearing. Changing any of them requires a new encoding version; it
-must not silently alter v1 output. Cross-implementation golden vectors live
-under `crates/capsule-core-codec/tests/vectors/`.
+identity-bearing. `ComputationRef` as defined by the current Core is permanently
+bound to this Computation Object v1 encoding. An incompatible future encoding
+must use a distinct reference domain and type; it must not reinterpret an
+existing `ComputationRef` or silently alter v1 output. Resolution of the
+current type therefore always uses this codec and requires no in-band version
+field. Cross-implementation golden vectors live under
+`crates/capsule-core-codec/tests/vectors/`.
