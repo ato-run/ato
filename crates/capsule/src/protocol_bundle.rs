@@ -12,16 +12,37 @@ use thiserror::Error;
 use crate::packers::pack_filter::PackFilter;
 use crate::security::no_secret::CredentialScanner;
 
-mod normalize;
 mod streaming;
 
-pub use normalize::{NormalizedLegacyComputation, normalize_v1_spool};
+pub use capsule_adapter_state_io_v1::{
+    LEGACY_V1_SEMANTICS, LegacyV1OriginMigration, NormalizedLegacyV1Computation,
+};
 pub use streaming::{
     AllowAllPortableExportPolicy, BundleSummary, BundleWriteOutcome, DirectoryObjectSource,
     InMemoryObjectSource, ObjectMetadata, ObjectSource, PortableExportError, PortableExportPolicy,
     PortableObjectRole, ProtocolMemberSpool, PtyPortableExportPolicy, RecordSpool, SpoolBundle,
     SpoolObjectStore, StreamingBundleReader, StreamingBundleWriter, StrictPortableExportPolicy,
 };
+
+pub fn normalize_v1_spool(
+    spool: &SpoolBundle,
+    cas_root: &Path,
+) -> Result<NormalizedLegacyV1Computation, capsule_adapter_state_io_v1::CompatibilityError> {
+    capsule_adapter_state_io_v1::normalize_v1_spool(
+        capsule_adapter_state_io_v1::LegacyV1Spool {
+            descriptor: &spool.descriptor,
+            descriptor_member: capsule_adapter_state_io_v1::SpoolMember {
+                path: spool.descriptor_member.path(),
+                size: spool.descriptor_member.size(),
+            },
+            record_stream_member: capsule_adapter_state_io_v1::SpoolMember {
+                path: spool.records.path(),
+                size: spool.records.size(),
+            },
+        },
+        cas_root,
+    )
+}
 
 const DESCRIPTOR_MEMBER: &str = "protocol/descriptor.cbor";
 const RECORDS_MEMBER: &str = "protocol/records.cborseq";
