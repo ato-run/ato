@@ -147,6 +147,8 @@ pub enum CompositeValidationError {
     EndpointBoundMoreThanOnce { endpoint: Endpoint },
     #[error("connection is duplicated: {0:?}")]
     DuplicateConnection(Connection),
+    #[error("connection between two ports on node {node} is unsupported by capsule.compose@1")]
+    SameNodeConnectionUnsupported { node: NodeId },
     #[error("connection protocols differ: {first} and {second}")]
     ConnectionProtocolMismatch {
         first: ProtocolId,
@@ -400,6 +402,11 @@ fn validate_local(
             return Err(CompositeValidationError::DuplicateConnection(
                 connection.clone(),
             ));
+        }
+        if connection.first().node == connection.second().node {
+            return Err(CompositeValidationError::SameNodeConnectionUnsupported {
+                node: connection.first().node.clone(),
+            });
         }
         bind_linear_endpoint(connection.first(), &mut bound_endpoints)?;
         bind_linear_endpoint(connection.second(), &mut bound_endpoints)?;
