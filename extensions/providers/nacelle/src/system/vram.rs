@@ -1,4 +1,5 @@
 use anyhow::Result;
+#[cfg(not(all(target_os = "linux", feature = "cuda")))]
 use tracing::warn;
 
 /// Result of a scrub operation
@@ -98,6 +99,7 @@ mod cuda_backend {
 }
 
 /// No-op backend for unsupported platforms
+#[cfg(not(all(target_os = "linux", feature = "cuda")))]
 mod noop_backend {
     use super::{Result, VramBackend};
 
