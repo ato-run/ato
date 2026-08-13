@@ -1,0 +1,23 @@
+[package]
+name = "capsule-compat-v1"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MPL-2.0"
+description = "Adapter from Capsule Protocol v1 to the Ato Computation Core"
+homepage = "https://ato.run"
+repository = "https://github.com/ato-run/ato"
+
+[package.metadata.dist]
+dist = false
+
+[dependencies]
+blake3 = "1.5"
+capsule-core = { path = "../capsule-core" }
+capsule-protocol = { path = "../capsule-protocol" }
+serde = { version = "1.0", features = ["derive"] }
+serde_jcs = "0.1"
+tempfile = "3"
+thiserror = "2.0"
+
+[dev-dependencies]
+capsule-codec = { path = "../capsule-codec" }

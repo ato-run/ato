@@ -1013,6 +1013,8 @@ dependencies = [
  "blake3",
  "bollard",
  "capsule-codec",
+ "capsule-compat-v1",
+ "capsule-core",
  "capsule-protocol",
  "capsule-session-runtime",
  "chrono",
@@ -1080,6 +1082,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "capsule-compat-v1"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "capsule-codec",
+ "capsule-core",
+ "capsule-protocol",
+ "serde",
+ "serde_jcs",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "capsule-core"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "capsule-protocol"
 version = "0.1.0"
 dependencies = [
@@ -1091,6 +1114,7 @@ name = "capsule-session-runtime"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "capsule-core",
  "capsule-protocol",
  "rand 0.8.6",
  "serde",
@@ -1315,6 +1339,7 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "capsule",
+ "capsule-core",
  "capsule-protocol",
  "capsule-session-runtime",
  "capsulefs",

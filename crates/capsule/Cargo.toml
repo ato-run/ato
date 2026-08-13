@@ -16,6 +16,8 @@ path = "src/lib.rs"
 [dependencies]
 anyhow = "1.0"
 capsule-codec = { path = "../capsule-codec", version = "0.1.0" }
+capsule-compat-v1 = { path = "../capsule-compat-v1", version = "0.1.0" }
+capsule-core = { path = "../capsule-core", version = "0.1.0" }
 capsule-protocol = { path = "../capsule-protocol", version = "0.1.0" }
 capsule-session-runtime = { path = "../capsule-session-runtime", version = "0.1.0" }
 protocol = { path = "../protocol", version = "0.1.0" }
