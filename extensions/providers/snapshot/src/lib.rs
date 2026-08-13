@@ -52,7 +52,7 @@ pub mod bench;
 /// snapshot builder daemon runs the same lane for a pinned wizard build. Two
 /// copies of a lane that mints Execution Identity would be two identities.
 pub mod build_v1;
-pub mod capsule_state;
+pub mod compatibility;
 pub mod compose_plan;
 #[cfg(test)]
 mod contract_fixtures;

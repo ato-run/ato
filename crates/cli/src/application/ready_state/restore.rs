@@ -93,7 +93,7 @@ pub(crate) fn restore_and_expose(
 pub(crate) fn exact_host_capability(
     contract: &SnapshotCompatibilityContractV1,
 ) -> HostRestoreCapabilityV1 {
-    snapshot::capsule_state::exact_host_restore_capability(contract)
+    snapshot::compatibility::exact_host_restore_capability(contract)
 }
 
 /// Verify an explicit Capsule v1 restore candidate: the Artifact Envelope
@@ -110,7 +110,7 @@ fn verify_v1_candidate(
     candidate: &SnapshotManifestV1,
     envelope: &ArtifactEnvelopeV1,
 ) -> Result<()> {
-    snapshot::capsule_state::verify_accepted_restore_candidate(backend, legacy, candidate, envelope)
+    snapshot::compatibility::verify_accepted_restore_candidate(backend, legacy, candidate, envelope)
         .context("verify accepted Snapshot restore candidate")
 }
 
