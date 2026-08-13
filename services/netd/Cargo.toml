@@ -45,7 +45,7 @@ layer = "service"
 # stable-origin derivation) live in protocol; depending on it keeps
 # client/server in lockstep on the wire protocol (Request / Response enums)
 # without pulling capsule or a separate network crate into the daemon.
-ato-ipc = { path = "../../lib/ipc" }
+ato-ipc = { path = "../../lib/ipc", version = "0.1.0" }
 
 # Async trait support for the object-safe Resolver trait.
 async-trait = "0.1"

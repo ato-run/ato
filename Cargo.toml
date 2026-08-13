@@ -47,3 +47,10 @@ authors = ["ato-run"]
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+panic = "abort"
+codegen-units = 1

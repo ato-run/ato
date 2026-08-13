@@ -30,15 +30,11 @@ pub mod bundle;
 pub mod bundle_rules; // v3.0: Pre-validated sandbox rules loader
 pub mod common;
 pub mod config; // R3 config.json loader
-#[cfg(feature = "sync-runtime")]
-pub mod guest;
 pub mod internal_api;
 pub mod launcher;
 pub mod license; // License verification (PoL)
 pub mod lockfile;
 pub mod manager;
-#[cfg(feature = "sync-runtime")]
-pub mod sync;
 pub mod system;
 pub mod workspace_provider;
 

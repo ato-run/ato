@@ -23,6 +23,7 @@
 [workspace]
 members = ["cargo:."]
 
+# Config for 'dist'
 [dist]
 # The preferred dist version to use in CI (Cargo.toml SemVer syntax)
 cargo-dist-version = "0.31.0"
@@ -33,23 +34,17 @@ ci = "github"
 # tarball/MSI so install.sh can fetch it from the same release as
 # ato-cli (instead of the legacy Koh0920/capsuled tag).
 packages = ["ato-cli", "ato-provider-nacelle"]
-# Force per-package builds so workspace-wide `cargo build` doesn't pull in
-# ato-desktop's GTK/GPUI native deps on Linux runners.
+# Build only the required packages, and individually
 precise-builds = true
-# The installers to generate for each app.
-# - homebrew → Formula in ato-run/homebrew-ato (CLI-only, alongside Cask).
-# - msi      → CLI MSI for `--cli-only` Windows install (PR-7).
-#              Desktop MSI is built separately by xtask + WiX (PR-7).
+# The installers to generate for each app
 installers = ["homebrew", "msi"]
-# Homebrew tap repository
+# A GitHub repo to push Homebrew formulas to
 tap = "ato-run/homebrew-ato"
-# Publish jobs to run on release
+# Publish jobs to run in CI
 publish-jobs = ["homebrew"]
-# Keep the generated workflow hand-edited so cargo-dist only responds to
-# `v*` CLI tags and never races the desktop `ato-desktop-v*` workflow.
+# Skip checking whether the specified configuration files are up to date
 allow-dirty = ["ci"]
 # Target platforms to build apps for (Rust target-triple syntax)
-# Intel Mac (x86_64-apple-darwin) is unsupported.
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
 # Where to host releases
 hosting = "github"

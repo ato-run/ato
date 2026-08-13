@@ -14,9 +14,9 @@ dist = false
 layer = "adapter"
 
 [dependencies]
-ato-computation = { path = "../../../lib/computation" }
-ato-objects = { path = "../../../lib/objects" }
-ato-semantics-workspace = { path = "../../semantics/workspace" }
+ato-computation = { path = "../../../lib/computation", version = "0.1.0" }
+ato-objects = { path = "../../../lib/objects", version = "0.1.0" }
+ato-semantics-workspace = { path = "../../semantics/workspace", version = "0.1.0" }
 blake3 = "1.5"
 hex = "0.4"
 regex = "1"

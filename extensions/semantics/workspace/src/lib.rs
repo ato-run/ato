@@ -17,6 +17,7 @@ use thiserror::Error;
 
 pub const WORKSPACE_SEMANTICS_ID: &str = "ato.workspace@1";
 pub const MAX_WORKSPACE_RESIDUAL_BYTES: u64 = 1024 * 1024;
+pub const MAX_SOURCE_CLOSURE_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -96,7 +97,7 @@ impl ComputationReferences for WorkspaceReferences {
             objects,
             &source,
             source_metadata.size,
-            MAX_WORKSPACE_RESIDUAL_BYTES,
+            MAX_SOURCE_CLOSURE_BYTES,
         )?;
         let closure: SourceClosure = serde_json::from_slice(&source_bytes)?;
         let mut links = vec![ObjectLink::Content(source)];
