@@ -250,18 +250,24 @@ plumbing:
 ato decap start <CAPSULE> [--detach] [--name <NAME>]
 ato decap list [--json]
 ato decap attach <NAME>
-ato decap stop <NAME> [--force]
+ato decap stop <NAME>
 ```
 
 `start` owns the destination workspace and internal `SessionId`. The default
 display name is derived from the local `.capsule` filename; a collision receives
 the first available numeric suffix (`name-2`, `name-3`, ...). Display names are
 local aliases only. Authentication and control continue to use the random
-128-bit `SessionId`.
+128-bit `SessionId`; public attach and stop resolve names only. A stopped Session
+releases its alias for reuse.
 
 When the descriptor exposes `ato.io.pty@1`, `start` attaches after Supervisor
 readiness unless `--detach` was requested. A profile without an attachable
 Connector remains running in the background. `list` is the human status surface;
 only its JSON form exposes the internal Session ID for automation. Public
 display metadata is stored owner-only beside, but outside, the validated
-Session Store record so it cannot weaken runtime identity validation.
+Session Store record so it cannot weaken runtime identity validation. Start
+durably reserves the alias before launching the Supervisor, releases the name
+lock before waiting for readiness, and commits the reservation as active only
+after readiness. If that final commit fails, start stops the Session before
+returning an error. Human-readable fields are terminal-escaped; JSON preserves
+their structured string values.

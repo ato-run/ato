@@ -78,8 +78,6 @@ pub(crate) fn start_public(
         .map(validate_public_name)
         .transpose()?
         .unwrap_or_else(|| public_name_from_bundle(&bundle));
-    let name_lock = public_name_lock()?;
-    let name = available_public_name(&requested_name)?;
     let session_id = random_session_id()?;
     let paths = SessionPaths::new(&session_id)?;
     paths.create()?;
@@ -94,24 +92,72 @@ pub(crate) fn start_public(
     import_session_seed(&bundle, &paths.seed_capsule)?;
     write_bootstrap_metadata(&paths, &SessionBootstrapMetadata::default())?;
 
+    let name_lock = public_name_lock()?;
+    let name = available_public_name(&requested_name)?;
+    let reservation_owner_pid = std::process::id();
+    let reservation = PublicSessionMetadata {
+        schema_version: PUBLIC_METADATA_SCHEMA_VERSION,
+        name: name.clone(),
+        source: bundle.to_string_lossy().into_owned(),
+        created_at_unix_ms: now_unix_ms(),
+        state: PublicMetadataState::Reserved,
+        reservation_owner: Some(ProcessIdentity {
+            pid: reservation_owner_pid,
+            start_identity: workload_process_start_identity(reservation_owner_pid)
+                .context("failed to establish public Session alias reservation identity")?,
+        }),
+    };
+    write_public_metadata(&paths, &reservation)?;
+    FileExt::unlock(&name_lock)?;
+
     println!("Starting {name}...");
     let workspace = paths.directory.join("workspace");
-    launch_session(&session_id, &paths, &workspace, true, false)?;
-    write_public_metadata(
-        &paths,
-        &PublicSessionMetadata {
-            schema_version: PUBLIC_METADATA_SCHEMA_VERSION,
-            name: name.clone(),
-            source: bundle.to_string_lossy().into_owned(),
-            created_at_unix_ms: now_unix_ms(),
-        },
-    )?;
-    FileExt::unlock(&name_lock)?;
+    if let Err(error) = launch_session(&session_id, &paths, &workspace, true, false) {
+        release_public_reservation(&paths);
+        return Err(error);
+    }
+    let active = PublicSessionMetadata {
+        state: PublicMetadataState::Active,
+        reservation_owner: None,
+        ..reservation
+    };
+    if let Err(error) = write_public_metadata(&paths, &active) {
+        let cleanup = stop_started_session_after_metadata_failure(&session_id, &paths);
+        release_public_reservation(&paths);
+        return match cleanup {
+            Ok(()) => {
+                Err(error.context("failed to commit public Session metadata; Session stopped"))
+            }
+            Err(cleanup) => Err(error.context(format!(
+                "failed to commit public Session metadata and failed to stop Session: {cleanup}"
+            ))),
+        };
+    }
     println!("Ready.");
     if attachable && !detach {
         attach(session_id.as_str(), false)
     } else {
         Ok(())
+    }
+}
+
+fn stop_started_session_after_metadata_failure(
+    session_id: &SessionId,
+    paths: &SessionPaths,
+) -> Result<()> {
+    match kill(session_id.as_str()) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let store = CapsuleProtocolSessionStore::open(&paths.root)?;
+            let stored = store.read(session_id)?;
+            if stored.lifecycle == "stopped"
+                && !paths.directory.join("ready-state-overlay").exists()
+            {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }
     }
 }
 
@@ -438,6 +484,9 @@ fn serve_ready_state(session: &str, _into: &Path, spool: SpoolBundle) -> Result<
         snapshot_manifest: imported.snapshot_manifest.clone(),
         artifact_envelope: imported.artifact_envelope.clone(),
     };
+    state_object
+        .validate_f1_session_profile()
+        .context("Ready-State is unsupported by the F1 Session profile")?;
     let backend = select_backend_for_ready_state(&state_object)
         .context("failed to select exact Ready-State backend")?;
     let host_runner_class = backend
@@ -851,7 +900,7 @@ pub(crate) fn attach_public(name: &str) -> Result<()> {
     attach(session.session_id.as_str(), false)
 }
 
-pub(crate) fn stop_public(name: &str, _force: bool) -> Result<()> {
+pub(crate) fn stop_public(name: &str) -> Result<()> {
     let session = resolve_public_session(name)?;
     let metadata = public_metadata_for(&session.session_id)?;
     if session.lifecycle != "stopped" {
@@ -1043,9 +1092,15 @@ pub(crate) fn list_public(json: bool) -> Result<()> {
     let now = now_unix_ms();
     let mut rows = Vec::new();
     for session in store.list()? {
+        if session.lifecycle == "stopped" {
+            continue;
+        }
         let Ok(metadata) = public_metadata_for(&session.session_id) else {
             continue;
         };
+        if metadata.state != PublicMetadataState::Active {
+            continue;
+        }
         let lifecycle = displayed_lifecycle(&session);
         rows.push(PublicSessionRow {
             name: metadata.name,
@@ -1064,10 +1119,10 @@ pub(crate) fn list_public(json: bool) -> Result<()> {
     for row in rows {
         println!(
             "{}\t{}\t{}\t{}",
-            row.name,
+            sanitize_terminal_text(&row.name),
             row.state,
             format_age(row.age_seconds),
-            display_source(&row.source)
+            sanitize_terminal_text(display_source(&row.source))
         );
     }
     Ok(())
@@ -2506,6 +2561,21 @@ struct PublicSessionMetadata {
     name: String,
     source: String,
     created_at_unix_ms: u64,
+    state: PublicMetadataState,
+    reservation_owner: Option<ProcessIdentity>,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum PublicMetadataState {
+    Reserved,
+    Active,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct ProcessIdentity {
+    pid: u32,
+    start_identity: String,
 }
 
 #[derive(Serialize)]
@@ -2562,6 +2632,11 @@ impl SessionPaths {
 
 fn write_public_metadata(paths: &SessionPaths, metadata: &PublicSessionMetadata) -> Result<()> {
     validate_public_metadata(metadata)?;
+    if metadata.state == PublicMetadataState::Active
+        && std::env::var_os("ATO_TEST_FAIL_PUBLIC_METADATA_COMMIT").is_some()
+    {
+        bail!("injected public Session metadata commit failure");
+    }
     capsule_session_runtime::session_store::write_atomic_owner_only(
         &paths.directory.join("display.json"),
         &serde_json::to_vec_pretty(metadata)?,
@@ -2590,6 +2665,12 @@ fn validate_public_metadata(metadata: &PublicSessionMetadata) -> Result<()> {
     validate_public_name(&metadata.name)?;
     if metadata.source.trim().is_empty() {
         bail!("public Session source is empty");
+    }
+    match (metadata.state, &metadata.reservation_owner) {
+        (PublicMetadataState::Reserved, Some(owner))
+            if owner.pid > 0 && !owner.start_identity.is_empty() => {}
+        (PublicMetadataState::Active, None) => {}
+        _ => bail!("public Session reservation state is invalid"),
     }
     Ok(())
 }
@@ -2640,7 +2721,7 @@ fn public_name_from_bundle(bundle: &Path) -> String {
 
 fn available_public_name(base: &str) -> Result<String> {
     let root = session_root()?;
-    CapsuleProtocolSessionStore::open(&root)?;
+    let store = CapsuleProtocolSessionStore::open(&root)?;
     let mut used = BTreeSet::new();
     for entry in fs::read_dir(root)? {
         let entry = entry?;
@@ -2655,7 +2736,18 @@ fn available_public_name(base: &str) -> Result<String> {
             continue;
         };
         if let Ok(metadata) = public_metadata_for(&session_id) {
-            used.insert(metadata.name);
+            let owns_alias = match metadata.state {
+                PublicMetadataState::Reserved => metadata
+                    .reservation_owner
+                    .as_ref()
+                    .is_some_and(process_identity_is_live),
+                PublicMetadataState::Active => store
+                    .read(&session_id)
+                    .is_ok_and(|session| session.lifecycle != "stopped"),
+            };
+            if owns_alias {
+                used.insert(metadata.name);
+            }
         }
     }
     if !used.contains(base) {
@@ -2689,14 +2781,13 @@ fn public_name_lock() -> Result<File> {
 fn resolve_public_session(name: &str) -> Result<StoredProtocolSession> {
     let root = session_root()?;
     let store = CapsuleProtocolSessionStore::open(root)?;
-    if let Ok(session_id) = SessionId::parse(name)
-        && let Ok(session) = store.read(&session_id)
-        && public_metadata_for(&session_id).is_ok()
-    {
-        return Ok(session);
-    }
     for session in store.list()? {
-        if public_metadata_for(&session.session_id).is_ok_and(|metadata| metadata.name == name) {
+        if session.lifecycle == "stopped" {
+            continue;
+        }
+        if public_metadata_for(&session.session_id).is_ok_and(|metadata| {
+            metadata.state == PublicMetadataState::Active && metadata.name == name
+        }) {
             return Ok(session);
         }
     }
@@ -2737,6 +2828,27 @@ fn display_source(source: &str) -> &str {
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or(source)
+}
+
+fn sanitize_terminal_text(value: &str) -> String {
+    let mut sanitized = String::with_capacity(value.len());
+    for character in value.chars() {
+        if matches!(character as u32, 0x00..=0x1f | 0x7f..=0x9f) {
+            sanitized.extend(character.escape_default());
+        } else {
+            sanitized.push(character);
+        }
+    }
+    sanitized
+}
+
+fn process_identity_is_live(identity: &ProcessIdentity) -> bool {
+    capsule::state::session::process::process_start_time_unix_ms(identity.pid)
+        .is_some_and(|value| value.to_string() == identity.start_identity)
+}
+
+fn release_public_reservation(paths: &SessionPaths) {
+    let _ = fs::remove_file(paths.directory.join("display.json"));
 }
 
 #[derive(Serialize, Deserialize)]
@@ -3337,5 +3449,13 @@ mod tests {
         assert_eq!(format_age(120), "2m");
         assert_eq!(format_age(7_200), "2h");
         assert_eq!(format_age(172_800), "2d");
+    }
+
+    #[test]
+    fn human_output_escapes_terminal_control_sequences() {
+        assert_eq!(
+            sanitize_terminal_text("ログイン\n\u{1b}[31m\u{0085}.capsule"),
+            "ログイン\\n\\u{1b}[31m\\u{85}.capsule"
+        );
     }
 }
