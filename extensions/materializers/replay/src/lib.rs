@@ -277,6 +277,22 @@ impl MaterializationReferences for ReplayReferences {
             })?),
         ];
         for record in descriptor.records {
+            links.push(ObjectLink::Computation(
+                ComputationRef::parse(record.head_before).map_err(|error| {
+                    BundleError::InvalidReference {
+                        value: "record head_before".to_owned(),
+                        reason: error.to_string(),
+                    }
+                })?,
+            ));
+            links.push(ObjectLink::Computation(
+                ComputationRef::parse(record.head_after).map_err(|error| {
+                    BundleError::InvalidReference {
+                        value: "record head_after".to_owned(),
+                        reason: error.to_string(),
+                    }
+                })?,
+            ));
             links.push(ObjectLink::Content(
                 ContentRef::parse(record.payload_ref).map_err(|error| {
                     BundleError::InvalidReference {

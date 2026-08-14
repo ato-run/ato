@@ -354,10 +354,7 @@ impl LocalCapsuleRepository {
             } else {
                 None
             };
-            record.caused_by = previous
-                .or(origin)
-                .into_iter()
-                .collect();
+            record.caused_by = previous.or(origin).into_iter().collect();
         }
         let committed = self.append_record_locked(&mut record)?;
         run.head = committed.head_after.clone();
