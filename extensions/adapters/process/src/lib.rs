@@ -103,6 +103,7 @@ impl ProcessAdapter {
         command
             .args(&self.spec.command[1..])
             .current_dir(cwd)
+            .env_remove("ATO_RUNTIME_BINDINGS")
             .envs(&self.spec.environment)
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())

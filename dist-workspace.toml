@@ -29,11 +29,10 @@ members = ["cargo:."]
 cargo-dist-version = "0.31.0"
 # CI backends to support
 ci = "github"
-# Restrict cargo-dist to the CLI binary plus nacelle (the Source
-# Runtime). Desktop is owned by xtask. nacelle ships as its own
-# tarball/MSI so install.sh can fetch it from the same release as
-# ato-cli (instead of the legacy Koh0920/capsuled tag).
-packages = ["ato-cli", "ato-provider-nacelle"]
+# Restrict cargo-dist to the Capsule lifecycle CLI. Physical adapters and
+# materializers are linked into that product assembly; no Provider binary is
+# part of the default lifecycle.
+packages = ["ato-cli"]
 # Build only the required packages, and individually
 precise-builds = true
 # The installers to generate for each app

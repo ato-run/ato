@@ -90,7 +90,7 @@ pub enum GcError {
     InvalidReference(String),
 }
 
-/// Extension-owned outgoing references from one retained provider object.
+/// Extension-owned outgoing references from one retained physical object.
 pub trait RetainedObjectReferences: Send + Sync {
     fn outgoing(
         &self,
@@ -263,7 +263,7 @@ impl FsObjectStore {
     }
 
     /// Removes objects outside the closure of the supplied computation roots
-    /// and explicitly retained provider materializations.
+    /// and explicitly retained physical materializations.
     pub fn gc(
         &self,
         roots: &[ComputationRef],
