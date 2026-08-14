@@ -108,6 +108,7 @@ struct RecordWire {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveRun {
+    pub token: String,
     pub branch: String,
     pub branch_base: ComputationRef,
     pub head: ComputationRef,
@@ -121,6 +122,7 @@ pub struct ActiveRun {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ActiveRunWire {
+    token: String,
     branch: String,
     branch_base: String,
     head: String,
@@ -311,10 +313,57 @@ impl LocalCapsuleRepository {
         wire.try_into().map(Some)
     }
 
-    pub fn set_active_run(&self, run: &ActiveRun) -> Result<(), RepositoryError> {
+    pub fn claim_active_run(&self, run: &ActiveRun) -> Result<(), RepositoryError> {
+        validate_name("run token", &run.token)?;
         validate_name("branch", &run.branch)?;
+        let _transaction = self.lock_transaction()?;
+        if let Some(active) = self.active_run()? {
+            return Err(RepositoryError::ActiveRunConflict {
+                token: active.token,
+                status: active.status,
+            });
+        }
+        if run.status != "starting" {
+            return Err(RepositoryError::InvalidRunStatus(run.status.clone()));
+        }
+        let bytes = serde_jcs::to_vec(&ActiveRunWire::from(run))?;
+        atomic_create(&self.root.join("runs/active.json"), &bytes)
+    }
+
+    pub fn activate_run(&self, token: &str, run: &ActiveRun) -> Result<(), RepositoryError> {
+        let _transaction = self.lock_transaction()?;
+        let claimed = self
+            .active_run()?
+            .ok_or_else(|| RepositoryError::ActiveRunConflict {
+                token: token.to_owned(),
+                status: "missing".to_owned(),
+            })?;
+        if claimed.token != token || claimed.status != "starting" {
+            return Err(RepositoryError::ActiveRunConflict {
+                token: claimed.token,
+                status: claimed.status,
+            });
+        }
+        if run.token != token || run.status != "active" || run.branch_base != claimed.branch_base {
+            return Err(RepositoryError::InvalidRunStatus(run.status.clone()));
+        }
         let bytes = serde_jcs::to_vec(&ActiveRunWire::from(run))?;
         atomic_write(&self.root.join("runs/active.json"), &bytes)
+    }
+
+    pub fn release_active_run(&self, token: &str) -> Result<(), RepositoryError> {
+        let _transaction = self.lock_transaction()?;
+        let Some(active) = self.active_run()? else {
+            return Ok(());
+        };
+        if active.token != token {
+            return Err(RepositoryError::ActiveRunConflict {
+                token: active.token,
+                status: active.status,
+            });
+        }
+        fs::remove_file(self.root.join("runs/active.json"))?;
+        Ok(())
     }
 
     /// Atomically advances only the mutable cursor of the currently active Run.
@@ -339,15 +388,6 @@ impl LocalCapsuleRepository {
         run.head = next.clone();
         let bytes = serde_jcs::to_vec(&ActiveRunWire::from(&run))?;
         atomic_write(&self.root.join("runs/active.json"), &bytes)
-    }
-
-    pub fn clear_active_run(&self) -> Result<(), RepositoryError> {
-        let path = self.root.join("runs/active.json");
-        match fs::remove_file(path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error.into()),
-        }
     }
 
     fn next_sequence(&self, stream: &str) -> Result<u64, RepositoryError> {
@@ -439,6 +479,7 @@ impl TryFrom<RecordWire> for RecordEnvelope {
 impl From<&ActiveRun> for ActiveRunWire {
     fn from(value: &ActiveRun) -> Self {
         Self {
+            token: value.token.clone(),
             branch: value.branch.clone(),
             branch_base: value.branch_base.to_string(),
             head: value.head.to_string(),
@@ -456,6 +497,7 @@ impl TryFrom<ActiveRunWire> for ActiveRun {
 
     fn try_from(value: ActiveRunWire) -> Result<Self, Self::Error> {
         Ok(Self {
+            token: value.token,
             branch: value.branch,
             branch_base: parse_computation(&value.branch_base)?,
             head: parse_computation(&value.head)?,
@@ -538,6 +580,10 @@ pub enum RepositoryError {
         expected: Option<String>,
         actual: Option<String>,
     },
+    #[error("active Run lease is already held by `{token}` in `{status}` state")]
+    ActiveRunConflict { token: String, status: String },
+    #[error("invalid active Run status `{0}`")]
+    InvalidRunStatus(String),
     #[error("record sequence for `{stream}` must be {expected}, got {actual}")]
     Sequence {
         stream: String,

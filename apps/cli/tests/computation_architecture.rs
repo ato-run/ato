@@ -716,6 +716,57 @@ fn concurrent_writers_never_lose_refs_or_records() {
 }
 
 #[test]
+fn concurrent_resume_claims_exactly_one_run_lease() {
+    let project = tempfile::tempdir().unwrap();
+    let ato_home = tempfile::tempdir().unwrap();
+    write_project(project.path(), r#"["sh", "-c", "exec sleep 30"]"#, "");
+    ato(ato_home.path())
+        .args(["init", project.path().to_str().unwrap(), "--initial-only"])
+        .assert()
+        .success();
+
+    let barrier = Arc::new(Barrier::new(3));
+    let contenders: Vec<_> = (0..2)
+        .map(|_| {
+            let project = project.path().to_path_buf();
+            let ato_home = ato_home.path().to_path_buf();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                ato(&ato_home)
+                    .args(["resume", project.to_str().unwrap()])
+                    .output()
+                    .unwrap()
+            })
+        })
+        .collect();
+    barrier.wait();
+    let outputs: Vec<_> = contenders
+        .into_iter()
+        .map(|contender| contender.join().unwrap())
+        .collect();
+    assert_eq!(
+        outputs
+            .iter()
+            .filter(|output| output.status.success())
+            .count(),
+        1,
+        "only one concurrent resume may own the active Run lease"
+    );
+    assert_eq!(
+        outputs
+            .iter()
+            .filter(|output| String::from_utf8_lossy(&output.stderr).contains("active Run lease"))
+            .count(),
+        1
+    );
+    ato(ato_home.path())
+        .args(["stop", project.path().to_str().unwrap()])
+        .assert()
+        .success();
+}
+
+#[test]
 fn failed_process_never_publishes_an_active_run() {
     let project = tempfile::tempdir().unwrap();
     let ato_home = tempfile::tempdir().unwrap();
