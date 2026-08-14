@@ -18,7 +18,7 @@ use ato_objects::{ActiveRun, LocalCapsuleRepository, ObjectStore, RecordEnvelope
 
 use crate::{
     adapter_registry,
-    authoring::{adapter_instances, load_state},
+    authoring::{adapter_instances, load_runtime_state},
 };
 
 const STOP_REQUEST: &str = "runs/stop.request";
@@ -85,7 +85,7 @@ pub(crate) fn start_durable(
 pub(crate) fn worker(project: &Path, branch: &str, head: &ComputationRef) -> Result<()> {
     let repository = LocalCapsuleRepository::open(project)?;
     enter(SupervisorState::Preparing);
-    let config = load_state(head, repository.objects())?.config;
+    let config = load_runtime_state(head, repository.objects())?.config;
     let bindings: BTreeMap<String, String> = std::env::var("ATO_RUNTIME_BINDINGS")
         .ok()
         .and_then(|value| serde_json::from_str(&value).ok())
@@ -203,7 +203,8 @@ impl RealizationDriver for CliRealizationDriver {
     fn begin(&self, anchor: &ComputationRef) -> Result<Box<dyn ReplayRuntime>, MaterializerError> {
         let repository =
             LocalCapsuleRepository::open(&self.project).map_err(materializer_operation)?;
-        let state = load_state(anchor, repository.objects()).map_err(materializer_operation)?;
+        let state =
+            load_runtime_state(anchor, repository.objects()).map_err(materializer_operation)?;
         restore_workspace(
             &ContentRef::parse(&state.workspace_snapshot).map_err(materializer_operation)?,
             &self.project,
