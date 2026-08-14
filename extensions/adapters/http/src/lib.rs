@@ -100,21 +100,15 @@ impl AdapterFactory for HttpAdapter {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let failure = Arc::new(Mutex::new(None));
         let observed_responses = Arc::new(Mutex::new(VecDeque::new()));
-        let join = spawn_proxy(
-            listener,
-            config.clone(),
-            Arc::clone(&context.observations),
-            Arc::clone(&stop),
-            Arc::clone(&failure),
-            Arc::clone(&observed_responses),
-        );
         Ok(Box::new(HttpSession {
             instance_id: instance.instance_id.clone(),
             config,
+            listener: Some(listener),
+            observations: Arc::clone(&context.observations),
             stop,
             failure,
             observed_responses,
-            join: Some(join),
+            join: None,
         }))
     }
 }
@@ -154,6 +148,8 @@ fn wait_until_ready(upstream: SocketAddr, path: &str) -> Result<(), AdapterError
 struct HttpSession {
     instance_id: String,
     config: HttpAdapterConfig,
+    listener: Option<TcpListener>,
+    observations: Arc<dyn ObservationSink>,
     stop: Arc<std::sync::atomic::AtomicBool>,
     failure: Arc<Mutex<Option<String>>>,
     observed_responses: Arc<Mutex<VecDeque<HttpEvent>>>,
@@ -177,6 +173,21 @@ impl AttachedAdapter for HttpSession {
         record.adapter_id == HTTP_ADAPTER_ID && record.port_id.as_str() == self.config.port_id
     }
 
+    fn activate(&mut self) -> Result<(), AdapterError> {
+        let Some(listener) = self.listener.take() else {
+            return Ok(());
+        };
+        self.join = Some(spawn_proxy(
+            listener,
+            self.config.clone(),
+            Arc::clone(&self.observations),
+            Arc::clone(&self.stop),
+            Arc::clone(&self.failure),
+            Arc::clone(&self.observed_responses),
+        ));
+        Ok(())
+    }
+
     fn apply(
         &mut self,
         record: &RecordEnvelope,
@@ -184,9 +195,13 @@ impl AttachedAdapter for HttpSession {
     ) -> Result<(), AdapterError> {
         match read_event(record, context)? {
             request @ HttpEvent::Request { .. } => {
-                let mut stream = connect_with_retry(self.config.listen)?;
+                let mut stream = connect_with_retry(self.config.upstream)?;
                 stream.write_all(&encode_request(&request)?)?;
-                let _ = read_http_message(&mut stream)?;
+                let response = parse_response(&read_http_message(&mut stream)?)?;
+                self.observed_responses
+                    .lock()
+                    .map_err(|_| AdapterError::Operation("HTTP response queue poisoned".into()))?
+                    .push_back(response);
                 Ok(())
             }
             expected @ HttpEvent::Response { .. } => {
