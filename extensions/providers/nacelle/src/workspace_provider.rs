@@ -49,7 +49,9 @@ impl NacelleWorkspaceProvider {
         }
     }
 
-    pub fn bind_source(
+    /// Register a source directory produced from the matching sealed closure.
+    /// Callers must not pass a mutable authoring repository.
+    pub fn bind_materialized_source(
         &self,
         source: ContentRef,
         repository_root: impl Into<PathBuf>,
@@ -323,7 +325,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let source = ContentRef::parse(format!("blake3:{}", "ab".repeat(32))).unwrap();
         let provider = NacelleWorkspaceProvider::default();
-        provider.bind_source(source.clone(), dir.path()).unwrap();
+        provider
+            .bind_materialized_source(source.clone(), dir.path())
+            .unwrap();
         let workspace = WorkspaceResidual {
             source: source.to_string(),
             toolchain: ToolchainConstraint {

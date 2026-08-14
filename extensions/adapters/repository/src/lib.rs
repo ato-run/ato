@@ -61,7 +61,6 @@ pub struct CompiledRepository {
     pub source: ContentRef,
     pub evidence: InferenceEvidence,
     pub resolution: LockedResolution,
-    pub repository_root: PathBuf,
 }
 
 /// Pinned repository resolution evidence. This is adapter data, not a
@@ -257,7 +256,6 @@ fn compile_repository_with_resolution(
             authoring_manifest_used,
         },
         resolution,
-        repository_root: root.to_path_buf(),
     })
 }
 
@@ -528,6 +526,7 @@ fn executable(_metadata: &fs::Metadata) -> bool {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AuthoringFile {
     workspace: AuthoringWorkspace,
 }
@@ -553,11 +552,9 @@ fn load_authoring(root: &Path) -> Result<Option<AuthoringWorkspace>, RepositoryE
         return Ok(None);
     }
     let raw = fs::read_to_string(path)?;
-    let parsed: Result<AuthoringFile, _> = toml::from_str(&raw);
-    match parsed {
-        Ok(file) => Ok(Some(file.workspace)),
-        Err(_) => Ok(None),
-    }
+    let file: AuthoringFile =
+        toml::from_str(&raw).map_err(|error| RepositoryError::Authoring(error.to_string()))?;
+    Ok(Some(file.workspace))
 }
 
 struct InferredWorkspace {
@@ -767,6 +764,47 @@ mod tests {
 
         assert_ne!(alice.source, bob.source);
         assert_ne!(alice.computation.residual, bob.computation.residual);
+    }
+
+    #[test]
+    fn sealed_source_materialization_ignores_later_authoring_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("main.py"), "print('sealed')").unwrap();
+        let objects = MemoryObjectStore::default();
+        let compiled =
+            compile_repository(dir.path(), &objects, RepositoryOptions::default()).unwrap();
+        fs::write(dir.path().join("main.py"), "print('mutable')").unwrap();
+
+        let destination_parent = tempfile::tempdir().unwrap();
+        let destination = destination_parent.path().join("workspace");
+        materialize_source(&compiled.source, &objects, &destination).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(destination.join("main.py")).unwrap(),
+            "print('sealed')"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("main.py")).unwrap(),
+            "print('mutable')"
+        );
+    }
+
+    #[test]
+    fn present_invalid_or_unsupported_capsule_toml_fails_closed() {
+        for manifest in [
+            "[workspace\ntoolchain = 'python'",
+            "schema = 'legacy-v0'\n[workspace]\ntoolchain = 'python'\nentrypoint = ['python', 'main.py']",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            fs::write(dir.path().join("main.py"), "print('must not infer')").unwrap();
+            fs::write(dir.path().join("capsule.toml"), manifest).unwrap();
+            let objects = MemoryObjectStore::default();
+
+            assert!(matches!(
+                compile_repository(dir.path(), &objects, RepositoryOptions::default()),
+                Err(RepositoryError::Authoring(_))
+            ));
+        }
     }
 
     #[test]
