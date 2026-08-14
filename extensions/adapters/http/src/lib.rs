@@ -2,13 +2,18 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::thread::JoinHandle;
 use std::time::Duration;
 
-use ato_adapter_api::{Adapter, AdapterCapabilities, AdapterContext, AdapterError};
+use ato_adapter_api::{
+    AdapterAttachContext, AdapterCapabilities, AdapterContext, AdapterError, AdapterFactory,
+    AdapterInstance, AdapterObservation, AttachedAdapter, ObservationSink,
+};
 use ato_objects::{RecordEnvelope, read_exact_object};
 use serde::{Deserialize, Serialize};
 
@@ -49,7 +54,15 @@ pub fn decode_event(bytes: &[u8]) -> Result<HttpEvent, serde_json::Error> {
 #[derive(Default)]
 pub struct HttpAdapter;
 
-impl Adapter for HttpAdapter {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HttpAdapterConfig {
+    pub listen: SocketAddr,
+    pub upstream: SocketAddr,
+    pub port_id: String,
+}
+
+impl AdapterFactory for HttpAdapter {
     fn id(&self) -> &str {
         HTTP_ADAPTER_ID
     }
@@ -63,30 +76,236 @@ impl Adapter for HttpAdapter {
         }
     }
 
-    fn apply(
+    fn preflight(
         &self,
+        instance: &AdapterInstance,
+        _context: &AdapterContext<'_>,
+    ) -> Result<(), AdapterError> {
+        parse_config(instance).map(|_| ())
+    }
+
+    fn attach(
+        &self,
+        instance: &AdapterInstance,
+        context: &AdapterAttachContext<'_>,
+    ) -> Result<Box<dyn AttachedAdapter>, AdapterError> {
+        let config = parse_config(instance)?;
+        let listener = TcpListener::bind(config.listen)?;
+        listener.set_nonblocking(true)?;
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let failure = Arc::new(Mutex::new(None));
+        let observed_responses = Arc::new(Mutex::new(VecDeque::new()));
+        let join = spawn_proxy(
+            listener,
+            config.clone(),
+            Arc::clone(&context.observations),
+            Arc::clone(&stop),
+            Arc::clone(&failure),
+            Arc::clone(&observed_responses),
+        );
+        Ok(Box::new(HttpSession {
+            instance_id: instance.instance_id.clone(),
+            config,
+            stop,
+            failure,
+            observed_responses,
+            join: Some(join),
+        }))
+    }
+}
+
+struct HttpSession {
+    instance_id: String,
+    config: HttpAdapterConfig,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    failure: Arc<Mutex<Option<String>>>,
+    observed_responses: Arc<Mutex<VecDeque<HttpEvent>>>,
+    join: Option<JoinHandle<()>>,
+}
+
+impl AttachedAdapter for HttpSession {
+    fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
+    fn adapter_id(&self) -> &str {
+        HTTP_ADAPTER_ID
+    }
+
+    fn capabilities(&self) -> AdapterCapabilities {
+        AdapterFactory::capabilities(&HttpAdapter)
+    }
+
+    fn accepts(&self, record: &RecordEnvelope) -> bool {
+        record.adapter_id == HTTP_ADAPTER_ID && record.port_id.as_str() == self.config.port_id
+    }
+
+    fn apply(
+        &mut self,
         record: &RecordEnvelope,
         context: &AdapterContext<'_>,
     ) -> Result<(), AdapterError> {
-        self.verify(record, context)
+        match read_event(record, context)? {
+            request @ HttpEvent::Request { .. } => {
+                let mut stream = connect_with_retry(self.config.listen)?;
+                stream.write_all(&encode_request(&request)?)?;
+                let _ = read_http_message(&mut stream)?;
+                Ok(())
+            }
+            expected @ HttpEvent::Response { .. } => {
+                let actual = self
+                    .observed_responses
+                    .lock()
+                    .map_err(|_| AdapterError::Operation("HTTP response queue poisoned".into()))?
+                    .pop_front()
+                    .ok_or_else(|| {
+                        AdapterError::Operation("HTTP replay produced no response".into())
+                    })?;
+                if actual == expected {
+                    Ok(())
+                } else {
+                    Err(AdapterError::Operation(format!(
+                        "HTTP replay response mismatch: expected {expected:?}, got {actual:?}"
+                    )))
+                }
+            }
+        }
     }
 
     fn verify(
-        &self,
+        &mut self,
         record: &RecordEnvelope,
         context: &AdapterContext<'_>,
     ) -> Result<(), AdapterError> {
-        let metadata = context.objects.metadata(&record.payload_ref)?;
-        let bytes = read_exact_object(
-            context.objects,
-            &record.payload_ref,
-            metadata.size,
-            16 << 20,
-        )?;
-        decode_event(&bytes)
-            .map(|_| ())
-            .map_err(|error| AdapterError::Operation(error.to_string()))
+        read_event(record, context).map(|_| ())
     }
+
+    fn quiesce(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        let _ = TcpStream::connect(self.config.listen);
+        if let Some(join) = self.join.take() {
+            join.join()
+                .map_err(|_| AdapterError::Operation("HTTP adapter thread panicked".into()))?;
+        }
+        if let Some(error) = self
+            .failure
+            .lock()
+            .map_err(|_| AdapterError::Operation("HTTP failure state poisoned".into()))?
+            .take()
+        {
+            return Err(AdapterError::Operation(error));
+        }
+        Ok(())
+    }
+
+    fn detach(&mut self, context: &AdapterContext<'_>) -> Result<(), AdapterError> {
+        self.quiesce(context)
+    }
+}
+
+fn parse_config(instance: &AdapterInstance) -> Result<HttpAdapterConfig, AdapterError> {
+    if instance.adapter_id != HTTP_ADAPTER_ID {
+        return Err(AdapterError::InvalidConfig(format!(
+            "HTTP factory cannot attach `{}`",
+            instance.adapter_id
+        )));
+    }
+    let config: HttpAdapterConfig = serde_json::from_value(instance.config.clone())?;
+    ato_computation::PortId::parse(&config.port_id)
+        .map_err(|error| AdapterError::InvalidConfig(error.to_string()))?;
+    Ok(config)
+}
+
+fn read_event(
+    record: &RecordEnvelope,
+    context: &AdapterContext<'_>,
+) -> Result<HttpEvent, AdapterError> {
+    let metadata = context.objects.metadata(&record.payload_ref)?;
+    let bytes = read_exact_object(
+        context.objects,
+        &record.payload_ref,
+        metadata.size,
+        16 << 20,
+    )?;
+    decode_event(&bytes).map_err(|error| AdapterError::Operation(error.to_string()))
+}
+
+fn spawn_proxy(
+    listener: TcpListener,
+    config: HttpAdapterConfig,
+    observations: Arc<dyn ObservationSink>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    failure: Arc<Mutex<Option<String>>>,
+    observed_responses: Arc<Mutex<VecDeque<HttpEvent>>>,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        while !stop.load(std::sync::atomic::Ordering::Acquire) {
+            match listener.accept() {
+                Ok((mut client, _)) => {
+                    if stop.load(std::sync::atomic::Ordering::Acquire) {
+                        break;
+                    }
+                    let result = proxy_exchange(
+                        &mut client,
+                        config.upstream,
+                        &ato_computation::PortId::parse(&config.port_id)
+                            .expect("preflight validated HTTP port id"),
+                        &mut |observation: AdapterObservation| {
+                            if observation.direction == ato_objects::Direction::Outbound
+                                && let Ok(event) = decode_event(&observation.payload)
+                                && let Ok(mut queue) = observed_responses.lock()
+                            {
+                                queue.push_back(event);
+                            }
+                            if let Err(error) = observations.emit(observation)
+                                && let Ok(mut slot) = failure.lock()
+                            {
+                                *slot = Some(error.to_string());
+                            }
+                        },
+                    );
+                    if let Err(error) = result
+                        && let Ok(mut slot) = failure.lock()
+                    {
+                        *slot = Some(error.to_string());
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => {
+                    if let Ok(mut slot) = failure.lock() {
+                        *slot = Some(error.to_string());
+                    }
+                    break;
+                }
+            }
+        }
+    })
+}
+
+fn encode_request(event: &HttpEvent) -> Result<Vec<u8>, AdapterError> {
+    let HttpEvent::Request {
+        method,
+        path,
+        headers,
+        body,
+    } = event
+    else {
+        return Err(AdapterError::Operation(
+            "cannot encode response as HTTP request".into(),
+        ));
+    };
+    let mut bytes = format!("{method} {path} HTTP/1.1\r\n").into_bytes();
+    for (name, value) in headers {
+        if name.eq_ignore_ascii_case("content-length") {
+            continue;
+        }
+        bytes.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
+    }
+    bytes.extend_from_slice(format!("content-length: {}\r\n\r\n", body.len()).as_bytes());
+    bytes.extend_from_slice(body);
+    Ok(bytes)
 }
 
 /// Runs a real HTTP/1 proxy until its owning process is stopped. Every inbound
@@ -116,6 +335,7 @@ fn proxy_exchange(
     let request_bytes = read_http_message(client)?;
     let request = parse_request(&request_bytes)?;
     observe(ato_adapter_api::AdapterObservation {
+        adapter_id: HTTP_ADAPTER_ID.to_owned(),
         protocol_id: ato_computation::ProtocolId::parse(HTTP_PROTOCOL_ID)
             .expect("valid static HTTP protocol id"),
         port_id: port_id.clone(),
@@ -130,6 +350,7 @@ fn proxy_exchange(
     let response = parse_response(&response_bytes)?;
     client.write_all(&response_bytes)?;
     observe(ato_adapter_api::AdapterObservation {
+        adapter_id: HTTP_ADAPTER_ID.to_owned(),
         protocol_id: ato_computation::ProtocolId::parse(HTTP_PROTOCOL_ID)
             .expect("valid static HTTP protocol id"),
         port_id: port_id.clone(),

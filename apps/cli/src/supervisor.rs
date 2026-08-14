@@ -1,20 +1,28 @@
 use std::collections::BTreeMap;
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use ato_adapter_api::AdapterContext;
-use ato_adapter_http::{HTTP_ADAPTER_ID, serve_proxy};
-use ato_adapter_process::{ProcessAdapter, ProcessSpec, terminate_process_tree};
-use ato_computation::ComputationRef;
-use ato_objects::{ActiveRun, LocalCapsuleRepository, ObjectStore, RecordId};
+use ato_adapter_api::{
+    AdapterAttachContext, AdapterContext, AdapterError, AdapterObservation, IgnoreObservations,
+    ObservationSink,
+};
+use ato_adapter_process::terminate_process_tree;
+use ato_adapter_workspace::restore_workspace;
+use ato_computation::{ComputationRef, ContentRef};
+use ato_materializer_api::{MaterializerError, Realization, RealizationDriver, ReplayRuntime};
+use ato_objects::{ActiveRun, LocalCapsuleRepository, ObjectStore, RecordEnvelope, RecordId};
 
 use crate::{
     adapter_registry,
-    authoring::{AdapterConfig, load_state},
+    authoring::{adapter_instances, load_state},
 };
+
+const STOP_REQUEST: &str = "runs/stop.request";
+const STOP_ACK: &str = "runs/stop.ack";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SupervisorState {
@@ -78,15 +86,26 @@ pub(crate) fn worker(project: &Path, branch: &str, head: &ComputationRef) -> Res
     let repository = LocalCapsuleRepository::open(project)?;
     enter(SupervisorState::Preparing);
     let config = load_state(head, repository.objects())?.config;
+    let bindings: BTreeMap<String, String> = std::env::var("ATO_RUNTIME_BINDINGS")
+        .ok()
+        .and_then(|value| serde_json::from_str(&value).ok())
+        .unwrap_or_default();
+    let instances = adapter_instances(&config, &bindings, false)?;
     let registry = adapter_registry()?;
-    let context = AdapterContext {
-        workspace: repository.project(),
-        objects: repository.objects(),
+    let sink: Arc<dyn ObservationSink> = Arc::new(RepositoryObservationSink {
+        project: repository.project().to_path_buf(),
+        branch: branch.to_owned(),
+        head: head.clone(),
+    });
+    let context = AdapterAttachContext {
+        runtime: AdapterContext {
+            workspace: repository.project(),
+            objects: repository.objects(),
+        },
+        observations: sink,
     };
-    for configured in &config.adapter {
-        registry.get(&configured.use_adapter)?.preflight(&context)?;
-    }
     enter(SupervisorState::Starting);
+    let mut sessions = registry.attach_all(&instances, &context)?;
     let active = ActiveRun {
         branch: branch.to_owned(),
         head: head.clone(),
@@ -100,45 +119,23 @@ pub(crate) fn worker(project: &Path, branch: &str, head: &ComputationRef) -> Res
     repository.set_active_run(&active)?;
     enter(SupervisorState::Active);
 
-    let bindings: BTreeMap<String, String> = std::env::var("ATO_RUNTIME_BINDINGS")
-        .ok()
-        .and_then(|value| serde_json::from_str(&value).ok())
-        .unwrap_or_default();
-    let environment: BTreeMap<_, _> = config
-        .binding
-        .iter()
-        .filter_map(|binding| {
-            bindings
-                .get(&binding.id)
-                .map(|value| (binding.environment.clone(), value.clone()))
-        })
-        .collect();
-    let mut processes = Vec::new();
-    for process in config.process {
-        let adapter = ProcessAdapter::new(ProcessSpec {
-            id: process.id,
-            command: process.command,
-            cwd: process.cwd,
-            environment: environment.clone(),
-        })?;
-        processes.push(adapter.spawn_attached(repository.project())?);
-    }
-    for configured in &config.adapter {
-        registry.get(&configured.use_adapter)?.attach(&context)?;
-    }
-    spawn_http_adapters(&repository, &config.adapter, true)?;
-    if processes.is_empty() {
-        loop {
-            std::thread::sleep(Duration::from_secs(60));
-        }
-    }
-    for process in &mut processes {
-        let _ = process.wait()?;
-    }
-    // A failed or exited child is still a valid handoff point. Keep the Run
-    // active until an explicit `ato stop` seals it.
+    let stop_request = repository.root().join(STOP_REQUEST);
+    let stop_ack = repository.root().join(STOP_ACK);
     loop {
-        std::thread::sleep(Duration::from_secs(60));
+        if stop_request.exists() {
+            enter(SupervisorState::Stopping);
+            let result = quiesce_and_detach(&mut sessions, &context.runtime);
+            let message = match &result {
+                Ok(()) => "ok".to_owned(),
+                Err(error) => format!("error:{error:#}"),
+            };
+            fs::write(&stop_ack, message)?;
+            result?;
+            loop {
+                std::thread::sleep(Duration::from_secs(60));
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -156,6 +153,25 @@ pub(crate) fn stop_active(repository: &LocalCapsuleRepository) -> Result<Option<
             run.pid
         );
     }
+    let request = repository.root().join(STOP_REQUEST);
+    let ack = repository.root().join(STOP_ACK);
+    let _ = fs::remove_file(&ack);
+    fs::write(&request, b"stop")?;
+    let mut acknowledged = None;
+    for _ in 0..250 {
+        if let Ok(value) = fs::read_to_string(&ack) {
+            acknowledged = Some(value);
+            break;
+        }
+        if process_start_time(run.pid).is_none() {
+            bail!("active Run exited before Adapter quiesce acknowledgement");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let acknowledged = acknowledged.context("timed out waiting for live Adapters to quiesce")?;
+    if let Some(error) = acknowledged.strip_prefix("error:") {
+        bail!("live Adapter quiesce failed: {error}");
+    }
     terminate_process_tree(run.pid, run.process_group)?;
     for _ in 0..100 {
         if process_start_time(run.pid).is_none() {
@@ -163,108 +179,191 @@ pub(crate) fn stop_active(repository: &LocalCapsuleRepository) -> Result<Option<
         }
         std::thread::sleep(Duration::from_millis(20));
     }
+    let _ = fs::remove_file(request);
+    let _ = fs::remove_file(ack);
     enter(SupervisorState::Sealed);
     Ok(Some(run))
 }
 
-pub(crate) fn run_foreground(
-    project: &Path,
-    head: &ComputationRef,
-    bindings: &BTreeMap<String, String>,
-) -> Result<()> {
-    let repository = LocalCapsuleRepository::open(project)?;
-    let config = load_state(head, repository.objects())?.config;
-    spawn_http_adapters(&repository, &config.adapter, false)?;
-    let environment: BTreeMap<_, _> = config
-        .binding
-        .iter()
-        .filter_map(|binding| {
-            bindings
-                .get(&binding.id)
-                .map(|value| (binding.environment.clone(), value.clone()))
-        })
-        .collect();
-    let mut processes = Vec::new();
-    for process in config.process {
-        let adapter = ProcessAdapter::new(ProcessSpec {
-            id: process.id,
-            command: process.command,
-            cwd: process.cwd,
-            environment: environment.clone(),
-        })?;
-        processes.push(adapter.spawn(project)?);
+pub(crate) struct CliRealizationDriver {
+    project: std::path::PathBuf,
+    bindings: BTreeMap<String, String>,
+}
+
+impl CliRealizationDriver {
+    pub(crate) fn new(project: &Path, bindings: &BTreeMap<String, String>) -> Self {
+        Self {
+            project: project.to_path_buf(),
+            bindings: bindings.clone(),
+        }
     }
-    for process in &mut processes {
-        let _ = process.wait()?;
+}
+
+impl RealizationDriver for CliRealizationDriver {
+    fn begin(&self, anchor: &ComputationRef) -> Result<Box<dyn ReplayRuntime>, MaterializerError> {
+        let repository =
+            LocalCapsuleRepository::open(&self.project).map_err(materializer_operation)?;
+        let state = load_state(anchor, repository.objects()).map_err(materializer_operation)?;
+        restore_workspace(
+            &ContentRef::parse(&state.workspace_snapshot).map_err(materializer_operation)?,
+            &self.project,
+            repository.objects(),
+        )
+        .map_err(materializer_operation)?;
+        let instances = adapter_instances(&state.config, &self.bindings, true)
+            .map_err(materializer_operation)?;
+        let registry = adapter_registry().map_err(materializer_operation)?;
+        let context = AdapterAttachContext {
+            runtime: AdapterContext {
+                workspace: &self.project,
+                objects: repository.objects(),
+            },
+            observations: Arc::new(IgnoreObservations),
+        };
+        let sessions = registry
+            .attach_all(&instances, &context)
+            .map_err(materializer_operation)?;
+        Ok(Box::new(CliReplayRuntime {
+            project: self.project.clone(),
+            sessions,
+        }))
+    }
+}
+
+struct CliReplayRuntime {
+    project: std::path::PathBuf,
+    sessions: Vec<Box<dyn ato_adapter_api::AttachedAdapter>>,
+}
+
+impl ReplayRuntime for CliReplayRuntime {
+    fn apply(&mut self, record: &RecordEnvelope) -> Result<(), MaterializerError> {
+        let repository =
+            LocalCapsuleRepository::open(&self.project).map_err(materializer_operation)?;
+        let mut matches = self
+            .sessions
+            .iter_mut()
+            .filter(|session| session.accepts(record));
+        let session = matches.next().ok_or_else(|| {
+            MaterializerError::Operation(format!(
+                "no attached Adapter accepts record {:?} ({})",
+                record.id, record.adapter_id
+            ))
+        })?;
+        if matches.next().is_some() {
+            return Err(MaterializerError::Operation(format!(
+                "multiple attached Adapters accept record {:?} ({})",
+                record.id, record.adapter_id
+            )));
+        }
+        session
+            .apply(
+                record,
+                &AdapterContext {
+                    workspace: &self.project,
+                    objects: repository.objects(),
+                },
+            )
+            .map_err(materializer_operation)
+    }
+
+    fn finish(
+        self: Box<Self>,
+        target: &ComputationRef,
+    ) -> Result<Box<dyn Realization>, MaterializerError> {
+        Ok(Box::new(CliRealization {
+            project: self.project,
+            sessions: self.sessions,
+            target: target.clone(),
+        }))
+    }
+}
+
+struct CliRealization {
+    project: std::path::PathBuf,
+    sessions: Vec<Box<dyn ato_adapter_api::AttachedAdapter>>,
+    target: ComputationRef,
+}
+
+impl Realization for CliRealization {
+    fn target(&self) -> &ComputationRef {
+        &self.target
+    }
+
+    fn run(mut self: Box<Self>) -> Result<(), MaterializerError> {
+        let repository =
+            LocalCapsuleRepository::open(&self.project).map_err(materializer_operation)?;
+        let mut result = Ok(());
+        for session in &mut self.sessions {
+            if let Err(error) = session.wait() {
+                result = Err(MaterializerError::Operation(error.to_string()));
+                break;
+            }
+        }
+        let context = AdapterContext {
+            workspace: &self.project,
+            objects: repository.objects(),
+        };
+        let detach =
+            quiesce_and_detach(&mut self.sessions, &context).map_err(materializer_operation);
+        result.and(detach)
+    }
+}
+
+fn materializer_operation(error: impl std::fmt::Display) -> MaterializerError {
+    MaterializerError::Operation(error.to_string())
+}
+
+fn quiesce_and_detach(
+    sessions: &mut [Box<dyn ato_adapter_api::AttachedAdapter>],
+    context: &AdapterContext<'_>,
+) -> Result<()> {
+    for session in sessions.iter_mut() {
+        session.quiesce(context)?;
+    }
+    for session in sessions.iter_mut().rev() {
+        session.detach(context)?;
     }
     Ok(())
 }
 
-fn spawn_http_adapters(
-    repository: &LocalCapsuleRepository,
-    configured: &[AdapterConfig],
-    record: bool,
-) -> Result<()> {
-    for adapter in configured {
-        if adapter.use_adapter != HTTP_ADAPTER_ID {
-            continue;
-        }
-        let listen = adapter
-            .listen
-            .as_deref()
-            .context("ato.http@1 adapter requires listen")?
-            .parse()?;
-        let upstream = adapter
-            .upstream
-            .as_deref()
-            .context("ato.http@1 adapter requires upstream")?
-            .parse()?;
-        let port = ato_computation::PortId::parse(
-            adapter
-                .port
-                .as_deref()
-                .context("ato.http@1 adapter requires port")?,
-        )?;
-        let project = repository.project().to_path_buf();
-        let branch = repository
-            .active_run()?
-            .map_or_else(|| "ephemeral".to_owned(), |run| run.branch);
-        std::thread::spawn(move || {
-            let _ = serve_proxy(listen, upstream, port, move |observation| {
-                if !record {
-                    return;
-                }
-                let Ok(repository) = LocalCapsuleRepository::open(&project) else {
-                    return;
-                };
-                let Ok(Some(active)) = repository.active_run() else {
-                    return;
-                };
-                let Ok(payload_ref) = repository.objects().put(&observation.payload) else {
-                    return;
-                };
-                let previous = repository
-                    .records_for_stream(&branch, None)
-                    .ok()
-                    .and_then(|records| records.last().map(|record| record.id.clone()));
-                let _ = repository.append_record(ato_objects::RecordEnvelope {
-                    id: RecordId::new(&branch, 0),
-                    adapter_id: HTTP_ADAPTER_ID.to_owned(),
-                    protocol_id: observation.protocol_id,
-                    port_id: observation.port_id,
-                    direction: observation.direction,
-                    payload_ref,
-                    head_before: active.head.clone(),
-                    head_after: active.head,
-                    caused_by: previous.into_iter().collect(),
-                    observed_at: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map_or_else(|_| "0".to_owned(), |value| value.as_secs().to_string()),
-                });
-            });
-        });
+struct RepositoryObservationSink {
+    project: std::path::PathBuf,
+    branch: String,
+    head: ComputationRef,
+}
+
+impl ObservationSink for RepositoryObservationSink {
+    fn emit(&self, observation: AdapterObservation) -> Result<(), AdapterError> {
+        let repository = LocalCapsuleRepository::open(&self.project)
+            .map_err(|error| AdapterError::Operation(error.to_string()))?;
+        let payload_ref = repository.objects().put(&observation.payload)?;
+        let previous = repository
+            .records_for_stream(&self.branch, None)
+            .map_err(|error| AdapterError::Operation(error.to_string()))?
+            .last()
+            .map(|record| record.id.clone());
+        repository
+            .append_record(RecordEnvelope {
+                id: RecordId::new(&self.branch, 0),
+                adapter_id: observation.adapter_id,
+                protocol_id: observation.protocol_id,
+                port_id: observation.port_id,
+                direction: observation.direction,
+                payload_ref,
+                head_before: self.head.clone(),
+                head_after: self.head.clone(),
+                caused_by: if observation.caused_by.is_empty() {
+                    previous.into_iter().collect()
+                } else {
+                    observation.caused_by
+                },
+                observed_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or_else(|_| "0".to_owned(), |value| value.as_secs().to_string()),
+            })
+            .map_err(|error| AdapterError::Operation(error.to_string()))?;
+        Ok(())
     }
-    Ok(())
 }
 
 #[cfg(unix)]

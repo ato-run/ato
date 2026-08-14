@@ -6,7 +6,10 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use ato_adapter_api::{Adapter, AdapterCapabilities, AdapterContext, AdapterError};
+use ato_adapter_api::{
+    AdapterAttachContext, AdapterCapabilities, AdapterContext, AdapterError, AdapterFactory,
+    AdapterInstance, AttachedAdapter,
+};
 use ato_computation::ContentRef;
 use ato_objects::{ObjectResolver, ObjectStore, RecordEnvelope, read_exact_object};
 use serde::{Deserialize, Serialize};
@@ -83,7 +86,7 @@ pub fn decode_mutation(bytes: &[u8]) -> Result<WorkspaceMutation, WorkspaceError
 #[derive(Default)]
 pub struct WorkspaceAdapter;
 
-impl Adapter for WorkspaceAdapter {
+impl AdapterFactory for WorkspaceAdapter {
     fn id(&self) -> &str {
         WORKSPACE_ADAPTER_ID
     }
@@ -97,8 +100,36 @@ impl Adapter for WorkspaceAdapter {
         }
     }
 
-    fn apply(
+    fn attach(
         &self,
+        instance: &AdapterInstance,
+        _context: &AdapterAttachContext<'_>,
+    ) -> Result<Box<dyn AttachedAdapter>, AdapterError> {
+        Ok(Box::new(WorkspaceSession {
+            instance_id: instance.instance_id.clone(),
+        }))
+    }
+}
+
+struct WorkspaceSession {
+    instance_id: String,
+}
+
+impl AttachedAdapter for WorkspaceSession {
+    fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
+    fn adapter_id(&self) -> &str {
+        WORKSPACE_ADAPTER_ID
+    }
+
+    fn capabilities(&self) -> AdapterCapabilities {
+        AdapterFactory::capabilities(&WorkspaceAdapter)
+    }
+
+    fn apply(
+        &mut self,
         record: &RecordEnvelope,
         context: &AdapterContext<'_>,
     ) -> Result<(), AdapterError> {
@@ -116,7 +147,7 @@ impl Adapter for WorkspaceAdapter {
     }
 
     fn verify(
-        &self,
+        &mut self,
         record: &RecordEnvelope,
         context: &AdapterContext<'_>,
     ) -> Result<(), AdapterError> {
