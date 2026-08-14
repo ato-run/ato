@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use ato_computation::{
     Boundary, ComputationObject, ComputationRef, PortDef, PortId, ProtocolId, ResolvedComputation,
@@ -7,15 +7,24 @@ use ato_computation::{
 };
 use ato_kernel::{
     Action, ChoiceId, Kernel, ProtocolError, ProtocolPayload, ProtocolSemantics, Run,
-    SemanticError, SemanticHost, SemanticStep, Semantics, TransitionOffer,
+    SemanticError, SemanticHost, SemanticStep, Semantics, Transition, TransitionOffer,
+    TransitionSink,
 };
 use ato_objects::{MemoryObjectStore, ObjectStore};
 use ato_semantics_compose::{
-    ComposeSemantics, CompositeResidual, Connection, Endpoint, NodeId, ProtocolRolePolicy,
-    encode_composite_residual,
+    ComposeSemantics, CompositeResidual, Connection, Endpoint, NodeId, encode_composite_residual,
 };
 
 const TEXT_PROTOCOL: &str = "example.text@1";
+
+#[derive(Default)]
+struct RecordingSink(Mutex<Vec<Transition>>);
+
+impl TransitionSink for RecordingSink {
+    fn observe(&self, transition: &Transition) {
+        self.0.lock().unwrap().push(transition.clone());
+    }
+}
 
 struct TextProtocol {
     id: ProtocolId,
@@ -26,28 +35,6 @@ impl TextProtocol {
         Self {
             id: ProtocolId::parse(TEXT_PROTOCOL).unwrap(),
         }
-    }
-}
-
-impl ProtocolRolePolicy for TextProtocol {
-    fn connection_roles_compatible(
-        &self,
-        protocol: &ProtocolId,
-        first: &RoleId,
-        second: &RoleId,
-    ) -> bool {
-        protocol == &self.id
-            && BTreeSet::from([first.as_str(), second.as_str()])
-                == BTreeSet::from(["receiver", "sender"])
-    }
-
-    fn export_role_compatible(
-        &self,
-        protocol: &ProtocolId,
-        parent: &RoleId,
-        child: &RoleId,
-    ) -> bool {
-        protocol == &self.id && parent == child
     }
 }
 
@@ -243,14 +230,11 @@ fn payload_text(payload: &ProtocolPayload) -> Result<&str, SemanticError> {
 #[test]
 fn behavioral_hello_world_branches_from_same_computation() {
     let objects = Arc::new(MemoryObjectStore::default());
-    let mut kernel = Kernel::new(objects.clone());
+    let sink = Arc::new(RecordingSink::default());
+    let mut kernel = Kernel::new(objects.clone()).with_transition_sink(sink.clone());
     kernel.register(Arc::new(NameProvider::new())).unwrap();
     kernel.register(Arc::new(Greeter::new())).unwrap();
-    kernel
-        .register(Arc::new(ComposeSemantics::new(Arc::new(
-            TextProtocol::new(),
-        ))))
-        .unwrap();
+    kernel.register(Arc::new(ComposeSemantics::new())).unwrap();
     kernel
         .register_protocol(Arc::new(TextProtocol::new()))
         .unwrap();
@@ -328,6 +312,15 @@ fn behavioral_hello_world_branches_from_same_computation() {
     }
     assert_branch_residuals(&kernel, &alice, "Alice");
     assert_branch_residuals(&kernel, &bob, "Bob");
+    let visible = sink.0.lock().unwrap();
+    assert_eq!(visible.len(), 6);
+    assert_eq!(
+        visible
+            .iter()
+            .filter(|transition| matches!(transition.offer.action, Action::Tau))
+            .count(),
+        2
+    );
 }
 
 fn branch(kernel: &Kernel, computation: &ComputationRef, name: &str) -> [ComputationRef; 3] {
