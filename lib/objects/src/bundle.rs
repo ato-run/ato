@@ -12,7 +12,7 @@ use crate::{
     resolve_computation,
 };
 
-pub const BUNDLE_VERSION: u32 = 1;
+pub const BUNDLE_VERSION: u32 = 2;
 const MAX_BUNDLE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_BUNDLE_OBJECTS: usize = 100_000;
 const MAX_BUNDLE_OBJECT_BYTES: u64 = 256 * 1024 * 1024;
@@ -35,9 +35,22 @@ pub trait ComputationReferences: Send + Sync {
     ) -> Result<Vec<ObjectLink>, BundleError>;
 }
 
+/// Materializer-specific closure discovery without teaching Objects concrete
+/// replay, snapshot, or protocol schemas.
+pub trait MaterializationReferences: Send + Sync {
+    fn materializer_id(&self) -> &str;
+
+    fn outgoing(
+        &self,
+        descriptor: &ContentRef,
+        objects: &dyn ObjectResolver,
+    ) -> Result<Vec<ObjectLink>, BundleError>;
+}
+
 #[derive(Default)]
 pub struct ReferenceRegistry {
     extractors: BTreeMap<SemanticsId, Arc<dyn ComputationReferences>>,
+    materializers: BTreeMap<String, Arc<dyn MaterializationReferences>>,
 }
 
 impl ReferenceRegistry {
@@ -58,6 +71,21 @@ impl ReferenceRegistry {
 
     fn get(&self, semantics: &SemanticsId) -> Option<&dyn ComputationReferences> {
         self.extractors.get(semantics).map(Arc::as_ref)
+    }
+
+    pub fn register_materializer(
+        &mut self,
+        extractor: Arc<dyn MaterializationReferences>,
+    ) -> Result<(), BundleError> {
+        let id = extractor.materializer_id().to_owned();
+        if self.materializers.insert(id.clone(), extractor).is_some() {
+            return Err(BundleError::DuplicateMaterializer(id));
+        }
+        Ok(())
+    }
+
+    fn materializer(&self, id: &str) -> Option<&dyn MaterializationReferences> {
+        self.materializers.get(id).map(Arc::as_ref)
     }
 }
 
@@ -85,10 +113,19 @@ pub struct BundleSignature {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct BundleMaterialization {
+    pub materializer_id: String,
+    pub descriptor_ref: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BundleIndex {
     pub version: u32,
     pub root: String,
     pub objects: Vec<BundleObjectDescriptor>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub materializations: Vec<BundleMaterialization>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub signatures: Vec<BundleSignature>,
 }
@@ -141,6 +178,12 @@ pub enum BundleError {
     MissingExtractor(SemanticsId),
     #[error("reference extractor already registered for semantics `{0}`")]
     DuplicateSemantics(SemanticsId),
+    #[error("no reference extractor registered for materializer `{0}`")]
+    MissingMaterializer(String),
+    #[error("reference extractor already registered for materializer `{0}`")]
+    DuplicateMaterializer(String),
+    #[error("bundle contains duplicate materializer `{0}`")]
+    DuplicateMaterialization(String),
     #[error("bundle signature is malformed")]
     MalformedSignature,
     #[error("bundle signature verification failed")]
@@ -158,7 +201,16 @@ pub fn export_bundle(
     objects: &dyn ObjectResolver,
     references: &ReferenceRegistry,
 ) -> Result<CapsuleBundle, BundleError> {
-    let closure = closure(root, objects, references)?;
+    export_bundle_with_materializations(root, &[], objects, references)
+}
+
+pub fn export_bundle_with_materializations(
+    root: &ComputationRef,
+    materializations: &[BundleMaterialization],
+    objects: &dyn ObjectResolver,
+    references: &ReferenceRegistry,
+) -> Result<CapsuleBundle, BundleError> {
+    let closure = closure(root, materializations, objects, references)?;
     let mut descriptors = Vec::with_capacity(closure.len());
     let mut payloads = Vec::with_capacity(closure.len());
     for (reference, kind) in closure {
@@ -186,6 +238,7 @@ pub fn export_bundle(
             version: BUNDLE_VERSION,
             root: root.to_string(),
             objects: descriptors,
+            materializations: materializations.to_vec(),
             signatures: Vec::new(),
         },
         payloads,
@@ -253,12 +306,15 @@ pub fn import_bundle(
         staging.insert(&reference, &bytes)?;
     }
 
-    let reachable = closure(&root, &staging, references).map_err(|error| match error {
-        BundleError::Object(ObjectError::NotFound(reference)) => {
-            BundleError::IncompleteClosure(reference)
-        }
-        other => other,
-    })?;
+    let reachable =
+        closure(&root, &bundle.index.materializations, &staging, references).map_err(|error| {
+            match error {
+                BundleError::Object(ObjectError::NotFound(reference)) => {
+                    BundleError::IncompleteClosure(reference)
+                }
+                other => other,
+            }
+        })?;
     let declared: BTreeSet<_> = bundle
         .index
         .objects
@@ -285,10 +341,21 @@ pub fn import_bundle(
 
 pub(crate) fn closure(
     root: &ComputationRef,
+    materializations: &[BundleMaterialization],
     objects: &dyn ObjectResolver,
     references: &ReferenceRegistry,
 ) -> Result<BTreeMap<ContentRef, BundleObjectKind>, BundleError> {
     let mut queue = VecDeque::from([ObjectLink::Computation(root.clone())]);
+    for materialization in materializations {
+        let descriptor = parse_content(&materialization.descriptor_ref)?;
+        queue.push_back(ObjectLink::Content(descriptor.clone()));
+        let extractor = references
+            .materializer(&materialization.materializer_id)
+            .ok_or_else(|| {
+                BundleError::MissingMaterializer(materialization.materializer_id.clone())
+            })?;
+        queue.extend(extractor.outgoing(&descriptor, objects)?);
+    }
     let mut result = BTreeMap::new();
     while let Some(link) = queue.pop_front() {
         if result.len() >= MAX_BUNDLE_OBJECTS {
@@ -334,6 +401,16 @@ fn validate_shape(bundle: &CapsuleBundle) -> Result<(), BundleError> {
         return Err(BundleError::UnsupportedVersion(bundle.index.version));
     }
     parse_computation(&bundle.index.root)?;
+    let mut materializers = BTreeSet::new();
+    for materialization in &bundle.index.materializations {
+        reject_path(&materialization.descriptor_ref)?;
+        parse_content(&materialization.descriptor_ref)?;
+        if !materializers.insert(materialization.materializer_id.clone()) {
+            return Err(BundleError::DuplicateMaterialization(
+                materialization.materializer_id.clone(),
+            ));
+        }
+    }
     if bundle.index.objects.len() > MAX_BUNDLE_OBJECTS {
         return Err(BundleError::TooManyObjects(bundle.index.objects.len()));
     }

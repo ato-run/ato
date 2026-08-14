@@ -53,10 +53,18 @@ impl Adapter for HttpAdapter {
     fn capabilities(&self) -> AdapterCapabilities {
         AdapterCapabilities {
             observe: true,
-            apply: false,
+            apply: true,
             verify: true,
             quiesce: true,
         }
+    }
+
+    fn apply(
+        &self,
+        record: &RecordEnvelope,
+        context: &AdapterContext<'_>,
+    ) -> Result<(), AdapterError> {
+        self.verify(record, context)
     }
 
     fn verify(

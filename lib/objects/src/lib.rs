@@ -9,9 +9,10 @@ mod bundle;
 mod repository;
 
 pub use bundle::{
-    BUNDLE_VERSION, BundleError, BundleIndex, BundleObjectDescriptor, BundleObjectKind,
-    CapsuleBundle, ComputationReferences, ObjectLink, ReferenceRegistry, bundle_root,
-    decode_bundle, encode_bundle, export_bundle, import_bundle, sign_bundle,
+    BUNDLE_VERSION, BundleError, BundleIndex, BundleMaterialization, BundleObjectDescriptor,
+    BundleObjectKind, CapsuleBundle, ComputationReferences, MaterializationReferences, ObjectLink,
+    ReferenceRegistry, bundle_root, decode_bundle, encode_bundle, export_bundle,
+    export_bundle_with_materializations, import_bundle, sign_bundle,
 };
 pub use repository::{
     ActiveRun, CapsuleSelector, Direction, LocalCapsuleRepository, RecordEnvelope, RepositoryError,
@@ -279,7 +280,7 @@ impl FsObjectStore {
             );
         }
         for root in roots {
-            retained.extend(bundle::closure(root, self, references)?.into_keys());
+            retained.extend(bundle::closure(root, &[], self, references)?.into_keys());
         }
         let mut removed = 0;
         for algorithm in ["blake3", "sha256"] {

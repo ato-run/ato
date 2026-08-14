@@ -1,4 +1,4 @@
-//! Snapshot materialization provider.
+//! Verify-only snapshot materializer.
 //!
 //! A snapshot is physical evidence that a provider can realize a computation;
 //! it never changes or replaces the computation's identity.
@@ -8,29 +8,33 @@
 use std::path::Path;
 
 use ato_computation::{ComputationRef, ContentRef};
+use ato_materializer_api::{
+    Compatibility, Materializer, MaterializerContext, MaterializerError, RestoreCapability,
+};
 use ato_objects::{
-    ObjectError, ObjectResolver, ObjectStore, RetainedObjectReferences, read_exact_object,
-    resolve_computation,
+    BundleError, MaterializationReferences, ObjectError, ObjectLink, ObjectResolver, ObjectStore,
+    RetainedObjectReferences, read_exact_object, resolve_computation,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const SNAPSHOT_MATERIALIZATION_VERSION: u32 = 1;
+pub const SNAPSHOT_MATERIALIZER_ID: &str = "ato.snapshot@1";
 const MAX_MATERIALIZATION_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RealizationContract {
-    pub provider: String,
+    pub materializer: String,
     pub architecture: String,
     pub operating_system: String,
     pub compatibility: String,
 }
 
 impl RealizationContract {
-    pub fn host(provider: impl Into<String>) -> Self {
+    pub fn host(materializer: impl Into<String>) -> Self {
         Self {
-            provider: provider.into(),
+            materializer: materializer.into(),
             architecture: std::env::consts::ARCH.to_owned(),
             operating_system: std::env::consts::OS.to_owned(),
             compatibility: "exact-host-v1".to_owned(),
@@ -70,7 +74,7 @@ pub enum SnapshotError {
     Json(#[from] serde_json::Error),
     #[error("unsupported snapshot materialization version {0}")]
     Version(u32),
-    #[error("snapshot realization contract does not match this host")]
+    #[error("snapshot compatibility contract does not match this host")]
     IncompatibleHost,
     #[error("invalid snapshot reference: {0}")]
     InvalidReference(String),
@@ -166,6 +170,91 @@ impl RetainedObjectReferences for SnapshotReferences {
                     .map_err(|error| ObjectError::Storage(error.to_string()))
             })
             .collect()
+    }
+}
+
+#[derive(Default)]
+pub struct SnapshotMaterializer;
+
+impl Materializer for SnapshotMaterializer {
+    fn id(&self) -> &str {
+        SNAPSHOT_MATERIALIZER_ID
+    }
+
+    fn restore_capability(&self) -> RestoreCapability {
+        RestoreCapability::VerifyOnly
+    }
+
+    fn encode(
+        &self,
+        target: &ComputationRef,
+        context: &MaterializerContext<'_>,
+    ) -> Result<ContentRef, MaterializerError> {
+        register_materialization(
+            target,
+            RealizationContract::host(SNAPSHOT_MATERIALIZER_ID),
+            &[] as &[&Path],
+            context.objects,
+        )
+        .map(|reference| reference.content_ref().clone())
+        .map_err(|error| MaterializerError::Operation(error.to_string()))
+    }
+
+    fn verify(
+        &self,
+        descriptor: &ContentRef,
+        context: &MaterializerContext<'_>,
+    ) -> Result<ComputationRef, MaterializerError> {
+        verify_materialization(
+            &MaterializationRef(descriptor.clone()),
+            &RealizationContract::host(SNAPSHOT_MATERIALIZER_ID),
+            context.objects,
+        )
+        .map_err(|error| MaterializerError::Operation(error.to_string()))
+    }
+
+    fn compatibility(
+        &self,
+        descriptor: &ContentRef,
+        context: &MaterializerContext<'_>,
+    ) -> Compatibility {
+        match self.verify(descriptor, context) {
+            Ok(_) => Compatibility::Compatible,
+            Err(_) => Compatibility::Incompatible,
+        }
+    }
+}
+
+impl MaterializationReferences for SnapshotReferences {
+    fn materializer_id(&self) -> &str {
+        SNAPSHOT_MATERIALIZER_ID
+    }
+
+    fn outgoing(
+        &self,
+        root: &ContentRef,
+        objects: &dyn ObjectResolver,
+    ) -> Result<Vec<ObjectLink>, BundleError> {
+        let metadata = objects.metadata(root)?;
+        let bytes = read_exact_object(objects, root, metadata.size, MAX_MATERIALIZATION_BYTES)?;
+        let materialization: SnapshotMaterialization = serde_json::from_slice(&bytes)?;
+        let mut links = vec![ObjectLink::Computation(
+            ComputationRef::parse(materialization.computation).map_err(|error| {
+                BundleError::InvalidReference {
+                    value: "snapshot computation".to_owned(),
+                    reason: error.to_string(),
+                }
+            })?,
+        )];
+        for artifact in materialization.artifacts {
+            links.push(ObjectLink::Content(ContentRef::parse(artifact).map_err(
+                |error| BundleError::InvalidReference {
+                    value: "snapshot artifact".to_owned(),
+                    reason: error.to_string(),
+                },
+            )?));
+        }
+        Ok(links)
     }
 }
 
@@ -307,11 +396,14 @@ mod tests {
         assert_eq!(report.retained, 2);
         verify_materialization(&materialization, &RealizationContract::host("test"), &store)
             .unwrap_err();
-        let artifact_reference = snapshot_references
-            .outgoing(materialization.content_ref(), &store)
-            .unwrap()
-            .pop()
-            .unwrap();
+        let artifact_reference = RetainedObjectReferences::outgoing(
+            &snapshot_references,
+            materialization.content_ref(),
+            &store,
+        )
+        .unwrap()
+        .pop()
+        .unwrap();
         assert!(store.metadata(&artifact_reference).is_ok());
     }
 }
