@@ -33,7 +33,7 @@ use clap::{Args, Parser, Subcommand};
 use crate::authoring::{
     AuthoringReferences, evolve_workspace, initial_computation, load_config, load_state,
 };
-use crate::supervisor::{run_foreground, start_durable, stop_active};
+use crate::supervisor::{CliRealizationDriver, start_durable, stop_active};
 
 #[derive(Parser)]
 #[command(
@@ -125,17 +125,13 @@ fn init(args: InitArgs) -> Result<()> {
         );
     }
     let config = load_config(&project)?;
-    preflight(&repository, &config.adapter)?;
+    let bindings: BTreeMap<_, _> = args.bindings.iter().cloned().collect();
+    preflight(&repository, &config, &bindings)?;
     let initial = initial_computation(&repository, config)?;
     repository.update_head("main", None, &initial)?;
     println!("{initial}");
     if !args.initial_only {
-        start_durable(
-            &repository,
-            "main",
-            &initial,
-            &args.bindings.into_iter().collect(),
-        )?;
+        start_durable(&repository, "main", &initial, &bindings)?;
     }
     Ok(())
 }
@@ -183,24 +179,12 @@ fn resume(args: ResumeArgs) -> Result<()> {
 fn stop(capsule: &str) -> Result<()> {
     let project = project_path(capsule, false)?;
     let repository = LocalCapsuleRepository::open(project)?;
-    let active = repository
+    repository
         .active_run()?
         .context("Capsule has no active Run")?;
-    let state = load_state(&active.head, repository.objects())?;
-    let registry = adapter_registry()?;
-    let context = AdapterContext {
-        workspace: repository.project(),
-        objects: repository.objects(),
-    };
-    for configured in &state.config.adapter {
-        registry.get(&configured.use_adapter)?.quiesce(&context)?;
-    }
     let stopped = stop_active(&repository)?.context("Capsule has no active Run")?;
     let head = evolve_workspace(&repository, &stopped.branch, &stopped.head)?;
     repository.update_head(&stopped.branch, Some(&stopped.head), &head)?;
-    for configured in &state.config.adapter {
-        registry.get(&configured.use_adapter)?.detach(&context)?;
-    }
     repository.clear_active_run()?;
     println!("sealed {} at {head}", stopped.branch);
     Ok(())
@@ -229,6 +213,7 @@ fn encap(args: EncapArgs) -> Result<()> {
         adapters: &adapters,
         records: &records,
         workspace: repository.project(),
+        realization: None,
     };
     let mut entries = Vec::new();
     for id in selected {
@@ -271,11 +256,6 @@ fn run_capsule(args: RunArgs) -> Result<()> {
     let references = reference_registry()?;
     let root = import_bundle(&bundle, repository.objects(), &references)?;
     let state = load_state(&root, repository.objects())?;
-    restore_workspace(
-        &ContentRef::parse(&state.workspace_snapshot)?,
-        &project,
-        repository.objects(),
-    )?;
     let bindings: BTreeMap<_, _> = args.bindings.into_iter().collect();
     let missing: Vec<_> = state
         .config
@@ -289,11 +269,13 @@ fn run_capsule(args: RunArgs) -> Result<()> {
     }
     let adapters = adapter_registry()?;
     let materializers = materializer_registry()?;
+    let driver = CliRealizationDriver::new(&project, &bindings);
     let context = MaterializerContext {
         objects: repository.objects(),
         adapters: &adapters,
         records: &[],
         workspace: &project,
+        realization: Some(&driver),
     };
     let mut candidates = bundle.index.materializations.clone();
     candidates.sort_by(|left, right| left.materializer_id.cmp(&right.materializer_id));
@@ -322,16 +304,19 @@ fn run_capsule(args: RunArgs) -> Result<()> {
         restored = Some(materializer.restore(&descriptor, &context)?);
         break;
     }
-    let restored = restored.ok_or_else(|| {
+    let realization = restored.ok_or_else(|| {
         anyhow::anyhow!(
             "no compatible restore-capable Materialization: {}",
             diagnostics.join("; ")
         )
     })?;
-    if restored != root {
-        bail!("Materialization restored {restored}, expected bundle root {root}");
+    if realization.target() != &root {
+        bail!(
+            "Materialization restored {}, expected bundle root {root}",
+            realization.target()
+        );
     }
-    run_foreground(&project, &root, &bindings)
+    realization.run().map_err(Into::into)
 }
 
 pub(crate) fn adapter_registry() -> Result<AdapterRegistry> {
@@ -362,15 +347,18 @@ fn reference_registry() -> Result<ReferenceRegistry> {
 
 fn preflight(
     repository: &LocalCapsuleRepository,
-    configured: &[authoring::AdapterConfig],
+    config: &authoring::AuthoringConfig,
+    bindings: &BTreeMap<String, String>,
 ) -> Result<()> {
     let registry = adapter_registry()?;
     let context = AdapterContext {
         workspace: repository.project(),
         objects: repository.objects(),
     };
-    for adapter in configured {
-        registry.get(&adapter.use_adapter)?.preflight(&context)?;
+    for instance in authoring::adapter_instances(config, bindings, false)? {
+        registry
+            .get(&instance.adapter_id)?
+            .preflight(&instance, &context)?;
     }
     Ok(())
 }

@@ -112,29 +112,27 @@ fn stateful_protocol_state_survives_nonzero_process_and_replay() {
     let project = tempfile::tempdir().unwrap();
     let author_home = tempfile::tempdir().unwrap();
     let recipient_home = tempfile::tempdir().unwrap();
-    fs::write(project.path().join("count.txt"), "0").unwrap();
     let upstream_port = unused_port();
     let public_port = unused_port();
     fs::write(
         project.path().join("counter.rs"),
-        r#"use std::fs;
-use std::io::{Read, Write};
+        r#"use std::io::{Read, Write};
 use std::net::TcpListener;
 
 fn main() {
     let address = std::env::args().nth(1).unwrap();
     let listener = TcpListener::bind(address).unwrap();
-    for _ in 0..2 {
+    let mut count = 0_u64;
+    for _ in 0..4 {
         let (mut stream, _) = listener.accept().unwrap();
         let mut request = [0_u8; 4096];
         let size = stream.read(&mut request).unwrap();
         let request = String::from_utf8_lossy(&request[..size]);
         if request.starts_with("POST /increment ") {
-            let count = fs::read_to_string("count.txt").unwrap().trim().parse::<u64>().unwrap() + 1;
-            fs::write("count.txt", count.to_string()).unwrap();
+            count += 1;
             stream.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
         } else {
-            let count = fs::read_to_string("count.txt").unwrap();
+            let count = count.to_string();
             let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", count.len(), count);
             stream.write_all(response.as_bytes()).unwrap();
         }
@@ -170,14 +168,14 @@ upstream = "127.0.0.1:{upstream_port}""#
     let count = http_request(public_port, "GET", "/count");
     assert!(count.ends_with("1"));
     wait_until(|| {
-        fs::read_dir(project.path().join(".capsule/records"))
+        fs::read_dir(project.path().join(".capsule/records/main"))
             .is_ok_and(|entries| entries.count() >= 4)
     });
     ato(author_home.path())
         .args(["stop", project.path().to_str().unwrap()])
         .assert()
         .success();
-    let records = fs::read_dir(project.path().join(".capsule/records"))
+    let records = fs::read_dir(project.path().join(".capsule/records/main"))
         .unwrap()
         .count();
     assert!(records >= 1);
