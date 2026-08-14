@@ -192,6 +192,7 @@ ready_path = "/ready""#
         .args(["init", project.path().to_str().unwrap()])
         .assert()
         .success();
+    let initial_root = fs::read_to_string(project.path().join(".capsule/refs/heads/main")).unwrap();
     let increment = http_request(public_port, "POST", "/increment");
     assert!(increment.starts_with("HTTP/1.1 204"));
     let count = http_request(public_port, "GET", "/count");
@@ -204,6 +205,11 @@ ready_path = "/ready""#
         .args(["stop", project.path().to_str().unwrap()])
         .assert()
         .success();
+    let final_root = fs::read_to_string(project.path().join(".capsule/refs/heads/main")).unwrap();
+    assert_ne!(
+        initial_root, final_root,
+        "a state-changing memory-only interaction must advance Capsule identity"
+    );
     let records = fs::read_dir(project.path().join(".capsule/records/main"))
         .unwrap()
         .count();

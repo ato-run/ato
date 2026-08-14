@@ -294,6 +294,12 @@ fn observation(
         },
         payload: encode_event(event)?,
         caused_by: Vec::new(),
+        effect: match event {
+            PtyEvent::Input { .. } | PtyEvent::Resize { .. } | PtyEvent::Signal { .. } => {
+                ato_adapter_api::ObservationEffect::Evolution
+            }
+            _ => ato_adapter_api::ObservationEffect::Evidence,
+        },
     })
 }
 

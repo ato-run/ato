@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -18,7 +18,7 @@ use ato_objects::{ActiveRun, LocalCapsuleRepository, ObjectStore, RecordEnvelope
 
 use crate::{
     adapter_registry,
-    authoring::{adapter_instances, load_runtime_state},
+    authoring::{adapter_instances, evolve_observation, load_runtime_state},
 };
 
 const STOP_REQUEST: &str = "runs/stop.request";
@@ -92,10 +92,11 @@ pub(crate) fn worker(project: &Path, branch: &str, head: &ComputationRef) -> Res
         .unwrap_or_default();
     let instances = adapter_instances(&config, &bindings, false, true)?;
     let registry = adapter_registry()?;
+    let live_head = Arc::new(Mutex::new(head.clone()));
     let sink: Arc<dyn ObservationSink> = Arc::new(RepositoryObservationSink {
         project: repository.project().to_path_buf(),
         branch: branch.to_owned(),
-        head: head.clone(),
+        head: Arc::clone(&live_head),
     });
     let context = AdapterAttachContext {
         runtime: AdapterContext {
@@ -106,9 +107,14 @@ pub(crate) fn worker(project: &Path, branch: &str, head: &ComputationRef) -> Res
     };
     enter(SupervisorState::Starting);
     let mut sessions = registry.attach_all(&instances, &context)?;
+    let attached_head = live_head
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Run head lock was poisoned"))?
+        .clone();
     let active = ActiveRun {
         branch: branch.to_owned(),
-        head: head.clone(),
+        branch_base: head.clone(),
+        head: attached_head,
         pid: std::process::id(),
         process_start_time: process_start_time(std::process::id())
             .context("worker process start time is unavailable")?,
@@ -336,7 +342,7 @@ fn quiesce_and_detach(
 struct RepositoryObservationSink {
     project: std::path::PathBuf,
     branch: String,
-    head: ComputationRef,
+    head: Arc<Mutex<ComputationRef>>,
 }
 
 impl ObservationSink for RepositoryObservationSink {
@@ -344,6 +350,17 @@ impl ObservationSink for RepositoryObservationSink {
         let repository = LocalCapsuleRepository::open(&self.project)
             .map_err(|error| AdapterError::Operation(error.to_string()))?;
         let payload_ref = repository.objects().put(&observation.payload)?;
+        let mut head = self
+            .head
+            .lock()
+            .map_err(|_| AdapterError::Operation("Run head lock was poisoned".to_owned()))?;
+        let next = match observation.effect {
+            ato_adapter_api::ObservationEffect::Evidence => head.clone(),
+            ato_adapter_api::ObservationEffect::Evolution => {
+                evolve_observation(repository.objects(), &head, &observation, &payload_ref)
+                    .map_err(|error| AdapterError::Operation(error.to_string()))?
+            }
+        };
         let previous = repository
             .records_for_stream(&self.branch, None)
             .map_err(|error| AdapterError::Operation(error.to_string()))?
@@ -357,8 +374,8 @@ impl ObservationSink for RepositoryObservationSink {
                 port_id: observation.port_id,
                 direction: observation.direction,
                 payload_ref,
-                head_before: self.head.clone(),
-                head_after: self.head.clone(),
+                head_before: head.clone(),
+                head_after: next.clone(),
                 caused_by: if observation.caused_by.is_empty() {
                     previous.into_iter().collect()
                 } else {
@@ -369,6 +386,18 @@ impl ObservationSink for RepositoryObservationSink {
                     .map_or_else(|_| "0".to_owned(), |value| value.as_secs().to_string()),
             })
             .map_err(|error| AdapterError::Operation(error.to_string()))?;
+        if next != *head {
+            if repository
+                .active_run()
+                .map_err(|error| AdapterError::Operation(error.to_string()))?
+                .is_some()
+            {
+                repository
+                    .update_active_head(&head, &next)
+                    .map_err(|error| AdapterError::Operation(error.to_string()))?;
+            }
+            *head = next;
+        }
         Ok(())
     }
 }

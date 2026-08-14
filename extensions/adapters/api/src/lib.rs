@@ -28,6 +28,15 @@ pub struct AdapterObservation {
     pub direction: Direction,
     pub payload: Vec<u8>,
     pub caused_by: Vec<RecordId>,
+    pub effect: ObservationEffect,
+}
+
+/// Whether an observation is only evidence about a realization or commits a
+/// semantic transition of the residual computation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObservationEffect {
+    Evidence,
+    Evolution,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

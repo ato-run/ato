@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use ato_adapter_api::{
     AdapterAttachContext, AdapterCapabilities, AdapterContext, AdapterError, AdapterFactory,
-    AdapterInstance, AdapterObservation, AttachedAdapter, ObservationSink,
+    AdapterInstance, AdapterObservation, AttachedAdapter, ObservationEffect, ObservationSink,
 };
 use ato_objects::{RecordEnvelope, read_exact_object};
 use serde::{Deserialize, Serialize};
@@ -374,6 +374,14 @@ fn proxy_exchange(
         direction: ato_objects::Direction::Inbound,
         payload: encode_event(&request).map_err(std::io::Error::other)?,
         caused_by: Vec::new(),
+        effect: match &request {
+            HttpEvent::Request { method, .. }
+                if !matches!(method.as_str(), "GET" | "HEAD" | "OPTIONS" | "TRACE") =>
+            {
+                ObservationEffect::Evolution
+            }
+            _ => ObservationEffect::Evidence,
+        },
     });
 
     let mut upstream_stream = connect_with_retry(upstream)?;
@@ -389,6 +397,7 @@ fn proxy_exchange(
         direction: ato_objects::Direction::Outbound,
         payload: encode_event(&response).map_err(std::io::Error::other)?,
         caused_by: Vec::new(),
+        effect: ObservationEffect::Evidence,
     });
     Ok(())
 }
