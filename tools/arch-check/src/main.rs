@@ -112,6 +112,10 @@ fn allowed(source: &str, target: &str) -> bool {
             target,
             "adapter-api" | "materializer-api" | "computation" | "objects"
         ),
+        "runtime" => matches!(
+            target,
+            "adapter-api" | "materializer-api" | "computation" | "objects"
+        ),
         "service" => matches!(target, "computation" | "objects" | "ipc"),
         "app" | "tool" => true,
         _ => false,

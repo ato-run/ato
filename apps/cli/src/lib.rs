@@ -27,7 +27,11 @@ use ato_materializer_snapshot::{SnapshotMaterializer, SnapshotReferences};
 use ato_objects::{
     BranchOrigin, BundleMaterialization, CapsuleSelector, LocalCapsuleRepository, RecordId,
     ReferenceRegistry, decode_bundle, encode_bundle, export_bundle_with_materializations,
-    import_bundle, resolve_computation, verify_bundle,
+    resolve_computation, verify_bundle,
+};
+use ato_runtime::{
+    PortableRuntimeFactory, PortableSession, PortableSessionContext, PortableSessionError,
+    PortableSessionRuntime,
 };
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
@@ -470,11 +474,12 @@ fn run_capsule(args: RunArgs) -> Result<()> {
         .tempdir_in(cache)?;
     let project = runtime.path().join("workspace");
     fs::create_dir_all(&project)?;
-    let repository = LocalCapsuleRepository::open(&project)?;
-    let bundle = decode_bundle(&fs::read(&args.capsule)?)?;
     let references = reference_registry()?;
-    let root = import_bundle(&bundle, repository.objects(), &references)?;
-    let state = load_runtime_state(&root, repository.objects())?;
+    let mut session = PortableSession::import(&fs::read(&args.capsule)?, &project, &references)?;
+    let state = load_runtime_state(
+        session.context().parent_root(),
+        session.context().repository().objects(),
+    )?;
     let bindings: BTreeMap<_, _> = args.bindings.into_iter().collect();
     let missing: Vec<_> = state
         .config
@@ -486,58 +491,117 @@ fn run_capsule(args: RunArgs) -> Result<()> {
     if !missing.is_empty() {
         bail!("portable Capsule requires Bindings: {}", missing.join(", "));
     }
-    let adapters = adapter_registry()?;
-    let materializers = materializer_registry()?;
-    let capture_policy = workspace_policy(&state.config)?;
-    let driver = CliRealizationDriver::new(&project, &bindings);
-    let context = MaterializerContext {
-        objects: repository.objects(),
-        adapters: &adapters,
-        records: &[],
-        workspace: &project,
-        workspace_policy: &capture_policy,
-        realization: Some(&driver),
-    };
-    let mut candidates = bundle.index.materializations.clone();
-    candidates.sort_by(|left, right| left.materializer_id.cmp(&right.materializer_id));
-    let mut diagnostics = Vec::new();
-    let mut restored = None;
-    for candidate in candidates {
-        let descriptor = ContentRef::parse(&candidate.descriptor_ref)?;
-        let materializer = match materializers.get(&candidate.materializer_id) {
-            Ok(materializer) => materializer,
-            Err(_) => {
-                diagnostics.push(format!(
-                    "{}: implementation missing",
-                    candidate.materializer_id
-                ));
+    session.start(&CliPortableRuntimeFactory { bindings })?;
+    let waited = session.wait();
+    let stopped = session.stop();
+    waited?;
+    stopped?;
+    Ok(())
+}
+
+struct CliPortableRuntimeFactory {
+    bindings: BTreeMap<String, String>,
+}
+
+impl PortableRuntimeFactory for CliPortableRuntimeFactory {
+    fn create(
+        &self,
+        session: &PortableSessionContext,
+    ) -> Result<Box<dyn PortableSessionRuntime>, PortableSessionError> {
+        let repository = session.repository();
+        let root = session.parent_root();
+        let state =
+            load_runtime_state(root, repository.objects()).map_err(portable_runtime_error)?;
+        let adapters = adapter_registry().map_err(portable_runtime_error)?;
+        let materializers = materializer_registry().map_err(portable_runtime_error)?;
+        let capture_policy = workspace_policy(&state.config).map_err(portable_runtime_error)?;
+        let driver = CliRealizationDriver::new(repository.project(), &self.bindings);
+        let context = MaterializerContext {
+            objects: repository.objects(),
+            adapters: &adapters,
+            records: &[],
+            workspace: repository.project(),
+            workspace_policy: &capture_policy,
+            realization: Some(&driver),
+        };
+        let mut candidates = session.materializations().to_vec();
+        candidates.sort_by(|left, right| left.materializer_id.cmp(&right.materializer_id));
+        let mut diagnostics = Vec::new();
+        let mut restored = None;
+        for candidate in candidates {
+            let descriptor =
+                ContentRef::parse(&candidate.descriptor_ref).map_err(portable_runtime_error)?;
+            let materializer = match materializers.get(&candidate.materializer_id) {
+                Ok(materializer) => materializer,
+                Err(_) => {
+                    diagnostics.push(format!(
+                        "{}: implementation missing",
+                        candidate.materializer_id
+                    ));
+                    continue;
+                }
+            };
+            if materializer.restore_capability() != RestoreCapability::Supported {
+                diagnostics.push(format!("{}: verify-only", candidate.materializer_id));
                 continue;
             }
-        };
-        if materializer.restore_capability() != RestoreCapability::Supported {
-            diagnostics.push(format!("{}: verify-only", candidate.materializer_id));
-            continue;
+            if materializer.compatibility(&descriptor, &context) != Compatibility::Compatible {
+                diagnostics.push(format!("{}: incompatible", candidate.materializer_id));
+                continue;
+            }
+            restored = Some(
+                materializer
+                    .restore(&descriptor, &context)
+                    .map_err(portable_runtime_error)?,
+            );
+            break;
         }
-        if materializer.compatibility(&descriptor, &context) != Compatibility::Compatible {
-            diagnostics.push(format!("{}: incompatible", candidate.materializer_id));
-            continue;
+        let realization = restored.ok_or_else(|| {
+            PortableSessionError::Runtime(format!(
+                "no compatible restore-capable Materialization: {}",
+                diagnostics.join("; ")
+            ))
+        })?;
+        if realization.target() != root {
+            return Err(PortableSessionError::Runtime(format!(
+                "Materialization restored {}, expected bundle root {root}",
+                realization.target()
+            )));
         }
-        restored = Some(materializer.restore(&descriptor, &context)?);
-        break;
+        Ok(Box::new(CliPortableRuntime { realization }))
     }
-    let realization = restored.ok_or_else(|| {
-        anyhow::anyhow!(
-            "no compatible restore-capable Materialization: {}",
-            diagnostics.join("; ")
-        )
-    })?;
-    if realization.target() != &root {
-        bail!(
-            "Materialization restored {}, expected bundle root {root}",
-            realization.target()
-        );
+}
+
+struct CliPortableRuntime {
+    realization: Box<dyn ato_materializer_api::Realization>,
+}
+
+impl PortableSessionRuntime for CliPortableRuntime {
+    fn start(&mut self) -> Result<(), PortableSessionError> {
+        self.realization.activate().map_err(portable_runtime_error)
     }
-    realization.run().map_err(Into::into)
+
+    fn wait(&mut self) -> Result<(), PortableSessionError> {
+        self.realization.wait().map_err(portable_runtime_error)
+    }
+
+    fn current_head(&self) -> Result<ComputationRef, PortableSessionError> {
+        Ok(self.realization.target().clone())
+    }
+
+    fn encap_current(&mut self, _output: &Path) -> Result<ComputationRef, PortableSessionError> {
+        Err(PortableSessionError::Runtime(
+            "ephemeral `ato run` does not retain an authored session".to_owned(),
+        ))
+    }
+
+    fn stop(&mut self) -> Result<(), PortableSessionError> {
+        self.realization.quiesce().map_err(portable_runtime_error)
+    }
+}
+
+fn portable_runtime_error(error: impl std::fmt::Display) -> PortableSessionError {
+    PortableSessionError::Runtime(error.to_string())
 }
 
 pub(crate) fn adapter_registry() -> Result<AdapterRegistry> {

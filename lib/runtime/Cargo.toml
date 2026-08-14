@@ -1,0 +1,21 @@
+[package]
+name = "ato-runtime"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MPL-2.0"
+description = "Reusable portable Capsule session lifecycle"
+
+[package.metadata.dist]
+dist = false
+
+[package.metadata.ato-architecture]
+layer = "runtime"
+
+[dependencies]
+ato-computation = { path = "../computation", version = "0.1.0" }
+ato-objects = { path = "../objects", version = "0.1.0" }
+thiserror = "2"
+
+[dev-dependencies]
+serde_jcs = "0.1"
+tempfile = "3"
