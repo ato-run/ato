@@ -8,7 +8,10 @@
 use std::path::Path;
 
 use ato_computation::{ComputationRef, ContentRef};
-use ato_objects::{ObjectError, ObjectResolver, ObjectStore, read_exact_object};
+use ato_objects::{
+    ObjectError, ObjectResolver, ObjectStore, RetainedObjectReferences, read_exact_object,
+    resolve_computation,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -77,12 +80,13 @@ pub enum SnapshotError {
     Io(#[from] std::io::Error),
 }
 
-pub fn capture(
+pub fn register_materialization(
     computation: &ComputationRef,
     contract: RealizationContract,
     artifact_paths: &[impl AsRef<Path>],
     objects: &dyn ObjectStore,
 ) -> Result<MaterializationRef, SnapshotError> {
+    resolve_computation(objects, computation)?;
     let mut artifacts = Vec::with_capacity(artifact_paths.len());
     for path in artifact_paths {
         let bytes = std::fs::read(path)?;
@@ -99,7 +103,7 @@ pub fn capture(
     Ok(MaterializationRef(objects.put(&bytes)?))
 }
 
-pub fn restore(
+pub fn verify_materialization(
     reference: &MaterializationRef,
     expected: &RealizationContract,
     objects: &dyn ObjectResolver,
@@ -134,8 +138,35 @@ pub fn restore(
             MAX_MATERIALIZATION_BYTES,
         )?;
     }
-    ComputationRef::parse(materialization.computation)
-        .map_err(|error| SnapshotError::InvalidReference(error.to_string()))
+    let computation = ComputationRef::parse(materialization.computation)
+        .map_err(|error| SnapshotError::InvalidReference(error.to_string()))?;
+    resolve_computation(objects, &computation)?;
+    Ok(computation)
+}
+
+/// Snapshot-owned object graph discovery for generic CAS retention.
+#[derive(Default)]
+pub struct SnapshotReferences;
+
+impl RetainedObjectReferences for SnapshotReferences {
+    fn outgoing(
+        &self,
+        root: &ContentRef,
+        objects: &dyn ObjectResolver,
+    ) -> Result<Vec<ContentRef>, ObjectError> {
+        let metadata = objects.metadata(root)?;
+        let bytes = read_exact_object(objects, root, metadata.size, MAX_MATERIALIZATION_BYTES)?;
+        let materialization: SnapshotMaterialization = serde_json::from_slice(&bytes)
+            .map_err(|error| ObjectError::Storage(error.to_string()))?;
+        materialization
+            .artifacts
+            .into_iter()
+            .map(|reference| {
+                ContentRef::parse(reference)
+                    .map_err(|error| ObjectError::Storage(error.to_string()))
+            })
+            .collect()
+    }
 }
 
 fn reject_plaintext_secret(bytes: &[u8]) -> Result<(), SnapshotError> {
@@ -151,13 +182,32 @@ fn reject_plaintext_secret(bytes: &[u8]) -> Result<(), SnapshotError> {
 
 #[cfg(test)]
 mod tests {
-    use ato_objects::{MemoryObjectStore, ObjectStore};
+    use std::collections::BTreeMap;
+
+    use ato_computation::{
+        ComputationObject, SemanticsId, computation_ref, encode_computation_object,
+    };
+    use ato_objects::{
+        FsObjectStore, MemoryObjectStore, ObjectStore, ReferenceRegistry, RetainedObjectRoot,
+    };
 
     use super::*;
 
     fn computation(store: &MemoryObjectStore) -> ComputationRef {
-        let content = store.put(b"computation").unwrap();
-        ComputationRef::parse(content.to_string()).unwrap()
+        let residual = store.put(b"residual").unwrap();
+        let object = ComputationObject {
+            semantics: SemanticsId::parse("example.snapshot@1").unwrap(),
+            boundary: BTreeMap::new(),
+            residual,
+        };
+        let reference = computation_ref(&object).unwrap();
+        store
+            .insert(
+                &reference.clone().content_ref().clone(),
+                &encode_computation_object(&object).unwrap(),
+            )
+            .unwrap();
+        reference
     }
 
     #[test]
@@ -169,10 +219,11 @@ mod tests {
         std::fs::write(&artifact, b"physical state").unwrap();
         let contract = RealizationContract::host("test");
 
-        let materialization = capture(&computation, contract.clone(), &[artifact], &store).unwrap();
+        let materialization =
+            register_materialization(&computation, contract.clone(), &[artifact], &store).unwrap();
 
         assert_eq!(
-            restore(&materialization, &contract, &store).unwrap(),
+            verify_materialization(&materialization, &contract, &store).unwrap(),
             computation
         );
     }
@@ -185,7 +236,7 @@ mod tests {
         let artifact = directory.path().join("memory");
         std::fs::write(&artifact, b"SECRET_KEY=exposed").unwrap();
         assert!(matches!(
-            capture(
+            register_materialization(
                 &computation,
                 RealizationContract::host("test"),
                 &[artifact],
@@ -193,5 +244,74 @@ mod tests {
             ),
             Err(SnapshotError::PlaintextSecret)
         ));
+    }
+
+    #[test]
+    fn capture_rejects_an_unresolvable_computation() {
+        let store = MemoryObjectStore::default();
+        let computation = ComputationRef::parse(format!("blake3:{}", "ab".repeat(32))).unwrap();
+        assert!(matches!(
+            register_materialization(
+                &computation,
+                RealizationContract::host("test"),
+                &[] as &[&Path],
+                &store,
+            ),
+            Err(SnapshotError::Objects(ObjectError::NotFound(_)))
+        ));
+    }
+
+    #[test]
+    fn retained_materialization_keeps_artifacts_during_gc() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = FsObjectStore::open(directory.path()).unwrap();
+        let residual = store.put(b"residual").unwrap();
+        let object = ComputationObject {
+            semantics: SemanticsId::parse("example.snapshot@1").unwrap(),
+            boundary: BTreeMap::new(),
+            residual,
+        };
+        let computation = computation_ref(&object).unwrap();
+        store
+            .insert(
+                computation.content_ref(),
+                &encode_computation_object(&object).unwrap(),
+            )
+            .unwrap();
+        let artifact_file = directory.path().join("artifact.bin");
+        std::fs::write(&artifact_file, b"physical artifact").unwrap();
+        let materialization = register_materialization(
+            &computation,
+            RealizationContract::host("test"),
+            &[artifact_file],
+            &store,
+        )
+        .unwrap();
+        let verified =
+            verify_materialization(&materialization, &RealizationContract::host("test"), &store)
+                .unwrap();
+        assert_eq!(verified, computation);
+        let snapshot_references = SnapshotReferences;
+
+        let report = store
+            .gc(
+                &[],
+                &[RetainedObjectRoot {
+                    reference: materialization.content_ref(),
+                    references: &snapshot_references,
+                }],
+                &ReferenceRegistry::default(),
+            )
+            .unwrap();
+
+        assert_eq!(report.retained, 2);
+        verify_materialization(&materialization, &RealizationContract::host("test"), &store)
+            .unwrap_err();
+        let artifact_reference = snapshot_references
+            .outgoing(materialization.content_ref(), &store)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert!(store.metadata(&artifact_reference).is_ok());
     }
 }

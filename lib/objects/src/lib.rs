@@ -85,6 +85,20 @@ pub enum GcError {
     InvalidReference(String),
 }
 
+/// Extension-owned outgoing references from one retained provider object.
+pub trait RetainedObjectReferences: Send + Sync {
+    fn outgoing(
+        &self,
+        root: &ContentRef,
+        objects: &dyn ObjectResolver,
+    ) -> Result<Vec<ContentRef>, ObjectError>;
+}
+
+pub struct RetainedObjectRoot<'a> {
+    pub reference: &'a ContentRef,
+    pub references: &'a dyn RetainedObjectReferences,
+}
+
 pub fn resolve_computation(
     objects: &dyn ObjectResolver,
     reference: &ComputationRef,
@@ -248,11 +262,18 @@ impl FsObjectStore {
     pub fn gc(
         &self,
         roots: &[ComputationRef],
-        retained_materializations: &[ContentRef],
+        retained_objects: &[RetainedObjectRoot<'_>],
         references: &ReferenceRegistry,
     ) -> Result<GcReport, GcError> {
-        let mut retained: std::collections::BTreeSet<ContentRef> =
-            retained_materializations.iter().cloned().collect();
+        let mut retained = std::collections::BTreeSet::new();
+        for retained_object in retained_objects {
+            retained.insert(retained_object.reference.clone());
+            retained.extend(
+                retained_object
+                    .references
+                    .outgoing(retained_object.reference, self)?,
+            );
+        }
         for root in roots {
             retained.extend(bundle::closure(root, self, references)?.into_keys());
         }
