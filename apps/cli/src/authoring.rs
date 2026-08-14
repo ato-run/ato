@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use ato_adapter_api::{AdapterInstance, AdapterObservation, WorkspaceCapturePolicy};
 use ato_adapter_binding::{BINDING_ADAPTER_ID, BindingAdapterConfig};
 use ato_adapter_http::{HTTP_ADAPTER_ID, HttpAdapterConfig};
-use ato_adapter_process::{PROCESS_ADAPTER_ID, ProcessSpec};
+use ato_adapter_process::{PROCESS_ADAPTER_ID, ProcessCapturePolicy, ProcessSpec};
 use ato_adapter_pty::{PTY_ADAPTER_ID, PtyAdapterConfig};
 use ato_adapter_workspace::{
     WorkspaceMutation, WorkspaceSnapshot, capture_workspace_with_policy, encode_mutation,
@@ -57,6 +57,8 @@ pub(crate) struct ProcessConfig {
     pub command: Vec<String>,
     #[serde(default = "default_cwd")]
     pub cwd: PathBuf,
+    #[serde(default, rename = "capture")]
+    pub capture_policy: ProcessCapturePolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -368,6 +370,7 @@ pub(crate) fn adapter_instances(
                     cwd: process.cwd.clone(),
                     environment: environment.clone(),
                     isolated_group: isolated_processes,
+                    capture_policy: process.capture_policy,
                 })?
             }
             HTTP_ADAPTER_ID => serde_json::to_value(HttpAdapterConfig {

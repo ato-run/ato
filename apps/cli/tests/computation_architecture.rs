@@ -31,6 +31,7 @@ fn write_project(root: &Path, command: &str, extra: &str) {
 id = "app"
 command = {command}
 cwd = "."
+capture = "adapter_mediated"
 
 [[adapter]]
 target = "app"

@@ -105,7 +105,7 @@ impl AdapterFactory for WorkspaceAdapter {
             apply: true,
             verify: true,
             quiesce: true,
-            capture_barrier: true,
+            capture_consistency: ato_adapter_api::CaptureConsistency::AdapterMediated,
         }
     }
 

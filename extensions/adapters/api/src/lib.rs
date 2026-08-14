@@ -126,14 +126,24 @@ fn securely_excluded(path: &str) -> bool {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CaptureConsistency {
+    #[default]
+    Unsupported,
+    /// The workload declares that semantic changes cross attached Adapter
+    /// boundaries. The barrier drains those boundaries but does not freeze
+    /// arbitrary background process state.
+    AdapterMediated,
+    /// The runtime freezes all state producers while the frontier is captured.
+    RuntimeFrozen,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AdapterCapabilities {
     pub observe: bool,
     pub apply: bool,
     pub verify: bool,
     pub quiesce: bool,
-    /// The live instance can hold every Evolution-producing boundary at a
-    /// drained frontier without destroying its underlying runtime.
-    pub capture_barrier: bool,
+    pub capture_consistency: CaptureConsistency,
 }
 
 #[derive(Debug, Default)]

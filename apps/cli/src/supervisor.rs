@@ -799,10 +799,10 @@ fn pause_for_capture(
     sessions: &mut [Box<dyn ato_adapter_api::AttachedAdapter>],
     context: &AdapterContext<'_>,
 ) -> Result<()> {
-    if let Some(session) = sessions
-        .iter()
-        .find(|session| !session.capabilities().capture_barrier)
-    {
+    if let Some(session) = sessions.iter().find(|session| {
+        session.capabilities().capture_consistency
+            == ato_adapter_api::CaptureConsistency::Unsupported
+    }) {
         bail!(
             "Adapter `{}` cannot establish a safe current-point capture barrier",
             session.adapter_id()

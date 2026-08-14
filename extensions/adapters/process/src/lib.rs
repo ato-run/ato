@@ -8,7 +8,7 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 
 use ato_adapter_api::{
     AdapterAttachContext, AdapterCapabilities, AdapterContext, AdapterError, AdapterFactory,
-    AdapterInstance, AttachedAdapter,
+    AdapterInstance, AttachedAdapter, CaptureConsistency,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -28,7 +28,6 @@ impl AdapterFactory for ProcessLifecycleAdapter {
             observe: true,
             verify: true,
             quiesce: true,
-            capture_barrier: true,
             ..AdapterCapabilities::default()
         }
     }
@@ -51,6 +50,7 @@ impl AdapterFactory for ProcessLifecycleAdapter {
     ) -> Result<Box<dyn AttachedAdapter>, AdapterError> {
         let spec = parse_spec(instance)?;
         let isolated_group = spec.isolated_group;
+        let capture_policy = spec.capture_policy;
         let handle = ProcessAdapter::new(spec)
             .map_err(operation_error)?
             .spawn_with_group(context.runtime.workspace, isolated_group)
@@ -58,6 +58,7 @@ impl AdapterFactory for ProcessLifecycleAdapter {
         Ok(Box::new(ProcessSession {
             instance_id: instance.instance_id.clone(),
             handle,
+            capture_policy,
         }))
     }
 }
@@ -71,6 +72,16 @@ pub struct ProcessSpec {
     pub environment: BTreeMap<String, String>,
     #[serde(default)]
     pub isolated_group: bool,
+    #[serde(default)]
+    pub capture_policy: ProcessCapturePolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessCapturePolicy {
+    #[default]
+    Unsupported,
+    AdapterMediated,
 }
 
 pub struct ProcessHandle {
@@ -179,6 +190,7 @@ impl ProcessAdapter {
 struct ProcessSession {
     instance_id: String,
     handle: ProcessHandle,
+    capture_policy: ProcessCapturePolicy,
 }
 
 impl AttachedAdapter for ProcessSession {
@@ -191,7 +203,13 @@ impl AttachedAdapter for ProcessSession {
     }
 
     fn capabilities(&self) -> AdapterCapabilities {
-        AdapterFactory::capabilities(&ProcessLifecycleAdapter)
+        AdapterCapabilities {
+            capture_consistency: match self.capture_policy {
+                ProcessCapturePolicy::Unsupported => CaptureConsistency::Unsupported,
+                ProcessCapturePolicy::AdapterMediated => CaptureConsistency::AdapterMediated,
+            },
+            ..AdapterFactory::capabilities(&ProcessLifecycleAdapter)
+        }
     }
 
     fn quiesce(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
@@ -199,11 +217,17 @@ impl AttachedAdapter for ProcessSession {
     }
 
     fn pause_for_capture(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
-        Ok(())
+        match self.capture_policy {
+            ProcessCapturePolicy::AdapterMediated => Ok(()),
+            ProcessCapturePolicy::Unsupported => Err(AdapterError::Unsupported {
+                adapter: PROCESS_ADAPTER_ID.to_owned(),
+                operation: "capture_barrier",
+            }),
+        }
     }
 
     fn resume_after_capture(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
-        Ok(())
+        self.pause_for_capture(_context)
     }
 
     fn detach(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
@@ -321,6 +345,7 @@ mod tests {
             cwd: PathBuf::from("."),
             environment: BTreeMap::new(),
             isolated_group: false,
+            capture_policy: ProcessCapturePolicy::Unsupported,
         })
         .unwrap();
         let mut handle = adapter
