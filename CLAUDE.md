@@ -3,6 +3,17 @@
 Repo-wide guidance for Claude Code (and humans). Crate-specific notes live in
 each crate's own `CLAUDE.md` (currently: `apps/desktop/CLAUDE.md`).
 
+## Commit author identity
+
+Use a plain email address only for `user.email` (e.g. `kohsuke20010920@gmail.com`).
+Do **not** use GitHub's `<numeric-id>+username@users.noreply.github.com` noreply
+format. GitHub attributes commits by the numeric ID embedded in that address, not
+by the username string — if the ID is stale or wrong, GitHub silently shows the
+commit as authored by whatever account currently owns that ID (this happened:
+commits showed as `Koh0920` locally but were attributed to an unrelated GitHub
+account, `maicon-sinapsis`, on github.com). Verify with `git config user.email`
+(local and `--global`) before committing.
+
 ## Branching model
 
 ### Long-lived branches
