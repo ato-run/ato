@@ -32,6 +32,8 @@ pub(crate) struct AuthoringConfig {
     #[serde(default)]
     pub port: Vec<PortConfig>,
     #[serde(default)]
+    pub connection: Vec<ConnectionConfig>,
+    #[serde(default)]
     pub binding: Vec<BindingConfig>,
     #[serde(default)]
     pub encap: EncapConfig,
@@ -67,6 +69,15 @@ pub(crate) struct PortConfig {
     pub id: String,
     pub protocol: String,
     pub role: String,
+    #[serde(default)]
+    pub internal: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ConnectionConfig {
+    pub from: String,
+    pub to: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +127,35 @@ pub(crate) fn load_config(project: &Path) -> Result<AuthoringConfig> {
     for process in &config.process {
         if process.id.is_empty() || process.command.is_empty() {
             bail!("every process requires an id and non-empty command argv");
+        }
+    }
+    let ports: BTreeSet<_> = config.port.iter().map(|port| port.id.as_str()).collect();
+    if ports.len() != config.port.len() {
+        bail!("port ids must be unique");
+    }
+    for connection in &config.connection {
+        if connection.from == connection.to
+            || !ports.contains(connection.from.as_str())
+            || !ports.contains(connection.to.as_str())
+        {
+            bail!(
+                "connection endpoints must name two distinct declared ports: {} -> {}",
+                connection.from,
+                connection.to
+            );
+        }
+        let from = config
+            .port
+            .iter()
+            .find(|port| port.id == connection.from)
+            .expect("validated port");
+        let to = config
+            .port
+            .iter()
+            .find(|port| port.id == connection.to)
+            .expect("validated port");
+        if !from.internal || !to.internal || from.protocol != to.protocol {
+            bail!("connections require internal ports with the same protocol");
         }
     }
     Ok(config)
@@ -244,6 +284,7 @@ fn boundary(config: &AuthoringConfig) -> Result<Boundary> {
     config
         .port
         .iter()
+        .filter(|port| !port.internal)
         .map(|port| {
             Ok((
                 PortId::parse(&port.id)?,

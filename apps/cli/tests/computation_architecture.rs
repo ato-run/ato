@@ -4,7 +4,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use assert_cmd::prelude::*;
 use predicates::prelude::*;
@@ -61,8 +61,10 @@ fn compiler_error_is_a_valid_portable_handoff_point() {
     let recipient_home = tempfile::tempdir().unwrap();
     write_project(
         project.path(),
-        r#"["sh", "-c", "rustc broken.rs 2>&1 || true"]"#,
-        "",
+        r#"["python3", "-c", "import pty; pty.spawn(['sh', '-c', 'rustc broken.rs 2>&1 || true; exec sh'])"]"#,
+        r#"[[adapter]]
+target = "app"
+use = "ato.pty@1""#,
     );
     fs::write(project.path().join("broken.rs"), "fn main() { missing( }\n").unwrap();
 
@@ -86,11 +88,23 @@ fn compiler_error_is_a_valid_portable_handoff_point() {
         ])
         .assert()
         .success();
-    ato(recipient_home.path())
+    let mut recipient = ato(recipient_home.path())
         .args(["run", bundle.to_str().unwrap()])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("error"));
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    recipient
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"printf continued-from-error\\n\nexit\n")
+        .unwrap();
+    let output = recipient.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("error"));
+    assert!(stdout.contains("continued-from-error"));
 }
 
 #[test]
@@ -375,18 +389,69 @@ fn same_capsule_identity_supports_multiple_encap_materializations() {
 fn one_root_computation_runs_an_explicit_multi_process_application() {
     let project = tempfile::tempdir().unwrap();
     let ato_home = tempfile::tempdir().unwrap();
+    let recipient_home = tempfile::tempdir().unwrap();
+    let public_port = unused_port();
+    let internal_port = unused_port();
+    fs::write(
+        project.path().join("composite.rs"),
+        r#"use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::thread;
+use std::time::Duration;
+
+fn main() {
+    let mode = std::env::args().nth(1).unwrap();
+    let listen = std::env::args().nth(2).unwrap();
+    if mode == "counter" {
+        let listener = TcpListener::bind(listen).unwrap();
+        let (mut client, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 64];
+        let _ = client.read(&mut request).unwrap();
+        client.write_all(b"1").unwrap();
+        return;
+    }
+    let counter = std::env::args().nth(3).unwrap();
+    let listener = TcpListener::bind(listen).unwrap();
+    let (mut client, _) = listener.accept().unwrap();
+    let mut request = [0_u8; 4096];
+    let _ = client.read(&mut request).unwrap();
+    let mut internal = loop {
+        match TcpStream::connect(&counter) {
+            Ok(stream) => break stream,
+            Err(_) => thread::sleep(Duration::from_millis(10)),
+        }
+    };
+    internal.write_all(b"increment").unwrap();
+    let mut count = String::new();
+    internal.read_to_string(&mut count).unwrap();
+    let body = format!("composed:{count}");
+    let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+    client.write_all(response.as_bytes()).unwrap();
+}
+"#,
+    )
+    .unwrap();
+    assert!(
+        Command::new("rustc")
+            .args(["composite.rs", "-o", "composite-bin"])
+            .current_dir(project.path())
+            .status()
+            .unwrap()
+            .success()
+    );
     fs::write(
         project.path().join("capsule.toml"),
-        r#"schema = 1
+        format!(
+            r#"schema = 1
 
 [[process]]
 id = "api"
-command = ["sh", "-c", "printf api > api.out"]
+command = ["sh", "-c", "chmod +x composite-bin && exec ./composite-bin api 127.0.0.1:{public_port} 127.0.0.1:{internal_port}"]
 cwd = "."
 
 [[process]]
 id = "counter"
-command = ["sh", "-c", "printf counter > counter.out"]
+command = ["sh", "-c", "chmod +x composite-bin && exec ./composite-bin counter 127.0.0.1:{internal_port}"]
 cwd = "."
 
 [[adapter]]
@@ -402,24 +467,55 @@ id = "app.http"
 protocol = "ato.http@1"
 role = "server"
 
+[[port]]
+id = "api.counter"
+protocol = "fixture.counter@1"
+role = "client"
+internal = true
+
+[[port]]
+id = "counter.api"
+protocol = "fixture.counter@1"
+role = "server"
+internal = true
+
+[[connection]]
+from = "api.counter"
+to = "counter.api"
+
 [encap]
 materializers = ["ato.replay@1"]
-"#,
+"#
+        ),
     )
     .unwrap();
     ato(ato_home.path())
         .args(["init", project.path().to_str().unwrap()])
         .assert()
         .success();
-    wait_until(|| {
-        project.path().join("api.out").is_file() && project.path().join("counter.out").is_file()
-    });
+    assert!(http_request(public_port, "GET", "/").ends_with("composed:1"));
     ato(ato_home.path())
         .args(["stop", project.path().to_str().unwrap()])
         .assert()
         .success();
     let root = fs::read_to_string(project.path().join(".capsule/refs/heads/main")).unwrap();
     assert!(root.starts_with("blake3:"));
+    let bundle = project.path().join("composite.capsule");
+    ato(ato_home.path())
+        .args([
+            "encap",
+            &format!("{}@main", project.path().display()),
+            "-o",
+            bundle.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let mut portable = ato(recipient_home.path())
+        .args(["run", bundle.to_str().unwrap()])
+        .spawn()
+        .unwrap();
+    assert!(http_request(public_port, "GET", "/").ends_with("composed:1"));
+    assert!(portable.wait().unwrap().success());
 }
 
 fn walk(root: impl AsRef<Path>) -> Vec<std::path::PathBuf> {
