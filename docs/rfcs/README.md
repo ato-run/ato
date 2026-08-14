@@ -6,5 +6,9 @@ historical evidence, not implementation authority.
 
 - [Computation Architecture](accepted/COMPUTATION_ARCHITECTURE.md)
 - [Object Closure Bundle](accepted/OBJECT_BUNDLE.md)
-- [Repository Workspace](accepted/REPOSITORY_WORKSPACE.md)
-- [Provider Materialization](accepted/PROVIDER_MATERIALIZATION.md)
+- [Composition](accepted/COMPOSITION.md)
+- [Local Capsule Repository](accepted/LOCAL_CAPSULE_REPOSITORY.md)
+- [Protocol Adapter](accepted/PROTOCOL_ADAPTER.md)
+- [Materialization](accepted/MATERIALIZATION.md)
+- [Capsule Bundle](accepted/CAPSULE_BUNDLE.md)
+- [Capsule CLI Lifecycle](accepted/CAPSULE_CLI_LIFECYCLE.md)

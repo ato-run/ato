@@ -19,4 +19,4 @@ ato-objects = { path = "../objects", version = "0.1.0" }
 thiserror = "2.0"
 
 [dev-dependencies]
-ato-semantics-compose = { path = "../../extensions/semantics/compose", version = "0.1.0" }
+ato-compose = { path = "../compose", version = "0.1.0" }

@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
+use ato_compose::{
+    ComposeSemantics, CompositeResidual, Connection, Endpoint, NodeId, encode_composite_residual,
+};
 use ato_computation::{
     Boundary, ComputationObject, ComputationRef, PortDef, PortId, ProtocolId, ResolvedComputation,
     RoleId, SemanticsId,
@@ -11,9 +14,6 @@ use ato_kernel::{
     TransitionSink,
 };
 use ato_objects::{MemoryObjectStore, ObjectStore};
-use ato_semantics_compose::{
-    ComposeSemantics, CompositeResidual, Connection, Endpoint, NodeId, encode_composite_residual,
-};
 
 const TEXT_PROTOCOL: &str = "example.text@1";
 
@@ -374,7 +374,7 @@ fn composite(kernel: &Kernel, reference: &ComputationRef) -> CompositeResidual {
     let computation = kernel.resolve(reference).unwrap();
     let bytes =
         SemanticHost::get_object(kernel, &computation.object().residual, 1024 * 1024).unwrap();
-    ato_semantics_compose::decode_composite_residual(&bytes).unwrap()
+    ato_compose::decode_composite_residual(&bytes).unwrap()
 }
 
 fn leaf_state(kernel: &Kernel, reference: &ComputationRef) -> String {

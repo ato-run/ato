@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use ato_computation::ComputationRef;
+use ato_materializer_snapshot::{RealizationContract, register_materialization};
 use ato_objects::FsObjectStore;
-use ato_provider_snapshot::{RealizationContract, register_materialization};
 
 fn main() -> Result<()> {
     let mut arguments = std::env::args_os().skip(1);
@@ -18,7 +18,7 @@ fn main() -> Result<()> {
     let objects = FsObjectStore::open(root)?;
     let reference = register_materialization(
         &computation,
-        RealizationContract::host("ato-provider-snapshot"),
+        RealizationContract::host("ato.snapshot@1"),
         &artifacts,
         &objects,
     )?;
