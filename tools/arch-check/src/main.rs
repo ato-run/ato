@@ -93,9 +93,11 @@ fn allowed(source: &str, target: &str) -> bool {
         "computation" => false,
         "objects" => target == "computation",
         "kernel" => matches!(target, "computation" | "objects"),
+        "compose" => matches!(target, "computation" | "kernel" | "objects"),
         "ipc" => target == "computation",
         "semantics" => matches!(target, "computation" | "kernel" | "objects" | "ipc"),
         "adapter" => matches!(target, "computation" | "objects" | "semantics" | "ipc"),
+        "materializer" => matches!(target, "computation" | "objects"),
         "provider" => matches!(
             target,
             "computation" | "kernel" | "objects" | "ipc" | "semantics"

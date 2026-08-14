@@ -1,5 +1,5 @@
 [package]
-name = "ato-provider-snapshot"
+name = "ato-materializer-snapshot"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0 OR MPL-2.0"
@@ -11,7 +11,7 @@ repository = "https://github.com/ato-run/ato"
 dist = false
 
 [package.metadata.ato-architecture]
-layer = "provider"
+layer = "materializer"
 
 [dependencies]
 ato-computation = { path = "../../../lib/computation", version = "0.1.0" }
