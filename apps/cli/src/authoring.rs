@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use ato_adapter_api::AdapterInstance;
+use ato_adapter_api::{AdapterInstance, AdapterObservation};
 use ato_adapter_binding::{BINDING_ADAPTER_ID, BindingAdapterConfig};
 use ato_adapter_http::{HTTP_ADAPTER_ID, HttpAdapterConfig};
 use ato_adapter_process::{PROCESS_ADAPTER_ID, ProcessSpec};
@@ -115,6 +115,19 @@ pub(crate) struct AuthoringState {
     version: u32,
     pub config: AuthoringConfig,
     pub workspace_snapshot: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    semantic_frontier: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SemanticTransition<'a> {
+    version: u32,
+    prior_frontier: Option<&'a str>,
+    adapter_id: &'a str,
+    protocol_id: String,
+    port_id: String,
+    direction: Direction,
+    payload_ref: String,
 }
 
 fn default_cwd() -> PathBuf {
@@ -558,7 +571,7 @@ pub(crate) fn evolve_workspace(
                 files: current_files.clone(),
             })?)?;
         state.workspace_snapshot = snapshot.to_string();
-        let next = seal_state(repository.objects(), state.config.clone(), snapshot)?;
+        let next = seal_authoring_state(repository.objects(), state.clone())?;
         let payload = repository.objects().put(&encode_mutation(&mutation)?)?;
         let record = repository.append_record(RecordEnvelope {
             id: RecordId::new(branch, 0),
@@ -591,8 +604,9 @@ fn evolve_composite_snapshot(
             .semantics
             .clone();
         *child = if semantics == SemanticsId::parse(AUTHORING_SEMANTICS_ID)? {
-            let state = load_state(child, objects)?;
-            seal_state(objects, state.config, snapshot.clone())?
+            let mut state = load_state(child, objects)?;
+            state.workspace_snapshot = snapshot.to_string();
+            seal_authoring_state(objects, state)?
         } else {
             evolve_composite_snapshot(objects, child, snapshot)?
         };
@@ -611,12 +625,20 @@ pub(crate) fn seal_state(
     config: AuthoringConfig,
     workspace_snapshot: ContentRef,
 ) -> Result<ComputationRef> {
-    let boundary = boundary(&config)?;
     let state = AuthoringState {
         version: AUTHORING_STATE_VERSION,
         config,
         workspace_snapshot: workspace_snapshot.to_string(),
+        semantic_frontier: None,
     };
+    seal_authoring_state(objects, state)
+}
+
+fn seal_authoring_state(
+    objects: &dyn ObjectStore,
+    state: AuthoringState,
+) -> Result<ComputationRef> {
+    let boundary = boundary(&state.config)?;
     let residual = objects.put(&serde_jcs::to_vec(&state)?)?;
     let computation = ComputationObject {
         semantics: SemanticsId::parse(AUTHORING_SEMANTICS_ID)?,
@@ -629,6 +651,93 @@ pub(crate) fn seal_state(
         &encode_computation_object(&computation)?,
     )?;
     Ok(reference)
+}
+
+/// Commits an Adapter-declared semantic transition without making its Record,
+/// sequence, timestamp, or other evidence part of computation identity.
+pub(crate) fn evolve_observation(
+    objects: &dyn ObjectStore,
+    start: &ComputationRef,
+    observation: &AdapterObservation,
+    payload_ref: &ContentRef,
+) -> Result<ComputationRef> {
+    let resolved = resolve_computation(objects, start)?;
+    if resolved.object().semantics == SemanticsId::parse(AUTHORING_SEMANTICS_ID)? {
+        let mut state = load_state(start, objects)?;
+        let transition = SemanticTransition {
+            version: 1,
+            prior_frontier: state.semantic_frontier.as_deref(),
+            adapter_id: &observation.adapter_id,
+            protocol_id: observation.protocol_id.to_string(),
+            port_id: observation.port_id.to_string(),
+            direction: observation.direction,
+            payload_ref: payload_ref.to_string(),
+        };
+        state.semantic_frontier = Some(format!(
+            "blake3:{}",
+            blake3::hash(&serde_jcs::to_vec(&transition)?).to_hex()
+        ));
+        return seal_authoring_state(objects, state);
+    }
+    if resolved.object().semantics != SemanticsId::parse(COMPOSE_SEMANTICS_ID)? {
+        bail!("computation {start} cannot commit an Adapter observation");
+    }
+
+    let mut composite = load_composite(start, objects)?;
+    let mut matching_nodes = Vec::new();
+    for (node, child) in &composite.nodes {
+        if computation_has_port(child, &observation.port_id, objects)? {
+            matching_nodes.push(node.clone());
+        }
+    }
+    let node = match matching_nodes.as_slice() {
+        [node] => node,
+        [] if composite.nodes.len() == 1 => composite.nodes.keys().next().expect("one node"),
+        [] => bail!(
+            "no composite child owns semantic observation port `{}`",
+            observation.port_id
+        ),
+        _ => bail!(
+            "multiple composite children own semantic observation port `{}`",
+            observation.port_id
+        ),
+    }
+    .clone();
+    let child = composite.nodes.get(&node).expect("selected child").clone();
+    composite.nodes.insert(
+        node,
+        evolve_observation(objects, &child, observation, payload_ref)?,
+    );
+    seal_composite(
+        objects,
+        composite.nodes,
+        composite.connections,
+        composite.exports,
+        resolved.object().boundary.clone(),
+    )
+}
+
+fn computation_has_port(
+    reference: &ComputationRef,
+    port_id: &PortId,
+    objects: &dyn ObjectResolver,
+) -> Result<bool> {
+    let computation = resolve_computation(objects, reference)?;
+    if computation.object().semantics == SemanticsId::parse(AUTHORING_SEMANTICS_ID)? {
+        return Ok(load_state(reference, objects)?
+            .config
+            .port
+            .iter()
+            .any(|port| port.id == port_id.as_str()));
+    }
+    if computation.object().semantics == SemanticsId::parse(COMPOSE_SEMANTICS_ID)? {
+        for child in load_composite(reference, objects)?.nodes.values() {
+            if computation_has_port(child, port_id, objects)? {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn seal_composite(

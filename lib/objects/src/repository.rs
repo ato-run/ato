@@ -109,6 +109,7 @@ struct RecordWire {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveRun {
     pub branch: String,
+    pub branch_base: ComputationRef,
     pub head: ComputationRef,
     pub pid: u32,
     pub process_start_time: String,
@@ -121,6 +122,7 @@ pub struct ActiveRun {
 #[serde(deny_unknown_fields)]
 struct ActiveRunWire {
     branch: String,
+    branch_base: String,
     head: String,
     pid: u32,
     process_start_time: String,
@@ -315,6 +317,30 @@ impl LocalCapsuleRepository {
         atomic_write(&self.root.join("runs/active.json"), &bytes)
     }
 
+    /// Atomically advances only the mutable cursor of the currently active Run.
+    pub fn update_active_head(
+        &self,
+        expected: &ComputationRef,
+        next: &ComputationRef,
+    ) -> Result<(), RepositoryError> {
+        let _transaction = self.lock_transaction()?;
+        let mut run = self.active_run()?.ok_or(RepositoryError::RefConflict {
+            branch: "active-run".to_owned(),
+            expected: Some(expected.to_string()),
+            actual: None,
+        })?;
+        if &run.head != expected {
+            return Err(RepositoryError::RefConflict {
+                branch: "active-run".to_owned(),
+                expected: Some(expected.to_string()),
+                actual: Some(run.head.to_string()),
+            });
+        }
+        run.head = next.clone();
+        let bytes = serde_jcs::to_vec(&ActiveRunWire::from(&run))?;
+        atomic_write(&self.root.join("runs/active.json"), &bytes)
+    }
+
     pub fn clear_active_run(&self) -> Result<(), RepositoryError> {
         let path = self.root.join("runs/active.json");
         match fs::remove_file(path) {
@@ -414,6 +440,7 @@ impl From<&ActiveRun> for ActiveRunWire {
     fn from(value: &ActiveRun) -> Self {
         Self {
             branch: value.branch.clone(),
+            branch_base: value.branch_base.to_string(),
             head: value.head.to_string(),
             pid: value.pid,
             process_start_time: value.process_start_time.clone(),
@@ -430,6 +457,7 @@ impl TryFrom<ActiveRunWire> for ActiveRun {
     fn try_from(value: ActiveRunWire) -> Result<Self, Self::Error> {
         Ok(Self {
             branch: value.branch,
+            branch_base: parse_computation(&value.branch_base)?,
             head: parse_computation(&value.head)?,
             pid: value.pid,
             process_start_time: value.process_start_time,
