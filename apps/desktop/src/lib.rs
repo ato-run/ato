@@ -33,9 +33,7 @@ pub fn dispatch(request: &ComputationCommand) -> Result<ComputationCommandResult
             }
             command.output()?
         }
-        ComputationCommand::Stop { capsule } => {
-            ato_command()?.args(["stop", capsule]).output()?
-        }
+        ComputationCommand::Stop { capsule } => ato_command()?.args(["stop", capsule]).output()?,
         ComputationCommand::Encap { selector, output } => ato_command()?
             .args(["encap", selector, "-o", output])
             .output()?,
@@ -51,7 +49,9 @@ pub fn launch_console() -> Result<()> {
     let status = if cfg!(target_os = "macos") {
         Command::new("open").arg(url).status()?
     } else if cfg!(windows) {
-        Command::new("cmd").args(["/C", "start", "", url]).status()?
+        Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .status()?
     } else {
         Command::new("xdg-open").arg(url).status()?
     };
