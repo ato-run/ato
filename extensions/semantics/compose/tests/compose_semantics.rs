@@ -6,6 +6,7 @@ use ato_computation::{
     Boundary, ComputationObject, ComputationRef, ContentRef, PortDef, PortId, ProtocolId,
     ResolvedComputation, RoleId, SemanticsId, computation_ref, encode_computation_object,
 };
+use ato_kernel::ProtocolPayload;
 use ato_objects::{ObjectError, ObjectMetadata, ObjectResolver, resolve_computation};
 use ato_semantics_compose::{
     BoundaryVisibility, COMPOSE_SEMANTICS_ID, CompositeResidual, CompositeStepError,
@@ -595,7 +596,7 @@ fn evolve_hello_branch(
             from: objects.resolve(&initial_provider),
             label: StepLabel::Input {
                 port: PortId::parse("input").unwrap(),
-                value: name,
+                payload: ProtocolPayload::from(name),
             },
             to: objects.resolve(&ready_name),
         },
@@ -605,7 +606,7 @@ fn evolve_hello_branch(
         input_reduction.label,
         StepLabel::Input {
             port: PortId::parse("name").unwrap(),
-            value: name,
+            payload: ProtocolPayload::from(name),
         }
     );
     let after_input = seal_composite(objects, parent_boundary.clone(), input_reduction.successor);
@@ -633,7 +634,7 @@ fn evolve_hello_branch(
             from: objects.resolve(&ready_name),
             label: StepLabel::Output {
                 port: PortId::parse("name").unwrap(),
-                value: name,
+                payload: ProtocolPayload::from(name),
             },
             to: objects.resolve(&provider_done),
         },
@@ -642,7 +643,7 @@ fn evolve_hello_branch(
             from: objects.resolve(&initial_greeter),
             label: StepLabel::Input {
                 port: PortId::parse("name").unwrap(),
-                value: name,
+                payload: ProtocolPayload::from(name),
             },
             to: objects.resolve(&ready_greeting),
         },
@@ -666,7 +667,7 @@ fn evolve_hello_branch(
             from: objects.resolve(&ready_greeting),
             label: StepLabel::Output {
                 port: PortId::parse("greeting").unwrap(),
-                value: greeting.as_str(),
+                payload: ProtocolPayload::from(greeting.as_str()),
             },
             to: objects.resolve(&greeter_done),
         },
@@ -676,7 +677,7 @@ fn evolve_hello_branch(
         greeting_reduction.label,
         StepLabel::Output {
             port: PortId::parse("greeting").unwrap(),
-            value: greeting.as_str(),
+            payload: ProtocolPayload::from(greeting.as_str()),
         }
     );
     let after_greeting = seal_composite(
@@ -861,7 +862,7 @@ fn reducer_rejects_invalid_transition_evidence() {
     };
 
     assert!(matches!(
-        lift_internal_step(&current, &provider_step(&alternate, StepLabel::<&str>::Tau)),
+        lift_internal_step(&current, &provider_step(&alternate, StepLabel::Tau)),
         Err(CompositeStepError::StaleFrom { .. })
     ));
     assert!(matches!(
@@ -871,12 +872,12 @@ fn reducer_rejects_invalid_transition_evidence() {
                 &provider,
                 StepLabel::Output {
                     port: PortId::parse("name").unwrap(),
-                    value: "Alice"
+                    payload: ProtocolPayload::from("Alice")
                 }
             ),
             &greeter_step(StepLabel::Output {
                 port: PortId::parse("name").unwrap(),
-                value: "Alice"
+                payload: ProtocolPayload::from("Alice")
             })
         ),
         Err(CompositeStepError::ComplementaryActionsRequired)
@@ -888,12 +889,12 @@ fn reducer_rejects_invalid_transition_evidence() {
                 &provider,
                 StepLabel::Input {
                     port: PortId::parse("name").unwrap(),
-                    value: "Alice"
+                    payload: ProtocolPayload::from("Alice")
                 }
             ),
             &greeter_step(StepLabel::Input {
                 port: PortId::parse("name").unwrap(),
-                value: "Alice"
+                payload: ProtocolPayload::from("Alice")
             })
         ),
         Err(CompositeStepError::ComplementaryActionsRequired)
@@ -905,12 +906,12 @@ fn reducer_rejects_invalid_transition_evidence() {
                 &provider,
                 StepLabel::Output {
                     port: PortId::parse("name").unwrap(),
-                    value: "Alice"
+                    payload: ProtocolPayload::from("Alice")
                 }
             ),
             &greeter_step(StepLabel::Input {
                 port: PortId::parse("name").unwrap(),
-                value: "Bob"
+                payload: ProtocolPayload::from("Bob")
             })
         ),
         Err(CompositeStepError::ValueMismatch)
@@ -922,12 +923,12 @@ fn reducer_rejects_invalid_transition_evidence() {
                 &provider,
                 StepLabel::Output {
                     port: PortId::parse("wrong").unwrap(),
-                    value: "Alice"
+                    payload: ProtocolPayload::from("Alice")
                 }
             ),
             &greeter_step(StepLabel::Input {
                 port: PortId::parse("name").unwrap(),
-                value: "Alice"
+                payload: ProtocolPayload::from("Alice")
             })
         ),
         Err(CompositeStepError::ConnectionEndpointMismatch)
@@ -939,7 +940,7 @@ fn reducer_rejects_invalid_transition_evidence() {
                 &provider,
                 StepLabel::Output {
                     port: PortId::parse("name").unwrap(),
-                    value: "Alice"
+                    payload: ProtocolPayload::from("Alice")
                 }
             )
         ),
@@ -950,7 +951,7 @@ fn reducer_rejects_invalid_transition_evidence() {
             &current,
             &greeter_step(StepLabel::Output {
                 port: PortId::parse("name").unwrap(),
-                value: "Alice"
+                payload: ProtocolPayload::from("Alice")
             })
         ),
         Err(CompositeStepError::ConnectedPortCannotBeExported { .. })
@@ -962,7 +963,7 @@ fn reducer_rejects_invalid_transition_evidence() {
                 &provider,
                 StepLabel::Output {
                     port: PortId::parse("other").unwrap(),
-                    value: "Alice"
+                    payload: ProtocolPayload::from("Alice")
                 }
             )
         ),
@@ -972,7 +973,7 @@ fn reducer_rejects_invalid_transition_evidence() {
         &current,
         &greeter_step(StepLabel::Input {
             port: PortId::parse("greeting").unwrap(),
-            value: "Hello, Alice",
+            payload: ProtocolPayload::from("Hello, Alice"),
         }),
     )
     .unwrap();
@@ -980,7 +981,7 @@ fn reducer_rejects_invalid_transition_evidence() {
         lifted_input.label,
         StepLabel::Input {
             port: PortId::parse("greeting").unwrap(),
-            value: "Hello, Alice",
+            payload: ProtocolPayload::from("Hello, Alice"),
         }
     );
 }
@@ -1022,7 +1023,7 @@ fn validator_rejects_same_node_connection_and_successor_without_exported_port() 
         &NodeStep {
             node: NodeId::parse("greeter").unwrap(),
             from: objects.resolve(&greeter),
-            label: StepLabel::<&str>::Tau,
+            label: StepLabel::Tau,
             to: objects.resolve(&broken),
         },
     )
