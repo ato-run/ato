@@ -1,6 +1,6 @@
 //! Product assembly for the Ato computation architecture.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_op_in_unsafe_fn)]
 
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -135,6 +135,10 @@ struct RunRecord {
     name: String,
     head: String,
     pid: u32,
+    process_start_time: String,
+    process_group: u32,
+    job_identity: Option<String>,
+    boot_session: String,
     status: String,
     exit_code: Option<i32>,
     log: PathBuf,
@@ -162,6 +166,7 @@ fn run_repository(args: RunArgs) -> Result<()> {
     if args.detach && !args.worker {
         return spawn_detached_run(&args, &name);
     }
+    let _worker_job = initialize_worker_job(args.worker.then_some(name.as_str()))?;
     let objects = Arc::new(object_store()?);
     let options = RepositoryOptions {
         arguments: args.arguments,
@@ -220,6 +225,7 @@ fn decap(command: DecapCommand) -> Result<()> {
             if detach && !worker {
                 return spawn_detached_decap(&capsule, &name);
             }
+            let _worker_job = initialize_worker_job(worker.then_some(name.as_str()))?;
             let objects = Arc::new(object_store()?);
             let bundle = decode_bundle(&fs::read(&capsule)?)?;
             let root = import_bundle(&bundle, objects.as_ref(), &references()?)?;
@@ -277,6 +283,11 @@ fn advance_workspace(
                 name: name.to_owned(),
                 head: run.head.to_string(),
                 pid: std::process::id(),
+                process_start_time: process_start_time(std::process::id())
+                    .context("current process start time is unavailable")?,
+                process_group: current_process_group()?,
+                job_identity: worker_job_identity(name),
+                boot_session: boot_session_identity()?,
                 status: "running".to_owned(),
                 exit_code: None,
                 log: run_directory(name)?.join("output.log"),
@@ -488,8 +499,11 @@ fn list_runs(json: bool) -> Result<()> {
         for entry in fs::read_dir(root)? {
             let path = entry?.path().join("run.json");
             if let Ok(bytes) = fs::read(path)
-                && let Ok(record) = serde_json::from_slice::<RunRecord>(&bytes)
+                && let Ok(mut record) = serde_json::from_slice::<RunRecord>(&bytes)
             {
+                if record.status == "running" && !process_matches(&record)? {
+                    record.status = "stale".to_owned();
+                }
                 records.push(record);
             }
         }
@@ -518,15 +532,15 @@ fn stop_run(name: &str) -> Result<()> {
     if record.status != "running" {
         return Ok(());
     }
-    let status = if cfg!(windows) {
-        Command::new("taskkill")
-            .args(["/PID", &record.pid.to_string(), "/T"])
-            .status()?
-    } else {
-        Command::new("kill")
-            .args(["-TERM", &record.pid.to_string()])
-            .status()?
-    };
+    if !process_matches(&record)? {
+        record.status = "stale".to_owned();
+        write_record(&run_record_path(name)?, &record)?;
+        bail!(
+            "run process identity no longer matches record; refusing to stop PID {}",
+            record.pid
+        );
+    }
+    let status = stop_process_tree(&record)?;
     if !status.success() {
         bail!("failed to stop process {}", record.pid);
     }
@@ -555,6 +569,7 @@ fn spawn_detached_run(args: &RunArgs, name: &str) -> Result<()> {
     if !args.arguments.is_empty() {
         command.arg("--").args(&args.arguments);
     }
+    configure_detached_process(&mut command);
     let child = command
         .stdin(Stdio::null())
         .stdout(stdout.try_clone()?)
@@ -568,15 +583,215 @@ fn spawn_detached_decap(capsule: &Path, name: &str) -> Result<()> {
     let log = run_directory(name)?.join("output.log");
     fs::create_dir_all(log.parent().context("log has no parent")?)?;
     let stdout = OpenOptions::new().create(true).append(true).open(&log)?;
-    let child = Command::new(std::env::current_exe()?)
+    let mut command = Command::new(std::env::current_exe()?);
+    command
         .args(["decap", "start"])
         .arg(capsule)
         .args(["--worker", "--name", name])
         .stdin(Stdio::null())
         .stdout(stdout.try_clone()?)
-        .stderr(stdout)
-        .spawn()?;
+        .stderr(stdout);
+    configure_detached_process(&mut command);
+    let child = command.spawn()?;
     println!("started {name} (pid {})", child.id());
+    Ok(())
+}
+
+fn process_matches(record: &RunRecord) -> Result<bool> {
+    if boot_session_identity()? != record.boot_session {
+        return Ok(false);
+    }
+    Ok(process_start_time(record.pid).as_deref() == Some(record.process_start_time.as_str()))
+}
+
+#[cfg(target_os = "linux")]
+fn process_start_time(pid: u32) -> Option<String> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let fields = stat
+        .rsplit_once(") ")?
+        .1
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    fields.get(19).map(|value| (*value).to_owned())
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_start_time(pid: u32) -> Option<String> {
+    let output = Command::new("ps")
+        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+#[cfg(windows)]
+fn process_start_time(pid: u32) -> Option<String> {
+    let script =
+        format!("(Get-Process -Id {pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks");
+    command_output("powershell", &["-NoProfile", "-Command", &script])
+}
+
+#[cfg(target_os = "linux")]
+fn boot_session_identity() -> Result<String> {
+    Ok(fs::read_to_string("/proc/sys/kernel/random/boot_id")?
+        .trim()
+        .to_owned())
+}
+
+#[cfg(target_os = "macos")]
+fn boot_session_identity() -> Result<String> {
+    command_output("sysctl", &["-n", "kern.boottime"])
+        .context("kernel boot identity is unavailable")
+}
+
+#[cfg(windows)]
+fn boot_session_identity() -> Result<String> {
+    command_output(
+        "powershell",
+        &[
+            "-NoProfile",
+            "-Command",
+            "(Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().Ticks",
+        ],
+    )
+    .context("Windows boot identity is unavailable")
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn boot_session_identity() -> Result<String> {
+    bail!("boot/session identity is unavailable on this platform")
+}
+
+#[cfg(unix)]
+fn current_process_group() -> Result<u32> {
+    command_output(
+        "ps",
+        &["-o", "pgid=", "-p", &std::process::id().to_string()],
+    )
+    .and_then(|value| value.parse::<u32>().ok())
+    .context("current process group is unavailable")
+}
+
+#[cfg(windows)]
+fn current_process_group() -> Result<u32> {
+    Ok(std::process::id())
+}
+
+#[cfg(unix)]
+fn configure_detached_process(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+#[cfg(windows)]
+fn configure_detached_process(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    command.creation_flags(CREATE_NEW_PROCESS_GROUP);
+}
+
+#[cfg(unix)]
+fn stop_process_tree(record: &RunRecord) -> Result<std::process::ExitStatus> {
+    if record.process_group != record.pid {
+        bail!("run does not own an isolated process group; refusing group termination");
+    }
+    Ok(Command::new("kill")
+        .args(["-TERM", "--", &format!("-{}", record.process_group)])
+        .status()?)
+}
+
+#[cfg(windows)]
+fn stop_process_tree(record: &RunRecord) -> Result<std::process::ExitStatus> {
+    let expected = worker_job_identity(&record.name)
+        .context("detached Windows run has no Job Object identity")?;
+    if record.job_identity.as_deref() != Some(expected.as_str()) {
+        bail!("run Job Object identity does not match record");
+    }
+    terminate_windows_job(&expected)?;
+    Ok(Command::new("cmd").args(["/C", "exit", "0"]).status()?)
+}
+
+#[cfg(any(unix, windows))]
+fn command_output(program: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new(program).args(args).output().ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+#[cfg(not(windows))]
+struct WorkerJob;
+
+#[cfg(not(windows))]
+fn initialize_worker_job(name: Option<&str>) -> Result<Option<WorkerJob>> {
+    Ok(name.map(|_| WorkerJob))
+}
+
+#[cfg(not(windows))]
+fn worker_job_identity(_name: &str) -> Option<String> {
+    None
+}
+
+#[cfg(windows)]
+struct WorkerJob(windows::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl Drop for WorkerJob {
+    fn drop(&mut self) {
+        // SAFETY: this guard exclusively owns the handle returned by
+        // CreateJobObjectW and closes it exactly once.
+        let _ = unsafe { windows::Win32::Foundation::CloseHandle(self.0) };
+    }
+}
+
+#[cfg(windows)]
+fn initialize_worker_job(name: Option<&str>) -> Result<Option<WorkerJob>> {
+    use windows::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW};
+    use windows::Win32::System::Threading::GetCurrentProcess;
+    use windows::core::PCWSTR;
+
+    let Some(name) = name else {
+        return Ok(None);
+    };
+    let identity = worker_job_identity(name).context("invalid Windows Job Object name")?;
+    let wide: Vec<u16> = identity.encode_utf16().chain(Some(0)).collect();
+    // SAFETY: `wide` is NUL-terminated for the duration of this call and the
+    // returned handle is immediately transferred to WorkerJob.
+    let handle = unsafe { CreateJobObjectW(None, PCWSTR(wide.as_ptr())) }?;
+    // SAFETY: both handles are valid and the Job handle remains open in the
+    // returned guard for the worker's lifetime.
+    unsafe { AssignProcessToJobObject(handle, GetCurrentProcess()) }?;
+    Ok(Some(WorkerJob(handle)))
+}
+
+#[cfg(windows)]
+fn worker_job_identity(name: &str) -> Option<String> {
+    Some(format!("Local\\ato-run-{name}"))
+}
+
+#[cfg(windows)]
+fn terminate_windows_job(identity: &str) -> Result<()> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::JobObjects::{OpenJobObjectW, TerminateJobObject};
+    use windows::core::PCWSTR;
+
+    let wide: Vec<u16> = identity.encode_utf16().chain(Some(0)).collect();
+    // SAFETY: `wide` is NUL-terminated and alive for the call.
+    const JOB_OBJECT_TERMINATE_ACCESS: u32 = 0x0008;
+    let handle =
+        unsafe { OpenJobObjectW(JOB_OBJECT_TERMINATE_ACCESS, false, PCWSTR(wide.as_ptr())) }?;
+    // SAFETY: the handle names the already identity-verified worker Job.
+    let termination = unsafe { TerminateJobObject(handle, 143) };
+    // SAFETY: this function owns the handle returned by OpenJobObjectW.
+    let close = unsafe { CloseHandle(handle) };
+    termination?;
+    close?;
     Ok(())
 }
 
@@ -612,5 +827,26 @@ mod tests {
             ])
             .is_ok()
         );
+    }
+
+    #[test]
+    fn process_identity_rejects_a_reused_pid_record() {
+        let current = RunRecord {
+            name: "identity".to_owned(),
+            head: format!("blake3:{}", "ab".repeat(32)),
+            pid: std::process::id(),
+            process_start_time: process_start_time(std::process::id()).unwrap(),
+            process_group: current_process_group().unwrap(),
+            job_identity: worker_job_identity("identity"),
+            boot_session: boot_session_identity().unwrap(),
+            status: "running".to_owned(),
+            exit_code: None,
+            log: PathBuf::from("unused.log"),
+        };
+        assert!(process_matches(&current).unwrap());
+
+        let mut reused = current;
+        reused.process_start_time.push_str("-different-process");
+        assert!(!process_matches(&reused).unwrap());
     }
 }
