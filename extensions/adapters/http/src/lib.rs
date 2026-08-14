@@ -60,6 +60,8 @@ pub struct HttpAdapterConfig {
     pub listen: SocketAddr,
     pub upstream: SocketAddr,
     pub port_id: String,
+    #[serde(default)]
+    pub ready_path: Option<String>,
 }
 
 impl AdapterFactory for HttpAdapter {
@@ -90,6 +92,9 @@ impl AdapterFactory for HttpAdapter {
         context: &AdapterAttachContext<'_>,
     ) -> Result<Box<dyn AttachedAdapter>, AdapterError> {
         let config = parse_config(instance)?;
+        if let Some(path) = &config.ready_path {
+            wait_until_ready(config.upstream, path)?;
+        }
         let listener = TcpListener::bind(config.listen)?;
         listener.set_nonblocking(true)?;
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -112,6 +117,38 @@ impl AdapterFactory for HttpAdapter {
             join: Some(join),
         }))
     }
+}
+
+fn wait_until_ready(upstream: SocketAddr, path: &str) -> Result<(), AdapterError> {
+    if !path.starts_with('/') || path.contains(['\r', '\n']) {
+        return Err(AdapterError::InvalidConfig(
+            "HTTP ready_path must be an absolute path without control characters".to_owned(),
+        ));
+    }
+    let mut last_error = None;
+    for _ in 0..400 {
+        match TcpStream::connect(upstream).and_then(|mut stream| {
+            stream.write_all(
+                format!("GET {path} HTTP/1.1\r\nHost: readiness\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )?;
+            let response = read_http_message(&mut stream)?;
+            match parse_response(&response)? {
+                HttpEvent::Response { status, .. } if (200..300).contains(&status) => Ok(()),
+                _ => Err(std::io::Error::other("HTTP readiness contract failed")),
+            }
+        }) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                thread::sleep(Duration::from_millis(25));
+            }
+        }
+    }
+    Err(AdapterError::Operation(format!(
+        "HTTP readiness contract timed out: {}",
+        last_error.map_or_else(|| "unknown error".to_owned(), |error| error.to_string())
+    )))
 }
 
 struct HttpSession {

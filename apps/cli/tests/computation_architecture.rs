@@ -137,11 +137,17 @@ fn main() {
     let address = std::env::args().nth(1).unwrap();
     let listener = TcpListener::bind(address).unwrap();
     let mut count = 0_u64;
-    for _ in 0..4 {
+    let mut handled = 0;
+    while handled < 4 {
         let (mut stream, _) = listener.accept().unwrap();
         let mut request = [0_u8; 4096];
         let size = stream.read(&mut request).unwrap();
         let request = String::from_utf8_lossy(&request[..size]);
+        if request.starts_with("GET /ready ") {
+            stream.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            continue;
+        }
+        handled += 1;
         if request.starts_with("POST /increment ") {
             count += 1;
             stream.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
@@ -155,10 +161,18 @@ fn main() {
 "#,
     )
     .unwrap();
+    assert!(
+        Command::new("rustc")
+            .args(["counter.rs", "-o", "counter-bin"])
+            .current_dir(project.path())
+            .status()
+            .unwrap()
+            .success()
+    );
     write_project(
         project.path(),
         &format!(
-            r#"["sh", "-c", "rustc counter.rs -o counter-bin && ./counter-bin 127.0.0.1:{upstream_port}"]"#
+            r#"["sh", "-c", "chmod +x counter-bin && exec ./counter-bin 127.0.0.1:{upstream_port}"]"#
         ),
         &format!(
             r#"[[port]]
@@ -170,7 +184,8 @@ role = "server"
 port = "app.http"
 use = "ato.http@1"
 listen = "127.0.0.1:{public_port}"
-upstream = "127.0.0.1:{upstream_port}""#
+upstream = "127.0.0.1:{upstream_port}"
+ready_path = "/ready""#
         ),
     );
     ato(author_home.path())
