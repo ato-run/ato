@@ -12,6 +12,119 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceCapturePolicy {
+    includes: Vec<String>,
+    excludes: Vec<String>,
+}
+
+impl WorkspaceCapturePolicy {
+    pub fn secure_default() -> Self {
+        Self {
+            includes: Vec::new(),
+            excludes: Vec::new(),
+        }
+    }
+
+    pub fn new(includes: Vec<String>, excludes: Vec<String>) -> Result<Self, AdapterError> {
+        for path in includes.iter().chain(&excludes) {
+            validate_capture_path(path)?;
+        }
+        Ok(Self { includes, excludes })
+    }
+
+    pub fn captures(&self, relative: &Path) -> bool {
+        let Some(path) = normalized_relative(relative) else {
+            return false;
+        };
+        !securely_excluded(&path)
+            && !self.excludes.iter().any(|entry| under(&path, entry))
+            && (self.includes.is_empty() || self.includes.iter().any(|entry| under(&path, entry)))
+    }
+
+    pub fn descends_into(&self, relative: &Path) -> bool {
+        let Some(path) = normalized_relative(relative) else {
+            return false;
+        };
+        !securely_excluded(&path)
+            && !self.excludes.iter().any(|entry| under(&path, entry))
+            && (self.includes.is_empty()
+                || self
+                    .includes
+                    .iter()
+                    .any(|entry| under(&path, entry) || under(entry, &path)))
+    }
+}
+
+impl Default for WorkspaceCapturePolicy {
+    fn default() -> Self {
+        Self::secure_default()
+    }
+}
+
+fn validate_capture_path(path: &str) -> Result<(), AdapterError> {
+    let value = Path::new(path);
+    if path.is_empty()
+        || value.is_absolute()
+        || value
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
+        return Err(AdapterError::InvalidConfig(format!(
+            "workspace capture path `{path}` must be a rooted-relative normal path"
+        )));
+    }
+    Ok(())
+}
+
+fn normalized_relative(path: &Path) -> Option<String> {
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    Some(
+        path.components()
+            .map(|part| part.as_os_str().to_str())
+            .collect::<Option<Vec<_>>>()?
+            .join("/"),
+    )
+}
+
+fn under(path: &str, prefix: &str) -> bool {
+    path == prefix
+        || path
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+fn securely_excluded(path: &str) -> bool {
+    let parts: Vec<_> = path.split('/').collect();
+    if parts.iter().any(|part| {
+        matches!(
+            part.to_ascii_lowercase().as_str(),
+            ".capsule" | ".git" | ".ssh" | ".aws" | ".gnupg"
+        )
+    }) {
+        return true;
+    }
+    let file = parts
+        .last()
+        .copied()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    file == ".env"
+        || file.starts_with(".env.")
+        || file == "credentials"
+        || file.starts_with("credentials.")
+        || matches!(file.as_str(), "id_rsa" | "id_ed25519")
+        || [".pem", ".key", ".p12", ".pfx"]
+            .iter()
+            .any(|suffix| file.ends_with(suffix))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AdapterCapabilities {
     pub observe: bool,
@@ -307,5 +420,19 @@ mod tests {
             .unwrap();
         assert_eq!(sessions[0].instance_id(), "custom.one");
         assert!(sessions[0].capabilities().observe);
+    }
+
+    #[test]
+    fn workspace_capture_policy_is_explicit_and_secure_by_default() {
+        let policy = WorkspaceCapturePolicy::new(
+            vec!["src".to_owned(), "config".to_owned()],
+            vec!["src/generated".to_owned()],
+        )
+        .unwrap();
+        assert!(policy.captures(Path::new("src/main.rs")));
+        assert!(!policy.captures(Path::new("src/generated/key.txt")));
+        assert!(!policy.captures(Path::new("README.md")));
+        assert!(!policy.captures(Path::new("config/.env")));
+        assert!(!policy.captures(Path::new("config/signing.key")));
     }
 }

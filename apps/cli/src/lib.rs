@@ -32,6 +32,7 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::authoring::{
     AuthoringReferences, evolve_workspace, initial_computation, load_config, load_runtime_state,
+    workspace_policy,
 };
 use crate::supervisor::{CliRealizationDriver, start_durable, stop_active};
 
@@ -199,6 +200,7 @@ fn encap(args: EncapArgs) -> Result<()> {
     let records = repository.records_for_stream(&selector.branch, selector.record)?;
     let adapters = adapter_registry()?;
     let materializers = materializer_registry()?;
+    let capture_policy = workspace_policy(&state.config)?;
     let selected = if args.materializers.is_empty() {
         if state.config.encap.materializers.is_empty() {
             vec!["ato.replay@1".to_owned()]
@@ -213,6 +215,7 @@ fn encap(args: EncapArgs) -> Result<()> {
         adapters: &adapters,
         records: &records,
         workspace: repository.project(),
+        workspace_policy: &capture_policy,
         realization: None,
     };
     let mut entries = Vec::new();
@@ -269,12 +272,14 @@ fn run_capsule(args: RunArgs) -> Result<()> {
     }
     let adapters = adapter_registry()?;
     let materializers = materializer_registry()?;
+    let capture_policy = workspace_policy(&state.config)?;
     let driver = CliRealizationDriver::new(&project, &bindings);
     let context = MaterializerContext {
         objects: repository.objects(),
         adapters: &adapters,
         records: &[],
         workspace: &project,
+        workspace_policy: &capture_policy,
         realization: Some(&driver),
     };
     let mut candidates = bundle.index.materializations.clone();

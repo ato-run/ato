@@ -10,6 +10,7 @@ use std::sync::{Arc, Barrier};
 use assert_cmd::prelude::*;
 use ato_computation::{ComputationRef, PortId, ProtocolId};
 use ato_objects::{Direction, LocalCapsuleRepository, ObjectStore, RecordEnvelope, RecordId};
+use base64::Engine;
 use predicates::prelude::*;
 
 fn ato(ato_home: &Path) -> Command {
@@ -319,6 +320,11 @@ id = "service.api_token"
 environment = "API_TOKEN"
 protocol = "ato.binding@1""#,
     );
+    fs::write(
+        project.path().join(".env"),
+        "OPENAI_API_KEY=canary-workspace-secret\n",
+    )
+    .unwrap();
     ato(author_home.path())
         .args([
             "init",
@@ -368,6 +374,12 @@ protocol = "ato.binding@1""#,
                     .windows(b"alice-secret".len())
                     .any(|value| value == b"alice-secret")
             );
+            assert!(
+                !bytes
+                    .windows(b"canary-workspace-secret".len())
+                    .any(|value| value == b"canary-workspace-secret"),
+                "workspace secret must not enter the local portable object closure"
+            );
         }
     }
     assert!(
@@ -376,6 +388,26 @@ protocol = "ato.binding@1""#,
             .windows(b"alice-secret".len())
             .any(|value| value == b"alice-secret")
     );
+    assert!(
+        !fs::read(&bundle)
+            .unwrap()
+            .windows(b"canary-workspace-secret".len())
+            .any(|value| value == b"canary-workspace-secret"),
+        "secure workspace capture must exclude project-local secrets"
+    );
+    let bundle_json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
+    for payload in bundle_json["payloads"].as_array().unwrap() {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(payload["bytes"].as_str().unwrap())
+            .unwrap();
+        assert!(
+            !bytes
+                .windows(b"canary-workspace-secret".len())
+                .any(|value| value == b"canary-workspace-secret"),
+            "portable bundle payload must not contain the workspace secret"
+        );
+    }
     ato(recipient_home.path())
         .args([
             "run",
