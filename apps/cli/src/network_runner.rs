@@ -37,19 +37,36 @@ enum RunnerCommands {
 #[derive(Debug, Args)]
 struct ServeArgs {
     #[arg(long, env = "ATO_API_URL")]
-    api_base: String,
+    api_base: Option<String>,
     #[arg(long, env = "ATO_RUNNER_ID")]
-    runner_id: String,
+    runner_id: Option<String>,
     #[arg(long, env = "ATO_RUNNER_TOKEN")]
-    runner_token: String,
+    runner_token: Option<String>,
     #[arg(long, env = "ATO_RUNNER_PUBLIC_BASE_URL")]
     public_base_url: String,
     #[arg(long, env = "ATO_RUNNER_STATE_DIR")]
-    state_dir: PathBuf,
+    state_dir: Option<PathBuf>,
     #[arg(long, default_value = "127.0.0.1:8420")]
     proxy_listen: SocketAddr,
     #[arg(long)]
     once: bool,
+}
+
+struct ResolvedServeArgs {
+    api_base: String,
+    runner_id: String,
+    runner_token: String,
+    public_base_url: String,
+    state_dir: PathBuf,
+    proxy_listen: SocketAddr,
+    once: bool,
+}
+
+#[derive(Deserialize)]
+struct StoredRunnerCredentials {
+    api_base: String,
+    runner_id: String,
+    runner_token: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -144,6 +161,7 @@ pub(crate) fn run(args: RunnerArgs) -> Result<()> {
 }
 
 fn serve(args: ServeArgs) -> Result<()> {
+    let args = resolve_serve_args(args)?;
     let evaluator = UntrustedProcessEvaluator::discover()?;
     fs::create_dir_all(&args.state_dir)?;
     let client = Client::builder().timeout(Duration::from_secs(30)).build()?;
@@ -192,6 +210,60 @@ fn serve(args: ServeArgs) -> Result<()> {
     }
 }
 
+fn resolve_serve_args(args: ServeArgs) -> Result<ResolvedServeArgs> {
+    let ato_home = std::env::var_os("ATO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".ato")))
+        .context("ATO_HOME is unset and the current home directory is unavailable")?;
+    resolve_serve_args_from_home(args, ato_home)
+}
+
+fn resolve_serve_args_from_home(args: ServeArgs, ato_home: PathBuf) -> Result<ResolvedServeArgs> {
+    let credentials_path = ato_home.join("runner").join("credentials.json");
+    let stored =
+        if args.api_base.is_none() || args.runner_id.is_none() || args.runner_token.is_none() {
+            let bytes = fs::read(&credentials_path).with_context(|| {
+                format!(
+                    "runner credentials are not fully supplied and {} cannot be read",
+                    credentials_path.display()
+                )
+            })?;
+            Some(
+                serde_json::from_slice::<StoredRunnerCredentials>(&bytes).with_context(|| {
+                    format!(
+                        "invalid runner credentials in {}",
+                        credentials_path.display()
+                    )
+                })?,
+            )
+        } else {
+            None
+        };
+    let api_base = args
+        .api_base
+        .or_else(|| stored.as_ref().map(|value| value.api_base.clone()))
+        .context("runner API base is unavailable")?;
+    let runner_id = args
+        .runner_id
+        .or_else(|| stored.as_ref().map(|value| value.runner_id.clone()))
+        .context("runner identity is unavailable")?;
+    let runner_token = args
+        .runner_token
+        .or_else(|| stored.map(|value| value.runner_token))
+        .context("runner credential is unavailable")?;
+    Ok(ResolvedServeArgs {
+        api_base,
+        runner_id,
+        runner_token,
+        public_base_url: args.public_base_url,
+        state_dir: args
+            .state_dir
+            .unwrap_or_else(|| ato_home.join("network-runner")),
+        proxy_listen: args.proxy_listen,
+        once: args.once,
+    })
+}
+
 impl UntrustedProcessEvaluator {
     fn discover() -> Result<Self> {
         let bwrap = find_executable("bwrap").context("bwrap is not available on PATH")?;
@@ -218,7 +290,7 @@ fn find_executable(name: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
-fn heartbeat(client: &Client, base: &str, args: &ServeArgs) -> Result<()> {
+fn heartbeat(client: &Client, base: &str, args: &ResolvedServeArgs) -> Result<()> {
     authorized(
         client.post(format!("{base}/v1/runners/{}/heartbeat", args.runner_id)),
         &args.runner_token,
@@ -254,7 +326,7 @@ fn heartbeat(client: &Client, base: &str, args: &ServeArgs) -> Result<()> {
 fn execute_lease(
     client: &Client,
     base: &str,
-    args: &ServeArgs,
+    args: &ResolvedServeArgs,
     evaluator: &UntrustedProcessEvaluator,
     lease: &ClaimedLease,
 ) -> Result<()> {
@@ -543,7 +615,7 @@ fn read_session_report(child: &mut Child) -> Result<HostedSessionReport> {
 fn capture_and_upload(
     client: &Client,
     base: &str,
-    args: &ServeArgs,
+    args: &ResolvedServeArgs,
     repository: &Path,
     capture: &CaptureRequest,
 ) -> Result<()> {
@@ -727,6 +799,39 @@ mod tests {
     use std::io::Write as _;
 
     use super::*;
+
+    #[test]
+    fn runner_reuses_registered_credentials_and_derives_private_state_directory() {
+        let test_root = std::env::current_dir()
+            .unwrap()
+            .join(".tmp")
+            .join(format!("network-runner-credentials-{}", std::process::id()));
+        let credentials_dir = test_root.join("runner");
+        fs::create_dir_all(&credentials_dir).unwrap();
+        fs::write(
+            credentials_dir.join("credentials.json"),
+            r#"{"api_base":"https://api.example","runner_id":"runr_test","runner_token":"private-token"}"#,
+        )
+        .unwrap();
+        let resolved = resolve_serve_args_from_home(
+            ServeArgs {
+                api_base: None,
+                runner_id: None,
+                runner_token: None,
+                public_base_url: "https://runner.example".to_owned(),
+                state_dir: None,
+                proxy_listen: "127.0.0.1:8420".parse().unwrap(),
+                once: true,
+            },
+            test_root.clone(),
+        )
+        .unwrap();
+        assert_eq!(resolved.api_base, "https://api.example");
+        assert_eq!(resolved.runner_id, "runr_test");
+        assert_eq!(resolved.runner_token, "private-token");
+        assert_eq!(resolved.state_dir, test_root.join("network-runner"));
+        fs::remove_dir_all(test_root).unwrap();
+    }
 
     #[test]
     fn untrusted_evaluator_has_minimal_mounts_namespaces_and_empty_host_environment() {
