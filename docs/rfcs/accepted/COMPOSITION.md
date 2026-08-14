@@ -14,3 +14,8 @@ successor, and publishes one parent transition.
 
 Composition does not create Placement, Cluster, ServiceGraph, WebApp, or other
 workload-specific semantic types.
+
+Every authored Port names its owner Node explicitly. Runtime projection derives
+per-node physical endpoint environment from Connections; it never infers owners
+from Port name prefixes or silently assigns an unmatched Port to a first process.
+An internal client Port without a Connection is invalid.

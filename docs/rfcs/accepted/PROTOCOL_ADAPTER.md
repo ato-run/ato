@@ -18,6 +18,11 @@ Protocol semantics defines the logical type, role, and behavior of Port
 interaction. An Adapter connects real interaction to that Protocol. They are
 not interchangeable, and Kernel never decodes Adapter payload schemas.
 
+Workspace capture is an Adapter boundary with explicit rooted-relative include
+and exclude paths. Secure exclusions for local environment files, credential
+stores, private keys, repository metadata, and `.capsule/` always win over an
+include. Every workspace/filesystem Materialization uses this same policy.
+
 Built-in v1 Adapters are Process, PTY, Workspace, Binding, and HTTP. PTY records
 bytes, resize, signal, and attachment events without inferring shell commands.
 HTTP request and response are distinct Records. Binding evidence contains only
