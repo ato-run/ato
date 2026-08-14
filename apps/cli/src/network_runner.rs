@@ -1,0 +1,548 @@
+//! Minimal Connected Runner consumer for `portable_capsule_v2`.
+//!
+//! It reuses the canonical control-plane lease wire and launches the ordinary
+//! `PortableSession` command inside bwrap. It is intentionally not another
+//! scheduler or execution engine.
+
+use std::fs;
+use std::io::{BufRead, BufReader, Read};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::JoinHandle;
+use std::time::Duration;
+
+use anyhow::{Context, Result, bail};
+use clap::{Args, Subcommand};
+use reqwest::blocking::{Client, RequestBuilder};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Args)]
+pub(crate) struct RunnerArgs {
+    #[command(subcommand)]
+    command: RunnerCommands,
+}
+
+#[derive(Debug, Subcommand)]
+enum RunnerCommands {
+    Serve(ServeArgs),
+}
+
+#[derive(Debug, Args)]
+struct ServeArgs {
+    #[arg(long, env = "ATO_API_URL")]
+    api_base: String,
+    #[arg(long, env = "ATO_RUNNER_ID")]
+    runner_id: String,
+    #[arg(long, env = "ATO_RUNNER_TOKEN")]
+    runner_token: String,
+    #[arg(long, env = "ATO_RUNNER_PUBLIC_BASE_URL")]
+    public_base_url: String,
+    #[arg(long, env = "ATO_RUNNER_STATE_DIR")]
+    state_dir: PathBuf,
+    #[arg(long, default_value = "127.0.0.1:8420")]
+    proxy_listen: SocketAddr,
+    #[arg(long)]
+    once: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaimResponse {
+    lease: Option<ClaimedLease>,
+    #[serde(default = "default_poll_seconds")]
+    next_poll_seconds: u64,
+}
+
+fn default_poll_seconds() -> u64 {
+    2
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaimedLease {
+    id: String,
+    run_id: String,
+    command: PortableLeaseCommand,
+}
+
+#[derive(Debug, Deserialize)]
+struct PortableLeaseCommand {
+    kind: String,
+    bundle_id: String,
+    transport_digest: String,
+    expected_root_computation_ref: String,
+    exported_port_id: String,
+    session_surface: SessionSurface,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionSurface {
+    kind: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct HostedSessionReport {
+    root_computation_ref: String,
+    exported_ports: Vec<HostedPort>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HostedPort {
+    port_id: String,
+    protocol: String,
+    local_endpoint: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ControlResponse {
+    stop_requested: bool,
+    capture: Option<CaptureRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CaptureRequest {
+    request_id: String,
+    upload_url: String,
+}
+
+#[derive(Serialize)]
+struct StatusReport<'a> {
+    status: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    execution_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<ErrorReport<'a>>,
+}
+
+#[derive(Serialize)]
+struct ErrorReport<'a> {
+    code: &'a str,
+    message: &'a str,
+}
+
+pub(crate) fn run(args: RunnerArgs) -> Result<()> {
+    match args.command {
+        RunnerCommands::Serve(args) => serve(args),
+    }
+}
+
+fn serve(args: ServeArgs) -> Result<()> {
+    require_bwrap()?;
+    fs::create_dir_all(&args.state_dir)?;
+    let client = Client::builder().timeout(Duration::from_secs(30)).build()?;
+    let base = args.api_base.trim_end_matches('/');
+    heartbeat(&client, base, &args)?;
+    loop {
+        let claim: ClaimResponse = authorized(
+            client.get(format!(
+                "{base}/v1/runners/{}/leases/next?wait_ms=20000",
+                args.runner_id
+            )),
+            &args.runner_token,
+        )
+        .send()?
+        .error_for_status()?
+        .json()?;
+        let Some(lease) = claim.lease else {
+            if args.once {
+                return Ok(());
+            }
+            thread_sleep(claim.next_poll_seconds);
+            heartbeat(&client, base, &args)?;
+            continue;
+        };
+        if let Err(error) = execute_lease(&client, base, &args, &lease) {
+            let message = format!("portable Capsule execution failed: {error:#}");
+            let _ = report_status(
+                &client,
+                base,
+                &args.runner_token,
+                &lease.id,
+                StatusReport {
+                    status: "failed",
+                    execution_id: None,
+                    error: Some(ErrorReport {
+                        code: "portable_capsule_failed",
+                        message: &message,
+                    }),
+                },
+            );
+        }
+        if args.once {
+            return Ok(());
+        }
+        heartbeat(&client, base, &args)?;
+    }
+}
+
+fn require_bwrap() -> Result<()> {
+    let available = Command::new("bwrap")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    if std::env::consts::OS != "linux" || !available {
+        bail!("portable Capsule runner requires the external linux-bwrap sandbox");
+    }
+    Ok(())
+}
+
+fn heartbeat(client: &Client, base: &str, args: &ServeArgs) -> Result<()> {
+    authorized(
+        client.post(format!("{base}/v1/runners/{}/heartbeat", args.runner_id)),
+        &args.runner_token,
+    )
+    .json(&serde_json::json!({
+        "capabilities": ["sandbox=linux-bwrap"],
+        "supported_lease_kinds": ["portable_capsule_v2"],
+        "supported_session_surfaces": [{
+            "kind": "web",
+            "profiles": ["ato.web-surface.v1"],
+            "transports": ["https"]
+        }],
+        "public_base_url": args.public_base_url,
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "max_slots": 1,
+        "active_slots": 0,
+        "agent_version": env!("CARGO_PKG_VERSION"),
+    }))
+    .send()?
+    .error_for_status()?;
+    Ok(())
+}
+
+fn execute_lease(
+    client: &Client,
+    base: &str,
+    args: &ServeArgs,
+    lease: &ClaimedLease,
+) -> Result<()> {
+    if lease.command.kind != "portable_capsule_v2" {
+        bail!("unsupported lease kind `{}`", lease.command.kind);
+    }
+    if !lease.command.bundle_id.starts_with("bnd_") {
+        bail!("portable lease carries an invalid bundle identity");
+    }
+    report_status(
+        client,
+        base,
+        &args.runner_token,
+        &lease.id,
+        StatusReport {
+            status: "preparing",
+            execution_id: None,
+            error: None,
+        },
+    )?;
+    let repository = args.state_dir.join("sessions").join(&lease.run_id);
+    fs::create_dir_all(&repository)?;
+    let bundle_path = repository.join("input.capsule");
+    let bytes = authorized(
+        client.get(format!(
+            "{base}/v1/runner-leases/{}/capsule-bundle",
+            lease.id
+        )),
+        &args.runner_token,
+    )
+    .send()?
+    .error_for_status()?
+    .bytes()?;
+    let actual_digest = format!("sha256:{:x}", sha2::Sha256::digest(&bytes));
+    if actual_digest != lease.command.transport_digest {
+        bail!("downloaded bundle transport digest mismatch");
+    }
+    fs::write(&bundle_path, &bytes)?;
+    let mut child = spawn_sandboxed_session(
+        &bundle_path,
+        &repository,
+        &lease.command.expected_root_computation_ref,
+    )?;
+    let report = read_session_report(&mut child)?;
+    if report.root_computation_ref != lease.command.expected_root_computation_ref {
+        terminate_child(&mut child);
+        bail!("sandboxed session reported an unexpected root");
+    }
+    let port = report
+        .exported_ports
+        .iter()
+        .find(|port| port.port_id == lease.command.exported_port_id)
+        .context("selected exported Port was not realized")?;
+    if (lease.command.session_surface.kind == "web" && port.protocol != "ato.http@1")
+        || (lease.command.session_surface.kind == "terminal" && port.protocol != "ato.pty@1")
+    {
+        terminate_child(&mut child);
+        bail!("realized Port does not match the negotiated session surface");
+    }
+    let local_endpoint = port
+        .local_endpoint
+        .as_deref()
+        .context("realized Port did not report a runtime endpoint")?;
+    let target: SocketAddr = local_endpoint
+        .parse()
+        .context("runtime endpoint is not a TCP socket")?;
+    let proxy = TcpProxy::start(args.proxy_listen, target)?;
+    report_status(
+        client,
+        base,
+        &args.runner_token,
+        &lease.id,
+        StatusReport {
+            status: "running",
+            execution_id: None,
+            error: None,
+        },
+    )?;
+    let execution_id = format!("portable:{}:{}", lease.run_id, child.id());
+    authorized(
+        client.post(format!("{base}/v1/runner-leases/{}/ready", lease.id)),
+        &args.runner_token,
+    )
+    .json(&serde_json::json!({
+        "execution_id": execution_id,
+        "ready_url": args.public_base_url,
+        "local_port": target.port(),
+    }))
+    .send()?
+    .error_for_status()?;
+
+    let mut handled_capture: Option<String> = None;
+    loop {
+        if child.try_wait()?.is_some() {
+            bail!("sandboxed portable session exited while active");
+        }
+        let control: ControlResponse = authorized(
+            client.get(format!("{base}/v1/runner-leases/{}/control", lease.id)),
+            &args.runner_token,
+        )
+        .send()?
+        .error_for_status()?
+        .json()?;
+        if control.stop_requested {
+            stop_session(&repository)?;
+            terminate_child(&mut child);
+            drop(proxy);
+            authorized(
+                client.post(format!("{base}/v1/runner-leases/{}/stopped", lease.id)),
+                &args.runner_token,
+            )
+            .json(&serde_json::json!({ "execution_id": execution_id }))
+            .send()?
+            .error_for_status()?;
+            return Ok(());
+        }
+        if let Some(capture) = control.capture
+            && handled_capture.as_deref() != Some(&capture.request_id)
+        {
+            capture_and_upload(client, base, args, &repository, &capture)?;
+            handled_capture = Some(capture.request_id);
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn spawn_sandboxed_session(bundle: &Path, repository: &Path, root: &str) -> Result<Child> {
+    let executable = std::env::current_exe()?;
+    let repository = repository.canonicalize()?;
+    let bundle = bundle.canonicalize()?;
+    Command::new("bwrap")
+        .args(["--die-with-parent", "--new-session", "--unshare-pid"])
+        .args(["--ro-bind", "/", "/"])
+        .arg("--bind")
+        .arg(&repository)
+        .arg(&repository)
+        .args(["--proc", "/proc", "--dev-bind", "/dev", "/dev"])
+        .args(["--setenv", "ATO_EXTERNAL_SANDBOX_PROFILE", "linux-bwrap"])
+        .arg(&executable)
+        .args(["__hosted-session", "start"])
+        .arg(&bundle)
+        .args(["--expected-root", root, "--repository"])
+        .arg(&repository)
+        .arg("--hold")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("failed to enter linux-bwrap sandbox")
+}
+
+fn read_session_report(child: &mut Child) -> Result<HostedSessionReport> {
+    let stdout = child.stdout.take().context("sandbox stdout unavailable")?;
+    let mut line = String::new();
+    BufReader::new(stdout).read_line(&mut line)?;
+    if line.trim().is_empty() {
+        let mut stderr = String::new();
+        if let Some(mut stream) = child.stderr.take() {
+            let _ = stream.read_to_string(&mut stderr);
+        }
+        bail!("sandboxed session failed before readiness: {stderr}");
+    }
+    serde_json::from_str(&line).context("invalid hosted session readiness report")
+}
+
+fn capture_and_upload(
+    client: &Client,
+    base: &str,
+    args: &ServeArgs,
+    repository: &Path,
+    capture: &CaptureRequest,
+) -> Result<()> {
+    let output = repository.join(format!("{}.capsule", capture.request_id));
+    let status = Command::new(std::env::current_exe()?)
+        .args(["__hosted-session", "capture", "--repository"])
+        .arg(repository)
+        .args(["--output"])
+        .arg(&output)
+        .env("ATO_EXTERNAL_SANDBOX_PROFILE", "linux-bwrap")
+        .status()?;
+    if !status.success() {
+        bail!("current-point hosted capture failed");
+    }
+    let bytes = fs::read(&output)?;
+    authorized(
+        client.put(format!("{base}{}", capture.upload_url)),
+        &args.runner_token,
+    )
+    .header("content-type", "application/vnd.ato.capsule")
+    .body(bytes)
+    .send()?
+    .error_for_status()?;
+    let _ = fs::remove_file(output);
+    Ok(())
+}
+
+fn stop_session(repository: &Path) -> Result<()> {
+    let status = Command::new(std::env::current_exe()?)
+        .args(["__hosted-session", "stop", "--repository"])
+        .arg(repository)
+        .env("ATO_EXTERNAL_SANDBOX_PROFILE", "linux-bwrap")
+        .status()?;
+    if !status.success() {
+        bail!("portable session stop failed");
+    }
+    Ok(())
+}
+
+fn report_status(
+    client: &Client,
+    base: &str,
+    token: &str,
+    lease_id: &str,
+    report: StatusReport<'_>,
+) -> Result<()> {
+    authorized(
+        client.post(format!("{base}/v1/runner-leases/{lease_id}/status")),
+        token,
+    )
+    .json(&report)
+    .send()?
+    .error_for_status()?;
+    Ok(())
+}
+
+fn authorized(request: RequestBuilder, token: &str) -> RequestBuilder {
+    request.bearer_auth(token)
+}
+
+fn terminate_child(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn thread_sleep(seconds: u64) {
+    std::thread::sleep(Duration::from_secs(seconds.clamp(1, 30)));
+}
+
+struct TcpProxy {
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl TcpProxy {
+    fn start(listen: SocketAddr, target: SocketAddr) -> Result<Self> {
+        let listener = TcpListener::bind(listen)?;
+        listener.set_nonblocking(true)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let worker = std::thread::spawn(move || {
+            while !thread_stop.load(Ordering::Acquire) {
+                match listener.accept() {
+                    Ok((client, _)) => {
+                        std::thread::spawn(move || proxy_connection(client, target));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Ok(Self {
+            stop,
+            worker: Some(worker),
+        })
+    }
+}
+
+impl Drop for TcpProxy {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn proxy_connection(mut client: TcpStream, target: SocketAddr) {
+    let Ok(mut upstream) = TcpStream::connect(target) else {
+        return;
+    };
+    let Ok(mut client_read) = client.try_clone() else {
+        return;
+    };
+    let Ok(mut upstream_write) = upstream.try_clone() else {
+        return;
+    };
+    let forward = std::thread::spawn(move || {
+        let _ = std::io::copy(&mut client_read, &mut upstream_write);
+        let _ = upstream_write.shutdown(std::net::Shutdown::Write);
+    });
+    let _ = std::io::copy(&mut upstream, &mut client);
+    let _ = client.shutdown(std::net::Shutdown::Write);
+    let _ = forward.join();
+}
+
+use sha2::Digest as _;
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write as _;
+
+    use super::*;
+
+    #[test]
+    fn tcp_proxy_preserves_bidirectional_http_bytes() {
+        let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+        let upstream_address = upstream.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = upstream.accept().unwrap();
+            let mut request = [0_u8; 4];
+            stream.read_exact(&mut request).unwrap();
+            assert_eq!(&request, b"ping");
+            stream.write_all(b"pong").unwrap();
+        });
+        let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy_address = probe.local_addr().unwrap();
+        drop(probe);
+        let proxy = TcpProxy::start(proxy_address, upstream_address).unwrap();
+        let mut client = TcpStream::connect(proxy_address).unwrap();
+        client.write_all(b"ping").unwrap();
+        let mut response = [0_u8; 4];
+        client.read_exact(&mut response).unwrap();
+        assert_eq!(&response, b"pong");
+        drop(proxy);
+        server.join().unwrap();
+    }
+}

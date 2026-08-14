@@ -3,6 +3,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 mod authoring;
+mod network_runner;
 mod supervisor;
 
 use std::collections::BTreeMap;
@@ -72,6 +73,9 @@ enum Commands {
     /// Internal hosted-runner interface for a portable Capsule session.
     #[command(name = "__hosted-session", hide = true)]
     HostedSession(HostedSessionArgs),
+    /// Internal Connected Runner worker for portable Capsule leases.
+    #[command(name = "__runner", hide = true)]
+    Runner(network_runner::RunnerArgs),
     #[command(name = "__worker", hide = true)]
     Worker {
         project: PathBuf,
@@ -104,6 +108,9 @@ struct HostedSessionStartArgs {
     repository: PathBuf,
     #[arg(long = "bind", value_parser = parse_binding)]
     bindings: Vec<(String, String)>,
+    /// Keep the sandbox command alive for the duration of the durable Run.
+    #[arg(long)]
+    hold: bool,
 }
 
 #[derive(Debug, Args)]
@@ -207,6 +214,7 @@ pub fn run() -> Result<()> {
             BundleCommands::ValidateQueue(args) => validate_bundle_queue(args),
         },
         Commands::HostedSession(args) => hosted_session(args),
+        Commands::Runner(args) => network_runner::run(args),
         Commands::Worker {
             project,
             branch,
@@ -403,6 +411,9 @@ fn hosted_session_start(args: HostedSessionStartArgs) -> Result<()> {
             exported_ports,
         })?
     );
+    if args.hold {
+        session.wait()?;
+    }
     Ok(())
 }
 
