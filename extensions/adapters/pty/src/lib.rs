@@ -105,21 +105,22 @@ impl AdapterFactory for PtyAdapter {
         context
             .observations
             .emit(observation(&port_id, &PtyEvent::Attach)?)?;
-        let mut readers = Vec::new();
-        readers.push(spawn_output_reader(
-            child.stdout.take().expect("piped stdout"),
-            Arc::clone(&context.observations),
-            port_id.clone(),
-            Arc::clone(&output),
-            Arc::clone(&failure),
-        ));
-        readers.push(spawn_output_reader(
-            child.stderr.take().expect("piped stderr"),
-            Arc::clone(&context.observations),
-            port_id.clone(),
-            Arc::clone(&output),
-            Arc::clone(&failure),
-        ));
+        let readers = vec![
+            spawn_output_reader(
+                child.stdout.take().expect("piped stdout"),
+                Arc::clone(&context.observations),
+                port_id.clone(),
+                Arc::clone(&output),
+                Arc::clone(&failure),
+            ),
+            spawn_output_reader(
+                child.stderr.take().expect("piped stderr"),
+                Arc::clone(&context.observations),
+                port_id.clone(),
+                Arc::clone(&output),
+                Arc::clone(&failure),
+            ),
+        ];
         if let Some(input) = config.initial_input {
             let event = PtyEvent::Input {
                 bytes: input.as_bytes().to_vec(),
