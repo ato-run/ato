@@ -82,8 +82,13 @@ pub(crate) struct AdapterConfig {
 #[serde(deny_unknown_fields)]
 pub(crate) struct PortConfig {
     pub id: String,
+    pub node: String,
     pub protocol: String,
     pub role: String,
+    #[serde(default)]
+    pub address: Option<String>,
+    #[serde(default)]
+    pub environment: Option<String>,
     #[serde(default)]
     pub internal: bool,
 }
@@ -166,9 +171,35 @@ pub(crate) fn load_config(project: &Path) -> Result<AuthoringConfig> {
             bail!("every process requires an id and non-empty command argv");
         }
     }
+    let process_ids: BTreeSet<_> = config
+        .process
+        .iter()
+        .map(|process| process.id.as_str())
+        .collect();
     let ports: BTreeSet<_> = config.port.iter().map(|port| port.id.as_str()).collect();
     if ports.len() != config.port.len() {
         bail!("port ids must be unique");
+    }
+    for port in &config.port {
+        if !process_ids.contains(port.node.as_str()) {
+            bail!(
+                "port `{}` names unknown owner node `{}`",
+                port.id,
+                port.node
+            );
+        }
+        if port.environment.as_deref().is_some_and(str::is_empty) {
+            bail!("port `{}` has an empty environment projection", port.id);
+        }
+        if port.internal
+            && port.role == "client"
+            && !config
+                .connection
+                .iter()
+                .any(|connection| connection.from == port.id || connection.to == port.id)
+        {
+            bail!("internal client port `{}` is unwired", port.id);
+        }
     }
     for connection in &config.connection {
         if connection.from == connection.to
@@ -225,27 +256,20 @@ fn seal_authored_root(
     if config.process.len() < 2 && config.connection.is_empty() {
         return seal_state(objects, config, snapshot);
     }
-    let process_ids: Vec<_> = config
-        .process
-        .iter()
-        .map(|process| process.id.clone())
-        .collect();
-    let first = process_ids
-        .first()
-        .context("composite requires a process")?;
-    let owner = |port: &str| {
-        process_ids
+    let owner = |port: &str| -> Result<String> {
+        config
+            .port
             .iter()
-            .find(|process| port.starts_with(&format!("{process}.")))
-            .unwrap_or(first)
-            .clone()
+            .find(|candidate| candidate.id == port)
+            .map(|candidate| candidate.node.clone())
+            .with_context(|| format!("unknown port `{port}`"))
     };
     let mut nodes = std::collections::BTreeMap::new();
     for process in &config.process {
         let ports: Vec<_> = config
             .port
             .iter()
-            .filter(|port| owner(&port.id) == process.id)
+            .filter(|port| port.node == process.id)
             .cloned()
             .collect();
         let port_ids: BTreeSet<_> = ports.iter().map(|port| port.id.as_str()).collect();
@@ -279,7 +303,7 @@ fn seal_authored_root(
     }
     let endpoint = |port: &str| -> Result<Endpoint> {
         Ok(Endpoint {
-            node: NodeId::parse(owner(port))?,
+            node: NodeId::parse(owner(port)?)?,
             port: PortId::parse(port)?,
         })
     };
@@ -306,7 +330,7 @@ pub(crate) fn adapter_instances(
     isolated_processes: bool,
     emit_initial_events: bool,
 ) -> Result<Vec<AdapterInstance>> {
-    let environment: BTreeMap<_, _> = config
+    let base_environment: BTreeMap<_, _> = config
         .binding
         .iter()
         .filter_map(|binding| {
@@ -337,6 +361,7 @@ pub(crate) fn adapter_instances(
                     .iter()
                     .find(|process| process.id == target)
                     .with_context(|| format!("unknown process adapter target `{target}`"))?;
+                let environment = process_environment(config, target, &base_environment)?;
                 serde_json::to_value(ProcessSpec {
                     id: process.id.clone(),
                     command: process.command.clone(),
@@ -372,6 +397,7 @@ pub(crate) fn adapter_instances(
                     .iter()
                     .find(|process| process.id == target)
                     .with_context(|| format!("unknown PTY adapter target `{target}`"))?;
+                let environment = process_environment(config, target, &base_environment)?;
                 serde_json::to_value(PtyAdapterConfig {
                     command: process.command.clone(),
                     cwd: process.cwd.clone(),
@@ -402,6 +428,56 @@ pub(crate) fn adapter_instances(
         }
     }
     Ok(instances)
+}
+
+fn process_environment(
+    config: &AuthoringConfig,
+    target: &str,
+    base: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>> {
+    let mut environment = base.clone();
+    for port in config.port.iter().filter(|port| port.node == target) {
+        if let (Some(name), Some(address)) = (&port.environment, &port.address) {
+            environment.insert(name.clone(), address.clone());
+        }
+    }
+    for connection in &config.connection {
+        let from = config
+            .port
+            .iter()
+            .find(|port| port.id == connection.from)
+            .context("validated connection source")?;
+        let to = config
+            .port
+            .iter()
+            .find(|port| port.id == connection.to)
+            .context("validated connection target")?;
+        project_peer_address(&mut environment, target, from, to)?;
+        project_peer_address(&mut environment, target, to, from)?;
+    }
+    Ok(environment)
+}
+
+fn project_peer_address(
+    environment: &mut BTreeMap<String, String>,
+    target: &str,
+    local: &PortConfig,
+    peer: &PortConfig,
+) -> Result<()> {
+    if local.node != target || local.role != "client" {
+        return Ok(());
+    }
+    let Some(name) = &local.environment else {
+        return Ok(());
+    };
+    let address = peer.address.as_ref().with_context(|| {
+        format!(
+            "connected peer port `{}` requires a physical address for `{}`",
+            peer.id, local.id
+        )
+    })?;
+    environment.insert(name.clone(), address.clone());
+    Ok(())
 }
 
 pub(crate) fn load_state(
