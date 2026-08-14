@@ -1106,6 +1106,7 @@ fn encap_current_exports_a_point_in_time_and_live_run_continues() {
     assert_eq!(report["format_version"], 2);
     assert_eq!(report["validation"]["status"], "valid");
     assert_eq!(report["materializations"][0]["id"], "ato.replay@1");
+    assert!(report["workspace_file_count"].as_u64().unwrap() > 0);
     assert!(report["object_count"].as_u64().unwrap() > 0);
     assert!(report["decoded_size"].as_u64().unwrap() > 0);
     assert_eq!(report["exported_ports"][0]["protocol"], "ato.http@1");

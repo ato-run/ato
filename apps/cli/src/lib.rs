@@ -17,7 +17,7 @@ use ato_adapter_binding::BindingAdapter;
 use ato_adapter_http::HttpAdapter;
 use ato_adapter_process::ProcessLifecycleAdapter;
 use ato_adapter_pty::PtyAdapter;
-use ato_adapter_workspace::{WorkspaceAdapter, restore_workspace};
+use ato_adapter_workspace::{WorkspaceAdapter, restore_workspace, workspace_snapshot_file_count};
 use ato_compose::ComposeReferences;
 use ato_computation::{ComputationRef, ContentRef};
 use ato_materializer_api::{
@@ -462,6 +462,7 @@ struct BundleVerificationReport {
     materializations: Vec<VerifiedMaterialization>,
     exported_ports: Vec<VerifiedPort>,
     required_bindings: Vec<VerifiedBinding>,
+    workspace_file_count: usize,
     object_count: usize,
     decoded_size: u64,
     validation: VerificationResult,
@@ -524,6 +525,9 @@ fn build_bundle_verification_report(
     let adapters = adapter_registry()?;
     let materializers = materializer_registry()?;
     let state = load_runtime_state(&root, verified.objects())?;
+    let workspace_snapshot = ContentRef::parse(&state.workspace_snapshot)?;
+    let workspace_file_count =
+        workspace_snapshot_file_count(&workspace_snapshot, verified.objects())?;
     let policy = workspace_policy(&state.config)?;
     let context = MaterializerContext {
         objects: verified.objects(),
@@ -579,6 +583,7 @@ fn build_bundle_verification_report(
         materializations: reported_materializations,
         exported_ports,
         required_bindings,
+        workspace_file_count,
         object_count: verified.object_count(),
         decoded_size: verified.decoded_size(),
         validation: VerificationResult { status: "valid" },
