@@ -18,7 +18,7 @@ fn main() -> Result<()> {
     let objects = FsObjectStore::open(root)?;
     let reference = register_materialization(
         &computation,
-        RealizationContract::host("ato-provider-snapshot"),
+        RealizationContract::host("ato.snapshot@1"),
         &artifacts,
         &objects,
     )?;

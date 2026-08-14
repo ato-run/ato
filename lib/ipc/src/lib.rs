@@ -2,7 +2,7 @@
 //!
 //! Semantic protocol and port identities live in `ato-computation`. This
 //! crate contains only transport shapes used across real process boundaries:
-//! computation commands, provider binding leases, network control, and
+//! computation commands, runtime binding leases, network control, and
 //! terminal/session presentation messages.
 
 #![forbid(unsafe_code)]

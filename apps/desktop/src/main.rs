@@ -6,8 +6,10 @@ fn main() -> Result<()> {
     match arguments.next().as_deref() {
         Some("--version" | "-V") => println!("ato-desktop {}", env!("CARGO_PKG_VERSION")),
         Some("--run") => {
-            let source = arguments.next().unwrap_or_else(|| ".".to_owned());
-            let result = ato_desktop::dispatch(&ComputationCommand::Run { source })?;
+            let capsule_file = arguments
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("--run requires a portable .capsule file"))?;
+            let result = ato_desktop::dispatch(&ComputationCommand::RunPortable { capsule_file })?;
             print!("{}", result.output);
             if !result.success {
                 std::process::exit(1);

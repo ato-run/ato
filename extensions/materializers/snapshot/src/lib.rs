@@ -1,6 +1,6 @@
 //! Verify-only snapshot materializer.
 //!
-//! A snapshot is physical evidence that a provider can realize a computation;
+//! A snapshot is physical evidence that a materializer can realize a computation;
 //! it never changes or replaces the computation's identity.
 
 #![forbid(unsafe_code)]
