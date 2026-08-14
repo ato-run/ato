@@ -9,11 +9,101 @@ use std::sync::{Arc, RwLock};
 
 use ato_computation::ContentRef;
 use ato_semantics_workspace::{
-    ProviderError, WorkspaceOutcome, WorkspaceProvider, WorkspaceResidual,
+    ProviderError, ToolchainConstraint, WorkspaceOutcome, WorkspaceProvider, WorkspaceResidual,
 };
 
+use crate::launcher::source::toolchain::{RuntimeFetcher, ToolchainManager};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::system::sandbox::SandboxPolicy;
+
+pub trait RuntimeResolver: Send + Sync {
+    fn resolve(
+        &self,
+        toolchain: &ToolchainConstraint,
+        requested_program: &str,
+    ) -> Result<PathBuf, ProviderError>;
+}
+
+#[derive(Default)]
+pub struct NacelleRuntimeResolver;
+
+impl RuntimeResolver for NacelleRuntimeResolver {
+    fn resolve(
+        &self,
+        toolchain: &ToolchainConstraint,
+        requested_program: &str,
+    ) -> Result<PathBuf, ProviderError> {
+        if let Some(version) = toolchain.version.as_deref() {
+            let fetcher =
+                RuntimeFetcher::new().map_err(|error| ProviderError::new(error.to_string()))?;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| ProviderError::new(error.to_string()))?;
+            let executable = runtime
+                .block_on(async {
+                    match toolchain.family.as_str() {
+                        "python" => fetcher.ensure_python(version).await,
+                        "node" => fetcher.ensure_node(version).await,
+                        "deno" => fetcher.ensure_deno(version).await,
+                        "bun" => fetcher.ensure_bun(version).await,
+                        family => anyhow::bail!(
+                            "managed runtime resolution is unavailable for {family} {version}"
+                        ),
+                    }
+                })
+                .map_err(|error| ProviderError::new(error.to_string()))?;
+            return controlled_program(&executable, requested_program);
+        }
+
+        let manager = ToolchainManager::new();
+        if let Some(toolchain) = manager.find_toolchain(&toolchain.family, None) {
+            return controlled_program(&toolchain.path, requested_program);
+        }
+        which::which(requested_program).map_err(|error| {
+            ProviderError::new(format!(
+                "unversioned runtime `{requested_program}` is unavailable: {error}"
+            ))
+        })
+    }
+}
+
+fn controlled_program(runtime: &Path, requested_program: &str) -> Result<PathBuf, ProviderError> {
+    let runtime_name = runtime.file_stem().and_then(|name| name.to_str());
+    let requested_stem = Path::new(requested_program)
+        .file_stem()
+        .and_then(|name| name.to_str());
+    if runtime_name == requested_stem
+        || matches!(
+            (runtime_name, requested_stem),
+            (Some("python" | "python3"), Some("python" | "python3"))
+        )
+    {
+        return Ok(runtime.to_path_buf());
+    }
+    let sibling = runtime
+        .parent()
+        .ok_or_else(|| ProviderError::new("managed runtime has no binary directory"))?
+        .join(requested_program);
+    if sibling.is_file() {
+        return Ok(sibling);
+    }
+    #[cfg(windows)]
+    {
+        let executable = sibling.with_extension("exe");
+        if executable.is_file() {
+            return Ok(executable);
+        }
+        let command = sibling.with_extension("cmd");
+        if command.is_file() {
+            return Ok(command);
+        }
+    }
+    Err(ProviderError::new(format!(
+        "program `{requested_program}` is absent from managed runtime {}",
+        runtime.display()
+    )))
+}
 
 pub trait SecretBackend: Send + Sync {
     fn resolve(&self, binding: &str) -> Result<String, ProviderError>;
@@ -33,6 +123,7 @@ impl SecretBackend for EmptySecretBackend {
 pub struct NacelleWorkspaceProvider {
     sources: RwLock<BTreeMap<ContentRef, PathBuf>>,
     secrets: Arc<dyn SecretBackend>,
+    runtimes: Arc<dyn RuntimeResolver>,
 }
 
 impl Default for NacelleWorkspaceProvider {
@@ -43,9 +134,17 @@ impl Default for NacelleWorkspaceProvider {
 
 impl NacelleWorkspaceProvider {
     pub fn new(secrets: Arc<dyn SecretBackend>) -> Self {
+        Self::with_runtime_resolver(secrets, Arc::new(NacelleRuntimeResolver))
+    }
+
+    pub fn with_runtime_resolver(
+        secrets: Arc<dyn SecretBackend>,
+        runtimes: Arc<dyn RuntimeResolver>,
+    ) -> Self {
         Self {
             sources: RwLock::new(BTreeMap::new()),
             secrets,
+            runtimes,
         }
     }
 
@@ -92,10 +191,29 @@ impl NacelleWorkspaceProvider {
             .split_first()
             .ok_or_else(|| ProviderError::new("empty workspace entrypoint"))?;
         let cwd = safe_working_directory(root, &workspace.working_directory)?;
-        let executable = which::which(program).map_err(|error| {
-            ProviderError::new(format!("runtime `{program}` is unavailable: {error}"))
-        })?;
+        if !workspace.realization.network_allow.is_empty() {
+            return Err(ProviderError::new(
+                "exact network allowlist enforcement is unavailable for this provider",
+            ));
+        }
+        let executable = self.runtimes.resolve(&workspace.toolchain, program)?;
+        let runtime_directory = executable
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
         let mut command = provider_command(executable, workspace, root)?;
+        let home = root.join(".ato");
+        std::fs::create_dir_all(&home).map_err(|error| ProviderError::new(error.to_string()))?;
+        command.env_clear();
+        command
+            .env(
+                "PATH",
+                std::env::join_paths([runtime_directory])
+                    .map_err(|error| ProviderError::new(error.to_string()))?,
+            )
+            .env("HOME", home)
+            .env("LANG", "C.UTF-8")
+            .env("LC_ALL", "C.UTF-8");
         command.args(args).current_dir(cwd);
         for (name, value) in &workspace.environment {
             command.env(name, value);
@@ -221,7 +339,7 @@ fn sandbox_policy(
         .collect::<Result<Vec<_>, _>>()?;
     Ok(SandboxPolicy::for_capsule(root)
         .allow_read_write(writable)
-        .with_network(!workspace.realization.network_allow.is_empty()))
+        .with_network(false))
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -315,20 +433,42 @@ fn configure_sandbox(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::sync::Mutex;
 
     use ato_semantics_workspace::{RealizationConstraint, ToolchainConstraint, WorkspacePhase};
 
     use super::*;
 
-    #[test]
-    fn realizes_bound_source_and_returns_process_exit_code() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = ContentRef::parse(format!("blake3:{}", "ab".repeat(32))).unwrap();
-        let provider = NacelleWorkspaceProvider::default();
-        provider
-            .bind_materialized_source(source.clone(), dir.path())
-            .unwrap();
-        let workspace = WorkspaceResidual {
+    struct FixedRuntime {
+        executable: PathBuf,
+        requests: Mutex<Vec<(ToolchainConstraint, String)>>,
+    }
+
+    impl FixedRuntime {
+        fn new(executable: PathBuf) -> Self {
+            Self {
+                executable,
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl RuntimeResolver for FixedRuntime {
+        fn resolve(
+            &self,
+            toolchain: &ToolchainConstraint,
+            requested_program: &str,
+        ) -> Result<PathBuf, ProviderError> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push((toolchain.clone(), requested_program.to_owned()));
+            Ok(self.executable.clone())
+        }
+    }
+
+    fn workspace(source: &ContentRef) -> WorkspaceResidual {
+        WorkspaceResidual {
             source: source.to_string(),
             toolchain: ToolchainConstraint {
                 family: "shell".to_owned(),
@@ -345,8 +485,97 @@ mod tests {
                 sandbox_required: false,
             },
             phase: WorkspacePhase::Ready,
-        };
+        }
+    }
+
+    #[test]
+    fn realizes_bound_source_and_returns_process_exit_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = ContentRef::parse(format!("blake3:{}", "ab".repeat(32))).unwrap();
+        let provider = NacelleWorkspaceProvider::default();
+        provider
+            .bind_materialized_source(source.clone(), dir.path())
+            .unwrap();
+        let workspace = workspace(&source);
 
         assert_eq!(provider.realize(&workspace).unwrap().exit_code, 7);
+    }
+
+    #[test]
+    fn command_environment_is_a_closed_provider_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = ContentRef::parse(format!("blake3:{}", "cd".repeat(32))).unwrap();
+        let runtime = Arc::new(FixedRuntime::new(std::env::current_exe().unwrap()));
+        let provider =
+            NacelleWorkspaceProvider::with_runtime_resolver(Arc::new(EmptySecretBackend), runtime);
+        provider
+            .bind_materialized_source(source.clone(), dir.path())
+            .unwrap();
+        let mut workspace = workspace(&source);
+        workspace
+            .environment
+            .insert("DECLARED".to_owned(), "yes".to_owned());
+
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let command = provider
+            .command(&workspace, &root, &workspace.entrypoint)
+            .unwrap();
+        let environment: BTreeMap<_, _> = command
+            .get_envs()
+            .filter_map(|(name, value)| value.map(|value| (name.to_owned(), value.to_owned())))
+            .collect();
+        let keys: Vec<_> = environment
+            .keys()
+            .map(|key| key.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(keys, ["DECLARED", "HOME", "LANG", "LC_ALL", "PATH"]);
+    }
+
+    #[test]
+    fn exact_network_allowlist_fails_closed_without_enforcement() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = ContentRef::parse(format!("blake3:{}", "ef".repeat(32))).unwrap();
+        let runtime = Arc::new(FixedRuntime::new(std::env::current_exe().unwrap()));
+        let provider =
+            NacelleWorkspaceProvider::with_runtime_resolver(Arc::new(EmptySecretBackend), runtime);
+        provider
+            .bind_materialized_source(source.clone(), dir.path())
+            .unwrap();
+        let mut workspace = workspace(&source);
+        workspace.realization.network_allow = vec!["api.openai.com".to_owned()];
+
+        let error = provider.realize(&workspace).unwrap_err();
+        assert!(error.to_string().contains("exact network allowlist"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_runtime_uses_resolved_artifact_not_requested_path_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = ContentRef::parse(format!("blake3:{}", "12".repeat(32))).unwrap();
+        let runtime = Arc::new(FixedRuntime::new(PathBuf::from("/bin/sh")));
+        let provider = NacelleWorkspaceProvider::with_runtime_resolver(
+            Arc::new(EmptySecretBackend),
+            runtime.clone(),
+        );
+        provider
+            .bind_materialized_source(source.clone(), dir.path())
+            .unwrap();
+        let mut workspace = workspace(&source);
+        workspace.toolchain = ToolchainConstraint {
+            family: "python".to_owned(),
+            version: Some("3.11.10".to_owned()),
+        };
+        workspace.entrypoint = vec![
+            "poisoned-python".to_owned(),
+            "-c".to_owned(),
+            "exit 0".to_owned(),
+        ];
+
+        assert_eq!(provider.realize(&workspace).unwrap().exit_code, 0);
+        assert_eq!(
+            runtime.requests.lock().unwrap().as_slice(),
+            [(workspace.toolchain, "poisoned-python".to_owned())]
+        );
     }
 }
