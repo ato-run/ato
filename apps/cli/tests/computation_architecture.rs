@@ -1080,8 +1080,8 @@ fn encap_current_exports_a_point_in_time_and_live_run_continues() {
         .args(["init", project.path().to_str().unwrap()])
         .assert()
         .success();
-    let sealed_before = fs::read_to_string(project.path().join(".capsule/refs/heads/main"))
-        .unwrap();
+    let sealed_before =
+        fs::read_to_string(project.path().join(".capsule/refs/heads/main")).unwrap();
     assert!(http_request(public_port, "POST", "/increment").starts_with("HTTP/1.1 204"));
     assert!(http_request(public_port, "GET", "/count").ends_with('1'));
 
@@ -1096,6 +1096,18 @@ fn encap_current_exports_a_point_in_time_and_live_run_continues() {
         ])
         .assert()
         .success();
+    let verified = ato(author_home.path())
+        .args(["__bundle", "verify", bundle.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert!(verified.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&verified.stdout).unwrap();
+    assert_eq!(report["format_version"], 2);
+    assert_eq!(report["validation"]["status"], "valid");
+    assert_eq!(report["materializations"][0]["id"], "ato.replay@1");
+    assert!(report["object_count"].as_u64().unwrap() > 0);
+    assert!(report["decoded_size"].as_u64().unwrap() > 0);
+    assert_eq!(report["exported_ports"][0]["protocol"], "ato.http@1");
     assert_eq!(
         fs::read_to_string(project.path().join(".capsule/refs/heads/main")).unwrap(),
         sealed_before,

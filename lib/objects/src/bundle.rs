@@ -146,6 +146,34 @@ pub struct CapsuleBundle {
     payloads: Vec<BundlePayload>,
 }
 
+/// Result of canonical bundle verification in isolated memory. Callers may
+/// inspect verified semantic objects without ever inserting untrusted bytes
+/// into a durable repository.
+pub struct VerifiedBundle {
+    root: ComputationRef,
+    objects: MemoryObjectStore,
+    object_count: usize,
+    decoded_size: u64,
+}
+
+impl VerifiedBundle {
+    pub fn root(&self) -> &ComputationRef {
+        &self.root
+    }
+
+    pub fn objects(&self) -> &MemoryObjectStore {
+        &self.objects
+    }
+
+    pub fn object_count(&self) -> usize {
+        self.object_count
+    }
+
+    pub fn decoded_size(&self) -> u64 {
+        self.decoded_size
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum BundleError {
     #[error(transparent)]
@@ -337,6 +365,32 @@ pub fn import_bundle(
         destination.insert(&reference, &bytes)?;
     }
     Ok(root)
+}
+
+pub fn verify_bundle(
+    bundle: &CapsuleBundle,
+    references: &ReferenceRegistry,
+) -> Result<VerifiedBundle, BundleError> {
+    let objects = MemoryObjectStore::default();
+    let root = import_bundle(bundle, &objects, references)?;
+    let decoded_size = bundle
+        .index
+        .objects
+        .iter()
+        .try_fold(0_u64, |total, object| {
+            total
+                .checked_add(object.size)
+                .ok_or(BundleError::BundleTooLarge {
+                    actual: u64::MAX,
+                    maximum: MAX_BUNDLE_BYTES,
+                })
+        })?;
+    Ok(VerifiedBundle {
+        root,
+        objects,
+        object_count: bundle.index.objects.len(),
+        decoded_size,
+    })
 }
 
 pub(crate) fn closure(
@@ -559,6 +613,17 @@ mod tests {
 
         assert_eq!(imported, root);
         assert!(destination.contains(root.content_ref()));
+    }
+
+    #[test]
+    fn machine_verification_stages_only_verified_objects() {
+        let (source, references, root) = fixture();
+        let bundle = export_bundle(&root, &source, &references).unwrap();
+        let verified = verify_bundle(&bundle, &references).unwrap();
+        assert_eq!(verified.root(), &root);
+        assert_eq!(verified.object_count(), bundle.index.objects.len());
+        assert!(verified.decoded_size() > 0);
+        assert!(verified.objects().contains(root.content_ref()));
     }
 
     #[test]

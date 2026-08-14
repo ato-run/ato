@@ -90,6 +90,16 @@ pub trait Materializer: Send + Sync {
         context: &MaterializerContext<'_>,
     ) -> Result<ComputationRef, MaterializerError>;
 
+    /// Validates a descriptor and its closure independently from whether this
+    /// host can restore it. Cross-host validators use this path.
+    fn validate(
+        &self,
+        descriptor: &ContentRef,
+        context: &MaterializerContext<'_>,
+    ) -> Result<ComputationRef, MaterializerError> {
+        self.verify(descriptor, context)
+    }
+
     fn compatibility(
         &self,
         descriptor: &ContentRef,

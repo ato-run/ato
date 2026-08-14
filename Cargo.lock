@@ -213,6 +213,7 @@ dependencies = [
  "serde",
  "serde_jcs",
  "serde_json",
+ "sha2",
  "tempfile",
  "toml",
  "windows",

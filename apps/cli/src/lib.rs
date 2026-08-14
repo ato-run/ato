@@ -27,9 +27,11 @@ use ato_materializer_snapshot::{SnapshotMaterializer, SnapshotReferences};
 use ato_objects::{
     BranchOrigin, BundleMaterialization, CapsuleSelector, LocalCapsuleRepository, RecordId,
     ReferenceRegistry, decode_bundle, encode_bundle, export_bundle_with_materializations,
-    import_bundle,
+    import_bundle, resolve_computation, verify_bundle,
 };
 use clap::{Args, Parser, Subcommand};
+use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::authoring::{
     AuthoringReferences, evolve_workspace, initial_computation, load_config, load_runtime_state,
@@ -60,6 +62,9 @@ enum Commands {
     Encap(EncapArgs),
     /// Consume a portable .capsule ephemerally.
     Run(RunArgs),
+    /// Internal machine interface for canonical portable bundle validation.
+    #[command(name = "__bundle", hide = true)]
+    Bundle(BundleArgs),
     #[command(name = "__worker", hide = true)]
     Worker {
         project: PathBuf,
@@ -107,6 +112,24 @@ struct RunArgs {
     bindings: Vec<(String, String)>,
 }
 
+#[derive(Debug, Args)]
+struct BundleArgs {
+    #[command(subcommand)]
+    command: BundleCommands,
+}
+
+#[derive(Debug, Subcommand)]
+enum BundleCommands {
+    Verify(BundleVerifyArgs),
+}
+
+#[derive(Debug, Args)]
+struct BundleVerifyArgs {
+    capsule: PathBuf,
+    #[arg(long)]
+    json: bool,
+}
+
 pub fn run() -> Result<()> {
     match Cli::parse().command {
         Commands::Init(args) => init(args),
@@ -114,6 +137,9 @@ pub fn run() -> Result<()> {
         Commands::Stop { capsule } => stop(&capsule),
         Commands::Encap(args) => encap(args),
         Commands::Run(args) => run_capsule(args),
+        Commands::Bundle(args) => match args.command {
+            BundleCommands::Verify(args) => verify_bundle_command(args),
+        },
         Commands::Worker {
             project,
             branch,
@@ -128,6 +154,129 @@ pub fn run() -> Result<()> {
             descriptor.map(ContentRef::parse).transpose()?.as_ref(),
         ),
     }
+}
+
+#[derive(Serialize)]
+struct BundleVerificationReport {
+    format_version: u32,
+    transport_digest: String,
+    root_computation_ref: String,
+    materializations: Vec<VerifiedMaterialization>,
+    exported_ports: Vec<VerifiedPort>,
+    required_bindings: Vec<VerifiedBinding>,
+    object_count: usize,
+    decoded_size: u64,
+    validation: VerificationResult,
+}
+
+#[derive(Serialize)]
+struct VerifiedMaterialization {
+    id: String,
+    restore_capability: &'static str,
+}
+
+#[derive(Serialize)]
+struct VerifiedPort {
+    port_id: String,
+    protocol: String,
+    role: String,
+}
+
+#[derive(Serialize)]
+struct VerifiedBinding {
+    id: String,
+    schema: String,
+}
+
+#[derive(Serialize)]
+struct VerificationResult {
+    status: &'static str,
+}
+
+fn verify_bundle_command(args: BundleVerifyArgs) -> Result<()> {
+    if !args.json {
+        bail!("internal bundle verification requires --json");
+    }
+    let bytes = fs::read(&args.capsule)?;
+    match build_bundle_verification_report(&bytes) {
+        Ok(report) => {
+            println!("{}", serde_json::to_string(&report)?);
+            Ok(())
+        }
+        Err(_) => {
+            println!("{{\"validation\":{{\"status\":\"rejected\"}}}}");
+            bail!("bundle verification failed")
+        }
+    }
+}
+
+fn build_bundle_verification_report(bytes: &[u8]) -> Result<BundleVerificationReport> {
+    let bundle = decode_bundle(bytes)?;
+    let references = reference_registry()?;
+    let verified = verify_bundle(&bundle, &references)?;
+    let root = verified.root().clone();
+    let adapters = adapter_registry()?;
+    let materializers = materializer_registry()?;
+    let state = load_runtime_state(&root, verified.objects())?;
+    let policy = workspace_policy(&state.config)?;
+    let context = MaterializerContext {
+        objects: verified.objects(),
+        adapters: &adapters,
+        records: &[],
+        workspace: Path::new("."),
+        workspace_policy: &policy,
+        realization: None,
+    };
+    let mut reported_materializations = Vec::new();
+    for entry in &bundle.index.materializations {
+        let descriptor = ContentRef::parse(&entry.descriptor_ref)?;
+        let materializer = materializers.get(&entry.materializer_id)?;
+        let target = materializer.validate(&descriptor, &context)?;
+        if target != root {
+            bail!(
+                "materializer `{}` targets a different computation",
+                entry.materializer_id
+            );
+        }
+        reported_materializations.push(VerifiedMaterialization {
+            id: entry.materializer_id.clone(),
+            restore_capability: match materializer.restore_capability() {
+                RestoreCapability::Supported => "supported",
+                RestoreCapability::VerifyOnly => "verify_only",
+            },
+        });
+    }
+    let computation = resolve_computation(verified.objects(), &root)?;
+    let exported_ports = computation
+        .object()
+        .boundary
+        .iter()
+        .map(|(id, port)| VerifiedPort {
+            port_id: id.to_string(),
+            protocol: port.protocol.to_string(),
+            role: port.role.to_string(),
+        })
+        .collect();
+    let required_bindings = state
+        .config
+        .binding
+        .iter()
+        .map(|binding| VerifiedBinding {
+            id: binding.id.clone(),
+            schema: binding.protocol.clone(),
+        })
+        .collect();
+    Ok(BundleVerificationReport {
+        format_version: bundle.index.version,
+        transport_digest: format!("sha256:{:x}", Sha256::digest(bytes)),
+        root_computation_ref: root.to_string(),
+        materializations: reported_materializations,
+        exported_ports,
+        required_bindings,
+        object_count: verified.object_count(),
+        decoded_size: verified.decoded_size(),
+        validation: VerificationResult { status: "valid" },
+    })
 }
 
 fn init(args: InitArgs) -> Result<()> {
