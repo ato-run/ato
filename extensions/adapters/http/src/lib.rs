@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use ato_adapter_api::{
     AdapterAttachContext, AdapterCapabilities, AdapterContext, AdapterError, AdapterFactory,
-    AdapterInstance, AdapterObservation, AttachedAdapter, ObservationEffect, ObservationSink,
+    AdapterInstance, AdapterObservation, AttachedAdapter, CaptureGate, ObservationEffect,
+    ObservationSink,
 };
 use ato_objects::{RecordEnvelope, read_exact_object};
 use serde::{Deserialize, Serialize};
@@ -75,6 +76,7 @@ impl AdapterFactory for HttpAdapter {
             apply: true,
             verify: true,
             quiesce: true,
+            capture_barrier: true,
         }
     }
 
@@ -100,6 +102,7 @@ impl AdapterFactory for HttpAdapter {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let failure = Arc::new(Mutex::new(None));
         let observed_responses = Arc::new(Mutex::new(VecDeque::new()));
+        let capture_gate = Arc::new(CaptureGate::default());
         Ok(Box::new(HttpSession {
             instance_id: instance.instance_id.clone(),
             config,
@@ -108,6 +111,7 @@ impl AdapterFactory for HttpAdapter {
             stop,
             failure,
             observed_responses,
+            capture_gate,
             join: None,
         }))
     }
@@ -153,6 +157,7 @@ struct HttpSession {
     stop: Arc<std::sync::atomic::AtomicBool>,
     failure: Arc<Mutex<Option<String>>>,
     observed_responses: Arc<Mutex<VecDeque<HttpEvent>>>,
+    capture_gate: Arc<CaptureGate>,
     join: Option<JoinHandle<()>>,
 }
 
@@ -184,6 +189,7 @@ impl AttachedAdapter for HttpSession {
             Arc::clone(&self.stop),
             Arc::clone(&self.failure),
             Arc::clone(&self.observed_responses),
+            Arc::clone(&self.capture_gate),
         ));
         Ok(())
     }
@@ -234,6 +240,7 @@ impl AttachedAdapter for HttpSession {
 
     fn quiesce(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
         self.stop.store(true, std::sync::atomic::Ordering::Release);
+        self.capture_gate.resume()?;
         let _ = TcpStream::connect(self.config.listen);
         if let Some(join) = self.join.take() {
             join.join()
@@ -252,6 +259,14 @@ impl AttachedAdapter for HttpSession {
 
     fn detach(&mut self, context: &AdapterContext<'_>) -> Result<(), AdapterError> {
         self.quiesce(context)
+    }
+
+    fn pause_for_capture(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
+        self.capture_gate.pause_and_drain()
+    }
+
+    fn resume_after_capture(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
+        self.capture_gate.resume()
     }
 }
 
@@ -289,9 +304,19 @@ fn spawn_proxy(
     stop: Arc<std::sync::atomic::AtomicBool>,
     failure: Arc<Mutex<Option<String>>>,
     observed_responses: Arc<Mutex<VecDeque<HttpEvent>>>,
+    capture_gate: Arc<CaptureGate>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
         loop {
+            let _permit = match capture_gate.enter() {
+                Ok(permit) => permit,
+                Err(error) => {
+                    if let Ok(mut slot) = failure.lock() {
+                        *slot = Some(error.to_string());
+                    }
+                    break;
+                }
+            };
             match listener.accept() {
                 Ok((mut client, _)) => {
                     let _ = proxy_exchange(

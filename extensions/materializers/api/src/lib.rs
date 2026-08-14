@@ -42,6 +42,14 @@ pub trait Realization: Send {
     fn wait(&mut self) -> Result<(), MaterializerError>;
     fn quiesce(&mut self) -> Result<(), MaterializerError>;
 
+    fn pause_for_capture(&mut self) -> Result<(), MaterializerError> {
+        Err(MaterializerError::CaptureUnsupported)
+    }
+
+    fn resume_after_capture(&mut self) -> Result<(), MaterializerError> {
+        Err(MaterializerError::CaptureUnsupported)
+    }
+
     fn run(mut self: Box<Self>) -> Result<(), MaterializerError> {
         self.activate()?;
         let result = self.wait();
@@ -165,6 +173,8 @@ pub enum MaterializerError {
     },
     #[error("materializer operation failed: {0}")]
     Operation(String),
+    #[error("realization does not support a non-destructive capture barrier")]
+    CaptureUnsupported,
     #[error(transparent)]
     Objects(#[from] ato_objects::ObjectError),
     #[error("materializer JSON failed: {0}")]

@@ -68,6 +68,7 @@ impl AdapterFactory for BindingAdapter {
             apply: true,
             verify: true,
             quiesce: true,
+            capture_barrier: true,
         }
     }
 
@@ -138,6 +139,14 @@ impl AttachedAdapter for BindingSession {
         context: &AdapterContext<'_>,
     ) -> Result<(), AdapterError> {
         AttachedAdapter::apply(self, record, context)
+    }
+
+    fn pause_for_capture(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
+        Ok(())
+    }
+
+    fn resume_after_capture(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
+        Ok(())
     }
 }
 

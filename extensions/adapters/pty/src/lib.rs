@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use ato_adapter_api::{
     AdapterAttachContext, AdapterCapabilities, AdapterContext, AdapterError, AdapterFactory,
-    AdapterInstance, AttachedAdapter,
+    AdapterInstance, AttachedAdapter, CaptureGate,
 };
 use ato_objects::{RecordEnvelope, read_exact_object};
 use serde::{Deserialize, Serialize};
@@ -70,6 +70,7 @@ impl AdapterFactory for PtyAdapter {
             apply: true,
             verify: true,
             quiesce: true,
+            capture_barrier: true,
         }
     }
 
@@ -100,6 +101,7 @@ impl AdapterFactory for PtyAdapter {
             })?));
         let output = Arc::new(Mutex::new(VecDeque::new()));
         let failure = Arc::new(Mutex::new(None));
+        let capture_gate = Arc::new(CaptureGate::default());
         let port_id = ato_computation::PortId::parse(format!("terminal.{}", instance.instance_id))
             .map_err(|error| AdapterError::InvalidConfig(error.to_string()))?;
         context
@@ -112,6 +114,7 @@ impl AdapterFactory for PtyAdapter {
                 port_id.clone(),
                 Arc::clone(&output),
                 Arc::clone(&failure),
+                Arc::clone(&capture_gate),
             ),
             spawn_output_reader(
                 child.stderr.take().expect("piped stderr"),
@@ -119,6 +122,7 @@ impl AdapterFactory for PtyAdapter {
                 port_id.clone(),
                 Arc::clone(&output),
                 Arc::clone(&failure),
+                Arc::clone(&capture_gate),
             ),
         ];
         if let Some(input) = config.initial_input {
@@ -141,6 +145,7 @@ impl AdapterFactory for PtyAdapter {
             observations: Arc::clone(&context.observations),
             port_id,
             activated: false,
+            capture_gate,
         }))
     }
 }
@@ -155,6 +160,7 @@ struct PtySession {
     observations: Arc<dyn ato_adapter_api::ObservationSink>,
     port_id: ato_computation::PortId,
     activated: bool,
+    capture_gate: Arc<CaptureGate>,
 }
 
 impl AttachedAdapter for PtySession {
@@ -204,6 +210,7 @@ impl AttachedAdapter for PtySession {
     }
 
     fn detach(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
+        self.capture_gate.resume()?;
         if self.child.try_wait()?.is_none() {
             self.child.kill()?;
         }
@@ -241,10 +248,19 @@ impl AttachedAdapter for PtySession {
                 Arc::clone(&self.observations),
                 self.port_id.clone(),
                 Arc::clone(&self.failure),
+                Arc::clone(&self.capture_gate),
             );
             self.activated = true;
         }
         Ok(())
+    }
+
+    fn pause_for_capture(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
+        self.capture_gate.pause_and_drain()
+    }
+
+    fn resume_after_capture(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
+        self.capture_gate.resume()
     }
 }
 
@@ -309,6 +325,7 @@ fn spawn_output_reader(
     port_id: ato_computation::PortId,
     output: Arc<Mutex<VecDeque<u8>>>,
     failure: Arc<Mutex<Option<String>>>,
+    capture_gate: Arc<CaptureGate>,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
         let mut buffer = [0_u8; 4096];
@@ -316,6 +333,15 @@ fn spawn_output_reader(
             match reader.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(size) => {
+                    let _permit = match capture_gate.enter() {
+                        Ok(permit) => permit,
+                        Err(error) => {
+                            if let Ok(mut slot) = failure.lock() {
+                                *slot = Some(error.to_string());
+                            }
+                            break;
+                        }
+                    };
                     let bytes = buffer[..size].to_vec();
                     let _ = std::io::stdout().write_all(&bytes);
                     if let Ok(mut queue) = output.lock() {
@@ -345,6 +371,7 @@ fn spawn_input_reader(
     observations: Arc<dyn ato_adapter_api::ObservationSink>,
     port_id: ato_computation::PortId,
     failure: Arc<Mutex<Option<String>>>,
+    capture_gate: Arc<CaptureGate>,
 ) {
     std::thread::spawn(move || {
         let mut stdin = std::io::stdin();
@@ -354,6 +381,15 @@ fn spawn_input_reader(
                 break;
             }
             let bytes = buffer[..size].to_vec();
+            let _permit = match capture_gate.enter() {
+                Ok(permit) => permit,
+                Err(error) => {
+                    if let Ok(mut slot) = failure.lock() {
+                        *slot = Some(error.to_string());
+                    }
+                    break;
+                }
+            };
             if let Err(error) = observations
                 .emit(
                     observation(

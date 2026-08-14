@@ -28,6 +28,7 @@ impl AdapterFactory for ProcessLifecycleAdapter {
             observe: true,
             verify: true,
             quiesce: true,
+            capture_barrier: true,
             ..AdapterCapabilities::default()
         }
     }
@@ -194,6 +195,14 @@ impl AttachedAdapter for ProcessSession {
     }
 
     fn quiesce(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
+        Ok(())
+    }
+
+    fn pause_for_capture(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
+        Ok(())
+    }
+
+    fn resume_after_capture(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
         Ok(())
     }
 

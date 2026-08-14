@@ -35,7 +35,7 @@ use crate::authoring::{
     AuthoringReferences, evolve_workspace, initial_computation, load_config, load_runtime_state,
     workspace_policy,
 };
-use crate::supervisor::{CliRealizationDriver, start_durable, stop_active};
+use crate::supervisor::{CliRealizationDriver, capture_active, start_durable, stop_active};
 
 #[derive(Parser)]
 #[command(
@@ -91,6 +91,9 @@ struct ResumeArgs {
 #[derive(Debug, Args)]
 struct EncapArgs {
     selector: String,
+    /// Export the current active Run frontier without sealing or stopping it.
+    #[arg(long)]
+    current: bool,
     #[arg(long = "materialize")]
     materializers: Vec<String>,
     #[arg(short, long, default_value = "computation.capsule")]
@@ -222,9 +225,47 @@ fn encap(args: EncapArgs) -> Result<()> {
     let selector: CapsuleSelector = args.selector.parse()?;
     let project = project_path(&selector.capsule, false)?;
     let repository = LocalCapsuleRepository::open(project)?;
-    let target = repository.resolve(&selector)?;
+    if args.current && selector.record.is_some() {
+        bail!("--current cannot be combined with a historical #record selector");
+    }
+    let lease = if args.current {
+        Some(capture_active(&repository, &selector.branch)?)
+    } else {
+        None
+    };
+    let (target, records) = match lease.as_ref() {
+        Some(lease) => {
+            if lease.branch != selector.branch {
+                bail!("capture worker returned a different branch");
+            }
+            (
+                lease.target.clone(),
+                repository.records_for_causal_branch(&selector.branch, Some(lease.record_seq))?,
+            )
+        }
+        None => (
+            repository.resolve(&selector)?,
+            repository.records_for_causal_branch(&selector.branch, selector.record)?,
+        ),
+    };
+    let export_result = encap_target(&repository, &target, &records, &args);
+    let release_result = match lease {
+        Some(lease) => lease.release(),
+        None => Ok(()),
+    };
+    export_result?;
+    release_result?;
+    println!("{target}");
+    Ok(())
+}
+
+fn encap_target(
+    repository: &LocalCapsuleRepository,
+    target: &ComputationRef,
+    records: &[ato_objects::RecordEnvelope],
+    args: &EncapArgs,
+) -> Result<()> {
     let state = load_runtime_state(&target, repository.objects())?;
-    let records = repository.records_for_causal_branch(&selector.branch, selector.record)?;
     let adapters = adapter_registry()?;
     let materializers = materializer_registry()?;
     let capture_policy = workspace_policy(&state.config)?;
@@ -235,12 +276,12 @@ fn encap(args: EncapArgs) -> Result<()> {
             state.config.encap.materializers.clone()
         }
     } else {
-        args.materializers
+        args.materializers.clone()
     };
     let context = MaterializerContext {
         objects: repository.objects(),
         adapters: &adapters,
-        records: &records,
+        records,
         workspace: repository.project(),
         workspace_policy: &capture_policy,
         realization: None,
@@ -250,7 +291,7 @@ fn encap(args: EncapArgs) -> Result<()> {
         let materializer = materializers.get(&id)?;
         let descriptor = materializer.encode(&target, &context)?;
         let verified = materializer.verify(&descriptor, &context)?;
-        if verified != target {
+        if &verified != target {
             bail!("materializer `{id}` verified a different computation {verified}");
         }
         entries.push(BundleMaterialization {
@@ -262,7 +303,6 @@ fn encap(args: EncapArgs) -> Result<()> {
     let bundle =
         export_bundle_with_materializations(&target, &entries, repository.objects(), &references)?;
     atomic_write(&args.output, &encode_bundle(&bundle)?)?;
-    println!("{target}");
     Ok(())
 }
 
@@ -466,6 +506,24 @@ mod tests {
                 .to_string()
                 .contains("portable .capsule")
         );
+    }
+
+    #[test]
+    fn encap_current_is_part_of_encap_not_a_capture_command() {
+        let cli = Cli::try_parse_from([
+            "ato",
+            "encap",
+            "demo@main",
+            "--current",
+            "-o",
+            "state.capsule",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Encap(EncapArgs { current: true, .. })
+        ));
+        assert!(Cli::try_parse_from(["ato", "capture", "demo@main"]).is_err());
     }
 
     #[test]

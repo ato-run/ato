@@ -105,6 +105,7 @@ impl AdapterFactory for WorkspaceAdapter {
             apply: true,
             verify: true,
             quiesce: true,
+            capture_barrier: true,
         }
     }
 
@@ -169,6 +170,14 @@ impl AttachedAdapter for WorkspaceSession {
         decode_mutation(&bytes)
             .map(|_| ())
             .map_err(|error| AdapterError::Operation(error.to_string()))
+    }
+
+    fn pause_for_capture(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
+        Ok(())
+    }
+
+    fn resume_after_capture(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
+        Ok(())
     }
 }
 

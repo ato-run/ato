@@ -573,6 +573,27 @@ pub(crate) fn evolve_workspace(
     branch: &str,
     start: &ComputationRef,
 ) -> Result<ComputationRef> {
+    evolve_workspace_with_run(repository, branch, start, None)
+}
+
+/// Reconciles the workspace while a live capture barrier is held. Each
+/// workspace Record and the active Run cursor move in the same repository
+/// transaction; the durable branch ref remains untouched.
+pub(crate) fn evolve_workspace_active(
+    repository: &LocalCapsuleRepository,
+    branch: &str,
+    token: &str,
+    start: &ComputationRef,
+) -> Result<ComputationRef> {
+    evolve_workspace_with_run(repository, branch, start, Some(token))
+}
+
+fn evolve_workspace_with_run(
+    repository: &LocalCapsuleRepository,
+    branch: &str,
+    start: &ComputationRef,
+    run_token: Option<&str>,
+) -> Result<ComputationRef> {
     let runtime = load_runtime_state(start, repository.objects())?;
     let before = load_snapshot(&runtime.workspace_snapshot, repository.objects())?;
     let policy = workspace_policy(&runtime.config)?;
@@ -622,18 +643,22 @@ pub(crate) fn evolve_workspace(
                 })?)?;
             let next = evolve_composite_snapshot(repository.objects(), &head, &snapshot)?;
             let payload = repository.objects().put(&encode_mutation(&mutation)?)?;
-            let record = repository.append_record(RecordEnvelope {
-                id: RecordId::new(branch, 0),
-                adapter_id: "ato.workspace@1".to_owned(),
-                protocol_id: ProtocolId::parse("ato.workspace@1")?,
-                port_id: PortId::parse("workspace.main")?,
-                direction: Direction::Inbound,
-                payload_ref: payload,
-                head_before: head,
-                head_after: next.clone(),
-                caused_by: previous.into_iter().collect(),
-                observed_at: observed_at(),
-            })?;
+            let record = commit_workspace_record(
+                repository,
+                run_token,
+                RecordEnvelope {
+                    id: RecordId::new(branch, 0),
+                    adapter_id: "ato.workspace@1".to_owned(),
+                    protocol_id: ProtocolId::parse("ato.workspace@1")?,
+                    port_id: PortId::parse("workspace.main")?,
+                    direction: Direction::Inbound,
+                    payload_ref: payload,
+                    head_before: head,
+                    head_after: next.clone(),
+                    caused_by: previous.into_iter().collect(),
+                    observed_at: observed_at(),
+                },
+            )?;
             previous = Some(record.id);
             head = next;
         }
@@ -674,22 +699,40 @@ pub(crate) fn evolve_workspace(
         state.workspace_snapshot = snapshot.to_string();
         let next = seal_authoring_state(repository.objects(), state.clone())?;
         let payload = repository.objects().put(&encode_mutation(&mutation)?)?;
-        let record = repository.append_record(RecordEnvelope {
-            id: RecordId::new(branch, 0),
-            adapter_id: "ato.workspace@1".to_owned(),
-            protocol_id: ProtocolId::parse("ato.workspace@1")?,
-            port_id: PortId::parse("workspace.main")?,
-            direction: Direction::Inbound,
-            payload_ref: payload,
-            head_before: head.clone(),
-            head_after: next.clone(),
-            caused_by: previous_record.into_iter().collect(),
-            observed_at: observed_at(),
-        })?;
+        let record = commit_workspace_record(
+            repository,
+            run_token,
+            RecordEnvelope {
+                id: RecordId::new(branch, 0),
+                adapter_id: "ato.workspace@1".to_owned(),
+                protocol_id: ProtocolId::parse("ato.workspace@1")?,
+                port_id: PortId::parse("workspace.main")?,
+                direction: Direction::Inbound,
+                payload_ref: payload,
+                head_before: head.clone(),
+                head_after: next.clone(),
+                caused_by: previous_record.into_iter().collect(),
+                observed_at: observed_at(),
+            },
+        )?;
         previous_record = Some(record.id);
         head = next;
     }
     Ok(head)
+}
+
+fn commit_workspace_record(
+    repository: &LocalCapsuleRepository,
+    run_token: Option<&str>,
+    record: RecordEnvelope,
+) -> Result<RecordEnvelope> {
+    match run_token {
+        Some(token) => {
+            let expected = record.head_before.clone();
+            Ok(repository.commit_observation(token, &expected, record)?)
+        }
+        None => Ok(repository.append_record(record)?),
+    }
 }
 
 fn evolve_composite_snapshot(
