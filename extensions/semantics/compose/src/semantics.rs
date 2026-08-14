@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use ato_computation::{ComputationObject, ResolvedComputation, SemanticsId};
 use ato_kernel::{
     Action, ChoiceId, SemanticError, SemanticHost, SemanticStep, Semantics, TransitionOffer,
@@ -13,14 +11,12 @@ use crate::{
 
 pub struct ComposeSemantics {
     id: SemanticsId,
-    roles: Arc<dyn ProtocolRolePolicy>,
 }
 
 impl ComposeSemantics {
-    pub fn new(roles: Arc<dyn ProtocolRolePolicy>) -> Self {
+    pub fn new() -> Self {
         Self {
             id: compose_semantics_id(),
-            roles,
         }
     }
 
@@ -30,7 +26,14 @@ impl ComposeSemantics {
         host: &dyn SemanticHost,
     ) -> Result<ValidatedComposite, SemanticError> {
         let resolver = HostResolver { host };
-        validate_composite(current, &resolver, self.roles.as_ref()).map_err(semantic_error)
+        let roles = HostRolePolicy { host };
+        validate_composite(current, &resolver, &roles).map_err(semantic_error)
+    }
+}
+
+impl Default for ComposeSemantics {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -215,7 +218,9 @@ fn reduce_candidate(
     match candidate.kind {
         CandidateKind::ChildTau { node, child } => {
             let reference = &current.residual().nodes[&node];
-            let transition = host.transition(reference, &child).map_err(semantic_error)?;
+            let transition = host
+                .derive_transition(reference, &child)
+                .map_err(semantic_error)?;
             let step = node_step(host, node, transition)?;
             lift_internal_step(current, &step).map_err(semantic_error)
         }
@@ -233,10 +238,10 @@ fn reduce_candidate(
             };
             let input_offer = TransitionOffer::external_input(input.port.clone(), payload.clone());
             let output_transition = host
-                .transition(output_ref, &child)
+                .derive_transition(output_ref, &child)
                 .map_err(semantic_error)?;
             let input_transition = host
-                .transition(input_ref, &input_offer)
+                .derive_transition(input_ref, &input_offer)
                 .map_err(semantic_error)?;
             let output_step = node_step(host, output.node, output_transition)?;
             let input_step = node_step(host, input.node, input_transition)?;
@@ -244,7 +249,9 @@ fn reduce_candidate(
         }
         CandidateKind::Export { node, child } => {
             let reference = &current.residual().nodes[&node];
-            let transition = host.transition(reference, &child).map_err(semantic_error)?;
+            let transition = host
+                .derive_transition(reference, &child)
+                .map_err(semantic_error)?;
             let step = node_step(host, node, transition)?;
             lift_exported_step(current, &step).map_err(semantic_error)
         }
@@ -266,7 +273,9 @@ fn reduce_external_input(
         .ok_or_else(|| SemanticError::new(format!("unexported parent port {port}")))?;
     let child = TransitionOffer::external_input(endpoint.port.clone(), payload.clone());
     let reference = &current.residual().nodes[&endpoint.node];
-    let transition = host.transition(reference, &child).map_err(semantic_error)?;
+    let transition = host
+        .derive_transition(reference, &child)
+        .map_err(semantic_error)?;
     let step = node_step(host, endpoint.node.clone(), transition)?;
     lift_exported_step(current, &step).map_err(semantic_error)
 }
@@ -311,6 +320,32 @@ fn semantic_error(error: impl std::fmt::Display) -> SemanticError {
 
 struct HostResolver<'a> {
     host: &'a dyn SemanticHost,
+}
+
+struct HostRolePolicy<'a> {
+    host: &'a dyn SemanticHost,
+}
+
+impl ProtocolRolePolicy for HostRolePolicy<'_> {
+    fn connection_roles_compatible(
+        &self,
+        protocol: &ato_computation::ProtocolId,
+        first: &ato_computation::RoleId,
+        second: &ato_computation::RoleId,
+    ) -> bool {
+        self.host
+            .roles_compatible(protocol, first, second)
+            .unwrap_or(false)
+    }
+
+    fn export_role_compatible(
+        &self,
+        _protocol: &ato_computation::ProtocolId,
+        parent: &ato_computation::RoleId,
+        child: &ato_computation::RoleId,
+    ) -> bool {
+        parent == child
+    }
 }
 
 impl ato_objects::ObjectResolver for HostResolver<'_> {
