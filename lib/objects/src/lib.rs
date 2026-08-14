@@ -6,11 +6,15 @@
 #![forbid(unsafe_code)]
 
 mod bundle;
+mod repository;
 
 pub use bundle::{
     BUNDLE_VERSION, BundleError, BundleIndex, BundleObjectDescriptor, BundleObjectKind,
     CapsuleBundle, ComputationReferences, ObjectLink, ReferenceRegistry, bundle_root,
     decode_bundle, encode_bundle, export_bundle, import_bundle, sign_bundle,
+};
+pub use repository::{
+    ActiveRun, CapsuleSelector, Direction, LocalCapsuleRepository, RecordEnvelope, RepositoryError,
 };
 
 use std::collections::BTreeMap;

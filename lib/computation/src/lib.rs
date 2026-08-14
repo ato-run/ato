@@ -272,6 +272,15 @@ impl FromStr for ComputationRef {
     }
 }
 
+/// One immutable logical point selected from a computation DAG.
+///
+/// Lineage and storage metadata are deliberately absent: a point is only its
+/// current computation identity.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ComputationPoint {
+    pub head: ComputationRef,
+}
+
 /// One typed opening in a sealed computation boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortDef {
