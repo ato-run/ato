@@ -808,15 +808,13 @@ fn pause_for_capture(
             session.adapter_id()
         );
     }
-    let mut paused = 0;
-    for session in sessions.iter_mut() {
+    for (paused, session) in sessions.iter_mut().enumerate() {
         if let Err(error) = session.pause_for_capture(context) {
             for session in sessions[..paused].iter_mut().rev() {
                 let _ = session.resume_after_capture(context);
             }
             return Err(error.into());
         }
-        paused += 1;
     }
     Ok(())
 }

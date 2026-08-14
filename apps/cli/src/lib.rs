@@ -418,7 +418,7 @@ fn encap_target(
     records: &[ato_objects::RecordEnvelope],
     args: &EncapArgs,
 ) -> Result<()> {
-    let state = load_runtime_state(&target, repository.objects())?;
+    let state = load_runtime_state(target, repository.objects())?;
     let adapters = adapter_registry()?;
     let materializers = materializer_registry()?;
     let capture_policy = workspace_policy(&state.config)?;
@@ -442,7 +442,7 @@ fn encap_target(
     let mut entries = Vec::new();
     for id in selected {
         let materializer = materializers.get(&id)?;
-        let descriptor = materializer.encode(&target, &context)?;
+        let descriptor = materializer.encode(target, &context)?;
         let verified = materializer.verify(&descriptor, &context)?;
         if &verified != target {
             bail!("materializer `{id}` verified a different computation {verified}");
@@ -454,7 +454,7 @@ fn encap_target(
     }
     let references = reference_registry()?;
     let bundle =
-        export_bundle_with_materializations(&target, &entries, repository.objects(), &references)?;
+        export_bundle_with_materializations(target, &entries, repository.objects(), &references)?;
     atomic_write(&args.output, &encode_bundle(&bundle)?)?;
     Ok(())
 }
