@@ -1,5 +1,10 @@
 # Capsule v0.3 to v1 migration
 
+> **Superseded.** This document describes the removed pre-Computation
+> application execution architecture and is retained only as migration
+> history. Current normative behavior is defined by the accepted Computation,
+> Repository Workspace, Object Bundle, and Provider Materialization RFCs.
+
 Capsule v1 changes the resolved execution and Snapshot contracts without
 silently reinterpreting existing artifacts. The v0.3 parser and deployed
 Ready-State artifacts remain readable on their legacy paths.

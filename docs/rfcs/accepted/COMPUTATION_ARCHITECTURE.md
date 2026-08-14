@@ -45,12 +45,32 @@ Goal and readiness are authoring/evaluator stopping concerns. A Contract is an
 observation requirement on a realized/resumed computation. Neither is a core
 primitive.
 
+Kernel transition handling is deliberately two-phase. `derive_transition`
+computes, seals, and validates a successor without publishing history.
+`commit_transition` sends only the selected top-level transition to the
+optional sink. `step` is derive + commit + `Run.head` update. Compose therefore
+derives boundary-hidden child transitions and commits one parent transition
+atomically; failed synchronization cannot leak partial child evidence.
+
 ## Boundaries and composition
 
 A Port is a typed interaction crossing the selected computation boundary. The
 same child action can become `Tau` when its endpoints are internal to a
 composite. Names such as install, build, launch, shell, or navigation do not by
 themselves create Ports.
+
+The Kernel knows which Protocol governs an interaction, but never knows the
+Protocol's payload model. `Action` carries `ProtocolPayload`, an opaque byte
+carrier. The Port's `ProtocolId` dispatches to registered `ProtocolSemantics`,
+which owns role compatibility, input/output payload validation, and future
+behavioral or capability rules. Thus payloads are opaque in the Kernel and
+typed by the Protocol; this is not an unvalidated universal bytes model.
+
+Enabled transitions are `TransitionOffer { choice, action }`. A
+semantics-owned opaque `ChoiceId` distinguishes two transitions even when both
+visible actions are `Tau` or carry equal output payloads. Semantic choice is
+never inferred from collection iteration order. External input may omit a
+choice when its payload selects the transition.
 
 `capsule.compose@1` is an ordinary semantics extension. Its child semantics
 produce transition evidence; compose validates endpoints/value agreement and
@@ -74,4 +94,5 @@ provider materializations.
 
 There is no universal Value enum, workflow/InitSpec DSL, generic Build or
 Launch graph, universal State, Connector, Record, or Capture Manager.
-`Action<V>` stays generic and concrete semantics own their payload type.
+There is no `Kernel<V>`, `Semantics<V>`, `Action<V>`, or universal payload
+enum. Concrete Protocol implementations own payload typing.
