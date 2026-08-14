@@ -173,6 +173,22 @@ impl Materializer for ReplayMaterializer {
     }
 }
 
+/// Decode the verifier-approved Record chain retained by a Replay
+/// Materialization. Hosted continuation capture uses this to carry the
+/// immutable parent realization history into a child bundle before appending
+/// the session-local delta.
+pub fn records_for_descriptor(
+    descriptor: &ContentRef,
+    objects: &dyn ObjectResolver,
+) -> Result<Vec<RecordEnvelope>, MaterializerError> {
+    load_descriptor(descriptor, objects)
+        .map_err(|error| MaterializerError::Operation(error.to_string()))?
+        .records
+        .into_iter()
+        .map(RecordEnvelope::try_from)
+        .collect()
+}
+
 impl From<&RecordEnvelope> for RecordWire {
     fn from(value: &RecordEnvelope) -> Self {
         Self {

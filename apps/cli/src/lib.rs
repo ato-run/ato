@@ -28,7 +28,7 @@ use ato_computation::{ComputationRef, ContentRef};
 use ato_materializer_api::{
     Compatibility, MaterializerContext, MaterializerRegistry, RestoreCapability,
 };
-use ato_materializer_replay::{ReplayMaterializer, ReplayReferences};
+use ato_materializer_replay::{ReplayMaterializer, ReplayReferences, records_for_descriptor};
 use ato_materializer_snapshot::{SnapshotMaterializer, SnapshotReferences};
 use ato_objects::{
     BranchOrigin, BundleMaterialization, CapsuleSelector, LocalCapsuleRepository, RecordId,
@@ -539,7 +539,18 @@ fn relay_surface_connection(mut client: UnixStream, target: SocketAddr) {
 fn hosted_session_capture(args: HostedSessionCaptureArgs) -> Result<()> {
     let repository = LocalCapsuleRepository::open(args.repository)?;
     let lease = capture_active(&repository, ato_runtime::PORTABLE_SESSION_BRANCH)?;
-    let records = repository.records_for_causal_branch(&lease.branch, Some(lease.record_seq))?;
+    let imported = decode_bundle(&fs::read(repository.project().join("input.capsule"))?)?;
+    let parent_replay = imported
+        .index
+        .materializations
+        .iter()
+        .find(|candidate| candidate.materializer_id == "ato.replay@1")
+        .context("hosted continuation has no parent Replay Materialization")?;
+    let mut records = records_for_descriptor(
+        &ContentRef::parse(&parent_replay.descriptor_ref)?,
+        repository.objects(),
+    )?;
+    records.extend(repository.records_for_causal_branch(&lease.branch, Some(lease.record_seq))?);
     let export = encap_target(
         &repository,
         &lease.target,
