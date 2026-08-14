@@ -344,7 +344,11 @@ impl LocalCapsuleRepository {
                 status: claimed.status,
             });
         }
-        if run.token != token || run.status != "active" || run.branch_base != claimed.branch_base {
+        if run.token != token
+            || run.status != "active"
+            || run.branch_base != claimed.branch_base
+            || run.head != claimed.head
+        {
             return Err(RepositoryError::InvalidRunStatus(run.status.clone()));
         }
         let bytes = serde_jcs::to_vec(&ActiveRunWire::from(run))?;

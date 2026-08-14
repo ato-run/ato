@@ -20,6 +20,11 @@ Objects and ComputationRefs are immutable. Branch refs are atomic mutable
 pointers. Updating one branch preserves sibling refs and all old objects.
 Active Run metadata is separate from sealed branch heads.
 
+Starting a Run transactionally claims a tokenized `starting` lease before any
+worker is spawned. Only that token may publish `active`, advance the live Run
+head, or release the lease. Concurrent resume attempts therefore cannot create
+multiple workers behind one `active.json` pointer.
+
 Selectors are parsed independently from clap:
 
 - `demo` selects `demo@main`;
