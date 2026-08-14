@@ -3,9 +3,16 @@
 Status: Accepted
 
 `ato-adapter-api` defines the only registration path for built-in and
-third-party Adapters. Each Adapter declares observe, apply, verify, and
-quiesce capabilities and implements preflight, attach, observation, optional
-application/verification, quiesce, and detach operations.
+third-party Adapters. An `AdapterFactory` validates an `AdapterInstance` and
+attaches one stateful `AttachedAdapter`. The attached instance, rather than a
+new registry singleton, owns observation, application/verification, quiesce,
+detach, activation, and waiting for its live resources.
+
+The Supervisor may not switch on Adapter IDs. It constructs every configured
+instance through the registry, completes every attach before publishing
+`ACTIVE`, and asks those same live instances to quiesce before terminating the
+owned process group. Observation persistence errors are part of quiesce and
+must not be discarded.
 
 Protocol semantics defines the logical type, role, and behavior of Port
 interaction. An Adapter connects real interaction to that Protocol. They are
@@ -16,3 +23,7 @@ bytes, resize, signal, and attachment events without inferring shell commands.
 HTTP request and response are distinct Records. Binding evidence contains only
 logical and safe provider-reference identity; secret values remain runtime
 inputs and are never persisted.
+
+Process execution starts from an empty environment. Only the minimal explicit
+platform base environment and declared Binding projections may cross into the
+computation.
