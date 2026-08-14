@@ -1,4 +1,8 @@
+#![cfg(unix)]
+
 use std::fs;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::process::Command;
 
@@ -95,23 +99,66 @@ fn stateful_protocol_state_survives_nonzero_process_and_replay() {
     let author_home = tempfile::tempdir().unwrap();
     let recipient_home = tempfile::tempdir().unwrap();
     fs::write(project.path().join("count.txt"), "0").unwrap();
+    let upstream_port = unused_port();
+    let public_port = unused_port();
+    fs::write(
+        project.path().join("counter.rs"),
+        r#"use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpListener;
+
+fn main() {
+    let address = std::env::args().nth(1).unwrap();
+    let listener = TcpListener::bind(address).unwrap();
+    for _ in 0..2 {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 4096];
+        let size = stream.read(&mut request).unwrap();
+        let request = String::from_utf8_lossy(&request[..size]);
+        if request.starts_with("POST /increment ") {
+            let count = fs::read_to_string("count.txt").unwrap().trim().parse::<u64>().unwrap() + 1;
+            fs::write("count.txt", count.to_string()).unwrap();
+            stream.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        } else {
+            let count = fs::read_to_string("count.txt").unwrap();
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", count.len(), count);
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+    }
+}
+"#,
+    )
+    .unwrap();
     write_project(
         project.path(),
-        r#"["sh", "-c", "test \"$(cat count.txt)\" = 1"]"#,
-        r#"[[port]]
+        &format!(
+            r#"["sh", "-c", "rustc counter.rs -o counter-bin && ./counter-bin 127.0.0.1:{upstream_port}"]"#
+        ),
+        &format!(
+            r#"[[port]]
 id = "app.http"
 protocol = "ato.http@1"
 role = "server"
 
 [[adapter]]
 port = "app.http"
-use = "ato.http@1""#,
+use = "ato.http@1"
+listen = "127.0.0.1:{public_port}"
+upstream = "127.0.0.1:{upstream_port}""#
+        ),
     );
     ato(author_home.path())
         .args(["init", project.path().to_str().unwrap()])
         .assert()
         .success();
-    fs::write(project.path().join("count.txt"), "1").unwrap();
+    let increment = http_request(public_port, "POST", "/increment");
+    assert!(increment.starts_with("HTTP/1.1 204"));
+    let count = http_request(public_port, "GET", "/count");
+    assert!(count.ends_with("1"));
+    wait_until(|| {
+        fs::read_dir(project.path().join(".capsule/records"))
+            .is_ok_and(|entries| entries.count() >= 4)
+    });
     ato(author_home.path())
         .args(["stop", project.path().to_str().unwrap()])
         .assert()
@@ -130,10 +177,15 @@ use = "ato.http@1""#,
         ])
         .assert()
         .success();
-    ato(recipient_home.path())
+    let mut portable = ato(recipient_home.path())
         .args(["run", bundle.to_str().unwrap()])
-        .assert()
-        .success();
+        .spawn()
+        .unwrap();
+    let count = http_request(public_port, "GET", "/count");
+    assert!(count.ends_with("1"));
+    let count_again = http_request(public_port, "GET", "/count");
+    assert!(count_again.ends_with("1"));
+    assert!(portable.wait().unwrap().success());
 }
 
 #[test]
@@ -386,4 +438,30 @@ fn walk(root: impl AsRef<Path>) -> Vec<std::path::PathBuf> {
         }
     }
     files
+}
+
+fn unused_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+fn http_request(port: u16, method: &str, path: &str) -> String {
+    for _ in 0..200 {
+        if let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) {
+            let request = format!(
+                "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            if stream.write_all(request.as_bytes()).is_ok() {
+                let mut response = String::new();
+                if stream.read_to_string(&mut response).is_ok() && !response.is_empty() {
+                    return response;
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    panic!("HTTP endpoint on port {port} did not return a response")
 }
