@@ -354,10 +354,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "ato-materializer-api"
+version = "0.1.0"
+dependencies = [
+ "ato-adapter-api",
+ "ato-computation",
+ "ato-objects",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ato-materializer-replay"
+version = "0.1.0"
+dependencies = [
+ "ato-adapter-api",
+ "ato-computation",
+ "ato-materializer-api",
+ "ato-objects",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+]
+
+[[package]]
 name = "ato-materializer-snapshot"
 version = "0.1.0"
 dependencies = [
+ "ato-adapter-api",
  "ato-computation",
+ "ato-materializer-api",
  "ato-objects",
  "serde",
  "serde_jcs",
