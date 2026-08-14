@@ -2,29 +2,36 @@
 
 Status: Accepted
 
-`ato-objects` owns verified object persistence, resolution, traversal,
-transport, signatures, and the GC boundary. It never defines semantic
-identity; that belongs to `ato-computation`.
+`ato-objects` owns verified CAS persistence, resolution, closure traversal,
+local refs and Records, transport, signatures, and garbage-collection
+boundaries. Semantic identity remains exclusively in `ato-computation`.
 
-A `.capsule` is a portable object bundle:
+A portable `.capsule` uses bundle version 2:
 
 ```text
 BundleIndex {
-  version,
+  version: 2,
   root: ComputationRef,
-  object descriptors,
-  optional signatures
+  objects[],
+  materializations[] { materializer_id, descriptor_ref },
+  signatures[]
 }
 ```
 
-The Capsule identity is always `root`. Envelope bytes are not identity.
+The Capsule identity is always `root`. Adding a compatible snapshot to a
+replay bundle changes bundle bytes and Materialization inventory, not Capsule
+identity.
 
-Traversal is dependency-inverted. `ato-objects` implements the graph
-algorithm; each semantics registers an outgoing-reference extractor for its
-own residual encoding. Compose discovers child `ComputationRef` values;
-workspace discovers its source closure and files.
+Objects traverses computation closure through registered
+`ComputationReferences` and Materialization descriptor closure through
+registered `MaterializationReferences`. It does not decode concrete Compose,
+Replay, Snapshot, Workspace, or HTTP schemas itself.
 
-Import verifies canonical encoding, limits, duplicate/path-like references,
-descriptor sizes, object hashes, signatures, closure completeness, and
-reachability before inserting into the destination CAS. Export starts at the
-root and includes exactly the reachable closure.
+Import verifies canonical JCS, version, limits, duplicate and path-like refs,
+descriptor sizes, hashes, signatures, complete closure, and absence of
+injected unreachable objects in temporary storage before inserting anything
+into the destination CAS.
+
+Export includes the selected computation closure and every explicitly
+requested Materialization closure. A failure in any requested Materializer
+fails the complete `encap`; sibling-branch-only history is not exported.
