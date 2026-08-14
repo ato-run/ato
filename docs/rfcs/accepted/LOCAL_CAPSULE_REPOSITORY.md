@@ -8,6 +8,7 @@ Each authored project has one `.capsule/` computation repository:
 .capsule/
   objects/
   refs/heads/
+  refs/origins/
   records/
   runs/
   protocols/
@@ -35,3 +36,14 @@ Records use stream-local monotonic sequence, explicit causal parents, Adapter,
 Protocol, Port, direction, payload ref, `head_before`, and `head_after`.
 Wall-clock observation time is informational and has no ordering or
 Computation identity authority.
+
+Forked branches store origin metadata under `refs/origins/`: the selected
+ComputationRef and optional parent RecordId. Origin is repository evidence, not
+Computation identity. Replay/export walks this metadata recursively and includes
+the parent Record closure before the selected branch stream.
+
+One `commit_observation` transaction validates the active lease token and
+expected head, allocates and appends the Record, and advances the Run cursor.
+Active metadata also stores the committed Record sequence so an append completed
+before a writer crash can recover its cursor from the append-only chain. Stop
+re-reads the same token after live Adapters quiesce and seals that final head.
