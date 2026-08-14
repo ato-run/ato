@@ -197,6 +197,57 @@ dependencies = [
 ]
 
 [[package]]
+name = "ato-adapter-api"
+version = "0.1.0"
+dependencies = [
+ "ato-computation",
+ "ato-objects",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ato-adapter-binding"
+version = "0.1.0"
+dependencies = [
+ "ato-adapter-api",
+ "ato-objects",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+]
+
+[[package]]
+name = "ato-adapter-http"
+version = "0.1.0"
+dependencies = [
+ "ato-adapter-api",
+ "ato-objects",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+]
+
+[[package]]
+name = "ato-adapter-process"
+version = "0.1.0"
+dependencies = [
+ "ato-adapter-api",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ato-adapter-pty"
+version = "0.1.0"
+dependencies = [
+ "ato-adapter-api",
+ "ato-objects",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+]
+
+[[package]]
 name = "ato-adapter-repository"
 version = "0.1.0"
 dependencies = [
@@ -214,6 +265,20 @@ dependencies = [
  "thiserror 2.0.18",
  "toml 0.8.23",
  "walkdir",
+]
+
+[[package]]
+name = "ato-adapter-workspace"
+version = "0.1.0"
+dependencies = [
+ "ato-adapter-api",
+ "ato-computation",
+ "ato-objects",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

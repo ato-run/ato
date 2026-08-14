@@ -1,0 +1,20 @@
+[package]
+name = "ato-adapter-api"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MPL-2.0"
+description = "Open protocol adapter contract for Ato"
+
+[package.metadata.dist]
+dist = false
+
+[package.metadata.ato-architecture]
+layer = "adapter-api"
+
+[dependencies]
+ato-computation = { path = "../../../lib/computation", version = "0.1.0" }
+ato-objects = { path = "../../../lib/objects", version = "0.1.0" }
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
