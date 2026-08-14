@@ -94,6 +94,7 @@ impl AdapterFactory for BindingAdapter {
                 direction: ato_objects::Direction::Inbound,
                 payload: encode_event(&event)?,
                 caused_by: Vec::new(),
+                effect: ato_adapter_api::ObservationEffect::Evolution,
             })?;
         Ok(Box::new(BindingSession {
             instance_id: instance.instance_id.clone(),
