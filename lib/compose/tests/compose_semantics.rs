@@ -2,19 +2,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Read};
 use std::sync::Mutex;
 
-use ato_computation::{
-    Boundary, ComputationObject, ComputationRef, ContentRef, PortDef, PortId, ProtocolId,
-    ResolvedComputation, RoleId, SemanticsId, computation_ref, encode_computation_object,
-};
-use ato_kernel::ProtocolPayload;
-use ato_objects::{ObjectError, ObjectMetadata, ObjectResolver, resolve_computation};
-use ato_semantics_compose::{
+use ato_compose::{
     BoundaryVisibility, COMPOSE_SEMANTICS_ID, CompositeResidual, CompositeStepError,
     CompositeValidationError, Connection, Endpoint, NodeId, NodeStep, ProtocolRolePolicy,
     StepLabel, ValidatedComposite, ValidationBudget, ValidationResource, composite_residual_ref,
     encode_composite_residual, lift_exported_step, lift_internal_step, synchronize_connection,
     validate_composite, validate_composite_with_budget,
 };
+use ato_computation::{
+    Boundary, ComputationObject, ComputationRef, ContentRef, PortDef, PortId, ProtocolId,
+    ResolvedComputation, RoleId, SemanticsId, computation_ref, encode_computation_object,
+};
+use ato_kernel::ProtocolPayload;
+use ato_objects::{ObjectError, ObjectMetadata, ObjectResolver, resolve_computation};
 
 #[derive(Default)]
 struct MemoryObjects {
