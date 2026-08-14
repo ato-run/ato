@@ -6,11 +6,15 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use ato_adapter_api::AdapterContext;
+use ato_adapter_http::{HTTP_ADAPTER_ID, serve_proxy};
 use ato_adapter_process::{ProcessAdapter, ProcessSpec, terminate_process_tree};
 use ato_computation::ComputationRef;
-use ato_objects::{ActiveRun, LocalCapsuleRepository};
+use ato_objects::{ActiveRun, LocalCapsuleRepository, ObjectStore};
 
-use crate::{adapter_registry, authoring::load_state};
+use crate::{
+    adapter_registry,
+    authoring::{AdapterConfig, load_state},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SupervisorState {
@@ -122,6 +126,7 @@ pub(crate) fn worker(project: &Path, branch: &str, head: &ComputationRef) -> Res
     for configured in &config.adapter {
         registry.get(&configured.use_adapter)?.attach(&context)?;
     }
+    spawn_http_adapters(&repository, &config.adapter, true)?;
     if processes.is_empty() {
         loop {
             std::thread::sleep(Duration::from_secs(60));
@@ -169,6 +174,7 @@ pub(crate) fn run_foreground(
 ) -> Result<()> {
     let repository = LocalCapsuleRepository::open(project)?;
     let config = load_state(head, repository.objects())?.config;
+    spawn_http_adapters(&repository, &config.adapter, false)?;
     let environment: BTreeMap<_, _> = config
         .binding
         .iter()
@@ -190,6 +196,74 @@ pub(crate) fn run_foreground(
     }
     for process in &mut processes {
         let _ = process.wait()?;
+    }
+    Ok(())
+}
+
+fn spawn_http_adapters(
+    repository: &LocalCapsuleRepository,
+    configured: &[AdapterConfig],
+    record: bool,
+) -> Result<()> {
+    for adapter in configured {
+        if adapter.use_adapter != HTTP_ADAPTER_ID {
+            continue;
+        }
+        let listen = adapter
+            .listen
+            .as_deref()
+            .context("ato.http@1 adapter requires listen")?
+            .parse()?;
+        let upstream = adapter
+            .upstream
+            .as_deref()
+            .context("ato.http@1 adapter requires upstream")?
+            .parse()?;
+        let port = ato_computation::PortId::parse(
+            adapter
+                .port
+                .as_deref()
+                .context("ato.http@1 adapter requires port")?,
+        )?;
+        let project = repository.project().to_path_buf();
+        let branch = repository
+            .active_run()?
+            .map_or_else(|| "ephemeral".to_owned(), |run| run.branch);
+        std::thread::spawn(move || {
+            let _ = serve_proxy(listen, upstream, port, move |observation| {
+                if !record {
+                    return;
+                }
+                let Ok(repository) = LocalCapsuleRepository::open(&project) else {
+                    return;
+                };
+                let Ok(Some(active)) = repository.active_run() else {
+                    return;
+                };
+                let Ok(payload_ref) = repository.objects().put(&observation.payload) else {
+                    return;
+                };
+                let previous = repository
+                    .records_for_stream(&branch, None)
+                    .ok()
+                    .and_then(|records| records.last().map(|record| record.seq));
+                let _ = repository.append_record(ato_objects::RecordEnvelope {
+                    seq: 0,
+                    stream: branch.clone(),
+                    adapter_id: HTTP_ADAPTER_ID.to_owned(),
+                    protocol_id: observation.protocol_id,
+                    port_id: observation.port_id,
+                    direction: observation.direction,
+                    payload_ref,
+                    head_before: active.head.clone(),
+                    head_after: active.head,
+                    caused_by: previous.into_iter().collect(),
+                    observed_at: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or_else(|_| "0".to_owned(), |value| value.as_secs().to_string()),
+                });
+            });
+        });
     }
     Ok(())
 }

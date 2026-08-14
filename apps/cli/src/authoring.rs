@@ -55,6 +55,10 @@ pub(crate) struct AdapterConfig {
     pub target: Option<String>,
     #[serde(default)]
     pub port: Option<String>,
+    #[serde(default)]
+    pub listen: Option<String>,
+    #[serde(default)]
+    pub upstream: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
