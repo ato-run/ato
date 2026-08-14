@@ -21,9 +21,18 @@ a dead CLI cannot permanently pause a durable Run. Adapters without a safe
 barrier make current capture fail closed.
 
 HTTP closes request admission and drains the active exchange. PTY holds newly
-read input/output at the gate and drains work that already crossed it. Process,
-Binding, and Workspace barriers are non-destructive no-ops; workspace
-reconciliation is Supervisor-owned while every interaction frontier is held.
+read input/output at the gate and drains work that already crossed it. Binding
+has no value serialization and Workspace reconciliation is Supervisor-owned
+while every interaction frontier is held.
+
+v0 current capture is explicitly limited to an **adapter-mediated frontier**.
+A Process may opt into `capture = "adapter_mediated"` only when all semantic
+Evolution crosses the attached HTTP/PTY/Binding/Workspace boundaries. The
+Process barrier itself does not freeze timers, background threads, or arbitrary
+filesystem mutation. A Process without that declaration reports
+`capture_consistency = unsupported`, and `encap --current` fails closed. A
+future runtime-frozen policy requires a real process freeze plus an atomic
+state projection; it must not be inferred from the presence of a process.
 
 Portable sessions import into a temporary local computation repository and
 create a private branch rooted at the immutable bundle root. New interactions

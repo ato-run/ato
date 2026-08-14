@@ -333,6 +333,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn capture_policy_is_explicit_and_fail_closed() {
+        let defaulted: ProcessSpec = serde_json::from_value(serde_json::json!({
+            "id": "background-worker",
+            "command": ["worker"],
+            "cwd": ".",
+            "environment": {}
+        }))
+        .unwrap();
+        assert_eq!(defaulted.capture_policy, ProcessCapturePolicy::Unsupported);
+
+        let mediated: ProcessSpec = serde_json::from_value(serde_json::json!({
+            "id": "request-driven-worker",
+            "command": ["worker"],
+            "cwd": ".",
+            "environment": {},
+            "capture_policy": "adapter_mediated"
+        }))
+        .unwrap();
+        assert_eq!(
+            mediated.capture_policy,
+            ProcessCapturePolicy::AdapterMediated
+        );
+    }
+
+    #[test]
     fn host_environment_does_not_cross_the_process_boundary() {
         assert!(std::env::var_os("HOME").is_some());
         let adapter = ProcessAdapter::new(ProcessSpec {
