@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use ato_computation::{ComputationObject, ResolvedComputation, SemanticsId};
-use ato_kernel::{Action, SemanticError, SemanticHost, SemanticStep, Semantics};
+use ato_kernel::{
+    Action, ChoiceId, SemanticError, SemanticHost, SemanticStep, Semantics, TransitionOffer,
+};
 
 use crate::{
     CompositeReduction, Endpoint, NodeId, NodeStep, ProtocolRolePolicy, ValidatedComposite,
@@ -22,20 +24,17 @@ impl ComposeSemantics {
         }
     }
 
-    fn current<V>(
+    fn current(
         &self,
         current: &ResolvedComputation,
-        host: &dyn SemanticHost<V>,
+        host: &dyn SemanticHost,
     ) -> Result<ValidatedComposite, SemanticError> {
         let resolver = HostResolver { host };
         validate_composite(current, &resolver, self.roles.as_ref()).map_err(semantic_error)
     }
 }
 
-impl<V> Semantics<V> for ComposeSemantics
-where
-    V: Clone + Eq + Send + Sync + 'static,
-{
+impl Semantics for ComposeSemantics {
     fn id(&self) -> &SemanticsId {
         &self.id
     }
@@ -43,7 +42,7 @@ where
     fn validate(
         &self,
         current: &ResolvedComputation,
-        host: &dyn SemanticHost<V>,
+        host: &dyn SemanticHost,
     ) -> Result<(), SemanticError> {
         self.current(current, host).map(|_| ())
     }
@@ -51,64 +50,38 @@ where
     fn enabled(
         &self,
         current: &ResolvedComputation,
-        host: &dyn SemanticHost<V>,
-    ) -> Result<Vec<Action<V>>, SemanticError> {
-        let current = self.current(current, host)?;
-        let residual = current.residual();
-        let mut actions = Vec::new();
-        let mut tau_enabled = false;
-
-        for (node, reference) in &residual.nodes {
-            for action in host.enabled(reference).map_err(semantic_error)? {
-                match action {
-                    Action::Tau => tau_enabled = true,
-                    Action::Input { port, value } => {
-                        if let Some(parent) = exported_parent(residual.exports.iter(), node, &port)
-                        {
-                            actions.push(Action::Input {
-                                port: parent,
-                                value,
-                            });
-                        }
-                    }
-                    Action::Output { port, value } => {
-                        if is_connected(residual, node, &port) {
-                            tau_enabled = true;
-                        }
-                        if let Some(parent) = exported_parent(residual.exports.iter(), node, &port)
-                        {
-                            actions.push(Action::Output {
-                                port: parent,
-                                value,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-        if tau_enabled {
-            actions.push(Action::Tau);
-        }
-        Ok(actions)
+        host: &dyn SemanticHost,
+    ) -> Result<Vec<TransitionOffer>, SemanticError> {
+        Ok(candidates(&self.current(current, host)?, host)?
+            .into_iter()
+            .map(|candidate| candidate.offer)
+            .collect())
     }
 
     fn step(
         &self,
         current: &ResolvedComputation,
-        action: &Action<V>,
-        host: &dyn SemanticHost<V>,
-    ) -> Result<SemanticStep<V>, SemanticError> {
+        offer: &TransitionOffer,
+        host: &dyn SemanticHost,
+    ) -> Result<SemanticStep, SemanticError> {
         let validated = self.current(current, host)?;
-        let reduction = match action {
-            Action::Tau => reduce_tau(&validated, host)?,
-            Action::Input { port, value } => reduce_export(&validated, host, port, value, true)?,
-            Action::Output { port, value } => reduce_export(&validated, host, port, value, false)?,
+        let reduction = if matches!(offer.action, Action::Input { .. }) && offer.choice.is_none() {
+            reduce_external_input(&validated, host, offer)?
+        } else {
+            let candidate = candidates(&validated, host)?
+                .into_iter()
+                .find(|candidate| candidate.offer == *offer)
+                .ok_or_else(|| SemanticError::new("transition offer is not enabled"))?;
+            reduce_candidate(&validated, host, candidate)?
         };
         let residual_bytes =
             encode_composite_residual(&reduction.successor).map_err(semantic_error)?;
         let residual = host.put_object(&residual_bytes).map_err(semantic_error)?;
         Ok(SemanticStep {
-            action: reduction.label,
+            offer: TransitionOffer {
+                choice: offer.choice.clone(),
+                action: reduction.label,
+            },
             successor: ComputationObject {
                 semantics: current.object().semantics.clone(),
                 boundary: current.object().boundary.clone(),
@@ -118,133 +91,208 @@ where
     }
 }
 
-fn reduce_export<V>(
+#[derive(Clone)]
+struct Candidate {
+    offer: TransitionOffer,
+    kind: CandidateKind,
+}
+
+#[derive(Clone)]
+enum CandidateKind {
+    ChildTau {
+        node: NodeId,
+        child: TransitionOffer,
+    },
+    Synchronize {
+        output: Endpoint,
+        input: Endpoint,
+        child: TransitionOffer,
+    },
+    Export {
+        node: NodeId,
+        child: TransitionOffer,
+    },
+}
+
+fn candidates(
     current: &ValidatedComposite,
-    host: &dyn SemanticHost<V>,
-    parent_port: &ato_computation::PortId,
-    value: &V,
-    input: bool,
-) -> Result<CompositeReduction<V>, SemanticError>
-where
-    V: Clone + Eq + Send + Sync + 'static,
-{
+    host: &dyn SemanticHost,
+) -> Result<Vec<Candidate>, SemanticError> {
+    let residual = current.residual();
+    let mut candidates = Vec::new();
+    for (node, reference) in &residual.nodes {
+        for child in host.enabled(reference).map_err(semantic_error)? {
+            match &child.action {
+                Action::Tau => candidates.push(Candidate {
+                    offer: TransitionOffer::selected(
+                        compose_choice("tau", node, child.choice.as_ref()),
+                        Action::Tau,
+                    ),
+                    kind: CandidateKind::ChildTau {
+                        node: node.clone(),
+                        child,
+                    },
+                }),
+                Action::Input { port, payload } => {
+                    if let Some(parent) = exported_parent(residual.exports.iter(), node, port) {
+                        candidates.push(Candidate {
+                            offer: TransitionOffer {
+                                choice: child
+                                    .choice
+                                    .clone()
+                                    .map(|choice| compose_choice("input", node, Some(&choice))),
+                                action: Action::Input {
+                                    port: parent,
+                                    payload: payload.clone(),
+                                },
+                            },
+                            kind: CandidateKind::Export {
+                                node: node.clone(),
+                                child,
+                            },
+                        });
+                    }
+                }
+                Action::Output { port, payload } => {
+                    for connection in &residual.connections {
+                        let endpoint = Endpoint {
+                            node: node.clone(),
+                            port: port.clone(),
+                        };
+                        let input = if connection.first() == &endpoint {
+                            Some(connection.second())
+                        } else if connection.second() == &endpoint {
+                            Some(connection.first())
+                        } else {
+                            None
+                        };
+                        if let Some(input) = input {
+                            candidates.push(Candidate {
+                                offer: TransitionOffer::selected(
+                                    ChoiceId::new(format!(
+                                        "sync:{node}:{}:{}:{}",
+                                        child_choice(&child),
+                                        input.node,
+                                        input.port
+                                    )),
+                                    Action::Tau,
+                                ),
+                                kind: CandidateKind::Synchronize {
+                                    output: endpoint,
+                                    input: input.clone(),
+                                    child: child.clone(),
+                                },
+                            });
+                        }
+                    }
+                    if let Some(parent) = exported_parent(residual.exports.iter(), node, port) {
+                        candidates.push(Candidate {
+                            offer: TransitionOffer::selected(
+                                compose_choice("output", node, child.choice.as_ref()),
+                                Action::Output {
+                                    port: parent,
+                                    payload: payload.clone(),
+                                },
+                            ),
+                            kind: CandidateKind::Export {
+                                node: node.clone(),
+                                child,
+                            },
+                        });
+                    }
+                }
+            }
+        }
+    }
+    Ok(candidates)
+}
+
+fn reduce_candidate(
+    current: &ValidatedComposite,
+    host: &dyn SemanticHost,
+    candidate: Candidate,
+) -> Result<CompositeReduction, SemanticError> {
+    match candidate.kind {
+        CandidateKind::ChildTau { node, child } => {
+            let reference = &current.residual().nodes[&node];
+            let transition = host.transition(reference, &child).map_err(semantic_error)?;
+            let step = node_step(host, node, transition)?;
+            lift_internal_step(current, &step).map_err(semantic_error)
+        }
+        CandidateKind::Synchronize {
+            output,
+            input,
+            child,
+        } => {
+            let output_ref = &current.residual().nodes[&output.node];
+            let input_ref = &current.residual().nodes[&input.node];
+            let Action::Output { payload, .. } = &child.action else {
+                return Err(SemanticError::new(
+                    "synchronization candidate is not output",
+                ));
+            };
+            let input_offer = TransitionOffer::external_input(input.port.clone(), payload.clone());
+            let output_transition = host
+                .transition(output_ref, &child)
+                .map_err(semantic_error)?;
+            let input_transition = host
+                .transition(input_ref, &input_offer)
+                .map_err(semantic_error)?;
+            let output_step = node_step(host, output.node, output_transition)?;
+            let input_step = node_step(host, input.node, input_transition)?;
+            synchronize_connection(current, &output_step, &input_step).map_err(semantic_error)
+        }
+        CandidateKind::Export { node, child } => {
+            let reference = &current.residual().nodes[&node];
+            let transition = host.transition(reference, &child).map_err(semantic_error)?;
+            let step = node_step(host, node, transition)?;
+            lift_exported_step(current, &step).map_err(semantic_error)
+        }
+    }
+}
+
+fn reduce_external_input(
+    current: &ValidatedComposite,
+    host: &dyn SemanticHost,
+    offer: &TransitionOffer,
+) -> Result<CompositeReduction, SemanticError> {
+    let Action::Input { port, payload } = &offer.action else {
+        return Err(SemanticError::new("external input expected"));
+    };
     let endpoint = current
         .residual()
         .exports
-        .get(parent_port)
-        .ok_or_else(|| SemanticError::new(format!("unexported parent port {parent_port}")))?;
-    let from_ref = current
-        .residual()
-        .nodes
-        .get(&endpoint.node)
-        .ok_or_else(|| {
-            SemanticError::new(format!("export names missing node {}", endpoint.node))
-        })?;
-    let child_action = if input {
-        Action::Input {
-            port: endpoint.port.clone(),
-            value: value.clone(),
-        }
-    } else {
-        Action::Output {
-            port: endpoint.port.clone(),
-            value: value.clone(),
-        }
-    };
-    let transition = host
-        .transition(from_ref, &child_action)
-        .map_err(semantic_error)?;
+        .get(port)
+        .ok_or_else(|| SemanticError::new(format!("unexported parent port {port}")))?;
+    let child = TransitionOffer::external_input(endpoint.port.clone(), payload.clone());
+    let reference = &current.residual().nodes[&endpoint.node];
+    let transition = host.transition(reference, &child).map_err(semantic_error)?;
     let step = node_step(host, endpoint.node.clone(), transition)?;
     lift_exported_step(current, &step).map_err(semantic_error)
 }
 
-fn reduce_tau<V>(
-    current: &ValidatedComposite,
-    host: &dyn SemanticHost<V>,
-) -> Result<CompositeReduction<V>, SemanticError>
-where
-    V: Clone + Eq + Send + Sync + 'static,
-{
-    for (node, reference) in &current.residual().nodes {
-        if host
-            .enabled(reference)
-            .map_err(semantic_error)?
-            .iter()
-            .any(|action| matches!(action, Action::Tau))
-        {
-            let transition = host
-                .transition(reference, &Action::Tau)
-                .map_err(semantic_error)?;
-            let step = node_step(host, node.clone(), transition)?;
-            return lift_internal_step(current, &step).map_err(semantic_error);
-        }
-    }
-
-    for connection in &current.residual().connections {
-        if let Some(reduction) =
-            synchronize_from_output(current, host, connection.first(), connection.second())?
-        {
-            return Ok(reduction);
-        }
-        if let Some(reduction) =
-            synchronize_from_output(current, host, connection.second(), connection.first())?
-        {
-            return Ok(reduction);
-        }
-    }
-    Err(SemanticError::new("no internal transition is enabled"))
-}
-
-fn synchronize_from_output<V>(
-    current: &ValidatedComposite,
-    host: &dyn SemanticHost<V>,
-    output: &Endpoint,
-    input: &Endpoint,
-) -> Result<Option<CompositeReduction<V>>, SemanticError>
-where
-    V: Clone + Eq + Send + Sync + 'static,
-{
-    let output_ref = &current.residual().nodes[&output.node];
-    let input_ref = &current.residual().nodes[&input.node];
-    let Some(output_action) = host
-        .enabled(output_ref)
-        .map_err(semantic_error)?
-        .into_iter()
-        .find(|action| matches!(action, Action::Output { port, .. } if port == &output.port))
-    else {
-        return Ok(None);
-    };
-    let Action::Output { value, .. } = &output_action else {
-        unreachable!("filtered output action")
-    };
-    let input_action = Action::Input {
-        port: input.port.clone(),
-        value: value.clone(),
-    };
-    let output_transition = host
-        .transition(output_ref, &output_action)
-        .map_err(semantic_error)?;
-    let input_transition = host
-        .transition(input_ref, &input_action)
-        .map_err(semantic_error)?;
-    let output_step = node_step(host, output.node.clone(), output_transition)?;
-    let input_step = node_step(host, input.node.clone(), input_transition)?;
-    synchronize_connection(current, &output_step, &input_step)
-        .map(Some)
-        .map_err(semantic_error)
-}
-
-fn node_step<V>(
-    host: &dyn SemanticHost<V>,
+fn node_step(
+    host: &dyn SemanticHost,
     node: NodeId,
-    transition: ato_kernel::Transition<V>,
-) -> Result<NodeStep<V>, SemanticError> {
+    transition: ato_kernel::Transition,
+) -> Result<NodeStep, SemanticError> {
     Ok(NodeStep {
         node,
         from: host.resolve(&transition.from).map_err(semantic_error)?,
-        label: transition.action,
+        label: transition.offer.action,
         to: host.resolve(&transition.to).map_err(semantic_error)?,
     })
+}
+
+fn compose_choice(kind: &str, node: &NodeId, child: Option<&ChoiceId>) -> ChoiceId {
+    ChoiceId::new(format!(
+        "{kind}:{node}:{}",
+        child.map_or("external", ChoiceId::as_str)
+    ))
+}
+
+fn child_choice(offer: &TransitionOffer) -> &str {
+    offer.choice.as_ref().map_or("external", ChoiceId::as_str)
 }
 
 fn exported_parent<'a>(
@@ -257,27 +305,15 @@ fn exported_parent<'a>(
     })
 }
 
-fn is_connected(
-    residual: &crate::CompositeResidual,
-    node: &NodeId,
-    port: &ato_computation::PortId,
-) -> bool {
-    residual.connections.iter().any(|connection| {
-        [connection.first(), connection.second()]
-            .iter()
-            .any(|endpoint| &endpoint.node == node && &endpoint.port == port)
-    })
-}
-
 fn semantic_error(error: impl std::fmt::Display) -> SemanticError {
     SemanticError::new(error.to_string())
 }
 
-struct HostResolver<'a, V> {
-    host: &'a dyn SemanticHost<V>,
+struct HostResolver<'a> {
+    host: &'a dyn SemanticHost,
 }
 
-impl<V> ato_objects::ObjectResolver for HostResolver<'_, V> {
+impl ato_objects::ObjectResolver for HostResolver<'_> {
     fn metadata(
         &self,
         reference: &ato_computation::ContentRef,
