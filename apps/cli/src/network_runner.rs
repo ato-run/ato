@@ -4,6 +4,11 @@
 //! `PortableSession` command inside bwrap. It is intentionally not another
 //! scheduler or execution engine.
 
+// The command remains present on every CLI build so unsupported hosts can fail
+// with the policy error, while its evaluator and relay implementation are
+// deliberately Unix-only.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
+
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs;
