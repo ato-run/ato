@@ -72,6 +72,8 @@ pub(crate) struct AdapterConfig {
     pub upstream: Option<String>,
     #[serde(default)]
     pub input: Option<String>,
+    #[serde(default)]
+    pub ready_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -322,6 +324,7 @@ pub(crate) fn adapter_instances(
                     .port
                     .clone()
                     .context("ato.http@1 adapter requires port")?,
+                ready_path: adapter.ready_path.clone(),
             })?,
             PTY_ADAPTER_ID => {
                 let target = adapter
