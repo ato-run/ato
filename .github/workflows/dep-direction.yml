@@ -1,151 +1,21 @@
-name: dep-direction
-
-# Enforces the workspace dependency DAG so the wire / runtime / shell
-# layering can't silently regress. The single biggest invariant is that
-# `protocol` stays a DAG root (consumed by both `cli` and
-# `desktop`, depends on neither), since that's what lets the Desktop
-# link the IPC surface without dragging in capsule's runtime stack
-# (bollard / tonic / rusqlite / reqwest / axum / prost / tokio-`full`).
-#
-# See `docs/monorepo-consolidation-plan.md` §N4 for the full rationale.
-# Run locally with: `bash scripts/check-dep-direction.sh` (or just
-# `cargo tree -p <crate>` and eyeball it).
+name: computation architecture
 
 on:
-  pull_request:
-    paths:
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "crates/**/Cargo.toml"
-      - ".github/workflows/dep-direction.yml"
   push:
-    branches: [main, dev]
-    paths:
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "crates/**/Cargo.toml"
-      - ".github/workflows/dep-direction.yml"
+    paths: ["**/Cargo.toml", "Cargo.lock", "tools/arch-check/**"]
+  pull_request:
+    paths: ["**/Cargo.toml", "Cargo.lock", "tools/arch-check/**"]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  check:
-    name: Dependency direction
+  architecture:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
-
-      - name: protocol is a DAG root (no ato-* / capsule deps)
-        run: |
-          set -euo pipefail
-          # `cargo tree --prefix=none` flattens the tree and de-dups
-          # transitive entries with `(*)`, so a simple grep against the
-          # crate-name column catches both direct and transitive
-          # violations.
-          tree=$(cargo tree -p protocol --prefix=none --edges=normal,build,dev)
-          violations=$(echo "$tree" | awk '{print $1}' | sort -u | \
-            grep -E '^(cli|capsule|desktop|ato-desktop-xtask|lock-draft-engine)$' || true)
-          if [ -n "$violations" ]; then
-            echo "::error::protocol pulled in a forbidden ato-/capsule/lock-draft dep:"
-            echo "$violations"
-            echo "---"
-            echo "Full tree:"
-            echo "$tree"
-            exit 1
-          fi
-          echo "OK: protocol is a clean DAG root."
-
-      - name: protocol avoids GUI / runtime / clap / heavy-network deps
-        run: |
-          set -euo pipefail
-          tree=$(cargo tree -p protocol --prefix=none --edges=normal,build,dev)
-          # Anything in this list would defeat the whole point of the
-          # split (the Desktop wanting a small wire surface). Add new
-          # entries here when a new heavy dep tries to sneak in via a
-          # type that "happens to need" it.
-          forbidden_re='^(tokio|hyper|reqwest|axum|tower|tonic|prost|bollard|gpui|gpui-component|gpui_platform|wry|portable-pty|clap|rusqlite|wasmtime|wasi-common|jsonschema|toml|toml_edit|globset|walkdir|notify|reqwest|rustls)$'
-          violations=$(echo "$tree" | awk '{print $1}' | sort -u | \
-            grep -E "$forbidden_re" || true)
-          if [ -n "$violations" ]; then
-            echo "::error::protocol pulled in a forbidden runtime/GUI dep:"
-            echo "$violations"
-            echo "---"
-            echo "If this is intentional (a wire shape genuinely needs the dep), update"
-            echo ".github/workflows/dep-direction.yml — but think hard first: the whole"
-            echo "point of protocol is a small surface."
-            exit 1
-          fi
-          echo "OK: protocol stays free of GUI / runtime deps."
-
-      - name: desktop does not depend on the cli crate (process-spawn boundary)
-        run: |
-          set -euo pipefail
-          # desktop spawns the `ato` binary as a subprocess; it must
-          # never link the cli library. Catching this at Cargo-dep
-          # level keeps the boundary honest even if the spawn site looks
-          # innocuous.
-          # NOTE: desktop lives outside the workspace (see root
-          # Cargo.toml `exclude` — its git-only deps would break
-          # `cargo package --workspace`), so we must address it via
-          # --manifest-path rather than `-p desktop`.
-          tree=$(cargo tree --manifest-path crates/desktop/Cargo.toml --prefix=none --edges=normal,build,dev)
-          if echo "$tree" | awk '{print $1}' | sort -u | grep -E '^cli$' > /dev/null; then
-            echo "::error::desktop linked cli as a Cargo dep — that violates the process-spawn boundary."
-            echo "desktop must spawn the ato binary, not link its library."
-            exit 1
-          fi
-          echo "OK: desktop does not depend on the cli crate."
-
-      - name: cli does not depend on desktop (one-way arrow)
-        run: |
-          set -euo pipefail
-          # The arrow is desktop → cli (process spawn). The
-          # reverse direction would let CLI builds drag in GPUI, which
-          # is exactly what we don't want.
-          tree=$(cargo tree -p cli --prefix=none --edges=normal,build,dev)
-          if echo "$tree" | awk '{print $1}' | sort -u | grep -E '^(desktop|ato-desktop-xtask|gpui|gpui-component|gpui_platform|wry)$' > /dev/null; then
-            echo "::error::cli pulled in a Desktop-only dep (above)."
-            exit 1
-          fi
-          echo "OK: cli stays Desktop-free."
-
-      - name: nacelle is a sibling binary, not linked from cli (process-spawn boundary)
-        run: |
-          set -euo pipefail
-          # cli invokes nacelle via subprocess (--nacelle <path>),
-          # never as a Cargo dep. Same shape as desktop → cli.
-          # If anyone tries to link nacelle into the CLI to "share types",
-          # they should hoist those types into protocol instead — see
-          # docs/monorepo-consolidation-plan.md §P3 for the rationale.
-          tree=$(cargo tree -p cli --prefix=none --edges=normal,build,dev)
-          if echo "$tree" | awk '{print $1}' | sort -u | grep -E '^nacelle$' > /dev/null; then
-            echo "::error::cli linked nacelle as a Cargo dep — that violates the process-spawn boundary."
-            echo "cli must spawn the nacelle binary, not link its library."
-            exit 1
-          fi
-          echo "OK: cli does not link nacelle."
-
-      - name: nacelle does not depend on ato-* / capsule-* crates (sandbox stays independent)
-        run: |
-          set -euo pipefail
-          # nacelle is the sandbox runtime; it must not pull in any
-          # workspace crate. A reverse arrow (nacelle → cli or
-          # nacelle → capsule) would create a dependency cycle the
-          # moment cli starts wanting types from nacelle. Keep the
-          # sandbox a clean DAG leaf so the CLI can spawn it from any
-          # version pin (release matrix, vendored cache, system PATH).
-          tree=$(cargo tree -p nacelle --prefix=none --edges=normal,build,dev)
-          violations=$(echo "$tree" | awk '{print $1}' | sort -u | \
-            grep -E '^(cli|desktop|ato-desktop-xtask|capsule|protocol|lock-draft-engine)$' || true)
-          if [ -n "$violations" ]; then
-            echo "::error::nacelle pulled in a forbidden workspace dep:"
-            echo "$violations"
-            echo "---"
-            echo "If you genuinely need a shared type, hoist it into protocol."
-            exit 1
-          fi
-          echo "OK: nacelle stays a clean sandbox leaf."
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo metadata --format-version 1 --locked > /dev/null
+      - run: cargo run --locked -p arch-check

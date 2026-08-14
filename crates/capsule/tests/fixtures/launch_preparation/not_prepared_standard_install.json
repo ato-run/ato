@@ -1,9 +1,0 @@
-{
-  "status": "not_prepared",
-  "blockers": [
-    {
-      "code": "launch_template_not_reusable",
-      "detail": "launch template is not reusable: install inputs are not ready for launch-template reuse: NotReady { reasons: [RequirementGraphPartial, CompatibilityIndexPartial, NoResolvedBindings] }"
-    }
-  ]
-}
