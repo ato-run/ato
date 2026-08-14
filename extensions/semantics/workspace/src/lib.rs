@@ -214,6 +214,16 @@ fn validate_residual(residual: &WorkspaceResidual) -> Result<(), WorkspaceCodecE
     }
     ensure_sorted_unique("network_allow", &residual.realization.network_allow)?;
     ensure_sorted_unique("writable_paths", &residual.realization.writable_paths)?;
+    for (name, binding) in &residual.secret_bindings {
+        if name.is_empty()
+            || !binding.starts_with("secret://")
+            || binding.len() == "secret://".len()
+        {
+            return Err(WorkspaceCodecError::Invalid(format!(
+                "secret binding {name:?} must reference secret://..."
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -371,5 +381,18 @@ mod tests {
         let python_311 = encode_workspace_residual(&other).unwrap();
 
         assert_ne!(python_312, python_311);
+    }
+
+    #[test]
+    fn literal_secret_value_is_rejected_by_canonical_codec() {
+        let mut residual = fixture();
+        residual
+            .secret_bindings
+            .insert("API_TOKEN".to_owned(), "actual-secret".to_owned());
+
+        assert!(matches!(
+            encode_workspace_residual(&residual),
+            Err(WorkspaceCodecError::Invalid(_))
+        ));
     }
 }
