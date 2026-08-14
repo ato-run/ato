@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use ato_compose::{
+    ComposeSemantics, CompositeResidual, Endpoint, NodeId, encode_composite_residual,
+};
 use ato_computation::{
     ComputationObject, ComputationRef, PortDef, PortId, ProtocolId, ResolvedComputation, RoleId,
     SemanticsId,
@@ -10,9 +13,6 @@ use ato_kernel::{
     SemanticHost, SemanticStep, Semantics, TransitionOffer,
 };
 use ato_objects::{MemoryObjectStore, ObjectStore};
-use ato_semantics_compose::{
-    ComposeSemantics, CompositeResidual, Endpoint, NodeId, encode_composite_residual,
-};
 
 struct TestProtocol {
     id: ProtocolId,

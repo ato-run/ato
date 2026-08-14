@@ -13,16 +13,16 @@ use ato_adapter_repository::{
     compile_repository_with_lock, encode_capsule_lock, fetch_git_repository, lock_for,
     materialize_source, read_capsule_lock,
 };
+use ato_compose::ComposeReferences;
 use ato_computation::{ComputationRef, ContentRef, SemanticsId};
 use ato_kernel::{Kernel, Run};
+use ato_materializer_snapshot::{
+    MaterializationRef, RealizationContract, register_materialization, verify_materialization,
+};
 use ato_objects::{
     FsObjectStore, ObjectResolver, ReferenceRegistry, decode_bundle, encode_bundle, export_bundle,
     import_bundle, read_exact_object,
 };
-use ato_provider_snapshot::{
-    MaterializationRef, RealizationContract, register_materialization, verify_materialization,
-};
-use ato_semantics_compose::ComposeReferences;
 use ato_semantics_workspace::{
     MAX_WORKSPACE_RESIDUAL_BYTES, WORKSPACE_SEMANTICS_ID, WorkspaceReferences, WorkspaceSemantics,
     decode_workspace_residual, observe_exit,
