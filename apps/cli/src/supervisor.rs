@@ -63,12 +63,12 @@ pub(crate) fn start_durable(
         .stdout(stdout.try_clone()?)
         .stderr(stdout);
     configure_detached_process(&mut command);
-    let child = command.spawn()?;
+    let mut child = command.spawn()?;
     for _ in 0..100 {
         if repository.active_run()?.is_some() {
             return Ok(());
         }
-        if process_start_time(child.id()).is_none() {
+        if child.try_wait()?.is_some() {
             bail!(
                 "capsule worker exited before becoming active; see {}",
                 log_path.display()
@@ -90,7 +90,7 @@ pub(crate) fn worker(project: &Path, branch: &str, head: &ComputationRef) -> Res
         .ok()
         .and_then(|value| serde_json::from_str(&value).ok())
         .unwrap_or_default();
-    let instances = adapter_instances(&config, &bindings, false)?;
+    let instances = adapter_instances(&config, &bindings, false, true)?;
     let registry = adapter_registry()?;
     let sink: Arc<dyn ObservationSink> = Arc::new(RepositoryObservationSink {
         project: repository.project().to_path_buf(),
@@ -118,6 +118,9 @@ pub(crate) fn worker(project: &Path, branch: &str, head: &ComputationRef) -> Res
     };
     repository.set_active_run(&active)?;
     enter(SupervisorState::Active);
+    for session in &mut sessions {
+        session.activate()?;
+    }
 
     let stop_request = repository.root().join(STOP_REQUEST);
     let stop_ack = repository.root().join(STOP_ACK);
@@ -211,7 +214,7 @@ impl RealizationDriver for CliRealizationDriver {
             repository.objects(),
         )
         .map_err(materializer_operation)?;
-        let instances = adapter_instances(&state.config, &self.bindings, true)
+        let instances = adapter_instances(&state.config, &self.bindings, true, false)
             .map_err(materializer_operation)?;
         let registry = adapter_registry().map_err(materializer_operation)?;
         let context = AdapterAttachContext {
@@ -294,6 +297,9 @@ impl Realization for CliRealization {
         let repository =
             LocalCapsuleRepository::open(&self.project).map_err(materializer_operation)?;
         let mut result = Ok(());
+        for session in &mut self.sessions {
+            session.activate().map_err(materializer_operation)?;
+        }
         for session in &mut self.sessions {
             if let Err(error) = session.wait() {
                 result = Err(MaterializerError::Operation(error.to_string()));
