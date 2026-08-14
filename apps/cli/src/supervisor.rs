@@ -173,6 +173,19 @@ pub(crate) fn start_durable(
     bindings: &BTreeMap<String, String>,
     replay_records: Option<&[RecordEnvelope]>,
 ) -> Result<()> {
+    let descriptor = replay_records
+        .map(|records| encode_replay(repository, head, records))
+        .transpose()?;
+    start_durable_with_descriptor(repository, branch, head, bindings, descriptor.as_ref())
+}
+
+pub(crate) fn start_durable_with_descriptor(
+    repository: &LocalCapsuleRepository,
+    branch: &str,
+    head: &ComputationRef,
+    bindings: &BTreeMap<String, String>,
+    descriptor: Option<&ContentRef>,
+) -> Result<()> {
     let token = format!(
         "{}-{}-{}",
         std::process::id(),
@@ -195,24 +208,7 @@ pub(crate) fn start_durable(
         status: "starting".to_owned(),
     };
     repository.claim_active_run(&lease)?;
-    let descriptor = match replay_records
-        .map(|records| encode_replay(repository, head, records))
-        .transpose()
-    {
-        Ok(descriptor) => descriptor,
-        Err(error) => {
-            let _ = repository.release_active_run(&token);
-            return Err(error);
-        }
-    };
-    let result = start_claimed(
-        repository,
-        branch,
-        head,
-        bindings,
-        &token,
-        descriptor.as_ref(),
-    );
+    let result = start_claimed(repository, branch, head, bindings, &token, descriptor);
     if result.is_err() {
         let _ = repository.release_active_run(&token);
     }

@@ -47,7 +47,9 @@ use crate::authoring::{
     AuthoringReferences, evolve_workspace, initial_computation, load_config, load_runtime_state,
     workspace_policy,
 };
-use crate::supervisor::{CliRealizationDriver, capture_active, start_durable, stop_active};
+use crate::supervisor::{
+    CliRealizationDriver, capture_active, start_durable, start_durable_with_descriptor, stop_active,
+};
 
 #[derive(Parser)]
 #[command(
@@ -424,7 +426,17 @@ fn hosted_session_start(args: HostedSessionStartArgs) -> Result<()> {
         bail!("portable Capsule requires Bindings: {}", missing.join(", "));
     }
     preflight(session.context().repository(), &state.config, &bindings)?;
-    session.start(&DurablePortableRuntimeFactory { bindings })?;
+    let replay_descriptor = session
+        .context()
+        .materializations()
+        .iter()
+        .find(|candidate| candidate.materializer_id == "ato.replay@1")
+        .context("hosted continuation has no Replay Materialization")?;
+    let replay_descriptor = ContentRef::parse(&replay_descriptor.descriptor_ref)?;
+    session.start(&DurablePortableRuntimeFactory {
+        bindings,
+        replay_descriptor,
+    })?;
     let computation = resolve_computation(
         session.context().repository().objects(),
         session.context().parent_root(),
@@ -1087,6 +1099,7 @@ struct CliPortableRuntimeFactory {
 /// Only the lifecycle wrapper is reusable; lineage remains in ato-objects.
 struct DurablePortableRuntimeFactory {
     bindings: BTreeMap<String, String>,
+    replay_descriptor: ContentRef,
 }
 
 impl PortableRuntimeFactory for DurablePortableRuntimeFactory {
@@ -1098,6 +1111,7 @@ impl PortableRuntimeFactory for DurablePortableRuntimeFactory {
             repository: session.repository().clone(),
             root: session.parent_root().clone(),
             bindings: self.bindings.clone(),
+            replay_descriptor: self.replay_descriptor.clone(),
             started: false,
         }))
     }
@@ -1107,17 +1121,18 @@ struct DurablePortableRuntime {
     repository: LocalCapsuleRepository,
     root: ComputationRef,
     bindings: BTreeMap<String, String>,
+    replay_descriptor: ContentRef,
     started: bool,
 }
 
 impl PortableSessionRuntime for DurablePortableRuntime {
     fn start(&mut self) -> Result<(), PortableSessionError> {
-        start_durable(
+        start_durable_with_descriptor(
             &self.repository,
             ato_runtime::PORTABLE_SESSION_BRANCH,
             &self.root,
             &self.bindings,
-            None,
+            Some(&self.replay_descriptor),
         )
         .map_err(portable_runtime_error)?;
         self.started = true;
