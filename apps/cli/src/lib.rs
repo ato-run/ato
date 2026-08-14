@@ -355,7 +355,7 @@ fn preflight(
         workspace: repository.project(),
         objects: repository.objects(),
     };
-    for instance in authoring::adapter_instances(config, bindings, false)? {
+    for instance in authoring::adapter_instances(config, bindings, false, false)? {
         registry
             .get(&instance.adapter_id)?
             .preflight(&instance, &context)?;
