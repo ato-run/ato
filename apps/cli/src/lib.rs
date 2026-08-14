@@ -25,8 +25,9 @@ use ato_materializer_api::{
 use ato_materializer_replay::{ReplayMaterializer, ReplayReferences};
 use ato_materializer_snapshot::{SnapshotMaterializer, SnapshotReferences};
 use ato_objects::{
-    BundleMaterialization, CapsuleSelector, LocalCapsuleRepository, ReferenceRegistry,
-    decode_bundle, encode_bundle, export_bundle_with_materializations, import_bundle,
+    BranchOrigin, BundleMaterialization, CapsuleSelector, LocalCapsuleRepository, RecordId,
+    ReferenceRegistry, decode_bundle, encode_bundle, export_bundle_with_materializations,
+    import_bundle,
 };
 use clap::{Args, Parser, Subcommand};
 
@@ -65,6 +66,7 @@ enum Commands {
         branch: String,
         head: String,
         token: String,
+        descriptor: Option<String>,
     },
 }
 
@@ -114,7 +116,14 @@ pub fn run() -> Result<()> {
             branch,
             head,
             token,
-        } => supervisor::worker(&project, &branch, &ComputationRef::parse(head)?, &token),
+            descriptor,
+        } => supervisor::worker(
+            &project,
+            &branch,
+            &ComputationRef::parse(head)?,
+            &token,
+            descriptor.map(ContentRef::parse).transpose()?.as_ref(),
+        ),
     }
 }
 
@@ -131,10 +140,10 @@ fn init(args: InitArgs) -> Result<()> {
     let bindings: BTreeMap<_, _> = args.bindings.iter().cloned().collect();
     preflight(&repository, &config, &bindings)?;
     let initial = initial_computation(&repository, config)?;
-    repository.update_head("main", None, &initial)?;
+    repository.create_branch("main", &initial, None)?;
     println!("{initial}");
     if !args.initial_only {
-        start_durable(&repository, "main", &initial, &bindings)?;
+        start_durable(&repository, "main", &initial, &bindings, None)?;
     }
     Ok(())
 }
@@ -158,7 +167,21 @@ fn resume(args: ResumeArgs) -> Result<()> {
             if repository.head(&branch)?.is_some() {
                 bail!("branch `{branch}` already exists");
             }
-            repository.update_head(&branch, None, &selected)?;
+            let parent_record = match selector.record {
+                Some(seq) => Some(RecordId::new(&selector.branch, seq)),
+                None => repository
+                    .records_for_stream(&selector.branch, None)?
+                    .last()
+                    .map(|record| record.id.clone()),
+            };
+            repository.create_branch(
+                &branch,
+                &selected,
+                Some(&BranchOrigin {
+                    computation: selected.clone(),
+                    parent_record,
+                }),
+            )?;
             branch
         }
         None if selected != current => bail!(
@@ -169,11 +192,13 @@ fn resume(args: ResumeArgs) -> Result<()> {
         ),
         None => selector.branch,
     };
+    let replay_records = repository.records_for_causal_branch(&branch, None)?;
     start_durable(
         &repository,
         &branch,
         &selected,
         &args.bindings.into_iter().collect(),
+        Some(&replay_records),
     )?;
     println!("resumed {branch} at {selected}");
     Ok(())
@@ -199,7 +224,7 @@ fn encap(args: EncapArgs) -> Result<()> {
     let repository = LocalCapsuleRepository::open(project)?;
     let target = repository.resolve(&selector)?;
     let state = load_runtime_state(&target, repository.objects())?;
-    let records = repository.records_for_stream(&selector.branch, selector.record)?;
+    let records = repository.records_for_causal_branch(&selector.branch, selector.record)?;
     let adapters = adapter_registry()?;
     let materializers = materializer_registry()?;
     let capture_policy = workspace_policy(&state.config)?;

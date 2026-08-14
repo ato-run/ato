@@ -1,5 +1,6 @@
 //! Durable local computation DAG storage under `.capsule/`.
 
+use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -91,6 +92,19 @@ pub struct RecordEnvelope {
     pub observed_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchOrigin {
+    pub computation: ComputationRef,
+    pub parent_record: Option<RecordId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BranchOriginWire {
+    computation: String,
+    parent_record: Option<RecordId>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RecordWire {
@@ -112,6 +126,7 @@ pub struct ActiveRun {
     pub branch: String,
     pub branch_base: ComputationRef,
     pub head: ComputationRef,
+    pub record_seq: u64,
     pub pid: u32,
     pub process_start_time: String,
     pub process_group: u32,
@@ -126,6 +141,7 @@ struct ActiveRunWire {
     branch: String,
     branch_base: String,
     head: String,
+    record_seq: u64,
     pid: u32,
     process_start_time: String,
     process_group: u32,
@@ -146,6 +162,7 @@ impl LocalCapsuleRepository {
         let root = project.join(REPOSITORY_DIRECTORY);
         for directory in [
             root.join("refs/heads"),
+            root.join("refs/origins"),
             root.join("records"),
             root.join("runs"),
             root.join("protocols"),
@@ -208,6 +225,64 @@ impl LocalCapsuleRepository {
         )
     }
 
+    pub fn create_branch(
+        &self,
+        branch: &str,
+        head: &ComputationRef,
+        origin: Option<&BranchOrigin>,
+    ) -> Result<(), RepositoryError> {
+        validate_name("branch", branch)?;
+        let _transaction = self.lock_transaction()?;
+        if let Some(actual) = self.head(branch)? {
+            return Err(RepositoryError::RefConflict {
+                branch: branch.to_owned(),
+                expected: None,
+                actual: Some(actual.to_string()),
+            });
+        }
+        if let Some(origin) = origin {
+            if &origin.computation != head {
+                return Err(RepositoryError::InvalidBranchOrigin(branch.to_owned()));
+            }
+            if let Some(parent) = &origin.parent_record {
+                let record = self.record(parent)?;
+                if record.head_after != origin.computation {
+                    return Err(RepositoryError::InvalidBranchOrigin(branch.to_owned()));
+                }
+            }
+            let bytes = serde_jcs::to_vec(&BranchOriginWire::from(origin))?;
+            atomic_create(
+                &self
+                    .root
+                    .join("refs/origins")
+                    .join(format!("{branch}.json")),
+                &bytes,
+            )?;
+        }
+        atomic_create(
+            &self.root.join("refs/heads").join(branch),
+            format!("{head}\n").as_bytes(),
+        )
+    }
+
+    pub fn branch_origin(&self, branch: &str) -> Result<Option<BranchOrigin>, RepositoryError> {
+        validate_name("branch", branch)?;
+        let path = self
+            .root
+            .join("refs/origins")
+            .join(format!("{branch}.json"));
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let wire: BranchOriginWire = serde_json::from_slice(&bytes)?;
+        if serde_jcs::to_vec(&wire)? != bytes {
+            return Err(RepositoryError::InvalidBranchOrigin(branch.to_owned()));
+        }
+        wire.try_into().map(Some)
+    }
+
     pub fn append_record(
         &self,
         mut record: RecordEnvelope,
@@ -215,6 +290,13 @@ impl LocalCapsuleRepository {
         validate_name("stream", &record.id.stream)?;
         validate_name("adapter id", &record.adapter_id)?;
         let _transaction = self.lock_transaction()?;
+        self.append_record_locked(&mut record)
+    }
+
+    fn append_record_locked(
+        &self,
+        record: &mut RecordEnvelope,
+    ) -> Result<RecordEnvelope, RepositoryError> {
         let next = self.next_sequence(&record.id.stream)?;
         if record.id.seq != 0 && record.id.seq != next {
             return Err(RepositoryError::Sequence {
@@ -231,9 +313,58 @@ impl LocalCapsuleRepository {
                 return Err(RepositoryError::InvalidCause(cause.clone()));
             }
         }
-        let bytes = serde_jcs::to_vec(&RecordWire::from(&record))?;
+        let bytes = serde_jcs::to_vec(&RecordWire::from(&*record))?;
         atomic_create(&self.record_path(&record.id), &bytes)?;
-        Ok(record)
+        Ok(record.clone())
+    }
+
+    /// Commits evidence and the live Run cursor under one repository
+    /// transaction. A cursor that was not flushed before a process crash is
+    /// recovered from the append-only record chain by `active_run`.
+    pub fn commit_observation(
+        &self,
+        token: &str,
+        expected_head: &ComputationRef,
+        mut record: RecordEnvelope,
+    ) -> Result<RecordEnvelope, RepositoryError> {
+        validate_name("run token", token)?;
+        validate_name("stream", &record.id.stream)?;
+        validate_name("adapter id", &record.adapter_id)?;
+        let _transaction = self.lock_transaction()?;
+        let mut run = self
+            .active_run()?
+            .ok_or_else(|| RepositoryError::ActiveRunConflict {
+                token: token.to_owned(),
+                status: "missing".to_owned(),
+            })?;
+        if run.token != token || &run.head != expected_head || run.branch != record.id.stream {
+            return Err(RepositoryError::ActiveRunConflict {
+                token: run.token,
+                status: run.status,
+            });
+        }
+        if record.caused_by.is_empty() {
+            let previous = self
+                .records_for_stream(&record.id.stream, None)?
+                .last()
+                .map(|previous| previous.id.clone());
+            let origin = if previous.is_none() {
+                self.branch_origin(&record.id.stream)?
+                    .and_then(|origin| origin.parent_record)
+            } else {
+                None
+            };
+            record.caused_by = previous
+                .or(origin)
+                .into_iter()
+                .collect();
+        }
+        let committed = self.append_record_locked(&mut record)?;
+        run.head = committed.head_after.clone();
+        run.record_seq = committed.id.seq;
+        let bytes = serde_jcs::to_vec(&ActiveRunWire::from(&run))?;
+        atomic_write(&self.root.join("runs/active.json"), &bytes)?;
+        Ok(committed)
     }
 
     pub fn record(&self, id: &RecordId) -> Result<RecordEnvelope, RepositoryError> {
@@ -293,6 +424,51 @@ impl LocalCapsuleRepository {
         Ok(records)
     }
 
+    pub fn records_for_causal_branch(
+        &self,
+        branch: &str,
+        through: Option<u64>,
+    ) -> Result<Vec<RecordEnvelope>, RepositoryError> {
+        self.causal_records(branch, through, &mut BTreeSet::new())
+    }
+
+    fn causal_records(
+        &self,
+        branch: &str,
+        through: Option<u64>,
+        visiting: &mut BTreeSet<String>,
+    ) -> Result<Vec<RecordEnvelope>, RepositoryError> {
+        if !visiting.insert(branch.to_owned()) {
+            return Err(RepositoryError::BranchOriginCycle(branch.to_owned()));
+        }
+        let origin = self.branch_origin(branch)?;
+        let mut records = if let Some(parent) = origin
+            .as_ref()
+            .and_then(|origin| origin.parent_record.as_ref())
+        {
+            self.causal_records(&parent.stream, Some(parent.seq), visiting)?
+        } else {
+            Vec::new()
+        };
+        visiting.remove(branch);
+        let own = self.records_for_stream(branch, through)?;
+        let mut current = records
+            .last()
+            .map(|record| record.head_after.clone())
+            .or_else(|| origin.as_ref().map(|origin| origin.computation.clone()));
+        for record in &own {
+            if current
+                .as_ref()
+                .is_some_and(|head| head != &record.head_before)
+            {
+                return Err(RepositoryError::CausalHeadMismatch(record.id.clone()));
+            }
+            current = Some(record.head_after.clone());
+        }
+        records.extend(own);
+        Ok(records)
+    }
+
     pub fn resolve(&self, selector: &CapsuleSelector) -> Result<ComputationRef, RepositoryError> {
         if let Some(seq) = selector.record {
             let record = self.record(&RecordId::new(&selector.branch, seq))?;
@@ -310,7 +486,29 @@ impl LocalCapsuleRepository {
             Err(error) => return Err(error.into()),
         };
         let wire: ActiveRunWire = serde_json::from_slice(&bytes)?;
-        wire.try_into().map(Some)
+        let mut run: ActiveRun = wire.try_into()?;
+        for record in self.records_for_stream(&run.branch, None)? {
+            if record.id.seq <= run.record_seq {
+                continue;
+            }
+            let expected_seq = run
+                .record_seq
+                .checked_add(1)
+                .ok_or(RepositoryError::SequenceOverflow)?;
+            if record.id.seq != expected_seq {
+                return Err(RepositoryError::Sequence {
+                    stream: run.branch.clone(),
+                    expected: expected_seq,
+                    actual: record.id.seq,
+                });
+            }
+            if record.head_before != run.head {
+                return Err(RepositoryError::CausalHeadMismatch(record.id));
+            }
+            run.head = record.head_after;
+            run.record_seq = record.id.seq;
+        }
+        Ok(Some(run))
     }
 
     pub fn claim_active_run(&self, run: &ActiveRun) -> Result<(), RepositoryError> {
@@ -348,6 +546,7 @@ impl LocalCapsuleRepository {
             || run.status != "active"
             || run.branch_base != claimed.branch_base
             || run.head != claimed.head
+            || run.record_seq != claimed.record_seq
         {
             return Err(RepositoryError::InvalidRunStatus(run.status.clone()));
         }
@@ -368,30 +567,6 @@ impl LocalCapsuleRepository {
         }
         fs::remove_file(self.root.join("runs/active.json"))?;
         Ok(())
-    }
-
-    /// Atomically advances only the mutable cursor of the currently active Run.
-    pub fn update_active_head(
-        &self,
-        expected: &ComputationRef,
-        next: &ComputationRef,
-    ) -> Result<(), RepositoryError> {
-        let _transaction = self.lock_transaction()?;
-        let mut run = self.active_run()?.ok_or(RepositoryError::RefConflict {
-            branch: "active-run".to_owned(),
-            expected: Some(expected.to_string()),
-            actual: None,
-        })?;
-        if &run.head != expected {
-            return Err(RepositoryError::RefConflict {
-                branch: "active-run".to_owned(),
-                expected: Some(expected.to_string()),
-                actual: Some(run.head.to_string()),
-            });
-        }
-        run.head = next.clone();
-        let bytes = serde_jcs::to_vec(&ActiveRunWire::from(&run))?;
-        atomic_write(&self.root.join("runs/active.json"), &bytes)
     }
 
     fn next_sequence(&self, stream: &str) -> Result<u64, RepositoryError> {
@@ -458,6 +633,26 @@ impl From<&RecordEnvelope> for RecordWire {
     }
 }
 
+impl From<&BranchOrigin> for BranchOriginWire {
+    fn from(value: &BranchOrigin) -> Self {
+        Self {
+            computation: value.computation.to_string(),
+            parent_record: value.parent_record.clone(),
+        }
+    }
+}
+
+impl TryFrom<BranchOriginWire> for BranchOrigin {
+    type Error = RepositoryError;
+
+    fn try_from(value: BranchOriginWire) -> Result<Self, Self::Error> {
+        Ok(Self {
+            computation: parse_computation(&value.computation)?,
+            parent_record: value.parent_record,
+        })
+    }
+}
+
 impl TryFrom<RecordWire> for RecordEnvelope {
     type Error = RepositoryError;
 
@@ -487,6 +682,7 @@ impl From<&ActiveRun> for ActiveRunWire {
             branch: value.branch.clone(),
             branch_base: value.branch_base.to_string(),
             head: value.head.to_string(),
+            record_seq: value.record_seq,
             pid: value.pid,
             process_start_time: value.process_start_time.clone(),
             process_group: value.process_group,
@@ -505,6 +701,7 @@ impl TryFrom<ActiveRunWire> for ActiveRun {
             branch: value.branch,
             branch_base: parse_computation(&value.branch_base)?,
             head: parse_computation(&value.head)?,
+            record_seq: value.record_seq,
             pid: value.pid,
             process_start_time: value.process_start_time,
             process_group: value.process_group,
@@ -588,6 +785,12 @@ pub enum RepositoryError {
     ActiveRunConflict { token: String, status: String },
     #[error("invalid active Run status `{0}`")]
     InvalidRunStatus(String),
+    #[error("invalid branch origin for `{0}`")]
+    InvalidBranchOrigin(String),
+    #[error("branch origin cycle includes `{0}`")]
+    BranchOriginCycle(String),
+    #[error("causal record closure has a head mismatch at {0:?}")]
+    CausalHeadMismatch(RecordId),
     #[error("record sequence for `{stream}` must be {expected}, got {actual}")]
     Sequence {
         stream: String,
@@ -752,5 +955,74 @@ mod tests {
             .append_record(evidence("experiment", &c0, &c0))
             .unwrap();
         assert_eq!(experiment.id, RecordId::new("experiment", 1));
+    }
+
+    #[test]
+    fn branch_record_closure_includes_parent_evolution_without_affecting_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = LocalCapsuleRepository::open(directory.path()).unwrap();
+        let c0 = reference("a");
+        let c1 = reference("b");
+        let c2 = reference("c");
+        repository.create_branch("main", &c0, None).unwrap();
+        let parent = repository
+            .append_record(evidence("main", &c0, &c1))
+            .unwrap();
+        repository.update_head("main", Some(&c0), &c1).unwrap();
+        repository
+            .create_branch(
+                "experiment",
+                &c1,
+                Some(&BranchOrigin {
+                    computation: c1.clone(),
+                    parent_record: Some(parent.id.clone()),
+                }),
+            )
+            .unwrap();
+        let mut child = evidence("experiment", &c1, &c2);
+        child.caused_by = vec![parent.id.clone()];
+        repository.append_record(child).unwrap();
+
+        let closure = repository
+            .records_for_causal_branch("experiment", None)
+            .unwrap();
+        assert_eq!(
+            closure
+                .iter()
+                .map(|record| record.id.clone())
+                .collect::<Vec<_>>(),
+            vec![parent.id, RecordId::new("experiment", 1)]
+        );
+        assert_eq!(repository.head("experiment").unwrap(), Some(c1));
+    }
+
+    #[test]
+    fn active_cursor_recovers_an_appended_observation_after_writer_crash() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = LocalCapsuleRepository::open(directory.path()).unwrap();
+        let c0 = reference("a");
+        let c1 = reference("b");
+        repository.create_branch("main", &c0, None).unwrap();
+        repository
+            .claim_active_run(&ActiveRun {
+                token: "test-token".to_owned(),
+                branch: "main".to_owned(),
+                branch_base: c0.clone(),
+                head: c0.clone(),
+                record_seq: 0,
+                pid: 0,
+                process_start_time: String::new(),
+                process_group: 0,
+                boot_session: String::new(),
+                status: "starting".to_owned(),
+            })
+            .unwrap();
+        repository
+            .append_record(evidence("main", &c0, &c1))
+            .unwrap();
+
+        let recovered = repository.active_run().unwrap().unwrap();
+        assert_eq!(recovered.head, c1);
+        assert_eq!(recovered.record_seq, 1);
     }
 }

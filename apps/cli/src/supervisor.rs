@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -14,12 +14,15 @@ use ato_adapter_api::{
 use ato_adapter_process::terminate_process_tree;
 use ato_adapter_workspace::restore_workspace;
 use ato_computation::{ComputationRef, ContentRef};
-use ato_materializer_api::{MaterializerError, Realization, RealizationDriver, ReplayRuntime};
+use ato_materializer_api::{
+    MaterializerContext, MaterializerError, Realization, RealizationDriver, ReplayRuntime,
+};
 use ato_objects::{ActiveRun, LocalCapsuleRepository, ObjectStore, RecordEnvelope, RecordId};
 
 use crate::{
     adapter_registry,
-    authoring::{adapter_instances, evolve_observation, load_runtime_state},
+    authoring::{adapter_instances, evolve_observation, load_runtime_state, workspace_policy},
+    materializer_registry,
 };
 
 const STOP_REQUEST: &str = "runs/stop.request";
@@ -45,6 +48,7 @@ pub(crate) fn start_durable(
     branch: &str,
     head: &ComputationRef,
     bindings: &BTreeMap<String, String>,
+    replay_records: Option<&[RecordEnvelope]>,
 ) -> Result<()> {
     let token = format!(
         "{}-{}-{}",
@@ -57,6 +61,10 @@ pub(crate) fn start_durable(
         branch: branch.to_owned(),
         branch_base: head.clone(),
         head: head.clone(),
+        record_seq: repository
+            .records_for_stream(branch, None)?
+            .last()
+            .map_or(0, |record| record.id.seq),
         pid: 0,
         process_start_time: String::new(),
         process_group: 0,
@@ -64,7 +72,24 @@ pub(crate) fn start_durable(
         status: "starting".to_owned(),
     };
     repository.claim_active_run(&lease)?;
-    let result = start_claimed(repository, branch, head, bindings, &token);
+    let descriptor = match replay_records
+        .map(|records| encode_replay(repository, head, records))
+        .transpose()
+    {
+        Ok(descriptor) => descriptor,
+        Err(error) => {
+            let _ = repository.release_active_run(&token);
+            return Err(error);
+        }
+    };
+    let result = start_claimed(
+        repository,
+        branch,
+        head,
+        bindings,
+        &token,
+        descriptor.as_ref(),
+    );
     if result.is_err() {
         let _ = repository.release_active_run(&token);
     }
@@ -77,6 +102,7 @@ fn start_claimed(
     head: &ComputationRef,
     bindings: &BTreeMap<String, String>,
     token: &str,
+    descriptor: Option<&ContentRef>,
 ) -> Result<()> {
     let log_path = repository.root().join("runs/output.log");
     let stdout = OpenOptions::new()
@@ -94,6 +120,9 @@ fn start_claimed(
         .stdin(Stdio::null())
         .stdout(stdout.try_clone()?)
         .stderr(stdout);
+    if let Some(descriptor) = descriptor {
+        command.arg(descriptor.to_string());
+    }
     configure_detached_process(&mut command);
     let mut child = command.spawn()?;
     for _ in 0..100 {
@@ -117,11 +146,34 @@ fn start_claimed(
     )
 }
 
+fn encode_replay(
+    repository: &LocalCapsuleRepository,
+    target: &ComputationRef,
+    records: &[RecordEnvelope],
+) -> Result<ContentRef> {
+    let state = load_runtime_state(target, repository.objects())?;
+    let policy = workspace_policy(&state.config)?;
+    let adapters = adapter_registry()?;
+    let materializers = materializer_registry()?;
+    let context = MaterializerContext {
+        objects: repository.objects(),
+        adapters: &adapters,
+        records,
+        workspace: repository.project(),
+        workspace_policy: &policy,
+        realization: None,
+    };
+    Ok(materializers
+        .get("ato.replay@1")?
+        .encode(target, &context)?)
+}
+
 pub(crate) fn worker(
     project: &Path,
     branch: &str,
     head: &ComputationRef,
     token: &str,
+    descriptor: Option<&ContentRef>,
 ) -> Result<()> {
     let repository = LocalCapsuleRepository::open(project)?;
     enter(SupervisorState::Preparing);
@@ -130,23 +182,59 @@ pub(crate) fn worker(
         .ok()
         .and_then(|value| serde_json::from_str(&value).ok())
         .unwrap_or_default();
-    let instances = adapter_instances(&config, &bindings, false, true)?;
     let registry = adapter_registry()?;
     let live_head = Arc::new(Mutex::new(head.clone()));
     let sink: Arc<dyn ObservationSink> = Arc::new(RepositoryObservationSink {
         project: repository.project().to_path_buf(),
         branch: branch.to_owned(),
+        token: token.to_owned(),
         head: Arc::clone(&live_head),
     });
-    let context = AdapterAttachContext {
-        runtime: AdapterContext {
-            workspace: repository.project(),
-            objects: repository.objects(),
-        },
-        observations: sink,
-    };
     enter(SupervisorState::Starting);
-    let mut sessions = registry.attach_all(&instances, &context)?;
+    let mut sessions = Vec::new();
+    let mut restored = None;
+    let observation_gate = Arc::new(GatedObservationSink {
+        enabled: AtomicBool::new(false),
+        inner: Arc::clone(&sink),
+    });
+    if let Some(descriptor) = descriptor {
+        let driver = CliRealizationDriver::with_observations(
+            repository.project(),
+            &bindings,
+            observation_gate.clone(),
+            false,
+        );
+        let policy = workspace_policy(&config)?;
+        let materializers = materializer_registry()?;
+        let context = MaterializerContext {
+            objects: repository.objects(),
+            adapters: &registry,
+            records: &[],
+            workspace: repository.project(),
+            workspace_policy: &policy,
+            realization: Some(&driver),
+        };
+        let realization = materializers
+            .get("ato.replay@1")?
+            .restore(descriptor, &context)?;
+        if realization.target() != head {
+            bail!(
+                "Replay restored {} instead of selected {head}",
+                realization.target()
+            );
+        }
+        restored = Some(realization);
+    } else {
+        let instances = adapter_instances(&config, &bindings, false, true)?;
+        let context = AdapterAttachContext {
+            runtime: AdapterContext {
+                workspace: repository.project(),
+                objects: repository.objects(),
+            },
+            observations: Arc::clone(&sink),
+        };
+        sessions = registry.attach_all(&instances, &context)?;
+    }
     let attached_head = live_head
         .lock()
         .map_err(|_| anyhow::anyhow!("Run head lock was poisoned"))?
@@ -156,6 +244,10 @@ pub(crate) fn worker(
         branch: branch.to_owned(),
         branch_base: head.clone(),
         head: attached_head,
+        record_seq: repository
+            .records_for_stream(branch, None)?
+            .last()
+            .map_or(0, |record| record.id.seq),
         pid: std::process::id(),
         process_start_time: process_start_time(std::process::id())
             .context("worker process start time is unavailable")?,
@@ -164,9 +256,14 @@ pub(crate) fn worker(
         status: "active".to_owned(),
     };
     repository.activate_run(token, &active)?;
+    observation_gate.enabled.store(true, Ordering::Release);
     enter(SupervisorState::Active);
-    for session in &mut sessions {
-        session.activate()?;
+    if let Some(realization) = &mut restored {
+        realization.activate()?;
+    } else {
+        for session in &mut sessions {
+            session.activate()?;
+        }
     }
 
     let stop_request = repository.root().join(STOP_REQUEST);
@@ -174,7 +271,20 @@ pub(crate) fn worker(
     loop {
         if stop_request.exists() {
             enter(SupervisorState::Stopping);
-            let result = quiesce_and_detach(&mut sessions, &context.runtime);
+            let result = if let Some(realization) = &mut restored {
+                realization
+                    .quiesce()
+                    .map_err(|error| anyhow::anyhow!(error))
+            } else {
+                quiesce_and_detach(
+                    &mut sessions,
+                    &AdapterContext {
+                        workspace: repository.project(),
+                        objects: repository.objects(),
+                    },
+                )
+            };
+            observation_gate.enabled.store(false, Ordering::Release);
             let message = match &result {
                 Ok(()) => "ok".to_owned(),
                 Err(error) => format!("error:{error:#}"),
@@ -225,6 +335,12 @@ pub(crate) fn stop_active(repository: &LocalCapsuleRepository) -> Result<Option<
     if let Some(error) = acknowledged.strip_prefix("error:") {
         bail!("live Adapter quiesce failed: {error}");
     }
+    let final_run = repository
+        .active_run()?
+        .context("active Run lease disappeared after quiesce")?;
+    if final_run.token != run.token {
+        bail!("active Run lease changed while quiescing");
+    }
     terminate_process_tree(run.pid, run.process_group)?;
     for _ in 0..100 {
         if process_start_time(run.pid).is_none() {
@@ -235,7 +351,7 @@ pub(crate) fn stop_active(repository: &LocalCapsuleRepository) -> Result<Option<
     let _ = fs::remove_file(request);
     let _ = fs::remove_file(ack);
     enter(SupervisorState::Sealed);
-    Ok(Some(run))
+    Ok(Some(final_run))
 }
 
 fn observed_nanos() -> u128 {
@@ -247,13 +363,26 @@ fn observed_nanos() -> u128 {
 pub(crate) struct CliRealizationDriver {
     project: std::path::PathBuf,
     bindings: BTreeMap<String, String>,
+    observations: Arc<dyn ObservationSink>,
+    isolated_processes: bool,
 }
 
 impl CliRealizationDriver {
     pub(crate) fn new(project: &Path, bindings: &BTreeMap<String, String>) -> Self {
+        Self::with_observations(project, bindings, Arc::new(IgnoreObservations), true)
+    }
+
+    fn with_observations(
+        project: &Path,
+        bindings: &BTreeMap<String, String>,
+        observations: Arc<dyn ObservationSink>,
+        isolated_processes: bool,
+    ) -> Self {
         Self {
             project: project.to_path_buf(),
             bindings: bindings.clone(),
+            observations,
+            isolated_processes,
         }
     }
 }
@@ -270,15 +399,20 @@ impl RealizationDriver for CliRealizationDriver {
             repository.objects(),
         )
         .map_err(materializer_operation)?;
-        let instances = adapter_instances(&state.config, &self.bindings, true, false)
-            .map_err(materializer_operation)?;
+        let instances = adapter_instances(
+            &state.config,
+            &self.bindings,
+            self.isolated_processes,
+            false,
+        )
+        .map_err(materializer_operation)?;
         let registry = adapter_registry().map_err(materializer_operation)?;
         let context = AdapterAttachContext {
             runtime: AdapterContext {
                 workspace: &self.project,
                 objects: repository.objects(),
             },
-            observations: Arc::new(IgnoreObservations),
+            observations: Arc::clone(&self.observations),
         };
         let sessions = registry
             .attach_all(&instances, &context)
@@ -349,26 +483,28 @@ impl Realization for CliRealization {
         &self.target
     }
 
-    fn run(mut self: Box<Self>) -> Result<(), MaterializerError> {
-        let repository =
-            LocalCapsuleRepository::open(&self.project).map_err(materializer_operation)?;
-        let mut result = Ok(());
+    fn activate(&mut self) -> Result<(), MaterializerError> {
         for session in &mut self.sessions {
             session.activate().map_err(materializer_operation)?;
         }
+        Ok(())
+    }
+
+    fn wait(&mut self) -> Result<(), MaterializerError> {
         for session in &mut self.sessions {
-            if let Err(error) = session.wait() {
-                result = Err(MaterializerError::Operation(error.to_string()));
-                break;
-            }
+            session.wait().map_err(materializer_operation)?;
         }
+        Ok(())
+    }
+
+    fn quiesce(&mut self) -> Result<(), MaterializerError> {
+        let repository =
+            LocalCapsuleRepository::open(&self.project).map_err(materializer_operation)?;
         let context = AdapterContext {
             workspace: &self.project,
             objects: repository.objects(),
         };
-        let detach =
-            quiesce_and_detach(&mut self.sessions, &context).map_err(materializer_operation);
-        result.and(detach)
+        quiesce_and_detach(&mut self.sessions, &context).map_err(materializer_operation)
     }
 }
 
@@ -392,7 +528,23 @@ fn quiesce_and_detach(
 struct RepositoryObservationSink {
     project: std::path::PathBuf,
     branch: String,
+    token: String,
     head: Arc<Mutex<ComputationRef>>,
+}
+
+struct GatedObservationSink {
+    enabled: AtomicBool,
+    inner: Arc<dyn ObservationSink>,
+}
+
+impl ObservationSink for GatedObservationSink {
+    fn emit(&self, observation: AdapterObservation) -> Result<(), AdapterError> {
+        if self.enabled.load(Ordering::Acquire) {
+            self.inner.emit(observation)
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl ObservationSink for RepositoryObservationSink {
@@ -411,41 +563,27 @@ impl ObservationSink for RepositoryObservationSink {
                     .map_err(|error| AdapterError::Operation(error.to_string()))?
             }
         };
-        let previous = repository
-            .records_for_stream(&self.branch, None)
-            .map_err(|error| AdapterError::Operation(error.to_string()))?
-            .last()
-            .map(|record| record.id.clone());
         repository
-            .append_record(RecordEnvelope {
-                id: RecordId::new(&self.branch, 0),
-                adapter_id: observation.adapter_id,
-                protocol_id: observation.protocol_id,
-                port_id: observation.port_id,
-                direction: observation.direction,
-                payload_ref,
-                head_before: head.clone(),
-                head_after: next.clone(),
-                caused_by: if observation.caused_by.is_empty() {
-                    previous.into_iter().collect()
-                } else {
-                    observation.caused_by
+            .commit_observation(
+                &self.token,
+                &head,
+                RecordEnvelope {
+                    id: RecordId::new(&self.branch, 0),
+                    adapter_id: observation.adapter_id,
+                    protocol_id: observation.protocol_id,
+                    port_id: observation.port_id,
+                    direction: observation.direction,
+                    payload_ref,
+                    head_before: head.clone(),
+                    head_after: next.clone(),
+                    caused_by: observation.caused_by,
+                    observed_at: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or_else(|_| "0".to_owned(), |value| value.as_secs().to_string()),
                 },
-                observed_at: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or_else(|_| "0".to_owned(), |value| value.as_secs().to_string()),
-            })
+            )
             .map_err(|error| AdapterError::Operation(error.to_string()))?;
         if next != *head {
-            if repository
-                .active_run()
-                .map_err(|error| AdapterError::Operation(error.to_string()))?
-                .is_some()
-            {
-                repository
-                    .update_active_head(&head, &next)
-                    .map_err(|error| AdapterError::Operation(error.to_string()))?;
-            }
             *head = next;
         }
         Ok(())
