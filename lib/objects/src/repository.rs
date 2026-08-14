@@ -227,6 +227,38 @@ impl LocalCapsuleRepository {
         wire.try_into()
     }
 
+    pub fn records_for_stream(
+        &self,
+        stream: &str,
+        through: Option<u64>,
+    ) -> Result<Vec<RecordEnvelope>, RepositoryError> {
+        validate_name("stream", stream)?;
+        let mut records = Vec::new();
+        for entry in fs::read_dir(self.root.join("records"))? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let Some(seq) = entry
+                .path()
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .and_then(|value| value.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            if through.is_some_and(|maximum| seq > maximum) {
+                continue;
+            }
+            let record = self.record(seq)?;
+            if record.stream == stream {
+                records.push(record);
+            }
+        }
+        records.sort_by_key(|record| record.seq);
+        Ok(records)
+    }
+
     pub fn resolve(&self, selector: &CapsuleSelector) -> Result<ComputationRef, RepositoryError> {
         if let Some(seq) = selector.record {
             let record = self.record(seq)?;

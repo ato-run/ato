@@ -12,8 +12,6 @@ members = [
     "extensions/adapters/binding",
     "extensions/adapters/http",
     "lib/compose",
-    "extensions/semantics/workspace",
-    "extensions/adapters/repository",
     "extensions/materializers/snapshot",
     "extensions/materializers/api",
     "extensions/materializers/replay",
@@ -37,6 +35,8 @@ exclude = [
     "apps/desktop/vendor",
     "services/ato-tsnetd",
     "extensions/providers/nacelle",
+    "extensions/semantics/workspace",
+    "extensions/adapters/repository",
     "extensions/materializers/snapshot/guest-agent",
 ]
 
