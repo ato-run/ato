@@ -23,5 +23,5 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p ato-cli -p ato-adapter-repository -p ato-kernel -p ato-objects
+      - run: cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects
       - run: cargo clippy -p ato-cli --all-targets -- -D warnings

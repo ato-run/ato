@@ -13,6 +13,7 @@ members = [
     "extensions/adapters/http",
     "lib/compose",
     "extensions/materializers/snapshot",
+    "extensions/materializers/snapshot/guest-agent",
     "extensions/materializers/api",
     "extensions/materializers/replay",
     "tools/snapshot-builder",
@@ -37,7 +38,6 @@ exclude = [
     "extensions/providers/nacelle",
     "extensions/semantics/workspace",
     "extensions/adapters/repository",
-    "extensions/materializers/snapshot/guest-agent",
 ]
 
 [workspace.package]
