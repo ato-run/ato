@@ -5,8 +5,11 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Barrier};
 
 use assert_cmd::prelude::*;
+use ato_computation::{ComputationRef, PortId, ProtocolId};
+use ato_objects::{Direction, LocalCapsuleRepository, ObjectStore, RecordEnvelope, RecordId};
 use predicates::prelude::*;
 
 fn ato(ato_home: &Path) -> Command {
@@ -61,10 +64,11 @@ fn compiler_error_is_a_valid_portable_handoff_point() {
     let recipient_home = tempfile::tempdir().unwrap();
     write_project(
         project.path(),
-        r#"["python3", "-c", "import pty; pty.spawn(['sh', '-c', 'rustc broken.rs 2>&1 || true; exec sh'])"]"#,
+        r#"["sh"]"#,
         r#"[[adapter]]
 target = "app"
-use = "ato.pty@1""#,
+use = "ato.pty@1"
+input = "rustc broken.rs 2>&1 || true\n""#,
     );
     fs::write(project.path().join("broken.rs"), "fn main() { missing( }\n").unwrap();
 
@@ -78,6 +82,16 @@ use = "ato.pty@1""#,
         .args(["stop", project.path().to_str().unwrap()])
         .assert()
         .success();
+    assert!(
+        record_events(project.path(), "ato.pty@1")
+            .iter()
+            .any(|event| {
+                event["kind"] == "input"
+                    && event["bytes"]
+                        .as_array()
+                        .is_some_and(|bytes| !bytes.is_empty())
+            })
+    );
     let bundle = project.path().join("error.capsule");
     ato(author_home.path())
         .args([
@@ -297,6 +311,25 @@ protocol = "ato.binding@1""#,
         .args(["stop", project.path().to_str().unwrap()])
         .assert()
         .success();
+    let binding_record = walk(project.path().join(".capsule/records/main"))
+        .into_iter()
+        .filter_map(|path| fs::read(path).ok())
+        .filter_map(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .find(|record| record["adapter_id"] == "ato.binding@1")
+        .expect("Binding Attach must be protocol evidence");
+    let payload = binding_record["payload_ref"].as_str().unwrap();
+    let event: serde_json::Value = serde_json::from_slice(
+        &fs::read(
+            project
+                .path()
+                .join(".capsule/objects/blake3")
+                .join(payload.split_once(':').unwrap().1),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(event["kind"], "attach");
+    assert_eq!(event["binding_id"], "service.api_token");
     let bundle = project.path().join("secret.capsule");
     ato(author_home.path())
         .args([
@@ -377,6 +410,11 @@ fn same_capsule_identity_supports_multiple_encap_materializations() {
             .len(),
         2
     );
+    assert!(
+        multi_json["index"]["objects"].as_array().unwrap().len()
+            >= replay_json["index"]["objects"].as_array().unwrap().len() + 2,
+        "snapshot materialization must retain a descriptor and a physical artifact"
+    );
     ato(ato_home.path())
         .args(["run", multi.to_str().unwrap()])
         .assert()
@@ -426,6 +464,7 @@ fn main() {
     let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
     client.write_all(response.as_bytes()).unwrap();
 }
+
 "#,
     )
     .unwrap();
@@ -527,6 +566,93 @@ materializers = ["ato.replay@1"]
     assert!(portable.wait().unwrap().success());
 }
 
+#[test]
+fn concurrent_writers_never_lose_refs_or_records() {
+    let project = tempfile::tempdir().unwrap();
+    let repository = LocalCapsuleRepository::open(project.path()).unwrap();
+    let computation =
+        |byte: &str| ComputationRef::parse(format!("blake3:{}", byte.repeat(64))).unwrap();
+    let base = computation("a");
+    repository.update_head("main", None, &base).unwrap();
+    let barrier = Arc::new(Barrier::new(3));
+    let updates: Vec<_> = [computation("b"), computation("c")]
+        .into_iter()
+        .map(|candidate| {
+            let path = project.path().to_path_buf();
+            let base = base.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let repository = LocalCapsuleRepository::open(path).unwrap();
+                barrier.wait();
+                repository.update_head("main", Some(&base), &candidate)
+            })
+        })
+        .collect();
+    barrier.wait();
+    assert_eq!(
+        updates
+            .into_iter()
+            .map(|update| update.join().unwrap())
+            .filter(Result::is_ok)
+            .count(),
+        1
+    );
+
+    let payload = repository.objects().put(b"event").unwrap();
+    let record_writers: Vec<_> = (0..32)
+        .map(|_| {
+            let path = project.path().to_path_buf();
+            let payload = payload.clone();
+            let base = base.clone();
+            std::thread::spawn(move || {
+                LocalCapsuleRepository::open(path)
+                    .unwrap()
+                    .append_record(RecordEnvelope {
+                        id: RecordId::new("main", 0),
+                        adapter_id: "test.adapter@1".to_owned(),
+                        protocol_id: ProtocolId::parse("test.protocol@1").unwrap(),
+                        port_id: PortId::parse("test.port").unwrap(),
+                        direction: Direction::Internal,
+                        payload_ref: payload,
+                        head_before: base.clone(),
+                        head_after: base,
+                        caused_by: Vec::new(),
+                        observed_at: "0".to_owned(),
+                    })
+                    .unwrap()
+                    .id
+            })
+        })
+        .collect();
+    let mut ids: Vec<_> = record_writers
+        .into_iter()
+        .map(|writer| writer.join().unwrap().seq)
+        .collect();
+    ids.sort_unstable();
+    assert_eq!(ids, (1..=32).collect::<Vec<_>>());
+    assert_eq!(
+        repository.records_for_stream("main", None).unwrap().len(),
+        32
+    );
+}
+
+#[test]
+fn failed_process_never_publishes_an_active_run() {
+    let project = tempfile::tempdir().unwrap();
+    let ato_home = tempfile::tempdir().unwrap();
+    write_project(
+        project.path(),
+        r#"["definitely-not-an-ato-test-command"]"#,
+        "",
+    );
+    ato(ato_home.path())
+        .args(["init", project.path().to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("before becoming active"));
+    assert!(!project.path().join(".capsule/runs/active.json").exists());
+}
+
 fn walk(root: impl AsRef<Path>) -> Vec<std::path::PathBuf> {
     let mut pending = vec![root.as_ref().to_path_buf()];
     let mut files = Vec::new();
@@ -543,6 +669,23 @@ fn walk(root: impl AsRef<Path>) -> Vec<std::path::PathBuf> {
         }
     }
     files
+}
+
+fn record_events(project: &Path, adapter_id: &str) -> Vec<serde_json::Value> {
+    walk(project.join(".capsule/records/main"))
+        .into_iter()
+        .filter_map(|path| fs::read(path).ok())
+        .filter_map(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .filter(|record| record["adapter_id"] == adapter_id)
+        .filter_map(|record| {
+            let reference = record["payload_ref"].as_str()?;
+            let digest = reference.split_once(':')?.1;
+            serde_json::from_slice(
+                &fs::read(project.join(".capsule/objects/blake3").join(digest)).ok()?,
+            )
+            .ok()
+        })
+        .collect()
 }
 
 fn unused_port() -> u16 {

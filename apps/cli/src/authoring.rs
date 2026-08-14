@@ -7,6 +7,7 @@ use ato_adapter_api::AdapterInstance;
 use ato_adapter_binding::{BINDING_ADAPTER_ID, BindingAdapterConfig};
 use ato_adapter_http::{HTTP_ADAPTER_ID, HttpAdapterConfig};
 use ato_adapter_process::{PROCESS_ADAPTER_ID, ProcessSpec};
+use ato_adapter_pty::{PTY_ADAPTER_ID, PtyAdapterConfig};
 use ato_adapter_workspace::{
     WorkspaceMutation, WorkspaceSnapshot, capture_workspace, encode_mutation,
 };
@@ -69,6 +70,8 @@ pub(crate) struct AdapterConfig {
     pub listen: Option<String>,
     #[serde(default)]
     pub upstream: Option<String>,
+    #[serde(default)]
+    pub input: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -263,6 +266,7 @@ pub(crate) fn adapter_instances(
     config: &AuthoringConfig,
     bindings: &BTreeMap<String, String>,
     isolated_processes: bool,
+    emit_initial_events: bool,
 ) -> Result<Vec<AdapterInstance>> {
     let environment: BTreeMap<_, _> = config
         .binding
@@ -274,6 +278,12 @@ pub(crate) fn adapter_instances(
         })
         .collect();
     let mut instances = Vec::new();
+    let pty_targets: BTreeSet<_> = config
+        .adapter
+        .iter()
+        .filter(|adapter| adapter.use_adapter == PTY_ADAPTER_ID)
+        .filter_map(|adapter| adapter.target.as_deref())
+        .collect();
     for (index, adapter) in config.adapter.iter().enumerate() {
         let value = match adapter.use_adapter.as_str() {
             PROCESS_ADAPTER_ID => {
@@ -281,6 +291,9 @@ pub(crate) fn adapter_instances(
                     .target
                     .as_deref()
                     .context("ato.process@1 adapter requires target")?;
+                if pty_targets.contains(target) {
+                    continue;
+                }
                 let process = config
                     .process
                     .iter()
@@ -310,6 +323,23 @@ pub(crate) fn adapter_instances(
                     .clone()
                     .context("ato.http@1 adapter requires port")?,
             })?,
+            PTY_ADAPTER_ID => {
+                let target = adapter
+                    .target
+                    .as_deref()
+                    .context("ato.pty@1 adapter requires target")?;
+                let process = config
+                    .process
+                    .iter()
+                    .find(|process| process.id == target)
+                    .with_context(|| format!("unknown PTY adapter target `{target}`"))?;
+                serde_json::to_value(PtyAdapterConfig {
+                    command: process.command.clone(),
+                    cwd: process.cwd.clone(),
+                    environment: environment.clone(),
+                    initial_input: emit_initial_events.then(|| adapter.input.clone()).flatten(),
+                })?
+            }
             _ => serde_json::Value::Object(Default::default()),
         };
         instances.push(AdapterInstance {
