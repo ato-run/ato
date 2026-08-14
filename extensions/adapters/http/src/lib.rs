@@ -245,7 +245,7 @@ fn spawn_proxy(
                     if stop.load(std::sync::atomic::Ordering::Acquire) {
                         break;
                     }
-                    let result = proxy_exchange(
+                    let _ = proxy_exchange(
                         &mut client,
                         config.upstream,
                         &ato_computation::PortId::parse(&config.port_id)
@@ -264,11 +264,6 @@ fn spawn_proxy(
                             }
                         },
                     );
-                    if let Err(error) = result
-                        && let Ok(mut slot) = failure.lock()
-                    {
-                        *slot = Some(error.to_string());
-                    }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(10));
