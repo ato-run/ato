@@ -220,7 +220,6 @@ fn decap(command: DecapCommand) -> Result<()> {
             let objects = Arc::new(object_store()?);
             let bundle = decode_bundle(&fs::read(&capsule)?)?;
             let root = import_bundle(&bundle, objects.as_ref(), &references()?)?;
-            let source = materialize_bundle_source(&root, objects.as_ref(), &name)?;
             let residual = workspace_residual(&root, objects.as_ref())?;
             let compiled = CompiledRepository {
                 computation: ato_objects::resolve_computation(objects.as_ref(), &root)?
@@ -239,7 +238,6 @@ fn decap(command: DecapCommand) -> Result<()> {
                     entrypoint: residual.entrypoint,
                     working_directory: residual.working_directory,
                 },
-                repository_root: source,
             };
             let head = advance_workspace(compiled, objects, Some(&name))?;
             println!("{head}");
@@ -256,8 +254,13 @@ fn advance_workspace(
     objects: Arc<FsObjectStore>,
     run_name: Option<&str>,
 ) -> Result<ComputationRef> {
+    let workspace = materialize_run_source(
+        &compiled.source,
+        objects.as_ref(),
+        run_name.unwrap_or("run"),
+    )?;
     let provider = Arc::new(NacelleWorkspaceProvider::default());
-    provider.bind_source(compiled.source, &compiled.repository_root)?;
+    provider.bind_materialized_source(compiled.source, &workspace)?;
     let mut kernel = Kernel::new(objects.clone());
     kernel.register(Arc::new(WorkspaceSemantics::new(provider)))?;
     let mut run = Run {
@@ -320,21 +323,22 @@ fn workspace_residual(
     )?)?)
 }
 
-fn materialize_bundle_source(
-    root: &ComputationRef,
+fn materialize_run_source(
+    source: &ContentRef,
     objects: &dyn ObjectResolver,
     name: &str,
 ) -> Result<PathBuf> {
-    let residual = workspace_residual(root, objects)?;
-    let source = ContentRef::parse(residual.source)?;
     let run_directory = run_directory(name)?;
     fs::create_dir_all(&run_directory)?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
     let destination = run_directory.join(format!(
-        "workspace-{}-{}",
-        &root.content_ref().digest()[..12],
-        std::process::id()
+        "workspace-{}-{}-{nonce}",
+        &source.digest()[..12],
+        std::process::id(),
     ));
-    materialize_source(&source, objects, &destination)?;
+    materialize_source(source, objects, &destination)?;
     Ok(destination)
 }
 
