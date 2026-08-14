@@ -38,7 +38,16 @@ pub struct MaterializerContext<'a> {
 /// actually owns the realized runtime.
 pub trait Realization: Send {
     fn target(&self) -> &ComputationRef;
-    fn run(self: Box<Self>) -> Result<(), MaterializerError>;
+    fn activate(&mut self) -> Result<(), MaterializerError>;
+    fn wait(&mut self) -> Result<(), MaterializerError>;
+    fn quiesce(&mut self) -> Result<(), MaterializerError>;
+
+    fn run(mut self: Box<Self>) -> Result<(), MaterializerError> {
+        self.activate()?;
+        let result = self.wait();
+        let quiesce = self.quiesce();
+        result.and(quiesce)
+    }
 }
 
 /// Mutable reconstruction owned by a Materializer while it applies evidence.

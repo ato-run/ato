@@ -15,8 +15,8 @@ pub use bundle::{
     export_bundle_with_materializations, import_bundle, sign_bundle,
 };
 pub use repository::{
-    ActiveRun, CapsuleSelector, Direction, LocalCapsuleRepository, RecordEnvelope, RecordId,
-    RepositoryError,
+    ActiveRun, BranchOrigin, CapsuleSelector, Direction, LocalCapsuleRepository, RecordEnvelope,
+    RecordId, RepositoryError,
 };
 
 use std::collections::BTreeMap;

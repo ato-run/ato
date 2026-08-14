@@ -5,13 +5,19 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Barrier, Mutex};
 
 use assert_cmd::prelude::*;
-use ato_computation::{ComputationRef, PortId, ProtocolId};
-use ato_objects::{Direction, LocalCapsuleRepository, ObjectStore, RecordEnvelope, RecordId};
+use ato_computation::{
+    ComputationRef, PortDef, PortId, ProtocolId, RoleId, computation_ref, encode_computation_object,
+};
+use ato_objects::{
+    Direction, LocalCapsuleRepository, ObjectStore, RecordEnvelope, RecordId, resolve_computation,
+};
 use base64::Engine;
 use predicates::prelude::*;
+
+static NETWORK_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn ato(ato_home: &Path) -> Command {
     let mut command = Command::new(assert_cmd::cargo::cargo_bin!("ato"));
@@ -46,6 +52,72 @@ materializers = ["ato.replay@1"]
         ),
     )
     .unwrap();
+}
+
+fn write_memory_counter(root: &Path, upstream_port: u16, public_port: u16, requests: usize) {
+    fs::write(
+        root.join("counter.rs"),
+        format!(
+            r#"use std::io::{{Read, Write}};
+use std::net::TcpListener;
+
+fn main() {{
+    let address = std::env::args().nth(1).unwrap();
+    let listener = TcpListener::bind(address).unwrap();
+    let mut count = 0_u64;
+    let mut handled = 0;
+    while handled < {requests} {{
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 4096];
+        let size = stream.read(&mut request).unwrap();
+        let request = String::from_utf8_lossy(&request[..size]);
+        if request.starts_with("GET /ready ") {{
+            stream.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            continue;
+        }}
+        handled += 1;
+        if request.starts_with("POST /increment ") {{
+            count += 1;
+            stream.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        }} else {{
+            let count = count.to_string();
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {{}}\r\nConnection: close\r\n\r\n{{}}", count.len(), count);
+            stream.write_all(response.as_bytes()).unwrap();
+        }}
+    }}
+}}
+"#,
+        ),
+    )
+    .unwrap();
+    assert!(
+        Command::new("rustc")
+            .args(["counter.rs", "-o", "counter-bin"])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success()
+    );
+    write_project(
+        root,
+        &format!(
+            r#"["sh", "-c", "chmod +x counter-bin && exec ./counter-bin 127.0.0.1:{upstream_port}"]"#
+        ),
+        &format!(
+            r#"[[port]]
+id = "app.http"
+node = "app"
+protocol = "ato.http@1"
+role = "server"
+
+[[adapter]]
+port = "app.http"
+use = "ato.http@1"
+listen = "127.0.0.1:{public_port}"
+upstream = "127.0.0.1:{upstream_port}"
+ready_path = "/ready""#
+        ),
+    );
 }
 
 fn wait_until(mut predicate: impl FnMut() -> bool) {
@@ -124,6 +196,7 @@ input = "rustc broken.rs 2>&1 || true\n""#,
 
 #[test]
 fn stateful_protocol_state_survives_nonzero_process_and_replay() {
+    let _network = NETWORK_TEST_LOCK.lock().unwrap();
     let project = tempfile::tempdir().unwrap();
     let author_home = tempfile::tempdir().unwrap();
     let recipient_home = tempfile::tempdir().unwrap();
@@ -139,7 +212,7 @@ fn main() {
     let listener = TcpListener::bind(address).unwrap();
     let mut count = 0_u64;
     let mut handled = 0;
-    while handled < 4 {
+    while handled < 5 {
         let (mut stream, _) = listener.accept().unwrap();
         let mut request = [0_u8; 4096];
         let size = stream.read(&mut request).unwrap();
@@ -159,6 +232,7 @@ fn main() {
         }
     }
 }
+
 "#,
     )
     .unwrap();
@@ -212,6 +286,18 @@ ready_path = "/ready""#
         initial_root, final_root,
         "a state-changing memory-only interaction must advance Capsule identity"
     );
+    ato(author_home.path())
+        .args(["resume", &format!("{}@main", project.path().display())])
+        .assert()
+        .success();
+    assert!(
+        http_request(public_port, "GET", "/count").ends_with("1"),
+        "resume must realize the selected semantic state before publishing ACTIVE"
+    );
+    ato(author_home.path())
+        .args(["stop", project.path().to_str().unwrap()])
+        .assert()
+        .success();
     let records = fs::read_dir(project.path().join(".capsule/records/main"))
         .unwrap()
         .count();
@@ -235,6 +321,100 @@ ready_path = "/ready""#
     let count_again = http_request(public_port, "GET", "/count");
     assert!(count_again.ends_with("1"));
     assert!(portable.wait().unwrap().success());
+}
+
+#[test]
+fn forked_branch_replays_its_parent_semantic_closure() {
+    let _network = NETWORK_TEST_LOCK.lock().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let author_home = tempfile::tempdir().unwrap();
+    let recipient_home = tempfile::tempdir().unwrap();
+    let upstream_port = unused_port();
+    let public_port = unused_port();
+    write_memory_counter(project.path(), upstream_port, public_port, 5);
+
+    ato(author_home.path())
+        .args(["init", project.path().to_str().unwrap()])
+        .assert()
+        .success();
+    assert!(http_request(public_port, "POST", "/increment").starts_with("HTTP/1.1 204"));
+    assert!(http_request(public_port, "GET", "/count").ends_with("1"));
+    wait_until(|| {
+        fs::read_dir(project.path().join(".capsule/records/main"))
+            .is_ok_and(|entries| entries.count() >= 4)
+    });
+    ato(author_home.path())
+        .args(["stop", project.path().to_str().unwrap()])
+        .assert()
+        .success();
+    let fork_record = fs::read_dir(project.path().join(".capsule/records/main"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.path().file_stem()?.to_str()?.parse::<u64>().ok())
+        .max()
+        .unwrap();
+
+    ato(author_home.path())
+        .args([
+            "resume",
+            &format!("{}@main#{fork_record}", project.path().display()),
+            "--branch",
+            "experiment",
+        ])
+        .assert()
+        .success();
+    assert!(http_request(public_port, "POST", "/increment").starts_with("HTTP/1.1 204"));
+    assert!(http_request(public_port, "GET", "/count").ends_with("2"));
+    ato(author_home.path())
+        .args(["stop", project.path().to_str().unwrap()])
+        .assert()
+        .success();
+
+    let bundle = project.path().join("experiment.capsule");
+    ato(author_home.path())
+        .args([
+            "encap",
+            &format!("{}@experiment", project.path().display()),
+            "-o",
+            bundle.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let mut portable = ato(recipient_home.path())
+        .args(["run", bundle.to_str().unwrap()])
+        .spawn()
+        .unwrap();
+    assert!(http_request(public_port, "GET", "/count").ends_with("2"));
+    assert!(portable.wait().unwrap().success());
+}
+
+#[test]
+fn resume_realizes_the_selected_memory_only_semantic_state() {
+    let _network = NETWORK_TEST_LOCK.lock().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let ato_home = tempfile::tempdir().unwrap();
+    let upstream_port = unused_port();
+    let public_port = unused_port();
+    write_memory_counter(project.path(), upstream_port, public_port, 2);
+    ato(ato_home.path())
+        .args(["init", project.path().to_str().unwrap()])
+        .assert()
+        .success();
+    assert!(http_request(public_port, "POST", "/increment").starts_with("HTTP/1.1 204"));
+    ato(ato_home.path())
+        .args(["stop", project.path().to_str().unwrap()])
+        .assert()
+        .success();
+
+    ato(ato_home.path())
+        .args(["resume", &format!("{}@main", project.path().display())])
+        .assert()
+        .success();
+    assert!(http_request(public_port, "GET", "/count").ends_with("1"));
+    ato(ato_home.path())
+        .args(["stop", project.path().to_str().unwrap()])
+        .assert()
+        .success();
 }
 
 #[test]
@@ -477,6 +657,7 @@ fn same_capsule_identity_supports_multiple_encap_materializations() {
 
 #[test]
 fn one_root_computation_runs_an_explicit_multi_process_application() {
+    let _network = NETWORK_TEST_LOCK.lock().unwrap();
     let project = tempfile::tempdir().unwrap();
     let ato_home = tempfile::tempdir().unwrap();
     let recipient_home = tempfile::tempdir().unwrap();
@@ -764,6 +945,85 @@ fn concurrent_resume_claims_exactly_one_run_lease() {
         .args(["stop", project.path().to_str().unwrap()])
         .assert()
         .success();
+}
+
+#[test]
+fn stop_seals_the_quiesced_observation_frontier() {
+    let project = tempfile::tempdir().unwrap();
+    let ato_home = tempfile::tempdir().unwrap();
+    write_project(project.path(), r#"["sh", "-c", "exec sleep 30"]"#, "");
+    ato(ato_home.path())
+        .args(["init", project.path().to_str().unwrap()])
+        .assert()
+        .success();
+
+    let repository = LocalCapsuleRepository::open(project.path()).unwrap();
+    let active = repository.active_run().unwrap().unwrap();
+    let resolved = resolve_computation(repository.objects(), &active.head).unwrap();
+    let mut successor_object = resolved.object().clone();
+    successor_object.boundary.insert(
+        PortId::parse("race.frontier").unwrap(),
+        PortDef {
+            protocol: ProtocolId::parse("test.frontier@1").unwrap(),
+            role: RoleId::parse("server").unwrap(),
+        },
+    );
+    let successor = computation_ref(&successor_object).unwrap();
+    repository
+        .objects()
+        .insert(
+            successor.content_ref(),
+            &encode_computation_object(&successor_object).unwrap(),
+        )
+        .unwrap();
+    let payload = repository.objects().put(b"late semantic action").unwrap();
+    let project_path = project.path().to_path_buf();
+    let home_path = ato_home.path().to_path_buf();
+    let stopping = std::thread::spawn(move || {
+        ato(&home_path)
+            .args(["stop", project_path.to_str().unwrap()])
+            .output()
+            .unwrap()
+    });
+    wait_until(|| project.path().join(".capsule/runs/stop.request").exists());
+    repository
+        .commit_observation(
+            &active.token,
+            &active.head,
+            RecordEnvelope {
+                id: RecordId::new("main", 0),
+                adapter_id: "ato.http@1".to_owned(),
+                protocol_id: ProtocolId::parse("ato.http@1").unwrap(),
+                port_id: PortId::parse("race.frontier").unwrap(),
+                direction: Direction::Inbound,
+                payload_ref: payload,
+                head_before: active.head.clone(),
+                head_after: successor.clone(),
+                caused_by: Vec::new(),
+                observed_at: "0".to_owned(),
+            },
+        )
+        .unwrap();
+    let stopped = stopping.join().unwrap();
+    assert!(
+        stopped.status.success(),
+        "stop failed: {}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+
+    let records = repository.records_for_stream("main", None).unwrap();
+    assert!(
+        !records.is_empty(),
+        "in-flight HTTP request was not drained; log: {}",
+        fs::read_to_string(project.path().join(".capsule/runs/output.log")).unwrap_or_default()
+    );
+    let final_record = records.last().unwrap().clone();
+    assert_eq!(
+        repository.head("main").unwrap().unwrap(),
+        successor,
+        "stop must seal the head observed after live Adapters finish quiescing"
+    );
+    assert_eq!(final_record.head_after, successor);
 }
 
 #[test]
