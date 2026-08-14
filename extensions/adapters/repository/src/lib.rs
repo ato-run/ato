@@ -212,6 +212,7 @@ fn compile_repository_with_resolution(
     options.network_allow.dedup();
     options.writable_paths.sort();
     options.writable_paths.dedup();
+    validate_secret_bindings(&options.secret_bindings)?;
 
     let (source, observed_files) = seal_source(root, objects)?;
     let authoring = load_authoring(root)?;
@@ -257,6 +258,20 @@ fn compile_repository_with_resolution(
         },
         resolution,
     })
+}
+
+fn validate_secret_bindings(bindings: &BTreeMap<String, String>) -> Result<(), RepositoryError> {
+    for (name, binding) in bindings {
+        if name.is_empty()
+            || !binding.starts_with("secret://")
+            || binding.len() == "secret://".len()
+        {
+            return Err(RepositoryError::Authoring(format!(
+                "secret binding {name:?} must reference secret://..."
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub fn lock_for(compiled: &CompiledRepository) -> Result<CapsuleLock, RepositoryError> {
@@ -805,6 +820,25 @@ mod tests {
                 Err(RepositoryError::Authoring(_))
             ));
         }
+    }
+
+    #[test]
+    fn literal_secret_values_never_compile_into_a_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("main.py"), "print('safe')").unwrap();
+        let objects = MemoryObjectStore::default();
+        let options = RepositoryOptions {
+            secret_bindings: BTreeMap::from([(
+                "API_KEY".to_owned(),
+                "actual-secret-value".to_owned(),
+            )]),
+            ..RepositoryOptions::default()
+        };
+
+        assert!(matches!(
+            compile_repository(dir.path(), &objects, options),
+            Err(RepositoryError::Authoring(_))
+        ));
     }
 
     #[test]

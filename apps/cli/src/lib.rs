@@ -77,8 +77,8 @@ struct RunArgs {
     name: Option<String>,
     #[arg(long = "env", value_parser = parse_binding)]
     environment: Vec<(String, String)>,
-    #[arg(long = "secret", value_parser = parse_binding)]
-    secrets: Vec<(String, String)>,
+    #[arg(long = "secret-ref", value_parser = parse_secret_binding)]
+    secret_refs: Vec<(String, String)>,
     #[arg(long = "allow-network")]
     network_allow: Vec<String>,
     #[arg(long)]
@@ -154,6 +154,9 @@ pub fn run() -> Result<()> {
 }
 
 fn run_repository(args: RunArgs) -> Result<()> {
+    if args.detach && !args.secret_refs.is_empty() {
+        bail!("detached runs with secret bindings require a secure one-shot transport");
+    }
     let source = resolve_source(&args.target)?;
     let name = safe_name(args.name.as_deref().unwrap_or("run"))?;
     if args.detach && !args.worker {
@@ -163,7 +166,7 @@ fn run_repository(args: RunArgs) -> Result<()> {
     let options = RepositoryOptions {
         arguments: args.arguments,
         environment: args.environment.into_iter().collect(),
-        secret_bindings: args.secrets.into_iter().collect(),
+        secret_bindings: args.secret_refs.into_iter().collect(),
         network_allow: args.network_allow,
         sandbox_required: !args.no_sandbox,
         ..RepositoryOptions::default()
@@ -423,6 +426,14 @@ fn parse_binding(value: &str) -> Result<(String, String), String> {
     Ok((name.to_owned(), value.to_owned()))
 }
 
+fn parse_secret_binding(value: &str) -> Result<(String, String), String> {
+    let (name, binding) = parse_binding(value)?;
+    if !binding.starts_with("secret://") || binding.len() == "secret://".len() {
+        return Err("secret binding must be NAME=secret://...".to_owned());
+    }
+    Ok((name, binding))
+}
+
 fn safe_name(value: &str) -> Result<String> {
     if value.is_empty()
         || !value
@@ -532,8 +543,8 @@ fn spawn_detached_run(args: &RunArgs, name: &str) -> Result<()> {
     for (key, value) in &args.environment {
         command.args(["--env", &format!("{key}={value}")]);
     }
-    for (key, value) in &args.secrets {
-        command.args(["--secret", &format!("{key}={value}")]);
+    for (key, binding) in &args.secret_refs {
+        command.args(["--secret-ref", &format!("{key}={binding}")]);
     }
     for host in &args.network_allow {
         command.args(["--allow-network", host]);
@@ -580,6 +591,26 @@ mod tests {
             ("A".to_owned(), "B".to_owned())
         );
         assert!(parse_binding("missing").is_err());
+        assert!(parse_secret_binding("API_KEY=actual-value").is_err());
+        assert_eq!(
+            parse_secret_binding("API_KEY=secret://profile/openai").unwrap(),
+            ("API_KEY".to_owned(), "secret://profile/openai".to_owned())
+        );
         assert!(safe_name("../escape").is_err());
+    }
+
+    #[test]
+    fn legacy_secret_value_flag_is_rejected() {
+        assert!(Cli::try_parse_from(["ato", "run", ".", "--secret", "API_KEY=value"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "ato",
+                "run",
+                ".",
+                "--secret-ref",
+                "API_KEY=secret://profile/openai"
+            ])
+            .is_ok()
+        );
     }
 }
