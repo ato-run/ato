@@ -9,7 +9,7 @@ homepage = "https://ato.run"
 repository = "https://github.com/ato-run/ato"
 
 [package.metadata.ato-architecture]
-layer = "provider"
+layer = "service"
 
 # The guest-agent binary runs INSIDE the guest (built into the rootfs), not a
 # distributed host CLI — cargo-dist must not try to package/MSI it.

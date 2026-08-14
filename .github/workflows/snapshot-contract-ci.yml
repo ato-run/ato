@@ -1,10 +1,10 @@
-name: snapshot provider
+name: snapshot materializer
 
 on:
   push:
-    paths: ["extensions/providers/snapshot/**", "tools/snapshot-builder/**", "lib/**"]
+    paths: ["extensions/materializers/snapshot/**", "tools/snapshot-builder/**", "lib/**"]
   pull_request:
-    paths: ["extensions/providers/snapshot/**", "tools/snapshot-builder/**", "lib/**"]
+    paths: ["extensions/materializers/snapshot/**", "tools/snapshot-builder/**", "lib/**"]
   workflow_dispatch:
 
 permissions:
@@ -19,5 +19,5 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p ato-provider-snapshot -p snapshot-builder -p guest-agent
-      - run: cargo clippy -p ato-provider-snapshot -p snapshot-builder -p guest-agent --all-targets -- -D warnings
+      - run: cargo test -p ato-materializer-snapshot -p snapshot-builder -p guest-agent
+      - run: cargo clippy -p ato-materializer-snapshot -p snapshot-builder -p guest-agent --all-targets -- -D warnings
