@@ -19,7 +19,9 @@ use ato_objects::{
     FsObjectStore, ObjectResolver, ReferenceRegistry, decode_bundle, encode_bundle, export_bundle,
     import_bundle, read_exact_object,
 };
-use ato_provider_snapshot::{MaterializationRef, RealizationContract, capture, restore};
+use ato_provider_snapshot::{
+    MaterializationRef, RealizationContract, register_materialization, verify_materialization,
+};
 use ato_semantics_compose::ComposeReferences;
 use ato_semantics_workspace::{
     MAX_WORKSPACE_RESIDUAL_BYTES, WORKSPACE_SEMANTICS_ID, WorkspaceReferences, WorkspaceSemantics,
@@ -125,7 +127,7 @@ enum SnapshotCommand {
         #[arg(required = true)]
         artifacts: Vec<PathBuf>,
     },
-    Restore {
+    Verify {
         materialization: String,
     },
 }
@@ -364,7 +366,7 @@ fn snapshot(command: SnapshotCommand) -> Result<()> {
             artifacts,
         } => {
             let computation = ComputationRef::parse(computation)?;
-            let reference = capture(
+            let reference = register_materialization(
                 &computation,
                 RealizationContract::host("ato-provider-snapshot"),
                 &artifacts,
@@ -372,9 +374,9 @@ fn snapshot(command: SnapshotCommand) -> Result<()> {
             )?;
             println!("{}", reference.content_ref());
         }
-        SnapshotCommand::Restore { materialization } => {
+        SnapshotCommand::Verify { materialization } => {
             let reference = MaterializationRef::parse(materialization)?;
-            let computation = restore(
+            let computation = verify_materialization(
                 &reference,
                 &RealizationContract::host("ato-provider-snapshot"),
                 &objects,
