@@ -1,8 +1,12 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use ato_adapter_api::AdapterInstance;
+use ato_adapter_binding::{BINDING_ADAPTER_ID, BindingAdapterConfig};
+use ato_adapter_http::{HTTP_ADAPTER_ID, HttpAdapterConfig};
+use ato_adapter_process::{PROCESS_ADAPTER_ID, ProcessSpec};
 use ato_adapter_workspace::{
     WorkspaceMutation, WorkspaceSnapshot, capture_workspace, encode_mutation,
 };
@@ -167,6 +171,82 @@ pub(crate) fn initial_computation(
 ) -> Result<ComputationRef> {
     let snapshot = capture_workspace(repository.project(), repository.objects())?;
     seal_state(repository.objects(), config, snapshot)
+}
+
+pub(crate) fn adapter_instances(
+    config: &AuthoringConfig,
+    bindings: &BTreeMap<String, String>,
+    isolated_processes: bool,
+) -> Result<Vec<AdapterInstance>> {
+    let environment: BTreeMap<_, _> = config
+        .binding
+        .iter()
+        .filter_map(|binding| {
+            bindings
+                .get(&binding.id)
+                .map(|value| (binding.environment.clone(), value.clone()))
+        })
+        .collect();
+    let mut instances = Vec::new();
+    for (index, adapter) in config.adapter.iter().enumerate() {
+        let value = match adapter.use_adapter.as_str() {
+            PROCESS_ADAPTER_ID => {
+                let target = adapter
+                    .target
+                    .as_deref()
+                    .context("ato.process@1 adapter requires target")?;
+                let process = config
+                    .process
+                    .iter()
+                    .find(|process| process.id == target)
+                    .with_context(|| format!("unknown process adapter target `{target}`"))?;
+                serde_json::to_value(ProcessSpec {
+                    id: process.id.clone(),
+                    command: process.command.clone(),
+                    cwd: process.cwd.clone(),
+                    environment: environment.clone(),
+                    isolated_group: isolated_processes,
+                })?
+            }
+            HTTP_ADAPTER_ID => serde_json::to_value(HttpAdapterConfig {
+                listen: adapter
+                    .listen
+                    .as_deref()
+                    .context("ato.http@1 adapter requires listen")?
+                    .parse()?,
+                upstream: adapter
+                    .upstream
+                    .as_deref()
+                    .context("ato.http@1 adapter requires upstream")?
+                    .parse()?,
+                port_id: adapter
+                    .port
+                    .clone()
+                    .context("ato.http@1 adapter requires port")?,
+            })?,
+            _ => serde_json::Value::Object(Default::default()),
+        };
+        instances.push(AdapterInstance {
+            instance_id: format!("configured.{index}"),
+            adapter_id: adapter.use_adapter.clone(),
+            config: value,
+        });
+    }
+    for binding in &config.binding {
+        if bindings.contains_key(&binding.id) {
+            instances.push(AdapterInstance {
+                instance_id: format!("binding.{}", binding.id),
+                adapter_id: BINDING_ADAPTER_ID.to_owned(),
+                config: serde_json::to_value(BindingAdapterConfig {
+                    binding_id: binding.id.clone(),
+                    protocol: binding.protocol.clone(),
+                    provider_ref: format!("runtime-binding:{}", binding.id),
+                    port_id: format!("binding.{}", binding.id),
+                })?,
+            });
+        }
+    }
+    Ok(instances)
 }
 
 pub(crate) fn load_state(

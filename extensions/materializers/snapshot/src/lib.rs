@@ -190,14 +190,18 @@ impl Materializer for SnapshotMaterializer {
         target: &ComputationRef,
         context: &MaterializerContext<'_>,
     ) -> Result<ContentRef, MaterializerError> {
-        register_materialization(
-            target,
-            RealizationContract::host(SNAPSHOT_MATERIALIZER_ID),
-            &[] as &[&Path],
-            context.objects,
-        )
-        .map(|reference| reference.content_ref().clone())
-        .map_err(|error| MaterializerError::Operation(error.to_string()))
+        let artifact = encode_workspace_artifact(context.workspace)
+            .map_err(|error| MaterializerError::Operation(error.to_string()))?;
+        reject_plaintext_secret(&artifact)
+            .map_err(|error| MaterializerError::Operation(error.to_string()))?;
+        let artifact = context.objects.put(&artifact)?;
+        let descriptor = SnapshotMaterialization {
+            version: SNAPSHOT_MATERIALIZATION_VERSION,
+            computation: target.to_string(),
+            contract: RealizationContract::host(SNAPSHOT_MATERIALIZER_ID),
+            artifacts: vec![artifact.to_string()],
+        };
+        Ok(context.objects.put(&serde_jcs::to_vec(&descriptor)?)?)
     }
 
     fn verify(
@@ -223,6 +227,59 @@ impl Materializer for SnapshotMaterializer {
             Err(_) => Compatibility::Incompatible,
         }
     }
+}
+
+fn encode_workspace_artifact(root: &Path) -> Result<Vec<u8>, std::io::Error> {
+    fn visit(
+        root: &Path,
+        directory: &Path,
+        entries: &mut Vec<(String, Vec<u8>)>,
+    ) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path == root.join(".capsule") {
+                continue;
+            }
+            let kind = entry.file_type()?;
+            if kind.is_symlink() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("snapshot cannot encode symlink {}", path.display()),
+                ));
+            }
+            if kind.is_dir() {
+                visit(root, &path, entries)?;
+            } else if kind.is_file() {
+                let relative = path
+                    .strip_prefix(root)
+                    .map_err(std::io::Error::other)?
+                    .to_str()
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "non-UTF-8 snapshot path",
+                        )
+                    })?
+                    .replace(std::path::MAIN_SEPARATOR, "/");
+                entries.push((relative, std::fs::read(path)?));
+            }
+        }
+        Ok(())
+    }
+
+    let mut entries = Vec::new();
+    visit(root, root, &mut entries)?;
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut bytes = b"ATO-WORKSPACE-SNAPSHOT\0\x01".to_vec();
+    for (path, content) in entries {
+        let path = path.as_bytes();
+        bytes.extend_from_slice(&(path.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(&(content.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(path);
+        bytes.extend_from_slice(&content);
+    }
+    Ok(bytes)
 }
 
 impl MaterializationReferences for SnapshotReferences {

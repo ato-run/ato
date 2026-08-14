@@ -29,6 +29,30 @@ pub struct MaterializerContext<'a> {
     pub adapters: &'a AdapterRegistry,
     pub records: &'a [RecordEnvelope],
     pub workspace: &'a Path,
+    pub realization: Option<&'a dyn RealizationDriver>,
+}
+
+/// A running or runnable physical realization. Returning a computation
+/// reference is insufficient: the Materializer must return the thing that
+/// actually owns the realized runtime.
+pub trait Realization: Send {
+    fn target(&self) -> &ComputationRef;
+    fn run(self: Box<Self>) -> Result<(), MaterializerError>;
+}
+
+/// Mutable reconstruction owned by a Materializer while it applies evidence.
+pub trait ReplayRuntime: Send {
+    fn apply(&mut self, record: &RecordEnvelope) -> Result<(), MaterializerError>;
+    fn finish(
+        self: Box<Self>,
+        target: &ComputationRef,
+    ) -> Result<Box<dyn Realization>, MaterializerError>;
+}
+
+/// Product-specific realization implementation injected into generic
+/// Materializers. Only this boundary may materialize a computation into a Run.
+pub trait RealizationDriver: Send + Sync {
+    fn begin(&self, anchor: &ComputationRef) -> Result<Box<dyn ReplayRuntime>, MaterializerError>;
 }
 
 pub trait Materializer: Send + Sync {
@@ -58,7 +82,7 @@ pub trait Materializer: Send + Sync {
         &self,
         descriptor: &ContentRef,
         context: &MaterializerContext<'_>,
-    ) -> Result<ComputationRef, MaterializerError> {
+    ) -> Result<Box<dyn Realization>, MaterializerError> {
         let _ = (descriptor, context);
         Err(MaterializerError::RestoreUnsupported(self.id().to_owned()))
     }
@@ -122,6 +146,8 @@ pub enum MaterializerError {
     Unknown(String),
     #[error("materializer `{0}` cannot restore")]
     RestoreUnsupported(String),
+    #[error("materializer `{0}` requires a realization driver")]
+    RealizationUnavailable(String),
     #[error("materializer `{materializer}` requires Adapter.apply from `{adapter}`")]
     MissingApply {
         materializer: String,

@@ -4,7 +4,8 @@
 
 use ato_computation::{ComputationRef, ContentRef, PortId, ProtocolId};
 use ato_materializer_api::{
-    Compatibility, Materializer, MaterializerContext, MaterializerError, RestoreCapability,
+    Compatibility, Materializer, MaterializerContext, MaterializerError, Realization,
+    RestoreCapability,
 };
 use ato_objects::{
     BundleError, Direction, MaterializationReferences, ObjectLink, ObjectResolver, RecordEnvelope,
@@ -142,28 +143,33 @@ impl Materializer for ReplayMaterializer {
         &self,
         descriptor: &ContentRef,
         context: &MaterializerContext<'_>,
-    ) -> Result<ComputationRef, MaterializerError> {
+    ) -> Result<Box<dyn Realization>, MaterializerError> {
         let descriptor = load_descriptor(descriptor, context.objects)
             .map_err(|error| MaterializerError::Operation(error.to_string()))?;
+        let anchor = parse_computation(&descriptor.anchor)?;
+        let target = parse_computation(&descriptor.target)?;
+        let driver = context
+            .realization
+            .ok_or_else(|| MaterializerError::RealizationUnavailable(self.id().to_owned()))?;
+        let mut runtime = driver.begin(&anchor)?;
+        let mut current = anchor;
         for wire in descriptor.records {
             let record = RecordEnvelope::try_from(wire)?;
-            let adapter = context.adapters.get(&record.adapter_id).map_err(|_| {
-                MaterializerError::MissingApply {
-                    materializer: self.id().to_owned(),
-                    adapter: record.adapter_id.clone(),
-                }
-            })?;
-            adapter
-                .apply(
-                    &record,
-                    &ato_adapter_api::AdapterContext {
-                        workspace: context.workspace,
-                        objects: context.objects,
-                    },
-                )
-                .map_err(|error| MaterializerError::Operation(error.to_string()))?;
+            if record.head_before != current {
+                return Err(MaterializerError::Operation(format!(
+                    "replay causal head mismatch at {:?}: expected {}, got {}",
+                    record.id, current, record.head_before
+                )));
+            }
+            runtime.apply(&record)?;
+            current = record.head_after;
         }
-        parse_computation(&descriptor.target)
+        if current != target {
+            return Err(MaterializerError::Operation(format!(
+                "replay derived {current}, descriptor target is {target}"
+            )));
+        }
+        runtime.finish(&target)
     }
 }
 

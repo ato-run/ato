@@ -2,12 +2,24 @@
 
 #![forbid(unsafe_code)]
 
-use ato_adapter_api::{Adapter, AdapterCapabilities, AdapterContext, AdapterError};
+use ato_adapter_api::{
+    AdapterAttachContext, AdapterCapabilities, AdapterContext, AdapterError, AdapterFactory,
+    AdapterInstance, AttachedAdapter,
+};
 use ato_objects::{RecordEnvelope, read_exact_object};
 use serde::{Deserialize, Serialize};
 
 pub const BINDING_ADAPTER_ID: &str = "ato.binding@1";
 pub const BINDING_PROTOCOL_ID: &str = "ato.binding@1";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BindingAdapterConfig {
+    pub binding_id: String,
+    pub protocol: String,
+    pub provider_ref: String,
+    pub port_id: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -45,7 +57,7 @@ pub fn decode_event(bytes: &[u8]) -> Result<BindingEvent, serde_json::Error> {
 #[derive(Default)]
 pub struct BindingAdapter;
 
-impl Adapter for BindingAdapter {
+impl AdapterFactory for BindingAdapter {
     fn id(&self) -> &str {
         BINDING_ADAPTER_ID
     }
@@ -59,8 +71,55 @@ impl Adapter for BindingAdapter {
         }
     }
 
-    fn apply(
+    fn attach(
         &self,
+        instance: &AdapterInstance,
+        context: &AdapterAttachContext<'_>,
+    ) -> Result<Box<dyn AttachedAdapter>, AdapterError> {
+        let config: BindingAdapterConfig = serde_json::from_value(instance.config.clone())?;
+        let event = BindingEvent::Attach {
+            binding_id: config.binding_id,
+            protocol: config.protocol,
+            provider_ref: config.provider_ref,
+        };
+        reject_secret_like_fields(&event)?;
+        context
+            .observations
+            .emit(ato_adapter_api::AdapterObservation {
+                adapter_id: BINDING_ADAPTER_ID.to_owned(),
+                protocol_id: ato_computation::ProtocolId::parse(BINDING_PROTOCOL_ID)
+                    .map_err(|error| AdapterError::InvalidConfig(error.to_string()))?,
+                port_id: ato_computation::PortId::parse(config.port_id)
+                    .map_err(|error| AdapterError::InvalidConfig(error.to_string()))?,
+                direction: ato_objects::Direction::Inbound,
+                payload: encode_event(&event)?,
+                caused_by: Vec::new(),
+            })?;
+        Ok(Box::new(BindingSession {
+            instance_id: instance.instance_id.clone(),
+        }))
+    }
+}
+
+struct BindingSession {
+    instance_id: String,
+}
+
+impl AttachedAdapter for BindingSession {
+    fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
+    fn adapter_id(&self) -> &str {
+        BINDING_ADAPTER_ID
+    }
+
+    fn capabilities(&self) -> AdapterCapabilities {
+        AdapterFactory::capabilities(&BindingAdapter)
+    }
+
+    fn apply(
+        &mut self,
         record: &RecordEnvelope,
         context: &AdapterContext<'_>,
     ) -> Result<(), AdapterError> {
@@ -73,11 +132,11 @@ impl Adapter for BindingAdapter {
     }
 
     fn verify(
-        &self,
+        &mut self,
         record: &RecordEnvelope,
         context: &AdapterContext<'_>,
     ) -> Result<(), AdapterError> {
-        self.apply(record, context)
+        AttachedAdapter::apply(self, record, context)
     }
 }
 

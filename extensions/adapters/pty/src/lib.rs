@@ -2,7 +2,10 @@
 
 #![forbid(unsafe_code)]
 
-use ato_adapter_api::{Adapter, AdapterCapabilities, AdapterContext, AdapterError};
+use ato_adapter_api::{
+    AdapterAttachContext, AdapterCapabilities, AdapterContext, AdapterError, AdapterFactory,
+    AdapterInstance, AttachedAdapter,
+};
 use ato_objects::{RecordEnvelope, read_exact_object};
 use serde::{Deserialize, Serialize};
 
@@ -38,7 +41,7 @@ pub fn decode_event(bytes: &[u8]) -> Result<PtyEvent, serde_json::Error> {
 #[derive(Default)]
 pub struct PtyAdapter;
 
-impl Adapter for PtyAdapter {
+impl AdapterFactory for PtyAdapter {
     fn id(&self) -> &str {
         PTY_ADAPTER_ID
     }
@@ -52,8 +55,36 @@ impl Adapter for PtyAdapter {
         }
     }
 
-    fn apply(
+    fn attach(
         &self,
+        instance: &AdapterInstance,
+        _context: &AdapterAttachContext<'_>,
+    ) -> Result<Box<dyn AttachedAdapter>, AdapterError> {
+        Ok(Box::new(PtySession {
+            instance_id: instance.instance_id.clone(),
+        }))
+    }
+}
+
+struct PtySession {
+    instance_id: String,
+}
+
+impl AttachedAdapter for PtySession {
+    fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
+    fn adapter_id(&self) -> &str {
+        PTY_ADAPTER_ID
+    }
+
+    fn capabilities(&self) -> AdapterCapabilities {
+        AdapterFactory::capabilities(&PtyAdapter)
+    }
+
+    fn apply(
+        &mut self,
         record: &RecordEnvelope,
         context: &AdapterContext<'_>,
     ) -> Result<(), AdapterError> {
@@ -69,10 +100,10 @@ impl Adapter for PtyAdapter {
     }
 
     fn verify(
-        &self,
+        &mut self,
         record: &RecordEnvelope,
         context: &AdapterContext<'_>,
     ) -> Result<(), AdapterError> {
-        self.apply(record, context)
+        AttachedAdapter::apply(self, record, context)
     }
 }
