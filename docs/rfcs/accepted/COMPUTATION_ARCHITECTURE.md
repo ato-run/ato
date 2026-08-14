@@ -24,6 +24,12 @@ processes, and Materializations never enter `ComputationObject`.
 For `C0 → C1 → C2`, the current computation is C2. History may relate all
 three refs, but C2 does not hash its history.
 
+An Adapter observation explicitly classifies itself as evidence-only or a
+semantic evolution. A semantic evolution advances an opaque residual frontier;
+Record identity, sequence, timestamp, and causal metadata remain outside the
+ComputationObject. Memory-only state changes therefore still produce C1 even
+when the workspace snapshot is unchanged.
+
 ## Evolution
 
 The Kernel resolves `Run.head`, dispatches by `SemanticsId`, validates opaque
