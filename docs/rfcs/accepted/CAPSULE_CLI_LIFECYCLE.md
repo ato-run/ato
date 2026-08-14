@@ -20,6 +20,12 @@ current head; a historical point requires a new branch. `stop` quiesces,
 terminates the owned process tree, records workspace changes, atomically moves
 the branch head, and clears active metadata. It creates no portable output.
 
+`resume` and portable `run` use the same Materializer and RealizationDriver
+reconstruction path. Resume differs only by publishing the verified realization
+as a durable local Run. Restoring only the selected workspace and assigning its
+ComputationRef as the Run head is forbidden because non-workspace semantic state
+would not be realized.
+
 `encap` is the only portable Materialization boundary. `run` accepts only a
 `.capsule` file, imports to temporary storage, resolves recipient Bindings,
 and delegates all physical restoration to one compatible Materializer. It
