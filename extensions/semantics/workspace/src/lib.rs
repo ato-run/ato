@@ -8,7 +8,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ato_computation::{ComputationObject, ContentRef, ResolvedComputation, SemanticsId};
-use ato_kernel::{Action, SemanticError, SemanticHost, SemanticStep, Semantics};
+use ato_kernel::{
+    Action, ChoiceId, SemanticError, SemanticHost, SemanticStep, Semantics, TransitionOffer,
+};
 use ato_objects::{
     BundleError, ComputationReferences, ObjectLink, ObjectResolver, read_exact_object,
 };
@@ -239,10 +241,7 @@ impl WorkspaceSemantics {
     }
 }
 
-impl<V> Semantics<V> for WorkspaceSemantics
-where
-    V: Clone + Send + Sync + 'static,
-{
+impl Semantics for WorkspaceSemantics {
     fn id(&self) -> &SemanticsId {
         &self.id
     }
@@ -250,7 +249,7 @@ where
     fn validate(
         &self,
         current: &ResolvedComputation,
-        host: &dyn SemanticHost<V>,
+        host: &dyn SemanticHost,
     ) -> Result<(), SemanticError> {
         load(current, host).map(|_| ())
     }
@@ -258,10 +257,13 @@ where
     fn enabled(
         &self,
         current: &ResolvedComputation,
-        host: &dyn SemanticHost<V>,
-    ) -> Result<Vec<Action<V>>, SemanticError> {
+        host: &dyn SemanticHost,
+    ) -> Result<Vec<TransitionOffer>, SemanticError> {
         Ok(match load(current, host)?.phase {
-            WorkspacePhase::Ready => vec![Action::Tau],
+            WorkspacePhase::Ready => vec![TransitionOffer::selected(
+                ChoiceId::new("realize"),
+                Action::Tau,
+            )],
             WorkspacePhase::Exited { .. } => Vec::new(),
         })
     }
@@ -269,10 +271,10 @@ where
     fn step(
         &self,
         current: &ResolvedComputation,
-        action: &Action<V>,
-        host: &dyn SemanticHost<V>,
-    ) -> Result<SemanticStep<V>, SemanticError> {
-        if !matches!(action, Action::Tau) {
+        offer: &TransitionOffer,
+        host: &dyn SemanticHost,
+    ) -> Result<SemanticStep, SemanticError> {
+        if !matches!(offer.action, Action::Tau) {
             return Err(SemanticError::new(
                 "workspace realization is an internal transition",
             ));
@@ -294,7 +296,7 @@ where
             .put_object(&bytes)
             .map_err(|error| SemanticError::new(error.to_string()))?;
         Ok(SemanticStep {
-            action: Action::Tau,
+            offer: offer.clone(),
             successor: ComputationObject {
                 semantics: current.object().semantics.clone(),
                 boundary: current.object().boundary.clone(),
@@ -311,9 +313,9 @@ pub fn observe_exit(residual: &WorkspaceResidual) -> Option<i32> {
     }
 }
 
-fn load<V>(
+fn load(
     current: &ResolvedComputation,
-    host: &dyn SemanticHost<V>,
+    host: &dyn SemanticHost,
 ) -> Result<WorkspaceResidual, SemanticError> {
     if current.object().semantics.as_str() != WORKSPACE_SEMANTICS_ID {
         return Err(SemanticError::new("wrong workspace semantics id"));

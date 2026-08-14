@@ -10,24 +10,24 @@ use thiserror::Error;
 use crate::{CompositeResidual, Endpoint, NodeId, ValidatedComposite};
 
 /// The label on one semantic transition; it is neither a record nor a wire format.
-pub type StepLabel<V> = Action<V>;
+pub type StepLabel = Action;
 
 /// Transition evidence supplied by a child semantics.
 ///
 /// The `from` and `to` computations are identity-verified; transition validity
 /// is owned by the child semantics.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NodeStep<V> {
+pub struct NodeStep {
     pub node: NodeId,
     pub from: ResolvedComputation,
-    pub label: StepLabel<V>,
+    pub label: StepLabel,
     pub to: ResolvedComputation,
 }
 
 /// A candidate composite successor; callers seal and validate it separately.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CompositeReduction<V> {
-    pub label: StepLabel<V>,
+pub struct CompositeReduction {
+    pub label: StepLabel,
     pub successor: CompositeResidual,
 }
 
@@ -60,10 +60,10 @@ pub enum CompositeStepError {
 }
 
 /// Lift a child's internal transition without changing the parent boundary.
-pub fn lift_internal_step<V>(
+pub fn lift_internal_step(
     current: &ValidatedComposite,
-    step: &NodeStep<V>,
-) -> Result<CompositeReduction<V>, CompositeStepError> {
+    step: &NodeStep,
+) -> Result<CompositeReduction, CompositeStepError> {
     if !matches!(step.label, StepLabel::Tau) {
         return Err(CompositeStepError::InternalActionMustBeTau);
     }
@@ -75,11 +75,11 @@ pub fn lift_internal_step<V>(
 }
 
 /// Synchronize complementary child actions connected inside the composite.
-pub fn synchronize_connection<V: Eq + Clone>(
+pub fn synchronize_connection(
     current: &ValidatedComposite,
-    first: &NodeStep<V>,
-    second: &NodeStep<V>,
-) -> Result<CompositeReduction<V>, CompositeStepError> {
+    first: &NodeStep,
+    second: &NodeStep,
+) -> Result<CompositeReduction, CompositeStepError> {
     if first.node == second.node {
         return Err(CompositeStepError::SameNodeSynchronizationUnsupported);
     }
@@ -89,24 +89,24 @@ pub fn synchronize_connection<V: Eq + Clone>(
 
     let (output, input) = match (&first.label, &second.label) {
         (
-            StepLabel::Output { port, value },
+            StepLabel::Output { port, payload },
             StepLabel::Input {
                 port: input_port,
-                value: input_value,
+                payload: input_payload,
             },
         ) => (
-            (&first.node, port, value),
-            (&second.node, input_port, input_value),
+            (&first.node, port, payload),
+            (&second.node, input_port, input_payload),
         ),
         (
-            StepLabel::Input { port, value },
+            StepLabel::Input { port, payload },
             StepLabel::Output {
                 port: output_port,
-                value: output_value,
+                payload: output_payload,
             },
         ) => (
-            (&second.node, output_port, output_value),
-            (&first.node, port, value),
+            (&second.node, output_port, output_payload),
+            (&first.node, port, payload),
         ),
         _ => return Err(CompositeStepError::ComplementaryActionsRequired),
     };
@@ -139,15 +139,15 @@ pub fn synchronize_connection<V: Eq + Clone>(
 }
 
 /// Lift one child action through an exported parent Port.
-pub fn lift_exported_step<V: Clone>(
+pub fn lift_exported_step(
     current: &ValidatedComposite,
-    step: &NodeStep<V>,
-) -> Result<CompositeReduction<V>, CompositeStepError> {
+    step: &NodeStep,
+) -> Result<CompositeReduction, CompositeStepError> {
     let current = current.residual();
     ensure_current_node(current, step)?;
-    let (child_port, value, is_input) = match &step.label {
-        StepLabel::Input { port, value } => (port, value, true),
-        StepLabel::Output { port, value } => (port, value, false),
+    let (child_port, payload, is_input) = match &step.label {
+        StepLabel::Input { port, payload } => (port, payload, true),
+        StepLabel::Output { port, payload } => (port, payload, false),
         StepLabel::Tau => return Err(CompositeStepError::ExportedActionRequired),
     };
     let endpoint = Endpoint {
@@ -174,20 +174,20 @@ pub fn lift_exported_step<V: Clone>(
     let label = if is_input {
         StepLabel::Input {
             port: parent_port,
-            value: value.clone(),
+            payload: payload.clone(),
         }
     } else {
         StepLabel::Output {
             port: parent_port,
-            value: value.clone(),
+            payload: payload.clone(),
         }
     };
     Ok(CompositeReduction { label, successor })
 }
 
-fn replace_node<V>(
+fn replace_node(
     current: &CompositeResidual,
-    step: &NodeStep<V>,
+    step: &NodeStep,
 ) -> Result<CompositeResidual, CompositeStepError> {
     ensure_current_node(current, step)?;
     let mut successor = current.clone();
@@ -197,9 +197,9 @@ fn replace_node<V>(
     Ok(successor)
 }
 
-fn ensure_current_node<V>(
+fn ensure_current_node(
     current: &CompositeResidual,
-    step: &NodeStep<V>,
+    step: &NodeStep,
 ) -> Result<(), CompositeStepError> {
     let expected =
         current

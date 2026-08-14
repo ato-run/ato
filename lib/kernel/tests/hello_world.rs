@@ -5,7 +5,10 @@ use ato_computation::{
     Boundary, ComputationObject, ComputationRef, PortDef, PortId, ProtocolId, ResolvedComputation,
     RoleId, SemanticsId,
 };
-use ato_kernel::{Action, Kernel, Run, SemanticError, SemanticHost, SemanticStep, Semantics};
+use ato_kernel::{
+    Action, ChoiceId, Kernel, ProtocolError, ProtocolPayload, ProtocolSemantics, Run,
+    SemanticError, SemanticHost, SemanticStep, Semantics, TransitionOffer,
+};
 use ato_objects::{MemoryObjectStore, ObjectStore};
 use ato_semantics_compose::{
     ComposeSemantics, CompositeResidual, Connection, Endpoint, NodeId, ProtocolRolePolicy,
@@ -14,7 +17,17 @@ use ato_semantics_compose::{
 
 const TEXT_PROTOCOL: &str = "example.text@1";
 
-struct TextProtocol;
+struct TextProtocol {
+    id: ProtocolId,
+}
+
+impl TextProtocol {
+    fn new() -> Self {
+        Self {
+            id: ProtocolId::parse(TEXT_PROTOCOL).unwrap(),
+        }
+    }
+}
 
 impl ProtocolRolePolicy for TextProtocol {
     fn connection_roles_compatible(
@@ -23,7 +36,7 @@ impl ProtocolRolePolicy for TextProtocol {
         first: &RoleId,
         second: &RoleId,
     ) -> bool {
-        protocol.as_str() == TEXT_PROTOCOL
+        protocol == &self.id
             && BTreeSet::from([first.as_str(), second.as_str()])
                 == BTreeSet::from(["receiver", "sender"])
     }
@@ -34,8 +47,48 @@ impl ProtocolRolePolicy for TextProtocol {
         parent: &RoleId,
         child: &RoleId,
     ) -> bool {
-        protocol.as_str() == TEXT_PROTOCOL && parent == child
+        protocol == &self.id && parent == child
     }
+}
+
+impl ProtocolSemantics for TextProtocol {
+    fn id(&self) -> &ProtocolId {
+        &self.id
+    }
+
+    fn roles_compatible(&self, left: &RoleId, right: &RoleId) -> Result<bool, ProtocolError> {
+        Ok(BTreeSet::from([left.as_str(), right.as_str()])
+            == BTreeSet::from(["receiver", "sender"]))
+    }
+
+    fn validate_input(
+        &self,
+        role: &RoleId,
+        payload: &ProtocolPayload,
+    ) -> Result<(), ProtocolError> {
+        validate_text("receiver", role, payload)
+    }
+
+    fn validate_output(
+        &self,
+        role: &RoleId,
+        payload: &ProtocolPayload,
+    ) -> Result<(), ProtocolError> {
+        validate_text("sender", role, payload)
+    }
+}
+
+fn validate_text(
+    expected_role: &str,
+    role: &RoleId,
+    payload: &ProtocolPayload,
+) -> Result<(), ProtocolError> {
+    if role.as_str() != expected_role {
+        return Err(ProtocolError::new("text action has the wrong role"));
+    }
+    std::str::from_utf8(payload.as_bytes())
+        .map(|_| ())
+        .map_err(|_| ProtocolError::new("text payload is not UTF-8"))
 }
 
 struct NameProvider {
@@ -50,7 +103,7 @@ impl NameProvider {
     }
 }
 
-impl Semantics<String> for NameProvider {
+impl Semantics for NameProvider {
     fn id(&self) -> &SemanticsId {
         &self.id
     }
@@ -58,14 +111,17 @@ impl Semantics<String> for NameProvider {
     fn enabled(
         &self,
         current: &ResolvedComputation,
-        host: &dyn SemanticHost<String>,
-    ) -> Result<Vec<Action<String>>, SemanticError> {
+        host: &dyn SemanticHost,
+    ) -> Result<Vec<TransitionOffer>, SemanticError> {
         let state = residual_text(current, host)?;
         Ok(match state.strip_prefix("ReadyName:") {
-            Some(name) => vec![Action::Output {
-                port: port("name"),
-                value: name.to_owned(),
-            }],
+            Some(name) => vec![TransitionOffer::selected(
+                ChoiceId::new("emit-name"),
+                Action::Output {
+                    port: port("name"),
+                    payload: ProtocolPayload::from(name),
+                },
+            )],
             None => Vec::new(),
         })
     }
@@ -73,23 +129,23 @@ impl Semantics<String> for NameProvider {
     fn step(
         &self,
         current: &ResolvedComputation,
-        action: &Action<String>,
-        host: &dyn SemanticHost<String>,
-    ) -> Result<SemanticStep<String>, SemanticError> {
+        offer: &TransitionOffer,
+        host: &dyn SemanticHost,
+    ) -> Result<SemanticStep, SemanticError> {
         let state = residual_text(current, host)?;
-        let next = match (state.as_str(), action) {
-            ("WaitingInput", Action::Input { port, value }) if port.as_str() == "input" => {
-                format!("ReadyName:{value}")
+        let next = match (state.as_str(), &offer.action) {
+            ("WaitingInput", Action::Input { port, payload }) if port.as_str() == "input" => {
+                format!("ReadyName:{}", payload_text(payload)?)
             }
-            (state, Action::Output { port, value })
+            (state, Action::Output { port, payload })
                 if port.as_str() == "name"
-                    && state.strip_prefix("ReadyName:") == Some(value.as_str()) =>
+                    && state.strip_prefix("ReadyName:") == Some(payload_text(payload)?) =>
             {
-                format!("Done:{value}")
+                format!("Done:{}", payload_text(payload)?)
             }
             _ => return Err(SemanticError::new("name-provider action is not enabled")),
         };
-        successor(current, action, next, host)
+        successor(current, offer, next, host)
     }
 }
 
@@ -105,7 +161,7 @@ impl Greeter {
     }
 }
 
-impl Semantics<String> for Greeter {
+impl Semantics for Greeter {
     fn id(&self) -> &SemanticsId {
         &self.id
     }
@@ -113,14 +169,17 @@ impl Semantics<String> for Greeter {
     fn enabled(
         &self,
         current: &ResolvedComputation,
-        host: &dyn SemanticHost<String>,
-    ) -> Result<Vec<Action<String>>, SemanticError> {
+        host: &dyn SemanticHost,
+    ) -> Result<Vec<TransitionOffer>, SemanticError> {
         let state = residual_text(current, host)?;
         Ok(match state.strip_prefix("ReadyGreeting:") {
-            Some(greeting) => vec![Action::Output {
-                port: port("greeting"),
-                value: greeting.to_owned(),
-            }],
+            Some(greeting) => vec![TransitionOffer::selected(
+                ChoiceId::new("emit-greeting"),
+                Action::Output {
+                    port: port("greeting"),
+                    payload: ProtocolPayload::from(greeting),
+                },
+            )],
             None => Vec::new(),
         })
     }
@@ -128,37 +187,37 @@ impl Semantics<String> for Greeter {
     fn step(
         &self,
         current: &ResolvedComputation,
-        action: &Action<String>,
-        host: &dyn SemanticHost<String>,
-    ) -> Result<SemanticStep<String>, SemanticError> {
+        offer: &TransitionOffer,
+        host: &dyn SemanticHost,
+    ) -> Result<SemanticStep, SemanticError> {
         let state = residual_text(current, host)?;
-        let next = match (state.as_str(), action) {
-            ("WaitingName", Action::Input { port, value }) if port.as_str() == "name" => {
-                format!("ReadyGreeting:Hello, {value}!")
+        let next = match (state.as_str(), &offer.action) {
+            ("WaitingName", Action::Input { port, payload }) if port.as_str() == "name" => {
+                format!("ReadyGreeting:Hello, {}!", payload_text(payload)?)
             }
-            (state, Action::Output { port, value })
+            (state, Action::Output { port, payload })
                 if port.as_str() == "greeting"
-                    && state.strip_prefix("ReadyGreeting:") == Some(value.as_str()) =>
+                    && state.strip_prefix("ReadyGreeting:") == Some(payload_text(payload)?) =>
             {
                 "Done".to_owned()
             }
             _ => return Err(SemanticError::new("greeter action is not enabled")),
         };
-        successor(current, action, next, host)
+        successor(current, offer, next, host)
     }
 }
 
 fn successor(
     current: &ResolvedComputation,
-    action: &Action<String>,
+    offer: &TransitionOffer,
     residual: String,
-    host: &dyn SemanticHost<String>,
-) -> Result<SemanticStep<String>, SemanticError> {
+    host: &dyn SemanticHost,
+) -> Result<SemanticStep, SemanticError> {
     let residual = host
         .put_object(residual.as_bytes())
         .map_err(|error| SemanticError::new(error.to_string()))?;
     Ok(SemanticStep {
-        action: action.clone(),
+        offer: offer.clone(),
         successor: ComputationObject {
             semantics: current.object().semantics.clone(),
             boundary: current.object().boundary.clone(),
@@ -169,7 +228,7 @@ fn successor(
 
 fn residual_text(
     current: &ResolvedComputation,
-    host: &dyn SemanticHost<String>,
+    host: &dyn SemanticHost,
 ) -> Result<String, SemanticError> {
     let bytes = host
         .get_object(&current.object().residual, 1024)
@@ -177,14 +236,23 @@ fn residual_text(
     String::from_utf8(bytes).map_err(|error| SemanticError::new(error.to_string()))
 }
 
+fn payload_text(payload: &ProtocolPayload) -> Result<&str, SemanticError> {
+    std::str::from_utf8(payload.as_bytes()).map_err(|error| SemanticError::new(error.to_string()))
+}
+
 #[test]
 fn behavioral_hello_world_branches_from_same_computation() {
     let objects = Arc::new(MemoryObjectStore::default());
-    let mut kernel = Kernel::<String>::new(objects.clone());
+    let mut kernel = Kernel::new(objects.clone());
     kernel.register(Arc::new(NameProvider::new())).unwrap();
     kernel.register(Arc::new(Greeter::new())).unwrap();
     kernel
-        .register(Arc::new(ComposeSemantics::new(Arc::new(TextProtocol))))
+        .register(Arc::new(ComposeSemantics::new(Arc::new(
+            TextProtocol::new(),
+        ))))
+        .unwrap();
+    kernel
+        .register_protocol(Arc::new(TextProtocol::new()))
         .unwrap();
 
     let provider = seal_leaf(
@@ -262,40 +330,41 @@ fn behavioral_hello_world_branches_from_same_computation() {
     assert_branch_residuals(&kernel, &bob, "Bob");
 }
 
-fn branch(
-    kernel: &Kernel<String>,
-    computation: &ComputationRef,
-    name: &str,
-) -> [ComputationRef; 3] {
+fn branch(kernel: &Kernel, computation: &ComputationRef, name: &str) -> [ComputationRef; 3] {
     let mut run = Run {
         head: computation.clone(),
     };
     let after_input = kernel
         .step(
             &mut run,
-            &Action::Input {
-                port: port("name"),
-                value: name.to_owned(),
-            },
+            &TransitionOffer::external_input(port("name"), ProtocolPayload::from(name)),
         )
         .unwrap();
-    let after_sync = kernel.step(&mut run, &Action::Tau).unwrap();
-    assert_eq!(after_sync.action, Action::Tau);
+    let tau = only_offer(kernel, &run, |action| matches!(action, Action::Tau));
+    let after_sync = kernel.step(&mut run, &tau).unwrap();
+    assert_eq!(after_sync.offer.action, Action::Tau);
     let greeting = format!("Hello, {name}!");
-    let after_output = kernel
-        .step(
-            &mut run,
-            &Action::Output {
-                port: port("greeting"),
-                value: greeting,
-            },
-        )
-        .unwrap();
+    let output = only_offer(kernel, &run, |action| {
+        matches!(action, Action::Output { port, payload }
+            if port.as_str() == "greeting" && payload.as_bytes() == greeting.as_bytes())
+    });
+    let after_output = kernel.step(&mut run, &output).unwrap();
     assert_eq!(run.head, after_output.to);
     [after_input.to, after_sync.to, after_output.to]
 }
 
-fn assert_branch_residuals(kernel: &Kernel<String>, branch: &[ComputationRef; 3], name: &str) {
+fn only_offer(kernel: &Kernel, run: &Run, predicate: impl Fn(&Action) -> bool) -> TransitionOffer {
+    let matching: Vec<_> = kernel
+        .enabled(&run.head)
+        .unwrap()
+        .into_iter()
+        .filter(|offer| predicate(&offer.action))
+        .collect();
+    assert_eq!(matching.len(), 1);
+    matching.into_iter().next().unwrap()
+}
+
+fn assert_branch_residuals(kernel: &Kernel, branch: &[ComputationRef; 3], name: &str) {
     let after_input = composite(kernel, &branch[0]);
     let provider = &after_input.nodes[&node("name-provider")];
     assert_eq!(leaf_state(kernel, provider), format!("ReadyName:{name}"));
@@ -308,14 +377,14 @@ fn assert_branch_residuals(kernel: &Kernel<String>, branch: &[ComputationRef; 3]
     );
 }
 
-fn composite(kernel: &Kernel<String>, reference: &ComputationRef) -> CompositeResidual {
+fn composite(kernel: &Kernel, reference: &ComputationRef) -> CompositeResidual {
     let computation = kernel.resolve(reference).unwrap();
     let bytes =
         SemanticHost::get_object(kernel, &computation.object().residual, 1024 * 1024).unwrap();
     ato_semantics_compose::decode_composite_residual(&bytes).unwrap()
 }
 
-fn leaf_state(kernel: &Kernel<String>, reference: &ComputationRef) -> String {
+fn leaf_state(kernel: &Kernel, reference: &ComputationRef) -> String {
     let computation = kernel.resolve(reference).unwrap();
     String::from_utf8(
         SemanticHost::get_object(kernel, &computation.object().residual, 1024).unwrap(),
@@ -324,7 +393,7 @@ fn leaf_state(kernel: &Kernel<String>, reference: &ComputationRef) -> String {
 }
 
 fn seal_leaf(
-    kernel: &Kernel<String>,
+    kernel: &Kernel,
     objects: &MemoryObjectStore,
     semantics: &str,
     boundary: Boundary,
