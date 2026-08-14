@@ -441,6 +441,13 @@ fn spawn_terminal_gateway(
                     break;
                 }
             };
+            // Accepted sockets can inherit nonblocking mode on some hosts.
+            // The synchronous WebSocket handshake must not observe a transient
+            // WouldBlock and reset an otherwise valid client connection.
+            if let Err(error) = stream.set_nonblocking(false) {
+                set_failure(&failure, error.to_string());
+                continue;
+            }
             let mut socket = match tungstenite::accept(stream) {
                 Ok(socket) => socket,
                 Err(error) => {
