@@ -190,7 +190,7 @@ impl Materializer for SnapshotMaterializer {
         target: &ComputationRef,
         context: &MaterializerContext<'_>,
     ) -> Result<ContentRef, MaterializerError> {
-        let artifact = encode_workspace_artifact(context.workspace)
+        let artifact = encode_workspace_artifact(context.workspace, context.workspace_policy)
             .map_err(|error| MaterializerError::Operation(error.to_string()))?;
         reject_plaintext_secret(&artifact)
             .map_err(|error| MaterializerError::Operation(error.to_string()))?;
@@ -229,18 +229,19 @@ impl Materializer for SnapshotMaterializer {
     }
 }
 
-fn encode_workspace_artifact(root: &Path) -> Result<Vec<u8>, std::io::Error> {
+fn encode_workspace_artifact(
+    root: &Path,
+    policy: &ato_adapter_api::WorkspaceCapturePolicy,
+) -> Result<Vec<u8>, std::io::Error> {
     fn visit(
         root: &Path,
         directory: &Path,
+        policy: &ato_adapter_api::WorkspaceCapturePolicy,
         entries: &mut Vec<(String, Vec<u8>)>,
     ) -> std::io::Result<()> {
         for entry in std::fs::read_dir(directory)? {
             let entry = entry?;
             let path = entry.path();
-            if path == root.join(".capsule") {
-                continue;
-            }
             let kind = entry.file_type()?;
             if kind.is_symlink() {
                 return Err(std::io::Error::new(
@@ -249,11 +250,19 @@ fn encode_workspace_artifact(root: &Path) -> Result<Vec<u8>, std::io::Error> {
                 ));
             }
             if kind.is_dir() {
-                visit(root, &path, entries)?;
+                let relative = path.strip_prefix(root).map_err(std::io::Error::other)?;
+                if policy.descends_into(relative) {
+                    visit(root, &path, policy, entries)?;
+                }
             } else if kind.is_file() {
                 let relative = path
                     .strip_prefix(root)
                     .map_err(std::io::Error::other)?
+                    .to_path_buf();
+                if !policy.captures(&relative) {
+                    continue;
+                }
+                let relative = relative
                     .to_str()
                     .ok_or_else(|| {
                         std::io::Error::new(
@@ -269,7 +278,7 @@ fn encode_workspace_artifact(root: &Path) -> Result<Vec<u8>, std::io::Error> {
     }
 
     let mut entries = Vec::new();
-    visit(root, root, &mut entries)?;
+    visit(root, root, policy, &mut entries)?;
     entries.sort_by(|left, right| left.0.cmp(&right.0));
     let mut bytes = b"ATO-WORKSPACE-SNAPSHOT\0\x01".to_vec();
     for (path, content) in entries {
