@@ -15,7 +15,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
-use ato_computation::{Boundary, ComputationObject, ContentRef, SemanticsId};
+use ato_computation::{Boundary, ComputationObject, ContentRef, SemanticsId, computation_ref};
 use ato_objects::{ObjectError, ObjectStore};
 use ato_semantics_workspace::{
     MAX_SOURCE_CLOSURE_BYTES, RealizationConstraint, SourceClosure, SourceEntry, SourceEntryKind,
@@ -27,6 +27,10 @@ use thiserror::Error;
 use walkdir::WalkDir;
 
 const MAX_SOURCE_FILE_BYTES: u64 = 64 * 1024 * 1024;
+pub const CAPSULE_LOCK_FILE: &str = "capsule.lock";
+pub const LEGACY_LOCK_FILE: &str = "ato.lock.json";
+pub const CAPSULE_LOCK_SCHEMA: &str = "ato.capsule-lock/computation-v1";
+pub const REPOSITORY_ADAPTER_ID: &str = "ato.repository@1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepositoryOptions {
@@ -56,7 +60,29 @@ pub struct CompiledRepository {
     pub computation: ComputationObject,
     pub source: ContentRef,
     pub evidence: InferenceEvidence,
+    pub resolution: LockedResolution,
     pub repository_root: PathBuf,
+}
+
+/// Pinned repository resolution evidence. This is adapter data, not a
+/// semantic-core value or execution plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapsuleLock {
+    pub schema: String,
+    pub adapter: String,
+    pub source: String,
+    pub computation: String,
+    pub resolution: LockedResolution,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LockedResolution {
+    pub toolchain: ToolchainConstraint,
+    pub package_manager: Option<String>,
+    pub entrypoint: Vec<String>,
+    pub working_directory: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,12 +159,52 @@ pub enum RepositoryError {
     Closure(#[from] serde_json::Error),
     #[error("git source fetch failed: {0}")]
     Git(String),
+    #[error("deprecated ato.lock.json found; regenerate as capsule.lock with `ato lock`")]
+    DeprecatedLock,
+    #[error("capsule.lock is malformed: {0}")]
+    MalformedLock(String),
+    #[error("unsupported capsule.lock schema or adapter")]
+    UnsupportedLock,
+    #[error("capsule.lock is stale; run `ato lock`")]
+    StaleLock,
 }
 
 pub fn compile_repository(
     root: &Path,
     objects: &dyn ObjectStore,
+    options: RepositoryOptions,
+) -> Result<CompiledRepository, RepositoryError> {
+    reject_legacy_lock(root)?;
+    compile_repository_with_resolution(root, objects, options, None)
+}
+
+pub fn compile_repository_with_lock(
+    root: &Path,
+    objects: &dyn ObjectStore,
+    options: RepositoryOptions,
+    lock: &CapsuleLock,
+) -> Result<CompiledRepository, RepositoryError> {
+    reject_legacy_lock(root)?;
+    validate_lock_header(lock)?;
+    let baseline = compile_repository_with_resolution(
+        root,
+        objects,
+        RepositoryOptions::default(),
+        Some(lock.resolution.clone()),
+    )?;
+    let reference = computation_ref(&baseline.computation)
+        .map_err(|error| RepositoryError::Workspace(error.to_string()))?;
+    if baseline.source.as_str() != lock.source || reference.as_str() != lock.computation {
+        return Err(RepositoryError::StaleLock);
+    }
+    compile_repository_with_resolution(root, objects, options, Some(lock.resolution.clone()))
+}
+
+fn compile_repository_with_resolution(
+    root: &Path,
+    objects: &dyn ObjectStore,
     mut options: RepositoryOptions,
+    locked: Option<LockedResolution>,
 ) -> Result<CompiledRepository, RepositoryError> {
     if !root.is_dir() {
         return Err(RepositoryError::NotDirectory(root.to_path_buf()));
@@ -150,7 +216,12 @@ pub fn compile_repository(
 
     let (source, observed_files) = seal_source(root, objects)?;
     let authoring = load_authoring(root)?;
-    let inferred = infer_workspace(root, authoring.as_ref())?;
+    let authoring_manifest_used = authoring.is_some();
+    let inferred = match locked {
+        Some(resolution) => InferredWorkspace::from(resolution),
+        None => infer_workspace(root, authoring.as_ref())?,
+    };
+    let resolution = LockedResolution::from(&inferred);
     let mut entrypoint = inferred.entrypoint.clone();
     entrypoint.extend(options.arguments);
     let residual = WorkspaceResidual {
@@ -183,10 +254,64 @@ pub fn compile_repository(
             observed_files,
             selected_toolchain: inferred.toolchain.family,
             selected_entrypoint: inferred.entrypoint,
-            authoring_manifest_used: authoring.is_some(),
+            authoring_manifest_used,
         },
+        resolution,
         repository_root: root.to_path_buf(),
     })
+}
+
+pub fn lock_for(compiled: &CompiledRepository) -> Result<CapsuleLock, RepositoryError> {
+    let computation = computation_ref(&compiled.computation)
+        .map_err(|error| RepositoryError::Workspace(error.to_string()))?;
+    Ok(CapsuleLock {
+        schema: CAPSULE_LOCK_SCHEMA.to_owned(),
+        adapter: REPOSITORY_ADAPTER_ID.to_owned(),
+        source: compiled.source.to_string(),
+        computation: computation.to_string(),
+        resolution: compiled.resolution.clone(),
+    })
+}
+
+pub fn read_capsule_lock(root: &Path) -> Result<Option<CapsuleLock>, RepositoryError> {
+    reject_legacy_lock(root)?;
+    let path = root.join(CAPSULE_LOCK_FILE);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let bytes = fs::read(path)?;
+    let lock: CapsuleLock = serde_json::from_slice(&bytes)
+        .map_err(|error| RepositoryError::MalformedLock(error.to_string()))?;
+    validate_lock_header(&lock)?;
+    Ok(Some(lock))
+}
+
+pub fn encode_capsule_lock(lock: &CapsuleLock) -> Result<Vec<u8>, RepositoryError> {
+    validate_lock_header(lock)?;
+    serde_json::to_vec_pretty(lock).map_err(RepositoryError::Closure)
+}
+
+fn validate_lock_header(lock: &CapsuleLock) -> Result<(), RepositoryError> {
+    if lock.schema != CAPSULE_LOCK_SCHEMA || lock.adapter != REPOSITORY_ADAPTER_ID {
+        return Err(RepositoryError::UnsupportedLock);
+    }
+    ContentRef::parse(&lock.source)
+        .map_err(|error| RepositoryError::MalformedLock(error.to_string()))?;
+    ato_computation::ComputationRef::parse(&lock.computation)
+        .map_err(|error| RepositoryError::MalformedLock(error.to_string()))?;
+    if lock.resolution.entrypoint.is_empty() {
+        return Err(RepositoryError::MalformedLock(
+            "resolution.entrypoint must not be empty".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn reject_legacy_lock(root: &Path) -> Result<(), RepositoryError> {
+    if root.join(LEGACY_LOCK_FILE).exists() {
+        return Err(RepositoryError::DeprecatedLock);
+    }
+    Ok(())
 }
 
 pub fn fetch_git_repository(source: &str, destination: &Path) -> Result<(), RepositoryError> {
@@ -350,7 +475,7 @@ fn ignored(path: &Path, root: &Path) -> bool {
     let Ok(relative) = path.strip_prefix(root) else {
         return true;
     };
-    if relative == Path::new("ato.lock.json") {
+    if relative == Path::new(CAPSULE_LOCK_FILE) {
         return true;
     }
     matches!(
@@ -440,6 +565,28 @@ struct InferredWorkspace {
     package_manager: Option<String>,
     entrypoint: Vec<String>,
     working_directory: String,
+}
+
+impl From<LockedResolution> for InferredWorkspace {
+    fn from(resolution: LockedResolution) -> Self {
+        Self {
+            toolchain: resolution.toolchain,
+            package_manager: resolution.package_manager,
+            entrypoint: resolution.entrypoint,
+            working_directory: resolution.working_directory,
+        }
+    }
+}
+
+impl From<&InferredWorkspace> for LockedResolution {
+    fn from(inferred: &InferredWorkspace) -> Self {
+        Self {
+            toolchain: inferred.toolchain.clone(),
+            package_manager: inferred.package_manager.clone(),
+            entrypoint: inferred.entrypoint.clone(),
+            working_directory: inferred.working_directory.clone(),
+        }
+    }
 }
 
 fn infer_workspace(
@@ -623,17 +770,66 @@ mod tests {
     }
 
     #[test]
-    fn resolution_receipt_does_not_change_source_identity() {
+    fn capsule_lock_does_not_change_source_identity() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("main.py"), "print('stable')").unwrap();
         let objects = MemoryObjectStore::default();
         let before =
             compile_repository(dir.path(), &objects, RepositoryOptions::default()).unwrap();
-        fs::write(dir.path().join("ato.lock.json"), r#"{"evidence":true}"#).unwrap();
+        let lock = lock_for(&before).unwrap();
+        fs::write(
+            dir.path().join(CAPSULE_LOCK_FILE),
+            encode_capsule_lock(&lock).unwrap(),
+        )
+        .unwrap();
         let after = compile_repository(dir.path(), &objects, RepositoryOptions::default()).unwrap();
 
         assert_eq!(before.source, after.source);
         assert_eq!(before.computation.residual, after.computation.residual);
+    }
+
+    #[test]
+    fn capsule_lock_is_consumed_and_rejects_stale_source() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("main.py"), "print('locked')").unwrap();
+        let objects = MemoryObjectStore::default();
+        let compiled =
+            compile_repository(dir.path(), &objects, RepositoryOptions::default()).unwrap();
+        let lock = lock_for(&compiled).unwrap();
+
+        let locked =
+            compile_repository_with_lock(dir.path(), &objects, RepositoryOptions::default(), &lock)
+                .unwrap();
+        assert_eq!(
+            computation_ref(&locked.computation).unwrap().as_str(),
+            lock.computation
+        );
+
+        fs::write(dir.path().join("main.py"), "print('mutated')").unwrap();
+        assert!(matches!(
+            compile_repository_with_lock(dir.path(), &objects, RepositoryOptions::default(), &lock,),
+            Err(RepositoryError::StaleLock)
+        ));
+    }
+
+    #[test]
+    fn malformed_and_deprecated_locks_fail_closed() {
+        let malformed = tempfile::tempdir().unwrap();
+        fs::write(malformed.path().join("main.py"), "print('x')").unwrap();
+        fs::write(malformed.path().join(CAPSULE_LOCK_FILE), "not json").unwrap();
+        assert!(matches!(
+            read_capsule_lock(malformed.path()),
+            Err(RepositoryError::MalformedLock(_))
+        ));
+
+        let deprecated = tempfile::tempdir().unwrap();
+        fs::write(deprecated.path().join("main.py"), "print('x')").unwrap();
+        fs::write(deprecated.path().join(LEGACY_LOCK_FILE), "{}").unwrap();
+        let objects = MemoryObjectStore::default();
+        assert!(matches!(
+            compile_repository(deprecated.path(), &objects, RepositoryOptions::default()),
+            Err(RepositoryError::DeprecatedLock)
+        ));
     }
 
     #[test]
