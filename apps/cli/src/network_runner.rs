@@ -4,8 +4,9 @@
 //! `PortableSession` command inside bwrap. It is intentionally not another
 //! scheduler or execution engine.
 
+use std::collections::BTreeMap;
 use std::fs;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -92,6 +93,11 @@ struct HostedPort {
     port_id: String,
     protocol: String,
     local_endpoint: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BindingGrant {
+    bindings: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -262,10 +268,21 @@ fn execute_lease(
         bail!("downloaded bundle transport digest mismatch");
     }
     fs::write(&bundle_path, &bytes)?;
+    let binding_grant: BindingGrant = authorized(
+        client.get(format!(
+            "{base}/v1/runner-leases/{}/capsule-bindings",
+            lease.id
+        )),
+        &args.runner_token,
+    )
+    .send()?
+    .error_for_status()?
+    .json()?;
     let mut child = spawn_sandboxed_session(
         &bundle_path,
         &repository,
         &lease.command.expected_root_computation_ref,
+        &binding_grant.bindings,
     )?;
     let report = read_session_report(&mut child)?;
     if report.root_computation_ref != lease.command.expected_root_computation_ref {
@@ -350,11 +367,16 @@ fn execute_lease(
     }
 }
 
-fn spawn_sandboxed_session(bundle: &Path, repository: &Path, root: &str) -> Result<Child> {
+fn spawn_sandboxed_session(
+    bundle: &Path,
+    repository: &Path,
+    root: &str,
+    bindings: &BTreeMap<String, String>,
+) -> Result<Child> {
     let executable = std::env::current_exe()?;
     let repository = repository.canonicalize()?;
     let bundle = bundle.canonicalize()?;
-    Command::new("bwrap")
+    let mut child = Command::new("bwrap")
         .args(["--die-with-parent", "--new-session", "--unshare-pid"])
         .args(["--ro-bind", "/", "/"])
         .arg("--bind")
@@ -368,12 +390,21 @@ fn spawn_sandboxed_session(bundle: &Path, repository: &Path, root: &str) -> Resu
         .arg(&bundle)
         .args(["--expected-root", root, "--repository"])
         .arg(&repository)
+        .arg("--bindings-stdin")
         .arg("--hold")
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .context("failed to enter linux-bwrap sandbox")
+        .context("failed to enter linux-bwrap sandbox")?;
+    let mut payload = serde_json::to_vec(bindings)?;
+    child
+        .stdin
+        .take()
+        .context("sandbox stdin unavailable")?
+        .write_all(&payload)?;
+    payload.fill(0);
+    Ok(child)
 }
 
 fn read_session_report(child: &mut Child) -> Result<HostedSessionReport> {

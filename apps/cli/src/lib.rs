@@ -8,6 +8,7 @@ mod supervisor;
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -108,6 +109,9 @@ struct HostedSessionStartArgs {
     repository: PathBuf,
     #[arg(long = "bind", value_parser = parse_binding)]
     bindings: Vec<(String, String)>,
+    /// Read a JSON object of Binding values from stdin. Hosted runner only.
+    #[arg(long, conflicts_with = "bindings")]
+    bindings_stdin: bool,
     /// Keep the sandbox command alive for the duration of the durable Run.
     #[arg(long)]
     hold: bool,
@@ -370,7 +374,13 @@ fn hosted_session_start(args: HostedSessionStartArgs) -> Result<()> {
         session.context().parent_root(),
         session.context().repository().objects(),
     )?;
-    let bindings: BTreeMap<_, _> = args.bindings.into_iter().collect();
+    let bindings: BTreeMap<String, String> = if args.bindings_stdin {
+        let mut payload = String::new();
+        std::io::stdin().read_to_string(&mut payload)?;
+        serde_json::from_str(&payload).context("invalid hosted Binding payload")?
+    } else {
+        args.bindings.into_iter().collect()
+    };
     let missing: Vec<_> = state
         .config
         .binding
