@@ -164,6 +164,7 @@ name = "ato-adapter-pty"
 version = "0.1.0"
 dependencies = [
  "ato-adapter-api",
+ "ato-computation",
  "ato-objects",
  "serde",
  "serde_jcs",

@@ -106,6 +106,10 @@ pub trait AttachedAdapter: Send {
     fn wait(&mut self) -> Result<(), AdapterError> {
         Ok(())
     }
+
+    fn activate(&mut self) -> Result<(), AdapterError> {
+        Ok(())
+    }
 }
 
 /// Creates configured live instances. Built-ins and third parties enter the
