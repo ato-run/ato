@@ -276,12 +276,9 @@ fn spawn_proxy(
     observed_responses: Arc<Mutex<VecDeque<HttpEvent>>>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
-        while !stop.load(std::sync::atomic::Ordering::Acquire) {
+        loop {
             match listener.accept() {
                 Ok((mut client, _)) => {
-                    if stop.load(std::sync::atomic::Ordering::Acquire) {
-                        break;
-                    }
                     let _ = proxy_exchange(
                         &mut client,
                         config.upstream,
@@ -301,6 +298,12 @@ fn spawn_proxy(
                             }
                         },
                     );
+                }
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && stop.load(std::sync::atomic::Ordering::Acquire) =>
+                {
+                    break;
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(10));
@@ -374,14 +377,7 @@ fn proxy_exchange(
         direction: ato_objects::Direction::Inbound,
         payload: encode_event(&request).map_err(std::io::Error::other)?,
         caused_by: Vec::new(),
-        effect: match &request {
-            HttpEvent::Request { method, .. }
-                if !matches!(method.as_str(), "GET" | "HEAD" | "OPTIONS" | "TRACE") =>
-            {
-                ObservationEffect::Evolution
-            }
-            _ => ObservationEffect::Evidence,
-        },
+        effect: ObservationEffect::Evolution,
     });
 
     let mut upstream_stream = connect_with_retry(upstream)?;
