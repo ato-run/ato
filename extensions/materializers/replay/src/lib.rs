@@ -8,7 +8,7 @@ use ato_materializer_api::{
 };
 use ato_objects::{
     BundleError, Direction, MaterializationReferences, ObjectLink, ObjectResolver, RecordEnvelope,
-    read_exact_object,
+    RecordId, read_exact_object,
 };
 use serde::{Deserialize, Serialize};
 
@@ -32,8 +32,7 @@ struct ReplayDescriptor {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RecordWire {
-    seq: u64,
-    stream: String,
+    id: RecordId,
     adapter_id: String,
     protocol_id: String,
     port_id: String,
@@ -41,7 +40,7 @@ struct RecordWire {
     payload_ref: String,
     head_before: String,
     head_after: String,
-    caused_by: Vec<u64>,
+    caused_by: Vec<RecordId>,
     observed_at: String,
 }
 
@@ -171,8 +170,7 @@ impl Materializer for ReplayMaterializer {
 impl From<&RecordEnvelope> for RecordWire {
     fn from(value: &RecordEnvelope) -> Self {
         Self {
-            seq: value.seq,
-            stream: value.stream.clone(),
+            id: value.id.clone(),
             adapter_id: value.adapter_id.clone(),
             protocol_id: value.protocol_id.to_string(),
             port_id: value.port_id.to_string(),
@@ -193,8 +191,7 @@ impl TryFrom<RecordWire> for RecordEnvelope {
         let invalid =
             |error: Box<dyn std::fmt::Display>| MaterializerError::Operation(error.to_string());
         Ok(Self {
-            seq: value.seq,
-            stream: value.stream,
+            id: value.id,
             adapter_id: value.adapter_id,
             protocol_id: ProtocolId::parse(value.protocol_id)
                 .map_err(|error| invalid(Box::new(error)))?,

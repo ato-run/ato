@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use ato_computation::{PortId, ProtocolId};
-use ato_objects::{Direction, ObjectStore, RecordEnvelope};
+use ato_objects::{Direction, ObjectStore, RecordEnvelope, RecordId};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -24,7 +24,7 @@ pub struct AdapterObservation {
     pub port_id: PortId,
     pub direction: Direction,
     pub payload: Vec<u8>,
-    pub caused_by: Vec<u64>,
+    pub caused_by: Vec<RecordId>,
 }
 
 pub struct AdapterContext<'a> {
