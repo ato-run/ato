@@ -11,179 +11,379 @@ fn ato(ato_home: &Path) -> Command {
     command
 }
 
-fn repository(root: &Path) {
-    #[cfg(windows)]
-    {
-        fs::write(
-            root.join("capsule.toml"),
-            "[workspace]\ntoolchain = 'cmd'\nentrypoint = ['cmd', '/C', 'if defined UNDECLARED_HOST_VALUE exit /b 9 & mkdir build-output & exit /b 0']\n",
-        )
-        .unwrap();
-    }
-    #[cfg(not(windows))]
-    {
-        fs::write(
-            root.join("capsule.toml"),
-            "[workspace]\ntoolchain = 'shell'\nentrypoint = ['sh', 'main.sh']\n",
-        )
-        .unwrap();
-        fs::write(
-            root.join("main.sh"),
-            "#!/bin/sh\ntest -z \"$UNDECLARED_HOST_VALUE\"\nmkdir build-output\n",
-        )
-        .unwrap();
-    }
-}
-
-#[test]
-fn lock_run_and_sealed_workspace_fail_closed_end_to_end() {
-    let repository_directory = tempfile::tempdir().unwrap();
-    let ato_home = tempfile::tempdir().unwrap();
-    repository(repository_directory.path());
-
-    ato(ato_home.path())
-        .args(["lock", repository_directory.path().to_str().unwrap()])
-        .assert()
-        .success();
-    assert!(repository_directory.path().join("capsule.lock").is_file());
-    assert!(!repository_directory.path().join("ato.lock.json").exists());
-
-    ato(ato_home.path())
-        .env("UNDECLARED_HOST_VALUE", "must-not-leak")
-        .args([
-            "run",
-            repository_directory.path().to_str().unwrap(),
-            "--no-sandbox",
-        ])
-        .assert()
-        .success();
-    assert!(!repository_directory.path().join("build-output").exists());
-    assert!(
-        fs::read_dir(ato_home.path().join("runs/run"))
-            .unwrap()
-            .filter_map(Result::ok)
-            .any(|entry| entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("workspace-"))
-    );
-
+fn write_project(root: &Path, command: &str, extra: &str) {
     fs::write(
-        repository_directory.path().join("source-mutation"),
-        "changed",
+        root.join("capsule.toml"),
+        format!(
+            r#"schema = 1
+
+[[process]]
+id = "app"
+command = {command}
+cwd = "."
+
+[[adapter]]
+target = "app"
+use = "ato.process@1"
+
+[[adapter]]
+target = "workspace"
+use = "ato.workspace@1"
+
+{extra}
+
+[encap]
+materializers = ["ato.replay@1"]
+"#,
+        ),
     )
     .unwrap();
-    ato(ato_home.path())
-        .args([
-            "run",
-            repository_directory.path().to_str().unwrap(),
-            "--no-sandbox",
-        ])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "capsule.lock is stale; run `ato lock`",
-        ));
-
-    fs::write(repository_directory.path().join("capsule.lock"), "not json").unwrap();
-    ato(ato_home.path())
-        .args([
-            "run",
-            repository_directory.path().to_str().unwrap(),
-            "--no-sandbox",
-        ])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("capsule.lock is malformed"));
-
-    fs::remove_file(repository_directory.path().join("capsule.lock")).unwrap();
-    fs::write(repository_directory.path().join("ato.lock.json"), "{}").unwrap();
-    ato(ato_home.path())
-        .args([
-            "run",
-            repository_directory.path().to_str().unwrap(),
-            "--no-sandbox",
-        ])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("deprecated ato.lock.json found"));
 }
 
-#[cfg(unix)]
-#[test]
-fn detached_stop_terminates_the_isolated_process_tree() {
-    let repository_directory = tempfile::tempdir().unwrap();
-    let ato_home = tempfile::tempdir().unwrap();
-    fs::write(
-        repository_directory.path().join("capsule.toml"),
-        "[workspace]\ntoolchain = 'shell'\nentrypoint = ['sh', 'main.sh']\n",
-    )
-    .unwrap();
-    fs::write(
-        repository_directory.path().join("main.sh"),
-        "#!/bin/sh\nsleep 60 &\necho $! > \"$HOME/child.pid\"\nwait\n",
-    )
-    .unwrap();
-
-    ato(ato_home.path())
-        .args([
-            "run",
-            repository_directory.path().to_str().unwrap(),
-            "--no-sandbox",
-            "--detach",
-            "--name",
-            "tree",
-        ])
-        .assert()
-        .success();
-
-    let record_path = ato_home.path().join("runs/tree/run.json");
-    wait_until(|| record_path.is_file());
-    let record: serde_json::Value =
-        serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
-    let worker = record["pid"].as_u64().unwrap() as u32;
-    let child_file = || {
-        fs::read_dir(ato_home.path().join("runs/tree"))
-            .ok()?
-            .filter_map(Result::ok)
-            .find(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("workspace-")
-            })
-            .map(|entry| entry.path().join(".ato/child.pid"))
-    };
-    wait_until(|| child_file().is_some_and(|path| path.is_file()));
-    let child = fs::read_to_string(child_file().unwrap())
-        .unwrap()
-        .trim()
-        .parse::<u32>()
-        .unwrap();
-
-    ato(ato_home.path())
-        .args(["stop", "tree"])
-        .assert()
-        .success();
-    wait_until(|| !pid_exists(worker) && !pid_exists(child));
-    assert!(!pid_exists(worker));
-    assert!(!pid_exists(child));
-}
-
-#[cfg(unix)]
-fn pid_exists(pid: u32) -> bool {
-    Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .status()
-        .is_ok_and(|status| status.success())
-}
-
-#[cfg(unix)]
 fn wait_until(mut predicate: impl FnMut() -> bool) {
-    for _ in 0..100 {
+    for _ in 0..200 {
         if predicate() {
             return;
         }
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::thread::sleep(std::time::Duration::from_millis(25));
     }
+    panic!("condition did not become true");
+}
+
+#[test]
+fn compiler_error_is_a_valid_portable_handoff_point() {
+    let project = tempfile::tempdir().unwrap();
+    let author_home = tempfile::tempdir().unwrap();
+    let recipient_home = tempfile::tempdir().unwrap();
+    write_project(
+        project.path(),
+        r#"["sh", "-c", "rustc broken.rs 2>&1 || true"]"#,
+        "",
+    );
+    fs::write(project.path().join("broken.rs"), "fn main() { missing( }\n").unwrap();
+
+    ato(author_home.path())
+        .args(["init", project.path().to_str().unwrap()])
+        .assert()
+        .success();
+    let log = project.path().join(".capsule/runs/output.log");
+    wait_until(|| fs::read_to_string(&log).is_ok_and(|text| text.contains("error")));
+    ato(author_home.path())
+        .args(["stop", project.path().to_str().unwrap()])
+        .assert()
+        .success();
+    let bundle = project.path().join("error.capsule");
+    ato(author_home.path())
+        .args([
+            "encap",
+            &format!("{}@main", project.path().display()),
+            "-o",
+            bundle.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    ato(recipient_home.path())
+        .args(["run", bundle.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("error"));
+}
+
+#[test]
+fn stateful_protocol_state_survives_nonzero_process_and_replay() {
+    let project = tempfile::tempdir().unwrap();
+    let author_home = tempfile::tempdir().unwrap();
+    let recipient_home = tempfile::tempdir().unwrap();
+    fs::write(project.path().join("count.txt"), "0").unwrap();
+    write_project(
+        project.path(),
+        r#"["sh", "-c", "test \"$(cat count.txt)\" = 1"]"#,
+        r#"[[port]]
+id = "app.http"
+protocol = "ato.http@1"
+role = "server"
+
+[[adapter]]
+port = "app.http"
+use = "ato.http@1""#,
+    );
+    ato(author_home.path())
+        .args(["init", project.path().to_str().unwrap()])
+        .assert()
+        .success();
+    fs::write(project.path().join("count.txt"), "1").unwrap();
+    ato(author_home.path())
+        .args(["stop", project.path().to_str().unwrap()])
+        .assert()
+        .success();
+    let records = fs::read_dir(project.path().join(".capsule/records"))
+        .unwrap()
+        .count();
+    assert!(records >= 1);
+    let bundle = project.path().join("counter.capsule");
+    ato(author_home.path())
+        .args([
+            "encap",
+            &format!("{}@main", project.path().display()),
+            "-o",
+            bundle.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    ato(recipient_home.path())
+        .args(["run", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+}
+
+#[test]
+fn historical_resume_creates_a_sibling_future_without_rewrite() {
+    let project = tempfile::tempdir().unwrap();
+    let ato_home = tempfile::tempdir().unwrap();
+    fs::write(project.path().join("state.txt"), "0").unwrap();
+    write_project(project.path(), r#"["sh", "-c", "true"]"#, "");
+
+    ato(ato_home.path())
+        .args(["init", project.path().to_str().unwrap()])
+        .assert()
+        .success();
+    fs::write(project.path().join("state.txt"), "A").unwrap();
+    ato(ato_home.path())
+        .args(["stop", project.path().to_str().unwrap()])
+        .assert()
+        .success();
+    ato(ato_home.path())
+        .args(["resume", &format!("{}@main", project.path().display())])
+        .assert()
+        .success();
+    fs::write(project.path().join("state.txt"), "AB").unwrap();
+    ato(ato_home.path())
+        .args(["stop", project.path().to_str().unwrap()])
+        .assert()
+        .success();
+    let main = fs::read_to_string(project.path().join(".capsule/refs/heads/main")).unwrap();
+
+    ato(ato_home.path())
+        .args(["resume", &format!("{}@main#1", project.path().display())])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--branch"));
+    ato(ato_home.path())
+        .args([
+            "resume",
+            &format!("{}@main#1", project.path().display()),
+            "--branch",
+            "experiment",
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(project.path().join("state.txt")).unwrap(),
+        "A"
+    );
+    fs::write(project.path().join("state.txt"), "AC").unwrap();
+    ato(ato_home.path())
+        .args(["stop", project.path().to_str().unwrap()])
+        .assert()
+        .success();
+    let experiment =
+        fs::read_to_string(project.path().join(".capsule/refs/heads/experiment")).unwrap();
+    assert_eq!(
+        fs::read_to_string(project.path().join(".capsule/refs/heads/main")).unwrap(),
+        main
+    );
+    assert_ne!(experiment, main);
+
+    let bundle = project.path().join("experiment.capsule");
+    ato(ato_home.path())
+        .args([
+            "encap",
+            &format!("{}@experiment", project.path().display()),
+            "-o",
+            bundle.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert!(!fs::read_to_string(bundle).unwrap().contains("QUI="));
+}
+
+#[test]
+fn recipient_rebinds_secret_without_secret_transport() {
+    let project = tempfile::tempdir().unwrap();
+    let author_home = tempfile::tempdir().unwrap();
+    let recipient_home = tempfile::tempdir().unwrap();
+    write_project(
+        project.path(),
+        r#"["sh", "-c", "test -n \"$API_TOKEN\""]"#,
+        r#"[[binding]]
+id = "service.api_token"
+environment = "API_TOKEN"
+protocol = "ato.binding@1""#,
+    );
+    ato(author_home.path())
+        .args([
+            "init",
+            project.path().to_str().unwrap(),
+            "--bind",
+            "service.api_token=alice-secret",
+        ])
+        .assert()
+        .success();
+    ato(author_home.path())
+        .args(["stop", project.path().to_str().unwrap()])
+        .assert()
+        .success();
+    let bundle = project.path().join("secret.capsule");
+    ato(author_home.path())
+        .args([
+            "encap",
+            &format!("{}@main", project.path().display()),
+            "-o",
+            bundle.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    for entry in walk(project.path().join(".capsule")) {
+        if let Ok(bytes) = fs::read(entry) {
+            assert!(
+                !bytes
+                    .windows(b"alice-secret".len())
+                    .any(|value| value == b"alice-secret")
+            );
+        }
+    }
+    assert!(
+        !fs::read(&bundle)
+            .unwrap()
+            .windows(b"alice-secret".len())
+            .any(|value| value == b"alice-secret")
+    );
+    ato(recipient_home.path())
+        .args([
+            "run",
+            bundle.to_str().unwrap(),
+            "--bind",
+            "service.api_token=bob-secret",
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn same_capsule_identity_supports_multiple_encap_materializations() {
+    let project = tempfile::tempdir().unwrap();
+    let ato_home = tempfile::tempdir().unwrap();
+    write_project(project.path(), r#"["sh", "-c", "true"]"#, "");
+    ato(ato_home.path())
+        .args(["init", project.path().to_str().unwrap(), "--initial-only"])
+        .assert()
+        .success();
+    let replay = project.path().join("replay.capsule");
+    let multi = project.path().join("multi.capsule");
+    for (output, extra) in [
+        (&replay, Vec::<&str>::new()),
+        (&multi, vec!["--materialize", "ato.snapshot@1"]),
+    ] {
+        let mut args = vec![
+            "encap",
+            project.path().to_str().unwrap(),
+            "--materialize",
+            "ato.replay@1",
+        ];
+        args.extend(extra);
+        args.extend(["-o", output.to_str().unwrap()]);
+        ato(ato_home.path()).args(args).assert().success();
+    }
+    let replay_json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&replay).unwrap()).unwrap();
+    let multi_json: serde_json::Value = serde_json::from_slice(&fs::read(&multi).unwrap()).unwrap();
+    assert_eq!(replay_json["index"]["root"], multi_json["index"]["root"]);
+    assert_ne!(fs::read(&replay).unwrap(), fs::read(&multi).unwrap());
+    assert_eq!(
+        replay_json["index"]["materializations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        multi_json["index"]["materializations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    ato(ato_home.path())
+        .args(["run", multi.to_str().unwrap()])
+        .assert()
+        .success();
+}
+
+#[test]
+fn one_root_computation_runs_an_explicit_multi_process_application() {
+    let project = tempfile::tempdir().unwrap();
+    let ato_home = tempfile::tempdir().unwrap();
+    fs::write(
+        project.path().join("capsule.toml"),
+        r#"schema = 1
+
+[[process]]
+id = "api"
+command = ["sh", "-c", "printf api > api.out"]
+cwd = "."
+
+[[process]]
+id = "counter"
+command = ["sh", "-c", "printf counter > counter.out"]
+cwd = "."
+
+[[adapter]]
+target = "api"
+use = "ato.process@1"
+
+[[adapter]]
+target = "counter"
+use = "ato.process@1"
+
+[[port]]
+id = "app.http"
+protocol = "ato.http@1"
+role = "server"
+
+[encap]
+materializers = ["ato.replay@1"]
+"#,
+    )
+    .unwrap();
+    ato(ato_home.path())
+        .args(["init", project.path().to_str().unwrap()])
+        .assert()
+        .success();
+    wait_until(|| {
+        project.path().join("api.out").is_file() && project.path().join("counter.out").is_file()
+    });
+    ato(ato_home.path())
+        .args(["stop", project.path().to_str().unwrap()])
+        .assert()
+        .success();
+    let root = fs::read_to_string(project.path().join(".capsule/refs/heads/main")).unwrap();
+    assert!(root.starts_with("blake3:"));
+}
+
+fn walk(root: impl AsRef<Path>) -> Vec<std::path::PathBuf> {
+    let mut pending = vec![root.as_ref().to_path_buf()];
+    let mut files = Vec::new();
+    while let Some(path) = pending.pop() {
+        if path.is_dir() {
+            pending.extend(
+                fs::read_dir(path)
+                    .unwrap()
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path()),
+            );
+        } else {
+            files.push(path);
+        }
+    }
+    files
 }
