@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -23,6 +24,7 @@ use crate::{
 
 const STOP_REQUEST: &str = "runs/stop.request";
 const STOP_ACK: &str = "runs/stop.ack";
+static RUN_TOKEN_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SupervisorState {
@@ -44,9 +46,38 @@ pub(crate) fn start_durable(
     head: &ComputationRef,
     bindings: &BTreeMap<String, String>,
 ) -> Result<()> {
-    if repository.active_run()?.is_some() {
-        bail!("capsule already has an active Run; stop it before resuming");
+    let token = format!(
+        "{}-{}-{}",
+        std::process::id(),
+        observed_nanos(),
+        RUN_TOKEN_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let lease = ActiveRun {
+        token: token.clone(),
+        branch: branch.to_owned(),
+        branch_base: head.clone(),
+        head: head.clone(),
+        pid: 0,
+        process_start_time: String::new(),
+        process_group: 0,
+        boot_session: String::new(),
+        status: "starting".to_owned(),
+    };
+    repository.claim_active_run(&lease)?;
+    let result = start_claimed(repository, branch, head, bindings, &token);
+    if result.is_err() {
+        let _ = repository.release_active_run(&token);
     }
+    result
+}
+
+fn start_claimed(
+    repository: &LocalCapsuleRepository,
+    branch: &str,
+    head: &ComputationRef,
+    bindings: &BTreeMap<String, String>,
+    token: &str,
+) -> Result<()> {
     let log_path = repository.root().join("runs/output.log");
     let stdout = OpenOptions::new()
         .create(true)
@@ -58,6 +89,7 @@ pub(crate) fn start_durable(
         .arg(repository.project())
         .arg(branch)
         .arg(head.to_string())
+        .arg(token)
         .env("ATO_RUNTIME_BINDINGS", serde_json::to_string(bindings)?)
         .stdin(Stdio::null())
         .stdout(stdout.try_clone()?)
@@ -65,7 +97,10 @@ pub(crate) fn start_durable(
     configure_detached_process(&mut command);
     let mut child = command.spawn()?;
     for _ in 0..100 {
-        if repository.active_run()?.is_some() {
+        if repository
+            .active_run()?
+            .is_some_and(|run| run.token == token && run.status == "active")
+        {
             return Ok(());
         }
         if child.try_wait()?.is_some() {
@@ -82,7 +117,12 @@ pub(crate) fn start_durable(
     )
 }
 
-pub(crate) fn worker(project: &Path, branch: &str, head: &ComputationRef) -> Result<()> {
+pub(crate) fn worker(
+    project: &Path,
+    branch: &str,
+    head: &ComputationRef,
+    token: &str,
+) -> Result<()> {
     let repository = LocalCapsuleRepository::open(project)?;
     enter(SupervisorState::Preparing);
     let config = load_runtime_state(head, repository.objects())?.config;
@@ -112,6 +152,7 @@ pub(crate) fn worker(project: &Path, branch: &str, head: &ComputationRef) -> Res
         .map_err(|_| anyhow::anyhow!("Run head lock was poisoned"))?
         .clone();
     let active = ActiveRun {
+        token: token.to_owned(),
         branch: branch.to_owned(),
         branch_base: head.clone(),
         head: attached_head,
@@ -122,7 +163,7 @@ pub(crate) fn worker(project: &Path, branch: &str, head: &ComputationRef) -> Res
         boot_session: boot_session_identity()?,
         status: "active".to_owned(),
     };
-    repository.set_active_run(&active)?;
+    repository.activate_run(token, &active)?;
     enter(SupervisorState::Active);
     for session in &mut sessions {
         session.activate()?;
@@ -153,6 +194,9 @@ pub(crate) fn stop_active(repository: &LocalCapsuleRepository) -> Result<Option<
     let Some(run) = repository.active_run()? else {
         return Ok(None);
     };
+    if run.status != "active" {
+        bail!("Capsule Run is still preparing and cannot be stopped");
+    }
     if boot_session_identity()? != run.boot_session
         || process_start_time(run.pid).as_deref() != Some(run.process_start_time.as_str())
     {
@@ -192,6 +236,12 @@ pub(crate) fn stop_active(repository: &LocalCapsuleRepository) -> Result<Option<
     let _ = fs::remove_file(ack);
     enter(SupervisorState::Sealed);
     Ok(Some(run))
+}
+
+fn observed_nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |value| value.as_nanos())
 }
 
 pub(crate) struct CliRealizationDriver {

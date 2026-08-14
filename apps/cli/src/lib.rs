@@ -64,6 +64,7 @@ enum Commands {
         project: PathBuf,
         branch: String,
         head: String,
+        token: String,
     },
 }
 
@@ -112,7 +113,8 @@ pub fn run() -> Result<()> {
             project,
             branch,
             head,
-        } => supervisor::worker(&project, &branch, &ComputationRef::parse(head)?),
+            token,
+        } => supervisor::worker(&project, &branch, &ComputationRef::parse(head)?, &token),
     }
 }
 
@@ -186,7 +188,7 @@ fn stop(capsule: &str) -> Result<()> {
     let stopped = stop_active(&repository)?.context("Capsule has no active Run")?;
     let head = evolve_workspace(&repository, &stopped.branch, &stopped.head)?;
     repository.update_head(&stopped.branch, Some(&stopped.branch_base), &head)?;
-    repository.clear_active_run()?;
+    repository.release_active_run(&stopped.token)?;
     println!("sealed {} at {head}", stopped.branch);
     Ok(())
 }
