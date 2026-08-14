@@ -2,10 +2,7 @@
 
 Status: Accepted
 
-## Thesis
-
-Ato does not execute manifests, build plans, or initialization workflows. Ato
-advances addressable computations.
+## Identity
 
 The only canonical semantic value is:
 
@@ -13,86 +10,73 @@ The only canonical semantic value is:
 ComputationObject { semantics, boundary, residual }
 ```
 
-Its canonical JCS encoding is hashed with BLAKE3 to derive a
-`ComputationRef`. Existing Computation Object v1 golden vectors and hash domain
-remain unchanged. A Capsule is exactly a sealed/addressable computation:
+Canonical JCS encoding and BLAKE3 derive `ComputationRef`. A Capsule is one
+selected immutable computation point:
 
 ```text
 Capsule = ComputationRef
 Run     = mutable cursor { head: ComputationRef }
 ```
 
-There is no second `Capsule` semantic root.
+History, branch names, Records, timestamps, host paths, bindings, active
+processes, and Materializations never enter `ComputationObject`.
 
-## Evolution and observation
+For `C0 → C1 → C2`, the current computation is C2. History may relate all
+three refs, but C2 does not hash its history.
+
+An Adapter observation explicitly classifies itself as evidence-only or a
+semantic evolution. A semantic evolution advances an opaque residual frontier;
+Record identity, sequence, timestamp, and causal metadata remain outside the
+ComputationObject. Memory-only state changes therefore still produce C1 even
+when the workspace snapshot is unchanged.
+
+## Evolution
+
+The Kernel resolves `Run.head`, dispatches by `SemanticsId`, validates opaque
+Protocol payloads through `ProtocolSemantics`, seals the successor, and moves
+the cursor. `derive_transition` does not publish evidence;
+`commit_transition` publishes one selected transition; `step` combines both
+and advances `Run.head`.
+
+Kernel code never learns HTTP, PTY, workspace, binding, runtime, snapshot, or
+process payload schemas. Concrete Adapters remain outside Kernel dependencies.
+
+## Ports and Protocols
+
+A Port is an interaction crossing the selected computation boundary. It has a
+stable `PortId`, `ProtocolId`, and `RoleId`. `ProtocolPayload` is opaque to the
+Kernel and typed by registered Protocol semantics.
+
+Recorded, replayable, and runnable are separate properties. An Adapter may
+observe without applying, or verify without restoring.
+
+## Composition
+
+Composition is a basic Ato operation:
 
 ```text
-C --action--> C'
-C models observer K
-composeW(C1, ..., Cn) -> C
+composeW(C1, …, Cn) = C
 ```
 
-The kernel resolves `Run.head`, dispatches by `SemanticsId`, asks that
-semantics for one successor, canonically persists it, and updates the cursor.
-The kernel contains no repository, compose, browser, language-runtime,
-snapshot, or Nacelle rules.
+Pure wiring types (`NodeId`, `Endpoint`, `Connection`, and
+`CompositeResidual`) live in `ato-computation`. Executable validation,
+synchronization, hiding, small-step reduction, and closure traversal live in
+the core `ato-compose` library because they require Kernel and Objects.
 
-`C0 -> C1 -> C2` is history. The current computation is `C2`; past
-transitions do not participate in its identity. A no-op transition sink is a
-complete kernel configuration. There is no privileged `C_init` concept.
-
-Goal and readiness are authoring/evaluator stopping concerns. A Contract is an
-observation requirement on a realized/resumed computation. Neither is a core
-primitive.
-
-Kernel transition handling is deliberately two-phase. `derive_transition`
-computes, seals, and validates a successor without publishing history.
-`commit_transition` sends only the selected top-level transition to the
-optional sink. `step` is derive + commit + `Run.head` update. Compose therefore
-derives boundary-hidden child transitions and commits one parent transition
-atomically; failed synchronization cannot leak partial child evidence.
-
-## Boundaries and composition
-
-A Port is a typed interaction crossing the selected computation boundary. The
-same child action can become `Tau` when its endpoints are internal to a
-composite. Names such as install, build, launch, shell, or navigation do not by
-themselves create Ports.
-
-The Kernel knows which Protocol governs an interaction, but never knows the
-Protocol's payload model. `Action` carries `ProtocolPayload`, an opaque byte
-carrier. The Port's `ProtocolId` dispatches to registered `ProtocolSemantics`,
-which owns role compatibility, input/output payload validation, and future
-behavioral or capability rules. Thus payloads are opaque in the Kernel and
-typed by the Protocol; this is not an unvalidated universal bytes model.
-
-Enabled transitions are `TransitionOffer { choice, action }`. A
-semantics-owned opaque `ChoiceId` distinguishes two transitions even when both
-visible actions are `Tau` or carry equal output payloads. Semantic choice is
-never inferred from collection iteration order. External input may omit a
-choice when its payload selects the transition.
-
-`capsule.compose@1` is an ordinary semantics extension. Its child semantics
-produce transition evidence; compose validates endpoints/value agreement and
-reduces internal synchronization to `Tau`. The canonical Alice/Bob test
-branches from the same computation and persists all seven distinct refs while
-keeping `{name, greeting}` invariant.
+Child-to-child communication is internalized as `Tau`; exported child Ports
+form exactly the parent boundary. Kernel still has no workload-specific graph,
+service, placement, or cluster primitive.
 
 ## Classification
 
-1. Future behavior belongs in semantics-specific residual identity.
-2. Boundary-crossing interaction is a Port action.
-3. Physically different but observationally equivalent realization belongs to a Provider.
-4. Past events are optional evidence/trace.
-5. Authoring notation is Adapter input and compiles away.
+Every new public concept must be one of:
 
-Runtime versions, environment values, source and filesystem topology are in
-the residual when they change future behavior. Plaintext secret values never
-are: residuals contain safe binding identities, while providers own values and
-injection. Network allowlists are provider security contracts. Snapshots are
-provider materializations.
+1. a property of the current Computation;
+2. history or evidence in Objects;
+3. a Protocol interaction;
+4. a physical Adapter;
+5. a Materialization implementation; or
+6. CLI/runtime orchestration.
 
-There is no universal Value enum, workflow/InitSpec DSL, generic Build or
-Launch graph, universal State, Connector, Record, or Capture Manager.
-There is no `Kernel<V>`, `Semantics<V>`, `Action<V>`, or universal payload
-enum. Concrete Protocol implementations own payload typing.
+No additional semantic root is introduced for lineage, runtime, provider,
+repository, snapshot, or application category.
