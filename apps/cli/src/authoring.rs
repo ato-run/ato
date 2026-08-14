@@ -10,6 +10,10 @@ use ato_adapter_process::{PROCESS_ADAPTER_ID, ProcessSpec};
 use ato_adapter_workspace::{
     WorkspaceMutation, WorkspaceSnapshot, capture_workspace, encode_mutation,
 };
+use ato_compose::{
+    COMPOSE_SEMANTICS_ID, CompositeResidual, Connection, Endpoint, NodeId,
+    decode_composite_residual, encode_composite_residual,
+};
 use ato_computation::{
     Boundary, ComputationObject, ComputationRef, ContentRef, PortDef, PortId, ProtocolId,
     ResolvedComputation, RoleId, SemanticsId, computation_ref, encode_computation_object,
@@ -170,7 +174,89 @@ pub(crate) fn initial_computation(
     config: AuthoringConfig,
 ) -> Result<ComputationRef> {
     let snapshot = capture_workspace(repository.project(), repository.objects())?;
-    seal_state(repository.objects(), config, snapshot)
+    seal_authored_root(repository.objects(), config, snapshot)
+}
+
+fn seal_authored_root(
+    objects: &dyn ObjectStore,
+    config: AuthoringConfig,
+    snapshot: ContentRef,
+) -> Result<ComputationRef> {
+    if config.process.len() < 2 && config.connection.is_empty() {
+        return seal_state(objects, config, snapshot);
+    }
+    let process_ids: Vec<_> = config
+        .process
+        .iter()
+        .map(|process| process.id.clone())
+        .collect();
+    let first = process_ids
+        .first()
+        .context("composite requires a process")?;
+    let owner = |port: &str| {
+        process_ids
+            .iter()
+            .find(|process| port.starts_with(&format!("{process}.")))
+            .unwrap_or(first)
+            .clone()
+    };
+    let mut nodes = std::collections::BTreeMap::new();
+    for process in &config.process {
+        let ports: Vec<_> = config
+            .port
+            .iter()
+            .filter(|port| owner(&port.id) == process.id)
+            .cloned()
+            .collect();
+        let port_ids: BTreeSet<_> = ports.iter().map(|port| port.id.as_str()).collect();
+        let adapters = config
+            .adapter
+            .iter()
+            .filter(|adapter| {
+                adapter.target.as_deref() == Some(process.id.as_str())
+                    || adapter
+                        .port
+                        .as_deref()
+                        .is_some_and(|port| port_ids.contains(port))
+                    || adapter.target.as_deref() == Some("workspace")
+            })
+            .cloned()
+            .collect();
+        let child = AuthoringConfig {
+            schema: config.schema,
+            process: vec![process.clone()],
+            adapter: adapters,
+            port: ports,
+            connection: Vec::new(),
+            binding: config.binding.clone(),
+            encap: config.encap.clone(),
+        };
+        nodes.insert(
+            NodeId::parse(&process.id)?,
+            seal_state(objects, child, snapshot.clone())?,
+        );
+    }
+    let endpoint = |port: &str| -> Result<Endpoint> {
+        Ok(Endpoint {
+            node: NodeId::parse(owner(port))?,
+            port: PortId::parse(port)?,
+        })
+    };
+    let connections = config
+        .connection
+        .iter()
+        .map(|connection| {
+            Connection::new(endpoint(&connection.from)?, endpoint(&connection.to)?)
+                .map_err(Into::into)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let exports = config
+        .port
+        .iter()
+        .filter(|port| !port.internal)
+        .map(|port| Ok((PortId::parse(&port.id)?, endpoint(&port.id)?)))
+        .collect::<Result<_>>()?;
+    seal_composite(objects, nodes, connections, exports, boundary(&config)?)
 }
 
 pub(crate) fn adapter_instances(
@@ -270,18 +356,143 @@ pub(crate) fn load_state(
     Ok(state)
 }
 
+pub(crate) fn load_runtime_state(
+    reference: &ComputationRef,
+    objects: &dyn ObjectResolver,
+) -> Result<AuthoringState> {
+    let computation = resolve_computation(objects, reference)?;
+    if computation.object().semantics == SemanticsId::parse(AUTHORING_SEMANTICS_ID)? {
+        return load_state(reference, objects);
+    }
+    if computation.object().semantics != SemanticsId::parse(COMPOSE_SEMANTICS_ID)? {
+        bail!("computation {reference} has no authoring runtime projection");
+    }
+    let composite = load_composite(reference, objects)?;
+    let mut states = composite
+        .nodes
+        .values()
+        .map(|child| load_runtime_state(child, objects));
+    let mut merged = states.next().context("composite has no child nodes")??;
+    for state in states {
+        let state = state?;
+        if state.workspace_snapshot != merged.workspace_snapshot {
+            bail!("composite children do not share one workspace snapshot");
+        }
+        merged.config.process.extend(state.config.process);
+        merged.config.adapter.extend(state.config.adapter);
+        for port in state.config.port {
+            if !merged
+                .config
+                .port
+                .iter()
+                .any(|existing| existing.id == port.id)
+            {
+                merged.config.port.push(port);
+            }
+        }
+        for binding in state.config.binding {
+            if !merged
+                .config
+                .binding
+                .iter()
+                .any(|existing| existing.id == binding.id)
+            {
+                merged.config.binding.push(binding);
+            }
+        }
+    }
+    merged.config.connection = composite
+        .connections
+        .iter()
+        .map(|connection| ConnectionConfig {
+            from: connection.first().port.to_string(),
+            to: connection.second().port.to_string(),
+        })
+        .collect();
+    Ok(merged)
+}
+
+fn load_composite(
+    reference: &ComputationRef,
+    objects: &dyn ObjectResolver,
+) -> Result<CompositeResidual> {
+    let computation = resolve_computation(objects, reference)?;
+    let residual = &computation.object().residual;
+    let metadata = objects.metadata(residual)?;
+    let bytes = read_exact_object(objects, residual, metadata.size, 16 * 1024 * 1024)?;
+    Ok(decode_composite_residual(&bytes)?)
+}
+
 pub(crate) fn evolve_workspace(
     repository: &LocalCapsuleRepository,
     branch: &str,
     start: &ComputationRef,
 ) -> Result<ComputationRef> {
-    let mut state = load_state(start, repository.objects())?;
-    let before = load_snapshot(&state.workspace_snapshot, repository.objects())?;
+    let runtime = load_runtime_state(start, repository.objects())?;
+    let before = load_snapshot(&runtime.workspace_snapshot, repository.objects())?;
     let final_ref = capture_workspace(repository.project(), repository.objects())?;
     let after = load_snapshot(final_ref.as_str(), repository.objects())?;
     if before == after {
         return Ok(start.clone());
     }
+    if resolve_computation(repository.objects(), start)?
+        .object()
+        .semantics
+        == SemanticsId::parse(COMPOSE_SEMANTICS_ID)?
+    {
+        let paths: BTreeSet<_> = before
+            .files
+            .keys()
+            .chain(after.files.keys())
+            .cloned()
+            .collect();
+        let mut files = before.files;
+        let mut head = start.clone();
+        let mut previous = repository
+            .records_for_stream(branch, None)?
+            .last()
+            .map(|record| record.id.clone());
+        for path in paths {
+            let mutation = match (files.get(&path), after.files.get(&path)) {
+                (left, right) if left == right => continue,
+                (_, Some(content)) => {
+                    files.insert(path.clone(), content.clone());
+                    WorkspaceMutation::Put {
+                        path,
+                        content: content.clone(),
+                    }
+                }
+                (Some(_), None) => {
+                    files.remove(&path);
+                    WorkspaceMutation::Delete { path }
+                }
+                (None, None) => continue,
+            };
+            let snapshot = repository
+                .objects()
+                .put(&serde_jcs::to_vec(&WorkspaceSnapshot {
+                    files: files.clone(),
+                })?)?;
+            let next = evolve_composite_snapshot(repository.objects(), &head, &snapshot)?;
+            let payload = repository.objects().put(&encode_mutation(&mutation)?)?;
+            let record = repository.append_record(RecordEnvelope {
+                id: RecordId::new(branch, 0),
+                adapter_id: "ato.workspace@1".to_owned(),
+                protocol_id: ProtocolId::parse("ato.workspace@1")?,
+                port_id: PortId::parse("workspace.main")?,
+                direction: Direction::Inbound,
+                payload_ref: payload,
+                head_before: head,
+                head_after: next.clone(),
+                caused_by: previous.into_iter().collect(),
+                observed_at: observed_at(),
+            })?;
+            previous = Some(record.id);
+            head = next;
+        }
+        return Ok(head);
+    }
+    let mut state = load_state(start, repository.objects())?;
 
     let paths: BTreeSet<_> = before
         .files
@@ -334,6 +545,34 @@ pub(crate) fn evolve_workspace(
     Ok(head)
 }
 
+fn evolve_composite_snapshot(
+    objects: &dyn ObjectStore,
+    reference: &ComputationRef,
+    snapshot: &ContentRef,
+) -> Result<ComputationRef> {
+    let resolved = resolve_computation(objects, reference)?;
+    let mut composite = load_composite(reference, objects)?;
+    for child in composite.nodes.values_mut() {
+        let semantics = resolve_computation(objects, child)?
+            .object()
+            .semantics
+            .clone();
+        *child = if semantics == SemanticsId::parse(AUTHORING_SEMANTICS_ID)? {
+            let state = load_state(child, objects)?;
+            seal_state(objects, state.config, snapshot.clone())?
+        } else {
+            evolve_composite_snapshot(objects, child, snapshot)?
+        };
+    }
+    seal_composite(
+        objects,
+        composite.nodes,
+        composite.connections,
+        composite.exports,
+        resolved.object().boundary.clone(),
+    )
+}
+
 pub(crate) fn seal_state(
     objects: &dyn ObjectStore,
     config: AuthoringConfig,
@@ -348,6 +587,31 @@ pub(crate) fn seal_state(
     let residual = objects.put(&serde_jcs::to_vec(&state)?)?;
     let computation = ComputationObject {
         semantics: SemanticsId::parse(AUTHORING_SEMANTICS_ID)?,
+        boundary,
+        residual,
+    };
+    let reference = computation_ref(&computation)?;
+    objects.insert(
+        reference.content_ref(),
+        &encode_computation_object(&computation)?,
+    )?;
+    Ok(reference)
+}
+
+fn seal_composite(
+    objects: &dyn ObjectStore,
+    nodes: std::collections::BTreeMap<NodeId, ComputationRef>,
+    connections: Vec<Connection>,
+    exports: std::collections::BTreeMap<PortId, Endpoint>,
+    boundary: Boundary,
+) -> Result<ComputationRef> {
+    let residual = objects.put(&encode_composite_residual(&CompositeResidual {
+        nodes,
+        connections,
+        exports,
+    })?)?;
+    let computation = ComputationObject {
+        semantics: SemanticsId::parse(COMPOSE_SEMANTICS_ID)?,
         boundary,
         residual,
     };

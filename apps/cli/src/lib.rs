@@ -31,7 +31,7 @@ use ato_objects::{
 use clap::{Args, Parser, Subcommand};
 
 use crate::authoring::{
-    AuthoringReferences, evolve_workspace, initial_computation, load_config, load_state,
+    AuthoringReferences, evolve_workspace, initial_computation, load_config, load_runtime_state,
 };
 use crate::supervisor::{CliRealizationDriver, start_durable, stop_active};
 
@@ -141,7 +141,7 @@ fn resume(args: ResumeArgs) -> Result<()> {
     let project = project_path(&selector.capsule, false)?;
     let repository = LocalCapsuleRepository::open(project)?;
     let selected = repository.resolve(&selector)?;
-    let selected_state = load_state(&selected, repository.objects())?;
+    let selected_state = load_runtime_state(&selected, repository.objects())?;
     restore_workspace(
         &ContentRef::parse(&selected_state.workspace_snapshot)?,
         repository.project(),
@@ -195,7 +195,7 @@ fn encap(args: EncapArgs) -> Result<()> {
     let project = project_path(&selector.capsule, false)?;
     let repository = LocalCapsuleRepository::open(project)?;
     let target = repository.resolve(&selector)?;
-    let state = load_state(&target, repository.objects())?;
+    let state = load_runtime_state(&target, repository.objects())?;
     let records = repository.records_for_stream(&selector.branch, selector.record)?;
     let adapters = adapter_registry()?;
     let materializers = materializer_registry()?;
@@ -255,7 +255,7 @@ fn run_capsule(args: RunArgs) -> Result<()> {
     let bundle = decode_bundle(&fs::read(&args.capsule)?)?;
     let references = reference_registry()?;
     let root = import_bundle(&bundle, repository.objects(), &references)?;
-    let state = load_state(&root, repository.objects())?;
+    let state = load_runtime_state(&root, repository.objects())?;
     let bindings: BTreeMap<_, _> = args.bindings.into_iter().collect();
     let missing: Vec<_> = state
         .config

@@ -498,6 +498,17 @@ materializers = ["ato.replay@1"]
         .success();
     let root = fs::read_to_string(project.path().join(".capsule/refs/heads/main")).unwrap();
     assert!(root.starts_with("blake3:"));
+    let root_object: serde_json::Value = serde_json::from_slice(
+        &fs::read(
+            project
+                .path()
+                .join(".capsule/objects/blake3")
+                .join(root.trim().split_once(':').unwrap().1),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(root_object["semantics"], "capsule.compose@1");
     let bundle = project.path().join("composite.capsule");
     ato(ato_home.path())
         .args([

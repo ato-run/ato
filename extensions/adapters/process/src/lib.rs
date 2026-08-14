@@ -314,7 +314,9 @@ mod tests {
             isolated_group: false,
         })
         .unwrap();
-        let mut handle = adapter.spawn_attached(PathBuf::from(".").as_path()).unwrap();
+        let mut handle = adapter
+            .spawn_attached(PathBuf::from(".").as_path())
+            .unwrap();
         assert!(handle.wait().unwrap().success());
     }
 }
