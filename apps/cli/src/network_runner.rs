@@ -330,6 +330,27 @@ fn execute_lease(
     evaluator: &UntrustedProcessEvaluator,
     lease: &ClaimedLease,
 ) -> Result<()> {
+    #[cfg(unix)]
+    {
+        execute_lease_unix(client, base, args, evaluator, lease)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (client, base, args, evaluator, lease);
+        bail!(
+            "portable Capsule runner has no Evaluator satisfying {UNTRUSTED_ISOLATION_CAPABILITY}"
+        )
+    }
+}
+
+#[cfg(unix)]
+fn execute_lease_unix(
+    client: &Client,
+    base: &str,
+    args: &ResolvedServeArgs,
+    evaluator: &UntrustedProcessEvaluator,
+    lease: &ClaimedLease,
+) -> Result<()> {
     if lease.command.kind != "portable_capsule_v2" {
         bail!("unsupported lease kind `{}`", lease.command.kind);
     }
