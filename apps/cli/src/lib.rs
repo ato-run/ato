@@ -9,11 +9,12 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use ato_adapter_repository::{
-    CompiledRepository, RepositoryOptions, compile_repository, fetch_git_repository,
-    inspect_repository, materialize_source,
+    CAPSULE_LOCK_FILE, CompiledRepository, LockedResolution, RepositoryOptions, compile_repository,
+    compile_repository_with_lock, encode_capsule_lock, fetch_git_repository, lock_for,
+    materialize_source, read_capsule_lock,
 };
 use ato_computation::{ComputationRef, ContentRef, SemanticsId};
-use ato_kernel::{Action, Kernel, Run};
+use ato_kernel::{Kernel, Run};
 use ato_objects::{
     FsObjectStore, ObjectResolver, ReferenceRegistry, decode_bundle, encode_bundle, export_bundle,
     import_bundle, read_exact_object,
@@ -39,7 +40,7 @@ struct Cli {
 enum Commands {
     /// Compile a repository and advance its workspace computation.
     Run(RunArgs),
-    /// Resolve repository authoring evidence into ato.lock.json.
+    /// Pin repository resolution evidence into capsule.lock.
     Lock { target: Option<String> },
     /// Export a repository as a portable object-closure bundle.
     Encap(EncapArgs),
@@ -139,16 +140,6 @@ struct RunRecord {
     log: PathBuf,
 }
 
-#[derive(Serialize)]
-struct ResolutionReceipt {
-    version: u32,
-    computation: String,
-    source: String,
-    toolchain: String,
-    entrypoint: Vec<String>,
-    observed_files: Vec<String>,
-}
-
 pub fn run() -> Result<()> {
     match Cli::parse().command {
         Commands::Run(args) => run_repository(args),
@@ -177,7 +168,10 @@ fn run_repository(args: RunArgs) -> Result<()> {
         sandbox_required: !args.no_sandbox,
         ..RepositoryOptions::default()
     };
-    let compiled = compile_repository(&source, objects.as_ref(), options)?;
+    let compiled = match read_capsule_lock(&source)? {
+        Some(lock) => compile_repository_with_lock(&source, objects.as_ref(), options, &lock)?,
+        None => compile_repository(&source, objects.as_ref(), options)?,
+    };
     let head = advance_workspace(compiled, objects, Some(&name))?;
     println!("{head}");
     Ok(())
@@ -187,19 +181,9 @@ fn lock_repository(target: &str) -> Result<()> {
     let source = resolve_source(target)?;
     let objects = Arc::new(object_store()?);
     let compiled = compile_repository(&source, objects.as_ref(), RepositoryOptions::default())?;
-    let kernel = Kernel::<()>::new(objects);
-    let computation = kernel.seal(&compiled.computation)?;
-    let inference = inspect_repository(&source)?;
-    let receipt = ResolutionReceipt {
-        version: 1,
-        computation: computation.to_string(),
-        source: compiled.source.to_string(),
-        toolchain: inference.toolchain.family,
-        entrypoint: inference.entrypoint,
-        observed_files: compiled.evidence.observed_files,
-    };
-    let path = source.join("ato.lock.json");
-    fs::write(&path, serde_json::to_vec_pretty(&receipt)?)?;
+    let lock = lock_for(&compiled)?;
+    let path = source.join(CAPSULE_LOCK_FILE);
+    fs::write(&path, encode_capsule_lock(&lock)?)?;
     println!("{}", path.display());
     Ok(())
 }
@@ -208,7 +192,7 @@ fn encap(args: EncapArgs) -> Result<()> {
     let source = resolve_source(&args.target)?;
     let objects = Arc::new(object_store()?);
     let compiled = compile_repository(&source, objects.as_ref(), RepositoryOptions::default())?;
-    let kernel = Kernel::<()>::new(objects.clone());
+    let kernel = Kernel::new(objects.clone());
     let root = kernel.seal(&compiled.computation)?;
     let references = references()?;
     let bundle = export_bundle(&root, objects.as_ref(), &references)?;
@@ -242,12 +226,18 @@ fn decap(command: DecapCommand) -> Result<()> {
                 computation: ato_objects::resolve_computation(objects.as_ref(), &root)?
                     .object()
                     .clone(),
-                source: ContentRef::parse(residual.source)?,
+                source: ContentRef::parse(&residual.source)?,
                 evidence: ato_adapter_repository::InferenceEvidence {
                     observed_files: Vec::new(),
-                    selected_toolchain: residual.toolchain.family,
-                    selected_entrypoint: residual.entrypoint,
+                    selected_toolchain: residual.toolchain.family.clone(),
+                    selected_entrypoint: residual.entrypoint.clone(),
                     authoring_manifest_used: false,
+                },
+                resolution: LockedResolution {
+                    toolchain: residual.toolchain,
+                    package_manager: residual.package_manager,
+                    entrypoint: residual.entrypoint,
+                    working_directory: residual.working_directory,
                 },
                 repository_root: source,
             };
@@ -268,7 +258,7 @@ fn advance_workspace(
 ) -> Result<ComputationRef> {
     let provider = Arc::new(NacelleWorkspaceProvider::default());
     provider.bind_source(compiled.source, &compiled.repository_root)?;
-    let mut kernel = Kernel::<()>::new(objects.clone());
+    let mut kernel = Kernel::new(objects.clone());
     kernel.register(Arc::new(WorkspaceSemantics::new(provider)))?;
     let mut run = Run {
         head: kernel.seal(&compiled.computation)?,
@@ -287,7 +277,12 @@ fn advance_workspace(
             },
         )?;
     }
-    let result = kernel.step(&mut run, &Action::Tau);
+    let offer = kernel
+        .enabled(&run.head)?
+        .into_iter()
+        .next()
+        .context("workspace computation has no enabled transition")?;
+    let result = kernel.step(&mut run, &offer);
     let exit = match result {
         Ok(_) => observe_exit(&workspace_residual(&run.head, objects.as_ref())?)
             .context("workspace computation did not expose an exit")?,
