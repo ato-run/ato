@@ -8,7 +8,7 @@ mod supervisor;
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -68,6 +68,8 @@ enum Commands {
     Encap(EncapArgs),
     /// Consume a portable .capsule ephemerally.
     Run(RunArgs),
+    /// Share a branch point as an unlisted Capsule URL.
+    Share(ShareArgs),
     /// Internal machine interface for canonical portable bundle validation.
     #[command(name = "__bundle", hide = true)]
     Bundle(BundleArgs),
@@ -171,6 +173,27 @@ struct RunArgs {
 }
 
 #[derive(Debug, Args)]
+struct ShareArgs {
+    selector: String,
+    #[arg(long = "materialize")]
+    materializers: Vec<String>,
+    #[arg(long, default_value = "Shared Capsule")]
+    title: String,
+    #[arg(long, default_value = "")]
+    description: String,
+    /// Skip the share-safety confirmation.
+    #[arg(long)]
+    yes: bool,
+    #[arg(long, env = "ATO_API_URL", default_value = "https://api.ato.run")]
+    api_base: String,
+    #[arg(long, env = "ATO_SHARE_URL", default_value = "https://ato.run")]
+    share_base: String,
+    /// Existing Ato device credential (`ato_dev_…`).
+    #[arg(long, env = "ATO_DEVICE_TOKEN", hide_env_values = true)]
+    device_token: String,
+}
+
+#[derive(Debug, Args)]
 struct BundleArgs {
     #[command(subcommand)]
     command: BundleCommands,
@@ -213,6 +236,7 @@ pub fn run() -> Result<()> {
         Commands::Stop { capsule } => stop(&capsule),
         Commands::Encap(args) => encap(args),
         Commands::Run(args) => run_capsule(args),
+        Commands::Share(args) => share(args),
         Commands::Bundle(args) => match args.command {
             BundleCommands::Verify(args) => verify_bundle_command(args),
             BundleCommands::ValidateQueue(args) => validate_bundle_queue(args),
@@ -692,6 +716,12 @@ fn stop(capsule: &str) -> Result<()> {
 }
 
 fn encap(args: EncapArgs) -> Result<()> {
+    let target = encap_impl(args)?;
+    println!("{target}");
+    Ok(())
+}
+
+fn encap_impl(args: EncapArgs) -> Result<ComputationRef> {
     let selector: CapsuleSelector = args.selector.parse()?;
     let project = project_path(&selector.capsule, false)?;
     let repository = LocalCapsuleRepository::open(project)?;
@@ -725,7 +755,171 @@ fn encap(args: EncapArgs) -> Result<()> {
     };
     export_result?;
     release_result?;
-    println!("{target}");
+    Ok(target)
+}
+
+#[derive(Deserialize)]
+struct PreparedShareBundle {
+    bundle_id: String,
+    upload_url: String,
+    upload_direct: bool,
+}
+
+#[derive(Deserialize)]
+struct ShareBundleEnvelope {
+    bundle: ShareBundleStatus,
+}
+
+#[derive(Deserialize)]
+struct ShareBundleStatus {
+    validation_status: String,
+    rejection_code: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CreatedSharePostEnvelope {
+    capsule_post: CreatedSharePost,
+}
+
+#[derive(Deserialize)]
+struct CreatedSharePost {
+    share_path: String,
+}
+
+struct ShareTempFile(PathBuf);
+
+impl Drop for ShareTempFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+fn share(args: ShareArgs) -> Result<()> {
+    let selector: CapsuleSelector = args.selector.parse()?;
+    let project = project_path(&selector.capsule, false)?;
+    let repository = LocalCapsuleRepository::open(project)?;
+    let active_current = selector.record.is_none()
+        && repository
+            .active_run()?
+            .is_some_and(|run| run.status == "active" && run.branch == selector.branch);
+    let temp_dir = repository.root().join("tmp");
+    fs::create_dir_all(&temp_dir)?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    let temp =
+        ShareTempFile(temp_dir.join(format!("share-{}-{nonce}.capsule", std::process::id())));
+    let target = encap_impl(EncapArgs {
+        selector: args.selector.clone(),
+        current: active_current,
+        materializers: args.materializers,
+        output: temp.0.clone(),
+    })?;
+    let bytes = fs::read(&temp.0)?;
+    let report = build_bundle_verification_report(&bytes, None)?;
+
+    println!("Share safety summary");
+    println!("  Included");
+    println!("    {} workspace files", report.workspace_file_count);
+    for materialization in &report.materializations {
+        println!(
+            "    {} ({})",
+            materialization.id, materialization.restore_capability
+        );
+    }
+    println!("  Rebound by recipient");
+    if report.required_bindings.is_empty() {
+        println!("    none");
+    } else {
+        for binding in &report.required_bindings {
+            println!("    {}", binding.id);
+        }
+    }
+    println!("  Excluded by default");
+    println!("    .env, SSH keys, cloud credential directories");
+    println!(
+        "Common credential files are excluded by default. Review included state before publishing."
+    );
+    if !args.yes {
+        print!("Create an unlisted Capsule URL? [y/N] ");
+        std::io::stdout().flush()?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+            bail!("share cancelled");
+        }
+    }
+
+    let base = args.api_base.trim_end_matches('/');
+    let client = reqwest::blocking::Client::builder().build()?;
+    let prepared: PreparedShareBundle = client
+        .post(format!("{base}/v1/capsule-bundles/prepare"))
+        .bearer_auth(&args.device_token)
+        .json(&serde_json::json!({
+            "transport_digest": report.transport_digest,
+            "size_bytes": bytes.len(),
+        }))
+        .send()?
+        .error_for_status()?
+        .json()?;
+    let mut upload = client
+        .put(&prepared.upload_url)
+        .header("content-type", "application/vnd.ato.capsule")
+        .body(bytes);
+    if !prepared.upload_direct {
+        upload = upload.bearer_auth(&args.device_token);
+    }
+    upload.send()?.error_for_status()?;
+    if prepared.upload_direct {
+        client
+            .post(format!(
+                "{base}/v1/capsule-bundles/{}/complete",
+                prepared.bundle_id
+            ))
+            .bearer_auth(&args.device_token)
+            .send()?
+            .error_for_status()?;
+    }
+    println!("Capsule root: {target}");
+    println!("Upload status: validating");
+
+    let ready = loop {
+        let status: ShareBundleEnvelope = client
+            .get(format!("{base}/v1/capsule-bundles/{}", prepared.bundle_id))
+            .bearer_auth(&args.device_token)
+            .send()?
+            .error_for_status()?
+            .json()?;
+        match status.bundle.validation_status.as_str() {
+            "ready" => break status.bundle,
+            "rejected" => bail!(
+                "bundle validation rejected: {}",
+                status
+                    .bundle
+                    .rejection_code
+                    .unwrap_or_else(|| "unspecified".to_owned())
+            ),
+            _ => std::thread::sleep(std::time::Duration::from_secs(2)),
+        }
+    };
+    debug_assert_eq!(ready.validation_status, "ready");
+    let post: CreatedSharePostEnvelope = client
+        .post(format!("{base}/v1/capsule-posts"))
+        .bearer_auth(&args.device_token)
+        .json(&serde_json::json!({
+            "bundle_id": prepared.bundle_id,
+            "title": args.title,
+            "description": args.description,
+        }))
+        .send()?
+        .error_for_status()?
+        .json()?;
+    println!("Upload status: ready");
+    println!(
+        "Share URL: {}{}",
+        args.share_base.trim_end_matches('/'),
+        post.capsule_post.share_path
+    );
     Ok(())
 }
 
@@ -1174,6 +1368,25 @@ mod tests {
             Commands::Encap(EncapArgs { current: true, .. })
         ));
         assert!(Cli::try_parse_from(["ato", "capture", "demo@main"]).is_err());
+    }
+
+    #[test]
+    fn share_is_a_product_command_using_an_existing_device_credential() {
+        let cli = Cli::try_parse_from([
+            "ato",
+            "share",
+            "demo@main",
+            "--device-token",
+            "ato_dev_test",
+            "--yes",
+        ])
+        .unwrap();
+        let Commands::Share(args) = cli.command else {
+            panic!("share command was not parsed");
+        };
+        assert_eq!(args.selector, "demo@main");
+        assert_eq!(args.device_token, "ato_dev_test");
+        assert!(args.yes);
     }
 
     #[test]
