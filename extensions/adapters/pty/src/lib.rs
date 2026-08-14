@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -23,6 +24,7 @@ pub const PTY_PROTOCOL_ID: &str = "ato.pty@1";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PtyAdapterConfig {
+    pub port_id: String,
     pub command: Vec<String>,
     pub cwd: PathBuf,
     pub environment: BTreeMap<String, String>,
@@ -100,9 +102,10 @@ impl AdapterFactory for PtyAdapter {
                 AdapterError::Operation("PTY stdin unavailable".to_owned())
             })?));
         let output = Arc::new(Mutex::new(VecDeque::new()));
+        let transcript = Arc::new(Mutex::new(VecDeque::new()));
         let failure = Arc::new(Mutex::new(None));
         let capture_gate = Arc::new(CaptureGate::default());
-        let port_id = ato_computation::PortId::parse(format!("terminal.{}", instance.instance_id))
+        let port_id = ato_computation::PortId::parse(&config.port_id)
             .map_err(|error| AdapterError::InvalidConfig(error.to_string()))?;
         context
             .observations
@@ -113,6 +116,7 @@ impl AdapterFactory for PtyAdapter {
                 Arc::clone(&context.observations),
                 port_id.clone(),
                 Arc::clone(&output),
+                Arc::clone(&transcript),
                 Arc::clone(&failure),
                 Arc::clone(&capture_gate),
             ),
@@ -121,6 +125,7 @@ impl AdapterFactory for PtyAdapter {
                 Arc::clone(&context.observations),
                 port_id.clone(),
                 Arc::clone(&output),
+                Arc::clone(&transcript),
                 Arc::clone(&failure),
                 Arc::clone(&capture_gate),
             ),
@@ -135,6 +140,26 @@ impl AdapterFactory for PtyAdapter {
                 .map_err(|_| AdapterError::Operation("PTY writer poisoned".to_owned()))?
                 .write_all(input.as_bytes())?;
         }
+        let gateway = std::env::var("ATO_PTY_GATEWAY_LISTEN")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| {
+                let listen: SocketAddr = value.parse().map_err(|error| {
+                    AdapterError::InvalidConfig(format!("invalid PTY gateway address: {error}"))
+                })?;
+                spawn_terminal_gateway(
+                    listen,
+                    Arc::clone(&writer),
+                    Arc::clone(&context.observations),
+                    port_id.clone(),
+                    Arc::clone(&failure),
+                    Arc::clone(&capture_gate),
+                    Arc::clone(&transcript),
+                )
+                .map(Some)
+            })
+            .transpose()?
+            .flatten();
         Ok(Box::new(PtySession {
             instance_id: instance.instance_id.clone(),
             child,
@@ -146,6 +171,7 @@ impl AdapterFactory for PtyAdapter {
             port_id,
             activated: false,
             capture_gate,
+            gateway,
         }))
     }
 }
@@ -161,6 +187,7 @@ struct PtySession {
     port_id: ato_computation::PortId,
     activated: bool,
     capture_gate: Arc<CaptureGate>,
+    gateway: Option<TerminalGateway>,
 }
 
 impl AttachedAdapter for PtySession {
@@ -211,6 +238,7 @@ impl AttachedAdapter for PtySession {
 
     fn detach(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
         self.capture_gate.resume()?;
+        self.gateway.take();
         if self.child.try_wait()?.is_none() {
             self.child.kill()?;
         }
@@ -324,6 +352,7 @@ fn spawn_output_reader(
     observations: Arc<dyn ato_adapter_api::ObservationSink>,
     port_id: ato_computation::PortId,
     output: Arc<Mutex<VecDeque<u8>>>,
+    transcript: Arc<Mutex<VecDeque<u8>>>,
     failure: Arc<Mutex<Option<String>>>,
     capture_gate: Arc<CaptureGate>,
 ) -> JoinHandle<()> {
@@ -347,6 +376,12 @@ fn spawn_output_reader(
                     if let Ok(mut queue) = output.lock() {
                         queue.extend(bytes.iter().copied());
                     }
+                    if let Ok(mut history) = transcript.lock() {
+                        history.extend(bytes.iter().copied());
+                        while history.len() > 1024 * 1024 {
+                            history.pop_front();
+                        }
+                    }
                     if let Err(error) = observations.emit(
                         observation(&port_id, &PtyEvent::Output { bytes })
                             .expect("PTY event serialization cannot fail"),
@@ -364,6 +399,165 @@ fn spawn_output_reader(
             }
         }
     })
+}
+
+struct TerminalGateway {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Drop for TerminalGateway {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn spawn_terminal_gateway(
+    listen: SocketAddr,
+    writer: Arc<Mutex<ChildStdin>>,
+    observations: Arc<dyn ato_adapter_api::ObservationSink>,
+    port_id: ato_computation::PortId,
+    failure: Arc<Mutex<Option<String>>>,
+    capture_gate: Arc<CaptureGate>,
+    transcript: Arc<Mutex<VecDeque<u8>>>,
+) -> Result<TerminalGateway, AdapterError> {
+    let listener = TcpListener::bind(listen)?;
+    listener.set_nonblocking(true)?;
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+    let thread = std::thread::spawn(move || {
+        while !thread_stop.load(std::sync::atomic::Ordering::Acquire) {
+            let (stream, _) = match listener.accept() {
+                Ok(connection) => connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(20));
+                    continue;
+                }
+                Err(error) => {
+                    set_failure(&failure, error.to_string());
+                    break;
+                }
+            };
+            let mut socket = match tungstenite::accept(stream) {
+                Ok(socket) => socket,
+                Err(error) => {
+                    set_failure(&failure, error.to_string());
+                    continue;
+                }
+            };
+            let _ = socket
+                .get_mut()
+                .set_read_timeout(Some(Duration::from_millis(25)));
+            let initial: Vec<u8> = transcript
+                .lock()
+                .map(|history| history.iter().copied().collect())
+                .unwrap_or_default();
+            if !initial.is_empty()
+                && socket
+                    .send(tungstenite::Message::Binary(initial.into()))
+                    .is_err()
+            {
+                continue;
+            }
+            let mut sent = transcript.lock().map_or(0, |history| history.len());
+            loop {
+                if thread_stop.load(std::sync::atomic::Ordering::Acquire) {
+                    let _ = socket.close(None);
+                    break;
+                }
+                match socket.read() {
+                    Ok(tungstenite::Message::Binary(bytes)) => {
+                        if let Err(error) =
+                            gateway_input(&bytes, &writer, &observations, &port_id, &capture_gate)
+                        {
+                            set_failure(&failure, error.to_string());
+                            break;
+                        }
+                    }
+                    Ok(tungstenite::Message::Text(text)) => {
+                        if let Err(error) = gateway_input(
+                            text.as_bytes(),
+                            &writer,
+                            &observations,
+                            &port_id,
+                            &capture_gate,
+                        ) {
+                            set_failure(&failure, error.to_string());
+                            break;
+                        }
+                    }
+                    Ok(tungstenite::Message::Close(_)) => break,
+                    Ok(tungstenite::Message::Ping(value)) => {
+                        let _ = socket.send(tungstenite::Message::Pong(value));
+                    }
+                    Ok(_) => {}
+                    Err(tungstenite::Error::Io(error))
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) => {}
+                    Err(tungstenite::Error::ConnectionClosed) => break,
+                    Err(error) => {
+                        set_failure(&failure, error.to_string());
+                        break;
+                    }
+                }
+                let pending: Vec<u8> = transcript.lock().map_or_else(
+                    |_| Vec::new(),
+                    |history| {
+                        if sent > history.len() {
+                            sent = 0;
+                        }
+                        let bytes = history.iter().skip(sent).copied().collect();
+                        sent = history.len();
+                        bytes
+                    },
+                );
+                if !pending.is_empty()
+                    && socket
+                        .send(tungstenite::Message::Binary(pending.into()))
+                        .is_err()
+                {
+                    break;
+                }
+            }
+        }
+    });
+    Ok(TerminalGateway {
+        stop,
+        thread: Some(thread),
+    })
+}
+
+fn gateway_input(
+    bytes: &[u8],
+    writer: &Arc<Mutex<ChildStdin>>,
+    observations: &Arc<dyn ato_adapter_api::ObservationSink>,
+    port_id: &ato_computation::PortId,
+    capture_gate: &Arc<CaptureGate>,
+) -> Result<(), AdapterError> {
+    let _permit = capture_gate.enter()?;
+    let bytes = bytes.to_vec();
+    observations.emit(observation(
+        port_id,
+        &PtyEvent::Input {
+            bytes: bytes.clone(),
+        },
+    )?)?;
+    writer
+        .lock()
+        .map_err(|_| AdapterError::Operation("PTY writer poisoned".to_owned()))?
+        .write_all(&bytes)?;
+    Ok(())
+}
+
+fn set_failure(failure: &Arc<Mutex<Option<String>>>, message: String) {
+    if let Ok(mut slot) = failure.lock() {
+        *slot = Some(message);
+    }
 }
 
 fn spawn_input_reader(
@@ -426,4 +620,58 @@ fn explicit_base_environment() -> BTreeMap<String, String> {
                 .map(|value| (name.to_owned(), value))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod gateway_tests {
+    use std::process::Stdio;
+
+    use ato_adapter_api::IgnoreObservations;
+
+    use super::*;
+
+    #[test]
+    fn terminal_gateway_replays_diagnostic_and_accepts_input() {
+        let mut child = Command::new("sh")
+            .args(["-c", "cat"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let writer = Arc::new(Mutex::new(child.stdin.take().unwrap()));
+        let mut output = child.stdout.take().unwrap();
+        let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = probe.local_addr().unwrap();
+        drop(probe);
+        let transcript = Arc::new(Mutex::new(VecDeque::from(
+            b"rustc error: expected expression\r\n".to_vec(),
+        )));
+        let failure = Arc::new(Mutex::new(None));
+        let gateway = spawn_terminal_gateway(
+            address,
+            writer,
+            Arc::new(IgnoreObservations),
+            ato_computation::PortId::parse("terminal").unwrap(),
+            Arc::clone(&failure),
+            Arc::new(CaptureGate::default()),
+            transcript,
+        )
+        .unwrap();
+        let (mut socket, _) = tungstenite::connect(format!("ws://{address}/")).unwrap();
+        let diagnostic = socket.read().unwrap().into_data();
+        assert!(String::from_utf8_lossy(&diagnostic).contains("rustc error"));
+        socket
+            .send(tungstenite::Message::Binary(
+                b"echo fixed\n".to_vec().into(),
+            ))
+            .unwrap();
+        let mut accepted = [0_u8; 11];
+        output.read_exact(&mut accepted).unwrap();
+        assert_eq!(&accepted, b"echo fixed\n");
+        socket.close(None).unwrap();
+        drop(gateway);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(failure.lock().unwrap().is_none());
+    }
 }

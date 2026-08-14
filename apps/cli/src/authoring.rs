@@ -402,6 +402,10 @@ pub(crate) fn adapter_instances(
                     .with_context(|| format!("unknown PTY adapter target `{target}`"))?;
                 let environment = process_environment(config, target, &base_environment)?;
                 serde_json::to_value(PtyAdapterConfig {
+                    port_id: adapter
+                        .port
+                        .clone()
+                        .unwrap_or_else(|| format!("terminal.configured.{index}")),
                     command: process.command.clone(),
                     cwd: process.cwd.clone(),
                     environment: environment.clone(),

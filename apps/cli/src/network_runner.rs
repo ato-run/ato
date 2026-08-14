@@ -197,11 +197,18 @@ fn heartbeat(client: &Client, base: &str, args: &ServeArgs) -> Result<()> {
     .json(&serde_json::json!({
         "capabilities": ["sandbox=linux-bwrap"],
         "supported_lease_kinds": ["portable_capsule_v2"],
-        "supported_session_surfaces": [{
-            "kind": "web",
-            "profiles": ["ato.web-surface.v1"],
-            "transports": ["https"]
-        }],
+        "supported_session_surfaces": [
+            {
+                "kind": "web",
+                "profiles": ["ato.web-surface.v1"],
+                "transports": ["https"]
+            },
+            {
+                "kind": "terminal",
+                "profiles": ["ato.terminal-surface.v1"],
+                "transports": ["terminal_websocket"]
+            }
+        ],
         "public_base_url": args.public_base_url,
         "os": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
@@ -355,6 +362,7 @@ fn spawn_sandboxed_session(bundle: &Path, repository: &Path, root: &str) -> Resu
         .arg(&repository)
         .args(["--proc", "/proc", "--dev-bind", "/dev", "/dev"])
         .args(["--setenv", "ATO_EXTERNAL_SANDBOX_PROFILE", "linux-bwrap"])
+        .args(["--setenv", "ATO_PTY_GATEWAY_LISTEN", "127.0.0.1:8431"])
         .arg(&executable)
         .args(["__hosted-session", "start"])
         .arg(&bundle)

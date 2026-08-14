@@ -395,12 +395,16 @@ fn hosted_session_start(args: HostedSessionStartArgs) -> Result<()> {
             port_id: id.to_string(),
             protocol: port.protocol.to_string(),
             role: port.role.to_string(),
-            local_endpoint: state
-                .config
-                .adapter
-                .iter()
-                .find(|adapter| adapter.port.as_deref() == Some(id.as_str()))
-                .and_then(|adapter| adapter.listen.clone()),
+            local_endpoint: if port.protocol.to_string() == "ato.pty@1" {
+                std::env::var("ATO_PTY_GATEWAY_LISTEN").ok()
+            } else {
+                state
+                    .config
+                    .adapter
+                    .iter()
+                    .find(|adapter| adapter.port.as_deref() == Some(id.as_str()))
+                    .and_then(|adapter| adapter.listen.clone())
+            },
         })
         .collect();
     println!(
