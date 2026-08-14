@@ -444,7 +444,6 @@ fn execute_lease(
         .error_for_status()?
         .json()?;
         if control.stop_requested {
-            stop_session(&repository)?;
             terminate_child(&mut child);
             drop(proxy);
             authorized(
@@ -640,18 +639,6 @@ fn capture_and_upload(
     .send()?
     .error_for_status()?;
     let _ = fs::remove_file(output);
-    Ok(())
-}
-
-fn stop_session(repository: &Path) -> Result<()> {
-    let status = Command::new(std::env::current_exe()?)
-        .args(["__hosted-session", "stop", "--repository"])
-        .arg(repository)
-        .env("ATO_EXTERNAL_SANDBOX_PROFILE", "untrusted-v1")
-        .status()?;
-    if !status.success() {
-        bail!("portable session stop failed");
-    }
     Ok(())
 }
 
