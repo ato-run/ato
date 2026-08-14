@@ -1443,8 +1443,9 @@ mod tests {
     fn hosted_execution_fails_closed_without_an_external_sandbox_profile() {
         assert!(!external_sandbox_profile_supported(""));
         assert!(!external_sandbox_profile_supported("host"));
-        assert!(external_sandbox_profile_supported("linux-bwrap"));
-        assert!(external_sandbox_profile_supported("firecracker"));
+        assert!(!external_sandbox_profile_supported("linux-bwrap"));
+        assert!(!external_sandbox_profile_supported("firecracker"));
+        assert!(external_sandbox_profile_supported("untrusted-v1"));
     }
 
     #[test]
