@@ -5,9 +5,12 @@
 //! scheduler or execution engine.
 
 use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -112,6 +115,13 @@ struct CaptureRequest {
     upload_url: String,
 }
 
+const UNTRUSTED_ISOLATION_CAPABILITY: &str = "isolation=untrusted-v1";
+const PROCESS_EXECUTION_ABI_CAPABILITY: &str = "execution_abi=process";
+
+struct UntrustedProcessEvaluator {
+    bwrap: PathBuf,
+}
+
 #[derive(Serialize)]
 struct StatusReport<'a> {
     status: &'a str,
@@ -134,7 +144,7 @@ pub(crate) fn run(args: RunnerArgs) -> Result<()> {
 }
 
 fn serve(args: ServeArgs) -> Result<()> {
-    require_bwrap()?;
+    let evaluator = UntrustedProcessEvaluator::discover()?;
     fs::create_dir_all(&args.state_dir)?;
     let client = Client::builder().timeout(Duration::from_secs(30)).build()?;
     let base = args.api_base.trim_end_matches('/');
@@ -158,7 +168,7 @@ fn serve(args: ServeArgs) -> Result<()> {
             heartbeat(&client, base, &args)?;
             continue;
         };
-        if let Err(error) = execute_lease(&client, base, &args, &lease) {
+        if let Err(error) = execute_lease(&client, base, &args, &evaluator, &lease) {
             let message = format!("portable Capsule execution failed: {error:#}");
             let _ = report_status(
                 &client,
@@ -182,17 +192,30 @@ fn serve(args: ServeArgs) -> Result<()> {
     }
 }
 
-fn require_bwrap() -> Result<()> {
-    let available = Command::new("bwrap")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success());
-    if std::env::consts::OS != "linux" || !available {
-        bail!("portable Capsule runner requires the external linux-bwrap sandbox");
+impl UntrustedProcessEvaluator {
+    fn discover() -> Result<Self> {
+        let bwrap = find_executable("bwrap").context("bwrap is not available on PATH")?;
+        let available = Command::new(&bwrap)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if std::env::consts::OS != "linux" || !available {
+            bail!(
+                "portable Capsule runner has no Evaluator satisfying {UNTRUSTED_ISOLATION_CAPABILITY}"
+            );
+        }
+        Ok(Self { bwrap })
     }
-    Ok(())
+}
+
+fn find_executable(name: &str) -> Option<PathBuf> {
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+        .map(|directory| directory.join(name))
+        .find(|candidate| candidate.is_file())
 }
 
 fn heartbeat(client: &Client, base: &str, args: &ServeArgs) -> Result<()> {
@@ -201,7 +224,8 @@ fn heartbeat(client: &Client, base: &str, args: &ServeArgs) -> Result<()> {
         &args.runner_token,
     )
     .json(&serde_json::json!({
-        "capabilities": ["sandbox=linux-bwrap"],
+        "capabilities": [PROCESS_EXECUTION_ABI_CAPABILITY, UNTRUSTED_ISOLATION_CAPABILITY],
+        "evaluator": { "implementation": "linux-bwrap", "policy": "untrusted-v1" },
         "supported_lease_kinds": ["portable_capsule_v2"],
         "supported_session_surfaces": [
             {
@@ -231,6 +255,7 @@ fn execute_lease(
     client: &Client,
     base: &str,
     args: &ServeArgs,
+    evaluator: &UntrustedProcessEvaluator,
     lease: &ClaimedLease,
 ) -> Result<()> {
     if lease.command.kind != "portable_capsule_v2" {
@@ -278,10 +303,11 @@ fn execute_lease(
     .send()?
     .error_for_status()?
     .json()?;
-    let mut child = spawn_sandboxed_session(
+    let mut child = evaluator.spawn_session(
         &bundle_path,
         &repository,
         &lease.command.expected_root_computation_ref,
+        &lease.command.exported_port_id,
         &binding_grant.bindings,
     )?;
     let report = read_session_report(&mut child)?;
@@ -304,10 +330,11 @@ fn execute_lease(
         .local_endpoint
         .as_deref()
         .context("realized Port did not report a runtime endpoint")?;
-    let target: SocketAddr = local_endpoint
-        .parse()
-        .context("runtime endpoint is not a TCP socket")?;
-    let proxy = TcpProxy::start(args.proxy_listen, target)?;
+    if local_endpoint != "unix:surface.sock" {
+        terminate_child(&mut child);
+        bail!("sandboxed session did not select the isolated surface relay");
+    }
+    let proxy = TcpProxy::start_unix(args.proxy_listen, repository.join("surface.sock"))?;
     report_status(
         client,
         base,
@@ -327,7 +354,7 @@ fn execute_lease(
     .json(&serde_json::json!({
         "execution_id": execution_id,
         "ready_url": args.public_base_url,
-        "local_port": target.port(),
+        "local_port": args.proxy_listen.port(),
     }))
     .send()?
     .error_for_status()?;
@@ -367,44 +394,136 @@ fn execute_lease(
     }
 }
 
-fn spawn_sandboxed_session(
-    bundle: &Path,
-    repository: &Path,
-    root: &str,
-    bindings: &BTreeMap<String, String>,
-) -> Result<Child> {
-    let executable = std::env::current_exe()?;
-    let repository = repository.canonicalize()?;
-    let bundle = bundle.canonicalize()?;
-    let mut child = Command::new("bwrap")
-        .args(["--die-with-parent", "--new-session", "--unshare-pid"])
-        .args(["--ro-bind", "/", "/"])
-        .arg("--bind")
-        .arg(&repository)
-        .arg(&repository)
-        .args(["--proc", "/proc", "--dev-bind", "/dev", "/dev"])
-        .args(["--setenv", "ATO_EXTERNAL_SANDBOX_PROFILE", "linux-bwrap"])
-        .args(["--setenv", "ATO_PTY_GATEWAY_LISTEN", "127.0.0.1:8431"])
-        .arg(&executable)
-        .args(["__hosted-session", "start"])
-        .arg(&bundle)
-        .args(["--expected-root", root, "--repository"])
-        .arg(&repository)
-        .arg("--bindings-stdin")
-        .arg("--hold")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("failed to enter linux-bwrap sandbox")?;
-    let mut payload = serde_json::to_vec(bindings)?;
-    child
-        .stdin
-        .take()
-        .context("sandbox stdin unavailable")?
-        .write_all(&payload)?;
-    payload.fill(0);
-    Ok(child)
+impl UntrustedProcessEvaluator {
+    fn spawn_session(
+        &self,
+        bundle: &Path,
+        repository: &Path,
+        root: &str,
+        surface_port: &str,
+        bindings: &BTreeMap<String, String>,
+    ) -> Result<Child> {
+        let executable = std::env::current_exe()?;
+        let repository = repository.canonicalize()?;
+        let bundle = bundle.canonicalize()?;
+        if bundle != repository.join("input.capsule") {
+            bail!("portable Bundle must be inside the isolated workspace");
+        }
+        let arguments = sandbox_arguments(&executable, &repository)?;
+        let mut command = evaluator_command(&self.bwrap, arguments);
+        let mut child = command
+            .args(["--setenv", "ATO_EXTERNAL_SANDBOX_PROFILE", "untrusted-v1"])
+            .args(["--setenv", "ATO_PTY_GATEWAY_LISTEN", "127.0.0.1:8431"])
+            .arg("/opt/ato/bin/ato")
+            .args(["__hosted-session", "start"])
+            .arg("/workspace/input.capsule")
+            .args(["--expected-root", root, "--repository"])
+            .arg("/workspace")
+            .args(["--surface-port", surface_port])
+            .args(["--surface-relay", "/workspace/surface.sock"])
+            .arg("--bindings-stdin")
+            .arg("--hold")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("failed to enter untrusted-v1 Evaluator")?;
+        let mut payload = serde_json::to_vec(bindings)?;
+        child
+            .stdin
+            .take()
+            .context("sandbox stdin unavailable")?
+            .write_all(&payload)?;
+        payload.fill(0);
+        Ok(child)
+    }
+}
+
+fn evaluator_command(bwrap: &Path, arguments: Vec<OsString>) -> Command {
+    let mut command = Command::new(bwrap);
+    command.env_clear().args(arguments);
+    command
+}
+
+fn sandbox_arguments(executable: &Path, repository: &Path) -> Result<Vec<OsString>> {
+    let mut arguments = vec![
+        "--die-with-parent".into(),
+        "--new-session".into(),
+        "--unshare-all".into(),
+        "--clearenv".into(),
+        "--cap-drop".into(),
+        "ALL".into(),
+        "--tmpfs".into(),
+        "/".into(),
+    ];
+    for directory in ["/usr", "/lib", "/lib64", "/bin", "/sbin"] {
+        append_read_only_runtime_path(&mut arguments, Path::new(directory))?;
+    }
+    for file in ["/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d"] {
+        append_read_only_runtime_path(&mut arguments, Path::new(file))?;
+    }
+    arguments.extend([
+        "--dir".into(),
+        "/opt".into(),
+        "--dir".into(),
+        "/opt/ato".into(),
+        "--dir".into(),
+        "/opt/ato/bin".into(),
+        "--ro-bind".into(),
+        executable.as_os_str().to_owned(),
+        "/opt/ato/bin/ato".into(),
+        "--dir".into(),
+        "/workspace".into(),
+        "--bind".into(),
+        repository.as_os_str().to_owned(),
+        "/workspace".into(),
+        "--proc".into(),
+        "/proc".into(),
+        "--dev".into(),
+        "/dev".into(),
+        "--tmpfs".into(),
+        "/tmp".into(),
+        "--tmpfs".into(),
+        "/home".into(),
+        "--dir".into(),
+        "/home/ato".into(),
+        "--dir".into(),
+        "/run".into(),
+        "--hostname".into(),
+        "ato-capsule".into(),
+        "--chdir".into(),
+        "/workspace".into(),
+        "--setenv".into(),
+        "HOME".into(),
+        "/home/ato".into(),
+        "--setenv".into(),
+        "TMPDIR".into(),
+        "/tmp".into(),
+        "--setenv".into(),
+        "PATH".into(),
+        "/usr/bin:/bin".into(),
+    ]);
+    Ok(arguments)
+}
+
+fn append_read_only_runtime_path(arguments: &mut Vec<OsString>, path: &Path) -> Result<()> {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return Ok(());
+    };
+    if metadata.file_type().is_symlink() {
+        arguments.extend([
+            OsStr::new("--symlink").to_owned(),
+            fs::read_link(path)?.into_os_string(),
+            path.as_os_str().to_owned(),
+        ]);
+    } else {
+        arguments.extend([
+            OsStr::new("--ro-bind").to_owned(),
+            path.as_os_str().to_owned(),
+            path.as_os_str().to_owned(),
+        ]);
+    }
+    Ok(())
 }
 
 fn read_session_report(child: &mut Child) -> Result<HostedSessionReport> {
@@ -434,7 +553,7 @@ fn capture_and_upload(
         .arg(repository)
         .args(["--output"])
         .arg(&output)
-        .env("ATO_EXTERNAL_SANDBOX_PROFILE", "linux-bwrap")
+        .env("ATO_EXTERNAL_SANDBOX_PROFILE", "untrusted-v1")
         .status()?;
     if !status.success() {
         bail!("current-point hosted capture failed");
@@ -456,7 +575,7 @@ fn stop_session(repository: &Path) -> Result<()> {
     let status = Command::new(std::env::current_exe()?)
         .args(["__hosted-session", "stop", "--repository"])
         .arg(repository)
-        .env("ATO_EXTERNAL_SANDBOX_PROFILE", "linux-bwrap")
+        .env("ATO_EXTERNAL_SANDBOX_PROFILE", "untrusted-v1")
         .status()?;
     if !status.success() {
         bail!("portable session stop failed");
@@ -500,6 +619,7 @@ struct TcpProxy {
 }
 
 impl TcpProxy {
+    #[cfg(test)]
     fn start(listen: SocketAddr, target: SocketAddr) -> Result<Self> {
         let listener = TcpListener::bind(listen)?;
         listener.set_nonblocking(true)?;
@@ -510,6 +630,32 @@ impl TcpProxy {
                 match listener.accept() {
                     Ok((client, _)) => {
                         std::thread::spawn(move || proxy_connection(client, target));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Ok(Self {
+            stop,
+            worker: Some(worker),
+        })
+    }
+
+    #[cfg(unix)]
+    fn start_unix(listen: SocketAddr, target: PathBuf) -> Result<Self> {
+        let listener = TcpListener::bind(listen)?;
+        listener.set_nonblocking(true)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let worker = std::thread::spawn(move || {
+            while !thread_stop.load(Ordering::Acquire) {
+                match listener.accept() {
+                    Ok((client, _)) => {
+                        let target = target.clone();
+                        std::thread::spawn(move || proxy_unix_connection(client, &target));
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(20));
@@ -534,8 +680,29 @@ impl Drop for TcpProxy {
     }
 }
 
+#[cfg(test)]
 fn proxy_connection(mut client: TcpStream, target: SocketAddr) {
     let Ok(mut upstream) = TcpStream::connect(target) else {
+        return;
+    };
+    let Ok(mut client_read) = client.try_clone() else {
+        return;
+    };
+    let Ok(mut upstream_write) = upstream.try_clone() else {
+        return;
+    };
+    let forward = std::thread::spawn(move || {
+        let _ = std::io::copy(&mut client_read, &mut upstream_write);
+        let _ = upstream_write.shutdown(std::net::Shutdown::Write);
+    });
+    let _ = std::io::copy(&mut upstream, &mut client);
+    let _ = client.shutdown(std::net::Shutdown::Write);
+    let _ = forward.join();
+}
+
+#[cfg(unix)]
+fn proxy_unix_connection(mut client: TcpStream, target: &Path) {
+    let Ok(mut upstream) = UnixStream::connect(target) else {
         return;
     };
     let Ok(mut client_read) = client.try_clone() else {
@@ -560,6 +727,32 @@ mod tests {
     use std::io::Write as _;
 
     use super::*;
+
+    #[test]
+    fn untrusted_evaluator_has_minimal_mounts_namespaces_and_empty_host_environment() {
+        let repository = std::env::current_dir().unwrap();
+        let executable = repository.join("ato-test-bin");
+        let arguments = sandbox_arguments(&executable, &repository).unwrap();
+        let rendered: Vec<_> = arguments
+            .iter()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect();
+        assert!(rendered.iter().any(|argument| argument == "--unshare-all"));
+        assert!(rendered.iter().any(|argument| argument == "--clearenv"));
+        assert!(rendered.windows(2).any(|pair| pair == ["--dev", "/dev"]));
+        assert!(
+            !rendered
+                .windows(3)
+                .any(|pair| { pair == ["--ro-bind", "/", "/"] || pair[0] == "--dev-bind" })
+        );
+        assert!(rendered.windows(3).any(|pair| {
+            pair[0] == "--bind"
+                && pair[1] == repository.to_string_lossy()
+                && pair[2] == "/workspace"
+        }));
+        let command = evaluator_command(Path::new("/usr/bin/bwrap"), arguments);
+        assert_eq!(command.get_envs().count(), 0);
+    }
 
     #[test]
     fn tcp_proxy_preserves_bidirectional_http_bytes() {

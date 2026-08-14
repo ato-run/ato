@@ -9,6 +9,10 @@ mod supervisor;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
+#[cfg(unix)]
+use std::net::{Shutdown, SocketAddr, TcpStream};
+#[cfg(unix)]
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -109,6 +113,10 @@ struct HostedSessionStartArgs {
     expected_root: String,
     #[arg(long)]
     repository: PathBuf,
+    #[arg(long)]
+    surface_port: String,
+    #[arg(long)]
+    surface_relay: PathBuf,
     #[arg(long = "bind", value_parser = parse_binding)]
     bindings: Vec<(String, String)>,
     /// Read a JSON object of Binding values from stdin. Hosted runner only.
@@ -378,7 +386,7 @@ fn require_external_sandbox() -> Result<()> {
 }
 
 fn external_sandbox_profile_supported(profile: &str) -> bool {
-    matches!(profile, "linux-bwrap" | "firecracker" | "container")
+    profile == "untrusted-v1"
 }
 
 fn hosted_session_start(args: HostedSessionStartArgs) -> Result<()> {
@@ -421,6 +429,13 @@ fn hosted_session_start(args: HostedSessionStartArgs) -> Result<()> {
         session.context().repository().objects(),
         session.context().parent_root(),
     )?;
+    let selected_endpoint = computation
+        .object()
+        .boundary
+        .get(&ato_computation::PortId::parse(&args.surface_port)?)
+        .and_then(|port| runtime_endpoint(&state, &args.surface_port, &port.protocol.to_string()))
+        .context("selected exported Port has no runtime endpoint")?;
+    start_unix_surface_relay(&args.surface_relay, selected_endpoint.parse()?)?;
     let exported_ports = computation
         .object()
         .boundary
@@ -429,15 +444,10 @@ fn hosted_session_start(args: HostedSessionStartArgs) -> Result<()> {
             port_id: id.to_string(),
             protocol: port.protocol.to_string(),
             role: port.role.to_string(),
-            local_endpoint: if port.protocol.to_string() == "ato.pty@1" {
-                std::env::var("ATO_PTY_GATEWAY_LISTEN").ok()
+            local_endpoint: if id.as_str() == args.surface_port {
+                Some("unix:surface.sock".to_owned())
             } else {
-                state
-                    .config
-                    .adapter
-                    .iter()
-                    .find(|adapter| adapter.port.as_deref() == Some(id.as_str()))
-                    .and_then(|adapter| adapter.listen.clone())
+                None
             },
         })
         .collect();
@@ -453,6 +463,65 @@ fn hosted_session_start(args: HostedSessionStartArgs) -> Result<()> {
         session.wait()?;
     }
     Ok(())
+}
+
+fn runtime_endpoint(
+    state: &authoring::AuthoringState,
+    port_id: &str,
+    protocol: &str,
+) -> Option<String> {
+    if protocol == "ato.pty@1" {
+        std::env::var("ATO_PTY_GATEWAY_LISTEN").ok()
+    } else {
+        state
+            .config
+            .adapter
+            .iter()
+            .find(|adapter| adapter.port.as_deref() == Some(port_id))
+            .and_then(|adapter| adapter.listen.clone())
+    }
+}
+
+#[cfg(unix)]
+fn start_unix_surface_relay(path: &Path, target: SocketAddr) -> Result<()> {
+    if path.exists() {
+        fs::remove_file(path)?;
+    }
+    let listener = UnixListener::bind(path)?;
+    std::thread::spawn(move || {
+        for connection in listener.incoming() {
+            let Ok(client) = connection else {
+                break;
+            };
+            std::thread::spawn(move || relay_surface_connection(client, target));
+        }
+    });
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn start_unix_surface_relay(_path: &Path, _target: std::net::SocketAddr) -> Result<()> {
+    bail!("untrusted-v1 surface relay requires Unix sockets")
+}
+
+#[cfg(unix)]
+fn relay_surface_connection(mut client: UnixStream, target: SocketAddr) {
+    let Ok(mut upstream) = TcpStream::connect(target) else {
+        return;
+    };
+    let Ok(mut client_read) = client.try_clone() else {
+        return;
+    };
+    let Ok(mut upstream_write) = upstream.try_clone() else {
+        return;
+    };
+    let forward = std::thread::spawn(move || {
+        let _ = std::io::copy(&mut client_read, &mut upstream_write);
+        let _ = upstream_write.shutdown(Shutdown::Write);
+    });
+    let _ = std::io::copy(&mut upstream, &mut client);
+    let _ = client.shutdown(Shutdown::Write);
+    let _ = forward.join();
 }
 
 fn hosted_session_capture(args: HostedSessionCaptureArgs) -> Result<()> {
