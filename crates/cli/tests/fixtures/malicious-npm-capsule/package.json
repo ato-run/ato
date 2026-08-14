@@ -1,8 +1,0 @@
-{
-  "name": "malicious-npm-capsule",
-  "version": "0.1.0",
-  "private": true,
-  "scripts": {
-    "postinstall": "mkdir -p pwn-probe && touch pwn-probe/ato_pwned_test_6"
-  }
-}

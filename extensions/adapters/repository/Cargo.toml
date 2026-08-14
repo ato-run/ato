@@ -1,0 +1,32 @@
+[package]
+name = "ato-adapter-repository"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MPL-2.0"
+description = "Compiles repositories into ato.workspace@1 computations"
+homepage = "https://ato.run"
+repository = "https://github.com/ato-run/ato"
+
+[package.metadata.dist]
+dist = false
+
+[package.metadata.ato-architecture]
+layer = "adapter"
+
+[dependencies]
+ato-computation = { path = "../../../lib/computation", version = "0.1.0" }
+ato-objects = { path = "../../../lib/objects", version = "0.1.0" }
+ato-semantics-workspace = { path = "../../semantics/workspace", version = "0.1.0" }
+blake3 = "1.5"
+hex = "0.4"
+regex = "1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_jcs = "0.1"
+sha2 = "0.10"
+thiserror = "2.0"
+toml = "0.8"
+walkdir = "2"
+
+[dev-dependencies]
+tempfile = "3"
