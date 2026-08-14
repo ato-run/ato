@@ -16,6 +16,10 @@ const FORBIDDEN_PACKAGES: &[&str] = &[
     "capsulefs",
     "lock-draft-engine",
     "protocol",
+    "ato-semantics-workspace",
+    "ato-adapter-repository",
+    "ato-provider-nacelle",
+    "ato-provider-snapshot",
 ];
 
 fn main() -> Result<()> {
@@ -37,6 +41,12 @@ fn main() -> Result<()> {
     for package in packages.values() {
         if FORBIDDEN_PACKAGES.contains(&package.name.as_str()) {
             violations.push(format!("forbidden legacy package exists: {}", package.name));
+        }
+        if package.name.starts_with("ato-provider-") {
+            violations.push(format!(
+                "provider architecture package exists: {}",
+                package.name
+            ));
         }
         let Some(source_layer) = layer(package) else {
             violations.push(format!("{} has no ato-architecture layer", package.name));
@@ -97,18 +107,10 @@ fn allowed(source: &str, target: &str) -> bool {
         "ipc" => target == "computation",
         "adapter-api" => matches!(target, "computation" | "objects"),
         "materializer-api" => matches!(target, "adapter-api" | "computation" | "objects"),
-        "semantics" => matches!(target, "computation" | "kernel" | "objects" | "ipc"),
-        "adapter" => matches!(
-            target,
-            "adapter-api" | "computation" | "objects" | "semantics" | "ipc"
-        ),
+        "adapter" => matches!(target, "adapter-api" | "computation" | "objects" | "ipc"),
         "materializer" => matches!(
             target,
             "adapter-api" | "materializer-api" | "computation" | "objects"
-        ),
-        "provider" => matches!(
-            target,
-            "computation" | "kernel" | "objects" | "ipc" | "semantics"
         ),
         "service" => matches!(target, "computation" | "objects" | "ipc"),
         "app" | "tool" => true,

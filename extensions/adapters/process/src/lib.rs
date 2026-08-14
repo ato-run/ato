@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 
@@ -10,11 +11,30 @@ use thiserror::Error;
 
 pub const PROCESS_ADAPTER_ID: &str = "ato.process@1";
 
+#[derive(Default)]
+pub struct ProcessLifecycleAdapter;
+
+impl Adapter for ProcessLifecycleAdapter {
+    fn id(&self) -> &str {
+        PROCESS_ADAPTER_ID
+    }
+
+    fn capabilities(&self) -> AdapterCapabilities {
+        AdapterCapabilities {
+            observe: true,
+            verify: true,
+            quiesce: true,
+            ..AdapterCapabilities::default()
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessSpec {
     pub id: String,
     pub command: Vec<String>,
     pub cwd: PathBuf,
+    pub environment: BTreeMap<String, String>,
 }
 
 pub struct ProcessHandle {
@@ -62,21 +82,39 @@ impl ProcessAdapter {
     }
 
     pub fn spawn(&self, workspace: &std::path::Path) -> Result<ProcessHandle, ProcessError> {
+        self.spawn_with_group(workspace, true)
+    }
+
+    pub fn spawn_attached(
+        &self,
+        workspace: &std::path::Path,
+    ) -> Result<ProcessHandle, ProcessError> {
+        self.spawn_with_group(workspace, false)
+    }
+
+    fn spawn_with_group(
+        &self,
+        workspace: &std::path::Path,
+        isolated_group: bool,
+    ) -> Result<ProcessHandle, ProcessError> {
         let program = &self.spec.command[0];
         let cwd = workspace.join(&self.spec.cwd);
         let mut command = Command::new(program);
         command
             .args(&self.spec.command[1..])
             .current_dir(cwd)
+            .envs(&self.spec.environment)
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
-        configure_process_group(&mut command);
+        if isolated_group {
+            configure_process_group(&mut command);
+        }
         let child = command.spawn()?;
         let pid = child.id();
         Ok(ProcessHandle {
             child,
-            process_group: pid,
+            process_group: if isolated_group { pid } else { 0 },
         })
     }
 }
