@@ -178,6 +178,7 @@ fn main() {
         &format!(
             r#"[[port]]
 id = "app.http"
+node = "app"
 protocol = "ato.http@1"
 role = "server"
 
@@ -490,7 +491,11 @@ use std::time::Duration;
 
 fn main() {
     let mode = std::env::args().nth(1).unwrap();
-    let listen = std::env::args().nth(2).unwrap();
+    let listen = if mode == "counter" {
+        std::env::var("COUNTER_LISTEN").unwrap()
+    } else {
+        std::env::var("APP_LISTEN").unwrap()
+    };
     if mode == "counter" {
         let listener = TcpListener::bind(listen).unwrap();
         let (mut client, _) = listener.accept().unwrap();
@@ -499,7 +504,7 @@ fn main() {
         client.write_all(b"1").unwrap();
         return;
     }
-    let counter = std::env::args().nth(3).unwrap();
+    let counter = std::env::var("COUNTER_ADDRESS").unwrap();
     let listener = TcpListener::bind(listen).unwrap();
     let (mut client, _) = listener.accept().unwrap();
     let mut request = [0_u8; 4096];
@@ -529,19 +534,17 @@ fn main() {
             .unwrap()
             .success()
     );
-    fs::write(
-        project.path().join("capsule.toml"),
-        format!(
-            r#"schema = 1
+    let manifest = format!(
+        r#"schema = 1
 
 [[process]]
 id = "api"
-command = ["sh", "-c", "chmod +x composite-bin && exec ./composite-bin api 127.0.0.1:{public_port} 127.0.0.1:{internal_port}"]
+command = ["sh", "-c", "chmod +x composite-bin && exec ./composite-bin api"]
 cwd = "."
 
 [[process]]
 id = "counter"
-command = ["sh", "-c", "chmod +x composite-bin && exec ./composite-bin counter 127.0.0.1:{internal_port}"]
+command = ["sh", "-c", "chmod +x composite-bin && exec ./composite-bin counter"]
 cwd = "."
 
 [[adapter]]
@@ -554,20 +557,28 @@ use = "ato.process@1"
 
 [[port]]
 id = "app.http"
+node = "api"
 protocol = "ato.http@1"
 role = "server"
+address = "127.0.0.1:{public_port}"
+environment = "APP_LISTEN"
 
 [[port]]
 id = "api.counter"
+node = "api"
 protocol = "fixture.counter@1"
 role = "client"
 internal = true
+environment = "COUNTER_ADDRESS"
 
 [[port]]
 id = "counter.api"
+node = "counter"
 protocol = "fixture.counter@1"
 role = "server"
 internal = true
+address = "127.0.0.1:{internal_port}"
+environment = "COUNTER_LISTEN"
 
 [[connection]]
 from = "api.counter"
@@ -576,9 +587,24 @@ to = "counter.api"
 [encap]
 materializers = ["ato.replay@1"]
 "#
+    );
+    fs::write(project.path().join("capsule.toml"), &manifest).unwrap();
+    let unwired = tempfile::tempdir().unwrap();
+    fs::write(
+        unwired.path().join("capsule.toml"),
+        manifest.replace(
+            "[[connection]]\nfrom = \"api.counter\"\nto = \"counter.api\"\n\n",
+            "",
         ),
     )
     .unwrap();
+    ato(ato_home.path())
+        .args(["init", unwired.path().to_str().unwrap(), "--initial-only"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "internal client port `api.counter` is unwired",
+        ));
     ato(ato_home.path())
         .args(["init", project.path().to_str().unwrap()])
         .assert()
