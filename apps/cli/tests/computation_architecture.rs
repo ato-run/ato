@@ -8,12 +8,8 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Barrier, Mutex};
 
 use assert_cmd::prelude::*;
-use ato_computation::{
-    ComputationRef, PortDef, PortId, ProtocolId, RoleId, computation_ref, encode_computation_object,
-};
-use ato_objects::{
-    Direction, LocalCapsuleRepository, ObjectStore, RecordEnvelope, RecordId, resolve_computation,
-};
+use ato_computation::{ComputationRef, PortId, ProtocolId};
+use ato_objects::{Direction, LocalCapsuleRepository, ObjectStore, RecordEnvelope, RecordId};
 use base64::Engine;
 use predicates::prelude::*;
 
@@ -88,6 +84,68 @@ fn main() {{
 }}
 "#,
         ),
+    )
+    .unwrap();
+    assert!(
+        Command::new("rustc")
+            .args(["counter.rs", "-o", "counter-bin"])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success()
+    );
+    write_project(
+        root,
+        &format!(
+            r#"["sh", "-c", "chmod +x counter-bin && exec ./counter-bin 127.0.0.1:{upstream_port}"]"#
+        ),
+        &format!(
+            r#"[[port]]
+id = "app.http"
+node = "app"
+protocol = "ato.http@1"
+role = "server"
+
+[[adapter]]
+port = "app.http"
+use = "ato.http@1"
+listen = "127.0.0.1:{public_port}"
+upstream = "127.0.0.1:{upstream_port}"
+ready_path = "/ready""#
+        ),
+    );
+}
+
+fn write_quiesce_counter(root: &Path, upstream_port: u16, public_port: u16) {
+    fs::write(
+        root.join("counter.rs"),
+        r#"use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::thread;
+use std::time::Duration;
+
+fn main() {
+    let address = std::env::args().nth(1).unwrap();
+    let listener = TcpListener::bind(address).unwrap();
+    for stream in listener.incoming() {
+        let mut stream = stream.unwrap();
+        let mut request = [0_u8; 4096];
+        let size = stream.read(&mut request).unwrap();
+        let request = String::from_utf8_lossy(&request[..size]);
+        if request.starts_with("GET /ready ") {
+            stream.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            continue;
+        }
+        fs::write(".capsule/runs/request.started", b"started").unwrap();
+        while !std::path::Path::new(".capsule/runs/request.release").exists() {
+            thread::sleep(Duration::from_millis(5));
+        }
+        stream.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        break;
+    }
+}
+"#,
     )
     .unwrap();
     assert!(
@@ -949,9 +1007,12 @@ fn concurrent_resume_claims_exactly_one_run_lease() {
 
 #[test]
 fn stop_seals_the_quiesced_observation_frontier() {
+    let _network = NETWORK_TEST_LOCK.lock().unwrap();
     let project = tempfile::tempdir().unwrap();
     let ato_home = tempfile::tempdir().unwrap();
-    write_project(project.path(), r#"["sh", "-c", "exec sleep 30"]"#, "");
+    let upstream_port = unused_port();
+    let public_port = unused_port();
+    write_quiesce_counter(project.path(), upstream_port, public_port);
     ato(ato_home.path())
         .args(["init", project.path().to_str().unwrap()])
         .assert()
@@ -959,24 +1020,13 @@ fn stop_seals_the_quiesced_observation_frontier() {
 
     let repository = LocalCapsuleRepository::open(project.path()).unwrap();
     let active = repository.active_run().unwrap().unwrap();
-    let resolved = resolve_computation(repository.objects(), &active.head).unwrap();
-    let mut successor_object = resolved.object().clone();
-    successor_object.boundary.insert(
-        PortId::parse("race.frontier").unwrap(),
-        PortDef {
-            protocol: ProtocolId::parse("test.frontier@1").unwrap(),
-            role: RoleId::parse("server").unwrap(),
-        },
-    );
-    let successor = computation_ref(&successor_object).unwrap();
-    repository
-        .objects()
-        .insert(
-            successor.content_ref(),
-            &encode_computation_object(&successor_object).unwrap(),
-        )
-        .unwrap();
-    let payload = repository.objects().put(b"late semantic action").unwrap();
+    let request = std::thread::spawn(move || http_request(public_port, "POST", "/increment"));
+    wait_until(|| {
+        project
+            .path()
+            .join(".capsule/runs/request.started")
+            .exists()
+    });
     let project_path = project.path().to_path_buf();
     let home_path = ato_home.path().to_path_buf();
     let stopping = std::thread::spawn(move || {
@@ -986,24 +1036,12 @@ fn stop_seals_the_quiesced_observation_frontier() {
             .unwrap()
     });
     wait_until(|| project.path().join(".capsule/runs/stop.request").exists());
-    repository
-        .commit_observation(
-            &active.token,
-            &active.head,
-            RecordEnvelope {
-                id: RecordId::new("main", 0),
-                adapter_id: "ato.http@1".to_owned(),
-                protocol_id: ProtocolId::parse("ato.http@1").unwrap(),
-                port_id: PortId::parse("race.frontier").unwrap(),
-                direction: Direction::Inbound,
-                payload_ref: payload,
-                head_before: active.head.clone(),
-                head_after: successor.clone(),
-                caused_by: Vec::new(),
-                observed_at: "0".to_owned(),
-            },
-        )
-        .unwrap();
+    fs::write(
+        project.path().join(".capsule/runs/request.release"),
+        b"release",
+    )
+    .unwrap();
+    assert!(request.join().unwrap().starts_with("HTTP/1.1 204"));
     let stopped = stopping.join().unwrap();
     assert!(
         stopped.status.success(),
@@ -1012,18 +1050,20 @@ fn stop_seals_the_quiesced_observation_frontier() {
     );
 
     let records = repository.records_for_stream("main", None).unwrap();
-    assert!(
-        !records.is_empty(),
-        "in-flight HTTP request was not drained; log: {}",
-        fs::read_to_string(project.path().join(".capsule/runs/output.log")).unwrap_or_default()
-    );
-    let final_record = records.last().unwrap().clone();
+    let final_evolution = records
+        .iter()
+        .find(|record| {
+            record.adapter_id == "ato.http@1"
+                && record.direction == Direction::Inbound
+                && record.head_before == active.head
+        })
+        .expect("the in-flight request must commit before quiesce acknowledgement");
     assert_eq!(
         repository.head("main").unwrap().unwrap(),
-        successor,
+        final_evolution.head_after,
         "stop must seal the head observed after live Adapters finish quiescing"
     );
-    assert_eq!(final_record.head_after, successor);
+    assert_ne!(final_evolution.head_before, final_evolution.head_after);
 }
 
 #[test]
