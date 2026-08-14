@@ -143,7 +143,7 @@ pub trait SemanticHost: Send + Sync {
 
     fn enabled(&self, reference: &ComputationRef) -> Result<Vec<TransitionOffer>, KernelError>;
 
-    fn transition(
+    fn derive_transition(
         &self,
         reference: &ComputationRef,
         offer: &TransitionOffer,
@@ -271,6 +271,8 @@ pub enum KernelError {
         registered: SemanticsId,
         actual: SemanticsId,
     },
+    #[error("semantics changed the selected transition offer while deriving its successor")]
+    TransitionOfferMismatch,
     #[error(transparent)]
     Semantic(#[from] SemanticError),
     #[error(transparent)]
@@ -340,7 +342,12 @@ impl Kernel {
         Ok(offers)
     }
 
-    pub fn transition(
+    /// Derive and seal a successor without publishing transition evidence.
+    ///
+    /// Concrete composition semantics use this operation for boundary-hidden
+    /// child steps. The resulting object may remain unreachable when a larger
+    /// reduction fails and is then ordinary GC material.
+    pub fn derive_transition(
         &self,
         reference: &ComputationRef,
         offer: &TransitionOffer,
@@ -350,6 +357,9 @@ impl Kernel {
         semantics.validate(&current, self)?;
         self.validate_action(&current, &offer.action)?;
         let step = semantics.step(&current, offer, self)?;
+        if step.offer != *offer {
+            return Err(KernelError::TransitionOfferMismatch);
+        }
         if step.successor.semantics != *semantics.id() {
             return Err(KernelError::SuccessorSemanticsMismatch {
                 registered: semantics.id().clone(),
@@ -359,19 +369,23 @@ impl Kernel {
         let to = self.seal(&step.successor)?;
         let successor = self.resolve(&to)?;
         semantics.validate(&successor, self)?;
-        let transition = Transition {
+        Ok(Transition {
             from: reference.clone(),
             offer: step.offer,
             to,
-        };
+        })
+    }
+
+    /// Publish one already-derived transition as visible evidence.
+    pub fn commit_transition(&self, transition: &Transition) {
         if let Some(sink) = &self.sink {
-            sink.observe(&transition);
+            sink.observe(transition);
         }
-        Ok(transition)
     }
 
     pub fn step(&self, run: &mut Run, offer: &TransitionOffer) -> Result<Transition, KernelError> {
-        let transition = self.transition(&run.head, offer)?;
+        let transition = self.derive_transition(&run.head, offer)?;
+        self.commit_transition(&transition);
         run.head = transition.to.clone();
         Ok(transition)
     }
@@ -457,12 +471,12 @@ impl SemanticHost for Kernel {
         Kernel::enabled(self, reference)
     }
 
-    fn transition(
+    fn derive_transition(
         &self,
         reference: &ComputationRef,
         offer: &TransitionOffer,
     ) -> Result<Transition, KernelError> {
-        Kernel::transition(self, reference, offer)
+        Kernel::derive_transition(self, reference, offer)
     }
 
     fn roles_compatible(
