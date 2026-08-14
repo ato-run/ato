@@ -219,7 +219,7 @@ impl AttachedAdapter for HttpSession {
                     .ok_or_else(|| {
                         AdapterError::Operation("HTTP replay produced no response".into())
                     })?;
-                if actual == expected {
+                if replay_equivalent(&actual, &expected) {
                     Ok(())
                 } else {
                     Err(AdapterError::Operation(format!(
@@ -267,6 +267,32 @@ impl AttachedAdapter for HttpSession {
 
     fn resume_after_capture(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
         self.capture_gate.resume()
+    }
+}
+
+fn replay_equivalent(actual: &HttpEvent, expected: &HttpEvent) -> bool {
+    match (actual, expected) {
+        (
+            HttpEvent::Response {
+                status: actual_status,
+                headers: actual_headers,
+                body: actual_body,
+            },
+            HttpEvent::Response {
+                status: expected_status,
+                headers: expected_headers,
+                body: expected_body,
+            },
+        ) => {
+            let mut actual_headers = actual_headers.clone();
+            let mut expected_headers = expected_headers.clone();
+            actual_headers.remove("date");
+            expected_headers.remove("date");
+            actual_status == expected_status
+                && actual_body == expected_body
+                && actual_headers == expected_headers
+        }
+        _ => actual == expected,
     }
 }
 
@@ -545,6 +571,22 @@ fn invalid_http() -> std::io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replay_ignores_transport_generated_date_header() {
+        let response = |date: &str| HttpEvent::Response {
+            status: 204,
+            headers: BTreeMap::from([
+                ("date".to_owned(), date.to_owned()),
+                ("server".to_owned(), "fixture".to_owned()),
+            ]),
+            body: Vec::new(),
+        };
+        assert!(replay_equivalent(
+            &response("Fri, 14 Aug 2026 18:44:37 GMT"),
+            &response("Fri, 14 Aug 2026 18:40:41 GMT"),
+        ));
+    }
 
     #[test]
     fn request_and_response_are_distinct_protocol_events() {
