@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use ato_adapter_api::AdapterRegistry;
+use ato_adapter_api::{AdapterRegistry, WorkspaceCapturePolicy};
 use ato_computation::{ComputationRef, ContentRef};
 use ato_objects::{ObjectStore, RecordEnvelope};
 use thiserror::Error;
@@ -29,6 +29,7 @@ pub struct MaterializerContext<'a> {
     pub adapters: &'a AdapterRegistry,
     pub records: &'a [RecordEnvelope],
     pub workspace: &'a Path,
+    pub workspace_policy: &'a WorkspaceCapturePolicy,
     pub realization: Option<&'a dyn RealizationDriver>,
 }
 

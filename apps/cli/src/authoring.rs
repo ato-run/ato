@@ -3,13 +3,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use ato_adapter_api::{AdapterInstance, AdapterObservation};
+use ato_adapter_api::{AdapterInstance, AdapterObservation, WorkspaceCapturePolicy};
 use ato_adapter_binding::{BINDING_ADAPTER_ID, BindingAdapterConfig};
 use ato_adapter_http::{HTTP_ADAPTER_ID, HttpAdapterConfig};
 use ato_adapter_process::{PROCESS_ADAPTER_ID, ProcessSpec};
 use ato_adapter_pty::{PTY_ADAPTER_ID, PtyAdapterConfig};
 use ato_adapter_workspace::{
-    WorkspaceMutation, WorkspaceSnapshot, capture_workspace, encode_mutation,
+    WorkspaceMutation, WorkspaceSnapshot, capture_workspace_with_policy, encode_mutation,
 };
 use ato_compose::{
     COMPOSE_SEMANTICS_ID, CompositeResidual, Connection, Endpoint, NodeId,
@@ -44,6 +44,8 @@ pub(crate) struct AuthoringConfig {
     pub connection: Vec<ConnectionConfig>,
     #[serde(default)]
     pub binding: Vec<BindingConfig>,
+    #[serde(default)]
+    pub workspace: WorkspaceConfig,
     #[serde(default)]
     pub encap: EncapConfig,
 }
@@ -107,6 +109,15 @@ pub(crate) struct BindingConfig {
 pub(crate) struct EncapConfig {
     #[serde(default)]
     pub materializers: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WorkspaceConfig {
+    #[serde(default)]
+    pub include: Vec<String>,
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -184,14 +195,25 @@ pub(crate) fn load_config(project: &Path) -> Result<AuthoringConfig> {
             bail!("connections require internal ports with the same protocol");
         }
     }
+    workspace_policy(&config)?;
     Ok(config)
+}
+
+pub(crate) fn workspace_policy(config: &AuthoringConfig) -> Result<WorkspaceCapturePolicy> {
+    WorkspaceCapturePolicy::new(
+        config.workspace.include.clone(),
+        config.workspace.exclude.clone(),
+    )
+    .map_err(Into::into)
 }
 
 pub(crate) fn initial_computation(
     repository: &LocalCapsuleRepository,
     config: AuthoringConfig,
 ) -> Result<ComputationRef> {
-    let snapshot = capture_workspace(repository.project(), repository.objects())?;
+    let policy = workspace_policy(&config)?;
+    let snapshot =
+        capture_workspace_with_policy(repository.project(), repository.objects(), &policy)?;
     seal_authored_root(repository.objects(), config, snapshot)
 }
 
@@ -247,6 +269,7 @@ fn seal_authored_root(
             port: ports,
             connection: Vec::new(),
             binding: config.binding.clone(),
+            workspace: config.workspace.clone(),
             encap: config.encap.clone(),
         };
         nodes.insert(
@@ -476,7 +499,9 @@ pub(crate) fn evolve_workspace(
 ) -> Result<ComputationRef> {
     let runtime = load_runtime_state(start, repository.objects())?;
     let before = load_snapshot(&runtime.workspace_snapshot, repository.objects())?;
-    let final_ref = capture_workspace(repository.project(), repository.objects())?;
+    let policy = workspace_policy(&runtime.config)?;
+    let final_ref =
+        capture_workspace_with_policy(repository.project(), repository.objects(), &policy)?;
     let after = load_snapshot(final_ref.as_str(), repository.objects())?;
     if before == after {
         return Ok(start.clone());

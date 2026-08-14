@@ -8,7 +8,7 @@ use std::path::{Component, Path, PathBuf};
 
 use ato_adapter_api::{
     AdapterAttachContext, AdapterCapabilities, AdapterContext, AdapterError, AdapterFactory,
-    AdapterInstance, AttachedAdapter,
+    AdapterInstance, AttachedAdapter, WorkspaceCapturePolicy,
 };
 use ato_computation::ContentRef;
 use ato_objects::{ObjectResolver, ObjectStore, RecordEnvelope, read_exact_object};
@@ -37,8 +37,16 @@ pub fn capture_workspace(
     root: &Path,
     objects: &dyn ObjectStore,
 ) -> Result<ContentRef, WorkspaceError> {
+    capture_workspace_with_policy(root, objects, &WorkspaceCapturePolicy::secure_default())
+}
+
+pub fn capture_workspace_with_policy(
+    root: &Path,
+    objects: &dyn ObjectStore,
+    policy: &WorkspaceCapturePolicy,
+) -> Result<ContentRef, WorkspaceError> {
     let mut files = BTreeMap::new();
-    capture_directory(root, root, objects, &mut files)?;
+    capture_directory(root, root, objects, policy, &mut files)?;
     Ok(objects.put(&serde_jcs::to_vec(&WorkspaceSnapshot { files })?)?)
 }
 
@@ -206,24 +214,30 @@ fn capture_directory(
     root: &Path,
     directory: &Path,
     objects: &dyn ObjectStore,
+    policy: &WorkspaceCapturePolicy,
     files: &mut BTreeMap<String, String>,
 ) -> Result<(), WorkspaceError> {
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
         let path = entry.path();
-        if path == root.join(".capsule") {
-            continue;
-        }
         let file_type = entry.file_type()?;
         if file_type.is_symlink() {
             return Err(WorkspaceError::Symlink(path));
         }
         if file_type.is_dir() {
-            capture_directory(root, &path, objects, files)?;
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| WorkspaceError::EscapesBoundary)?;
+            if policy.descends_into(relative) {
+                capture_directory(root, &path, objects, policy, files)?;
+            }
         } else if file_type.is_file() {
             let relative = path
                 .strip_prefix(root)
                 .map_err(|_| WorkspaceError::EscapesBoundary)?;
+            if !policy.captures(relative) {
+                continue;
+            }
             let relative = relative
                 .to_str()
                 .ok_or(WorkspaceError::NonUtf8Path)?
