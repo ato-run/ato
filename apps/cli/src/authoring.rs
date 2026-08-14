@@ -12,7 +12,7 @@ use ato_computation::{
 };
 use ato_objects::{
     BundleError, ComputationReferences, Direction, LocalCapsuleRepository, ObjectLink,
-    ObjectResolver, ObjectStore, RecordEnvelope, read_exact_object, resolve_computation,
+    ObjectResolver, ObjectStore, RecordEnvelope, RecordId, read_exact_object, resolve_computation,
 };
 use serde::{Deserialize, Serialize};
 
@@ -237,8 +237,7 @@ pub(crate) fn evolve_workspace(
         let next = seal_state(repository.objects(), state.config.clone(), snapshot)?;
         let payload = repository.objects().put(&encode_mutation(&mutation)?)?;
         let record = repository.append_record(RecordEnvelope {
-            seq: 0,
-            stream: branch.to_owned(),
+            id: RecordId::new(branch, 0),
             adapter_id: "ato.workspace@1".to_owned(),
             protocol_id: ProtocolId::parse("ato.workspace@1")?,
             port_id: PortId::parse("workspace.main")?,
@@ -249,7 +248,7 @@ pub(crate) fn evolve_workspace(
             caused_by: previous_record.into_iter().collect(),
             observed_at: observed_at(),
         })?;
-        previous_record = Some(record.seq);
+        previous_record = Some(record.id);
         head = next;
     }
     Ok(head)

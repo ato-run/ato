@@ -9,7 +9,7 @@ use ato_adapter_api::AdapterContext;
 use ato_adapter_http::{HTTP_ADAPTER_ID, serve_proxy};
 use ato_adapter_process::{ProcessAdapter, ProcessSpec, terminate_process_tree};
 use ato_computation::ComputationRef;
-use ato_objects::{ActiveRun, LocalCapsuleRepository, ObjectStore};
+use ato_objects::{ActiveRun, LocalCapsuleRepository, ObjectStore, RecordId};
 
 use crate::{
     adapter_registry,
@@ -246,10 +246,9 @@ fn spawn_http_adapters(
                 let previous = repository
                     .records_for_stream(&branch, None)
                     .ok()
-                    .and_then(|records| records.last().map(|record| record.seq));
+                    .and_then(|records| records.last().map(|record| record.id.clone()));
                 let _ = repository.append_record(ato_objects::RecordEnvelope {
-                    seq: 0,
-                    stream: branch.clone(),
+                    id: RecordId::new(&branch, 0),
                     adapter_id: HTTP_ADAPTER_ID.to_owned(),
                     protocol_id: observation.protocol_id,
                     port_id: observation.port_id,

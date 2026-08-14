@@ -1,10 +1,11 @@
 //! Durable local computation DAG storage under `.capsule/`.
 
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use ato_computation::{ComputationRef, ContentRef, PortId, ProtocolId};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -59,11 +60,26 @@ pub enum Direction {
     Internal,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecordId {
+    pub stream: String,
+    pub seq: u64,
+}
+
+impl RecordId {
+    pub fn new(stream: impl Into<String>, seq: u64) -> Self {
+        Self {
+            stream: stream.into(),
+            seq,
+        }
+    }
+}
+
 /// Protocol-neutral evidence for one adapter-selected interaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordEnvelope {
-    pub seq: u64,
-    pub stream: String,
+    pub id: RecordId,
     pub adapter_id: String,
     pub protocol_id: ProtocolId,
     pub port_id: PortId,
@@ -71,15 +87,14 @@ pub struct RecordEnvelope {
     pub payload_ref: ContentRef,
     pub head_before: ComputationRef,
     pub head_after: ComputationRef,
-    pub caused_by: Vec<u64>,
+    pub caused_by: Vec<RecordId>,
     pub observed_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RecordWire {
-    seq: u64,
-    stream: String,
+    id: RecordId,
     adapter_id: String,
     protocol_id: String,
     port_id: String,
@@ -87,7 +102,7 @@ struct RecordWire {
     payload_ref: String,
     head_before: String,
     head_after: String,
-    caused_by: Vec<u64>,
+    caused_by: Vec<RecordId>,
     observed_at: String,
 }
 
@@ -174,6 +189,7 @@ impl LocalCapsuleRepository {
         next: &ComputationRef,
     ) -> Result<(), RepositoryError> {
         validate_name("branch", branch)?;
+        let _transaction = self.lock_transaction()?;
         let actual = self.head(branch)?;
         if actual.as_ref() != expected {
             return Err(RepositoryError::RefConflict {
@@ -192,39 +208,51 @@ impl LocalCapsuleRepository {
         &self,
         mut record: RecordEnvelope,
     ) -> Result<RecordEnvelope, RepositoryError> {
-        validate_name("stream", &record.stream)?;
+        validate_name("stream", &record.id.stream)?;
         validate_name("adapter id", &record.adapter_id)?;
-        let next = self.next_sequence()?;
-        if record.seq != 0 && record.seq != next {
+        let _transaction = self.lock_transaction()?;
+        let next = self.next_sequence(&record.id.stream)?;
+        if record.id.seq != 0 && record.id.seq != next {
             return Err(RepositoryError::Sequence {
+                stream: record.id.stream.clone(),
                 expected: next,
-                actual: record.seq,
+                actual: record.id.seq,
             });
         }
-        record.seq = next;
+        record.id.seq = next;
         for cause in &record.caused_by {
-            if *cause >= next || !self.record_path(*cause).is_file() {
-                return Err(RepositoryError::InvalidCause(*cause));
+            if (cause.stream == record.id.stream && cause.seq >= next)
+                || !self.record_path(cause).is_file()
+            {
+                return Err(RepositoryError::InvalidCause(cause.clone()));
             }
         }
         let bytes = serde_jcs::to_vec(&RecordWire::from(&record))?;
-        atomic_write(&self.record_path(next), &bytes)?;
+        atomic_create(&self.record_path(&record.id), &bytes)?;
         Ok(record)
     }
 
-    pub fn record(&self, seq: u64) -> Result<RecordEnvelope, RepositoryError> {
-        let bytes = fs::read(self.record_path(seq)).map_err(|error| {
+    pub fn record(&self, id: &RecordId) -> Result<RecordEnvelope, RepositoryError> {
+        validate_name("stream", &id.stream)?;
+        let bytes = fs::read(self.record_path(id)).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
-                RepositoryError::RecordNotFound(seq)
+                RepositoryError::RecordNotFound(id.clone())
             } else {
                 RepositoryError::Io(error)
             }
         })?;
         let wire: RecordWire = serde_json::from_slice(&bytes)?;
         if serde_jcs::to_vec(&wire)? != bytes {
-            return Err(RepositoryError::NonCanonicalRecord(seq));
+            return Err(RepositoryError::NonCanonicalRecord(id.clone()));
         }
-        wire.try_into()
+        let record: RecordEnvelope = wire.try_into()?;
+        if &record.id != id {
+            return Err(RepositoryError::RecordIdentityMismatch {
+                expected: id.clone(),
+                actual: record.id,
+            });
+        }
+        Ok(record)
     }
 
     pub fn records_for_stream(
@@ -234,7 +262,12 @@ impl LocalCapsuleRepository {
     ) -> Result<Vec<RecordEnvelope>, RepositoryError> {
         validate_name("stream", stream)?;
         let mut records = Vec::new();
-        for entry in fs::read_dir(self.root.join("records"))? {
+        let entries = match fs::read_dir(self.root.join("records").join(stream)) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(records),
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries {
             let entry = entry?;
             if !entry.file_type()?.is_file() {
                 continue;
@@ -250,25 +283,15 @@ impl LocalCapsuleRepository {
             if through.is_some_and(|maximum| seq > maximum) {
                 continue;
             }
-            let record = self.record(seq)?;
-            if record.stream == stream {
-                records.push(record);
-            }
+            records.push(self.record(&RecordId::new(stream, seq))?);
         }
-        records.sort_by_key(|record| record.seq);
+        records.sort_by_key(|record| record.id.seq);
         Ok(records)
     }
 
     pub fn resolve(&self, selector: &CapsuleSelector) -> Result<ComputationRef, RepositoryError> {
         if let Some(seq) = selector.record {
-            let record = self.record(seq)?;
-            if record.stream != selector.branch {
-                return Err(RepositoryError::RecordOnDifferentStream {
-                    seq,
-                    expected: selector.branch.clone(),
-                    actual: record.stream,
-                });
-            }
+            let record = self.record(&RecordId::new(&selector.branch, seq))?;
             return Ok(record.head_after);
         }
         self.head(&selector.branch)?
@@ -301,9 +324,11 @@ impl LocalCapsuleRepository {
         }
     }
 
-    fn next_sequence(&self) -> Result<u64, RepositoryError> {
+    fn next_sequence(&self, stream: &str) -> Result<u64, RepositoryError> {
         let mut maximum = 0;
-        for entry in fs::read_dir(self.root.join("records"))? {
+        let directory = self.root.join("records").join(stream);
+        fs::create_dir_all(&directory)?;
+        for entry in fs::read_dir(directory)? {
             let entry = entry?;
             if !entry.file_type()?.is_file() {
                 continue;
@@ -319,16 +344,36 @@ impl LocalCapsuleRepository {
             .ok_or(RepositoryError::SequenceOverflow)
     }
 
-    fn record_path(&self, seq: u64) -> PathBuf {
-        self.root.join("records").join(format!("{seq}.json"))
+    fn record_path(&self, id: &RecordId) -> PathBuf {
+        self.root
+            .join("records")
+            .join(&id.stream)
+            .join(format!("{}.json", id.seq))
+    }
+
+    fn lock_transaction(&self) -> Result<TransactionGuard, RepositoryError> {
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(self.root.join("transaction.lock"))?;
+        file.lock_exclusive()?;
+        Ok(TransactionGuard(file))
+    }
+}
+
+struct TransactionGuard(fs::File);
+
+impl Drop for TransactionGuard {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.0);
     }
 }
 
 impl From<&RecordEnvelope> for RecordWire {
     fn from(value: &RecordEnvelope) -> Self {
         Self {
-            seq: value.seq,
-            stream: value.stream.clone(),
+            id: value.id.clone(),
             adapter_id: value.adapter_id.clone(),
             protocol_id: value.protocol_id.to_string(),
             port_id: value.port_id.to_string(),
@@ -347,8 +392,7 @@ impl TryFrom<RecordWire> for RecordEnvelope {
 
     fn try_from(value: RecordWire) -> Result<Self, Self::Error> {
         Ok(Self {
-            seq: value.seq,
-            stream: value.stream,
+            id: value.id,
             adapter_id: value.adapter_id,
             protocol_id: ProtocolId::parse(value.protocol_id)
                 .map_err(|error| RepositoryError::InvalidReference(error.to_string()))?,
@@ -433,6 +477,16 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), RepositoryError> {
     Ok(())
 }
 
+fn atomic_create(path: &Path, bytes: &[u8]) -> Result<(), RepositoryError> {
+    let parent = path.parent().ok_or(RepositoryError::MissingParent)?;
+    fs::create_dir_all(parent)?;
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    use std::io::Write;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+
 #[derive(Debug, Error)]
 pub enum RepositoryError {
     #[error("local capsule repository I/O failed: {0}")]
@@ -455,21 +509,24 @@ pub enum RepositoryError {
         expected: Option<String>,
         actual: Option<String>,
     },
-    #[error("record sequence must be {expected}, got {actual}")]
-    Sequence { expected: u64, actual: u64 },
+    #[error("record sequence for `{stream}` must be {expected}, got {actual}")]
+    Sequence {
+        stream: String,
+        expected: u64,
+        actual: u64,
+    },
     #[error("record sequence overflow")]
     SequenceOverflow,
-    #[error("record #{0} does not exist")]
-    RecordNotFound(u64),
-    #[error("record #{0} is not canonical JCS")]
-    NonCanonicalRecord(u64),
-    #[error("causal parent record #{0} does not exist before this record")]
-    InvalidCause(u64),
-    #[error("record #{seq} belongs to `{actual}`, not `{expected}`")]
-    RecordOnDifferentStream {
-        seq: u64,
-        expected: String,
-        actual: String,
+    #[error("record {0:?} does not exist")]
+    RecordNotFound(RecordId),
+    #[error("record {0:?} is not canonical JCS")]
+    NonCanonicalRecord(RecordId),
+    #[error("causal parent record {0:?} does not exist before this record")]
+    InvalidCause(RecordId),
+    #[error("record identity mismatch (expected {expected:?}, actual {actual:?})")]
+    RecordIdentityMismatch {
+        expected: RecordId,
+        actual: RecordId,
     },
     #[error("repository path has no parent")]
     MissingParent,
@@ -477,10 +534,31 @@ pub enum RepositoryError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Barrier};
+
     use super::*;
 
     fn reference(byte: &str) -> ComputationRef {
         ComputationRef::parse(format!("blake3:{}", byte.repeat(64))).unwrap()
+    }
+
+    fn evidence(
+        stream: &str,
+        head_before: &ComputationRef,
+        head_after: &ComputationRef,
+    ) -> RecordEnvelope {
+        RecordEnvelope {
+            id: RecordId::new(stream, 0),
+            adapter_id: "ato.workspace@1".to_owned(),
+            protocol_id: ProtocolId::parse("ato.workspace@1").unwrap(),
+            port_id: PortId::parse("workspace.main").unwrap(),
+            direction: Direction::Inbound,
+            payload_ref: ContentRef::parse(format!("blake3:{}", "d".repeat(64))).unwrap(),
+            head_before: head_before.clone(),
+            head_after: head_after.clone(),
+            caused_by: Vec::new(),
+            observed_at: "2030-01-01T00:00:00Z".to_owned(),
+        }
     }
 
     #[test]
@@ -513,28 +591,87 @@ mod tests {
         let c2 = reference("c");
         repository.update_head("main", None, &c0).unwrap();
         repository.update_head("experiment", None, &c0).unwrap();
-        let payload = ContentRef::parse(format!("blake3:{}", "d".repeat(64))).unwrap();
         let record = repository
-            .append_record(RecordEnvelope {
-                seq: 0,
-                stream: "main".to_owned(),
-                adapter_id: "ato.workspace@1".to_owned(),
-                protocol_id: ProtocolId::parse("ato.workspace@1").unwrap(),
-                port_id: PortId::parse("workspace.main").unwrap(),
-                direction: Direction::Inbound,
-                payload_ref: payload,
-                head_before: c0.clone(),
-                head_after: c1.clone(),
-                caused_by: Vec::new(),
-                observed_at: "2030-01-01T00:00:00Z".to_owned(),
-            })
+            .append_record(evidence("main", &c0, &c1))
             .unwrap();
-        assert_eq!(record.seq, 1);
+        assert_eq!(record.id, RecordId::new("main", 1));
         repository.update_head("main", Some(&c0), &c2).unwrap();
         assert_eq!(repository.head("experiment").unwrap(), Some(c0));
         assert_eq!(
             repository.resolve(&"demo@main#1".parse().unwrap()).unwrap(),
             c1
         );
+    }
+
+    #[test]
+    fn concurrent_ref_compare_and_swap_has_exactly_one_winner() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = LocalCapsuleRepository::open(directory.path()).unwrap();
+        let c0 = reference("a");
+        repository.update_head("main", None, &c0).unwrap();
+        let barrier = Arc::new(Barrier::new(3));
+        let handles: Vec<_> = [reference("b"), reference("c")]
+            .into_iter()
+            .map(|next| {
+                let repository = repository.clone();
+                let expected = c0.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    repository.update_head("main", Some(&expected), &next)
+                })
+            })
+            .collect();
+        barrier.wait();
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(RepositoryError::RefConflict { .. })))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn concurrent_records_are_append_only_and_stream_local() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = LocalCapsuleRepository::open(directory.path()).unwrap();
+        let c0 = reference("a");
+        let barrier = Arc::new(Barrier::new(3));
+        let handles: Vec<_> = ["main", "main"]
+            .into_iter()
+            .map(|stream| {
+                let repository = repository.clone();
+                let head = c0.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    for _ in 0..25 {
+                        repository
+                            .append_record(evidence(stream, &head, &head))
+                            .unwrap();
+                    }
+                })
+            })
+            .collect();
+        barrier.wait();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let main = repository.records_for_stream("main", None).unwrap();
+        assert_eq!(main.len(), 50);
+        assert_eq!(
+            main.iter().map(|record| record.id.seq).collect::<Vec<_>>(),
+            (1..=50).collect::<Vec<_>>()
+        );
+        let experiment = repository
+            .append_record(evidence("experiment", &c0, &c0))
+            .unwrap();
+        assert_eq!(experiment.id, RecordId::new("experiment", 1));
     }
 }
