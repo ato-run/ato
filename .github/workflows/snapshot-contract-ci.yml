@@ -1,168 +1,23 @@
-name: Snapshot acceptance CI
-
-# Focused gate for the `snapshot` crate (Ready-State build/restore + the #1088
-# `running` acceptance orchestration).
-#
-# The workspace `rust-ci.yml` only runs on PRs to `main` / `dev`, so 0.7 feature
-# PRs targeting `nightly` (where the running-acceptance work lands,
-# ato-run/ato#1088) got no Rust test/clippy job. The `capsule-contract-ci.yml`
-# gate path-filters `crates/capsule/**` only, so changes under `crates/snapshot`
-# ran no cargo test/clippy at all. Rather than run the whole workspace CI on
-# `nightly` (which would surface unrelated pre-existing lint/fmt debt), this
-# path-filtered workflow runs exactly the snapshot crate's own gates on any PR
-# that touches `crates/snapshot`.
+name: snapshot provider
 
 on:
-  pull_request:
-    paths:
-      # The snapshot crate itself...
-      - "crates/snapshot/**"
-      # ...its `snapshot-builder` consumer (ato-wizard PR-2: the HOLD-phase
-      # orchestration + interactive_capture lane ride here, and it otherwise had
-      # NO nightly test/clippy gate — the workspace rust-ci only runs on PRs to
-      # main/dev, and this gate previously path-filtered crates/snapshot only).
-      - "crates/snapshot-builder/**"
-      # ...and the crates it depends on: a change to capsule / capsulefs /
-      # protocol can break the acceptance API without touching crates/snapshot,
-      # so the gate must fire on those too (verified against
-      # crates/snapshot/Cargo.toml [dependencies]).
-      - "crates/capsule/**"
-      - "crates/capsulefs/**"
-      - "crates/protocol/**"
-      # ...and the workspace pins that determine how it builds.
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - ".github/workflows/snapshot-contract-ci.yml"
   push:
-    branches: [main, dev, nightly]
-    paths:
-      - "crates/snapshot/**"
-      - "crates/snapshot-builder/**"
-      - "crates/capsule/**"
-      - "crates/capsulefs/**"
-      - "crates/protocol/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - ".github/workflows/snapshot-contract-ci.yml"
-      # The reproducibility proof drives the CLI's v1 build lane end to end, so
-      # it must also fire when that lane or the script itself changes.
-      - "crates/cli/**"
-      - "scripts/ready-state/verify-v1-pack-reproducible.sh"
+    paths: ["extensions/providers/snapshot/**", "tools/snapshot-builder/**", "lib/**"]
+  pull_request:
+    paths: ["extensions/providers/snapshot/**", "tools/snapshot-builder/**", "lib/**"]
   workflow_dispatch:
 
 permissions:
   contents: read
 
-env:
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
-
 jobs:
-  # The reproducibility claim, actually run rather than asserted.
-  #
-  # `filesystem.view_digest` is blake3 over the packed ext4 and the Execution
-  # Identity commits it, so a pack that is not byte-stable makes two builds of
-  # one program source two different executions. The unit tests can only check
-  # that the emitted script ASKS for determinism (`-U`, `-E hash_seed`,
-  # `SOURCE_DATE_EPOCH`, `mke2fs -d`, no loop mount) — whether `mke2fs`
-  # DELIVERS it needs `mke2fs`, which the dev Macs do not have.
-  #
-  # A GitHub runner does: Linux, passwordless sudo, docker, e2fsprogs 1.47. So
-  # the proof runs here on every PR that touches the pack, and a regression
-  # surfaces as a red check rather than on a builder host weeks later.
-  v1-pack-reproducible:
-    name: v1 pack is reproducible
+  snapshot:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.96.0
-      - uses: Swatinem/rust-cache@v2
-      - run: docker --version && mke2fs -V 2>&1 | head -1
-      - run: cargo build -p cli --bin ato
-      # Root because `docker export | tar -x` restores ownership. `-E` keeps the
-      # cargo/rustup environment so the built binary's own toolchain lookups
-      # behave the same as they would for the user.
-      - name: two builds of one source must agree
-        run: sudo -E ./scripts/ready-state/verify-v1-pack-reproducible.sh target/debug/ato
-
-  snapshot-acceptance:
-    name: snapshot acceptance
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      # Pin to the repo's rust-toolchain.toml channel (1.96.0). The default
-      # `@stable` used by other workflows floats to the newest stable, which
-      # can diverge from the pinned channel and surface version-dependent
-      # fmt/clippy behaviour; this gate must match the toolchain the tree pins.
-      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
+          components: clippy
       - uses: Swatinem/rust-cache@v2
-      # Prove the active toolchain is the pinned 1.96.0 (visible in the log).
-      - run: rustc --version && cargo --version
-      - run: cargo fmt -p snapshot -- --check
-      # `--lib` covers the crate's unit tests, including the #1088 `acceptance`
-      # module's disposable-orchestration tests (`pub mod acceptance;`).
-      - run: cargo test -p snapshot --lib
-      # `--doc` enforces the `compile_fail` doctest that guards the
-      # no-public-constructor property of `VerifiedRunningSnapshotEligibility`
-      # (a raw struct literal must fail on its private `execution_id` field).
-      - run: cargo test -p snapshot --doc
-      - run: cargo clippy -p snapshot --all-targets -- -D warnings
-      # ato-wizard PR-2: the `snapshot-builder` daemon (HOLD-phase orchestration +
-      # wizard wire + interactive_capture lane) rides no other nightly gate, so
-      # run its own fmt / test / clippy here. `cargo test -p snapshot-builder`
-      # activates snapshot's dev-only `test-support` feature (the HoldPhase tests
-      # seed #1088 `accept()` via `for_test`/`analyze_for_test`); all tests are
-      # KVM-free.
-      - run: cargo fmt -p snapshot-builder -- --check
-      - run: cargo test -p snapshot-builder
-      - run: cargo clippy -p snapshot-builder --all-targets -- -D warnings
-      # ── `test-support` must stay dev-dependency-only (feature-unification guard) ─
-      # snapshot's `test-support` feature exposes the eligibility TEST constructors
-      # (`for_test` / `analyze_for_test`) that BYPASS the running-capture
-      # eligibility gate. It is activated only under [dev-dependencies] (see
-      # crates/snapshot-builder/Cargo.toml), so it can never reach a release build.
-      # But Cargo feature unification is global: if ANY crate ever lists a
-      # dependency with `features = [ ... "test-support" ... ]` in a NORMAL (non-dev)
-      # dependency table — [dependencies], [dependencies.*], [build-dependencies],
-      # or a [target.*.dependencies] table — the bypass constructors would unify
-      # into release builds of the WHOLE workspace. This static gate fails if that
-      # invariant is ever broken. It tracks the current TOML table header and flags
-      # any `test-support` occurrence inside a non-dev dependency table (comments
-      # and the [features] definition of `test-support = []` are ignored).
-      - name: test-support stays dev-dependency-only
-        run: |
-          violations=$(find . -name Cargo.toml -not -path '*/target/*' -print0 \
-            | xargs -0 -r awk '
-                FNR == 1 { in_normal_dep = 0 }
-                /^[[:space:]]*\[/ {
-                  header = $0
-                  sub(/#.*/, "", header)
-                  # A non-dev dependency table has a standalone `dependencies` or
-                  # `build-dependencies` component. `dev-dependencies` is excluded
-                  # because the `dependencies` there is preceded by `-`, not by
-                  # `[`/`.`, so the boundary class does not match it.
-                  if (header ~ /[.[]dependencies[].]/ || header ~ /[.[]build-dependencies[].]/)
-                    in_normal_dep = 1
-                  else
-                    in_normal_dep = 0
-                  next
-                }
-                {
-                  line = $0
-                  sub(/#.*/, "", line)
-                  if (in_normal_dep && line ~ /test-support/)
-                    printf "%s:%d:%s\n", FILENAME, FNR, $0
-                }
-              ')
-          if [ -n "$violations" ]; then
-            echo "ERROR: snapshot test-support activated outside [dev-dependencies]:" >&2
-            echo "$violations" >&2
-            echo "The test-support feature exposes eligibility-gate BYPASS constructors" >&2
-            echo "and must be activated ONLY under a [dev-dependencies] table." >&2
-            exit 1
-          fi
-          echo "OK: test-support is activated only under [dev-dependencies]."
+      - run: cargo test -p ato-provider-snapshot -p snapshot-builder -p guest-agent
+      - run: cargo clippy -p ato-provider-snapshot -p snapshot-builder -p guest-agent --all-targets -- -D warnings

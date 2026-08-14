@@ -1,5 +1,9 @@
 # Publishing your app to the Ato Store
 
+> **Superseded workflow.** The manifest/lock/package paths in this historical
+> guide predate the Computation cutover. Do not treat them as normative; use
+> the accepted Repository Workspace and Object Bundle RFCs.
+
 > Audience: developers (human or AI agent) who have an app in a public GitHub
 > repository and want it runnable by anyone through the Ato Store.
 > Everything in this document reflects the implementation as of June 2026
