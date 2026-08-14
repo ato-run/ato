@@ -34,7 +34,7 @@ use ato_runtime::{
     PortableSessionRuntime,
 };
 use clap::{Args, Parser, Subcommand};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::authoring::{
@@ -69,6 +69,9 @@ enum Commands {
     /// Internal machine interface for canonical portable bundle validation.
     #[command(name = "__bundle", hide = true)]
     Bundle(BundleArgs),
+    /// Internal hosted-runner interface for a portable Capsule session.
+    #[command(name = "__hosted-session", hide = true)]
+    HostedSession(HostedSessionArgs),
     #[command(name = "__worker", hide = true)]
     Worker {
         project: PathBuf,
@@ -77,6 +80,46 @@ enum Commands {
         token: String,
         descriptor: Option<String>,
     },
+}
+
+#[derive(Debug, Args)]
+struct HostedSessionArgs {
+    #[command(subcommand)]
+    command: HostedSessionCommands,
+}
+
+#[derive(Debug, Subcommand)]
+enum HostedSessionCommands {
+    Start(HostedSessionStartArgs),
+    Capture(HostedSessionCaptureArgs),
+    Stop(HostedSessionStopArgs),
+}
+
+#[derive(Debug, Args)]
+struct HostedSessionStartArgs {
+    bundle: PathBuf,
+    #[arg(long)]
+    expected_root: String,
+    #[arg(long)]
+    repository: PathBuf,
+    #[arg(long = "bind", value_parser = parse_binding)]
+    bindings: Vec<(String, String)>,
+}
+
+#[derive(Debug, Args)]
+struct HostedSessionCaptureArgs {
+    #[arg(long)]
+    repository: PathBuf,
+    #[arg(short, long)]
+    output: PathBuf,
+    #[arg(long = "materialize")]
+    materializers: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+struct HostedSessionStopArgs {
+    #[arg(long)]
+    repository: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -125,6 +168,20 @@ struct BundleArgs {
 #[derive(Debug, Subcommand)]
 enum BundleCommands {
     Verify(BundleVerifyArgs),
+    ValidateQueue(BundleValidateQueueArgs),
+}
+
+#[derive(Debug, Args)]
+struct BundleValidateQueueArgs {
+    #[arg(long, env = "ATO_API_URL")]
+    api_base: String,
+    #[arg(long, env = "ATO_CAPSULE_VALIDATOR_TOKEN")]
+    token: String,
+    #[arg(long)]
+    agent_id: String,
+    /// Process at most one job. Intended for job schedulers and tests.
+    #[arg(long)]
+    once: bool,
 }
 
 #[derive(Debug, Args)]
@@ -132,6 +189,10 @@ struct BundleVerifyArgs {
     capsule: PathBuf,
     #[arg(long)]
     json: bool,
+    /// Validator-only fork proof: require this Computation to be in the
+    /// verifier-approved portable closure. The value is never echoed.
+    #[arg(long, hide = true)]
+    require_computation: Option<String>,
 }
 
 pub fn run() -> Result<()> {
@@ -143,7 +204,9 @@ pub fn run() -> Result<()> {
         Commands::Run(args) => run_capsule(args),
         Commands::Bundle(args) => match args.command {
             BundleCommands::Verify(args) => verify_bundle_command(args),
+            BundleCommands::ValidateQueue(args) => validate_bundle_queue(args),
         },
+        Commands::HostedSession(args) => hosted_session(args),
         Commands::Worker {
             project,
             branch,
@@ -158,6 +221,222 @@ pub fn run() -> Result<()> {
             descriptor.map(ContentRef::parse).transpose()?.as_ref(),
         ),
     }
+}
+
+#[derive(Deserialize)]
+struct ValidationClaimResponse {
+    job: ValidationJob,
+}
+
+#[derive(Deserialize)]
+struct ValidationJob {
+    job_id: String,
+    claim_id: String,
+    claimed_parent_root: Option<String>,
+    download_url: String,
+}
+
+fn validate_bundle_queue(args: BundleValidateQueueArgs) -> Result<()> {
+    if args.agent_id.trim().is_empty() {
+        bail!("validator agent id must not be empty");
+    }
+    let base = args.api_base.trim_end_matches('/');
+    let client = reqwest::blocking::Client::builder().build()?;
+    loop {
+        let response = client
+            .post(format!("{base}/v1/capsule-bundles/validation-jobs/claim"))
+            .bearer_auth(&args.token)
+            .json(&serde_json::json!({ "agent_id": args.agent_id }))
+            .send()?
+            .error_for_status()?;
+        if response.status() == reqwest::StatusCode::NO_CONTENT {
+            if args.once {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            continue;
+        }
+        let claimed: ValidationClaimResponse = response.json()?;
+        validate_claimed_bundle(&client, base, &args, claimed.job)?;
+        if args.once {
+            return Ok(());
+        }
+    }
+}
+
+fn validate_claimed_bundle(
+    client: &reqwest::blocking::Client,
+    base: &str,
+    args: &BundleValidateQueueArgs,
+    job: ValidationJob,
+) -> Result<()> {
+    let headers = |request: reqwest::blocking::RequestBuilder| {
+        request
+            .bearer_auth(&args.token)
+            .header("x-ato-validator-agent-id", &args.agent_id)
+            .header("x-ato-validation-claim-id", &job.claim_id)
+    };
+    let bytes = headers(client.get(format!("{base}{}", job.download_url)))
+        .send()?
+        .error_for_status()?
+        .bytes()?;
+    let verified = build_bundle_verification_report(&bytes, job.claimed_parent_root.as_deref());
+    let body = match verified {
+        Ok(report) => {
+            let mut body = serde_json::json!({
+                "status": "verified",
+                "report": report,
+            });
+            if job.claimed_parent_root.is_some() {
+                body["parent_reachable"] = serde_json::Value::Bool(true);
+            }
+            body
+        }
+        Err(_) => serde_json::json!({
+            "status": "rejected",
+            "rejection_code": "validator_failed",
+        }),
+    };
+    headers(client.post(format!(
+        "{base}/v1/capsule-bundles/validation-jobs/{}/ack",
+        job.job_id
+    )))
+    .json(&body)
+    .send()?
+    .error_for_status()?;
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct HostedSessionReport {
+    root_computation_ref: String,
+    branch: &'static str,
+    exported_ports: Vec<HostedPortReport>,
+}
+
+#[derive(Serialize)]
+struct HostedPortReport {
+    port_id: String,
+    protocol: String,
+    role: String,
+    local_endpoint: Option<String>,
+}
+
+fn hosted_session(args: HostedSessionArgs) -> Result<()> {
+    require_external_sandbox()?;
+    match args.command {
+        HostedSessionCommands::Start(args) => hosted_session_start(args),
+        HostedSessionCommands::Capture(args) => hosted_session_capture(args),
+        HostedSessionCommands::Stop(args) => hosted_session_stop(args),
+    }
+}
+
+fn require_external_sandbox() -> Result<()> {
+    let profile = std::env::var("ATO_EXTERNAL_SANDBOX_PROFILE").unwrap_or_default();
+    if !external_sandbox_profile_supported(&profile) {
+        bail!(
+            "hosted portable Capsule execution requires an external sandbox profile; refusing host execution"
+        );
+    }
+    Ok(())
+}
+
+fn external_sandbox_profile_supported(profile: &str) -> bool {
+    matches!(profile, "linux-bwrap" | "firecracker" | "container")
+}
+
+fn hosted_session_start(args: HostedSessionStartArgs) -> Result<()> {
+    let bytes = fs::read(&args.bundle)?;
+    let references = reference_registry()?;
+    let verified = verify_bundle(&decode_bundle(&bytes)?, &references)?;
+    let expected = ComputationRef::parse(&args.expected_root)?;
+    if verified.root() != &expected {
+        bail!(
+            "portable Capsule root {} does not match expected {expected}",
+            verified.root()
+        );
+    }
+    fs::create_dir_all(&args.repository)?;
+    let mut session = PortableSession::import(&bytes, &args.repository, &references)?;
+    let state = load_runtime_state(
+        session.context().parent_root(),
+        session.context().repository().objects(),
+    )?;
+    let bindings: BTreeMap<_, _> = args.bindings.into_iter().collect();
+    let missing: Vec<_> = state
+        .config
+        .binding
+        .iter()
+        .filter(|binding| !bindings.contains_key(&binding.id))
+        .map(|binding| binding.id.clone())
+        .collect();
+    if !missing.is_empty() {
+        bail!("portable Capsule requires Bindings: {}", missing.join(", "));
+    }
+    preflight(session.context().repository(), &state.config, &bindings)?;
+    session.start(&DurablePortableRuntimeFactory { bindings })?;
+    let computation = resolve_computation(
+        session.context().repository().objects(),
+        session.context().parent_root(),
+    )?;
+    let exported_ports = computation
+        .object()
+        .boundary
+        .iter()
+        .map(|(id, port)| HostedPortReport {
+            port_id: id.to_string(),
+            protocol: port.protocol.to_string(),
+            role: port.role.to_string(),
+            local_endpoint: state
+                .config
+                .adapter
+                .iter()
+                .find(|adapter| adapter.port.as_deref() == Some(id.as_str()))
+                .and_then(|adapter| adapter.listen.clone()),
+        })
+        .collect();
+    println!(
+        "{}",
+        serde_json::to_string(&HostedSessionReport {
+            root_computation_ref: expected.to_string(),
+            branch: ato_runtime::PORTABLE_SESSION_BRANCH,
+            exported_ports,
+        })?
+    );
+    Ok(())
+}
+
+fn hosted_session_capture(args: HostedSessionCaptureArgs) -> Result<()> {
+    let repository = LocalCapsuleRepository::open(args.repository)?;
+    let lease = capture_active(&repository, ato_runtime::PORTABLE_SESSION_BRANCH)?;
+    let records = repository.records_for_causal_branch(&lease.branch, Some(lease.record_seq))?;
+    let export = encap_target(
+        &repository,
+        &lease.target,
+        &records,
+        &EncapArgs {
+            selector: String::new(),
+            current: true,
+            materializers: args.materializers,
+            output: args.output,
+        },
+    );
+    let root = lease.target.clone();
+    let release = lease.release();
+    export?;
+    release?;
+    println!("{root}");
+    Ok(())
+}
+
+fn hosted_session_stop(args: HostedSessionStopArgs) -> Result<()> {
+    let repository = LocalCapsuleRepository::open(args.repository)?;
+    let stopped = stop_active(&repository)?.context("hosted session has no active Run")?;
+    let head = evolve_workspace(&repository, &stopped.branch, &stopped.head)?;
+    repository.update_head(&stopped.branch, Some(&stopped.branch_base), &head)?;
+    repository.release_active_run(&stopped.token)?;
+    println!("{head}");
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -202,7 +481,7 @@ fn verify_bundle_command(args: BundleVerifyArgs) -> Result<()> {
         bail!("internal bundle verification requires --json");
     }
     let bytes = fs::read(&args.capsule)?;
-    match build_bundle_verification_report(&bytes) {
+    match build_bundle_verification_report(&bytes, args.require_computation.as_deref()) {
         Ok(report) => {
             println!("{}", serde_json::to_string(&report)?);
             Ok(())
@@ -214,11 +493,19 @@ fn verify_bundle_command(args: BundleVerifyArgs) -> Result<()> {
     }
 }
 
-fn build_bundle_verification_report(bytes: &[u8]) -> Result<BundleVerificationReport> {
+fn build_bundle_verification_report(
+    bytes: &[u8],
+    required_computation: Option<&str>,
+) -> Result<BundleVerificationReport> {
     let bundle = decode_bundle(bytes)?;
     let references = reference_registry()?;
     let verified = verify_bundle(&bundle, &references)?;
     let root = verified.root().clone();
+    if let Some(required) = required_computation {
+        let required = ComputationRef::parse(required)?;
+        resolve_computation(verified.objects(), &required)
+            .context("required parent computation is absent from the portable closure")?;
+    }
     let adapters = adapter_registry()?;
     let materializers = materializer_registry()?;
     let state = load_runtime_state(&root, verified.objects())?;
@@ -503,6 +790,118 @@ struct CliPortableRuntimeFactory {
     bindings: BTreeMap<String, String>,
 }
 
+/// Hosted sessions use the same durable supervisor as authored local Runs.
+/// Only the lifecycle wrapper is reusable; lineage remains in ato-objects.
+struct DurablePortableRuntimeFactory {
+    bindings: BTreeMap<String, String>,
+}
+
+impl PortableRuntimeFactory for DurablePortableRuntimeFactory {
+    fn create(
+        &self,
+        session: &PortableSessionContext,
+    ) -> Result<Box<dyn PortableSessionRuntime>, PortableSessionError> {
+        Ok(Box::new(DurablePortableRuntime {
+            repository: session.repository().clone(),
+            root: session.parent_root().clone(),
+            bindings: self.bindings.clone(),
+            started: false,
+        }))
+    }
+}
+
+struct DurablePortableRuntime {
+    repository: LocalCapsuleRepository,
+    root: ComputationRef,
+    bindings: BTreeMap<String, String>,
+    started: bool,
+}
+
+impl PortableSessionRuntime for DurablePortableRuntime {
+    fn start(&mut self) -> Result<(), PortableSessionError> {
+        start_durable(
+            &self.repository,
+            ato_runtime::PORTABLE_SESSION_BRANCH,
+            &self.root,
+            &self.bindings,
+            None,
+        )
+        .map_err(portable_runtime_error)?;
+        self.started = true;
+        Ok(())
+    }
+
+    fn wait(&mut self) -> Result<(), PortableSessionError> {
+        while self
+            .repository
+            .active_run()
+            .map_err(portable_runtime_error)?
+            .is_some_and(|run| run.status == "active")
+        {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        Ok(())
+    }
+
+    fn current_head(&self) -> Result<ComputationRef, PortableSessionError> {
+        if let Some(run) = self
+            .repository
+            .active_run()
+            .map_err(portable_runtime_error)?
+        {
+            return Ok(run.head);
+        }
+        self.repository
+            .head(ato_runtime::PORTABLE_SESSION_BRANCH)
+            .map_err(portable_runtime_error)?
+            .ok_or(PortableSessionError::MissingBranch)
+    }
+
+    fn encap_current(&mut self, output: &Path) -> Result<ComputationRef, PortableSessionError> {
+        let lease = capture_active(&self.repository, ato_runtime::PORTABLE_SESSION_BRANCH)
+            .map_err(portable_runtime_error)?;
+        let records = self
+            .repository
+            .records_for_causal_branch(&lease.branch, Some(lease.record_seq))
+            .map_err(portable_runtime_error)?;
+        let target = lease.target.clone();
+        let export = encap_target(
+            &self.repository,
+            &target,
+            &records,
+            &EncapArgs {
+                selector: String::new(),
+                current: true,
+                materializers: Vec::new(),
+                output: output.to_path_buf(),
+            },
+        );
+        let release = lease.release();
+        export.map_err(portable_runtime_error)?;
+        release.map_err(portable_runtime_error)?;
+        Ok(target)
+    }
+
+    fn stop(&mut self) -> Result<(), PortableSessionError> {
+        if !self.started {
+            return Ok(());
+        }
+        let stopped = stop_active(&self.repository)
+            .map_err(portable_runtime_error)?
+            .ok_or_else(|| PortableSessionError::Runtime("active Run disappeared".to_owned()))?;
+        let head = evolve_workspace(&self.repository, &stopped.branch, &stopped.head)
+            .map_err(portable_runtime_error)?;
+        self.repository
+            .update_head(&stopped.branch, Some(&stopped.branch_base), &head)
+            .map_err(portable_runtime_error)?;
+        self.repository
+            .release_active_run(&stopped.token)
+            .map_err(portable_runtime_error)?;
+        self.started = false;
+        Ok(())
+    }
+}
+
 impl PortableRuntimeFactory for CliPortableRuntimeFactory {
     fn create(
         &self,
@@ -719,6 +1118,14 @@ mod tests {
                 .to_string()
                 .contains("portable .capsule")
         );
+    }
+
+    #[test]
+    fn hosted_execution_fails_closed_without_an_external_sandbox_profile() {
+        assert!(!external_sandbox_profile_supported(""));
+        assert!(!external_sandbox_profile_supported("host"));
+        assert!(external_sandbox_profile_supported("linux-bwrap"));
+        assert!(external_sandbox_profile_supported("firecracker"));
     }
 
     #[test]
