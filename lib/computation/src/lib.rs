@@ -272,6 +272,15 @@ impl FromStr for ComputationRef {
     }
 }
 
+/// One immutable logical point selected from a computation DAG.
+///
+/// Lineage and storage metadata are deliberately absent: a point is only its
+/// current computation identity.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ComputationPoint {
+    pub head: ComputationRef,
+}
+
 /// One typed opening in a sealed computation boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortDef {
@@ -291,6 +300,98 @@ pub struct ComputationObject {
     pub semantics: SemanticsId,
     pub boundary: Boundary,
     pub residual: ContentRef,
+}
+
+/// Identifier for one child occurrence in a composed computation.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NodeId(String);
+
+impl NodeId {
+    pub fn parse(value: impl Into<String>) -> Result<Self, NodeIdError> {
+        let value = value.into();
+        if value.is_empty()
+            || value.len() > MAX_IDENTIFIER_BYTES
+            || !value.split('.').all(valid_component_segment)
+        {
+            return Err(NodeIdError { value });
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for NodeId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl FromStr for NodeId {
+    type Err = NodeIdError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("invalid node id `{value}`")]
+pub struct NodeIdError {
+    value: String,
+}
+
+/// A child Port selected by a node occurrence and its local PortId.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Endpoint {
+    pub node: NodeId,
+    pub port: PortId,
+}
+
+/// An undirected connection stored in canonical endpoint order.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Connection {
+    first: Endpoint,
+    second: Endpoint,
+}
+
+impl Connection {
+    pub fn new(first: Endpoint, second: Endpoint) -> Result<Self, ConnectionError> {
+        if first == second {
+            return Err(ConnectionError::SelfConnection(first));
+        }
+        let (first, second) = if first < second {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        Ok(Self { first, second })
+    }
+
+    pub fn first(&self) -> &Endpoint {
+        &self.first
+    }
+
+    pub fn second(&self) -> &Endpoint {
+        &self.second
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ConnectionError {
+    #[error("endpoint {0:?} cannot be connected to itself")]
+    SelfConnection(Endpoint),
+}
+
+/// Pure composition wiring. Its operational codec and reduction live in
+/// `ato-compose`, keeping this crate as the dependency root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompositeResidual {
+    pub nodes: BTreeMap<NodeId, ComputationRef>,
+    pub connections: Vec<Connection>,
+    pub exports: BTreeMap<PortId, Endpoint>,
 }
 
 #[cfg(test)]

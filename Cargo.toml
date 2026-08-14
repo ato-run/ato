@@ -5,15 +5,20 @@ members = [
     "lib/computation",
     "lib/kernel",
     "lib/objects",
-    "extensions/semantics/compose",
-    "extensions/semantics/workspace",
-    "extensions/adapters/repository",
-    "extensions/providers/snapshot",
+    "extensions/adapters/api",
+    "extensions/adapters/process",
+    "extensions/adapters/pty",
+    "extensions/adapters/workspace",
+    "extensions/adapters/binding",
+    "extensions/adapters/http",
+    "lib/compose",
+    "extensions/materializers/snapshot",
+    "extensions/materializers/snapshot/guest-agent",
+    "extensions/materializers/api",
+    "extensions/materializers/replay",
     "tools/snapshot-builder",
     "tools/arch-check",
     "lib/ipc",
-    "extensions/providers/snapshot/guest-agent",
-    "extensions/providers/nacelle",
     "services/netd",
 ]
 
@@ -30,6 +35,9 @@ exclude = [
     "apps/desktop/.tmp",
     "apps/desktop/vendor",
     "services/ato-tsnetd",
+    "extensions/providers/nacelle",
+    "extensions/semantics/workspace",
+    "extensions/adapters/repository",
 ]
 
 [workspace.package]

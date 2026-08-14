@@ -6,11 +6,17 @@
 #![forbid(unsafe_code)]
 
 mod bundle;
+mod repository;
 
 pub use bundle::{
-    BUNDLE_VERSION, BundleError, BundleIndex, BundleObjectDescriptor, BundleObjectKind,
-    CapsuleBundle, ComputationReferences, ObjectLink, ReferenceRegistry, bundle_root,
-    decode_bundle, encode_bundle, export_bundle, import_bundle, sign_bundle,
+    BUNDLE_VERSION, BundleError, BundleIndex, BundleMaterialization, BundleObjectDescriptor,
+    BundleObjectKind, CapsuleBundle, ComputationReferences, MaterializationReferences, ObjectLink,
+    ReferenceRegistry, bundle_root, decode_bundle, encode_bundle, export_bundle,
+    export_bundle_with_materializations, import_bundle, sign_bundle,
+};
+pub use repository::{
+    ActiveRun, BranchOrigin, CapsuleSelector, Direction, LocalCapsuleRepository, RecordEnvelope,
+    RecordId, RepositoryError,
 };
 
 use std::collections::BTreeMap;
@@ -85,7 +91,7 @@ pub enum GcError {
     InvalidReference(String),
 }
 
-/// Extension-owned outgoing references from one retained provider object.
+/// Extension-owned outgoing references from one retained physical object.
 pub trait RetainedObjectReferences: Send + Sync {
     fn outgoing(
         &self,
@@ -258,7 +264,7 @@ impl FsObjectStore {
     }
 
     /// Removes objects outside the closure of the supplied computation roots
-    /// and explicitly retained provider materializations.
+    /// and explicitly retained physical materializations.
     pub fn gc(
         &self,
         roots: &[ComputationRef],
@@ -275,7 +281,7 @@ impl FsObjectStore {
             );
         }
         for root in roots {
-            retained.extend(bundle::closure(root, self, references)?.into_keys());
+            retained.extend(bundle::closure(root, &[], self, references)?.into_keys());
         }
         let mut removed = 0;
         for algorithm in ["blake3", "sha256"] {

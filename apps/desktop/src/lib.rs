@@ -2,7 +2,7 @@
 //!
 //! The native launcher intentionally delegates computation advancement to the
 //! `ato` binary and opens the web console for visual interaction. It does not
-//! link application semantics or providers into the desktop process.
+//! link application semantics or adapters into the desktop process.
 
 #![forbid(unsafe_code)]
 
@@ -14,8 +14,32 @@ use ato_ipc::computation::{ComputationCommand, ComputationCommandResult};
 
 pub fn dispatch(request: &ComputationCommand) -> Result<ComputationCommandResult> {
     let output = match request {
-        ComputationCommand::Run { source } => ato_command()?.args(["run", source]).output()?,
-        ComputationCommand::ListRuns => ato_command()?.args(["ps", "--json"]).output()?,
+        ComputationCommand::Init {
+            capsule,
+            initial_only,
+        } => {
+            let mut command = ato_command()?;
+            command.args(["init", capsule]);
+            if *initial_only {
+                command.arg("--initial-only");
+            }
+            command.output()?
+        }
+        ComputationCommand::Resume { selector, branch } => {
+            let mut command = ato_command()?;
+            command.args(["resume", selector]);
+            if let Some(branch) = branch {
+                command.args(["--branch", branch]);
+            }
+            command.output()?
+        }
+        ComputationCommand::Stop { capsule } => ato_command()?.args(["stop", capsule]).output()?,
+        ComputationCommand::Encap { selector, output } => ato_command()?
+            .args(["encap", selector, "-o", output])
+            .output()?,
+        ComputationCommand::RunPortable { capsule_file } => {
+            ato_command()?.args(["run", capsule_file]).output()?
+        }
     };
     Ok(result(output))
 }
@@ -25,7 +49,9 @@ pub fn launch_console() -> Result<()> {
     let status = if cfg!(target_os = "macos") {
         Command::new("open").arg(url).status()?
     } else if cfg!(windows) {
-        Command::new("cmd").args(["/C", "start", "", url]).status()?
+        Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .status()?
     } else {
         Command::new("xdg-open").arg(url).status()?
     };

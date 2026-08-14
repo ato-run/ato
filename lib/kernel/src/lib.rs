@@ -1,7 +1,7 @@
 //! The minimal Ato kernel advances addressable computations.
 //!
 //! Concrete logical behavior is registered through [`Semantics`]. Physical
-//! realization, history, authoring syntax, and provider state do not live here.
+//! realization, history, authoring syntax, and adapter state do not live here.
 
 #![forbid(unsafe_code)]
 
