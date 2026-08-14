@@ -354,6 +354,7 @@ impl LocalCapsuleRepository {
     fn lock_transaction(&self) -> Result<TransactionGuard, RepositoryError> {
         let file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(self.root.join("transaction.lock"))?;
