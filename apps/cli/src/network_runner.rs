@@ -635,6 +635,11 @@ fn execute_replay_lease_unix(
                 }
                 let replay_proxy =
                     TcpProxy::start_unix(args.proxy_listen, repository.join("surface.sock"))?;
+                // Persist completion before /ready makes the lease terminal. The
+                // Replay projection is independent of the ordinary Session
+                // Surface readiness transition and must never be stranded at
+                // `playing` if the latter succeeds first.
+                report_replay_progress(client, base, args, lease, "complete", &event)?;
                 report_status(
                     client,
                     base,
@@ -657,7 +662,6 @@ fn execute_replay_lease_unix(
                 }))
                 .send()?
                 .error_for_status()?;
-                report_replay_progress(client, base, args, lease, "complete", &event)?;
                 break Some(replay_proxy);
             }
         }
