@@ -700,6 +700,19 @@ impl ReplayRuntime for CliReplayRuntime {
             .map_err(materializer_operation)
     }
 
+    fn abort(&mut self) -> Result<(), MaterializerError> {
+        let repository =
+            LocalCapsuleRepository::open(&self.project).map_err(materializer_operation)?;
+        quiesce_and_detach(
+            &mut self.sessions,
+            &AdapterContext {
+                workspace: &self.project,
+                objects: repository.objects(),
+            },
+        )
+        .map_err(materializer_operation)
+    }
+
     fn finish(
         self: Box<Self>,
         target: &ComputationRef,

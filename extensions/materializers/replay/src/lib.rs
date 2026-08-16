@@ -122,7 +122,7 @@ pub struct ReplayStepper {
     sequence: ReplaySequence,
     cursor: usize,
     current_head: ComputationRef,
-    runtime: Box<dyn ato_materializer_api::ReplayRuntime>,
+    runtime: Option<Box<dyn ato_materializer_api::ReplayRuntime>>,
 }
 
 impl ReplayStepper {
@@ -138,7 +138,7 @@ impl ReplayStepper {
             sequence,
             cursor: 0,
             current_head,
-            runtime,
+            runtime: Some(runtime),
         })
     }
 
@@ -158,7 +158,10 @@ impl ReplayStepper {
         let Some(record) = self.sequence.records.get(self.cursor) else {
             return Ok(None);
         };
-        self.runtime.apply(record)?;
+        self.runtime
+            .as_mut()
+            .expect("unfinished ReplayStepper owns its runtime")
+            .apply(record)?;
         self.cursor += 1;
         self.current_head = record.head_after.clone();
         Ok(Some(ReplayProgress {
@@ -174,7 +177,7 @@ impl ReplayStepper {
         }))
     }
 
-    pub fn finish(self) -> Result<Box<dyn Realization>, MaterializerError> {
+    pub fn finish(mut self) -> Result<Box<dyn Realization>, MaterializerError> {
         if self.cursor != self.sequence.records.len() || self.current_head != self.sequence.target {
             return Err(MaterializerError::Operation(format!(
                 "replay is incomplete at {}/{} ({})",
@@ -183,7 +186,18 @@ impl ReplayStepper {
                 self.current_head
             )));
         }
-        self.runtime.finish(&self.sequence.target)
+        self.runtime
+            .take()
+            .expect("unfinished ReplayStepper owns its runtime")
+            .finish(&self.sequence.target)
+    }
+}
+
+impl Drop for ReplayStepper {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.runtime.as_mut() {
+            let _ = runtime.abort();
+        }
     }
 }
 

@@ -61,6 +61,14 @@ pub trait Realization: Send {
 /// Mutable reconstruction owned by a Materializer while it applies evidence.
 pub trait ReplayRuntime: Send {
     fn apply(&mut self, record: &RecordEnvelope) -> Result<(), MaterializerError>;
+
+    /// Best-effort teardown when incremental reconstruction is stopped or an
+    /// apply fails before `finish`. Implementations that own processes must
+    /// override this and terminate their physical resources.
+    fn abort(&mut self) -> Result<(), MaterializerError> {
+        Ok(())
+    }
+
     fn finish(
         self: Box<Self>,
         target: &ComputationRef,
