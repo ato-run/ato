@@ -224,6 +224,11 @@ fn serve(args: ServeArgs) -> Result<()> {
         };
         if let Err(error) = execute_lease(&client, base, &args, &evaluator, &lease) {
             let replay = lease.command.kind == "portable_capsule_replay_v1";
+            if replay {
+                // Payload-free operator diagnostics stay on the Runner host;
+                // the public control plane receives only the stable safe code.
+                eprintln!("isolated Replay lease {} failed: {error:#}", lease.id);
+            }
             let message = if replay {
                 "Replay Session failed and its isolated state was discarded.".to_owned()
             } else {
