@@ -28,7 +28,9 @@ use ato_computation::{ComputationRef, ContentRef};
 use ato_materializer_api::{
     Compatibility, MaterializerContext, MaterializerRegistry, RestoreCapability,
 };
-use ato_materializer_replay::{ReplayMaterializer, ReplayReferences, records_for_descriptor};
+use ato_materializer_replay::{
+    ReplayMaterializer, ReplayReferences, ReplaySequence, ReplayStepper, records_for_descriptor,
+};
 use ato_materializer_snapshot::{SnapshotMaterializer, SnapshotReferences};
 use ato_objects::{
     BranchOrigin, BundleMaterialization, CapsuleSelector, LocalCapsuleRepository, RecordId,
@@ -104,8 +106,30 @@ struct HostedSessionArgs {
 #[derive(Debug, Subcommand)]
 enum HostedSessionCommands {
     Start(HostedSessionStartArgs),
+    Replay(HostedReplayStartArgs),
     Capture(HostedSessionCaptureArgs),
     Stop(HostedSessionStopArgs),
+}
+
+#[derive(Debug, Args)]
+struct HostedReplayStartArgs {
+    bundle: PathBuf,
+    #[arg(long)]
+    expected_root: String,
+    #[arg(long)]
+    repository: PathBuf,
+    #[arg(long)]
+    surface_port: String,
+    #[arg(long)]
+    surface_relay: PathBuf,
+    /// Presentation timing only. It never changes descriptor order.
+    #[arg(long, default_value_t = 80)]
+    minimum_delay_ms: u64,
+    /// Presentation timing only. Long idle gaps are compressed to this bound.
+    #[arg(long, default_value_t = 750)]
+    maximum_delay_ms: u64,
+    #[arg(long)]
+    hold: bool,
 }
 
 #[derive(Debug, Args)]
@@ -372,9 +396,190 @@ fn hosted_session(args: HostedSessionArgs) -> Result<()> {
     require_external_sandbox()?;
     match args.command {
         HostedSessionCommands::Start(args) => hosted_session_start(args),
+        HostedSessionCommands::Replay(args) => hosted_replay_start(args),
         HostedSessionCommands::Capture(args) => hosted_session_capture(args),
         HostedSessionCommands::Stop(args) => hosted_session_stop(args),
     }
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum HostedReplayEvent {
+    Prepared {
+        anchor_root: String,
+        target_root: String,
+        cursor: usize,
+        total_records: usize,
+    },
+    Progress {
+        cursor: usize,
+        total_records: usize,
+        current_head: String,
+        current_record: HostedReplayRecord,
+    },
+    Complete {
+        cursor: usize,
+        total_records: usize,
+        current_head: String,
+        surface: HostedSessionReport,
+    },
+}
+
+#[derive(Serialize)]
+struct HostedReplayRecord {
+    id: RecordId,
+    protocol_id: String,
+    port_id: String,
+    direction: ato_objects::Direction,
+}
+
+fn emit_replay_event(event: &HostedReplayEvent) -> Result<()> {
+    println!("{}", serde_json::to_string(event)?);
+    std::io::stdout().flush()?;
+    Ok(())
+}
+
+fn hosted_replay_start(args: HostedReplayStartArgs) -> Result<()> {
+    if args.minimum_delay_ms > args.maximum_delay_ms {
+        bail!("Replay presentation delay bounds are invalid");
+    }
+    let bytes = fs::read(&args.bundle)?;
+    let references = reference_registry()?;
+    let verified = verify_bundle(&decode_bundle(&bytes)?, &references)?;
+    let expected = ComputationRef::parse(&args.expected_root)?;
+    if verified.root() != &expected {
+        bail!("portable Replay root does not match the expected Post root");
+    }
+    fs::create_dir_all(&args.repository)?;
+    let session = PortableSession::import(&bytes, &args.repository, &references)?;
+    let replay_descriptor = session
+        .context()
+        .materializations()
+        .iter()
+        .find(|candidate| candidate.materializer_id == "ato.replay@1")
+        .context("Replay Materialization is unavailable")?;
+    let replay_descriptor = ContentRef::parse(&replay_descriptor.descriptor_ref)?;
+    let state = load_runtime_state(
+        session.context().parent_root(),
+        session.context().repository().objects(),
+    )?;
+    if !state.config.binding.is_empty() {
+        bail!("replay_requires_binding");
+    }
+    const AUDITED: &[&str] = &[
+        "ato.process@1",
+        "ato.pty@1",
+        "ato.workspace@1",
+        "ato.binding@1",
+        "ato.http@1",
+    ];
+    if state
+        .config
+        .adapter
+        .iter()
+        .any(|adapter| !AUDITED.contains(&adapter.use_adapter.as_str()))
+    {
+        bail!("replay_requires_non_audited_adapter");
+    }
+    let adapters = adapter_registry()?;
+    let sequence = ReplaySequence::load(
+        &replay_descriptor,
+        session.context().repository().objects(),
+        &adapters,
+    )?;
+    if sequence.target() != &expected {
+        bail!("Replay target does not match the expected Post root");
+    }
+    if !sequence.required_bindings().is_empty()
+        || sequence
+            .required_adapters()
+            .iter()
+            .any(|adapter| !AUDITED.contains(&adapter.as_str()))
+    {
+        bail!("Replay safety preflight failed");
+    }
+    let total_records = sequence.records().len();
+    let delays = sequence
+        .records()
+        .windows(2)
+        .map(|pair| {
+            pair[0]
+                .observed_at
+                .parse::<u128>()
+                .ok()
+                .zip(pair[1].observed_at.parse::<u128>().ok())
+                .and_then(|(before, after)| after.checked_sub(before))
+                .map(|nanos| (nanos / 1_000_000).min(u64::MAX as u128) as u64)
+                .unwrap_or(args.minimum_delay_ms)
+                .clamp(args.minimum_delay_ms, args.maximum_delay_ms)
+        })
+        .collect::<Vec<_>>();
+    emit_replay_event(&HostedReplayEvent::Prepared {
+        anchor_root: sequence.anchor().to_string(),
+        target_root: sequence.target().to_string(),
+        cursor: 0,
+        total_records,
+    })?;
+
+    let driver =
+        CliRealizationDriver::new(session.context().repository().project(), &BTreeMap::new());
+    let mut stepper = ReplayStepper::begin(sequence, &driver)?;
+    while let Some(progress) = stepper.step()? {
+        emit_replay_event(&HostedReplayEvent::Progress {
+            cursor: progress.cursor,
+            total_records: progress.total,
+            current_head: progress.head_after.to_string(),
+            current_record: HostedReplayRecord {
+                id: progress.record_id,
+                protocol_id: progress.protocol_id.to_string(),
+                port_id: progress.port_id.to_string(),
+                direction: progress.direction,
+            },
+        })?;
+        if let Some(delay) = delays.get(progress.cursor.saturating_sub(1)) {
+            std::thread::sleep(std::time::Duration::from_millis(*delay));
+        }
+    }
+    let mut realization = stepper.finish()?;
+    realization.activate()?;
+    let computation = resolve_computation(session.context().repository().objects(), &expected)?;
+    let selected_endpoint = computation
+        .object()
+        .boundary
+        .get(&ato_computation::PortId::parse(&args.surface_port)?)
+        .and_then(|port| runtime_endpoint(&state, &args.surface_port, &port.protocol.to_string()))
+        .context("selected Replay Port has no runtime endpoint")?;
+    start_unix_surface_relay(&args.surface_relay, selected_endpoint.parse()?)?;
+    let exported_ports = computation
+        .object()
+        .boundary
+        .iter()
+        .map(|(id, port)| HostedPortReport {
+            port_id: id.to_string(),
+            protocol: port.protocol.to_string(),
+            role: port.role.to_string(),
+            local_endpoint: (id.as_str() == args.surface_port)
+                .then(|| "unix:surface.sock".to_owned()),
+        })
+        .collect();
+    emit_replay_event(&HostedReplayEvent::Complete {
+        cursor: total_records,
+        total_records,
+        current_head: expected.to_string(),
+        surface: HostedSessionReport {
+            root_computation_ref: expected.to_string(),
+            branch: "replay-session",
+            exported_ports,
+        },
+    })?;
+    if args.hold {
+        let waited = realization.wait();
+        let quiesced = realization.quiesce();
+        waited.and(quiesced)?;
+    } else {
+        realization.quiesce()?;
+    }
+    Ok(())
 }
 
 fn require_external_sandbox() -> Result<()> {

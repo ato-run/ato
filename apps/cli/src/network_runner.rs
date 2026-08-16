@@ -107,17 +107,48 @@ struct SessionSurface {
     kind: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct HostedSessionReport {
     root_computation_ref: String,
     exported_ports: Vec<HostedPort>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct HostedPort {
     port_id: String,
     protocol: String,
     local_endpoint: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ReplayWorkerEvent {
+    Prepared {
+        anchor_root: String,
+        target_root: String,
+        cursor: usize,
+        total_records: usize,
+    },
+    Progress {
+        cursor: usize,
+        total_records: usize,
+        current_head: String,
+        current_record: ReplayRecordProgress,
+    },
+    Complete {
+        cursor: usize,
+        total_records: usize,
+        current_head: String,
+        surface: HostedSessionReport,
+    },
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ReplayRecordProgress {
+    id: ato_objects::RecordId,
+    protocol_id: String,
+    port_id: String,
+    direction: ato_objects::Direction,
 }
 
 #[derive(Debug, Deserialize)]
@@ -192,7 +223,12 @@ fn serve(args: ServeArgs) -> Result<()> {
             continue;
         };
         if let Err(error) = execute_lease(&client, base, &args, &evaluator, &lease) {
-            let message = format!("portable Capsule execution failed: {error:#}");
+            let replay = lease.command.kind == "portable_capsule_replay_v1";
+            let message = if replay {
+                "Replay Session failed and its isolated state was discarded.".to_owned()
+            } else {
+                format!("portable Capsule execution failed: {error:#}")
+            };
             let _ = report_status(
                 &client,
                 base,
@@ -202,7 +238,11 @@ fn serve(args: ServeArgs) -> Result<()> {
                     status: "failed",
                     execution_id: None,
                     error: Some(ErrorReport {
-                        code: "portable_capsule_failed",
+                        code: if replay {
+                            "capsule_replay_failed"
+                        } else {
+                            "portable_capsule_failed"
+                        },
                         message: &message,
                     }),
                 },
@@ -303,7 +343,7 @@ fn heartbeat(client: &Client, base: &str, args: &ResolvedServeArgs) -> Result<()
     .json(&serde_json::json!({
         "capabilities": [PROCESS_EXECUTION_ABI_CAPABILITY, UNTRUSTED_ISOLATION_CAPABILITY],
         "evaluator": { "implementation": "linux-bwrap", "policy": "untrusted-v1" },
-        "supported_lease_kinds": ["portable_capsule_v2"],
+        "supported_lease_kinds": ["portable_capsule_v2", "portable_capsule_replay_v1"],
         "supported_session_surfaces": [
             {
                 "kind": "web",
@@ -356,6 +396,9 @@ fn execute_lease_unix(
     evaluator: &UntrustedProcessEvaluator,
     lease: &ClaimedLease,
 ) -> Result<()> {
+    if lease.command.kind == "portable_capsule_replay_v1" {
+        return execute_replay_lease_unix(client, base, args, evaluator, lease);
+    }
     if lease.command.kind != "portable_capsule_v2" {
         bail!("unsupported lease kind `{}`", lease.command.kind);
     }
@@ -491,6 +534,201 @@ fn execute_lease_unix(
     }
 }
 
+#[cfg(unix)]
+fn execute_replay_lease_unix(
+    client: &Client,
+    base: &str,
+    args: &ResolvedServeArgs,
+    evaluator: &UntrustedProcessEvaluator,
+    lease: &ClaimedLease,
+) -> Result<()> {
+    if !lease.command.bundle_id.starts_with("bnd_") {
+        bail!("Replay lease carries an invalid bundle identity");
+    }
+    report_status(
+        client,
+        base,
+        &args.runner_token,
+        &lease.id,
+        StatusReport {
+            status: "preparing",
+            execution_id: None,
+            error: None,
+        },
+    )?;
+    let repository = args.state_dir.join("replay-sessions").join(&lease.run_id);
+    fs::create_dir_all(&repository)?;
+    let bundle_path = repository.join("input.capsule");
+    let bytes = authorized(
+        client.get(format!(
+            "{base}/v1/runner-leases/{}/capsule-bundle",
+            lease.id
+        )),
+        &args.runner_token,
+    )
+    .send()?
+    .error_for_status()?
+    .bytes()?;
+    let actual_digest = format!("sha256:{:x}", sha2::Sha256::digest(&bytes));
+    if actual_digest != lease.command.transport_digest {
+        bail!("downloaded Replay bundle transport digest mismatch");
+    }
+    fs::write(&bundle_path, &bytes)?;
+    let child = evaluator.spawn_replay_session(
+        &bundle_path,
+        &repository,
+        &lease.command.expected_root_computation_ref,
+        &lease.command.exported_port_id,
+    )?;
+    let mut sandbox = ReplaySandbox {
+        child,
+        repository: repository.clone(),
+    };
+    let stdout = sandbox
+        .child
+        .stdout
+        .take()
+        .context("Replay sandbox stdout unavailable")?;
+    let mut lines = BufReader::new(stdout).lines();
+    let execution_id = format!("replay:{}:{}", lease.run_id, sandbox.child.id());
+    let mut proxy = loop {
+        let line = lines
+            .next()
+            .transpose()?
+            .context("Replay sandbox exited before completion")?;
+        let event: ReplayWorkerEvent =
+            serde_json::from_str(&line).context("invalid safe Replay progress")?;
+        match &event {
+            ReplayWorkerEvent::Prepared { target_root, .. } => {
+                if target_root != &lease.command.expected_root_computation_ref {
+                    bail!("Replay prepared an unexpected target");
+                }
+                report_replay_progress(client, base, args, lease, "playing", &event)?;
+            }
+            ReplayWorkerEvent::Progress { current_head, .. } => {
+                if current_head.is_empty() {
+                    bail!("Replay reported an empty causal head");
+                }
+                report_replay_progress(client, base, args, lease, "playing", &event)?;
+            }
+            ReplayWorkerEvent::Complete {
+                current_head,
+                surface,
+                ..
+            } => {
+                if current_head != &lease.command.expected_root_computation_ref
+                    || surface.root_computation_ref != lease.command.expected_root_computation_ref
+                {
+                    bail!("Replay completed at an unexpected target");
+                }
+                let port = surface
+                    .exported_ports
+                    .iter()
+                    .find(|port| port.port_id == lease.command.exported_port_id)
+                    .context("selected Replay Port was not realized")?;
+                if (lease.command.session_surface.kind == "web" && port.protocol != "ato.http@1")
+                    || (lease.command.session_surface.kind == "terminal"
+                        && port.protocol != "ato.pty@1")
+                    || port.local_endpoint.as_deref() != Some("unix:surface.sock")
+                {
+                    bail!("Replay surface does not match the negotiated Port");
+                }
+                let replay_proxy =
+                    TcpProxy::start_unix(args.proxy_listen, repository.join("surface.sock"))?;
+                report_status(
+                    client,
+                    base,
+                    &args.runner_token,
+                    &lease.id,
+                    StatusReport {
+                        status: "running",
+                        execution_id: None,
+                        error: None,
+                    },
+                )?;
+                authorized(
+                    client.post(format!("{base}/v1/runner-leases/{}/ready", lease.id)),
+                    &args.runner_token,
+                )
+                .json(&serde_json::json!({
+                    "execution_id": execution_id,
+                    "ready_url": args.public_base_url,
+                    "local_port": args.proxy_listen.port(),
+                }))
+                .send()?
+                .error_for_status()?;
+                report_replay_progress(client, base, args, lease, "complete", &event)?;
+                break Some(replay_proxy);
+            }
+        }
+    };
+
+    loop {
+        if sandbox.child.try_wait()?.is_some() {
+            bail!("Replay sandbox exited while its view-only surface was active");
+        }
+        let control: ControlResponse = authorized(
+            client.get(format!("{base}/v1/runner-leases/{}/control", lease.id)),
+            &args.runner_token,
+        )
+        .send()?
+        .error_for_status()?
+        .json()?;
+        if control.capture.is_some() {
+            bail!("Replay Session cannot capture");
+        }
+        if control.stop_requested {
+            drop(proxy.take());
+            terminate_child(&mut sandbox.child);
+            authorized(
+                client.post(format!("{base}/v1/runner-leases/{}/stopped", lease.id)),
+                &args.runner_token,
+            )
+            .json(&serde_json::json!({ "execution_id": execution_id }))
+            .send()?
+            .error_for_status()?;
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+#[cfg(unix)]
+fn report_replay_progress(
+    client: &Client,
+    base: &str,
+    args: &ResolvedServeArgs,
+    lease: &ClaimedLease,
+    status: &str,
+    event: &ReplayWorkerEvent,
+) -> Result<()> {
+    authorized(
+        client.post(format!(
+            "{base}/v1/runner-leases/{}/replay-progress",
+            lease.id
+        )),
+        &args.runner_token,
+    )
+    .json(&serde_json::json!({ "status": status, "event": event }))
+    .send()?
+    .error_for_status()?;
+    Ok(())
+}
+
+#[cfg(unix)]
+struct ReplaySandbox {
+    child: Child,
+    repository: PathBuf,
+}
+
+#[cfg(unix)]
+impl Drop for ReplaySandbox {
+    fn drop(&mut self) {
+        terminate_child(&mut self.child);
+        let _ = fs::remove_dir_all(&self.repository);
+    }
+}
+
 impl UntrustedProcessEvaluator {
     fn spawn_session(
         &self,
@@ -533,6 +771,38 @@ impl UntrustedProcessEvaluator {
             .write_all(&payload)?;
         payload.fill(0);
         Ok(child)
+    }
+
+    fn spawn_replay_session(
+        &self,
+        bundle: &Path,
+        repository: &Path,
+        root: &str,
+        surface_port: &str,
+    ) -> Result<Child> {
+        let executable = std::env::current_exe()?;
+        let repository = repository.canonicalize()?;
+        let bundle = bundle.canonicalize()?;
+        if bundle != repository.join("input.capsule") {
+            bail!("portable Replay Bundle must be inside the isolated workspace");
+        }
+        let arguments = sandbox_arguments(&executable, &repository)?;
+        evaluator_command(&self.bwrap, arguments)
+            .args(["--setenv", "ATO_EXTERNAL_SANDBOX_PROFILE", "untrusted-v1"])
+            .args(["--setenv", "ATO_PTY_GATEWAY_LISTEN", "127.0.0.1:8431"])
+            .arg("/opt/ato/bin/ato")
+            .args(["__hosted-session", "replay"])
+            .arg("/workspace/input.capsule")
+            .args(["--expected-root", root, "--repository"])
+            .arg("/workspace")
+            .args(["--surface-port", surface_port])
+            .args(["--surface-relay", "/workspace/surface.sock"])
+            .arg("--hold")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("failed to enter isolated Replay Evaluator")
     }
 }
 
@@ -894,5 +1164,65 @@ mod tests {
         assert_eq!(&response, b"pong");
         drop(proxy);
         server.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_replay_sandbox_terminates_process_tree_and_removes_workspace() {
+        let root = std::env::current_dir()
+            .unwrap()
+            .join(".tmp")
+            .join(format!("replay-drop-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let child = Command::new("sh").args(["-c", "sleep 30"]).spawn().unwrap();
+        let pid = child.id();
+        drop(ReplaySandbox {
+            child,
+            repository: root.clone(),
+        });
+        assert!(!root.exists());
+        assert!(
+            !Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .status()
+                .is_ok_and(|status| status.success())
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn replay_namespace_cannot_write_host_or_reach_external_canary() {
+        let Some(bwrap) = find_executable("bwrap") else {
+            return;
+        };
+        let root = std::env::current_dir()
+            .unwrap()
+            .join(".tmp")
+            .join(format!("replay-isolation-{}", std::process::id()));
+        let repository = root.join("workspace");
+        let marker = root.join("host-canary");
+        fs::create_dir_all(&repository).unwrap();
+        let canary = TcpListener::bind("127.0.0.1:0").unwrap();
+        canary.set_nonblocking(true).unwrap();
+        let mut arguments =
+            sandbox_arguments(&std::env::current_exe().unwrap(), &repository).unwrap();
+        arguments.extend([
+            OsString::from("/bin/bash"),
+            OsString::from("-c"),
+            OsString::from(format!(
+                "echo escaped > {}; exec 3<>/dev/tcp/127.0.0.1/{}",
+                marker.display(),
+                canary.local_addr().unwrap().port()
+            )),
+        ]);
+        let status = evaluator_command(&bwrap, arguments).status().unwrap();
+        assert!(!status.success());
+        assert!(!marker.exists());
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(matches!(
+            canary.accept(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+        fs::remove_dir_all(root).unwrap();
     }
 }
