@@ -605,6 +605,31 @@ fn execute_replay_lease_unix(
             .context("Replay sandbox exited before completion")?;
         let event: ReplayWorkerEvent =
             serde_json::from_str(&line).context("invalid safe Replay progress")?;
+        // A user may stop while the sandbox is still preparing or stepping.
+        // Observe that request before publishing another progress transition;
+        // otherwise the control plane correctly rejects the late progress and
+        // the voluntary stop is misclassified as a Replay failure.
+        let control: ControlResponse = authorized(
+            client.get(format!("{base}/v1/runner-leases/{}/control", lease.id)),
+            &args.runner_token,
+        )
+        .send()?
+        .error_for_status()?
+        .json()?;
+        if control.capture.is_some() {
+            bail!("Replay Session cannot capture");
+        }
+        if control.stop_requested {
+            terminate_child(&mut sandbox.child);
+            authorized(
+                client.post(format!("{base}/v1/runner-leases/{}/stopped", lease.id)),
+                &args.runner_token,
+            )
+            .json(&serde_json::json!({ "execution_id": execution_id }))
+            .send()?
+            .error_for_status()?;
+            return Ok(());
+        }
         match &event {
             ReplayWorkerEvent::Prepared { target_root, .. } => {
                 if target_root != &lease.command.expected_root_computation_ref {
