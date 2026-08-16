@@ -110,6 +110,7 @@ struct SessionSurface {
 #[derive(Debug, Deserialize, Serialize)]
 struct HostedSessionReport {
     root_computation_ref: String,
+    branch: String,
     exported_ports: Vec<HostedPort>,
 }
 
@@ -117,6 +118,7 @@ struct HostedSessionReport {
 struct HostedPort {
     port_id: String,
     protocol: String,
+    role: String,
     local_endpoint: Option<String>,
 }
 
