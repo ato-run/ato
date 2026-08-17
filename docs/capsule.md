@@ -1,15 +1,26 @@
-# Capsule
+# Capsule bundle
 
-A Capsule is a sealed, addressable computation: a `ComputationRef`.
+For the concept, start with [Capsule and Run](concepts/capsule.md).
 
-There is no separate Capsule semantic struct. A `.capsule` file is transport:
-it contains a root `ComputationRef`, the reachable object closure, and optional
-signatures. Import verifies the complete closure before inserting objects.
-Different bundle encodings of the same root identify the same Capsule.
+The current implementation identifies a Capsule by one immutable
+`ComputationRef`. A portable `.capsule` file is transport, not identity. Bundle
+version 2 contains the root ComputationRef, its verified object closure,
+optional Materialization descriptors, and optional signatures.
 
-```bash
-ato encap . --output app.capsule
-ato decap start app.capsule
+```text
+Capsule identity = root ComputationRef
+Capsule identity != bundle bytes
+Capsule identity != Materialization inventory
 ```
 
-See [Object Closure Bundle](rfcs/accepted/OBJECT_BUNDLE.md).
+Different bundle encodings or compatible Materializations of the same root
+refer to the same logical Capsule. Import verifies the complete closure before
+inserting objects.
+
+```sh
+ato encap demo@main --materialize ato.replay@1 -o demo.capsule
+ato run demo.capsule
+```
+
+See [Object Closure Bundle](rfcs/accepted/OBJECT_BUNDLE.md) and
+[Capsule Bundle](rfcs/accepted/CAPSULE_BUNDLE.md).
