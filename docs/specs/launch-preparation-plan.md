@@ -1,5 +1,8 @@
 # Launch Preparation Bridge Contract (#581 ↔ #593)
 
+> **Historical draft.** The crate paths and launch-plan model below predate the
+> Computation architecture and are not current implementation authority.
+
 Status: draft · Date: 2026-06-09 · SSOT: `crates/capsule/src/engine/launch_preparation_bridge.rs`
 
 ## Purpose
