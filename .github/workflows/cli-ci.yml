@@ -1,0 +1,27 @@
+name: computation CLI
+
+on:
+  push:
+    paths: ["apps/cli/**", "lib/**", "extensions/**", "Cargo.toml", "Cargo.lock"]
+  pull_request:
+    paths: ["apps/cli/**", "lib/**", "extensions/**", "Cargo.toml", "Cargo.lock"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cli:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects
+      - run: cargo clippy -p ato-cli --all-targets -- -D warnings

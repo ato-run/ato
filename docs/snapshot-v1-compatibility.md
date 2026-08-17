@@ -1,5 +1,10 @@
 # Snapshot v1 Compatibility Contract
 
+> **Historical implementation contract.** This document describes the former
+> Ready-State product path. Snapshot v1 is a physical realization format, not
+> Capsule identity or a current Semantic Core primitive. Use
+> [Materialization](concepts/materialization.md) for the current model.
+
 > **Snapshot v1 is a sealed ready-state path for no-binding, single-process web
 > apps. It is not a general VM hosting product.**
 
@@ -18,7 +23,7 @@ is added or changed in the same PR.
 ## 1. What Snapshot v1 is
 
 A **Snapshot v1 capsule** is built once on a KVM builder host
-(`crates/snapshot-builder`): source is materialized from the *server-approved*
+(`tools/snapshot-builder`): source is materialized from the *server-approved*
 recipe or repository manifest, a rootfs is derived (Docker → ext4), the app is
 booted under Firecracker, verified against its readiness probe, snapshotted,
 sealed into a content-addressed artifact, scanned for secrets, and registered.
@@ -133,7 +138,7 @@ The suite is intentionally minimal; widen it only by amending this contract.
 
 The contract is enforced by, in order:
 
-1. **Fixtures** (`crates/snapshot-builder/fixtures/compat/*`) — one directory
+1. **Fixtures** (`tools/snapshot-builder/fixtures/compat/*`) — one directory
    per row above.
 2. **Staging recipe seed script** — seeds the fixtures as approved recipes so
    the real builder claims them.

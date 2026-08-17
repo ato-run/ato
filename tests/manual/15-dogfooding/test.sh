@@ -16,14 +16,14 @@ echo "════════════════════════�
 check_ato
 
 # ---------------------------------------------------------------------------
-# Human: internal team encap + share URL cross-machine
+# Human: internal team workspace share cross-machine
 # ---------------------------------------------------------------------------
 test_team_encap_share() {
-    checklist "Team encap → share URL → colleague run" \
-        "Each team member takes their own real project and runs: ato encap ." \
-        "After publish, copy the share URL (https://ato.run/s/<id>)" \
-        "Send the URL to a colleague who has ato installed on a DIFFERENT machine" \
-        "Colleague runs: ato run <url> — confirm it works without extra steps" \
+    checklist "Team workspace share → colleague run" \
+        "Each team member takes their own real project and runs: ato workspace share ." \
+        "Copy share.spec.json + share.lock.json (e.g., via git/chat)" \
+        "Send the files to a colleague who has ato installed on a DIFFERENT machine" \
+        "Colleague runs: ato run ./share.spec.json — confirm it works without extra steps" \
         "Repeat with at least one cross-OS pair (e.g., Mac sender → Linux receiver)" \
         "Note and file any friction points encountered"
 }
@@ -76,7 +76,7 @@ test_t30_metrics() {
         "Number of bugs filed per day during the sprint" \
         "Coverage: at least one run on Mac Intel, Mac ARM, Ubuntu, Windows" \
         "Coverage: at least one run with GPU capsule, one without" \
-        "Coverage: at least one share-URL cross-machine flow" \
+        "Coverage: at least one share-files cross-machine flow" \
         "All P0 bugs resolved before T-14"
 }
 
@@ -89,7 +89,7 @@ test_external_alpha_testers() {
         "Include at least 2 testers on corporate networks with proxies" \
         "Include at least 2 testers on slow/mobile internet" \
         "Include at least 1 tester on Windows 10 and 1 on Ubuntu LTS" \
-        "Testers run §1 (install), §2 (GPU if available), §6 (share URL end-to-end)" \
+        "Testers run §1 (install), §2 (GPU if available), §6 (workspace share end-to-end)" \
         "Testers run §10 (error messages) — intentionally break manifests and report quality" \
         "Collect structured feedback: what confused them, what was missing, what failed" \
         "File all issues before T-7"

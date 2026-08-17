@@ -1,5 +1,9 @@
 # Publishing your app to the Ato Store
 
+> **Superseded workflow.** The manifest/lock/package paths in this historical
+> guide predate the Computation cutover. Do not treat them as normative; use
+> the accepted Repository Workspace and Object Bundle RFCs.
+
 > Audience: developers (human or AI agent) who have an app in a public GitHub
 > repository and want it runnable by anyone through the Ato Store.
 > Everything in this document reflects the implementation as of June 2026
@@ -428,7 +432,7 @@ approve/publish steps remain operator-side.
 |-------|-----------------|
 | `capsule.toml` schema | `crates/capsule/src/foundation/types/manifest.rs` (+ `manifest_validation.rs`) |
 | Lockfile (`capsule.lock.json`) | `crates/capsule/src/contract/lockfile.rs` |
-| CLI commands | `ato --help`; clap definitions in `crates/ato-cli/.../root.rs` (`run`, `validate`, `lock`, `encap`, `install`, `launch`, `rollback`, `logs`, `receipts`, `secrets`, …) |
+| CLI commands | `ato --help`; clap definitions in `crates/ato-cli/.../root.rs` (`run`, `validate`, `lock`, `workspace share`, `install`, `launch`, `rollback`, `logs`, `receipts`, `secrets`, …) |
 | Store apply API | `ato-api: src/routes/store_apply.ts` |
 | Discovery / capsule API | `ato-api: src/routes/capsule_tomls.ts`, `capsules.ts`, `runs.ts` |
 | Slug/fork/publish policy | `ato-api: docs/store-apply-decisions.md`, `store-ownership-fork-policy.md` |

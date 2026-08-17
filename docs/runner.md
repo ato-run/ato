@@ -1,5 +1,9 @@
 # Connected Runner
 
+> **Historical document.** This describes the pre-Computation Connected Runner
+> product and CLI. The current `ato` CLI in this repository does not expose
+> these commands. It is not current architecture authority.
+
 ## Overview
 
 A **Connected Runner** is a machine you enroll under your Ato account so it can

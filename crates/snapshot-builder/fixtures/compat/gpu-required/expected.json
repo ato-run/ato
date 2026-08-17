@@ -1,9 +1,0 @@
-{
-  "class": "negative",
-  "eligibility": "fail",
-  "eligibility_reason_contains": "requires GPU (build.gpu)",
-  "seal": "failed",
-  "seal_failure_stage": "eligibility",
-  "manifest_source": "repo",
-  "notes": "R4: GPU execution and GPU state stay outside the snapshot contract."
-}
