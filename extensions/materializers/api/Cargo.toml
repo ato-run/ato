@@ -1,0 +1,22 @@
+[package]
+name = "ato-materializer-api"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MPL-2.0"
+description = "Open materializer contract for Ato"
+
+[package.metadata.dist]
+dist = false
+
+[package.metadata.ato-architecture]
+layer = "materializer-api"
+
+[dependencies]
+ato-adapter-api = { path = "../../adapters/api", version = "0.1.0" }
+ato-computation = { path = "../../../lib/computation", version = "0.1.0" }
+ato-objects = { path = "../../../lib/objects", version = "0.1.0" }
+thiserror = "2"
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
