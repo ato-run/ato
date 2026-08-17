@@ -1,19 +1,15 @@
 # Core architecture
 
-The semantic center consists of three libraries:
+Computation is the semantic center. The core libraries are:
 
-- `ato-computation` defines canonical semantic values and identity.
-- `ato-kernel` advances `ComputationRef` values through registered semantics.
-- `ato-objects` persists and transports verified object closures.
+- `ato-computation` — canonical semantic values, Ports, identity, and pure
+  composition wiring;
+- `ato-kernel` — Protocol-aware, payload-opaque evolution;
+- `ato-compose` — validation and operational small-step composition;
+- `ato-objects` — verified CAS, Records, lineage, closure traversal,
+  signatures, and transport.
 
-`ato-ipc` is adjacent process wire, not a semantic protocol model.
-
-Concrete behavior belongs to semantics extensions. External syntax belongs to
-adapters. Physical execution, security enforcement, secrets, networking, and
-snapshot capture belong to providers or services. Trace/receipt storage is an
-optional transition observer and does not affect identity.
-
-The enforced dependency direction is:
+`ato-ipc` is an adjacent process wire, not a semantic protocol model.
 
 ```text
 computation
@@ -22,12 +18,23 @@ objects
     ▲
 kernel          ipc
     ▲             ▲
-semantics      services
+compose       services
     ▲
-adapters / providers
+adapters / materializers
     ▲
 apps / tools
 ```
 
-Run `cargo run -p arch-check`; it validates the actual graph returned by
+## Boundaries
+
+Protocol semantics owns logical interaction typing. Adapters connect physical
+interaction to Protocols. Materializers physically encode or restore one
+selected Computation point. Records observe transitions. None of these replaces
+the Computation.
+
+Distribution, placement, sandboxing, secrets, networking, process supervision,
+containers, and VMs are realization concerns. They may constrain whether a
+Capsule can run on a host, but do not define Capsule identity.
+
+Run `cargo run -p arch-check`; it validates the dependency graph returned by
 `cargo metadata`, including forbidden legacy package names.
