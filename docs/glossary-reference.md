@@ -13,14 +13,23 @@ These terms are normative for current public documentation.
   `ComputationRef`.
 - **Run** — a mutable evaluation whose head advances between immutable
   Computation points. A Run is not a Capsule.
-- **Port** — a typed interaction boundary owned by a Computation.
-- **PortRef** — a logical, persistent reference to a Port. It is not a socket,
-  file descriptor, URL, or other runtime Endpoint.
-- **Endpoint** — a physical interaction endpoint chosen during realization,
-  such as a socket or PTY attachment.
-- **Binding** — the realization-time mapping from a logical requirement or
-  PortRef to an Endpoint or provider resource. Secret values are runtime
-  inputs, not logical identity.
+- **Port** — a typed interaction boundary owned by a Computation. Implemented
+  as `PortId`/`PortDef` on a Computation's `Boundary`.
+- **Endpoint** (core/composition sense) — `{ node, port }`: the core
+  library's selector for a child Port inside a Composition graph. This is a
+  wiring detail, not a runtime resource. See
+  [Port and Endpoint](concepts/computation.md#port-and-endpoint-theory-vs-implementation)
+  for why this document avoids reusing "Endpoint" for the physical sense
+  below.
+- **runtime endpoint** (physical sense, lowercase) — a physical interaction
+  resource chosen during realization, such as a socket or PTY attachment.
+  Not the same thing as the core `Endpoint` type above.
+- **PortRef** — *Model/future.* A logical, persistent reference to a Port
+  that would survive across resumes and hosts. Not a type in the current
+  codebase; do not present it as implemented.
+- **Binding** — the realization-time mapping from a logical requirement
+  (currently a `PortId`) to a runtime endpoint or provider resource. Secret
+  values are runtime inputs, not logical identity.
 - **Contract** — a predicate or obligation over a Computation, written
   `C ⊨ K`. Readiness is one possible Contract, not a universal primitive.
 - **Record** — durable evidence that an Evolution was observed. A Record is
