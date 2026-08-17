@@ -1,15 +1,10 @@
 name: Rust CI
 
-# Workspace-wide CI for the ato monorepo. Runs cargo check / fmt / clippy /
-# test against every workspace member. Crate-specific release workflows
-# (ato-cli release.yml, ato-desktop desktop-release.yml) are intentionally
-# kept separate and live in their own files.
-
 on:
   push:
-    branches: [main, dev]
+    branches: [main, dev, nightly]
   pull_request:
-    branches: [main, dev]
+    branches: [main, dev, nightly]
   workflow_dispatch:
 
 permissions:
@@ -20,145 +15,44 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  dep-direction:
-    name: dependency direction
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      # Pure-bash Cargo.toml parse — no toolchain/build needed. Enforces the
-      # protocol/capsule/netd/cli/desktop/nacelle layering DAG and bans the
-      # pre-reorg crate names. See scripts/check-dep-direction.sh.
-      - run: bash scripts/check-dep-direction.sh
-
-  check:
-    name: cargo check (workspace)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # ato-desktop requires native GUI deps (webkit2gtk, etc.) not available
-      # in the ubuntu-latest runner; excluded until M3 desktop CI bringup.
-      - run: cargo check --workspace --all-targets --exclude desktop
-
-  fmt:
-    name: rustfmt
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - run: cargo fmt --all -- --check
-
-  clippy:
-    name: clippy (workspace)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets --exclude desktop -- -D warnings
-
-  test:
-    name: cargo test
+  workspace:
+    name: workspace (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-    env:
-      # The full workspace debug build with default debuginfo overflows the
-      # ubuntu runner's disk ("No space left on device" at link time).
-      # Line tables keep file:line in backtraces at a fraction of the size.
-      CARGO_PROFILE_DEV_DEBUG: line-tables-only
-      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-          # Full history so we can diff this PR against its merge base.
-          fetch-depth: 0
-      - name: Free runner disk space (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/boost
-          df -h /
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      # Run only the tests relevant to the change: a crate is selected if it
-      # was edited, or transitively depends on an edited crate. An unrelated PR
-      # (e.g. a desktop- or netd-only fix) therefore skips the heavy ato-cli
-      # suite instead of running — and flaking on — it. `ato-desktop` is outside
-      # the cargo workspace (own Cargo.lock, GUI-only git deps) and is never
-      # built here, so desktop-only changes select nothing. Selection is
-      # fail-safe: an unknown diff or a build-wide file falls back to the full
-      # set. See .github/scripts/affected_crates.py.
-      - name: Select affected crates
-        id: affected
-        shell: bash
-        run: |
-          set -euo pipefail
-          PY=python3; command -v "$PY" >/dev/null 2>&1 || PY=python
-          if [ -n "${GITHUB_BASE_REF:-}" ]; then
-            git fetch --no-tags --quiet origin "$GITHUB_BASE_REF" || true
-            base="$(git merge-base "origin/${GITHUB_BASE_REF}" HEAD 2>/dev/null || true)"
-          else
-            base="$(git rev-parse --verify --quiet HEAD~1 || true)"
-          fi
-          if [ -n "$base" ]; then
-            git diff --name-only "$base" HEAD > changed.txt || echo "<FULL>" > changed.txt
-          else
-            echo "<FULL>" > changed.txt
-          fi
-          echo "----- changed files -----"; cat changed.txt
-          # Strip CR: on the Windows runner Python's text-mode stdout writes
-          # CRLF, so a bare redirect leaves each crate name as `name\r`. That
-          # makes `cargo test -p "name\r"` fail ("invalid character in package
-          # name") and `grep -qx ato-cli` mis-match. Normalise to LF here so
-          # every consumer (the read loop, grep -c, grep -qx) sees clean names.
-          "$PY" .github/scripts/affected_crates.py < changed.txt | tr -d '\r' > pkgs.txt
-          echo "----- affected crates -----"; cat pkgs.txt
-          count="$(grep -c . pkgs.txt || true)"; count="${count:-0}"
-          echo "count=${count}" >> "$GITHUB_OUTPUT"
-          if grep -qx cli pkgs.txt; then
-            echo "ato_cli=1" >> "$GITHUB_OUTPUT"
-          else
-            echo "ato_cli=0" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Install system dependencies (Linux)
-        if: runner.os == 'Linux' && steps.affected.outputs.count != '0'
-        run: |
-          sudo apt-get install -y bubblewrap
-          sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
-      # ato-cli's e2e tests spawn `ato`/`nacelle`, so they must resolve from
-      # PATH. Only build them when ato-cli is actually in the affected set.
-      - name: Build test binaries
-        if: steps.affected.outputs.ato_cli == '1'
-        shell: bash
-        run: |
-          cargo build -p cli --bin ato
-          cargo build -p nacelle --bin nacelle
-          echo "$(pwd)/target/debug" >> $GITHUB_PATH
-      # Test each selected crate in its own `cargo test -p` process, matching
-      # the previous job's per-crate isolation (a single combined invocation
-      # raises cross-crate test parallelism and destabilises ato-cli's
-      # process-spawning e2e tests). Run them all, then fail if any failed.
-      - name: Run affected tests
-        if: steps.affected.outputs.count != '0'
-        shell: bash
-        run: |
-          set -uo pipefail
-          rc=0
-          while IFS= read -r p; do
-            [ -n "$p" ] || continue
-            echo "::group::cargo test -p $p"
-            cargo test -p "$p" --no-fail-fast || rc=1
-            echo "::endgroup::"
-          done < pkgs.txt
-          exit $rc
-      - name: No affected crates
-        if: steps.affected.outputs.count == '0'
-        run: echo "No testable workspace crate is affected by this change — skipping the test run."
+      - name: Install Linux sandbox dependency
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - run: cargo fmt --all -- --check
+      - name: Check workspace
+        if: runner.os != 'Windows'
+        run: cargo check --workspace --all-targets --locked
+      - name: Check host workspace (Windows)
+        if: runner.os == 'Windows'
+        # guest-agent is built into the Linux snapshot guest rootfs and has no
+        # Windows host target. Every host-side package remains in this check.
+        run: cargo check --workspace --exclude guest-agent --all-targets --locked
+      - name: Test workspace
+        if: runner.os != 'Windows'
+        run: cargo test --workspace --no-fail-fast
+      # The workspace's execution E2Es exercise POSIX PTYs, /bin/sh paths,
+      # Unix path policy, and Linux/macOS daemon lifecycle. Windows host code
+      # is still compiled and linted here; portable CLI behavior is exercised
+      # separately by cli-ci on windows-latest.
+      - name: Clippy workspace
+        if: runner.os != 'Windows'
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Clippy host workspace (Windows)
+        if: runner.os == 'Windows'
+        run: cargo clippy --workspace --exclude guest-agent --all-targets --all-features --locked -- -D warnings
+      - run: cargo run --locked -p arch-check

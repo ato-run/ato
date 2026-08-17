@@ -1,5 +1,8 @@
 # Desktop OCI Session Surface
 
+> **Historical manual test.** This covers a removed pre-Computation CLI and OCI
+> session surface. Do not use it as current CLI documentation.
+
 ## Scope
 
 Desktop OCI Session Surface v1 makes OCI sessions started by the CLI visible in

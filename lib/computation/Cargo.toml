@@ -1,0 +1,24 @@
+[package]
+name = "ato-computation"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MPL-2.0"
+description = "Canonical semantic values and identities for Ato computations"
+homepage = "https://ato.run"
+repository = "https://github.com/ato-run/ato"
+
+[package.metadata.dist]
+dist = false
+
+[package.metadata.ato-architecture]
+layer = "computation"
+
+[dependencies]
+blake3 = "1.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_jcs = "0.1"
+thiserror = "2.0"
+
+[dev-dependencies]
+hex = "0.4"
