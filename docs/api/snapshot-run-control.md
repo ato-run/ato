@@ -1,5 +1,10 @@
 # Snapshot Run Control — API contract (Store Capsule Ready-State Run E2E)
 
+> **Historical coordination document.** This contract belongs to the former
+> Store/Ready-State control-plane model. It may describe deployed external
+> services, but it does not define current Capsule identity, CLI behavior, or
+> Semantic Core architecture in this repository.
+
 > **This is the coordination artifact.** Every workstream (Registry API, Build
 > Worker, Run Control, PWA, Desktop) implements against this contract. Change the
 > contract here first, in a PR, before changing an implementation. Tracks

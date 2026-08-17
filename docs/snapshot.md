@@ -1,16 +1,18 @@
 # Snapshot materialization
 
-Snapshots are provider-owned physical materializations. They are not Capsule
-identity and do not replace a `ComputationRef`.
+A snapshot is a provider-owned physical Materialization. It is not a Capsule,
+does not replace a `ComputationRef`, and does not make VM or process state part
+of the Semantic Core.
 
-`ato-provider-snapshot` registers opaque artifacts in Objects with an exact
-provider/host realization contract. Registration verifies that the referenced
-Computation resolves. Verification checks the contract, computation, and every
-artifact, then returns the unchanged computation reference; it does not claim
-to restore physical state. Retained metadata keeps its artifact refs live
-through Objects GC. Registration rejects likely plaintext secrets.
+The current `ato.snapshot@1` implementation is specifically a
+workspace/filesystem Materialization. It records physical artifacts and an
+exact host compatibility contract, verifies the target Computation and every
+artifact, and keeps referenced content live through object-store traversal.
+Likely plaintext secrets are rejected.
 
-```bash
-ato snapshot capture COMPUTATION_REF vmstate.bin memory.bin
-ato snapshot verify MATERIALIZATION_REF
-```
+Its current restore capability is **verify-only**. There is no public
+`ato snapshot` command and it must not be presented as a process or VM
+checkpoint backend.
+
+See [Materialization](concepts/materialization.md) and the accepted
+[Materialization RFC](rfcs/accepted/MATERIALIZATION.md).

@@ -2,35 +2,48 @@
 
 Guidelines for agentic coding assistants working on the Capsule project.
 
-## Ato Minimal Philosophy
+## Computation / Capsule invariants
 
-This philosophy should inform design, implementation, and review decisions throughout the repo.
+These invariants govern design, implementation, documentation, and review:
 
-1. **Everything is a capsule**
-   Ato が扱う対象は、app・tool・service を問わず、すべて capsule である。違いはカテゴリではなく、実行契約の違いにすぎない。
-2. **Everything runs through the same handle**
-   capsule の起動は、できる限り同じ操作面で扱う。特別な対象ごとに別の mental model を増やさない。
-3. **Declare first, then materialize**
-   まず「何が必要か」を宣言し、次に Ato がそれを環境として展開する。実行は宣言の上に成り立つ。
-4. **One boundary, one policy**
-   どの capsule も、同じ境界モデルで実行される。workspace、filesystem、network、env、permissions は、対象ごとに別物ではなく共通の政策面で扱う。
-5. **Execution is not installation**
-   インストール、解決、起動、修復、状態確認は分離されうるが、ユーザーから見える世界では一貫した流れであるべき。
-6. **Reuse the model, not special cases**
-   個別の Ollama 対応や Desky 対応を増やすのではなく、それらを自然に表現できる共通モデルを先に作る。
-7. **State is layered**
-   - 宣言: `capsule.toml`
-   - 解決結果: `ato.lock.json`
-   - 実機状態: local state
-     この 3 層を混ぜない。
-8. **Safe by default**
-   Ato は便利さより先に、境界・再現性・監査可能性を守る。曖昧な自動化より、明示的で安全な実行を優先する。
+1. **Computation is the semantic center.** It is the evolving residual
+   computation, not a repository, manifest, state snapshot, or trace.
+2. **Capsule is immutable.** A Capsule is a sealed, addressable Computation
+   point—a persistent open continuation.
+3. **Run is mutable.** A Run evaluates a Capsule and advances through immutable
+   successor Computations. Do not use Run and Capsule interchangeably.
+4. **Record is evidence.** Records and Traces describe observed Evolution; they
+   are not the current Computation and do not define its identity.
+5. **Materialization does not define Capsule identity.** Replay, filesystem or
+   source reconstruction, checkpoints, snapshots, containers, and VMs are
+   possible realization strategies.
+6. **Composition is closed over Computation.** Wiring Computations through
+   compatible Ports produces another Computation, not a new semantic root.
+7. **Distribution, placement, sandboxing, providers, processes, and VMs are
+   realization concerns.** Keep their policy and evidence outside the Semantic
+   Core.
+8. **Do not introduce a top-level semantic noun** unless it cannot be expressed
+   through Computation, Port, Evolution, Composition, Contract, or realization
+   concerns.
 
-> **One-sentence version:** Ato は、あらゆるソフトウェアを capsule として宣言し、同じハンドルで安全に展開・実行・修復できるようにするための基盤である。
+Practical consequences:
+
+- `capsule.toml` is authoring input, not Capsule identity.
+- A `.capsule` file is transport rooted at a `ComputationRef`, not the Capsule
+  itself.
+- State is a purpose-specific projection of a Computation.
+- PortRef is logical and persistent; Binding owns its mapping to a physical
+  Endpoint.
+- Ready State is a Contract/realization concern, not a universal primitive.
+- Prefer one extensible Adapter and Materializer model over workload-specific
+  special cases, and remain safe by default at every physical boundary.
 
 ## Repository Structure
 
-This root directory (`capsuled-dev/`) is **NOT** a git repository. Each app under `apps/` is an independent git repository with its own `.git`, branches, and release cycle. Always `cd` into the specific app directory before running `git` commands. Cross-app changes require separate commits in each repository.
+This directory is the `ato-run/ato` Git repository and a Rust workspace. The
+desktop app under `apps/desktop` and the Nacelle provider under
+`extensions/providers/nacelle` have separate build boundaries and are excluded
+from the root Cargo workspace.
 
 ### Git Commit Rules
 
@@ -39,57 +52,45 @@ This root directory (`capsuled-dev/`) is **NOT** a git repository. Each app unde
 - Do not hardcode a commit author identity. Use the currently authenticated `gh` user for GitHub operations, and use the current repository/global `git config user.name` and `git config user.email` for local commits. Do not add any `Co-Authored-By` lines.
 - Message format: `<scope>(<app>): <what changed>` — e.g., `fix(ato-desktop): guard evaluate_script after PageLoadEvent::Finished`
 
-## Apps Structure
+## Repository layout
 
-```
+```text
 apps/
-├── ato-cli/            # Meta-CLI (Rust)
-│   ├── src/                # CLI commands (open, pack, ipc, profile, key, etc.)
-│   ├── core/src/           # capsule library (router, resource, signing, IPC)
-│   └── tests/              # CLI integration & E2E tests
-├── nacelle/            # Source Runtime Engine (Rust)
-│   └── src/                # Sandbox (Landlock/eBPF), execution, supervision
-├── ato-desktop/        # Desktop Shell (Rust + GPUI + Wry)
-│   └── src/                # GPUI shell, Wry WebView host, bridge, orchestrator
-├── desky/              # AI Workspace (Electron + React, Tauri variant)
-│   ├── src/                # React frontend (@assistant-ui/react)
-│   ├── electron/           # Electron main process
-│   └── src-tauri/          # Tauri variant backend
-├── sync-rs/            # .sync Archive Rust Workspace
-│   └── crates/             # sync-format, sync-runtime, sync-fs, sync-wasm-engine
-├── uarc/               # UARC Spec & JSON Schema (Single Source of Truth)
-│   └── schemas/            # capsule.schema.json (v0.2)
-├── ato-api/          # Store API (Cloudflare Workers + Hono + D1 + R2)
-│   └── src/                # Routes, services, DB schema (Drizzle)
-├── ato-web/      # Store Web GUI (Astro + Cloudflare Pages)
-│   └── src/                # Catalog, publisher console, dock UI
-├── ato-play-edge/      # Playground Data Plane Worker (*.atousercontent.com)
-│   └── src/                # Artifact serving, CSP injection, OpenAI proxy relay
-├── ato-play-web/       # Playground Theater UI (React + Vite)
-│   └── src/                # Launchpad, Theater, iframe postMessage bridge
-├── ato-proxy-edge/     # Proxy Edge Worker (proxy.ato.run)
-│   └── src/                # TVM JWT verification, API key swapping, OpenAI relay
-├── ato-docs/           # Documentation Site (Astro + Starlight)
-│   └── src/                # MDX doc content, custom components
-└── ato-tsnetd/         # Tailnet Sidecar (Go + tsnet + gRPC + SOCKS5)
+├── cli/                         # lifecycle CLI and supervisor
+└── desktop/                     # GPUI + Wry shell; separate workspace
+lib/
+├── computation/                 # Semantic Core values and identity
+├── kernel/                      # Evolution
+├── compose/                     # operational composition
+├── objects/                     # CAS, Records, lineage, bundle transport
+└── ipc/                         # process-boundary DTOs
+extensions/
+├── adapters/                    # process, PTY, workspace, binding, HTTP
+├── materializers/               # replay, snapshot, public API
+└── providers/nacelle/           # source runtime and sandbox; separate boundary
+services/
+├── netd/                        # session network broker
+└── ato-tsnetd/                  # Go tailnet sidecar
+tools/
+├── arch-check/                  # dependency boundary validator
+└── snapshot-builder/            # Ready-State implementation tooling
 ```
 
 ## Build/Test/Lint Commands
 
 Hermetic CLI, desktop, MCP, and manual smoke verification must use a fresh env root on every run by default. In this repo, `scripts/ato-test-shell.sh` and `tests/manual/config.sh` should allocate a unique root per invocation; reuse is allowed only as an explicit opt-in with `ATO_TEST_REUSE_ENV_ROOT=1` plus `ATO_TEST_ENV_ROOT=<existing-root>` when debugging state carry-over.
 
-### Rust (ato-cli, nacelle)
+### Root Rust workspace
 
 ```bash
 # Build
  cargo build --workspace                    # All crates
- cargo build -p cli                 # Single crate
- cargo build --release -p nacelle          # Release
+ cargo build -p ato-cli                     # CLI package
 
 # Test
  cargo test --workspace                     # All tests
- cargo test -p cli test_name       # Single test
- cargo test -p capsule --lib test_fn  # Library test
+ cargo test -p ato-cli test_name            # Single CLI test
+ cargo test -p ato-computation --lib test_fn
  cargo test -- --nocapture                 # Show output
 
 # Lint/Format
@@ -100,10 +101,10 @@ Hermetic CLI, desktop, MCP, and manual smoke verification must use a fresh env r
  cargo check --workspace && cargo test --workspace --no-fail-fast && cargo fmt --all -- --check && cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-### ato-desktop (GPUI + Wry)
+### Desktop (GPUI + Wry)
 
 ```bash
-cd apps/ato-desktop
+cd apps/desktop
 
 # Dev
 cargo run --bin ato-desktop
@@ -113,71 +114,6 @@ cargo test
 
 # Bundle (macOS)
 cargo run --manifest-path xtask/Cargo.toml -- bundle --target darwin-arm64
-```
-
-### Web / Workers Build & Deploy
-
-#### ato-web (Astro + Cloudflare Pages)
-
-```bash
-cd apps/ato-web
-pnpm install
-
-# Build
-pnpm build                 # default build
-pnpm build:staging         # staging env build
-pnpm build:production      # production env build
-
-# Deploy
-pnpm deploy:staging        # deploy to staging Pages project
-pnpm deploy:production     # deploy to production Pages project
-```
-
-#### ato-api (Store API Worker)
-
-```bash
-cd apps/ato-api
-
-# Deploy
-npx wrangler deploy --env staging
-npx wrangler deploy --env production
-```
-
-#### ato-play-edge / ato-play-web
-
-```bash
-# Edge worker
-cd apps/ato-play-edge
-npx wrangler deploy --env staging
-npx wrangler deploy --env production
-
-# Web frontend
-cd apps/ato-play-web
-pnpm build
-npx wrangler deploy --env staging
-npx wrangler deploy --env production
-```
-
-#### ato-proxy-edge (Proxy Worker)
-
-```bash
-cd apps/ato-proxy-edge
-pnpm install
-pnpm dev
-npx wrangler deploy --env staging
-npx wrangler deploy --env production
-```
-
-#### Post-deploy Quick Checks
-
-```bash
-# store-web
-curl -sI https://staging.ato.run | head -n 5
-curl -sI https://ato.run | head -n 5
-
-# store api
-curl -s https://staging.api.ato.run/v1/capsules?limit=1 | head -c 500
-curl -s https://api.ato.run/v1/capsules?limit=1 | head -c 500
 ```
 
 ## Branching Model
@@ -262,41 +198,48 @@ Never backport from `nightly` to `release/*`.
    - `docs/rfcs/accepted/` — 確定仕様（現行実装の根拠）
    - `docs/rfcs/draft/` — ドラフト仕様（議論中・未確定）
 2. **Key specs**:
-   - `ATO_CLI_SPEC.md` - CLI commands & behavior
-   - `NACELLE_SPEC.md` - Runtime & sandbox
-   - `DRAFT_LIFECYCLE.md` - Task/Service lifecycle (draft)
-   - `DRAFT_CAPSULE_IPC.md` - IPC protocol (draft)
+   - `COMPUTATION_ARCHITECTURE.md` — semantic identity and Evolution
+   - `COMPOSITION.md` — closed Computation composition
+   - `LOCAL_CAPSULE_REPOSITORY.md` — branches, Runs, Records, and lineage
+   - `PROTOCOL_ADAPTER.md` — logical Protocol / physical Adapter boundary
+   - `MATERIALIZATION.md` — physical realization boundary
+   - `OBJECT_BUNDLE.md` and `CAPSULE_BUNDLE.md` — portable closure format
+   - `CAPSULE_CLI_LIFECYCLE.md` — public CLI behavior
 3. **Missing specs**: If implementing important logic not in specs, document it as a new RFC in `docs/rfcs/draft/`
 
 ### Component Responsibilities
 
-- **ato-cli**: Meta-CLI, runtime routing, metering, IPC broker, orchestration
-- **nacelle**: OS-native isolation (Landlock, eBPF), source execution engine
-- **ato-desktop**: Desktop shell via GPUI + Wry WebView (NOT Tauri), capsule host, bridge
-- **desky**: Local AI workspace (multi-agent), Electron/Tauri, React + @assistant-ui
-- **sync-rs**: `.sync` archive format library (sync-format, sync-runtime, sync-fs, sync-wasm-engine)
-- **uarc**: UARC manifest spec and JSON Schema (`capsule.toml` v0.2 contract)
-- **ato-api**: Store/registry API backend (Cloudflare Workers + Hono + D1 + R2)
-- **ato-web**: Store web frontend, publisher console, dock UI (Astro)
-- **ato-play-edge**: Playground data plane (`*.atousercontent.com`), artifact serving
-- **ato-play-web**: Playground theater UI (`play.ato.run`), iframe bridge
-- **ato-proxy-edge**: Proxy worker (`proxy.ato.run`), TVM JWT, API key swap, OpenAI relay
-- **ato-docs**: Public documentation site (Astro + Starlight)
-- **ato-tsnetd**: Tailnet sidecar (Go + tsnet), SOCKS5, gRPC
+- **lib/computation**: canonical Computation values, Ports, identity, and pure wiring
+- **lib/kernel**: payload-opaque Evolution through registered semantics and Protocols
+- **lib/compose**: operational composition and closure traversal
+- **lib/objects**: verified CAS, Records, lineage, signatures, and bundles
+- **lib/ipc**: adjacent process-boundary DTOs, not Semantic Core
+- **extensions/adapters**: physical interactions mapped to logical Protocols
+- **extensions/materializers**: physical encoding and restoration strategies
+- **apps/cli**: lifecycle supervision and product assembly
+- **apps/desktop**: separate GPUI + Wry shell (NOT Tauri)
+- **extensions/providers/nacelle**: OS-native sandbox and source execution provider
+- **services/netd**: session network broker
+- **tools/snapshot-builder**: Ready-State implementation tooling, not Capsule identity
 
 ### Agent Instructions by App
 
 - Treat this root file as the workspace-wide baseline.
-- For `apps/ato-cli`, always read and follow `apps/ato-cli/AGENTS.md` before editing code, tests, CI, or release metadata.
-- For `apps/nacelle`, consult `apps/nacelle/docs/` and `docs/rfcs/accepted/NACELLE_SPEC.md`.
-- For `apps/ato-desktop` (GPUI + Wry shell), follow the Rust + GPUI patterns; do NOT apply Tauri/TypeScript patterns here.
-- For `apps/desky` (Electron/Tauri AI workspace), follow the React + TypeScript patterns in the codebase.
+- For `apps/cli`, verify public behavior against
+  `docs/rfcs/accepted/CAPSULE_CLI_LIFECYCLE.md` and CLI tests.
+- For `extensions/providers/nacelle`, consult its local documentation before
+  changing provider or sandbox behavior.
+- For `apps/desktop` (GPUI + Wry shell), follow Rust + GPUI patterns; do NOT
+  apply Tauri/TypeScript patterns.
 - Keep app-specific release flow, semver policy, and test commands in the nearest app-level `AGENTS.md` instead of duplicating operational detail here.
 
-### Smart Build, Dumb Runtime
+### Semantic core, explicit realization
 
-- Build-time: Validate manifests, resolve dependencies, compute configs
-- Runtime: Minimal logic, pre-computed configs via JSON over stdio
+- Seal immutable Computation identity before treating a point as a Capsule.
+- Keep runtime orchestration, physical endpoints, placement, and policy outside
+  the Semantic Core.
+- Validate at boundaries and persist evidence without folding history into the
+  current Computation.
 
 ## Code Style (Rust)
 
@@ -365,11 +308,12 @@ try {
 
 ## Architecture Principles
 
-### Runtime Selection (router.rs)
+### Semantic classification
 
-1. OCI: `targets.oci.image` or `execution.runtime=oci`
-2. Wasm: `targets.wasm` or `*.wasm` entrypoint
-3. Source: Default fallback
+Every public concept must be classified as a property of the current
+Computation, history/evidence, Protocol interaction, Adapter, Materialization,
+or runtime orchestration. Do not add application-, provider-, snapshot-, or
+placement-specific semantic roots.
 
 ### Security
 
@@ -387,23 +331,20 @@ try {
 ## Before Committing
 
 ```bash
-# Rust (ato-cli, nacelle, ato-desktop, sync-rs)
+# Root Rust workspace
  cargo fmt --all
  cargo clippy --all-targets --all-features -- -D warnings
  cargo test --workspace
-
-# TypeScript (desky, ato-api, ato-web, ato-play-*)
- pnpm lint
- pnpm test
 ```
 
 ## Key Paths
 
 - `~/.ato/config.toml`: CLI configuration
-- `~/.ato/store/`: Installed capsules
-- `~/.ato/keys/`: Signing keys
-- `~/.ato/runtimes/`: Runtime binaries
-- `capsule.toml`: Project manifest (spec: `apps/uarc/`)
+- `.capsule/objects/`: immutable Computation and content objects
+- `.capsule/refs/heads/`: mutable branch pointers
+- `.capsule/records/`: Evolution evidence
+- `.capsule/runs/`: active physical Run metadata
+- `capsule.toml`: explicit authoring configuration, never Capsule identity
 - `docs/rfcs/`: Architecture specs (accepted/ = confirmed, draft/ = in discussion)
 - `samples/`: Example apps
 
@@ -484,4 +425,4 @@ Serena は、コードベースのシンボルレベルの読み書きを提供�
 
 ---
 
-Last updated: 2026-04-23
+Last updated: 2026-08-17
