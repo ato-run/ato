@@ -80,13 +80,13 @@ cd apps/ato && cargo run -p desktop
 
 ---
 
-### Scene 4: ハッカーの権利 (decap)
+### Scene 4: ハッカーの権利 (workspace setup)
 
 **操作:** 別のターミナルウィンドウを開く
 
 ```bash
 mkdir /tmp/byok-hack && cd /tmp/byok-hack
-ato decap ato/byok-ai-chat --into .
+ato workspace setup ato/byok-ai-chat --into .
 ```
 
 **期待動作:**

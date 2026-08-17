@@ -1,5 +1,8 @@
 # OCI Ingress Router Smoke Test
 
+> **Historical manual test.** This covers the removed provider-centric OCI
+> launch path, not the current Capsule lifecycle.
+
 Manual verification for the local path ingress router runtime.
 
 ## Prerequisites

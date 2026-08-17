@@ -1,0 +1,30 @@
+[package]
+name = "ato-objects"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MPL-2.0"
+description = "Verified persistence and transport for addressable Ato objects"
+homepage = "https://ato.run"
+repository = "https://github.com/ato-run/ato"
+
+[package.metadata.dist]
+dist = false
+
+[package.metadata.ato-architecture]
+layer = "objects"
+
+[dependencies]
+ato-computation = { path = "../computation", version = "0.1.0" }
+blake3 = "1.5"
+base64 = "0.22"
+ed25519-dalek = "2.0"
+hex = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_jcs = "0.1"
+sha2 = "0.10"
+thiserror = "2.0"
+fs2 = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
