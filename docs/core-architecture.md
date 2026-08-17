@@ -11,18 +11,28 @@ Computation is the semantic center. The core libraries are:
 
 `ato-ipc` is an adjacent process wire, not a semantic protocol model.
 
+Arrows point from a layer to what it depends on:
+
 ```text
-computation
-    ▲
-objects
-    ▲
-kernel          ipc
-    ▲             ▲
-compose       services
-    ▲
-adapters / materializers
-    ▲
 apps / tools
+    │ depends on
+    ▼
+adapters / materializers
+    │ depends on
+    ▼
+compose       services
+    │             │
+    │ depends on  │ depends on
+    ▼             ▼
+kernel          ipc
+    │
+    │ depends on
+    ▼
+objects
+    │
+    │ depends on
+    ▼
+computation
 ```
 
 ## Boundaries
