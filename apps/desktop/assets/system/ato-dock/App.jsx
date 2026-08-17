@@ -173,10 +173,27 @@ function getLifecycleBadge(capsule) {
 }
 
 function sourceOwner(capsule) {
-  if (capsule.sourceUrl.includes("github.com")) {
-    const parts = capsule.sourceUrl.replace(/^https?:\/\//, "").split("/");
-    return parts[1] ?? capsule.owner;
+  const rawSourceUrl = capsule.sourceUrl?.trim();
+  if (!rawSourceUrl) return "Local";
+
+  try {
+    const parsed = new URL(
+      /^[a-z][a-z\d+.-]*:\/\//i.test(rawSourceUrl)
+        ? rawSourceUrl
+        : `https://${rawSourceUrl}`,
+    );
+    const hostname = parsed.hostname.toLowerCase().replace(/\.$/, "");
+    if (
+      (parsed.protocol === "https:" || parsed.protocol === "http:") &&
+      (hostname === "github.com" || hostname === "www.github.com")
+    ) {
+      const [owner] = parsed.pathname.split("/").filter(Boolean);
+      return owner ?? capsule.owner;
+    }
+  } catch {
+    // Invalid or non-hierarchical source values are local to this surface.
   }
+
   return "Local";
 }
 
