@@ -1,6 +1,8 @@
-# Capsule bundle
+# Portable Capsule bundle
 
-For the concept, start with [Capsule and Run](concepts/capsule.md).
+This page is about the `.capsule` **file format** (transport). For the
+concept — what a Capsule *is* — start with
+[Capsule and Run](concepts/capsule.md).
 
 The current implementation identifies a Capsule by one immutable
 `ComputationRef`. A portable `.capsule` file is transport, not identity. Bundle
