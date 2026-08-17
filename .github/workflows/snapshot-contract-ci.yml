@@ -1,0 +1,23 @@
+name: snapshot materializer
+
+on:
+  push:
+    paths: ["extensions/materializers/snapshot/**", "tools/snapshot-builder/**", "lib/**"]
+  pull_request:
+    paths: ["extensions/materializers/snapshot/**", "tools/snapshot-builder/**", "lib/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p ato-materializer-snapshot -p snapshot-builder -p guest-agent
+      - run: cargo clippy -p ato-materializer-snapshot -p snapshot-builder -p guest-agent --all-targets -- -D warnings

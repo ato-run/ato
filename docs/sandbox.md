@@ -1,5 +1,10 @@
 # Sandbox
 
+> **Historical document.** This describes an earlier manifest/provider
+> execution path. Sandboxing remains a realization concern, but the commands,
+> crate paths, and identity statements below are not current Semantic Core or
+> CLI authority.
+
 ## Overview
 
 The sandbox is the execution boundary that separates **what is allowed** from
@@ -55,15 +60,26 @@ At runtime:
 >   `network.enabled = false` (deny-all) is enforced on both platforms, but a
 >   hostname/IP `egress_allow` list is advisory only on source runtimes — there
 >   is no enforcing SOCKS sidecar yet.
+> - **The deny must be declared; it is not the default.** An absent
+>   `[network] enabled` means *enabled* — a capsule that says nothing about
+>   network gets egress. Only an explicit `[network] enabled = false` denies.
+>   Whether the absent case should instead fail closed is an open decision
+>   (ato#786): flipping it changes runtime behavior for every already-published
+>   capsule that fetches anything. The single source of that default is
+>   `capsule::types::NETWORK_ENABLED_WHEN_UNDECLARED`.
+> - **`[isolation.network]` is not an authoring surface.** Network policy is
+>   authored at the top-level `[network]`; `[isolation.network]` is the internal
+>   wire format the CLI synthesizes for nacelle, and authoring it in
+>   `capsule.toml` has no effect.
 > - **The build / prepare phase is not sandboxed.** Dependency installs and
 >   `build` / `prepare` lifecycle commands run as ordinary host processes with
 >   the host environment, secrets, and network. Only the run phase is isolated.
 
 References:
 
-- [`rfcs/accepted/SECURITY_AND_ISOLATION_MODEL.md`](rfcs/accepted/SECURITY_AND_ISOLATION_MODEL.md)
-- [`rfcs/accepted/NACELLE_SPEC.md`](rfcs/accepted/NACELLE_SPEC.md)
-- [`rfcs/accepted/ADR-007-macos-sandbox-api-strategy.md`](rfcs/accepted/ADR-007-macos-sandbox-api-strategy.md)
+- [historical security and isolation model](archive/rfcs-legacy-accepted/SECURITY_AND_ISOLATION_MODEL.md)
+- [historical Nacelle specification](archive/rfcs-legacy-accepted/NACELLE_SPEC.md)
+- [historical macOS sandbox ADR](archive/rfcs-legacy-accepted/ADR-007-macos-sandbox-api-strategy.md)
 
 ## Recipe permissions
 
