@@ -1,8 +1,8 @@
 # Snapshot materialization
 
-A snapshot is a provider-owned physical Materialization. It is not a Capsule,
-does not replace a `ComputationRef`, and does not make VM or process state part
-of the Semantic Core.
+A snapshot is a physical Materialization. It is not a Capsule, does not
+replace a `ComputationRef`, and does not make VM or process state part of the
+Semantic Core.
 
 The current `ato.snapshot@1` implementation is specifically a
 workspace/filesystem Materialization. It records physical artifacts and an
