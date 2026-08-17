@@ -1,5 +1,9 @@
 # Computation architecture migration matrix
 
+> **Historical cutover record.** Component names and compatibility paths below
+> capture an intermediate migration state. Use the accepted RFCs and current
+> repository layout for implementation authority.
+
 | Former capability | Current owner |
 |---|---|
 | Local/Git repository execution | `ato-adapter-repository` → `ato.workspace@1` → Nacelle provider |
