@@ -1,5 +1,9 @@
 # ato.submission-wizard-wire/v1
 
+> **Historical wire contract.** This pre-Computation submission workflow is
+> retained as implementation history and is not a current Semantic Core or CLI
+> contract.
+
 Submission Wizard — PR-0 Wire Contract (types only, nothing wired).
 
 > **This file is the single source of truth (SSOT) for the submission-wizard

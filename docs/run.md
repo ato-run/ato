@@ -1,32 +1,28 @@
-# Run
+# Local lifecycle
 
-`ato run` compiles a repository into a computation and advances it once:
+The current CLI authors a local computation repository and transports selected
+Capsule points. It does not infer a project from source, install toolchains, or
+run Git repositories and URLs.
 
 ```text
-repository -> adapter -> ato.workspace@1 -> Objects -> Kernel
-           -> Workspace Semantics -> Nacelle Provider -> successor ref
+ato init <capsule> [--initial-only]
+ato resume <capsule-selector> [--branch <name>]
+ato stop <capsule>
+ato encap <capsule-selector> --materialize <id>... -o <file.capsule>
+ato run <file.capsule>
 ```
 
-```bash
-ato run .
-ato run github.com/owner/repository
-ato run . --env MODE=development --secret-ref TOKEN=secret://profile/token
-ato run . --allow-network api.example.com
-```
+`init` reads an explicit `capsule.toml`, seals the initial Computation, creates
+`main`, and normally starts a durable Run. `stop` quiesces that Run and advances
+the branch head. `resume` continues the current head or forks a historical
+Record onto a new branch.
 
-Source, exact runtime constraints, entrypoint, semantic environment values,
-and filesystem topology contribute to residual identity. Secret values do not;
-only safe binding identifiers are stored and the provider resolves values at
-realization time. Network and sandbox enforcement are provider concerns.
+`encap` is the portable Materialization boundary. `run` verifies the bundle,
+selects a compatible restore-capable Materialization, resolves Bindings, and
+starts an ephemeral Run without advancing an authored branch.
 
-`ato lock` writes Adapter-owned `capsule.lock`, not a semantic Lock primitive.
-`ato run` recomputes its source and baseline ComputationRef before execution;
-stale/malformed locks and legacy `ato.lock.json` fail closed. Source bytes are
-materialized from Objects into `~/.ato/runs/<run>/workspace-*`; the mutable
-authoring repository is never executed.
+There are no current lifecycle commands for `lock`, `decap`, or `snapshot`.
+`ato run .` and `ato run github.com/owner/repository` belong to the superseded
+repository-execution model and are not accepted inputs.
 
-Secret arguments contain binding identities only. Literal values and the old
-`--secret NAME=value` form are rejected. Detached runs with secret bindings
-also fail closed until a secure one-shot transport is available. A non-empty
-network allowlist runs only on a provider capable of exact enforcement; it is
-never widened to full network access.
+See the accepted [Capsule CLI Lifecycle](rfcs/accepted/CAPSULE_CLI_LIFECYCLE.md).

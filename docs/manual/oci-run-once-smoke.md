@@ -1,5 +1,8 @@
 # OCI `run_once` → Podman: Manual Smoke Verification
 
+> **Historical manual test.** This documents a removed OCI recipe execution
+> path and is not current architecture authority.
+
 This document covers manual verification of the OCI `run_once` lifecycle
 against a real Podman instance, complementing the automated fake-provider
 unit tests in

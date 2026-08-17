@@ -1,5 +1,8 @@
 # Manual smoke test: `ato run . --oci-install-sh`
 
+> **Historical manual test.** The command below belongs to the removed
+> repository/toolchain setup model and is not supported by the current CLI.
+
 This guide walks through using Ato to extract `docker run` intent from an
 `install.sh` script and run the resulting service graph via Podman.
 
