@@ -1,5 +1,8 @@
 # OCI Compose → Podman: Manual Smoke Verification
 
+> **Historical manual test.** The `ato run . --oci-compose` path and referenced
+> crate layout are not part of the current CLI.
+
 This document covers manual verification of the `ato run . --oci-compose` path
 against a real Podman instance, complementing the automated fake-provider unit
 tests in `crates/ato-cli/src/adapters/runtime/executors/oci_compose_runner.rs`.

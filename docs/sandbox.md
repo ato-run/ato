@@ -1,5 +1,10 @@
 # Sandbox
 
+> **Historical document.** This describes an earlier manifest/provider
+> execution path. Sandboxing remains a realization concern, but the commands,
+> crate paths, and identity statements below are not current Semantic Core or
+> CLI authority.
+
 ## Overview
 
 The sandbox is the execution boundary that separates **what is allowed** from
@@ -72,9 +77,9 @@ At runtime:
 
 References:
 
-- [`rfcs/accepted/SECURITY_AND_ISOLATION_MODEL.md`](rfcs/accepted/SECURITY_AND_ISOLATION_MODEL.md)
-- [`rfcs/accepted/NACELLE_SPEC.md`](rfcs/accepted/NACELLE_SPEC.md)
-- [`rfcs/accepted/ADR-007-macos-sandbox-api-strategy.md`](rfcs/accepted/ADR-007-macos-sandbox-api-strategy.md)
+- [historical security and isolation model](archive/rfcs-legacy-accepted/SECURITY_AND_ISOLATION_MODEL.md)
+- [historical Nacelle specification](archive/rfcs-legacy-accepted/NACELLE_SPEC.md)
+- [historical macOS sandbox ADR](archive/rfcs-legacy-accepted/ADR-007-macos-sandbox-api-strategy.md)
 
 ## Recipe permissions
 

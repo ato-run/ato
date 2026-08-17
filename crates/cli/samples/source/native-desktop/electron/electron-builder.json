@@ -1,6 +1,0 @@
-{
-  "appId": "dev.ato.samples.electron",
-  "mac": {
-    "target": ["dir"]
-  }
-}

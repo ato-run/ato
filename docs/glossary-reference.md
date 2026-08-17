@@ -1,53 +1,57 @@
 # Glossary
 
-## Overview
+These terms are normative for current public documentation.
 
-This is the minimal public glossary for terms that appear in the current docs
-and code. It is intentionally shorter than the older internal glossary and
-tracks the current implementation first.
+- **Computation** — the evolving residual computation at a current point. It
+  is not state, history, a trace, or a runtime process.
+- **Evolution** — a transition `C ──α──▶ C'` from one Computation to its
+  successor.
+- **Composition** — explicit Port wiring that combines Computations and
+  produces another Computation: `composeW(C1, ..., Cn) = C`.
+- **Capsule** — an immutable, addressable, sealed Computation point: a
+  persistent open continuation. The current implementation identifies it by a
+  `ComputationRef`.
+- **Run** — a mutable evaluation whose head advances between immutable
+  Computation points. A Run is not a Capsule.
+- **Port** — a typed interaction boundary owned by a Computation.
+- **PortRef** — a logical, persistent reference to a Port. It is not a socket,
+  file descriptor, URL, or other runtime Endpoint.
+- **Endpoint** — a physical interaction endpoint chosen during realization,
+  such as a socket or PTY attachment.
+- **Binding** — the realization-time mapping from a logical requirement or
+  PortRef to an Endpoint or provider resource. Secret values are runtime
+  inputs, not logical identity.
+- **Contract** — a predicate or obligation over a Computation, written
+  `C ⊨ K`. Readiness is one possible Contract, not a universal primitive.
+- **Record** — durable evidence that an Evolution was observed. A Record is
+  not the Computation and does not define its current state.
+- **Trace** — an ordered or causally related view of past Records. History is
+  not the current Computation.
+- **Materialization** — a physical representation or reconstruction strategy
+  for a Capsule. It is not Capsule identity.
+- **Evaluator** — a physical mechanism that advances a realized Computation.
+  It belongs to runtime realization, not the Semantic Core.
+- **Lineage** — evidence relating a branch or fork to an origin Computation and
+  optional parent Record. It is not part of Computation identity.
+- **Fork** — creation of a new Run or branch future from an existing Capsule
+  without mutating that Capsule.
+- **Resume** — realization and continued evaluation of a Capsule as a Run.
+- **Replay** — a Materialization strategy that reconstructs a target by
+  applying recorded interactions from a verified anchor.
+- **State** — a purpose-specific projection `StateK(C)` of a Computation. State
+  is not the semantic primitive.
+- **ComputationObject** — the current canonical representation
+  `{ semantics, boundary, residual }` of a sealed Computation.
+- **ComputationRef** — the immutable address derived from canonical
+  ComputationObject bytes; the current Capsule handle.
+- **`.capsule`** — a portable object-closure bundle rooted at a
+  ComputationRef. Bundle bytes and included Materializations are not Capsule
+  identity.
 
-## How it works
+## Legacy terminology
 
-| Term | Current meaning |
-|---|---|
-| **Source** | Raw input material for a recipe: Git repository, local directory, source snapshot, generated build output, or declared artifact |
-| **Recipe** | The executable interpretation of source inputs. A recipe defines how source inputs are arranged, built, configured, permissioned, and launched. The Store shares recipes, not source code or app binaries |
-| **`capsule.toml`** | The local file format for an Ato recipe. Not necessarily one-to-one with a repository — a repository may have many recipes |
-| **Execution** | A resolved launch produced from source inputs, a recipe, and the user environment |
-| **Execution Identity** | A content-addressed fingerprint of the resolved launch world, including recipe snapshot, source snapshots, runtime, environment, filesystem grants, network policy, capability policy, and entrypoint |
-| **Session** | A managed, running or reusable execution |
-| **Capsule** | A runnable unit materialized from a recipe. In current docs, prefer "recipe" when discussing authoring, sharing, review, or Store entries |
-| **Target** | A named execution surface under `[targets.<label>]` |
-| **`default_target`** | The target selected when the caller does not specify one |
-| **Runtime kind** | The routed runtime family: `source`, `wasm`, `oci`, or `web` |
-| **Execution descriptor** | The routed execution plan built from a manifest or lock input |
-| **`ato.lock.json`** | The authoritative lock-backed execution input when present and selected |
-| **Nacelle** | The current execution engine implementation used through the internal JSON-over-stdio contract |
-| **Provider toolchain** | The language-specific runtime tooling used inside execution, such as `uv`, `node`, or `deno` |
-| **Required env** | Environment variables that must be present before launch; missing values fail closed |
-| **Dependency contract** | A dependency relationship declared under `[dependencies.<alias>]` with parameters, credentials, and exported values |
-| **Runtime exports** | Runtime-only dependency outputs injected into the consumer environment and excluded from identity |
-| **Sandbox grant** | Explicit host filesystem access granted through flags such as `--read`, `--write`, and `--read-write` |
-| **Execution receipt** | The structured document that records the launch envelope for a run |
-| **Execution ID** | The canonical digest of the launch identity, used to address execution receipts |
-| **Connected Runner** | A machine enrolled under an Ato account (`ato runner enroll`) that heartbeats to the control plane and executes dispatched run leases sandboxed. See [Connected Runner](runner.md) |
-| **Run lease** | A dispatched run claimed by a Connected Runner; the runner reports status, readiness, and stop acknowledgements against the lease |
-| **Ready-State snapshot** | A sealed, content-addressed Firecracker artifact of a capsule already booted and probe-verified; restoring it serves the app without re-running setup. See [Snapshot v1 Compatibility](snapshot-v1-compatibility.md) |
-
-## Specification
-
-- glossary terms SHOULD prefer current code and public behavior over historical wording
-- public docs SHOULD use these terms consistently across topic pages
-- if docs and code diverge, the code is authoritative
-
-References:
-
-- [Capsule](capsule.md)
-- [Run](run.md)
-- [Sandbox](sandbox.md)
-- [Execution Identity](execution-identity.md)
-
-## Design Notes
-
-The older glossary tried to be exhaustive and drifted. This version stays small
-on purpose so it can track the implementation without becoming another archive.
+The following framings are historical and must not be used as current
+definitions: Capsule as application package, manifest, VM snapshot, Ready-State
+artifact, lockfile, or Store revision; lockfile-centered reproducibility as
+Ato's semantic core; and “source → detect → resolve → run” as the universal
+Capsule lifecycle.
