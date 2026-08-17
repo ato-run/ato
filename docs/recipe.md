@@ -1,5 +1,10 @@
 # Recipes
 
+> **Historical document.** This guide describes the pre-Computation,
+> recipe/Store-centered product model. It is retained as implementation history
+> and is not current authoring or semantic architecture. Start at the
+> [documentation map](README.md).
+
 ## Overview
 
 A recipe is the unit Ato shares, stores, reviews, and runs.
@@ -121,8 +126,8 @@ When a recipe is loaded from the Store, the Store surface shows:
 
 References:
 
-- [`rfcs/accepted/CAPSULE_SPEC.md`](rfcs/accepted/CAPSULE_SPEC.md)
+- [historical Capsule specification](archive/rfcs-legacy-accepted/CAPSULE_SPEC.md)
 - [legacy Capsule Artifact Format v2](rfcs/archived/CAPSULE_FORMAT_V2.md)
-- [`rfcs/accepted/CAPSULE_DEPENDENCY_CONTRACTS.md`](rfcs/accepted/CAPSULE_DEPENDENCY_CONTRACTS.md)
+- [historical dependency contracts](archive/rfcs-legacy-accepted/CAPSULE_DEPENDENCY_CONTRACTS.md)
 - [Execution Identity](execution-identity.md)
 - [Capsule](capsule.md)
