@@ -442,7 +442,7 @@ mod tests {
         let browser = record(1, BROWSER_ADAPTER_ID, BROWSER_PROTOCOL_ID, "app.browser");
         let http = record(2, "ato.http@1", "ato.http@1", "app.http");
 
-        AdapterFactory::validate_replay(&BrowserAdapter, &[browser.clone()])
+        AdapterFactory::validate_replay(&BrowserAdapter, std::slice::from_ref(&browser))
             .expect("Browser-only replay should remain valid");
         let error = AdapterFactory::validate_replay(&BrowserAdapter, &[browser, http])
             .expect_err("Browser and HTTP Evolution must fail closed");
