@@ -76,6 +76,8 @@ pub(crate) struct AdapterConfig {
     pub input: Option<String>,
     #[serde(default)]
     pub ready_path: Option<String>,
+    #[serde(default)]
+    pub config: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -405,7 +407,7 @@ pub(crate) fn adapter_instances(
                     initial_input: emit_initial_events.then(|| adapter.input.clone()).flatten(),
                 })?
             }
-            _ => serde_json::Value::Object(Default::default()),
+            _ => lower_generic_adapter_config(adapter)?,
         };
         instances.push(AdapterInstance {
             instance_id: format!("configured.{index}"),
@@ -428,6 +430,30 @@ pub(crate) fn adapter_instances(
         }
     }
     Ok(instances)
+}
+
+fn lower_generic_adapter_config(adapter: &AdapterConfig) -> Result<serde_json::Value> {
+    let mut value = match adapter.config.clone() {
+        serde_json::Value::Null => serde_json::Value::Object(Default::default()),
+        serde_json::Value::Object(value) => serde_json::Value::Object(value),
+        _ => bail!("Adapter config must be a table"),
+    };
+    if let Some(port) = &adapter.port {
+        let object = value.as_object_mut().expect("generic config is an object");
+        match object.get("port_id") {
+            Some(existing) if existing != port => {
+                bail!("Adapter port and config.port_id must match")
+            }
+            Some(_) => {}
+            None => {
+                object.insert(
+                    "port_id".to_owned(),
+                    serde_json::Value::String(port.clone()),
+                );
+            }
+        }
+    }
+    Ok(value)
 }
 
 fn process_environment(
@@ -881,6 +907,49 @@ fn boundary(config: &AuthoringConfig) -> Result<Boundary> {
             ))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generic_adapter_config_lowers_port_without_an_adapter_id_branch() {
+        let project = tempfile::tempdir().expect("temporary project should open");
+        std::fs::write(
+            project.path().join("capsule.toml"),
+            r#"schema = 1
+
+[[process]]
+id = "app"
+command = ["app"]
+
+[[port]]
+id = "app.browser"
+node = "app"
+protocol = "ato.browser@1"
+role = "server"
+
+[[adapter]]
+use = "ato.browser@1"
+port = "app.browser"
+
+[adapter.config]
+expected_origin = "http://127.0.0.1:3000"
+"#,
+        )
+        .expect("authoring config should write");
+        let config = load_config(project.path()).expect("authoring config should load");
+        let instances = adapter_instances(&config, &BTreeMap::new(), false, false)
+            .expect("generic Adapter should lower");
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].adapter_id, "ato.browser@1");
+        assert_eq!(instances[0].config["port_id"], "app.browser");
+        assert_eq!(
+            instances[0].config["expected_origin"],
+            "http://127.0.0.1:3000"
+        );
+    }
 }
 
 pub(crate) fn load_snapshot(

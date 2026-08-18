@@ -13,6 +13,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use ato_adapter_api::{AdapterContext, AdapterRegistry};
 use ato_adapter_binding::BindingAdapter;
+use ato_adapter_browser::BrowserAdapter;
 use ato_adapter_http::HttpAdapter;
 use ato_adapter_process::ProcessLifecycleAdapter;
 use ato_adapter_pty::PtyAdapter;
@@ -358,6 +359,7 @@ pub(crate) fn adapter_registry() -> Result<AdapterRegistry> {
     registry.register(Arc::new(WorkspaceAdapter))?;
     registry.register(Arc::new(BindingAdapter))?;
     registry.register(Arc::new(HttpAdapter))?;
+    registry.register(Arc::new(BrowserAdapter))?;
     Ok(registry)
 }
 
