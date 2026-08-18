@@ -125,6 +125,12 @@ JavaScript realm. Tests use this same physical boundary with a fresh browser
 context. Future delivery may use an extension, Wry/WebView injection, or the
 ato.run delivery pipeline without changing Protocol or Replay semantics.
 
+The staging acceptance driver under `tests/browser/` uses raw Chrome DevTools
+Protocol over a loopback WebSocket and Chrome's `Input` domain. It launches a
+real Chrome process with an isolated, disposable profile and does not use
+Playwright. This remains operator/test tooling: Chrome/CDP is not linked into
+the Adapter, Protocol, Materializer, Capsule identity, or product runtime.
+
 The Bridge lifecycle is `restoring -> active -> quiescing -> stopped`. Trusted
 input is captured and suppressed before it reaches application listeners while
 the lifecycle is not active. Apply and lifecycle requests have transport-owned
