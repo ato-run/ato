@@ -100,15 +100,24 @@ mod tests {
     #[test]
     fn pending_continuous_events_flush_before_every_later_discrete_event() {
         let cases = [
-            (pointer(PointerKind::PointerMove, 0.1), key(KeyboardKind::KeyDown)),
+            (
+                pointer(PointerKind::PointerMove, 0.1),
+                key(KeyboardKind::KeyDown),
+            ),
             (scroll(10.0), click()),
-            (pointer(PointerKind::PointerMove, 0.1), pointer(PointerKind::PointerUp, 0.2)),
+            (
+                pointer(PointerKind::PointerMove, 0.1),
+                pointer(PointerKind::PointerUp, 0.2),
+            ),
             (scroll(10.0), key(KeyboardKind::KeyUp)),
         ];
         for (continuous, discrete) in cases {
             let mut coalescer = ContinuousCoalescer::default();
             assert!(coalescer.ingest(continuous.clone()).is_empty());
-            assert_eq!(coalescer.ingest(discrete.clone()), vec![continuous, discrete]);
+            assert_eq!(
+                coalescer.ingest(discrete.clone()),
+                vec![continuous, discrete]
+            );
         }
     }
 
@@ -129,10 +138,22 @@ mod tests {
     #[test]
     fn only_adjacent_events_from_the_same_continuous_stream_are_coalesced() {
         let mut coalescer = ContinuousCoalescer::default();
-        assert!(coalescer.ingest(pointer(PointerKind::PointerMove, 0.1)).is_empty());
-        assert!(coalescer.ingest(pointer(PointerKind::PointerMove, 0.2)).is_empty());
+        assert!(
+            coalescer
+                .ingest(pointer(PointerKind::PointerMove, 0.1))
+                .is_empty()
+        );
+        assert!(
+            coalescer
+                .ingest(pointer(PointerKind::PointerMove, 0.2))
+                .is_empty()
+        );
         assert!(coalescer.ingest(scroll(10.0)).is_empty());
-        assert!(coalescer.ingest(pointer(PointerKind::PointerMove, 0.3)).is_empty());
+        assert!(
+            coalescer
+                .ingest(pointer(PointerKind::PointerMove, 0.3))
+                .is_empty()
+        );
         assert_eq!(
             coalescer.flush(),
             vec![

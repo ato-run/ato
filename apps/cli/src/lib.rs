@@ -18,6 +18,7 @@ use ato_adapter_api::{
     ADAPTER_REMOVE_OPERATION, AdapterContext, AdapterControlPayload, AdapterRegistry,
     SupportedOperation, decode_adapter_control_payload,
 };
+use ato_adapter_browser::BrowserAdapter;
 use ato_adapter_binding::{
     BINDING_ATTACH_OPERATION, BINDING_DETACH_OPERATION, BINDING_PROTOCOL_ID,
     BINDING_REPLACE_OPERATION, BindingAdapter, BindingEvent, decode_event as decode_binding_event,
@@ -686,6 +687,7 @@ pub(crate) fn adapter_registry() -> Result<AdapterRegistry> {
     registry.register(Arc::new(WorkspaceAdapter))?;
     registry.register(Arc::new(BindingAdapter))?;
     registry.register(Arc::new(HttpAdapter))?;
+    registry.register(Arc::new(BrowserAdapter))?;
     Ok(registry)
 }
 
