@@ -117,5 +117,6 @@ Version 1 deliberately excludes text input, touch, multi-tab and multi-frame
 semantics, local/session storage, IndexedDB, cookies, authentication sessions,
 clipboard, browser checkpoints, DOM semantic diffs, selector healing,
 AI-assisted repair, wall-clock deterministic replay, OS-window input, Pixel
-Adapters, and application-specific semantic/state Adapters. ComfyUI support is
+Adapters, viewport adaptation, and application-specific semantic/state
+Adapters. Replay currently requires a compatible viewport. ComfyUI support is
 not part of this RFC's implementation change.

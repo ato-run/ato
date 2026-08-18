@@ -201,7 +201,9 @@ fn run_transport(
                             result,
                         });
                     } else {
-                        queued_commands.push_front(TransportCommand::Apply {
+                        // Keep processing later lifecycle commands while a
+                        // replay waits for its Bridge to connect.
+                        queued_commands.push_back(TransportCommand::Apply {
                             request_id,
                             event,
                             result,
@@ -532,6 +534,8 @@ pub(crate) fn wait_for_result(
 
 #[cfg(test)]
 mod tests {
+    use ato_adapter_api::IgnoreObservations;
+
     use super::*;
 
     fn config() -> TransportConfig {
@@ -580,5 +584,47 @@ mod tests {
         ] {
             assert!(validate_hello(&config, values.0, values.1, values.2, values.3).is_err());
         }
+    }
+
+    #[test]
+    fn shutdown_is_not_starved_by_an_apply_waiting_for_a_bridge() {
+        let directory = tempfile::tempdir().expect("temporary workspace should open");
+        let config = config();
+        let mut handle = start_transport(
+            directory.path(),
+            "browser.test",
+            config,
+            Arc::new(IgnoreObservations),
+        )
+        .expect("transport should start");
+        let (result, receiver) = mpsc::channel();
+        handle
+            .commands
+            .send(TransportCommand::Apply {
+                request_id: "1".to_owned(),
+                event: BrowserEvent::Click {
+                    x_normalized: 0.5,
+                    y_normalized: 0.5,
+                    button: 0,
+                },
+                result,
+            })
+            .expect("apply should queue");
+        handle
+            .commands
+            .send(TransportCommand::Shutdown)
+            .expect("shutdown should queue");
+        handle
+            .join
+            .take()
+            .expect("transport thread should exist")
+            .join()
+            .expect("transport should stop without a Bridge");
+        assert!(
+            receiver
+                .recv()
+                .expect("apply result should return")
+                .is_err()
+        );
     }
 }

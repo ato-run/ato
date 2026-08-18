@@ -537,7 +537,16 @@ mod tests {
                 .send(Message::Text(
                     serde_json::json!({
                         "type": "event",
-                        "event": {"type": "click", "x_normalized": 0.5, "y_normalized": 0.5, "button": 0}
+                        "event": {
+                            "type": "pointer",
+                            "kind": "pointer_move",
+                            "pointer_id": 1,
+                            "pointer_type": "mouse",
+                            "x_normalized": 0.5,
+                            "y_normalized": 0.5,
+                            "button": -1,
+                            "buttons": 0
+                        }
                     })
                     .to_string()
                     .into(),
@@ -618,7 +627,10 @@ mod tests {
             .expect("quiesce should persist the final event before returning");
         assert!(matches!(
             decode_event(&frontier.payload),
-            Ok(BrowserEvent::Click { .. })
+            Ok(BrowserEvent::Pointer {
+                kind: PointerKind::PointerMove,
+                ..
+            })
         ));
         session
             .detach(&AdapterContext {
