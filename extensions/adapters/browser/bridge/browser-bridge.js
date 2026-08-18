@@ -27,6 +27,7 @@
   const socket = new WebSocket(bootstrap.control_url);
   const pointerTargets = new Map();
   let acceptingInput = false;
+  globalThis.__ATO_BROWSER_READY__ = false;
 
   socket.addEventListener("open", () => {
     send({
@@ -53,6 +54,7 @@
       value.browser_session === bootstrap.browser_session
     ) {
       acceptingInput = true;
+      globalThis.__ATO_BROWSER_READY__ = true;
       return;
     }
     if (value.type === "apply" && typeof value.request_id === "string") {
@@ -70,6 +72,7 @@
     }
     if (value.type === "quiesce" && typeof value.request_id === "string") {
       acceptingInput = false;
+      globalThis.__ATO_BROWSER_READY__ = false;
       send({ type: "quiesced", request_id: value.request_id });
     }
   });

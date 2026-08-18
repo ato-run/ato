@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8">
+  <title>Keyboard Grid</title>
+  <body data-x="0" data-y="0">
+    <output id="position">0,0</output>
+    <script>
+      let x = 0;
+      let y = 0;
+      const directions = {
+        ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1],
+      };
+      addEventListener("keydown", (event) => {
+        const delta = directions[event.code];
+        if (!delta) return;
+        x += delta[0];
+        y += delta[1];
+        document.body.dataset.x = String(x);
+        document.body.dataset.y = String(y);
+        document.querySelector("#position").textContent = `${x},${y}`;
+      });
+    </script>
+  </body>
+</html>

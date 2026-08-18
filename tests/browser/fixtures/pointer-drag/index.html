@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8">
+  <title>Pointer Drag</title>
+  <style>
+    body { margin: 0; min-height: 100vh }
+    #drag { position: absolute; left: 80px; top: 80px; width: 60px; height: 60px; background: #5b5bd6; touch-action: none }
+  </style>
+  <body data-x="80" data-y="80">
+    <div id="drag"></div>
+    <script>
+      const drag = document.querySelector("#drag");
+      let active = false;
+      drag.addEventListener("pointerdown", () => { active = true; });
+      addEventListener("pointermove", (event) => {
+        if (!active) return;
+        const x = Math.round(event.clientX);
+        const y = Math.round(event.clientY);
+        drag.style.left = `${x}px`;
+        drag.style.top = `${y}px`;
+        document.body.dataset.x = String(x);
+        document.body.dataset.y = String(y);
+      });
+      addEventListener("pointerup", () => { active = false; });
+      addEventListener("pointercancel", () => { active = false; });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,52 @@
+name: Browser Adapter E2E
+
+on:
+  push:
+    branches: [main, dev, nightly]
+    paths:
+      - "apps/cli/**"
+      - "extensions/adapters/**"
+      - "extensions/materializers/replay/**"
+      - "lib/**"
+      - "tests/browser/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/browser-adapter-e2e.yml"
+  pull_request:
+    branches: [main, dev, nightly]
+    paths:
+      - "apps/cli/**"
+      - "extensions/adapters/**"
+      - "extensions/materializers/replay/**"
+      - "lib/**"
+      - "tests/browser/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/browser-adapter-e2e.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  browser-adapter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tests/browser/package-lock.json
+      - run: cargo build --locked -p ato-cli
+      - run: npm ci
+        working-directory: tests/browser
+      - run: npx playwright install --with-deps chromium
+        working-directory: tests/browser
+      - run: npm test
+        working-directory: tests/browser
+        env:
+          ATO_BIN: ${{ github.workspace }}/target/debug/ato

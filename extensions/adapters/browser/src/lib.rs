@@ -369,6 +369,56 @@ mod tests {
     }
 
     #[test]
+    fn verification_rejects_wrong_adapter_protocol_port_and_direction() {
+        let directory = tempfile::tempdir().expect("temporary object store should open");
+        let objects = FsObjectStore::open(directory.path().join("objects"))
+            .expect("object store should open");
+        let payload = encode_event(&BrowserEvent::Keyboard {
+            kind: KeyboardKind::KeyDown,
+            code: "ArrowRight".to_owned(),
+            modifiers: Modifiers::default(),
+        })
+        .expect("test event should encode");
+        let payload_ref = objects.put(&payload).expect("payload should persist");
+        let head = ComputationRef::parse(format!("blake3:{}", "ab".repeat(32)))
+            .expect("test head should parse");
+        let config = BrowserAdapterConfig {
+            port_id: "app.browser".to_owned(),
+            expected_origin: "http://127.0.0.1:3000".to_owned(),
+            allowed_non_text_codes: BTreeSet::new(),
+        };
+        let base = RecordEnvelope {
+            id: RecordId::new("main", 1),
+            adapter_id: BROWSER_ADAPTER_ID.to_owned(),
+            protocol_id: ProtocolId::parse(BROWSER_PROTOCOL_ID).expect("protocol should parse"),
+            port_id: ato_computation::PortId::parse("app.browser").expect("port should parse"),
+            direction: Direction::Inbound,
+            payload_ref,
+            head_before: head.clone(),
+            head_after: head,
+            caused_by: Vec::new(),
+            observed_at: "0".to_owned(),
+        };
+        let context = AdapterContext {
+            workspace: directory.path(),
+            objects: &objects,
+        };
+        let mut wrong_adapter = base.clone();
+        wrong_adapter.adapter_id = "example.wrong@1".to_owned();
+        let mut wrong_protocol = base.clone();
+        wrong_protocol.protocol_id =
+            ProtocolId::parse("example.wrong@1").expect("protocol should parse");
+        let mut wrong_port = base.clone();
+        wrong_port.port_id =
+            ato_computation::PortId::parse("wrong.browser").expect("port should parse");
+        let mut wrong_direction = base;
+        wrong_direction.direction = Direction::Outbound;
+        for record in [wrong_adapter, wrong_protocol, wrong_port, wrong_direction] {
+            assert!(read_event(&record, &context, &config).is_err());
+        }
+    }
+
+    #[test]
     fn registry_observes_applies_with_ack_and_quiesces_the_final_frontier() {
         let directory = tempfile::tempdir().expect("temporary repository should open");
         let objects_path = directory.path().join(".capsule/objects");

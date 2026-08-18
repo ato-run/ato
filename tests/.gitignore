@@ -10,3 +10,5 @@ __pycache__/
 
 # Node
 node_modules/
+browser/test-results/
+browser/playwright-report/

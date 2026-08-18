@@ -25,7 +25,7 @@ metadata, and `.capsule/` from being captured, but is not a proof that arbitrary
 secret-like filenames are absent. These exclusions always win over an include.
 Every workspace/filesystem Materialization uses this same policy.
 
-Built-in v1 Adapters are Process, PTY, Workspace, Binding, and HTTP. PTY records
+Built-in v1 Adapters are Process, PTY, Workspace, Binding, HTTP, and Browser. PTY records
 bytes, resize, signal, and attachment events without inferring shell commands.
 HTTP request and response are distinct Records. Binding evidence contains only
 logical and safe provider-reference identity; secret values remain runtime
@@ -39,3 +39,10 @@ precise effect; the physical Adapter must not infer application purity.
 Process execution starts from an empty environment. Only the minimal explicit
 platform base environment and declared Binding projections may cross into the
 computation.
+
+Browser v1 records top-level physical keyboard control/navigation, pointer,
+click, and scroll input as inbound Evolution. Its generic Bridge validates an
+exact origin plus runtime-only channel and browser-session credentials. Replay
+applies one canonical Browser event at a time through the ordinary
+`AttachedAdapter` path and waits for Bridge acknowledgement. Runtime discovery
+and credentials are never Computation, Record, authoring, or bundle data.
