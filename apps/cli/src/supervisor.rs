@@ -8,8 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use ato_adapter_api::{
-    AdapterAttachContext, AdapterContext, AdapterError, AdapterObservation, IgnoreObservations,
-    ObservationSink,
+    AdapterAttachContext, AdapterContext, AdapterError, AdapterObservation, ObservationSink,
 };
 use ato_adapter_process::terminate_process_tree;
 use ato_adapter_workspace::restore_workspace;
@@ -370,14 +369,11 @@ pub(crate) struct CliRealizationDriver {
     project: std::path::PathBuf,
     bindings: BTreeMap<String, String>,
     observations: Arc<dyn ObservationSink>,
+    activation_gate: Option<Arc<GatedObservationSink>>,
     isolated_processes: bool,
 }
 
 impl CliRealizationDriver {
-    pub(crate) fn new(project: &Path, bindings: &BTreeMap<String, String>) -> Self {
-        Self::with_observations(project, bindings, Arc::new(IgnoreObservations), true)
-    }
-
     fn with_observations(
         project: &Path,
         bindings: &BTreeMap<String, String>,
@@ -388,7 +384,94 @@ impl CliRealizationDriver {
             project: project.to_path_buf(),
             bindings: bindings.clone(),
             observations,
+            activation_gate: None,
             isolated_processes,
+        }
+    }
+}
+
+pub(crate) struct PortableContinuationCapture {
+    driver: CliRealizationDriver,
+    head: Arc<Mutex<ComputationRef>>,
+    project: std::path::PathBuf,
+    token: String,
+}
+
+impl PortableContinuationCapture {
+    pub(crate) const BRANCH: &'static str = "continued";
+
+    pub(crate) fn begin(
+        repository: &LocalCapsuleRepository,
+        head: &ComputationRef,
+        bindings: &BTreeMap<String, String>,
+    ) -> Result<Self> {
+        repository.create_branch(Self::BRANCH, head, None)?;
+        let token = format!("portable-{}-{}", std::process::id(), observed_nanos());
+        let starting = ActiveRun {
+            token: token.clone(),
+            branch: Self::BRANCH.to_owned(),
+            branch_base: head.clone(),
+            head: head.clone(),
+            record_seq: 0,
+            pid: std::process::id(),
+            process_start_time: "portable-foreground".to_owned(),
+            process_group: 0,
+            boot_session: String::new(),
+            status: "starting".to_owned(),
+        };
+        repository.claim_active_run(&starting)?;
+        let mut active = starting;
+        active.status = "active".to_owned();
+        if let Err(error) = repository.activate_run(&token, &active) {
+            let _ = repository.release_active_run(&token);
+            return Err(error.into());
+        }
+
+        let live_head = Arc::new(Mutex::new(head.clone()));
+        let sink: Arc<dyn ObservationSink> = Arc::new(RepositoryObservationSink {
+            project: repository.project().to_path_buf(),
+            branch: Self::BRANCH.to_owned(),
+            token: token.clone(),
+            head: Arc::clone(&live_head),
+        });
+        let gate = Arc::new(GatedObservationSink {
+            enabled: AtomicBool::new(false),
+            inner: sink,
+        });
+        let driver = CliRealizationDriver {
+            project: repository.project().to_path_buf(),
+            bindings: bindings.clone(),
+            observations: gate.clone(),
+            activation_gate: Some(gate),
+            isolated_processes: true,
+        };
+        Ok(Self {
+            driver,
+            head: live_head,
+            project: repository.project().to_path_buf(),
+            token,
+        })
+    }
+
+    pub(crate) fn driver(&self) -> &CliRealizationDriver {
+        &self.driver
+    }
+
+    pub(crate) fn finish(self) -> Result<ComputationRef> {
+        let head = self
+            .head
+            .lock()
+            .map_err(|_| anyhow::anyhow!("portable continuation head lock was poisoned"))?
+            .clone();
+        LocalCapsuleRepository::open(&self.project)?.release_active_run(&self.token)?;
+        Ok(head)
+    }
+}
+
+impl Drop for PortableContinuationCapture {
+    fn drop(&mut self) {
+        if let Ok(repository) = LocalCapsuleRepository::open(&self.project) {
+            let _ = repository.release_active_run(&self.token);
         }
     }
 }
@@ -426,6 +509,7 @@ impl RealizationDriver for CliRealizationDriver {
         Ok(Box::new(CliReplayRuntime {
             project: self.project.clone(),
             sessions,
+            activation_gate: self.activation_gate.clone(),
         }))
     }
 }
@@ -433,6 +517,7 @@ impl RealizationDriver for CliRealizationDriver {
 struct CliReplayRuntime {
     project: std::path::PathBuf,
     sessions: Vec<Box<dyn ato_adapter_api::AttachedAdapter>>,
+    activation_gate: Option<Arc<GatedObservationSink>>,
 }
 
 impl ReplayRuntime for CliReplayRuntime {
@@ -474,6 +559,7 @@ impl ReplayRuntime for CliReplayRuntime {
             project: self.project,
             sessions: self.sessions,
             target: target.clone(),
+            activation_gate: self.activation_gate,
         }))
     }
 }
@@ -482,6 +568,7 @@ struct CliRealization {
     project: std::path::PathBuf,
     sessions: Vec<Box<dyn ato_adapter_api::AttachedAdapter>>,
     target: ComputationRef,
+    activation_gate: Option<Arc<GatedObservationSink>>,
 }
 
 impl Realization for CliRealization {
@@ -494,8 +581,16 @@ impl Realization for CliRealization {
     }
 
     fn activate(&mut self) -> Result<(), MaterializerError> {
+        if let Some(gate) = &self.activation_gate {
+            gate.enabled.store(true, Ordering::Release);
+        }
         for session in &mut self.sessions {
-            session.activate().map_err(materializer_operation)?;
+            if let Err(error) = session.activate() {
+                if let Some(gate) = &self.activation_gate {
+                    gate.enabled.store(false, Ordering::Release);
+                }
+                return Err(materializer_operation(error));
+            }
         }
         Ok(())
     }
@@ -514,7 +609,11 @@ impl Realization for CliRealization {
             workspace: &self.project,
             objects: repository.objects(),
         };
-        quiesce_and_detach(&mut self.sessions, &context).map_err(materializer_operation)
+        let result = quiesce_and_detach(&mut self.sessions, &context);
+        if let Some(gate) = &self.activation_gate {
+            gate.enabled.store(false, Ordering::Release);
+        }
+        result.map_err(materializer_operation)
     }
 }
 

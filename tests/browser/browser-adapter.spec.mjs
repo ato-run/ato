@@ -286,6 +286,19 @@ async function runScenario(browser, fixtureName, scenario) {
     await recipientPage.evaluate(() => fetch("/__shutdown"));
     const exit = await waitForExit(portableRun, portableOutput);
     expect(exit.code, exit.stderr).toBe(0);
+    const continuedHead = (
+      await readFile(join(recipientProject, ".capsule/refs/heads/continued"), "utf8")
+    ).trim();
+    expect(continuedHead).not.toBe(finalHead);
+    const continuedRecords = await recordedEvents(recipientProject, "continued");
+    expect(continuedRecords.length).toBeGreaterThan(0);
+    expect(continuedRecords.at(-1)).toMatchObject({
+      adapter_id: "ato.browser@1",
+      protocol_id: "ato.browser@1",
+      head_after: continuedHead,
+    });
+    expect(exit.stderr).toContain(`continued computation: ${continuedHead}`);
+    expect(exit.stderr).toContain("continuation workspace:");
   } finally {
     await authorContext?.close().catch(() => {});
     await recipientContext?.close().catch(() => {});
@@ -382,8 +395,8 @@ async function browserRecords(project) {
   return (await recordedEvents(project)).filter((record) => record.adapter_id === "ato.browser@1");
 }
 
-async function recordedEvents(project) {
-  const directory = join(project, ".capsule/records/main");
+async function recordedEvents(project, stream = "main") {
+  const directory = join(project, `.capsule/records/${stream}`);
   const names = (await readdir(directory)).sort();
   const records = await Promise.all(names.map(async (name) => JSON.parse(await readFile(join(directory, name), "utf8"))));
   return records.sort((left, right) => left.id.seq - right.id.seq);

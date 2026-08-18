@@ -66,6 +66,13 @@ does not prove the resulting application state. A replay Realization therefore
 reports `AppliedUnverified` unless an independent Contract verifies the target;
 fixture DOM or HTTP inspection remains test-harness responsibility.
 
+After a portable Replay activates, new trusted input is recorded on a
+`continued` branch rooted at the restored Computation. When the foreground
+Run exits cleanly, Ato seals that branch, retains its workspace under the
+recipient's private cache, and reports the new ComputationRef and workspace.
+The recipient can therefore encap the new future instead of losing post-Replay
+interaction with an ephemeral realization.
+
 ## Ordering and continuous input
 
 Adjacent `pointer_move` and scroll events may be coalesced. The implementation

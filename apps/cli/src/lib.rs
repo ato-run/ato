@@ -37,7 +37,7 @@ use crate::authoring::{
     AuthoringReferences, evolve_workspace, initial_computation, load_config, load_runtime_state,
     workspace_policy,
 };
-use crate::supervisor::{CliRealizationDriver, start_durable, stop_active};
+use crate::supervisor::{PortableContinuationCapture, start_durable, stop_active};
 
 #[derive(Parser)]
 #[command(
@@ -302,14 +302,14 @@ fn run_capsule(args: RunArgs) -> Result<()> {
     let adapters = adapter_registry()?;
     let materializers = materializer_registry()?;
     let capture_policy = workspace_policy(&state.config)?;
-    let driver = CliRealizationDriver::new(&project, &bindings);
+    let capture = PortableContinuationCapture::begin(&repository, &root, &bindings)?;
     let context = MaterializerContext {
         objects: repository.objects(),
         adapters: &adapters,
         records: &[],
         workspace: &project,
         workspace_policy: &capture_policy,
-        realization: Some(&driver),
+        realization: Some(capture.driver()),
     };
     let mut candidates = bundle.index.materializations.clone();
     candidates.sort_by(|left, right| left.materializer_id.cmp(&right.materializer_id));
@@ -355,7 +355,20 @@ fn run_capsule(args: RunArgs) -> Result<()> {
             "replay applied all Records for {root}; target state remains unverified without an independent Contract"
         );
     }
-    realization.run().map_err(Into::into)
+    let run_result = realization.run().map_err(anyhow::Error::from);
+    let observed = capture.finish()?;
+    run_result?;
+    let continued = evolve_workspace(&repository, PortableContinuationCapture::BRANCH, &observed)?;
+    repository.update_head(PortableContinuationCapture::BRANCH, Some(&root), &continued)?;
+    if continued != root {
+        let retained = runtime.keep();
+        eprintln!("continued computation: {continued}");
+        eprintln!(
+            "continuation workspace: {}",
+            retained.join("workspace").display()
+        );
+    }
+    Ok(())
 }
 
 pub(crate) fn adapter_registry() -> Result<AdapterRegistry> {

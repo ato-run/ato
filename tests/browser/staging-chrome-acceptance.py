@@ -14,6 +14,7 @@ import hashlib
 import http.client
 import json
 import os
+import re
 import secrets
 import shutil
 import socket
@@ -380,6 +381,19 @@ def wait_for_bootstrap(runtime_dir: Path) -> tuple[Path, dict[str, Any]]:
     return wait_until(read)
 
 
+def wait_for_portable_project(home: Path) -> Path:
+    def find() -> Path | None:
+        cache = home / "cache"
+        if not cache.is_dir():
+            return None
+        for candidate in sorted(cache.glob("portable-run-*/workspace")):
+            if (candidate / ".capsule").is_dir():
+                return candidate
+        return None
+
+    return wait_until(find)
+
+
 def run_ato(ato: Path, arguments: list[str], home: Path, runtime_dir: Path) -> subprocess.CompletedProcess:
     return subprocess.run(
         [str(ato), *arguments],
@@ -614,6 +628,7 @@ materializers = ["ato.replay@1"]
     )
     atexit.register(stop_child, recipient_process, port)
     _, recipient_bootstrap = wait_for_bootstrap(recipient_runtime)
+    recipient_project = wait_for_portable_project(recipient_home)
     wait_until(lambda: server_state(port))
     recipient_chrome = ChromeSession(
         args.chrome,
@@ -670,6 +685,50 @@ materializers = ["ato.replay@1"]
     if recipient_process.returncode != 0:
         raise AcceptanceError(f"portable Run failed: {stderr}")
     wait_until(lambda: not list(recipient_runtime.glob("browser-*.json")))
+    continued_match = re.search(r"continued computation: (blake3:[0-9a-f]+)", stderr)
+    workspace_match = re.search(r"continuation workspace: (.+)", stderr)
+    if continued_match is None or workspace_match is None:
+        raise AcceptanceError(f"portable continuation receipt is missing: {stderr}")
+    continued_head = continued_match.group(1)
+    if Path(workspace_match.group(1)) != recipient_project:
+        raise AcceptanceError("retained continuation workspace does not match the recipient Run")
+    if (recipient_project / ".capsule/refs/heads/continued").read_text().strip() != continued_head:
+        raise AcceptanceError("continued branch head does not match the portable Run receipt")
+    if continued_head == final_head:
+        raise AcceptanceError("post-Replay human input did not create a new ComputationRef")
+    continued_records = [
+        json.loads(path.read_text())
+        for path in sorted(
+            (recipient_project / ".capsule/records/continued").glob("*.json")
+        )
+    ]
+    if not continued_records or continued_records[-1]["head_after"] != continued_head:
+        raise AcceptanceError("continued Browser Records do not seal the new future")
+    continued_bundle = work_root / "continued.capsule"
+    run_ato(
+        args.ato,
+        [
+            "encap",
+            f"{recipient_project}@continued",
+            "--materialize",
+            "ato.replay@1",
+            "-o",
+            str(continued_bundle),
+        ],
+        recipient_home,
+        recipient_runtime,
+    )
+    continued_portable = json.loads(continued_bundle.read_text())
+    if continued_portable["index"]["root"] != continued_head:
+        raise AcceptanceError("continued future was not exported at its sealed head")
+    continued_text = continued_bundle.read_text()
+    for secret_value in [
+        recipient_bootstrap["channel_credential"],
+        recipient_bootstrap["browser_session"],
+        recipient_bootstrap["control_url"],
+    ]:
+        if secret_value in continued_text:
+            raise AcceptanceError("recipient Browser credential leaked into continued Capsule")
     failure_home = work_root / "failure-home"
     failure_runtime = work_root / "failure-private-runtime"
     failure_home.mkdir(mode=0o700)
@@ -737,12 +796,19 @@ materializers = ["ato.replay@1"]
         "initial_computation": initial_head,
         "sealed_computation": final_head,
         "portable_root": portable["index"]["root"],
+        "recipient_run": recipient_project.parent.name,
         "browser_records": len(browser_records),
         "replay_applied_records": len(records),
         "verification": {
             "kind": "independent_http_and_dom_contract",
             "state_after_replay": 2,
             "state_after_continue": final_state,
+        },
+        "continuation": {
+            "computation": continued_head,
+            "browser_records": len(continued_records),
+            "portable_root": continued_portable["index"]["root"],
+            "sealable": True,
         },
         "security": {
             "credential_absent_from_bundle": True,
