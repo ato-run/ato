@@ -14,6 +14,7 @@ members = [
     "extensions/adapters/workspace",
     "extensions/adapters/binding",
     "extensions/adapters/http",
+    "extensions/adapters/browser",
     "extensions/player",
     "extensions/record-writer",
     "lib/compose",
