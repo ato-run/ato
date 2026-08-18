@@ -180,6 +180,7 @@ class ChromeSession:
         bootstrap: dict[str, Any],
         origin: str,
         delay_ack: bool,
+        disconnect_on_apply: bool = False,
     ):
         self.closed = False
         self.cdp: Cdp | None = None
@@ -230,6 +231,14 @@ class ChromeSession:
             )
             if original not in bridge_source:
                 raise AcceptanceError("Bridge ACK hook not found")
+            bridge_source = bridge_source.replace(original, replacement)
+        if disconnect_on_apply:
+            original = "dispatch(value.event);"
+            replacement = (
+                'socket.close(4000, "injected staging replay disconnect"); return;'
+            )
+            if original not in bridge_source:
+                raise AcceptanceError("Bridge dispatch hook not found")
             bridge_source = bridge_source.replace(original, replacement)
         world_name = f"ato.browser.bridge.{bootstrap['browser_session']}"
         source = (
@@ -654,6 +663,46 @@ materializers = ["ato.replay@1"]
     if recipient_process.returncode != 0:
         raise AcceptanceError(f"portable Run failed: {stderr}")
     wait_until(lambda: not list(recipient_runtime.glob("browser-*.json")))
+    failure_home = work_root / "failure-home"
+    failure_runtime = work_root / "failure-private-runtime"
+    failure_home.mkdir(mode=0o700)
+    failure_runtime.mkdir(mode=0o700)
+    failure_process = subprocess.Popen(
+        [str(args.ato), "run", str(bundle)],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={
+            **os.environ,
+            "ATO_HOME": str(failure_home),
+            "ATO_BROWSER_RUNTIME_DIR": str(failure_runtime),
+        },
+    )
+    atexit.register(stop_child, failure_process, port)
+    _, failure_bootstrap = wait_for_bootstrap(failure_runtime)
+    wait_until(lambda: server_state(port))
+    failure_chrome = ChromeSession(
+        args.chrome,
+        work_root / "failure-chrome",
+        bridge_source,
+        failure_bootstrap,
+        origin,
+        False,
+        True,
+    )
+    failure_chrome.isolated_context()
+    failure_stdout, failure_stderr = failure_process.communicate(
+        timeout=TIMEOUT_SECONDS
+    )
+    atexit.unregister(stop_child)
+    failure_chrome.close()
+    if failure_process.returncode == 0:
+        raise AcceptanceError("Bridge disconnect was reported as successful Replay")
+    if "Browser Bridge disconnected" not in failure_stderr:
+        raise AcceptanceError(
+            f"Bridge disconnect failure was not explicit: {failure_stderr}"
+        )
+    wait_until(lambda: not list(failure_runtime.glob("browser-*.json")))
     receipt = {
         "schema": "ato.browser.staging-acceptance/v1",
         "result": "PASS",
@@ -683,6 +732,14 @@ materializers = ["ato.replay@1"]
             "real_input_during_replay_blocked": True,
             "fresh_chrome_process": True,
             "browser_http_double_effect": "absent; HTTP Adapter not attached",
+        },
+        "failure_path": {
+            "kind": "bridge_disconnect_during_replay",
+            "exit_code": failure_process.returncode,
+            "explicit_error": "Browser Bridge disconnected" in failure_stderr,
+            "runtime_discovery_cleanup": True,
+            "stdout": failure_stdout,
+            "stderr": failure_stderr,
         },
         "portable_stderr": stderr,
         "portable_stdout": stdout,
