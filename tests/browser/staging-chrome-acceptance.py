@@ -8,6 +8,7 @@ Playwright and drives trusted physical input through Chrome's CDP Input domain.
 from __future__ import annotations
 
 import argparse
+import atexit
 import base64
 import hashlib
 import http.client
@@ -180,6 +181,9 @@ class ChromeSession:
         origin: str,
         delay_ack: bool,
     ):
+        self.closed = False
+        self.cdp: Cdp | None = None
+        self.browser_context_id: str | None = None
         self.work_dir = work_dir
         self.profile = work_dir / "profile"
         self.profile.mkdir(parents=True)
@@ -203,6 +207,7 @@ class ChromeSession:
             stdout=self.log_file,
             stderr=subprocess.STDOUT,
         )
+        atexit.register(self.close)
         version = wait_for_json(f"http://127.0.0.1:{self.debug_port}/json/version")
         self.version = version["Browser"]
         self.cdp = Cdp(version["webSocketDebuggerUrl"])
@@ -299,14 +304,25 @@ class ChromeSession:
         )
 
     def close(self) -> None:
-        try:
-            self.cdp.call(
-                "Target.disposeBrowserContext", {"browserContextId": self.browser_context_id}
-            )
-        except (AcceptanceError, OSError):
-            pass
-        self.cdp.close()
-        self.process.terminate()
+        if self.closed:
+            return
+        self.closed = True
+        atexit.unregister(self.close)
+        if self.cdp is not None:
+            try:
+                if self.browser_context_id is not None:
+                    self.cdp.call(
+                        "Target.disposeBrowserContext",
+                        {"browserContextId": self.browser_context_id},
+                    )
+            except (AcceptanceError, OSError):
+                pass
+            try:
+                self.cdp.close()
+            except OSError:
+                pass
+        if self.process.poll() is None:
+            self.process.terminate()
         try:
             self.process.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -363,6 +379,26 @@ def run_ato(ato: Path, arguments: list[str], home: Path, runtime_dir: Path) -> s
         env={**os.environ, "ATO_HOME": str(home), "ATO_BROWSER_RUNTIME_DIR": str(runtime_dir)},
         timeout=TIMEOUT_SECONDS,
     )
+
+
+def stop_child(process: subprocess.Popen, port: int) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
+        connection.request("GET", "/__shutdown")
+        connection.getresponse().read()
+        connection.close()
+        process.wait(timeout=5)
+        return
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
 
 
 def server_state(port: int) -> dict[str, Any]:
@@ -481,6 +517,18 @@ materializers = ["ato.replay@1"]
 '''
     )
     run_ato(args.ato, ["init", str(project)], author_home, author_runtime)
+    stop_author = lambda: subprocess.run(
+        [str(args.ato), "stop", str(project)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env={
+            **os.environ,
+            "ATO_HOME": str(author_home),
+            "ATO_BROWSER_RUNTIME_DIR": str(author_runtime),
+        },
+        timeout=10,
+    )
+    atexit.register(stop_author)
     initial_head = (project / ".capsule/refs/heads/main").read_text().strip()
     _, author_bootstrap = wait_for_bootstrap(author_runtime)
     wait_until(lambda: server_state(port))
@@ -505,6 +553,7 @@ materializers = ["ato.replay@1"]
     wait_until(lambda: server_state(port).get("count") == 2)
     author_chrome.close()
     run_ato(args.ato, ["stop", str(project)], author_home, author_runtime)
+    atexit.unregister(stop_author)
     if list(author_runtime.glob("browser-*.json")):
         raise AcceptanceError("author runtime discovery was not cleaned")
     final_head = (project / ".capsule/refs/heads/main").read_text().strip()
@@ -547,6 +596,7 @@ materializers = ["ato.replay@1"]
             "ATO_BROWSER_RUNTIME_DIR": str(recipient_runtime),
         },
     )
+    atexit.register(stop_child, recipient_process, port)
     _, recipient_bootstrap = wait_for_bootstrap(recipient_runtime)
     wait_until(lambda: server_state(port))
     recipient_chrome = ChromeSession(
@@ -592,12 +642,15 @@ materializers = ["ato.replay@1"]
     if page_security != {"globals": [], "local": 0, "session": 0, "count": 2}:
         raise AcceptanceError(f"page-realm security assertion failed: {page_security}")
     recipient_chrome.click("#increment")
-    final_state = wait_until(
-        lambda: (value := server_state(port)) if value.get("count") == 3 else None
-    )
+    def continued_state() -> dict[str, Any] | None:
+        value = server_state(port)
+        return value if value.get("count") == 3 else None
+
+    final_state = wait_until(continued_state)
     recipient_chrome.evaluate("fetch('/__shutdown')")
     recipient_chrome.close()
     stdout, stderr = recipient_process.communicate(timeout=TIMEOUT_SECONDS)
+    atexit.unregister(stop_child)
     if recipient_process.returncode != 0:
         raise AcceptanceError(f"portable Run failed: {stderr}")
     wait_until(lambda: not list(recipient_runtime.glob("browser-*.json")))
