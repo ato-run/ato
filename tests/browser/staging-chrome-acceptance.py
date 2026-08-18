@@ -729,6 +729,139 @@ materializers = ["ato.replay@1"]
     ]:
         if secret_value in continued_text:
             raise AcceptanceError("recipient Browser credential leaked into continued Capsule")
+
+    mixed_project = work_root / "browser-http-project"
+    mixed_project.mkdir()
+    shutil.copy(project / "index.html", mixed_project / "index.html")
+    shutil.copy(project / "server.py", mixed_project / "server.py")
+    mixed_home = work_root / "browser-http-home"
+    mixed_runtime = work_root / "browser-http-private-runtime"
+    mixed_home.mkdir(mode=0o700)
+    mixed_runtime.mkdir(mode=0o700)
+    mixed_upstream_port = unused_port()
+    mixed_public_port = unused_port()
+    mixed_origin = f"http://127.0.0.1:{mixed_public_port}"
+    (mixed_project / "capsule.toml").write_text(
+        f'''schema = 1
+
+[[process]]
+id = "app"
+command = ["{sys.executable}", "server.py", "{mixed_upstream_port}"]
+cwd = "."
+
+[[adapter]]
+target = "app"
+use = "ato.process@1"
+
+[[port]]
+id = "app.browser"
+node = "app"
+protocol = "ato.browser@1"
+role = "server"
+
+[[adapter]]
+port = "app.browser"
+use = "ato.browser@1"
+
+[adapter.config]
+expected_origin = "{mixed_origin}"
+
+[[port]]
+id = "app.http"
+node = "app"
+protocol = "ato.http@1"
+role = "server"
+
+[[adapter]]
+port = "app.http"
+use = "ato.http@1"
+listen = "127.0.0.1:{mixed_public_port}"
+upstream = "127.0.0.1:{mixed_upstream_port}"
+ready_path = "/"
+
+[encap]
+materializers = ["ato.replay@1"]
+'''
+    )
+    run_ato(args.ato, ["init", str(mixed_project)], mixed_home, mixed_runtime)
+    stop_mixed = lambda: subprocess.run(
+        [str(args.ato), "stop", str(mixed_project)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env={
+            **os.environ,
+            "ATO_HOME": str(mixed_home),
+            "ATO_BROWSER_RUNTIME_DIR": str(mixed_runtime),
+        },
+        timeout=10,
+    )
+    atexit.register(stop_mixed)
+    _, mixed_bootstrap = wait_for_bootstrap(mixed_runtime)
+    wait_until(lambda: server_state(mixed_public_port))
+    mixed_chrome = ChromeSession(
+        args.chrome,
+        work_root / "browser-http-chrome",
+        bridge_source,
+        mixed_bootstrap,
+        mixed_origin,
+        False,
+    )
+    mixed_context = mixed_chrome.isolated_context()
+    wait_until(
+        lambda: mixed_chrome.evaluate(
+            "globalThis.__ATO_BROWSER_LIFECYCLE__", mixed_context
+        )
+        == "active"
+    )
+    mixed_chrome.click("#increment")
+    mixed_state = wait_until(
+        lambda: (
+            value
+            if (value := server_state(mixed_public_port)).get("count") == 1
+            else None
+        )
+    )
+    mixed_chrome.close()
+    run_ato(args.ato, ["stop", str(mixed_project)], mixed_home, mixed_runtime)
+    atexit.unregister(stop_mixed)
+    mixed_records = [
+        json.loads(path.read_text())
+        for path in sorted((mixed_project / ".capsule/records/main").glob("*.json"))
+    ]
+    mixed_adapters = {record["adapter_id"] for record in mixed_records}
+    if not {PROTOCOL, "ato.http@1"}.issubset(mixed_adapters):
+        raise AcceptanceError("mixed Browser + HTTP run did not record both boundaries")
+    mixed_bundle = work_root / "browser-http.capsule"
+    mixed_encap = subprocess.run(
+        [
+            str(args.ato),
+            "encap",
+            f"{mixed_project}@main",
+            "--materialize",
+            "ato.replay@1",
+            "-o",
+            str(mixed_bundle),
+        ],
+        text=True,
+        capture_output=True,
+        env={
+            **os.environ,
+            "ATO_HOME": str(mixed_home),
+            "ATO_BROWSER_RUNTIME_DIR": str(mixed_runtime),
+        },
+        timeout=TIMEOUT_SECONDS,
+    )
+    mixed_diagnostic = (
+        "Browser-driven network effects cannot currently be replayed through both "
+        "Browser and HTTP adapters"
+    )
+    if mixed_encap.returncode == 0 or mixed_diagnostic not in mixed_encap.stderr:
+        raise AcceptanceError(
+            f"mixed Browser + HTTP Replay did not fail closed: {mixed_encap.stderr}"
+        )
+    if mixed_bundle.exists() or mixed_state != {"count": 1, "requests": 1}:
+        raise AcceptanceError("mixed Browser + HTTP path duplicated its server mutation")
+    wait_until(lambda: not list(mixed_runtime.glob("browser-*.json")))
     failure_home = work_root / "failure-home"
     failure_runtime = work_root / "failure-private-runtime"
     failure_home.mkdir(mode=0o700)
@@ -810,13 +943,21 @@ materializers = ["ato.replay@1"]
             "portable_root": continued_portable["index"]["root"],
             "sealable": True,
         },
+        "browser_http": {
+            "policy": "fail_closed_before_replay",
+            "recorded_boundaries": sorted(mixed_adapters),
+            "state_before_replay_rejection": mixed_state,
+            "encap_exit_code": mixed_encap.returncode,
+            "explicit_diagnostic": mixed_diagnostic in mixed_encap.stderr,
+            "double_effect": "absent",
+        },
         "security": {
             "credential_absent_from_bundle": True,
             "credential_absent_from_page_realm": True,
             "runtime_discovery_cleanup": True,
             "real_input_during_replay_blocked": True,
             "fresh_chrome_process": True,
-            "browser_http_double_effect": "absent; HTTP Adapter not attached",
+            "browser_http_double_effect": "absent; mixed descriptors fail closed",
         },
         "failure_path": {
             "kind": "bridge_disconnect_during_replay",
