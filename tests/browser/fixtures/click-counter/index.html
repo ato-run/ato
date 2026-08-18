@@ -3,12 +3,15 @@
   <meta charset="utf-8">
   <title>Click Counter</title>
   <style>body { font: 24px system-ui; padding: 40px } button { font-size: 32px; width: 80px; height: 60px }</style>
-  <body>
+  <body data-trusted-clicks="0">
     <output id="count">0</output>
     <button id="increment" type="button">+</button>
     <script>
       let count = 0;
-      document.querySelector("#increment").addEventListener("click", () => {
+      document.querySelector("#increment").addEventListener("click", (event) => {
+        if (event.isTrusted) {
+          document.body.dataset.trustedClicks = String(Number(document.body.dataset.trustedClicks) + 1);
+        }
         document.querySelector("#count").textContent = String(++count);
       });
     </script>

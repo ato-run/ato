@@ -1,4 +1,4 @@
-import { createReadStream } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { extname, join, normalize } from "node:path";
 
@@ -10,8 +10,30 @@ const contentTypes = new Map([
   [".js", "text/javascript; charset=utf-8"],
   [".css", "text/css; charset=utf-8"],
 ]);
+let serverCount = 0;
+let incrementRequests = 0;
 
-const server = createServer((request, response) => {
+const server = createServer(async (request, response) => {
+  response.sendDate = false;
+  response.setHeader("connection", "close");
+  if (request.method === "POST" && request.url === "/increment") {
+    serverCount += 1;
+    incrementRequests += 1;
+    const body = JSON.stringify({ count: serverCount, requests: incrementRequests });
+    response.writeHead(200, {
+      "content-type": "application/json",
+      "content-length": Buffer.byteLength(body),
+    }).end(body);
+    return;
+  }
+  if (request.method === "GET" && request.url === "/__ato_test/state") {
+    const body = JSON.stringify({ count: serverCount, requests: incrementRequests });
+    response.writeHead(200, {
+      "content-type": "application/json",
+      "content-length": Buffer.byteLength(body),
+    }).end(body);
+    return;
+  }
   if (request.url === "/__shutdown") {
     response.writeHead(204).end();
     server.close();
@@ -23,8 +45,15 @@ const server = createServer((request, response) => {
     response.writeHead(403).end();
     return;
   }
-  response.writeHead(200, { "content-type": contentTypes.get(extname(file)) ?? "application/octet-stream" });
-  createReadStream(file).on("error", () => response.writeHead(404).end()).pipe(response);
+  try {
+    const body = await readFile(file);
+    response.writeHead(200, {
+      "content-type": contentTypes.get(extname(file)) ?? "application/octet-stream",
+      "content-length": body.length,
+    }).end(body);
+  } catch {
+    response.writeHead(404, { "content-length": 0 }).end();
+  }
 });
 
 server.listen(port, "127.0.0.1");

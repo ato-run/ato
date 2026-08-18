@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8">
+  <title>HTTP Stateful Counter</title>
+  <style>body { font: 24px system-ui; padding: 40px } button { font-size: 24px; padding: 12px 24px }</style>
+  <body>
+    <output id="count">0</output>
+    <button id="increment" type="button">Increment</button>
+    <script>
+      document.querySelector("#increment").addEventListener("click", async () => {
+        const state = await fetch("/increment", { method: "POST" }).then((response) => response.json());
+        document.querySelector("#count").textContent = String(state.count);
+        document.body.dataset.requests = String(state.requests);
+      });
+    </script>
+  </body>
+</html>

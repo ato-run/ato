@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8">
+  <title>Focus Keyboard</title>
+  <style>body { font: 24px system-ui; padding: 40px } button { font-size: 24px; padding: 12px 24px }</style>
+  <body data-actions="0">
+    <button id="action" type="button">Focused action</button>
+    <output id="status">0</output>
+    <script>
+      document.querySelector("#action").addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && document.activeElement === event.currentTarget) {
+          event.preventDefault();
+          const actions = Number(document.body.dataset.actions) + 1;
+          document.body.dataset.actions = String(actions);
+          document.querySelector("#status").textContent = String(actions);
+        }
+      });
+    </script>
+  </body>
+</html>
