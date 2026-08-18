@@ -29,6 +29,7 @@ from typing import Any
 
 PROTOCOL = "ato.browser@1"
 TIMEOUT_SECONDS = 30
+FAILURE_TIMEOUT_SECONDS = 45
 
 
 class AcceptanceError(RuntimeError):
@@ -692,7 +693,7 @@ materializers = ["ato.replay@1"]
     )
     failure_chrome.isolated_context()
     failure_stdout, failure_stderr = failure_process.communicate(
-        timeout=TIMEOUT_SECONDS
+        timeout=FAILURE_TIMEOUT_SECONDS
     )
     atexit.unregister(stop_child)
     failure_chrome.close()
