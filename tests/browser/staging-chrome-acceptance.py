@@ -460,6 +460,10 @@ command = ["{sys.executable}", "server.py", "{port}"]
 cwd = "."
 
 [[adapter]]
+target = "app"
+use = "ato.process@1"
+
+[[adapter]]
 port = "app.browser"
 use = "ato.browser@1"
 
