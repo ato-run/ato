@@ -11,6 +11,7 @@ members = [
     "extensions/adapters/workspace",
     "extensions/adapters/binding",
     "extensions/adapters/http",
+    "extensions/adapters/browser",
     "lib/compose",
     "extensions/materializers/snapshot",
     "extensions/materializers/snapshot/guest-agent",
