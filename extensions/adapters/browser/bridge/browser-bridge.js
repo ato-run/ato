@@ -2,6 +2,11 @@
   "use strict";
 
   const bootstrap = globalThis.__ATO_BROWSER_BOOTSTRAP__;
+  try {
+    delete globalThis.__ATO_BROWSER_BOOTSTRAP__;
+  } catch {
+    globalThis.__ATO_BROWSER_BOOTSTRAP__ = undefined;
+  }
   if (
     globalThis.top !== globalThis ||
     !isObject(bootstrap) ||
@@ -26,8 +31,10 @@
   ]);
   const socket = new WebSocket(bootstrap.control_url);
   const pointerTargets = new Map();
-  let acceptingInput = false;
+  let lifecycle = "connected";
   globalThis.__ATO_BROWSER_READY__ = false;
+  globalThis.__ATO_BROWSER_LIFECYCLE__ = lifecycle;
+  globalThis.__ATO_BROWSER_ERROR__ = null;
 
   socket.addEventListener("open", () => {
     send({
@@ -37,6 +44,16 @@
       browser_session: bootstrap.browser_session,
       top_level_origin: globalThis.location.origin,
     });
+  });
+
+  socket.addEventListener("error", () => {
+    globalThis.__ATO_BROWSER_ERROR__ = "control socket error";
+  });
+
+  socket.addEventListener("close", (event) => {
+    if (lifecycle !== "stopped") {
+      globalThis.__ATO_BROWSER_ERROR__ = `control socket closed (${event.code})`;
+    }
   });
 
   socket.addEventListener("message", (message) => {
@@ -51,10 +68,10 @@
     if (
       value.type === "hello_ack" &&
       value.protocol === "ato.browser@1" &&
-      value.browser_session === bootstrap.browser_session
+      value.browser_session === bootstrap.browser_session &&
+      ["restoring", "active"].includes(value.lifecycle)
     ) {
-      acceptingInput = true;
-      globalThis.__ATO_BROWSER_READY__ = true;
+      setLifecycle(value.lifecycle);
       return;
     }
     if (value.type === "apply" && typeof value.request_id === "string") {
@@ -71,9 +88,22 @@
       return;
     }
     if (value.type === "quiesce" && typeof value.request_id === "string") {
-      acceptingInput = false;
-      globalThis.__ATO_BROWSER_READY__ = false;
+      setLifecycle("quiescing");
       send({ type: "quiesced", request_id: value.request_id });
+      return;
+    }
+    if (value.type === "block_input") {
+      setLifecycle("quiescing");
+      return;
+    }
+    if (value.type === "activate" && typeof value.request_id === "string") {
+      setLifecycle("active");
+      send({ type: "activated", request_id: value.request_id });
+      return;
+    }
+    if (value.type === "stopped") {
+      setLifecycle("stopped");
+      socket.close(1000, "stopped");
     }
   });
 
@@ -85,9 +115,10 @@
   globalThis.addEventListener("pointermove", capturePointer, true);
   globalThis.addEventListener("click", captureClick, true);
   globalThis.addEventListener("scroll", captureScroll, true);
+  globalThis.addEventListener("wheel", blockInactiveInput, { capture: true, passive: false });
 
   function captureKeyboard(event) {
-    if (!canCapture(event) || !allowedCodes.has(event.code)) return;
+    if (blockInactiveInput(event) || !canCapture(event) || !allowedCodes.has(event.code)) return;
     send({
       type: "event",
       event: {
@@ -100,7 +131,7 @@
   }
 
   function capturePointer(event) {
-    if (!canCapture(event) || !["mouse", "pen"].includes(event.pointerType)) return;
+    if (blockInactiveInput(event) || !canCapture(event) || !["mouse", "pen"].includes(event.pointerType)) return;
     send({
       type: "event",
       event: {
@@ -117,7 +148,7 @@
   }
 
   function captureClick(event) {
-    if (!canCapture(event)) return;
+    if (blockInactiveInput(event) || !canCapture(event)) return;
     send({
       type: "event",
       event: {
@@ -130,12 +161,29 @@
   }
 
   function captureScroll(event) {
-    if (!canCapture(event)) return;
+    if (blockInactiveInput(event) || !canCapture(event) || !isTopLevelScroll(event)) return;
     send({ type: "event", event: { type: "scroll", x: globalThis.scrollX, y: globalThis.scrollY } });
   }
 
   function canCapture(event) {
-    return acceptingInput && event.isTrusted === true && socket.readyState === WebSocket.OPEN;
+    return lifecycle === "active" && event.isTrusted === true && socket.readyState === WebSocket.OPEN;
+  }
+
+  function blockInactiveInput(event) {
+    if (event.isTrusted !== true || lifecycle === "active") return false;
+    if (event.cancelable) event.preventDefault();
+    event.stopImmediatePropagation();
+    return true;
+  }
+
+  function isTopLevelScroll(event) {
+    return event.target === document || event.target === document.documentElement || event.target === document.body;
+  }
+
+  function setLifecycle(next) {
+    lifecycle = next;
+    globalThis.__ATO_BROWSER_LIFECYCLE__ = next;
+    globalThis.__ATO_BROWSER_READY__ = next === "active";
   }
 
   function dispatch(event) {

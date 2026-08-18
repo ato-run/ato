@@ -191,7 +191,22 @@ async function openRecordedBrowser(browser, project, origin) {
     }
   });
   await page.goto(origin, { waitUntil: "domcontentloaded", timeout: 15_000 });
-  await page.waitForFunction(() => globalThis.__ATO_BROWSER_READY__ === true);
+  try {
+    await page.waitForFunction(() => globalThis.__ATO_BROWSER_READY__ === true, null, { timeout: 10_000 });
+  } catch (error) {
+    const diagnostic = await page.evaluate(() => ({
+      ready: globalThis.__ATO_BROWSER_READY__,
+      lifecycle: globalThis.__ATO_BROWSER_LIFECYCLE__,
+      bridgeError: globalThis.__ATO_BROWSER_ERROR__,
+      bootstrapVisible: "__ATO_BROWSER_BOOTSTRAP__" in globalThis,
+      origin: globalThis.location.origin,
+    }));
+    const workerLog = await readFile(join(project, ".capsule/runs/output.log"), "utf8").catch(() => "<unavailable>");
+    throw new Error(
+      `Browser Bridge did not become active: ${JSON.stringify(diagnostic)}; worker=${workerLog}`,
+      { cause: error },
+    );
+  }
   return { context, bootstrap };
 }
 

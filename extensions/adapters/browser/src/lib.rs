@@ -29,7 +29,10 @@ pub const BROWSER_ADAPTER_ID: &str = "ato.browser@1";
 pub const BROWSER_PROTOCOL_ID: &str = "ato.browser@1";
 
 const MAX_BROWSER_EVENT_BYTES: u64 = 64 * 1024;
-const ACK_TIMEOUT: Duration = Duration::from_secs(30);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+const LIFECYCLE_CALL_TIMEOUT: Duration = Duration::from_secs(3);
+const BRIDGE_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const APPLY_CALL_TIMEOUT: Duration = Duration::from_secs(33);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -160,10 +163,12 @@ impl AttachedAdapter for BrowserSession {
             .send(transport::TransportCommand::Apply {
                 request_id,
                 event,
+                deadline: std::time::Instant::now() + BRIDGE_CONNECT_TIMEOUT,
+                ack_timeout: REQUEST_TIMEOUT,
                 result: sender,
             })
             .map_err(|error| AdapterError::Operation(error.to_string()))?;
-        transport::wait_for_result(receiver, ACK_TIMEOUT, "apply")
+        transport::wait_for_result(receiver, APPLY_CALL_TIMEOUT, "apply")
     }
 
     fn verify(
@@ -185,30 +190,39 @@ impl AttachedAdapter for BrowserSession {
             .commands
             .send(transport::TransportCommand::Quiesce {
                 request_id,
+                deadline: std::time::Instant::now() + REQUEST_TIMEOUT,
+                ack_timeout: REQUEST_TIMEOUT,
                 result: sender,
             })
             .map_err(|error| AdapterError::Operation(error.to_string()))?;
-        transport::wait_for_result(receiver, ACK_TIMEOUT, "quiesce")?;
+        transport::wait_for_result(receiver, LIFECYCLE_CALL_TIMEOUT, "quiesce")?;
         self.quiesced = true;
         Ok(())
     }
 
     fn detach(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
-        let _ = self
-            .transport
+        self.transport.shutdown()
+    }
+
+    fn activate(&mut self) -> Result<(), AdapterError> {
+        self.transport_failure()?;
+        if self.quiesced {
+            return Err(AdapterError::Operation(
+                "Browser Adapter is already quiesced".to_owned(),
+            ));
+        }
+        let request_id = self.request_id();
+        let (sender, receiver) = mpsc::channel();
+        self.transport
             .commands
-            .send(transport::TransportCommand::Shutdown);
-        if let Some(join) = self.transport.join.take() {
-            join.join().map_err(|_| {
-                AdapterError::Operation("Browser transport thread panicked".to_owned())
-            })?;
-        }
-        match std::fs::remove_file(&self.transport.discovery_path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-        self.transport_failure()
+            .send(transport::TransportCommand::Activate {
+                request_id,
+                deadline: std::time::Instant::now() + REQUEST_TIMEOUT,
+                ack_timeout: REQUEST_TIMEOUT,
+                result: sender,
+            })
+            .map_err(|error| AdapterError::Operation(error.to_string()))?;
+        transport::wait_for_result(receiver, LIFECYCLE_CALL_TIMEOUT, "activate")
     }
 }
 
@@ -450,7 +464,7 @@ mod tests {
                 },
             )
             .expect("Browser Adapter should attach");
-        let session = sessions.pop().expect("one session should attach");
+        let mut session = sessions.pop().expect("one session should attach");
         let bootstrap: transport::BrowserRuntimeBootstrap = serde_json::from_slice(
             &std::fs::read(runtime_discovery_path(directory.path(), "browser.test"))
                 .expect("runtime discovery should exist"),
@@ -486,13 +500,35 @@ mod tests {
                     .into(),
                 ))
                 .expect("hello should send");
-            let hello = socket.read().expect("hello ack should arrive");
-            assert!(
-                hello
+            let hello: serde_json::Value = serde_json::from_str(
+                socket
+                    .read()
+                    .expect("hello ack should arrive")
                     .to_text()
-                    .expect("ack should be text")
-                    .contains("hello_ack")
-            );
+                    .expect("ack should be text"),
+            )
+            .expect("hello ack should decode");
+            assert_eq!(hello["type"], "hello_ack");
+            if hello["lifecycle"] == "restoring" {
+                let activate: serde_json::Value = serde_json::from_str(
+                    socket
+                        .read()
+                        .expect("activate should arrive")
+                        .to_text()
+                        .expect("activate should be text"),
+                )
+                .expect("activate should decode");
+                socket
+                    .send(Message::Text(
+                        serde_json::json!({
+                            "type": "activated",
+                            "request_id": activate["request_id"]
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .expect("activate ack should send");
+            }
             socket
                 .send(Message::Text(
                     serde_json::json!({
@@ -525,14 +561,19 @@ mod tests {
                         .into(),
                 ))
                 .expect("apply ack should send");
-            let quiesce: serde_json::Value = serde_json::from_str(
-                socket
-                    .read()
-                    .expect("quiesce should arrive")
-                    .to_text()
-                    .expect("quiesce should be text"),
-            )
-            .expect("quiesce should decode");
+            let quiesce = loop {
+                let message: serde_json::Value = serde_json::from_str(
+                    socket
+                        .read()
+                        .expect("quiesce should arrive")
+                        .to_text()
+                        .expect("quiesce should be text"),
+                )
+                .expect("quiesce should decode");
+                if message["type"] == "quiesce" {
+                    break message;
+                }
+            };
             socket
                 .send(Message::Text(
                     serde_json::json!({
@@ -561,6 +602,7 @@ mod tests {
                 .expect("quiesce ack should send");
         });
 
+        session.activate().expect("Browser Adapter should activate");
         let observed = observations_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("Browser observation should arrive");

@@ -2,7 +2,6 @@ use std::collections::{BTreeSet, VecDeque};
 use std::io::ErrorKind;
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -34,10 +33,20 @@ pub(crate) enum TransportCommand {
     Apply {
         request_id: String,
         event: BrowserEvent,
+        deadline: Instant,
+        ack_timeout: Duration,
         result: mpsc::Sender<Result<(), AdapterError>>,
     },
     Quiesce {
         request_id: String,
+        deadline: Instant,
+        ack_timeout: Duration,
+        result: mpsc::Sender<Result<(), AdapterError>>,
+    },
+    Activate {
+        request_id: String,
+        deadline: Instant,
+        ack_timeout: Duration,
         result: mpsc::Sender<Result<(), AdapterError>>,
     },
     Shutdown,
@@ -49,6 +58,7 @@ enum AdapterMessage<'a> {
     HelloAck {
         protocol: &'a str,
         browser_session: &'a str,
+        lifecycle: BrowserLifecycle,
     },
     Apply {
         request_id: &'a str,
@@ -57,6 +67,11 @@ enum AdapterMessage<'a> {
     Quiesce {
         request_id: &'a str,
     },
+    BlockInput,
+    Activate {
+        request_id: &'a str,
+    },
+    Stopped,
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,6 +92,9 @@ enum BridgeMessage {
     Quiesced {
         request_id: String,
     },
+    Activated {
+        request_id: String,
+    },
     Error {
         #[serde(default)]
         request_id: Option<String>,
@@ -87,13 +105,34 @@ enum BridgeMessage {
 struct PendingRequest {
     request_id: String,
     kind: PendingKind,
+    deadline: Instant,
     result: mpsc::Sender<Result<(), AdapterError>>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PendingKind {
     Apply,
     Quiesce,
+    Activate,
+}
+
+impl PendingKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Apply => "apply",
+            Self::Quiesce => "quiesce",
+            Self::Activate => "activate",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum BrowserLifecycle {
+    Restoring,
+    Active,
+    Quiescing,
+    Stopped,
 }
 
 pub(crate) struct TransportHandle {
@@ -101,6 +140,40 @@ pub(crate) struct TransportHandle {
     pub commands: mpsc::Sender<TransportCommand>,
     pub failure: Arc<Mutex<Option<String>>>,
     pub join: Option<JoinHandle<()>>,
+}
+
+impl TransportHandle {
+    pub(crate) fn shutdown(&mut self) -> Result<(), AdapterError> {
+        let _ = self.commands.send(TransportCommand::Shutdown);
+        let join_result = self.join.take().map(JoinHandle::join);
+        remove_discovery(&self.discovery_path)?;
+        if join_result.is_some_and(|result| result.is_err()) {
+            return Err(AdapterError::Operation(
+                "Browser transport thread panicked".to_owned(),
+            ));
+        }
+        if let Some(error) = self
+            .failure
+            .lock()
+            .map_err(|_| {
+                AdapterError::Operation("Browser transport failure state poisoned".to_owned())
+            })?
+            .as_ref()
+        {
+            return Err(AdapterError::Operation(error.clone()));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for TransportHandle {
+    fn drop(&mut self) {
+        let _ = self.commands.send(TransportCommand::Shutdown);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+        let _ = remove_discovery(&self.discovery_path);
+    }
 }
 
 pub(crate) struct TransportConfig {
@@ -134,10 +207,11 @@ pub(crate) fn start_transport(
     let failure = Arc::new(Mutex::new(None));
     let thread_failure = Arc::clone(&failure);
     let join = thread::spawn(move || {
-        if let Err(error) = run_transport(listener, config, observations, receiver)
-            && let Ok(mut slot) = thread_failure.lock()
-        {
-            *slot = Some(error.to_string());
+        if let Err(error) = run_transport(listener, config, observations, receiver) {
+            eprintln!("Browser Adapter transport failed: {error}");
+            if let Ok(mut slot) = thread_failure.lock() {
+                *slot = Some(error.to_string());
+            }
         }
     });
     Ok(TransportHandle {
@@ -154,28 +228,78 @@ fn run_transport(
     observations: Arc<dyn ObservationSink>,
     commands: mpsc::Receiver<TransportCommand>,
 ) -> Result<(), AdapterError> {
+    let mut listener = Some(listener);
     let mut socket = None;
     let mut authenticated = false;
-    let mut accepting_input = true;
+    let mut lifecycle = BrowserLifecycle::Restoring;
     let mut coalescer = ContinuousCoalescer::default();
     let mut queued_commands = VecDeque::new();
     let mut pending: Option<PendingRequest> = None;
-    let stopped = AtomicBool::new(false);
 
-    while !stopped.load(Ordering::Acquire) {
-        if socket.is_none() {
+    loop {
+        let mut shutdown = false;
+        while let Ok(command) = commands.try_recv() {
+            match command {
+                TransportCommand::Shutdown => {
+                    shutdown = true;
+                    break;
+                }
+                command @ TransportCommand::Quiesce { .. } => {
+                    lifecycle = BrowserLifecycle::Quiescing;
+                    listener.take();
+                    if let Some(bridge) = socket.as_mut().filter(|_| authenticated) {
+                        send_message(bridge, &AdapterMessage::BlockInput)?;
+                    }
+                    queued_commands.push_front(command);
+                }
+                command => queued_commands.push_back(command),
+            }
+        }
+        if shutdown {
+            lifecycle = BrowserLifecycle::Stopped;
+            if let Some(bridge) = socket.as_mut().filter(|_| authenticated) {
+                let _ = send_message(bridge, &AdapterMessage::Stopped);
+                let _ = bridge.close(None);
+            }
+            fail_pending(&mut pending, "Browser Adapter detached");
+            fail_queued(&mut queued_commands, "Browser Adapter detached");
+            break;
+        }
+
+        if pending
+            .as_ref()
+            .is_some_and(|request| Instant::now() >= request.deadline)
+        {
+            let operation = pending
+                .as_ref()
+                .map_or("request", |request| request.kind.name());
+            fail_pending(
+                &mut pending,
+                &format!("Browser {operation} acknowledgement timed out"),
+            );
+            socket.take();
+            authenticated = false;
+        }
+        expire_queued(&mut queued_commands);
+
+        if socket.is_none()
+            && !matches!(
+                lifecycle,
+                BrowserLifecycle::Quiescing | BrowserLifecycle::Stopped
+            )
+            && let Some(listener) = listener.as_ref()
+        {
             match listener.accept() {
                 Ok((stream, _)) => match accept_bridge(stream, &config.expected_origin) {
                     Ok(bridge) => socket = Some(bridge),
-                    Err(_) => continue,
+                    Err(error) => {
+                        eprintln!("Browser Adapter rejected Bridge connection: {error}");
+                        continue;
+                    }
                 },
                 Err(error) if error.kind() == ErrorKind::WouldBlock => {}
                 Err(error) => return Err(error.into()),
             }
-        }
-
-        while let Ok(command) = commands.try_recv() {
-            queued_commands.push_back(command);
         }
 
         if pending.is_none()
@@ -185,6 +309,8 @@ fn run_transport(
                 TransportCommand::Apply {
                     request_id,
                     event,
+                    deadline,
+                    ack_timeout,
                     result,
                 } => {
                     if let Some(bridge) = socket.as_mut().filter(|_| authenticated) {
@@ -198,6 +324,7 @@ fn run_transport(
                         pending = Some(PendingRequest {
                             request_id,
                             kind: PendingKind::Apply,
+                            deadline: Instant::now() + ack_timeout,
                             result,
                         });
                     } else {
@@ -206,11 +333,18 @@ fn run_transport(
                         queued_commands.push_back(TransportCommand::Apply {
                             request_id,
                             event,
+                            deadline,
+                            ack_timeout,
                             result,
                         });
                     }
                 }
-                TransportCommand::Quiesce { request_id, result } => {
+                TransportCommand::Quiesce {
+                    request_id,
+                    deadline: _,
+                    ack_timeout,
+                    result,
+                } => {
                     if let Some(bridge) = socket.as_mut().filter(|_| authenticated) {
                         send_message(
                             bridge,
@@ -221,6 +355,7 @@ fn run_transport(
                         pending = Some(PendingRequest {
                             request_id,
                             kind: PendingKind::Quiesce,
+                            deadline: Instant::now() + ack_timeout,
                             result,
                         });
                     } else {
@@ -228,7 +363,37 @@ fn run_transport(
                         let _ = result.send(Ok(()));
                     }
                 }
-                TransportCommand::Shutdown => stopped.store(true, Ordering::Release),
+                TransportCommand::Activate {
+                    request_id,
+                    deadline: _,
+                    ack_timeout,
+                    result,
+                } => {
+                    if lifecycle == BrowserLifecycle::Quiescing {
+                        let _ = result.send(Err(AdapterError::Operation(
+                            "Browser Adapter is quiescing".to_owned(),
+                        )));
+                    } else if lifecycle == BrowserLifecycle::Active {
+                        let _ = result.send(Ok(()));
+                    } else if let Some(bridge) = socket.as_mut().filter(|_| authenticated) {
+                        send_message(
+                            bridge,
+                            &AdapterMessage::Activate {
+                                request_id: &request_id,
+                            },
+                        )?;
+                        pending = Some(PendingRequest {
+                            request_id,
+                            kind: PendingKind::Activate,
+                            deadline: Instant::now() + ack_timeout,
+                            result,
+                        });
+                    } else {
+                        lifecycle = BrowserLifecycle::Active;
+                        let _ = result.send(Ok(()));
+                    }
+                }
+                TransportCommand::Shutdown => unreachable!("shutdown is handled with priority"),
             }
         }
 
@@ -258,10 +423,17 @@ fn run_transport(
                                 &AdapterMessage::HelloAck {
                                     protocol: BROWSER_PROTOCOL_ID,
                                     browser_session: &config.browser_session,
+                                    lifecycle,
                                 },
                             )?;
                         }
-                        BridgeMessage::Event { event } if authenticated && accepting_input => {
+                        BridgeMessage::Event { event }
+                            if authenticated
+                                && matches!(
+                                    lifecycle,
+                                    BrowserLifecycle::Active | BrowserLifecycle::Quiescing
+                                ) =>
+                        {
                             if validate_event(&event, &config.allowed_non_text_codes).is_ok() {
                                 for ready in coalescer.ingest(event) {
                                     emit_event(&config, Arc::clone(&observations), &ready)?;
@@ -277,7 +449,6 @@ fn run_transport(
                             )?;
                         }
                         BridgeMessage::Quiesced { request_id } if authenticated => {
-                            accepting_input = false;
                             flush_events(&mut coalescer, &config, Arc::clone(&observations))?;
                             complete_pending(
                                 &mut pending,
@@ -285,6 +456,15 @@ fn run_transport(
                                 PendingKind::Quiesce,
                                 Ok(()),
                             )?;
+                        }
+                        BridgeMessage::Activated { request_id } if authenticated => {
+                            complete_pending(
+                                &mut pending,
+                                &request_id,
+                                PendingKind::Activate,
+                                Ok(()),
+                            )?;
+                            lifecycle = BrowserLifecycle::Active;
                         }
                         BridgeMessage::Error { request_id, reason } if authenticated => {
                             if let Some(request_id) = request_id {
@@ -327,7 +507,7 @@ fn run_transport(
                     authenticated = false;
                     fail_pending(&mut pending, "Browser Bridge disconnected");
                 }
-                Err(_) if !accepting_input && pending.is_none() => {
+                Err(_) if lifecycle == BrowserLifecycle::Quiescing && pending.is_none() => {
                     socket = None;
                     authenticated = false;
                 }
@@ -336,17 +516,7 @@ fn run_transport(
         }
         thread::sleep(POLL_INTERVAL);
     }
-    fail_pending(&mut pending, "Browser Adapter detached");
-    for command in queued_commands {
-        match command {
-            TransportCommand::Apply { result, .. } | TransportCommand::Quiesce { result, .. } => {
-                let _ = result.send(Err(AdapterError::Operation(
-                    "Browser Adapter detached".to_owned(),
-                )));
-            }
-            TransportCommand::Shutdown => {}
-        }
-    }
+    debug_assert_eq!(lifecycle, BrowserLifecycle::Stopped);
     Ok(())
 }
 
@@ -356,8 +526,12 @@ fn accept_bridge(
     stream: TcpStream,
     expected_origin: &str,
 ) -> Result<WebSocket<TcpStream>, AdapterError> {
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    // Accepted streams inherit nonblocking mode on some platforms. The HTTP
+    // upgrade itself must be allowed to finish atomically; a bounded read
+    // timeout keeps shutdown from being held indefinitely by a partial client.
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
     let expected_origin = expected_origin.to_owned();
     let mut socket = accept_hdr(stream, move |request: &Request, response: Response| {
         let origin = request
@@ -469,6 +643,56 @@ fn fail_pending(pending: &mut Option<PendingRequest>, reason: &str) {
     }
 }
 
+fn fail_queued(commands: &mut VecDeque<TransportCommand>, reason: &str) {
+    while let Some(command) = commands.pop_front() {
+        fail_command(command, reason);
+    }
+}
+
+fn expire_queued(commands: &mut VecDeque<TransportCommand>) {
+    let now = Instant::now();
+    let mut live = VecDeque::with_capacity(commands.len());
+    while let Some(command) = commands.pop_front() {
+        let (deadline, operation) = match &command {
+            TransportCommand::Apply { deadline, .. } => (*deadline, "apply"),
+            TransportCommand::Quiesce { deadline, .. } => (*deadline, "quiesce"),
+            TransportCommand::Activate { deadline, .. } => (*deadline, "activate"),
+            TransportCommand::Shutdown => {
+                live.push_back(command);
+                continue;
+            }
+        };
+        if now >= deadline {
+            fail_command(
+                command,
+                &format!("Browser {operation} acknowledgement timed out"),
+            );
+        } else {
+            live.push_back(command);
+        }
+    }
+    *commands = live;
+}
+
+fn fail_command(command: TransportCommand, reason: &str) {
+    match command {
+        TransportCommand::Apply { result, .. }
+        | TransportCommand::Quiesce { result, .. }
+        | TransportCommand::Activate { result, .. } => {
+            let _ = result.send(Err(AdapterError::Operation(reason.to_owned())));
+        }
+        TransportCommand::Shutdown => {}
+    }
+}
+
+fn remove_discovery(path: &Path) -> Result<(), AdapterError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn discovery_path(workspace: &Path, instance_id: &str) -> Result<PathBuf, AdapterError> {
     if instance_id.is_empty()
         || !instance_id
@@ -535,6 +759,8 @@ pub(crate) fn wait_for_result(
 #[cfg(test)]
 mod tests {
     use ato_adapter_api::IgnoreObservations;
+    use tungstenite::client::IntoClientRequest;
+    use tungstenite::{Message, WebSocket, connect};
 
     use super::*;
 
@@ -545,6 +771,61 @@ mod tests {
             allowed_non_text_codes: BTreeSet::new(),
             channel_credential: "credential".to_owned(),
             browser_session: "session".to_owned(),
+        }
+    }
+
+    fn bootstrap(directory: &Path) -> BrowserRuntimeBootstrap {
+        serde_json::from_slice(
+            &std::fs::read(discovery_path(directory, "browser.test").expect("path should resolve"))
+                .expect("runtime discovery should exist"),
+        )
+        .expect("runtime discovery should decode")
+    }
+
+    fn connect_bridge(
+        bootstrap: &BrowserRuntimeBootstrap,
+    ) -> WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>> {
+        let mut request = bootstrap
+            .control_url
+            .as_str()
+            .into_client_request()
+            .expect("control URL should be valid");
+        request.headers_mut().insert(
+            "origin",
+            bootstrap
+                .expected_origin
+                .parse()
+                .expect("test origin should be a header"),
+        );
+        let (mut socket, _) = connect(request).expect("test Bridge should connect");
+        socket
+            .send(Message::Text(
+                serde_json::json!({
+                    "type": "hello",
+                    "protocol": bootstrap.protocol,
+                    "channel_credential": bootstrap.channel_credential,
+                    "browser_session": bootstrap.browser_session,
+                    "top_level_origin": bootstrap.expected_origin,
+                })
+                .to_string()
+                .into(),
+            ))
+            .expect("hello should send");
+        let hello = socket.read().expect("hello ack should arrive");
+        assert!(
+            hello
+                .to_text()
+                .expect("hello ack should be text")
+                .contains("hello_ack")
+        );
+        socket
+    }
+
+    fn click() -> BrowserEvent {
+        BrowserEvent::Click {
+            x_normalized: 0.5,
+            y_normalized: 0.5,
+            button: 0,
         }
     }
 
@@ -602,11 +883,9 @@ mod tests {
             .commands
             .send(TransportCommand::Apply {
                 request_id: "1".to_owned(),
-                event: BrowserEvent::Click {
-                    x_normalized: 0.5,
-                    y_normalized: 0.5,
-                    button: 0,
-                },
+                event: click(),
+                deadline: Instant::now() + Duration::from_secs(1),
+                ack_timeout: Duration::from_millis(50),
                 result,
             })
             .expect("apply should queue");
@@ -626,5 +905,174 @@ mod tests {
                 .expect("apply result should return")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn apply_timeout_is_owned_by_transport_and_cleanup_still_completes() {
+        let directory = tempfile::tempdir().expect("temporary workspace should open");
+        let mut handle = start_transport(
+            directory.path(),
+            "browser.test",
+            config(),
+            Arc::new(IgnoreObservations),
+        )
+        .expect("transport should start");
+        let mut socket = connect_bridge(&bootstrap(directory.path()));
+        let (result, receiver) = mpsc::channel();
+        handle
+            .commands
+            .send(TransportCommand::Apply {
+                request_id: "apply-timeout".to_owned(),
+                event: click(),
+                deadline: Instant::now() + Duration::from_millis(50),
+                ack_timeout: Duration::from_millis(50),
+                result,
+            })
+            .expect("apply should queue");
+        let apply = socket.read().expect("apply should arrive");
+        assert!(
+            apply
+                .to_text()
+                .expect("apply should be text")
+                .contains("apply")
+        );
+        let error = receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("transport should resolve timeout")
+            .expect_err("missing ACK must fail");
+        assert!(error.to_string().contains("timed out"));
+        handle
+            .shutdown()
+            .expect("shutdown should complete after timeout");
+        assert!(handle.join.is_none());
+        assert!(
+            !discovery_path(directory.path(), "browser.test")
+                .expect("path should resolve")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn pending_apply_cannot_delay_shutdown() {
+        let directory = tempfile::tempdir().expect("temporary workspace should open");
+        let mut handle = start_transport(
+            directory.path(),
+            "browser.test",
+            config(),
+            Arc::new(IgnoreObservations),
+        )
+        .expect("transport should start");
+        let mut socket = connect_bridge(&bootstrap(directory.path()));
+        let (result, receiver) = mpsc::channel();
+        handle
+            .commands
+            .send(TransportCommand::Apply {
+                request_id: "pending".to_owned(),
+                event: click(),
+                deadline: Instant::now() + Duration::from_secs(5),
+                ack_timeout: Duration::from_secs(5),
+                result,
+            })
+            .expect("apply should queue");
+        socket.read().expect("apply should arrive");
+        let started = Instant::now();
+        handle
+            .shutdown()
+            .expect("shutdown should preempt pending apply");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(receiver.recv().expect("apply should resolve").is_err());
+    }
+
+    #[test]
+    fn quiesce_timeout_does_not_prevent_shutdown_cleanup() {
+        let directory = tempfile::tempdir().expect("temporary workspace should open");
+        let mut handle = start_transport(
+            directory.path(),
+            "browser.test",
+            config(),
+            Arc::new(IgnoreObservations),
+        )
+        .expect("transport should start");
+        let mut socket = connect_bridge(&bootstrap(directory.path()));
+        let (result, receiver) = mpsc::channel();
+        handle
+            .commands
+            .send(TransportCommand::Quiesce {
+                request_id: "quiesce-timeout".to_owned(),
+                deadline: Instant::now() + Duration::from_millis(50),
+                ack_timeout: Duration::from_millis(50),
+                result,
+            })
+            .expect("quiesce should queue");
+        loop {
+            let message = socket.read().expect("lifecycle message should arrive");
+            if message
+                .to_text()
+                .expect("lifecycle message should be text")
+                .contains("quiesce")
+            {
+                break;
+            }
+        }
+        assert!(
+            receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("quiesce should resolve")
+                .is_err()
+        );
+        handle
+            .shutdown()
+            .expect("shutdown should complete after quiesce timeout");
+        assert!(
+            !discovery_path(directory.path(), "browser.test")
+                .expect("path should resolve")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn quiesce_without_bridge_closes_listener_before_returning() {
+        let directory = tempfile::tempdir().expect("temporary workspace should open");
+        let mut handle = start_transport(
+            directory.path(),
+            "browser.test",
+            config(),
+            Arc::new(IgnoreObservations),
+        )
+        .expect("transport should start");
+        let bootstrap = bootstrap(directory.path());
+        let (result, receiver) = mpsc::channel();
+        handle
+            .commands
+            .send(TransportCommand::Quiesce {
+                request_id: "quiesce".to_owned(),
+                deadline: Instant::now() + Duration::from_secs(1),
+                ack_timeout: Duration::from_millis(50),
+                result,
+            })
+            .expect("quiesce should queue");
+        receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("quiesce should resolve")
+            .expect("quiesce without a Bridge should flush cleanly");
+        assert!(connect_bridge_result(&bootstrap).is_err());
+        handle.shutdown().expect("shutdown should complete");
+    }
+
+    fn connect_bridge_result(
+        bootstrap: &BrowserRuntimeBootstrap,
+    ) -> tungstenite::Result<(
+        WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>>,
+        tungstenite::handshake::client::Response,
+    )> {
+        let mut request = bootstrap.control_url.as_str().into_client_request()?;
+        request.headers_mut().insert(
+            "origin",
+            bootstrap
+                .expected_origin
+                .parse()
+                .expect("origin should parse"),
+        );
+        connect(request)
     }
 }
