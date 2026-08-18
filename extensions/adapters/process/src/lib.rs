@@ -97,10 +97,11 @@ impl ProcessHandle {
     pub fn terminate(&mut self) -> Result<(), ProcessError> {
         if self.process_group == 0 {
             self.child.kill()?;
-            Ok(())
         } else {
-            terminate_process_tree(self.pid(), self.process_group)
+            terminate_process_tree(self.pid(), self.process_group)?;
         }
+        self.child.wait()?;
+        Ok(())
     }
 }
 
@@ -178,6 +179,14 @@ impl ProcessAdapter {
 struct ProcessSession {
     instance_id: String,
     handle: ProcessHandle,
+}
+
+impl Drop for ProcessSession {
+    fn drop(&mut self) {
+        if matches!(self.handle.try_wait(), Ok(None)) {
+            let _ = self.handle.terminate();
+        }
+    }
 }
 
 impl AttachedAdapter for ProcessSession {
@@ -318,5 +327,44 @@ mod tests {
             .spawn_attached(PathBuf::from(".").as_path())
             .unwrap();
         assert!(handle.wait().unwrap().success());
+    }
+
+    #[test]
+    fn dropped_session_terminates_an_attached_process_tree() {
+        let directory = tempfile::tempdir().expect("temporary workspace should open");
+        let adapter = ProcessAdapter::new(ProcessSpec {
+            id: "drop-cleanup".to_owned(),
+            command: vec![
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                "touch ready; trap 'touch terminated; exit 0' TERM; while :; do sleep 1; done"
+                    .to_owned(),
+            ],
+            cwd: PathBuf::from("."),
+            environment: BTreeMap::new(),
+            isolated_group: true,
+        })
+        .expect("process adapter should construct");
+        let handle = adapter
+            .spawn(directory.path())
+            .expect("test process should start");
+        for _ in 0..100 {
+            if directory.path().join("ready").exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(directory.path().join("ready").exists());
+        drop(ProcessSession {
+            instance_id: "drop-cleanup".to_owned(),
+            handle,
+        });
+        for _ in 0..100 {
+            if directory.path().join("terminated").exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(directory.path().join("terminated").exists());
     }
 }

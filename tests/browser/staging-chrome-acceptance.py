@@ -668,11 +668,14 @@ materializers = ["ato.replay@1"]
     failure_runtime = work_root / "failure-private-runtime"
     failure_home.mkdir(mode=0o700)
     failure_runtime.mkdir(mode=0o700)
+    failure_stdout_path = work_root / "failure-stdout.log"
+    failure_stderr_path = work_root / "failure-stderr.log"
+    failure_stdout_handle = failure_stdout_path.open("wb")
+    failure_stderr_handle = failure_stderr_path.open("wb")
     failure_process = subprocess.Popen(
         [str(args.ato), "run", str(bundle)],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=failure_stdout_handle,
+        stderr=failure_stderr_handle,
         env={
             **os.environ,
             "ATO_HOME": str(failure_home),
@@ -691,10 +694,18 @@ materializers = ["ato.replay@1"]
         False,
         True,
     )
-    failure_chrome.isolated_context()
-    failure_stdout, failure_stderr = failure_process.communicate(
-        timeout=FAILURE_TIMEOUT_SECONDS
+    failure_context = failure_chrome.isolated_context()
+    wait_until(
+        lambda: failure_chrome.evaluate(
+            "globalThis.__ATO_BROWSER_LIFECYCLE__", failure_context
+        )
+        == "restoring"
     )
+    failure_process.wait(timeout=FAILURE_TIMEOUT_SECONDS)
+    failure_stdout_handle.close()
+    failure_stderr_handle.close()
+    failure_stdout = failure_stdout_path.read_text()
+    failure_stderr = failure_stderr_path.read_text()
     atexit.unregister(stop_child)
     failure_chrome.close()
     if failure_process.returncode == 0:
