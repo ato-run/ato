@@ -178,14 +178,19 @@ async function openRecordedBrowser(browser, project, origin) {
     content: `globalThis.__ATO_BROWSER_BOOTSTRAP__ = ${JSON.stringify(bootstrap)};\n${bridgeSource}`,
   });
   const page = await context.newPage();
+  // Adapter discovery is published when its control listener is ready, which
+  // can precede the application HTTP listener on a loaded CI runner. Polling
+  // with repeated page.goto() calls leaves overlapping/cancelled navigations
+  // and can prevent the init-script Bridge from completing its handshake.
   await waitFor(async () => {
     try {
-      await page.goto(origin, { waitUntil: "domcontentloaded", timeout: 1_000 });
-      return true;
+      const response = await fetch(origin, { signal: AbortSignal.timeout(1_000) });
+      return response.ok;
     } catch {
       return false;
     }
   });
+  await page.goto(origin, { waitUntil: "domcontentloaded", timeout: 15_000 });
   await page.waitForFunction(() => globalThis.__ATO_BROWSER_READY__ === true);
   return { context, bootstrap };
 }
