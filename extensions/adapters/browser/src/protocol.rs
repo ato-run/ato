@@ -82,7 +82,14 @@ impl std::fmt::Display for BrowserProtocolError {
 impl std::error::Error for BrowserProtocolError {}
 
 pub fn encode_event(event: &BrowserEvent) -> Result<Vec<u8>, BrowserProtocolError> {
-    validate_event(event, &BTreeSet::new())?;
+    encode_event_with_policy(event, &BTreeSet::new())
+}
+
+pub(crate) fn encode_event_with_policy(
+    event: &BrowserEvent,
+    allowed_non_text_codes: &BTreeSet<String>,
+) -> Result<Vec<u8>, BrowserProtocolError> {
+    validate_event(event, allowed_non_text_codes)?;
     serde_jcs::to_vec(event).map_err(|error| BrowserProtocolError::Json(error.to_string()))
 }
 
@@ -96,8 +103,8 @@ pub(crate) fn decode_event_with_policy(
 ) -> Result<BrowserEvent, BrowserProtocolError> {
     let event: BrowserEvent = serde_json::from_slice(bytes)
         .map_err(|error| BrowserProtocolError::Json(error.to_string()))?;
-    let canonical = serde_jcs::to_vec(&event)
-        .map_err(|error| BrowserProtocolError::Json(error.to_string()))?;
+    let canonical =
+        serde_jcs::to_vec(&event).map_err(|error| BrowserProtocolError::Json(error.to_string()))?;
     if canonical != bytes {
         return Err(BrowserProtocolError::NonCanonical);
     }
@@ -111,7 +118,9 @@ pub(crate) fn validate_event(
 ) -> Result<(), BrowserProtocolError> {
     match event {
         BrowserEvent::Keyboard { code, .. } => {
-            if !default_keyboard_codes().iter().any(|allowed| *allowed == code)
+            if !default_keyboard_codes()
+                .iter()
+                .any(|allowed| *allowed == code)
                 && !allowed_non_text_codes.contains(code)
             {
                 return Err(BrowserProtocolError::Invalid(format!(
@@ -219,7 +228,10 @@ mod tests {
             Err(BrowserProtocolError::NonCanonical)
         );
         let unknown = br#"{"code":"ArrowRight","kind":"key_down","modifiers":{"alt":false,"control":false,"meta":false,"shift":false},"secret":"x","type":"keyboard"}"#;
-        assert!(matches!(decode_event(unknown), Err(BrowserProtocolError::Json(_))));
+        assert!(matches!(
+            decode_event(unknown),
+            Err(BrowserProtocolError::Json(_))
+        ));
     }
 
     #[test]
