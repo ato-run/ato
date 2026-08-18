@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::time::Duration;
 
 use ato_adapter_api::{
     AdapterAttachContext, AdapterCapabilities, AdapterContext, AdapterError, AdapterFactory,
@@ -99,6 +100,19 @@ impl ProcessHandle {
             self.child.kill()?;
         } else {
             terminate_process_tree(self.pid(), self.process_group)?;
+        }
+
+        for _ in 0..100 {
+            if self.child.try_wait()?.is_some() {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        if self.process_group == 0 {
+            self.child.kill()?;
+        } else {
+            force_terminate_process_tree(self.pid(), self.process_group)?;
         }
         self.child.wait()?;
         Ok(())
@@ -278,6 +292,20 @@ pub fn terminate_process_tree(pid: u32, process_group: u32) -> Result<(), Proces
     Ok(())
 }
 
+#[cfg(unix)]
+fn force_terminate_process_tree(pid: u32, process_group: u32) -> Result<(), ProcessError> {
+    if pid != process_group {
+        return Err(ProcessError::UnownedProcessGroup);
+    }
+    let status = Command::new("kill")
+        .args(["-KILL", "--", &format!("-{process_group}")])
+        .status()?;
+    if !status.success() {
+        return Err(ProcessError::TerminationFailed);
+    }
+    Ok(())
+}
+
 #[cfg(windows)]
 pub fn terminate_process_tree(pid: u32, process_group: u32) -> Result<(), ProcessError> {
     if pid != process_group {
@@ -290,6 +318,11 @@ pub fn terminate_process_tree(pid: u32, process_group: u32) -> Result<(), Proces
         return Err(ProcessError::TerminationFailed);
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn force_terminate_process_tree(pid: u32, process_group: u32) -> Result<(), ProcessError> {
+    terminate_process_tree(pid, process_group)
 }
 
 #[derive(Debug, Error)]

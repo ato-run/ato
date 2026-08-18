@@ -420,6 +420,12 @@ def server_state(port: int) -> dict[str, Any]:
     return value
 
 
+def server_is_closed(port: int) -> bool:
+    with socket.socket() as connection:
+        connection.settimeout(0.2)
+        return connection.connect_ex(("127.0.0.1", port)) != 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--ato", type=Path, required=True)
@@ -715,6 +721,7 @@ materializers = ["ato.replay@1"]
             f"Bridge disconnect failure was not explicit: {failure_stderr}"
         )
     wait_until(lambda: not list(failure_runtime.glob("browser-*.json")))
+    wait_until(lambda: server_is_closed(port))
     receipt = {
         "schema": "ato.browser.staging-acceptance/v1",
         "result": "PASS",
@@ -750,6 +757,7 @@ materializers = ["ato.replay@1"]
             "exit_code": failure_process.returncode,
             "explicit_error": "Browser Bridge disconnected" in failure_stderr,
             "runtime_discovery_cleanup": True,
+            "workload_process_cleanup": True,
             "stdout": failure_stdout,
             "stderr": failure_stderr,
         },
