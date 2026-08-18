@@ -21,14 +21,19 @@ declared anchor through the target and hands the resulting runnable resources
 to the caller. The caller must not restore the target workspace or spawn the
 target runtime before choosing the Materializer.
 
-A Realization exposes activate, wait, and quiesce lifecycle operations. Both an
-ephemeral portable run and a durable local resume consume this same verified
-handle; orchestration policy does not bypass reconstruction.
+A Realization classifies its result as `AppliedUnverified` or `Verified` and
+exposes activate, wait, and quiesce lifecycle operations. An Adapter dispatch
+ACK proves only application of one physical interaction; it is not target-state
+verification. Both an ephemeral portable run and a durable local resume consume
+this same realization handle; orchestration policy does not bypass
+reconstruction.
 
 Replay is restore-capable and protocol-generic. It starts a realization at the
 descriptor anchor, checks every `head_before` against the causally derived
 head, applies the Record through the matching live Adapter instance, and only
-finishes when the derived head equals the descriptor target. Generic Replay
+finishes when the derived logical head equals the descriptor target. Without
+an independently evaluated Contract, its physical result is
+`AppliedUnverified`. Generic Replay
 has no Protocol switch. Encoding or restoration fails when a required Adapter
 lacks `apply`.
 

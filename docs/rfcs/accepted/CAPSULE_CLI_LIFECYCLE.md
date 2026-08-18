@@ -21,7 +21,7 @@ terminates the owned process tree, records workspace changes, atomically moves
 the branch head, and clears active metadata. It creates no portable output.
 
 `resume` and portable `run` use the same Materializer and RealizationDriver
-reconstruction path. Resume differs only by publishing the verified realization
+reconstruction path. Resume differs only by publishing the reconstructed realization
 as a durable local Run. Restoring only the selected workspace and assigning its
 ComputationRef as the Run head is forbidden because non-workspace semantic state
 would not be realized.

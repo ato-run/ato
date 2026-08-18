@@ -192,7 +192,13 @@
       const target = document.activeElement || document.body;
       target.dispatchEvent(new KeyboardEvent(
         event.kind === "key_down" ? "keydown" : "keyup",
-        { code: event.code, ...modifierInit(event.modifiers), bubbles: true, cancelable: true },
+        {
+          code: event.code,
+          key: keyForCode(event.code),
+          ...modifierInit(event.modifiers),
+          bubbles: true,
+          cancelable: true,
+        },
       ));
       return;
     }
@@ -218,6 +224,7 @@
       const x = denormalize(event.x_normalized, globalThis.innerWidth);
       const y = denormalize(event.y_normalized, globalThis.innerHeight);
       const target = document.elementFromPoint(x, y) || document.body;
+      if (typeof target.focus === "function") target.focus({ preventScroll: true });
       target.dispatchEvent(new MouseEvent("click", {
         clientX: x,
         clientY: y,
@@ -245,6 +252,11 @@
   function modifierInit(value) {
     if (!isObject(value)) throw new Error("invalid modifiers");
     return { altKey: value.alt, ctrlKey: value.control, metaKey: value.meta, shiftKey: value.shift };
+  }
+
+  function keyForCode(code) {
+    const aliases = { Space: " ", Esc: "Escape" };
+    return aliases[code] || code;
   }
 
   function normalize(value, extent) {

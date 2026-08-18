@@ -29,7 +29,8 @@ pub const BROWSER_ADAPTER_ID: &str = "ato.browser@1";
 pub const BROWSER_PROTOCOL_ID: &str = "ato.browser@1";
 
 const MAX_BROWSER_EVENT_BYTES: u64 = 64 * 1024;
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+pub const BROWSER_LIFECYCLE_TIMEOUT_SECONDS: u64 = 2;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(BROWSER_LIFECYCLE_TIMEOUT_SECONDS);
 const LIFECYCLE_CALL_TIMEOUT: Duration = Duration::from_secs(3);
 const BRIDGE_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const APPLY_CALL_TIMEOUT: Duration = Duration::from_secs(33);
@@ -55,6 +56,25 @@ impl AdapterFactory for BrowserAdapter {
         browser_capabilities()
     }
 
+    fn validate_replay(&self, records: &[RecordEnvelope]) -> Result<(), AdapterError> {
+        let contains_browser_evolution = records.iter().any(|record| {
+            record.adapter_id == BROWSER_ADAPTER_ID
+                && record.direction == ato_objects::Direction::Inbound
+                && record.head_before != record.head_after
+        });
+        let contains_http_evolution = records.iter().any(|record| {
+            record.adapter_id == "ato.http@1"
+                && record.direction == ato_objects::Direction::Inbound
+                && record.head_before != record.head_after
+        });
+        if contains_browser_evolution && contains_http_evolution {
+            return Err(AdapterError::Operation(
+                "Browser-driven network effects cannot currently be replayed through both Browser and HTTP adapters".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     fn preflight(
         &self,
         instance: &AdapterInstance,
@@ -71,8 +91,9 @@ impl AdapterFactory for BrowserAdapter {
         let config = parse_config(instance)?;
         let channel_credential = random_credential();
         let browser_session = random_credential();
+        let runtime_dir = browser_runtime_dir(context.runtime.workspace)?;
         let transport = transport::start_transport(
-            context.runtime.workspace,
+            &runtime_dir,
             &instance.instance_id,
             transport::TransportConfig {
                 expected_origin: config.expected_origin.clone(),
@@ -328,6 +349,19 @@ pub fn runtime_discovery_path(workspace: &Path, instance_id: &str) -> std::path:
         .join(format!("browser-{instance_id}.json"))
 }
 
+fn browser_runtime_dir(workspace: &Path) -> Result<std::path::PathBuf, AdapterError> {
+    let Some(configured) = std::env::var_os("ATO_BROWSER_RUNTIME_DIR") else {
+        return Ok(workspace.join(".capsule/runs"));
+    };
+    let path = std::path::PathBuf::from(configured);
+    if !path.is_absolute() {
+        return Err(AdapterError::InvalidConfig(
+            "ATO_BROWSER_RUNTIME_DIR must be an absolute host-private path".to_owned(),
+        ));
+    }
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, mpsc};
@@ -380,6 +414,39 @@ mod tests {
             };
             assert!(parse_config(&instance).is_err());
         }
+    }
+
+    #[test]
+    fn replay_policy_rejects_browser_and_http_evolution_together() {
+        let directory = tempfile::tempdir().expect("temporary object store should open");
+        let objects = FsObjectStore::open(directory.path().join("objects"))
+            .expect("object store should open");
+        let payload_ref = objects.put(b"payload").expect("payload should persist");
+        let before = ComputationRef::parse(format!("blake3:{}", "ab".repeat(32)))
+            .expect("test head should parse");
+        let after = ComputationRef::parse(format!("blake3:{}", "cd".repeat(32)))
+            .expect("test head should parse");
+        let record =
+            |sequence, adapter_id: &str, protocol_id: &str, port_id: &str| RecordEnvelope {
+                id: RecordId::new("main", sequence),
+                adapter_id: adapter_id.to_owned(),
+                protocol_id: ProtocolId::parse(protocol_id).expect("protocol should parse"),
+                port_id: ato_computation::PortId::parse(port_id).expect("port should parse"),
+                direction: Direction::Inbound,
+                payload_ref: payload_ref.clone(),
+                head_before: before.clone(),
+                head_after: after.clone(),
+                caused_by: Vec::new(),
+                observed_at: "0".to_owned(),
+            };
+        let browser = record(1, BROWSER_ADAPTER_ID, BROWSER_PROTOCOL_ID, "app.browser");
+        let http = record(2, "ato.http@1", "ato.http@1", "app.http");
+
+        AdapterFactory::validate_replay(&BrowserAdapter, &[browser.clone()])
+            .expect("Browser-only replay should remain valid");
+        let error = AdapterFactory::validate_replay(&BrowserAdapter, &[browser, http])
+            .expect_err("Browser and HTTP Evolution must fail closed");
+        assert!(error.to_string().contains("cannot currently be replayed"));
     }
 
     #[test]

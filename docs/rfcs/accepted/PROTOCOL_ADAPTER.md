@@ -45,4 +45,8 @@ click, and scroll input as inbound Evolution. Its generic Bridge validates an
 exact origin plus runtime-only channel and browser-session credentials. Replay
 applies one canonical Browser event at a time through the ordinary
 `AttachedAdapter` path and waits for Bridge acknowledgement. Runtime discovery
-and credentials are never Computation, Record, authoring, or bundle data.
+and credentials are never Computation, Record, authoring, or bundle data;
+hosted Runners place them in a host-private runtime directory. ACK establishes
+dispatch, not target-state verification. Replay containing both Browser and
+HTTP inbound Evolution fails closed until cross-Adapter causality can rule out
+double application of Browser-triggered network effects.

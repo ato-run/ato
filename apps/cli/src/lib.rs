@@ -21,7 +21,8 @@ use ato_adapter_workspace::{WorkspaceAdapter, restore_workspace};
 use ato_compose::ComposeReferences;
 use ato_computation::{ComputationRef, ContentRef};
 use ato_materializer_api::{
-    Compatibility, MaterializerContext, MaterializerRegistry, RestoreCapability,
+    Compatibility, MaterializerContext, MaterializerRegistry, RealizationVerification,
+    RestoreCapability,
 };
 use ato_materializer_replay::{ReplayMaterializer, ReplayReferences};
 use ato_materializer_snapshot::{SnapshotMaterializer, SnapshotReferences};
@@ -347,6 +348,11 @@ fn run_capsule(args: RunArgs) -> Result<()> {
         bail!(
             "Materialization restored {}, expected bundle root {root}",
             realization.target()
+        );
+    }
+    if realization.verification() == RealizationVerification::AppliedUnverified {
+        eprintln!(
+            "replay applied all Records for {root}; target state remains unverified without an independent Contract"
         );
     }
     realization.run().map_err(Into::into)

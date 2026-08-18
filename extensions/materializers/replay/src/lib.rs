@@ -84,6 +84,7 @@ impl Materializer for ReplayMaterializer {
         required_adapters.dedup();
         required_protocols.sort();
         required_protocols.dedup();
+        validate_replay_policies(context.records, &required_adapters, context)?;
         let anchor = context
             .records
             .first()
@@ -124,6 +125,13 @@ impl Materializer for ReplayMaterializer {
                 });
             }
         }
+        let records = descriptor
+            .records
+            .clone()
+            .into_iter()
+            .map(RecordEnvelope::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        validate_replay_policies(&records, &descriptor.required_adapters, context)?;
         parse_computation(&descriptor.target)
     }
 
@@ -151,10 +159,15 @@ impl Materializer for ReplayMaterializer {
         let driver = context
             .realization
             .ok_or_else(|| MaterializerError::RealizationUnavailable(self.id().to_owned()))?;
+        let records = descriptor
+            .records
+            .into_iter()
+            .map(RecordEnvelope::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        validate_replay_policies(&records, &descriptor.required_adapters, context)?;
         let mut runtime = driver.begin(&anchor)?;
         let mut current = anchor;
-        for wire in descriptor.records {
-            let record = RecordEnvelope::try_from(wire)?;
+        for record in records {
             if record.head_before != current {
                 return Err(MaterializerError::Operation(format!(
                     "replay causal head mismatch at {:?}: expected {}, got {}",
@@ -171,6 +184,26 @@ impl Materializer for ReplayMaterializer {
         }
         runtime.finish(&target)
     }
+}
+
+fn validate_replay_policies(
+    records: &[RecordEnvelope],
+    required_adapters: &[String],
+    context: &MaterializerContext<'_>,
+) -> Result<(), MaterializerError> {
+    for id in required_adapters {
+        let adapter = context
+            .adapters
+            .get(id)
+            .map_err(|_| MaterializerError::MissingApply {
+                materializer: REPLAY_MATERIALIZER_ID.to_owned(),
+                adapter: id.clone(),
+            })?;
+        adapter
+            .validate_replay(records)
+            .map_err(|error| MaterializerError::Operation(error.to_string()))?;
+    }
+    Ok(())
 }
 
 impl From<&RecordEnvelope> for RecordWire {

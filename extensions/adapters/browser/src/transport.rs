@@ -185,7 +185,7 @@ pub(crate) struct TransportConfig {
 }
 
 pub(crate) fn start_transport(
-    workspace: &Path,
+    runtime_dir: &Path,
     instance_id: &str,
     config: TransportConfig,
     observations: Arc<dyn ObservationSink>,
@@ -201,7 +201,7 @@ pub(crate) fn start_transport(
         expected_origin: config.expected_origin.clone(),
         allowed_non_text_codes: config.allowed_non_text_codes.clone(),
     };
-    let discovery_path = discovery_path(workspace, instance_id)?;
+    let discovery_path = discovery_path(runtime_dir, instance_id)?;
     write_runtime_discovery(&discovery_path, &bootstrap)?;
     let (commands, receiver) = mpsc::channel();
     let failure = Arc::new(Mutex::new(None));
@@ -693,7 +693,7 @@ fn remove_discovery(path: &Path) -> Result<(), AdapterError> {
     }
 }
 
-fn discovery_path(workspace: &Path, instance_id: &str) -> Result<PathBuf, AdapterError> {
+fn discovery_path(runtime_dir: &Path, instance_id: &str) -> Result<PathBuf, AdapterError> {
     if instance_id.is_empty()
         || !instance_id
             .bytes()
@@ -703,9 +703,7 @@ fn discovery_path(workspace: &Path, instance_id: &str) -> Result<PathBuf, Adapte
             "Browser Adapter instance_id is not safe for runtime discovery".to_owned(),
         ));
     }
-    Ok(workspace
-        .join(".capsule/runs")
-        .join(format!("browser-{instance_id}.json")))
+    Ok(runtime_dir.join(format!("browser-{instance_id}.json")))
 }
 
 fn write_runtime_discovery(

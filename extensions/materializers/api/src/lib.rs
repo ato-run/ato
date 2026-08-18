@@ -24,6 +24,15 @@ pub enum RestoreCapability {
     VerifyOnly,
 }
 
+/// Physical reconstruction and independent target-state verification are
+/// separate claims. Applying every Record proves neither application state nor
+/// Contract satisfaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RealizationVerification {
+    AppliedUnverified,
+    Verified,
+}
+
 pub struct MaterializerContext<'a> {
     pub objects: &'a dyn ObjectStore,
     pub adapters: &'a AdapterRegistry,
@@ -38,6 +47,7 @@ pub struct MaterializerContext<'a> {
 /// actually owns the realized runtime.
 pub trait Realization: Send {
     fn target(&self) -> &ComputationRef;
+    fn verification(&self) -> RealizationVerification;
     fn activate(&mut self) -> Result<(), MaterializerError>;
     fn wait(&mut self) -> Result<(), MaterializerError>;
     fn quiesce(&mut self) -> Result<(), MaterializerError>;

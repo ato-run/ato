@@ -15,7 +15,8 @@ use ato_adapter_process::terminate_process_tree;
 use ato_adapter_workspace::restore_workspace;
 use ato_computation::{ComputationRef, ContentRef};
 use ato_materializer_api::{
-    MaterializerContext, MaterializerError, Realization, RealizationDriver, ReplayRuntime,
+    MaterializerContext, MaterializerError, Realization, RealizationDriver,
+    RealizationVerification, ReplayRuntime,
 };
 use ato_objects::{ActiveRun, LocalCapsuleRepository, ObjectStore, RecordEnvelope, RecordId};
 
@@ -27,6 +28,11 @@ use crate::{
 
 const STOP_REQUEST: &str = "runs/stop.request";
 const STOP_ACK: &str = "runs/stop.ack";
+const SUPERVISOR_STOP_TIMEOUT_SECONDS: u64 = 5;
+const STOP_POLL_INTERVAL: Duration = Duration::from_millis(20);
+const _: () = assert!(
+    ato_adapter_browser::BROWSER_LIFECYCLE_TIMEOUT_SECONDS < SUPERVISOR_STOP_TIMEOUT_SECONDS
+);
 static RUN_TOKEN_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -321,7 +327,7 @@ pub(crate) fn stop_active(repository: &LocalCapsuleRepository) -> Result<Option<
     let _ = fs::remove_file(&ack);
     fs::write(&request, b"stop")?;
     let mut acknowledged = None;
-    for _ in 0..250 {
+    for _ in 0..(SUPERVISOR_STOP_TIMEOUT_SECONDS * 1_000 / STOP_POLL_INTERVAL.as_millis() as u64) {
         if let Ok(value) = fs::read_to_string(&ack) {
             acknowledged = Some(value);
             break;
@@ -329,7 +335,7 @@ pub(crate) fn stop_active(repository: &LocalCapsuleRepository) -> Result<Option<
         if process_start_time(run.pid).is_none() {
             bail!("active Run exited before Adapter quiesce acknowledgement");
         }
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(STOP_POLL_INTERVAL);
     }
     let acknowledged = acknowledged.context("timed out waiting for live Adapters to quiesce")?;
     if let Some(error) = acknowledged.strip_prefix("error:") {
@@ -481,6 +487,10 @@ struct CliRealization {
 impl Realization for CliRealization {
     fn target(&self) -> &ComputationRef {
         &self.target
+    }
+
+    fn verification(&self) -> RealizationVerification {
+        RealizationVerification::AppliedUnverified
     }
 
     fn activate(&mut self) -> Result<(), MaterializerError> {

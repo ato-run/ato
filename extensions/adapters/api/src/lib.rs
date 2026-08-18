@@ -240,6 +240,10 @@ pub trait AdapterFactory: Send + Sync {
     fn id(&self) -> &str;
     fn capabilities(&self) -> AdapterCapabilities;
 
+    fn validate_replay(&self, _records: &[RecordEnvelope]) -> Result<(), AdapterError> {
+        Ok(())
+    }
+
     fn preflight(
         &self,
         _instance: &AdapterInstance,
