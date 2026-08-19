@@ -173,7 +173,13 @@ impl ChromeProcess {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         if headless {
-            command.arg("--headless=new").arg("--disable-gpu");
+            command
+                .arg("--headless=new")
+                .arg("--disable-gpu")
+                // The disposable Browser Host profile is safe to back with
+                // files when a constrained runner exposes too little /dev/shm.
+                // This preserves Chrome's sandbox, unlike --no-sandbox.
+                .arg("--disable-dev-shm-usage");
         }
         let child = command.spawn().context("launch Browser Host Chrome")?;
         Ok(Self { child })
