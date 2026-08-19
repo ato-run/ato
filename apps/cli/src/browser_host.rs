@@ -171,6 +171,7 @@ impl ChromeProcess {
             .arg("--remote-debugging-address=127.0.0.1")
             .arg(format!("--remote-debugging-port={debug_port}"))
             .arg("--remote-allow-origins=*")
+            .arg("--window-size=800,600")
             .arg(format!("--user-data-dir={}", profile.display()))
             .arg("about:blank")
             .stdin(Stdio::null())
