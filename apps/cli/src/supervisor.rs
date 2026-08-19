@@ -56,6 +56,27 @@ struct CaptureAck {
     target: Option<String>,
     record_seq: Option<u64>,
     error: Option<String>,
+    #[serde(default)]
+    presentation_assets: Vec<CapturePresentationAsset>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CapturePresentationAsset {
+    pub(crate) kind: String,
+    pub(crate) content_type: String,
+    pub(crate) width: Option<u32>,
+    pub(crate) height: Option<u32>,
+    pub(crate) sequence: u32,
+    pub(crate) path: std::path::PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PresentationCaptureReceipt {
+    pub(crate) root_computation_ref: String,
+    pub(crate) record_sequence: u64,
+    pub(crate) assets: Vec<CapturePresentationAsset>,
 }
 
 pub(crate) struct CaptureLease {
@@ -64,6 +85,8 @@ pub(crate) struct CaptureLease {
     pub(crate) branch: String,
     pub(crate) target: ComputationRef,
     pub(crate) record_seq: u64,
+    pub(crate) presentation_assets: Vec<CapturePresentationAsset>,
+    presentation_dir: Option<std::path::PathBuf>,
     released: bool,
 }
 
@@ -74,6 +97,9 @@ impl CaptureLease {
         let ack = self.repository_root.join(CAPTURE_ACK);
         for _ in 0..250 {
             if !request.exists() && !ack.exists() {
+                if let Some(directory) = self.presentation_dir.take() {
+                    let _ = fs::remove_dir_all(directory);
+                }
                 self.released = true;
                 return Ok(());
             }
@@ -96,8 +122,55 @@ impl Drop for CaptureLease {
     fn drop(&mut self) {
         if !self.released {
             let _ = self.signal_release();
+            if let Some(directory) = self.presentation_dir.take() {
+                let _ = fs::remove_dir_all(directory);
+            }
         }
     }
+}
+
+pub(crate) fn export_capture_presentations(lease: &CaptureLease, output: &Path) -> Result<()> {
+    if output.exists() {
+        bail!("presentation output already exists")
+    }
+    fs::create_dir_all(output)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(output, fs::Permissions::from_mode(0o700))?;
+    }
+    let mut exported = Vec::with_capacity(lease.presentation_assets.len());
+    for (index, asset) in lease.presentation_assets.iter().enumerate() {
+        let extension = asset
+            .path
+            .extension()
+            .and_then(|value| value.to_str())
+            .context("presentation asset has no safe extension")?;
+        let file = format!("{index:03}-{}.{}", asset.kind, extension);
+        let target = output.join(&file);
+        fs::copy(&asset.path, &target)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o600))?;
+        }
+        exported.push(CapturePresentationAsset {
+            kind: asset.kind.clone(),
+            content_type: asset.content_type.clone(),
+            width: asset.width,
+            height: asset.height,
+            sequence: asset.sequence,
+            path: std::path::PathBuf::from(file),
+        });
+    }
+    atomic_control_write(
+        &output.join("receipt.json"),
+        &serde_jcs::to_vec(&PresentationCaptureReceipt {
+            root_computation_ref: lease.target.to_string(),
+            record_sequence: lease.record_seq,
+            assets: exported,
+        })?,
+    )
 }
 
 pub(crate) fn capture_active(
@@ -138,6 +211,10 @@ pub(crate) fn capture_active(
                 let _ = fs::remove_file(&request);
                 bail!("current-point capture failed: {error}")
             }
+            let presentation_dir = repository
+                .root()
+                .join("runs")
+                .join(format!("presentation-{token}"));
             return Ok(CaptureLease {
                 repository_root: repository.root().to_path_buf(),
                 token,
@@ -146,6 +223,8 @@ pub(crate) fn capture_active(
                 record_seq: response
                     .record_seq
                     .context("capture Record frontier missing")?,
+                presentation_assets: response.presentation_assets,
+                presentation_dir: Some(presentation_dir),
                 released: false,
             });
         }
@@ -454,11 +533,13 @@ fn handle_capture_request(
         workspace: repository.project(),
         objects: repository.objects(),
     };
+    eprintln!("current-point capture: pausing live Adapter boundaries");
     let paused = match realization.as_deref_mut() {
         Some(realization) => realization.pause_for_capture().map_err(Into::into),
         None => pause_for_capture(sessions, &context),
     };
     let result = paused.and_then(|()| {
+        eprintln!("current-point capture: Adapter boundaries paused");
         let run = repository
             .active_run()?
             .context("active Run disappeared during capture")?;
@@ -466,6 +547,7 @@ fn handle_capture_request(
             bail!("active Run lease changed during capture")
         }
         let target = evolve_workspace_active(repository, branch, run_token, &run.head)?;
+        eprintln!("current-point capture: workspace frontier reconciled");
         let frontier = repository
             .active_run()?
             .context("active Run disappeared after workspace reconciliation")?;
@@ -475,16 +557,28 @@ fn handle_capture_request(
         *live_head
             .lock()
             .map_err(|_| anyhow::anyhow!("Run head lock was poisoned"))? = target.clone();
-        Ok((target, frontier.record_seq))
+        let assets = match realization.as_deref_mut() {
+            Some(realization) => realization
+                .capture_final_presentation()
+                .map_err(anyhow::Error::from)?,
+            None => capture_final_presentation(sessions, &context)?,
+        };
+        eprintln!(
+            "current-point capture: collected {} bounded presentation asset(s)",
+            assets.len()
+        );
+        let persisted = persist_presentation_assets(repository, &request.token, &assets)?;
+        Ok((target, frontier.record_seq, persisted))
     });
 
     let ack = match &result {
-        Ok((target, record_seq)) => CaptureAck {
+        Ok((target, record_seq, presentation_assets)) => CaptureAck {
             token: request.token.clone(),
             branch: branch.to_owned(),
             target: Some(target.to_string()),
             record_seq: Some(*record_seq),
             error: None,
+            presentation_assets: presentation_assets.clone(),
         },
         Err(error) => CaptureAck {
             token: request.token.clone(),
@@ -492,8 +586,10 @@ fn handle_capture_request(
             target: None,
             record_seq: None,
             error: Some(format!("{error:#}")),
+            presentation_assets: Vec::new(),
         },
     };
+    eprintln!("current-point capture: publishing acknowledgement");
     atomic_control_write(&ack_path, &serde_jcs::to_vec(&ack)?)?;
 
     if result.is_ok() {
@@ -512,6 +608,17 @@ fn handle_capture_request(
             // A dead CLI must not strand a durable Run behind a capture gate.
             eprintln!("capture lease expired; resuming live Adapters");
         }
+    } else {
+        // Keep a failure acknowledgement observable until the requesting CLI
+        // consumes it. Without this bounded handshake a fast worker can remove
+        // the receipt between two polling intervals and turn a concrete error
+        // into a misleading timeout.
+        for _ in 0..500 {
+            if !request_path.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     let resume = match realization.as_deref_mut() {
@@ -528,6 +635,67 @@ fn handle_capture_request(
             Ok(())
         }
     }
+}
+
+fn capture_final_presentation(
+    sessions: &mut [Box<dyn ato_adapter_api::AttachedAdapter>],
+    context: &AdapterContext<'_>,
+) -> Result<Vec<ato_adapter_api::PresentationAsset>> {
+    let mut assets = Vec::new();
+    for session in sessions {
+        let Some(capture) = session.presentation_capture() else {
+            continue;
+        };
+        capture.attach(context)?;
+        let result = capture.capture_final(context);
+        let detach = capture.detach(context);
+        assets.extend(result?);
+        detach?;
+    }
+    Ok(assets)
+}
+
+fn persist_presentation_assets(
+    repository: &LocalCapsuleRepository,
+    token: &str,
+    assets: &[ato_adapter_api::PresentationAsset],
+) -> Result<Vec<CapturePresentationAsset>> {
+    if assets.is_empty() {
+        return Ok(Vec::new());
+    }
+    let directory = repository
+        .root()
+        .join("runs")
+        .join(format!("presentation-{token}"));
+    fs::create_dir_all(&directory)?;
+    let mut persisted = Vec::with_capacity(assets.len());
+    for (index, asset) in assets.iter().enumerate() {
+        if asset.bytes.is_empty() || asset.bytes.len() > 8 * 1024 * 1024 {
+            bail!("presentation asset is outside the bounded size contract")
+        }
+        let kind = match asset.kind {
+            ato_adapter_api::PresentationKind::FinalState => "final_state",
+            ato_adapter_api::PresentationKind::ArchiveKeyframe => "archive_keyframe",
+            ato_adapter_api::PresentationKind::TerminalFinal => "terminal_final",
+        };
+        let extension = match asset.content_type.as_str() {
+            "image/png" => "png",
+            "image/webp" => "webp",
+            "application/vnd.ato.terminal-screen+json" => "json",
+            _ => bail!("unsupported presentation content type"),
+        };
+        let path = directory.join(format!("{index:03}-{kind}.{extension}"));
+        atomic_control_write(&path, &asset.bytes)?;
+        persisted.push(CapturePresentationAsset {
+            kind: kind.to_owned(),
+            content_type: asset.content_type.clone(),
+            width: asset.width,
+            height: asset.height,
+            sequence: asset.sequence,
+            path,
+        });
+    }
+    Ok(persisted)
 }
 
 fn atomic_control_write(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -891,6 +1059,21 @@ impl Realization for CliRealization {
         let repository =
             LocalCapsuleRepository::open(&self.project).map_err(materializer_operation)?;
         resume_after_capture(
+            &mut self.sessions,
+            &AdapterContext {
+                workspace: &self.project,
+                objects: repository.objects(),
+            },
+        )
+        .map_err(materializer_operation)
+    }
+
+    fn capture_final_presentation(
+        &mut self,
+    ) -> Result<Vec<ato_adapter_api::PresentationAsset>, MaterializerError> {
+        let repository =
+            LocalCapsuleRepository::open(&self.project).map_err(materializer_operation)?;
+        capture_final_presentation(
             &mut self.sessions,
             &AdapterContext {
                 workspace: &self.project,

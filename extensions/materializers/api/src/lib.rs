@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use ato_adapter_api::{AdapterRegistry, WorkspaceCapturePolicy};
+use ato_adapter_api::{AdapterRegistry, PresentationAsset, WorkspaceCapturePolicy};
 use ato_computation::{ComputationRef, ContentRef};
 use ato_objects::{ObjectStore, RecordEnvelope};
 use thiserror::Error;
@@ -58,6 +58,10 @@ pub trait Realization: Send {
 
     fn resume_after_capture(&mut self) -> Result<(), MaterializerError> {
         Err(MaterializerError::CaptureUnsupported)
+    }
+
+    fn capture_final_presentation(&mut self) -> Result<Vec<PresentationAsset>, MaterializerError> {
+        Ok(Vec::new())
     }
 
     fn run(mut self: Box<Self>) -> Result<(), MaterializerError> {

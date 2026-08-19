@@ -25,7 +25,10 @@ use ato_adapter_http::HttpAdapter;
 use ato_adapter_process::ProcessLifecycleAdapter;
 use ato_adapter_pty::PtyAdapter;
 use ato_adapter_workspace::{WorkspaceAdapter, restore_workspace, workspace_snapshot_file_count};
-use ato_compose::ComposeReferences;
+use ato_compose::{
+    COMPOSE_SEMANTICS_ID, ComposeReferences, MAX_COMPOSITE_RESIDUAL_BYTES,
+    decode_composite_residual,
+};
 use ato_computation::{ComputationRef, ContentRef};
 use ato_materializer_api::{
     Compatibility, MaterializerContext, MaterializerRegistry, RealizationVerification,
@@ -38,7 +41,7 @@ use ato_materializer_snapshot::{SnapshotMaterializer, SnapshotReferences};
 use ato_objects::{
     BranchOrigin, BundleMaterialization, CapsuleSelector, LocalCapsuleRepository, RecordId,
     ReferenceRegistry, decode_bundle, encode_bundle, export_bundle_with_materializations,
-    resolve_computation, verify_bundle,
+    read_exact_object, resolve_computation, verify_bundle,
 };
 use ato_runtime::{
     PortableRuntimeFactory, PortableSession, PortableSessionContext, PortableSessionError,
@@ -168,6 +171,9 @@ struct HostedSessionCaptureArgs {
     output: PathBuf,
     #[arg(long = "materialize")]
     materializers: Vec<String>,
+    /// Runtime-private destination for presentation bytes and receipt metadata.
+    #[arg(long)]
+    presentation_output: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -204,6 +210,9 @@ struct EncapArgs {
     materializers: Vec<String>,
     #[arg(short, long, default_value = "computation.capsule")]
     output: PathBuf,
+    /// Runtime-private presentation receipt. It never changes Bundle identity.
+    #[arg(long, hide = true)]
+    presentation_output: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -794,11 +803,18 @@ fn hosted_session_capture(args: HostedSessionCaptureArgs) -> Result<()> {
             current: true,
             materializers: args.materializers,
             output: args.output,
+            presentation_output: None,
         },
     );
     let root = lease.target.clone();
+    let presentation = args
+        .presentation_output
+        .as_deref()
+        .map(|output| supervisor::export_capture_presentations(&lease, output))
+        .transpose();
     let release = lease.release();
     export?;
+    presentation?;
     release?;
     println!("{root}");
     Ok(())
@@ -821,6 +837,7 @@ struct BundleVerificationReport {
     root_computation_ref: String,
     materializations: Vec<VerifiedMaterialization>,
     exported_ports: Vec<VerifiedPort>,
+    structure: CapsuleStructureNode,
     required_bindings: Vec<VerifiedBinding>,
     workspace_file_count: usize,
     object_count: usize,
@@ -840,6 +857,25 @@ struct VerifiedPort {
     protocol: String,
     role: String,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct CapsuleStructureNode {
+    computation_ref: String,
+    label: Option<String>,
+    exported_ports: Vec<StructurePort>,
+    children: Vec<CapsuleStructureNode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct StructurePort {
+    protocol: String,
+    role: String,
+}
+
+const MAX_STRUCTURE_DEPTH: usize = 16;
+const MAX_STRUCTURE_NODES: usize = 512;
+const MAX_STRUCTURE_CHILDREN: usize = 128;
+const MAX_STRUCTURE_PORTS: usize = 128;
 
 #[derive(Serialize)]
 struct VerifiedBinding {
@@ -927,6 +963,7 @@ fn build_bundle_verification_report(
             role: port.role.to_string(),
         })
         .collect();
+    let structure = build_structure_projection(verified.objects(), &root)?;
     let required_bindings = state
         .config
         .binding
@@ -942,11 +979,87 @@ fn build_bundle_verification_report(
         root_computation_ref: root.to_string(),
         materializations: reported_materializations,
         exported_ports,
+        structure,
         required_bindings,
         workspace_file_count,
         object_count: verified.object_count(),
         decoded_size: verified.decoded_size(),
         validation: VerificationResult { status: "valid" },
+    })
+}
+
+fn build_structure_projection(
+    objects: &dyn ato_objects::ObjectResolver,
+    root: &ComputationRef,
+) -> Result<CapsuleStructureNode> {
+    let mut node_count = 0;
+    project_structure_node(objects, root, None, 1, &mut node_count)
+}
+
+fn project_structure_node(
+    objects: &dyn ato_objects::ObjectResolver,
+    reference: &ComputationRef,
+    label: Option<String>,
+    depth: usize,
+    node_count: &mut usize,
+) -> Result<CapsuleStructureNode> {
+    if depth > MAX_STRUCTURE_DEPTH {
+        bail!("Capsule Structure exceeds maximum depth {MAX_STRUCTURE_DEPTH}")
+    }
+    *node_count = node_count.saturating_add(1);
+    if *node_count > MAX_STRUCTURE_NODES {
+        bail!("Capsule Structure exceeds maximum node count {MAX_STRUCTURE_NODES}")
+    }
+    let computation = resolve_computation(objects, reference)?;
+    if computation.object().boundary.len() > MAX_STRUCTURE_PORTS {
+        bail!("Capsule Structure node exceeds maximum exported port count")
+    }
+    let exported_ports = computation
+        .object()
+        .boundary
+        .values()
+        .map(|port| StructurePort {
+            protocol: port.protocol.to_string(),
+            role: port.role.to_string(),
+        })
+        .collect();
+    let children = if computation.object().semantics.as_str() == COMPOSE_SEMANTICS_ID {
+        if depth == MAX_STRUCTURE_DEPTH {
+            bail!("Capsule Structure exceeds maximum depth {MAX_STRUCTURE_DEPTH}")
+        }
+        let residual = &computation.object().residual;
+        let metadata = objects.metadata(residual)?;
+        let bytes = read_exact_object(
+            objects,
+            residual,
+            metadata.size,
+            MAX_COMPOSITE_RESIDUAL_BYTES,
+        )?;
+        let composite = decode_composite_residual(&bytes)?;
+        if composite.nodes.len() > MAX_STRUCTURE_CHILDREN {
+            bail!("Capsule Structure node exceeds maximum child count")
+        }
+        composite
+            .nodes
+            .iter()
+            .map(|(node, child)| {
+                project_structure_node(
+                    objects,
+                    child,
+                    Some(node.to_string()),
+                    depth + 1,
+                    node_count,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        Vec::new()
+    };
+    Ok(CapsuleStructureNode {
+        computation_ref: reference.to_string(),
+        label,
+        exported_ports,
+        children,
     })
 }
 
@@ -1075,11 +1188,17 @@ fn encap_impl(args: EncapArgs) -> Result<ComputationRef> {
         ),
     };
     let export_result = encap_target(&repository, &target, &records, &args);
+    let presentation_result = match (lease.as_ref(), args.presentation_output.as_deref()) {
+        (Some(lease), Some(output)) => supervisor::export_capture_presentations(lease, output),
+        (None, Some(_)) => bail!("--presentation-output requires --current"),
+        _ => Ok(()),
+    };
     let release_result = match lease {
         Some(lease) => lease.release(),
         None => Ok(()),
     };
     export_result?;
+    presentation_result?;
     release_result?;
     Ok(target)
 }
@@ -1140,6 +1259,7 @@ fn share(args: ShareArgs) -> Result<()> {
         current: active_current,
         materializers: args.materializers,
         output: temp.0.clone(),
+        presentation_output: None,
     })?;
     let bytes = fs::read(&temp.0)?;
     let report = build_bundle_verification_report(&bytes, None)?;
@@ -1440,6 +1560,7 @@ impl PortableSessionRuntime for DurablePortableRuntime {
                 current: true,
                 materializers: Vec::new(),
                 output: output.to_path_buf(),
+                presentation_output: None,
             },
         );
         let release = lease.release();
@@ -1710,7 +1831,125 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use ato_computation::{
+        ComputationObject, NodeId, PortDef, PortId, ProtocolId, RoleId, SemanticsId,
+        computation_ref, encode_computation_object,
+    };
+    use ato_objects::{MemoryObjectStore, ObjectStore};
+
     use super::*;
+
+    fn store_computation(
+        objects: &MemoryObjectStore,
+        computation: &ComputationObject,
+    ) -> ComputationRef {
+        let reference = computation_ref(computation).unwrap();
+        objects
+            .insert(
+                reference.content_ref(),
+                &encode_computation_object(computation).unwrap(),
+            )
+            .unwrap();
+        reference
+    }
+
+    fn leaf(objects: &MemoryObjectStore) -> ComputationRef {
+        let residual = objects.put(b"leaf-state").unwrap();
+        store_computation(
+            objects,
+            &ComputationObject {
+                semantics: SemanticsId::parse("example.leaf@1").unwrap(),
+                boundary: BTreeMap::from([(
+                    PortId::parse("surface").unwrap(),
+                    PortDef {
+                        protocol: ProtocolId::parse("ato.http@1").unwrap(),
+                        role: RoleId::parse("server").unwrap(),
+                    },
+                )]),
+                residual,
+            },
+        )
+    }
+
+    fn composite(
+        objects: &MemoryObjectStore,
+        nodes: BTreeMap<NodeId, ComputationRef>,
+    ) -> ComputationRef {
+        let bytes = ato_compose::encode_composite_residual(&ato_compose::CompositeResidual {
+            nodes,
+            connections: Vec::new(),
+            exports: BTreeMap::new(),
+        })
+        .unwrap();
+        let residual = objects.put(&bytes).unwrap();
+        store_computation(
+            objects,
+            &ComputationObject {
+                semantics: SemanticsId::parse(COMPOSE_SEMANTICS_ID).unwrap(),
+                boundary: BTreeMap::new(),
+                residual,
+            },
+        )
+    }
+
+    #[test]
+    fn structure_projection_is_deterministic_and_contains_only_interfaces() {
+        let objects = MemoryObjectStore::default();
+        let child = leaf(&objects);
+        let root = composite(
+            &objects,
+            BTreeMap::from([
+                (NodeId::parse("zeta").unwrap(), child.clone()),
+                (NodeId::parse("alpha").unwrap(), child),
+            ]),
+        );
+        let first = build_structure_projection(&objects, &root).unwrap();
+        let second = build_structure_projection(&objects, &root).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(
+            first
+                .children
+                .iter()
+                .map(|node| node.label.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["alpha", "zeta"]
+        );
+        assert_eq!(first.children[0].exported_ports[0].protocol, "ato.http@1");
+        let json = serde_json::to_string(&first).unwrap();
+        assert!(!json.contains("leaf-state"));
+    }
+
+    #[test]
+    fn structure_projection_rejects_more_than_the_product_node_budget() {
+        let objects = MemoryObjectStore::default();
+        let child = leaf(&objects);
+        let group_nodes = (0..MAX_STRUCTURE_CHILDREN)
+            .map(|index| {
+                (
+                    NodeId::parse(format!("node{index:03}")).unwrap(),
+                    child.clone(),
+                )
+            })
+            .collect();
+        let group = composite(&objects, group_nodes);
+        let root = composite(
+            &objects,
+            (0..4)
+                .map(|index| {
+                    (
+                        NodeId::parse(format!("group{index}")).unwrap(),
+                        group.clone(),
+                    )
+                })
+                .collect(),
+        );
+        assert!(
+            build_structure_projection(&objects, &root)
+                .unwrap_err()
+                .to_string()
+                .contains("maximum node count")
+        );
+    }
 
     #[test]
     fn public_cli_has_only_the_capsule_lifecycle() {

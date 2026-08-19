@@ -530,14 +530,20 @@ def wait_for_portable_project(home: Path) -> Path:
 
 
 def run_ato(ato: Path, arguments: list[str], home: Path, runtime_dir: Path) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [str(ato), *arguments],
-        check=True,
-        text=True,
-        capture_output=True,
-        env={**os.environ, "ATO_HOME": str(home), "ATO_BROWSER_RUNTIME_DIR": str(runtime_dir)},
-        timeout=TIMEOUT_SECONDS,
-    )
+    try:
+        return subprocess.run(
+            [str(ato), *arguments],
+            check=True,
+            text=True,
+            capture_output=True,
+            env={**os.environ, "ATO_HOME": str(home), "ATO_BROWSER_RUNTIME_DIR": str(runtime_dir)},
+            timeout=TIMEOUT_SECONDS,
+        )
+    except subprocess.CalledProcessError as error:
+        raise AcceptanceError(
+            f"ato {' '.join(arguments)} failed (exit={error.returncode}): "
+            f"stdout={error.stdout!r}; stderr={error.stderr!r}"
+        ) from error
 
 
 def stop_child(process: subprocess.Popen, port: int) -> None:
@@ -664,6 +670,7 @@ server.serve_forever()
 id = "app"
 command = ["{sys.executable}", "server.py", "{port}"]
 cwd = "."
+capture = "adapter_mediated"
 
 [[adapter]]
 target = "app"
@@ -722,6 +729,40 @@ materializers = ["ato.replay@1"]
     wait_until(lambda: server_state(port).get("count") == 1)
     author_chrome.click("#increment")
     wait_until(lambda: server_state(port).get("count") == 2)
+    bundle = work_root / "counter.capsule"
+    presentation = work_root / "author-presentation"
+    encap_args = [
+        "encap",
+        f"{project}@main",
+        "--current",
+        "--materialize",
+        "ato.replay@1",
+        "-o",
+        str(bundle),
+    ]
+    if args.browser_host:
+        encap_args.extend(["--presentation-output", str(presentation)])
+    run_ato(args.ato, encap_args, author_home, author_runtime)
+    presentation_receipt = None
+    if args.browser_host:
+        presentation_receipt = json.loads((presentation / "receipt.json").read_text())
+        assets = presentation_receipt.get("assets", [])
+        if len(assets) != 1 or assets[0].get("kind") != "final_state":
+            raise AcceptanceError("Browser final-state presentation receipt is incomplete")
+        final_png = (presentation / assets[0]["path"]).read_bytes()
+        expected_png = base64.b64decode(
+            author_chrome.cdp.call(
+                "Page.captureScreenshot",
+                {
+                    "format": "png",
+                    "fromSurface": True,
+                    "captureBeyondViewport": False,
+                },
+                author_chrome.session_id,
+            )["data"]
+        )
+        if hashlib.sha256(final_png).digest() != hashlib.sha256(expected_png).digest():
+            raise AcceptanceError("captured final screenshot is not the quiesced final page")
     if not args.browser_host:
         author_chrome.close()
     run_ato(args.ato, ["stop", str(project)], author_home, author_runtime)
@@ -743,13 +784,6 @@ materializers = ["ato.replay@1"]
         for record in browser_records
     ):
         raise AcceptanceError("Browser Record semantic evidence is incomplete")
-    bundle = work_root / "counter.capsule"
-    run_ato(
-        args.ato,
-        ["encap", f"{project}@main", "--materialize", "ato.replay@1", "-o", str(bundle)],
-        author_home,
-        author_runtime,
-    )
     portable = json.loads(bundle.read_text())
     portable_text = bundle.read_text()
     for secret_value in [
@@ -1121,6 +1155,20 @@ materializers = ["ato.replay@1"]
             ),
             "fresh_chrome_process": True,
             "browser_http_double_effect": "absent; mixed descriptors fail closed",
+        },
+        "presentation": {
+            "final_state_captured": presentation_receipt is not None,
+            "root_computation_ref": (
+                presentation_receipt["root_computation_ref"]
+                if presentation_receipt is not None
+                else None
+            ),
+            "record_sequence": (
+                presentation_receipt["record_sequence"]
+                if presentation_receipt is not None
+                else None
+            ),
+            "identity_independent": True,
         },
         "failure_path": {
             "kind": "bridge_disconnect_during_replay",

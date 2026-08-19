@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 mod coalescer;
+mod presentation;
 mod protocol;
 mod transport;
 
@@ -13,7 +14,7 @@ use std::time::Duration;
 
 use ato_adapter_api::{
     AdapterAttachContext, AdapterCapabilities, AdapterContext, AdapterError, AdapterFactory,
-    AdapterInstance, AttachedAdapter,
+    AdapterInstance, AttachedAdapter, PresentationAsset, PresentationCapture,
 };
 use ato_objects::{RecordEnvelope, read_exact_object};
 use rand::RngCore;
@@ -112,7 +113,21 @@ impl AdapterFactory for BrowserAdapter {
             transport,
             next_request_id: 1,
             quiesced: false,
+            capture_paused: false,
         }))
+    }
+}
+
+impl PresentationCapture for BrowserSession {
+    fn capture_final(
+        &mut self,
+        _context: &AdapterContext<'_>,
+    ) -> Result<Vec<PresentationAsset>, AdapterError> {
+        let runtime_dir = self.transport.discovery_path.parent().ok_or_else(|| {
+            AdapterError::Operation("Browser runtime discovery has no parent".to_owned())
+        })?;
+        presentation::capture_final(runtime_dir, &self.config.expected_origin)
+            .map(|asset| asset.into_iter().collect())
     }
 }
 
@@ -122,6 +137,7 @@ struct BrowserSession {
     transport: transport::TransportHandle,
     next_request_id: u64,
     quiesced: bool,
+    capture_paused: bool,
 }
 
 impl BrowserSession {
@@ -158,6 +174,10 @@ impl AttachedAdapter for BrowserSession {
 
     fn capabilities(&self) -> AdapterCapabilities {
         browser_capabilities()
+    }
+
+    fn presentation_capture(&mut self) -> Option<&mut dyn PresentationCapture> {
+        Some(self)
     }
 
     fn accepts(&self, record: &RecordEnvelope) -> bool {
@@ -226,6 +246,53 @@ impl AttachedAdapter for BrowserSession {
         self.transport.shutdown()
     }
 
+    fn pause_for_capture(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
+        self.transport_failure()?;
+        if self.quiesced {
+            return Err(AdapterError::Operation(
+                "Browser Adapter is already quiesced".to_owned(),
+            ));
+        }
+        if self.capture_paused {
+            return Ok(());
+        }
+        let request_id = self.request_id();
+        let (sender, receiver) = mpsc::channel();
+        self.transport
+            .commands
+            .send(transport::TransportCommand::Pause {
+                request_id,
+                deadline: std::time::Instant::now() + REQUEST_TIMEOUT,
+                ack_timeout: REQUEST_TIMEOUT,
+                result: sender,
+            })
+            .map_err(|error| AdapterError::Operation(error.to_string()))?;
+        transport::wait_for_result(receiver, LIFECYCLE_CALL_TIMEOUT, "capture pause")?;
+        self.capture_paused = true;
+        Ok(())
+    }
+
+    fn resume_after_capture(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
+        self.transport_failure()?;
+        if !self.capture_paused {
+            return Ok(());
+        }
+        let request_id = self.request_id();
+        let (sender, receiver) = mpsc::channel();
+        self.transport
+            .commands
+            .send(transport::TransportCommand::Resume {
+                request_id,
+                deadline: std::time::Instant::now() + REQUEST_TIMEOUT,
+                ack_timeout: REQUEST_TIMEOUT,
+                result: sender,
+            })
+            .map_err(|error| AdapterError::Operation(error.to_string()))?;
+        transport::wait_for_result(receiver, LIFECYCLE_CALL_TIMEOUT, "capture resume")?;
+        self.capture_paused = false;
+        Ok(())
+    }
+
     fn activate(&mut self) -> Result<(), AdapterError> {
         self.transport_failure()?;
         if self.quiesced {
@@ -254,7 +321,7 @@ fn browser_capabilities() -> AdapterCapabilities {
         apply: true,
         verify: true,
         quiesce: true,
-        capture_consistency: ato_adapter_api::CaptureConsistency::Unsupported,
+        capture_consistency: ato_adapter_api::CaptureConsistency::AdapterMediated,
     }
 }
 

@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 
 use ato_adapter_api::{
     AdapterAttachContext, AdapterCapabilities, AdapterContext, AdapterError, AdapterFactory,
-    AdapterInstance, AttachedAdapter, CaptureGate,
+    AdapterInstance, AttachedAdapter, CaptureGate, PresentationAsset, PresentationCapture,
+    PresentationKind,
 };
 use ato_objects::{RecordEnvelope, read_exact_object};
 use serde::{Deserialize, Serialize};
@@ -172,6 +173,7 @@ impl AdapterFactory for PtyAdapter {
             activated: false,
             capture_gate,
             gateway,
+            transcript,
         }))
     }
 }
@@ -188,6 +190,7 @@ struct PtySession {
     activated: bool,
     capture_gate: Arc<CaptureGate>,
     gateway: Option<TerminalGateway>,
+    transcript: Arc<Mutex<VecDeque<u8>>>,
 }
 
 impl AttachedAdapter for PtySession {
@@ -201,6 +204,10 @@ impl AttachedAdapter for PtySession {
 
     fn capabilities(&self) -> AdapterCapabilities {
         AdapterFactory::capabilities(&PtyAdapter)
+    }
+
+    fn presentation_capture(&mut self) -> Option<&mut dyn PresentationCapture> {
+        Some(self)
     }
 
     fn apply(
@@ -290,6 +297,84 @@ impl AttachedAdapter for PtySession {
     fn resume_after_capture(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
         self.capture_gate.resume()
     }
+}
+
+impl PresentationCapture for PtySession {
+    fn capture_final(
+        &mut self,
+        _context: &AdapterContext<'_>,
+    ) -> Result<Vec<PresentationAsset>, AdapterError> {
+        let transcript: Vec<u8> = self
+            .transcript
+            .lock()
+            .map_err(|_| AdapterError::Operation("PTY transcript was poisoned".to_owned()))?
+            .iter()
+            .copied()
+            .collect();
+        let bytes = terminal_screen_projection(&transcript)?;
+        Ok(vec![PresentationAsset {
+            kind: PresentationKind::TerminalFinal,
+            content_type: "application/vnd.ato.terminal-screen+json".to_owned(),
+            width: None,
+            height: None,
+            sequence: 0,
+            bytes,
+        }])
+    }
+}
+
+fn terminal_screen_projection(transcript: &[u8]) -> Result<Vec<u8>, AdapterError> {
+    const COLUMNS: usize = 80;
+    const ROWS: usize = 24;
+    const MAX_TEXT_BYTES: usize = 64 * 1024;
+
+    let printable = strip_terminal_controls(&String::from_utf8_lossy(transcript));
+    let lines: Vec<&str> = printable.lines().collect();
+    let start = lines.len().saturating_sub(ROWS);
+    let mut text = lines[start..]
+        .iter()
+        .map(|line| line.chars().take(COLUMNS).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+    while text.len() > MAX_TEXT_BYTES {
+        let next = text
+            .char_indices()
+            .nth(1024)
+            .map_or(text.len(), |(index, _)| index);
+        text.drain(..next);
+    }
+    serde_jcs::to_vec(&serde_json::json!({
+        "schema": "ato.terminal-screen@1",
+        "columns": COLUMNS,
+        "rows": ROWS,
+        "text": text,
+    }))
+    .map_err(AdapterError::from)
+}
+
+fn strip_terminal_controls(input: &str) -> String {
+    let mut result = String::new();
+    let mut characters = input.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '\u{1b}' {
+            if characters.peek() == Some(&'[') {
+                characters.next();
+                for suffix in characters.by_ref() {
+                    if ('@'..='~').contains(&suffix) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        match character {
+            '\n' | '\t' => result.push(character),
+            '\r' => {}
+            value if !value.is_control() => result.push(value),
+            _ => {}
+        }
+    }
+    result
 }
 
 impl PtySession {
@@ -636,6 +721,23 @@ mod gateway_tests {
     use ato_adapter_api::IgnoreObservations;
 
     use super::*;
+
+    #[test]
+    fn terminal_projection_is_bounded_and_removes_ansi_controls() {
+        let mut transcript = b"\x1b[31msecret-looking output\x1b[0m\r\n".to_vec();
+        for index in 0..40 {
+            transcript.extend_from_slice(format!("line-{index:02}\n").as_bytes());
+        }
+        let projection = terminal_screen_projection(&transcript).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&projection).unwrap();
+        let text = value["text"].as_str().unwrap();
+        assert!(!text.contains('\u{1b}'));
+        assert!(!text.contains("line-00"));
+        assert!(text.contains("line-39"));
+        assert_eq!(value["rows"], 24);
+        assert_eq!(value["columns"], 80);
+        assert!(projection.len() < 64 * 1024);
+    }
 
     #[test]
     fn terminal_gateway_replays_diagnostic_and_accepts_input() {

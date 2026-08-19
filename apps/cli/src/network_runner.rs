@@ -28,6 +28,8 @@ use clap::{Args, Subcommand};
 use reqwest::blocking::{Client, RequestBuilder};
 use serde::{Deserialize, Serialize};
 
+use crate::supervisor::PresentationCaptureReceipt;
+
 #[derive(Debug, Args)]
 pub(crate) struct RunnerArgs {
     #[command(subcommand)]
@@ -950,28 +952,69 @@ fn capture_and_upload(
     repository: &Path,
     capture: &CaptureRequest,
 ) -> Result<()> {
-    let output = repository.join(format!("{}.capsule", capture.request_id));
-    let status = Command::new(std::env::current_exe()?)
-        .args(["__hosted-session", "capture", "--repository"])
-        .arg(repository)
-        .args(["--output"])
-        .arg(&output)
-        .env("ATO_EXTERNAL_SANDBOX_PROFILE", "untrusted-v1")
-        .status()?;
-    if !status.success() {
-        bail!("current-point hosted capture failed");
+    if capture.request_id.is_empty()
+        || !capture
+            .request_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        bail!("Runner received an unsafe capture request id");
     }
-    let bytes = fs::read(&output)?;
-    authorized(
-        client.put(format!("{base}{}", capture.upload_url)),
-        &args.runner_token,
-    )
-    .header("content-type", "application/vnd.ato.capsule")
-    .body(bytes)
-    .send()?
-    .error_for_status()?;
+    let output = repository.join(format!("{}.capsule", capture.request_id));
+    let presentation_output = repository.join(format!("{}.presentation", capture.request_id));
+    let result = (|| {
+        let status = Command::new(std::env::current_exe()?)
+            .args(["__hosted-session", "capture", "--repository"])
+            .arg(repository)
+            .args(["--output"])
+            .arg(&output)
+            .arg("--presentation-output")
+            .arg(&presentation_output)
+            .env("ATO_EXTERNAL_SANDBOX_PROFILE", "untrusted-v1")
+            .status()?;
+        if !status.success() {
+            bail!("current-point hosted capture failed");
+        }
+        let bytes = fs::read(&output)?;
+        authorized(
+            client.put(format!("{base}{}", capture.upload_url)),
+            &args.runner_token,
+        )
+        .header("content-type", "application/vnd.ato.capsule")
+        .body(bytes)
+        .send()?
+        .error_for_status()?;
+
+        let receipt_bytes = fs::read(presentation_output.join("receipt.json"))?;
+        let receipt: PresentationCaptureReceipt = serde_json::from_slice(&receipt_bytes)?;
+        if serde_jcs::to_vec(&receipt)? != receipt_bytes {
+            bail!("presentation capture receipt is not canonical")
+        }
+        for asset in receipt.assets {
+            if asset.path.components().count() != 1 {
+                bail!("presentation capture receipt contains an unsafe asset path")
+            }
+            let bytes = fs::read(presentation_output.join(&asset.path))?;
+            let mut upload = authorized(
+                client.put(format!(
+                    "{base}{}/presentation-assets/{}/{}",
+                    capture.upload_url, asset.kind, asset.sequence
+                )),
+                &args.runner_token,
+            )
+            .header("content-type", &asset.content_type);
+            if let (Some(width), Some(height)) = (asset.width, asset.height) {
+                upload = upload
+                    .header("x-ato-viewport-width", width)
+                    .header("x-ato-viewport-height", height);
+            }
+            upload.body(bytes).send()?.error_for_status()?;
+        }
+        Ok(())
+    })();
     let _ = fs::remove_file(output);
-    Ok(())
+    let _ = fs::remove_dir_all(presentation_output);
+    result
 }
 
 fn report_status(
