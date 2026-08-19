@@ -49,6 +49,14 @@ jobs:
       # an unavailable runner mirror before either Browser E2E executes.
       - run: npx playwright install chromium
         working-directory: tests/browser
+      - name: Enable Chromium setuid sandbox
+        run: |
+          chrome="$(node -p "require('./tests/browser/node_modules/@playwright/test').chromium.executablePath()")"
+          sandbox="$(dirname "$chrome")/chrome_sandbox"
+          test -f "$sandbox"
+          sudo chown root:root "$sandbox"
+          sudo chmod 4755 "$sandbox"
+          echo "CHROME_DEVEL_SANDBOX=$sandbox" >> "$GITHUB_ENV"
       - run: npm test
         working-directory: tests/browser
         env:
