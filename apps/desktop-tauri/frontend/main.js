@@ -86,7 +86,9 @@ document.getElementById("run").addEventListener("click", async () => {
   if (!capsule) return;
   clear();
   log("running capsule … (Cancel stops the CLI process tree)");
+  const run = document.getElementById("run");
   const cancel = document.getElementById("cancel");
+  run.disabled = true;
   cancel.disabled = false;
   try {
     const result = await invoke("computation_execute", {
@@ -96,6 +98,7 @@ document.getElementById("run").addEventListener("click", async () => {
   } catch (error) {
     log(`error: ${error}`);
   } finally {
+    run.disabled = false;
     cancel.disabled = true;
   }
 });
