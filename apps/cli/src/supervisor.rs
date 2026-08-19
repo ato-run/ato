@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, OpenOptions};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -293,6 +293,11 @@ pub(crate) fn capture_active(
                 .root()
                 .join("runs")
                 .join(format!("presentation-{token}"));
+            let presentation_assets = resolve_capture_asset_paths(
+                repository.root(),
+                &token,
+                response.presentation_assets,
+            )?;
             return Ok(CaptureLease {
                 repository_root: repository.root().to_path_buf(),
                 token,
@@ -301,7 +306,7 @@ pub(crate) fn capture_active(
                 record_seq: response
                     .record_seq
                     .context("capture Record frontier missing")?,
-                presentation_assets: response.presentation_assets,
+                presentation_assets,
                 presentation_dir: Some(presentation_dir),
                 released: false,
             });
@@ -861,10 +866,8 @@ fn persist_presentation_assets(
     if assets.is_empty() {
         return Ok(Vec::new());
     }
-    let directory = repository
-        .root()
-        .join("runs")
-        .join(format!("presentation-{token}"));
+    let relative_directory = PathBuf::from("runs").join(format!("presentation-{token}"));
+    let directory = repository.root().join(&relative_directory);
     fs::create_dir_all(&directory)?;
     let mut persisted = Vec::with_capacity(assets.len());
     for (index, asset) in assets.iter().enumerate() {
@@ -882,18 +885,41 @@ fn persist_presentation_assets(
             "application/vnd.ato.terminal-screen+json" => "json",
             _ => bail!("unsupported presentation content type"),
         };
-        let path = directory.join(format!("{index:03}-{kind}.{extension}"));
-        atomic_control_write(&path, &asset.bytes)?;
+        let relative_path = relative_directory.join(format!("{index:03}-{kind}.{extension}"));
+        atomic_control_write(&repository.root().join(&relative_path), &asset.bytes)?;
         persisted.push(CapturePresentationAsset {
             kind: kind.to_owned(),
             content_type: asset.content_type.clone(),
             width: asset.width,
             height: asset.height,
             sequence: asset.sequence,
-            path,
+            path: relative_path,
         });
     }
     Ok(persisted)
+}
+
+fn resolve_capture_asset_paths(
+    repository_root: &Path,
+    token: &str,
+    assets: Vec<CapturePresentationAsset>,
+) -> Result<Vec<CapturePresentationAsset>> {
+    let expected_directory = format!("presentation-{token}");
+    assets
+        .into_iter()
+        .map(|mut asset| {
+            let components: Vec<_> = asset.path.components().collect();
+            let safe = components.len() == 3
+                && matches!(components[0], std::path::Component::Normal(value) if value == "runs")
+                && matches!(components[1], std::path::Component::Normal(value) if value == expected_directory.as_str())
+                && matches!(components[2], std::path::Component::Normal(_));
+            if !safe {
+                bail!("capture worker returned an unsafe presentation asset path")
+            }
+            asset.path = repository_root.join(&asset.path);
+            Ok(asset)
+        })
+        .collect()
 }
 
 fn atomic_control_write(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -1619,5 +1645,46 @@ mod tests {
         assert_eq!(assets[0].bytes, assets[1].bytes);
         assert_eq!(assets[1].bytes, assets[2].bytes);
         assert_eq!(archive.digests.len(), 1);
+    }
+
+    #[test]
+    fn capture_asset_locator_is_namespace_neutral_and_host_resolved() {
+        let asset = CapturePresentationAsset {
+            kind: "terminal_final".to_owned(),
+            content_type: "application/vnd.ato.terminal-screen+json".to_owned(),
+            width: None,
+            height: None,
+            sequence: 4,
+            path: PathBuf::from("runs/presentation-token/000-terminal_final.json"),
+        };
+        let [resolved] = resolve_capture_asset_paths(
+            Path::new("/host/repository/.capsule"),
+            "token",
+            vec![asset.clone()],
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+        assert_eq!(
+            resolved.path,
+            Path::new("/host/repository/.capsule/runs/presentation-token/000-terminal_final.json")
+        );
+
+        for unsafe_path in [
+            "/workspace/.capsule/runs/presentation-token/000-terminal_final.json",
+            "runs/presentation-token/../credential",
+            "runs/presentation-other/000-terminal_final.json",
+        ] {
+            let mut unsafe_asset = asset.clone();
+            unsafe_asset.path = PathBuf::from(unsafe_path);
+            assert!(
+                resolve_capture_asset_paths(
+                    Path::new("/host/repository/.capsule"),
+                    "token",
+                    vec![unsafe_asset],
+                )
+                .is_err()
+            );
+        }
     }
 }
