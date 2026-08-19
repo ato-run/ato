@@ -1,8 +1,8 @@
 # Computation
 
-Take the [README's compiler-error example](../../README.md#a-concrete-example):
-Alice runs a build and hits `error[E0277]` at a point we call `C42`. Her
-shell is still sitting there, interactive, waiting for the next command.
+Take a concrete example: Alice runs a build and hits `error[E0277]` at a
+point we call `C42`. Her shell is still sitting there, interactive, waiting
+for the next command.
 
 `C42` is not "everything Alice typed to get here" — `git clone`, `npm
 install`, `npm run build` are done and gone. What matters about `C42` is what
