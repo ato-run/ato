@@ -190,6 +190,7 @@ class ChromeSession:
         self.closed = False
         self.cdp: Cdp | None = None
         self.browser_context_id: str | None = None
+        self.host_isolated_context_id: int | None = None
         self.browser_host = browser_host is not None
         self.work_dir = work_dir
         self.work_dir.mkdir(parents=True, exist_ok=False)
@@ -218,9 +219,10 @@ class ChromeSession:
             )
             version = wait_for_json(f"http://127.0.0.1:{self.debug_port}/json/version")
             self.version = version["Browser"]
-            self.cdp = Cdp(version["webSocketDebuggerUrl"])
             def host_page_target() -> dict[str, Any] | None:
-                targets = self.cdp.call("Target.getTargets")["targetInfos"]
+                targets = wait_for_json(
+                    f"http://127.0.0.1:{self.debug_port}/json/list"
+                )
                 self.host_target_urls = [
                     str(value.get("url", "")) for value in targets if value.get("type") == "page"
                 ]
@@ -235,12 +237,18 @@ class ChromeSession:
                 raise AcceptanceError(
                     f"Browser Host did not expose its target page; pages={self.host_target_urls}"
                 ) from error
-            attached = self.cdp.call(
-                "Target.attachToTarget", {"targetId": target["targetId"], "flatten": True}
+            self.cdp = Cdp(target["webSocketDebuggerUrl"])
+            self.session_id = None
+            frame_tree = self.cdp.call("Page.getFrameTree")
+            frame_id = frame_tree["frameTree"]["frame"]["id"]
+            isolated = self.cdp.call(
+                "Page.createIsolatedWorld",
+                {
+                    "frameId": frame_id,
+                    "worldName": f"ato.browser.bridge.{bootstrap['browser_session']}",
+                },
             )
-            self.session_id = attached["sessionId"]
-            self.cdp.call("Runtime.enable", session_id=self.session_id)
-            self.cdp.call("Page.enable", session_id=self.session_id)
+            self.host_isolated_context_id = isolated["executionContextId"]
             self.wait_document_ready()
             return
 
@@ -329,6 +337,8 @@ class ChromeSession:
         wait_until(lambda: self.evaluate("document.readyState") in {"interactive", "complete"})
 
     def isolated_context(self) -> int:
+        if self.host_isolated_context_id is not None:
+            return self.host_isolated_context_id
         expected = f"ato.browser.bridge."
 
         def find() -> int | None:
@@ -429,6 +439,48 @@ def browser_host_start_error(process: subprocess.Popen, log_file) -> AcceptanceE
         "Browser Host did not expose its runtime-only CDP port "
         f"(exit={process.poll()}): {log or '<no Browser Host output>'}"
     )
+
+
+def option_path(name: str) -> Path | None:
+    try:
+        index = sys.argv.index(name)
+        return Path(sys.argv[index + 1])
+    except (ValueError, IndexError):
+        return None
+
+
+def write_failure_receipt(error: Exception) -> None:
+    receipt_path = option_path("--receipt")
+    work_root = option_path("--work-root")
+    if receipt_path is None:
+        return
+    logs: dict[str, str] = {}
+    if work_root is not None and work_root.is_dir():
+        for path in sorted(work_root.rglob("chrome.log"))[:8]:
+            try:
+                logs[str(path.relative_to(work_root))] = path.read_text(
+                    errors="replace"
+                )[-16_384:]
+            except OSError as log_error:
+                logs[str(path)] = f"<log unavailable: {log_error}>"
+    message = str(error)
+    browser_host_exit = re.search(r"\(exit=([^)]*)\)", message)
+    chrome_exit = re.search(
+        r"Browser Host Chrome exit status after cleanup: ([^;]+)", message
+    )
+    receipt = {
+        "schema": "ato.browser.acceptance.receipt/v1",
+        "status": "failed",
+        "error_type": type(error).__name__,
+        "error": message,
+        "browser_host_exit_status": (
+            browser_host_exit.group(1) if browser_host_exit else "unavailable"
+        ),
+        "chrome_exit_status": chrome_exit.group(1) if chrome_exit else "unavailable",
+        "chrome_stderr_and_host_logs": logs,
+    }
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt_path.write_text(json.dumps(receipt, indent=2) + "\n")
 
 
 def wait_until(predicate, timeout: float = TIMEOUT_SECONDS):
@@ -1092,5 +1144,12 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as error:
+        try:
+            write_failure_receipt(error)
+        except Exception as receipt_error:
+            print(
+                f"failed to write Browser acceptance failure receipt: {receipt_error}",
+                file=sys.stderr,
+            )
         print(f"staging Chrome acceptance failed: {error}", file=sys.stderr)
         raise

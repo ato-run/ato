@@ -62,3 +62,11 @@ jobs:
             --work-root "${{ github.workspace }}/.tmp/browser-host-acceptance" \
             --receipt "${{ github.workspace }}/.tmp/browser-host-acceptance/receipt.json" \
             --browser-host
+      - name: Upload Browser Host acceptance receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-host-acceptance-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/.tmp/browser-host-acceptance
+          if-no-files-found: error
+          retention-days: 14

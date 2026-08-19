@@ -5,11 +5,11 @@
 //! Chrome isolated world, and owns only the disposable Chrome process/profile.
 //! It never reads Records or participates in Replay ordering.
 
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -25,8 +25,12 @@ const DISCOVERY_WAIT: Duration = Duration::from_secs(30);
 const CDP_WAIT: Duration = Duration::from_secs(15);
 const NAVIGATION_WAIT: Duration = Duration::from_secs(15);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
+const CDP_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const PROFILE_DIR_NAME: &str = "browser-host-profile";
 const CDP_PORT_FILE_NAME: &str = "browser-host-cdp-port";
+const CHROME_STDERR_FILE_NAME: &str = "chrome-stderr.log";
+const DEVTOOLS_ACTIVE_PORT_FILE_NAME: &str = "DevToolsActivePort";
+const MAX_CHROME_DIAGNOSTIC_BYTES: usize = 16 * 1024;
 const BRIDGE_SOURCE: &str =
     include_str!("../../../extensions/adapters/browser/bridge/browser-bridge.js");
 
@@ -57,15 +61,34 @@ pub(crate) fn run(
             return Err(error);
         }
     };
-    let result = attach_bridge(&profile, target_url, &bootstrap, chrome_process.debug_port)
-        .and_then(|_cdp| {
+    let result =
+        attach_bridge(&profile, target_url, &bootstrap, &mut chrome_process).and_then(|()| {
             wait_for_run_end(&bootstrap_path, &mut chrome_process)?;
             Ok(())
         });
-    let cleanup = chrome_process
-        .cleanup()
-        .and_then(|_| fs::remove_dir_all(&profile).context("remove Browser Host private profile"));
-    result.and(cleanup)
+    let failure_diagnostic = result
+        .as_ref()
+        .err()
+        .map(|_| chrome_process.startup_diagnostic());
+    let exit_status = chrome_process.cleanup();
+    let profile_cleanup =
+        fs::remove_dir_all(&profile).context("remove Browser Host private profile");
+    match result {
+        Ok(()) => {
+            exit_status?;
+            profile_cleanup
+        }
+        Err(error) => {
+            let exit_status = exit_status
+                .map(|status| status.to_string())
+                .unwrap_or_else(|cleanup_error| format!("cleanup failed: {cleanup_error:#}"));
+            let diagnostic = failure_diagnostic.unwrap_or_else(|| "unavailable".to_owned());
+            let _ = profile_cleanup;
+            Err(error.context(format!(
+                "Browser Host Chrome exit status after cleanup: {exit_status}; {diagnostic}"
+            )))
+        }
+    }
 }
 
 fn validate_runtime_dir(runtime_dir: &Path) -> Result<()> {
@@ -158,25 +181,38 @@ fn validate_target(target_url: &str, expected_origin: &str) -> Result<()> {
 
 struct ChromeProcess {
     child: Child,
-    debug_port: u16,
+    stderr_path: PathBuf,
 }
 
 impl ChromeProcess {
     fn launch(chrome: &Path, profile: &Path, headless: bool) -> Result<Self> {
-        let debug_port = available_loopback_port()?;
+        let stderr_path = profile.join(CHROME_STDERR_FILE_NAME);
+        let stderr = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&stderr_path)
+            .context("create Browser Host Chrome stderr log")?;
+        #[cfg(unix)]
+        fs::set_permissions(
+            &stderr_path,
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )
+        .context("restrict Browser Host Chrome stderr log")?;
         let mut command = Command::new(chrome);
         command
             .arg("--no-first-run")
             .arg("--no-default-browser-check")
             .arg("--remote-debugging-address=127.0.0.1")
-            .arg(format!("--remote-debugging-port={debug_port}"))
+            // Chrome owns the ephemeral port reservation and publishes the
+            // result through DevToolsActivePort. This avoids a bind/drop race.
+            .arg("--remote-debugging-port=0")
             .arg("--remote-allow-origins=*")
             .arg("--window-size=800,600")
             .arg(format!("--user-data-dir={}", profile.display()))
             .arg("about:blank")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stderr(stderr);
         if headless {
             command
                 .arg("--headless=new")
@@ -187,32 +223,42 @@ impl ChromeProcess {
                 .arg("--disable-dev-shm-usage");
         }
         let child = command.spawn().context("launch Browser Host Chrome")?;
-        Ok(Self { child, debug_port })
+        Ok(Self { child, stderr_path })
     }
 
-    fn cleanup(&mut self) -> Result<()> {
-        if self
+    fn cleanup(&mut self) -> Result<ExitStatus> {
+        if let Some(status) = self
             .child
             .try_wait()
             .context("inspect Browser Host Chrome")?
-            .is_none()
         {
-            self.child.kill().context("stop Browser Host Chrome")?;
-            self.child.wait().context("wait for Browser Host Chrome")?;
+            return Ok(status);
         }
-        Ok(())
+        self.child.kill().context("stop Browser Host Chrome")?;
+        self.child.wait().context("wait for Browser Host Chrome")
     }
-}
 
-fn available_loopback_port() -> Result<u16> {
-    let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
-        .context("reserve Browser Host Chrome CDP port")?;
-    let port = listener
-        .local_addr()
-        .context("inspect Browser Host Chrome CDP port")?
-        .port();
-    drop(listener);
-    Ok(port)
+    fn startup_diagnostic(&mut self) -> String {
+        let status = match self.child.try_wait() {
+            Ok(Some(status)) => status.to_string(),
+            Ok(None) => "still running at readiness deadline".to_owned(),
+            Err(error) => format!("status unavailable: {error}"),
+        };
+        let stderr = fs::read(&self.stderr_path)
+            .map(|bytes| {
+                let start = bytes.len().saturating_sub(MAX_CHROME_DIAGNOSTIC_BYTES);
+                String::from_utf8_lossy(&bytes[start..]).into_owned()
+            })
+            .unwrap_or_else(|error| format!("<Chrome stderr unavailable: {error}>"));
+        format!(
+            "Browser Host Chrome status before cleanup: {status}; Chrome stderr: {}",
+            if stderr.is_empty() {
+                "<empty>"
+            } else {
+                &stderr
+            }
+        )
+    }
 }
 
 fn wait_for_run_end(discovery_path: &Path, chrome: &mut ChromeProcess) -> Result<()> {
@@ -240,16 +286,29 @@ fn attach_bridge(
     profile: &Path,
     target_url: &str,
     bootstrap: &BrowserRuntimeBootstrap,
-    debug_port: u16,
-) -> Result<Cdp> {
-    let ws_url = wait_for_debugger_websocket_url(debug_port, CDP_WAIT)?;
-    let websocket = connect_cdp(&ws_url)?;
+    chrome: &mut ChromeProcess,
+) -> Result<()> {
+    let (debug_port, browser_ws_url) = wait_for_debugger_websocket_url(profile, chrome, CDP_WAIT)?;
+    let websocket = connect_cdp(&browser_ws_url)?;
     let mut cdp = Cdp {
         websocket,
         next_id: 1,
     };
     let targets = cdp.call("Target.getTargets", json!({}), None)?;
-    let target_id = initial_page_target_id(&targets)?.to_owned();
+    let startup_target_id = initial_page_target_id(&targets)?.to_owned();
+    let context = cdp.call("Target.createBrowserContext", json!({}), None)?;
+    let browser_context_id = required_string(&context, "browserContextId")?.to_owned();
+    let target = cdp.call(
+        "Target.createTarget",
+        json!({"url": "about:blank", "browserContextId": browser_context_id}),
+        None,
+    )?;
+    let target_id = required_string(&target, "targetId")?.to_owned();
+    cdp.call(
+        "Target.closeTarget",
+        json!({"targetId": startup_target_id}),
+        None,
+    )?;
     let attached = cdp.call(
         "Target.attachToTarget",
         json!({"targetId": target_id.clone(), "flatten": true}),
@@ -271,30 +330,19 @@ fn attach_bridge(
         "Page.navigate",
         json!({"url": target_url}),
         Some(&session_id),
-    );
-    let mut cdp = match navigation {
-        Ok(navigation) => {
-            if let Some(error) = navigation.get("errorText").and_then(Value::as_str) {
-                bail!("Browser Host page navigation failed: {error}");
-            }
-            cdp
-        }
-        Err(error) => {
-            // Some Chrome builds accept Page.navigate but delay its command
-            // response while the new document initializes. Reconnect only
-            // after the request was written, then independently confirm the
-            // exact target origin below. No unverified navigation succeeds.
-            let websocket = connect_cdp(&ws_url)
-                .with_context(|| format!("recover Browser Host CDP after navigation: {error}"))?;
-            Cdp {
-                websocket,
-                next_id: 1,
-            }
-        }
-    };
+    )?;
+    if let Some(error) = navigation.get("errorText").and_then(Value::as_str) {
+        bail!("Browser Host page navigation failed: {error}");
+    }
     wait_for_target_origin(&mut cdp, &target_id, target_url)?;
+    cdp.call(
+        "Target.detachFromTarget",
+        json!({"sessionId": session_id}),
+        None,
+    )?;
+    cdp.close()?;
     write_cdp_port(profile, debug_port)?;
-    Ok(cdp)
+    Ok(())
 }
 
 fn initial_page_target_id(targets: &Value) -> Result<&str> {
@@ -370,7 +418,17 @@ fn wait_for_target_origin(cdp: &mut Cdp, target_id: &str, target_url: &str) -> R
 }
 
 impl Cdp {
-    fn call(&mut self, method: &str, params: Value, session_id: Option<&str>) -> Result<Value> {
+    fn close(mut self) -> Result<()> {
+        let _ = self.websocket.close(None);
+        if let MaybeTlsStream::Plain(stream) = self.websocket.get_mut() {
+            stream
+                .shutdown(Shutdown::Both)
+                .context("close Browser Host CDP socket")?;
+        }
+        Ok(())
+    }
+
+    fn send(&mut self, method: &str, params: Value, session_id: Option<&str>) -> Result<u64> {
         let request_id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
         let mut request = json!({"id": request_id, "method": method, "params": params});
@@ -381,6 +439,11 @@ impl Cdp {
         self.websocket
             .send(Message::Text(request.to_string().into()))
             .context("send Browser Host CDP request")?;
+        Ok(request_id)
+    }
+
+    fn call(&mut self, method: &str, params: Value, session_id: Option<&str>) -> Result<Value> {
+        let request_id = self.send(method, params, session_id)?;
         loop {
             let message = self
                 .websocket
@@ -406,17 +469,62 @@ impl Cdp {
     }
 }
 
-fn wait_for_debugger_websocket_url(port: u16, timeout: Duration) -> Result<String> {
+fn wait_for_debugger_websocket_url(
+    profile: &Path,
+    chrome: &mut ChromeProcess,
+    timeout: Duration,
+) -> Result<(u16, String)> {
     let deadline = Instant::now() + timeout;
     loop {
-        if let Ok(url) = debugger_websocket_url(port) {
-            return Ok(url);
+        let probe = read_devtools_active_port(profile).and_then(|(port, active_url)| {
+            let version_url = debugger_websocket_url(port)?;
+            if version_url != active_url {
+                bail!("Browser Host CDP discovery sources disagree");
+            }
+            Ok((port, version_url))
+        });
+        let last_error = match probe {
+            Ok(ready) => return Ok(ready),
+            Err(error) => format!("{error:#}"),
+        };
+        if let Some(status) = chrome
+            .child
+            .try_wait()
+            .context("inspect Browser Host Chrome during CDP readiness")?
+        {
+            bail!("Browser Host Chrome exited before CDP readiness ({status}): {last_error}");
         }
         if Instant::now() >= deadline {
-            bail!("timed out waiting for Browser Host Chrome CDP");
+            bail!("timed out waiting for Browser Host Chrome CDP: {last_error}");
         }
         thread::sleep(POLL_INTERVAL);
     }
+}
+
+fn read_devtools_active_port(profile: &Path) -> Result<(u16, String)> {
+    let path = profile.join(DEVTOOLS_ACTIVE_PORT_FILE_NAME);
+    let bytes = fs::read(&path).context("read Browser Host DevToolsActivePort")?;
+    if bytes.len() > 4096 {
+        bail!("Browser Host DevToolsActivePort is too large");
+    }
+    let text =
+        std::str::from_utf8(&bytes).context("Browser Host DevToolsActivePort is not UTF-8")?;
+    let mut lines = text.lines();
+    let port = lines
+        .next()
+        .context("Browser Host DevToolsActivePort has no port")?
+        .parse::<u16>()
+        .context("Browser Host DevToolsActivePort has an invalid port")?;
+    if port == 0 {
+        bail!("Browser Host DevToolsActivePort published port zero");
+    }
+    let path = lines
+        .next()
+        .filter(|value| {
+            value.starts_with("/devtools/browser/") && !value.chars().any(char::is_control)
+        })
+        .context("Browser Host DevToolsActivePort has an invalid WebSocket path")?;
+    Ok((port, format!("ws://127.0.0.1:{port}{path}")))
 }
 
 fn write_cdp_port(profile: &Path, port: u16) -> Result<()> {
@@ -433,24 +541,36 @@ fn write_cdp_port(profile: &Path, port: u16) -> Result<()> {
 }
 
 fn debugger_websocket_url(port: u16) -> Result<String> {
-    let mut stream =
-        TcpStream::connect(("127.0.0.1", port)).context("connect Browser Host CDP HTTP")?;
-    stream
-        .set_read_timeout(Some(CDP_WAIT))
-        .context("set Browser Host CDP HTTP read deadline")?;
-    stream
-        .write_all(b"GET /json/version HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
-        .context("request Browser Host CDP version")?;
-    let response = read_http_response(&mut stream)?;
-    let (_, body) = response
-        .split_once("\r\n\r\n")
-        .context("Browser Host CDP version returned no body")?;
-    let value: Value = serde_json::from_str(body).context("decode Browser Host CDP version")?;
+    let value = debugger_json(port, "/json/version")?;
     let url = value
         .get("webSocketDebuggerUrl")
         .and_then(Value::as_str)
         .context("Browser Host CDP version returned no WebSocket URL")?;
     normalize_debugger_websocket_url(url, port)
+}
+
+fn debugger_json(port: u16, path: &str) -> Result<Value> {
+    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let mut stream = TcpStream::connect_timeout(&address, CDP_PROBE_TIMEOUT)
+        .context("connect Browser Host CDP HTTP")?;
+    stream
+        .set_nonblocking(false)
+        .context("configure Browser Host CDP HTTP blocking mode")?;
+    stream
+        .set_read_timeout(Some(CDP_PROBE_TIMEOUT))
+        .context("set Browser Host CDP HTTP read deadline")?;
+    stream
+        .set_write_timeout(Some(CDP_PROBE_TIMEOUT))
+        .context("set Browser Host CDP HTTP write deadline")?;
+    let request = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .context("request Browser Host CDP version")?;
+    let response = read_http_response(&mut stream)?;
+    let (_, body) = response
+        .split_once("\r\n\r\n")
+        .context("Browser Host CDP version returned no body")?;
+    serde_json::from_str(body).context("decode Browser Host CDP JSON")
 }
 
 fn normalize_debugger_websocket_url(url: &str, port: u16) -> Result<String> {
@@ -526,8 +646,26 @@ mod tests {
     }
 
     #[test]
-    fn allocated_debug_port_is_a_nonzero_loopback_port() {
-        assert_ne!(available_loopback_port().expect("port"), 0);
+    fn devtools_active_port_requires_a_nonzero_port_and_browser_path() {
+        let directory = tempfile::tempdir().expect("profile");
+        fs::write(
+            directory.path().join(DEVTOOLS_ACTIVE_PORT_FILE_NAME),
+            "9222\n/devtools/browser/opaque-id\n",
+        )
+        .expect("active port");
+        assert_eq!(
+            read_devtools_active_port(directory.path()).expect("active port"),
+            (
+                9222,
+                "ws://127.0.0.1:9222/devtools/browser/opaque-id".to_owned()
+            )
+        );
+        fs::write(
+            directory.path().join(DEVTOOLS_ACTIVE_PORT_FILE_NAME),
+            "0\n/devtools/browser/opaque-id\n",
+        )
+        .expect("invalid active port");
+        assert!(read_devtools_active_port(directory.path()).is_err());
     }
 
     #[test]
@@ -566,18 +704,21 @@ mod tests {
     fn initial_page_target_is_the_single_blank_page() {
         let targets = json!({
             "targetInfos": [
-                {"targetId": "extension", "type": "background_page", "url": "chrome-extension://id"},
-                {"targetId": "page", "type": "page", "url": "about:blank"},
-            ],
+                {"targetId": "page-1", "type": "page", "url": "about:blank"},
+                {"targetId": "worker-1", "type": "service_worker", "url": "https://example.test/worker.js"}
+            ]
         });
         assert_eq!(
-            initial_page_target_id(&targets).expect("initial page"),
-            "page"
+            initial_page_target_id(&targets).expect("single blank page"),
+            "page-1"
         );
 
-        let non_blank = json!({
-            "targetInfos": [{"targetId": "page", "type": "page", "url": "https://example.test"}],
+        let multiple_pages = json!({
+            "targetInfos": [
+                {"targetId": "page-1", "type": "page", "url": "about:blank"},
+                {"targetId": "page-2", "type": "page", "url": "about:blank"}
+            ]
         });
-        assert!(initial_page_target_id(&non_blank).is_err());
+        assert!(initial_page_target_id(&multiple_pages).is_err());
     }
 }
