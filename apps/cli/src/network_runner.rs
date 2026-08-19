@@ -9,7 +9,7 @@
 // deliberately Unix-only.
 #![cfg_attr(not(unix), allow(dead_code, unused_imports))]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -24,9 +24,16 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use ato_ipc::terminal_surface::{MAX_TERMINAL_INPUT_FRAME_BYTES, TERMINAL_WEBSOCKET_SUBPROTOCOL};
 use clap::{Args, Subcommand};
+use netd::pixel_authorization::{HmacSurfaceAccessAuthorizer, SurfaceAssertionKeyring};
+use netd::surface_authorization::{SurfaceAccessAuthorizer, SurfaceGatewayScope};
+use netd::surface_websocket_auth::{
+    SurfaceHandshakeAuthorizer, is_normalized_allowed_origin, new_consumed_surface_grants,
+};
 use reqwest::blocking::{Client, RequestBuilder};
 use serde::{Deserialize, Serialize};
+use tungstenite::client::IntoClientRequest;
 
 use crate::supervisor::PresentationCaptureReceipt;
 
@@ -101,6 +108,8 @@ struct PortableLeaseCommand {
     transport_digest: String,
     expected_root_computation_ref: String,
     exported_port_id: String,
+    session_id: String,
+    surface_contract_version: String,
     session_surface: SessionSurface,
     #[serde(default)]
     compose_inputs: Vec<ComposeInput>,
@@ -119,6 +128,7 @@ struct ComposeInput {
 #[derive(Debug, Deserialize)]
 struct SessionSurface {
     kind: String,
+    surface_id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -503,7 +513,11 @@ fn execute_lease_unix(
         terminate_child(&mut child);
         bail!("sandboxed session did not select the isolated surface relay");
     }
-    let proxy = TcpProxy::start_unix(args.proxy_listen, repository.join("surface.sock"))?;
+    let proxy = start_surface_proxy(
+        args.proxy_listen,
+        repository.join("surface.sock"),
+        &lease.command,
+    )?;
     report_status(
         client,
         base,
@@ -778,8 +792,11 @@ fn execute_replay_lease_unix(
                 {
                     bail!("Replay surface does not match the negotiated Port");
                 }
-                let replay_proxy =
-                    TcpProxy::start_unix(args.proxy_listen, repository.join("surface.sock"))?;
+                let replay_proxy = start_surface_proxy(
+                    args.proxy_listen,
+                    repository.join("surface.sock"),
+                    &lease.command,
+                )?;
                 // Persist completion before /ready makes the lease terminal. The
                 // Replay projection is independent of the ordinary Session
                 // Surface readiness transition and must never be stranded at
@@ -1158,6 +1175,285 @@ fn thread_sleep(seconds: u64) {
     std::thread::sleep(Duration::from_secs(seconds.clamp(1, 30)));
 }
 
+#[cfg(unix)]
+fn start_surface_proxy(
+    listen: SocketAddr,
+    target: PathBuf,
+    command: &PortableLeaseCommand,
+) -> Result<Box<dyn Send>> {
+    if command.session_surface.kind == "web" {
+        return Ok(Box::new(TcpProxy::start_unix(listen, target)?));
+    }
+    if command.session_surface.kind != "terminal" {
+        bail!("unsupported hosted session surface");
+    }
+    if command.surface_contract_version != "1"
+        || command.session_id.trim().is_empty()
+        || command.session_surface.surface_id.trim().is_empty()
+    {
+        bail!("terminal hosted session has an invalid surface scope");
+    }
+    let keyring_json = std::env::var("ATO_SURFACE_ASSERTION_KEYS_JSON")
+        .context("ATO_SURFACE_ASSERTION_KEYS_JSON is required for Terminal Surface")?;
+    let keys: BTreeMap<String, String> = serde_json::from_str(&keyring_json)
+        .context("ATO_SURFACE_ASSERTION_KEYS_JSON is invalid")?;
+    let keyring = Arc::new(
+        SurfaceAssertionKeyring::new(keys)
+            .context("Terminal Surface assertion keyring is invalid")?,
+    );
+    let origins_json = std::env::var("ATO_SURFACE_ALLOWED_ORIGINS_JSON")
+        .context("ATO_SURFACE_ALLOWED_ORIGINS_JSON is required for Terminal Surface")?;
+    let allowed_origins: BTreeSet<String> = serde_json::from_str(&origins_json)
+        .context("ATO_SURFACE_ALLOWED_ORIGINS_JSON is invalid")?;
+    if allowed_origins.is_empty()
+        || allowed_origins
+            .iter()
+            .any(|origin| !is_normalized_allowed_origin(origin))
+    {
+        bail!("Terminal Surface requires normalized exact allowed origins");
+    }
+    let scope = SurfaceGatewayScope {
+        session_id: command.session_id.clone(),
+        surface_id: command.session_surface.surface_id.clone(),
+    };
+    let readiness = keyring
+        .issue_readiness_assertion(&scope)
+        .context("Terminal Surface readiness assertion could not be issued")?;
+    let probe_origin = allowed_origins
+        .iter()
+        .next()
+        .cloned()
+        .context("Terminal Surface has no readiness Origin")?;
+    let authorizer: Arc<dyn SurfaceAccessAuthorizer> =
+        Arc::new(HmacSurfaceAccessAuthorizer::new(keyring));
+    let proxy = TerminalSurfaceProxy::start(listen, target, scope, allowed_origins, authorizer)?;
+    probe_terminal_surface_ready(listen, &probe_origin, readiness.as_str())?;
+    Ok(Box::new(proxy))
+}
+
+#[cfg(unix)]
+fn probe_terminal_surface_ready(listen: SocketAddr, origin: &str, assertion: &str) -> Result<()> {
+    let mut request = format!("ws://{listen}/").into_client_request()?;
+    request.headers_mut().insert(
+        tungstenite::http::header::ORIGIN,
+        tungstenite::http::HeaderValue::from_str(origin)
+            .context("Terminal Surface readiness Origin is invalid")?,
+    );
+    request.headers_mut().insert(
+        tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL,
+        tungstenite::http::HeaderValue::from_static(TERMINAL_WEBSOCKET_SUBPROTOCOL),
+    );
+    request.headers_mut().insert(
+        netd::surface_websocket_auth::SURFACE_ASSERTION_HEADER,
+        tungstenite::http::HeaderValue::from_str(assertion)
+            .context("Terminal Surface readiness assertion is invalid")?,
+    );
+    let stream = TcpStream::connect_timeout(&listen, Duration::from_secs(2))?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+    let (mut websocket, response) = tungstenite::client(request, stream)
+        .map_err(|error| anyhow::anyhow!("Terminal Surface readiness handshake failed: {error}"))?;
+    if response
+        .headers()
+        .get(tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL)
+        .and_then(|value| value.to_str().ok())
+        != Some(TERMINAL_WEBSOCKET_SUBPROTOCOL)
+    {
+        bail!("Terminal Surface readiness did not negotiate ato.terminal.v1");
+    }
+    let message = websocket
+        .read()
+        .map_err(|error| anyhow::anyhow!("Terminal Surface readiness frame failed: {error}"))?;
+    let tungstenite::Message::Text(text) = message else {
+        bail!("Terminal Surface readiness did not emit a control frame");
+    };
+    let control: ato_ipc::terminal_surface::TerminalServerControl =
+        serde_json::from_str(&text).context("Terminal Surface readiness control is invalid")?;
+    if !matches!(
+        control,
+        ato_ipc::terminal_surface::TerminalServerControl::Ready { .. }
+    ) || control.validate().is_err()
+    {
+        bail!("Terminal Surface readiness control is not ready");
+    }
+    let _ = websocket.close(None);
+    Ok(())
+}
+
+#[cfg(unix)]
+struct TerminalSurfaceProxy {
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+#[cfg(unix)]
+impl TerminalSurfaceProxy {
+    fn start(
+        listen: SocketAddr,
+        target: PathBuf,
+        scope: SurfaceGatewayScope,
+        allowed_origins: BTreeSet<String>,
+        authorizer: Arc<dyn SurfaceAccessAuthorizer>,
+    ) -> Result<Self> {
+        let listener = TcpListener::bind(listen)?;
+        listener.set_nonblocking(true)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let consumed_grants = new_consumed_surface_grants();
+        let active_viewer = Arc::new(AtomicBool::new(false));
+        let worker = std::thread::spawn(move || {
+            while !thread_stop.load(Ordering::Acquire) {
+                match listener.accept() {
+                    Ok((client, _)) => {
+                        let target = target.clone();
+                        let scope = scope.clone();
+                        let origins = allowed_origins.clone();
+                        let authorizer = Arc::clone(&authorizer);
+                        let consumed = Arc::clone(&consumed_grants);
+                        let active = Arc::clone(&active_viewer);
+                        std::thread::spawn(move || {
+                            let callback = SurfaceHandshakeAuthorizer::new(
+                                origins,
+                                scope,
+                                authorizer,
+                                consumed,
+                                TERMINAL_WEBSOCKET_SUBPROTOCOL,
+                                true,
+                            );
+                            let config = tungstenite::protocol::WebSocketConfig::default()
+                                .max_message_size(Some(MAX_TERMINAL_INPUT_FRAME_BYTES))
+                                .max_frame_size(Some(MAX_TERMINAL_INPUT_FRAME_BYTES));
+                            let Ok(mut browser) =
+                                tungstenite::accept_hdr_with_config(client, callback, Some(config))
+                            else {
+                                return;
+                            };
+                            if active
+                                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                                .is_err()
+                            {
+                                let _ = browser.close(None);
+                                return;
+                            }
+                            let _viewer = ActiveTerminalViewer(active);
+                            let Ok(stream) = UnixStream::connect(&target) else {
+                                let _ = browser.close(None);
+                                return;
+                            };
+                            let mut request = match "ws://localhost/".into_client_request() {
+                                Ok(request) => request,
+                                Err(_) => return,
+                            };
+                            request.headers_mut().insert(
+                                tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL,
+                                tungstenite::http::HeaderValue::from_static(
+                                    TERMINAL_WEBSOCKET_SUBPROTOCOL,
+                                ),
+                            );
+                            let Ok((mut sandbox, response)) = tungstenite::client(request, stream)
+                            else {
+                                let _ = browser.close(None);
+                                return;
+                            };
+                            if response
+                                .headers()
+                                .get(tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL)
+                                .and_then(|value| value.to_str().ok())
+                                != Some(TERMINAL_WEBSOCKET_SUBPROTOCOL)
+                            {
+                                let _ = browser.close(None);
+                                let _ = sandbox.close(None);
+                                return;
+                            }
+                            let timeout = Some(Duration::from_millis(25));
+                            let _ = browser.get_mut().set_read_timeout(timeout);
+                            let _ = browser
+                                .get_mut()
+                                .set_write_timeout(Some(Duration::from_secs(2)));
+                            let _ = sandbox.get_mut().set_read_timeout(timeout);
+                            let _ = sandbox
+                                .get_mut()
+                                .set_write_timeout(Some(Duration::from_secs(2)));
+                            relay_terminal_websockets(&mut browser, &mut sandbox);
+                        });
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Ok(Self {
+            stop,
+            worker: Some(worker),
+        })
+    }
+}
+
+#[cfg(unix)]
+struct ActiveTerminalViewer(Arc<AtomicBool>);
+
+#[cfg(unix)]
+impl Drop for ActiveTerminalViewer {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+#[cfg(unix)]
+fn relay_terminal_websockets(
+    browser: &mut tungstenite::WebSocket<TcpStream>,
+    sandbox: &mut tungstenite::WebSocket<UnixStream>,
+) {
+    loop {
+        match browser.read() {
+            Ok(message) => {
+                let closing = message.is_close();
+                if sandbox.send(message).is_err() || closing {
+                    return;
+                }
+            }
+            Err(tungstenite::Error::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
+                return;
+            }
+            Err(_) => return,
+        }
+        match sandbox.read() {
+            Ok(message) => {
+                let closing = message.is_close();
+                if browser.send(message).is_err() || closing {
+                    return;
+                }
+            }
+            Err(tungstenite::Error::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
+                return;
+            }
+            Err(_) => return,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for TerminalSurfaceProxy {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 struct TcpProxy {
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
@@ -1270,8 +1566,131 @@ use sha2::Digest as _;
 #[cfg(test)]
 mod tests {
     use std::io::Write as _;
+    #[cfg(unix)]
+    use std::os::unix::net::UnixListener;
 
     use super::*;
+
+    #[cfg(unix)]
+    #[allow(clippy::result_large_err)]
+    fn accept_test_terminal_upstream(stream: UnixStream) -> tungstenite::WebSocket<UnixStream> {
+        tungstenite::accept_hdr(
+            stream,
+            |request: &tungstenite::handshake::server::Request,
+             mut response: tungstenite::handshake::server::Response| {
+                assert_eq!(
+                    request
+                        .headers()
+                        .get(tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL)
+                        .unwrap(),
+                    TERMINAL_WEBSOCKET_SUBPROTOCOL
+                );
+                response.headers_mut().insert(
+                    tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL,
+                    tungstenite::http::HeaderValue::from_static(TERMINAL_WEBSOCKET_SUBPROTOCOL),
+                );
+                Ok(response)
+            },
+        )
+        .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_surface_proxy_requires_scoped_assertion_and_relays_v1_frames() {
+        let test_root = PathBuf::from(".tmp").join(format!("tsp-{}", std::process::id()));
+        fs::create_dir_all(&test_root).unwrap();
+        let socket_path = test_root.join("surface.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let upstream = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut websocket = accept_test_terminal_upstream(stream);
+            websocket
+                .send(tungstenite::Message::Text(
+                    serde_json::to_string(
+                        &ato_ipc::terminal_surface::TerminalServerControl::Ready {
+                            cols: 80,
+                            rows: 24,
+                        },
+                    )
+                    .unwrap()
+                    .into(),
+                ))
+                .unwrap();
+            let message = websocket.read().unwrap();
+            websocket.send(message).unwrap();
+            let _ = websocket.close(None);
+        });
+        let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = probe.local_addr().unwrap();
+        drop(probe);
+        let scope = SurfaceGatewayScope {
+            session_id: "run:test".to_owned(),
+            surface_id: "run:test".to_owned(),
+        };
+        let keyring = Arc::new(
+            SurfaceAssertionKeyring::new(BTreeMap::from([(
+                "test-v1".to_owned(),
+                "0123456789abcdef0123456789abcdef".to_owned(),
+            )]))
+            .unwrap(),
+        );
+        let assertion = keyring.issue_readiness_assertion(&scope).unwrap();
+        let authorizer: Arc<dyn SurfaceAccessAuthorizer> =
+            Arc::new(HmacSurfaceAccessAuthorizer::new(Arc::clone(&keyring)));
+        let proxy = TerminalSurfaceProxy::start(
+            address,
+            socket_path,
+            scope,
+            BTreeSet::from(["https://stg-app.ato.run".to_owned()]),
+            authorizer,
+        )
+        .unwrap();
+
+        let unauthenticated = tungstenite::connect(format!("ws://{address}/")).unwrap_err();
+        assert!(unauthenticated.to_string().contains("403"));
+
+        let mut request = format!("ws://{address}/").into_client_request().unwrap();
+        request.headers_mut().insert(
+            tungstenite::http::header::ORIGIN,
+            tungstenite::http::HeaderValue::from_static("https://stg-app.ato.run"),
+        );
+        request.headers_mut().insert(
+            tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL,
+            tungstenite::http::HeaderValue::from_static(TERMINAL_WEBSOCKET_SUBPROTOCOL),
+        );
+        request.headers_mut().insert(
+            netd::surface_websocket_auth::SURFACE_ASSERTION_HEADER,
+            tungstenite::http::HeaderValue::from_str(assertion.as_str()).unwrap(),
+        );
+        let replay_request = request.clone();
+        let (mut websocket, response) = tungstenite::connect(request).unwrap();
+        assert_eq!(
+            response
+                .headers()
+                .get(tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL)
+                .unwrap(),
+            TERMINAL_WEBSOCKET_SUBPROTOCOL
+        );
+        let ready: ato_ipc::terminal_surface::TerminalServerControl =
+            serde_json::from_slice(&websocket.read().unwrap().into_data()).unwrap();
+        assert!(matches!(
+            ready,
+            ato_ipc::terminal_surface::TerminalServerControl::Ready { .. }
+        ));
+        websocket
+            .send(tungstenite::Message::Binary(b"whoami\n".to_vec().into()))
+            .unwrap();
+        assert_eq!(websocket.read().unwrap().into_data().as_ref(), b"whoami\n");
+        websocket.close(None).unwrap();
+        upstream.join().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+
+        let replayed = tungstenite::connect(replay_request).unwrap_err();
+        assert!(replayed.to_string().contains("401"));
+        drop(proxy);
+        fs::remove_dir_all(test_root).unwrap();
+    }
 
     #[test]
     fn runner_reuses_registered_credentials_and_derives_private_state_directory() {

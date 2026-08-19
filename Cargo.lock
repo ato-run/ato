@@ -183,6 +183,7 @@ version = "0.1.0"
 dependencies = [
  "ato-adapter-api",
  "ato-computation",
+ "ato-ipc",
  "ato-objects",
  "serde",
  "serde_jcs",
@@ -230,6 +231,7 @@ dependencies = [
  "blake3",
  "clap",
  "dirs",
+ "netd",
  "predicates",
  "reqwest",
  "serde",
