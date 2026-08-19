@@ -8,6 +8,7 @@
 //! [`DesktopHost`]'s [`ProcessSupervisor`], so app exit or an explicit cancel
 //! tears down the whole CLI process tree.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -30,10 +31,24 @@ pub struct DesktopInfo {
     pub platform: String,
 }
 
+/// Failure to claim the single active portable-run slot.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum RunError {
+    #[error("a portable run is already active")]
+    AlreadyActive,
+    #[error("{0}")]
+    Supervisor(String),
+}
+
+/// Monotonic suffix for per-run log files, so one run's output can never bleed
+/// into the next.
+static RUN_LOG_SEQ: AtomicU64 = AtomicU64::new(0);
+
 /// Shell-owned process supervision state. Short-lived CLI commands run to
 /// completion; long-lived commands (portable `run`) are spawned and tracked
 /// here so that app exit or cancellation can terminate their whole process
-/// group.
+/// group. At most one portable run is active at a time; the claim is atomic so
+/// two concurrent runs can never both own the supervisor slot.
 pub struct DesktopHost {
     supervisor: Mutex<ProcessSupervisor<NativeHost>>,
     run_child: Mutex<Option<ChildId>>,
@@ -59,6 +74,45 @@ impl DesktopHost {
             .map_err(|_| "supervisor lock poisoned".to_owned())
     }
 
+    /// Atomically claim the single portable-run slot and spawn the child under
+    /// supervision. Returns [`RunError::AlreadyActive`] when a run is already
+    /// in flight; check, spawn, and slot registration happen under one lock so
+    /// two callers can never both win.
+    pub fn spawn_run(&self, spec: &SpawnSpec) -> Result<ChildId, RunError> {
+        let mut slot = self
+            .run_child
+            .lock()
+            .map_err(|_| RunError::Supervisor("run lock poisoned".to_owned()))?;
+        if slot.is_some() {
+            return Err(RunError::AlreadyActive);
+        }
+        let id = self
+            .supervisor()
+            .map_err(RunError::Supervisor)?
+            .spawn(spec)
+            .map_err(|error| RunError::Supervisor(error.to_string()))?;
+        *slot = Some(id);
+        Ok(id)
+    }
+
+    /// Whether `id` is still the owned active run.
+    pub fn is_run_owned(&self, id: ChildId) -> bool {
+        self.run_child
+            .lock()
+            .map(|slot| slot.as_ref() == Some(&id))
+            .unwrap_or(false)
+    }
+
+    /// Clear the run slot only if it is still owned by `id`. A caller that has
+    /// already been superseded or cancelled must not clear a newer run's slot.
+    pub fn finish_run(&self, id: ChildId) {
+        if let Ok(mut slot) = self.run_child.lock()
+            && slot.as_ref() == Some(&id)
+        {
+            *slot = None;
+        }
+    }
+
     /// Terminate the tracked portable-run child, if one is running.
     pub fn cancel_run(&self) -> Result<(), String> {
         let id = self
@@ -76,6 +130,9 @@ impl DesktopHost {
 
     /// Terminate every supervised process group. Idempotent.
     pub fn shutdown(&self) -> Result<(), String> {
+        if let Ok(mut slot) = self.run_child.lock() {
+            *slot = None;
+        }
         self.supervisor()?
             .shutdown()
             .map_err(|error| error.to_string())
@@ -139,35 +196,39 @@ fn run_cli(args: Vec<String>) -> Result<CompletedCommand, String> {
     .map_err(|error| error.to_string())
 }
 
+/// A unique log path for one portable run, so consecutive runs never share (or
+/// append onto) each other's output.
+fn unique_run_log_path() -> std::path::PathBuf {
+    let seq = RUN_LOG_SEQ.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir()
+        .join("ato-desktop")
+        .join(format!("run-{}-{seq}.log", std::process::id()))
+}
+
 /// Spawn a long-lived CLI command through the shell's supervisor and wait for
-/// it to exit, reading its combined output from a log file. The child remains
-/// supervisor-owned for the whole wait, so app exit or cancellation can
-/// terminate its process group mid-run.
+/// it to exit, reading its combined output from a per-run log file. The child
+/// remains supervisor-owned for the whole wait, so app exit or cancellation can
+/// terminate its process group mid-run. Only one portable run is admitted at a
+/// time — a second call fails with "already active" instead of overwriting the
+/// ownership slot.
 fn run_supervised(
     host: &DesktopHost,
     args: Vec<String>,
 ) -> Result<ComputationCommandResult, String> {
     let program = binary::resolve_ato_binary().map_err(|error| error.to_string())?;
-    let log_path = std::env::temp_dir()
-        .join("ato-desktop")
-        .join(format!("run-{}.log", std::process::id()));
+    let log_path = unique_run_log_path();
     let log_dir = log_path
         .parent()
         .ok_or_else(|| "run log path has no parent".to_owned())?;
     std::fs::create_dir_all(log_dir).map_err(|error| error.to_string())?;
     let id = host
-        .supervisor()?
-        .spawn(&SpawnSpec {
+        .spawn_run(&SpawnSpec {
             program,
             args,
             env: vec![],
             output: OutputSink::LogFile(log_path.clone()),
         })
         .map_err(|error| error.to_string())?;
-    *host
-        .run_child
-        .lock()
-        .map_err(|_| "run lock poisoned".to_owned())? = Some(id);
 
     let exit_code = loop {
         let reaped = host.supervisor()?.reap_with_status();
@@ -175,23 +236,15 @@ fn run_supervised(
             break *code;
         }
         std::thread::sleep(Duration::from_millis(50));
-        if !host
-            .run_child
-            .lock()
-            .map_err(|_| "run lock poisoned".to_owned())?
-            .as_ref()
-            .is_some_and(|current| *current == id)
-        {
+        if !host.is_run_owned(id) {
             // Cancelled: terminate() already removed ownership.
             break None;
         }
     };
-    *host
-        .run_child
-        .lock()
-        .map_err(|_| "run lock poisoned".to_owned())? = None;
+    host.finish_run(id);
 
     let output = std::fs::read(&log_path).unwrap_or_default();
+    let _ = std::fs::remove_file(&log_path);
     Ok(ComputationCommandResult {
         success: exit_code == Some(0),
         output: String::from_utf8_lossy(&output).into_owned(),
@@ -397,5 +450,46 @@ mod tests {
             }),
             vec!["run", "x.capsule"]
         );
+    }
+
+    fn sleep_spec(seconds: &str) -> SpawnSpec {
+        SpawnSpec {
+            program: ato_host_control::resolve_on_path("sleep")
+                .expect("sleep on PATH for the test"),
+            args: vec![seconds.to_owned()],
+            env: vec![],
+            output: OutputSink::Null,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_second_active_run_is_rejected() {
+        let host = DesktopHost::new();
+        let _first = host.spawn_run(&sleep_spec("30")).unwrap();
+        assert_eq!(
+            host.spawn_run(&sleep_spec("30")).unwrap_err(),
+            RunError::AlreadyActive
+        );
+        host.shutdown().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancel_releases_the_run_slot_for_the_next_run() {
+        let host = DesktopHost::new();
+        let first = host.spawn_run(&sleep_spec("30")).unwrap();
+        assert!(host.is_run_owned(first));
+        host.cancel_run().unwrap();
+        assert!(!host.is_run_owned(first));
+        // The next run can claim the now-free slot.
+        let second = host.spawn_run(&sleep_spec("0")).unwrap();
+        assert!(host.is_run_owned(second));
+        host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn run_log_paths_are_unique_per_run() {
+        assert_ne!(unique_run_log_path(), unique_run_log_path());
     }
 }
