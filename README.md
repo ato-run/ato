@@ -1,269 +1,275 @@
 # Ato
 
-**Share where a computation got to. Continue from there.**
+Ato is a computing interface that lets you save, share, and resume files,
+applications, execution state, and operation history as one common unit
+called a **Capsule**. It isn't just file sharing — the goal is to hand over
+a computation's midpoint as-is, so the recipient can pick up and continue
+from exactly there. A single file, a file with its application, or a full
+working state with history are all expressed through the same unified
+Capsule model.
 
-Ato lets you share a point in a computation so someone else can resume or
-fork from it — without sending the repository, the setup steps, or a
-description of what went wrong.
+*([日本語 README](README.ja.md))*
 
-## A concrete example
+---
 
-Alice is debugging a build.
+## Main use cases
 
-```text
-Alice's terminal
+- **Faster bug reproduction**: instead of sending repro steps and
+  screenshots, share the Workspace, Terminal, and Browser state where the
+  error is actually happening, as a Capsule. The recipient starts debugging
+  from that exact point, with no environment setup in between.
+- **Collaborating with AI agents**: not just a code diff, but the history of
+  commands run, files changed, tests, and browser actions can be Replayed
+  and inspected. A human can pick up from the working point, or hand it off
+  to another AI agent to continue.
+- **Sharing application state**: share not just the app itself, but the
+  actual state you've built up — "this far, with this model and these
+  settings." The recipient can Continue from there and branch off into their
+  own future with their own changes.
+- **Restoring and handing off dev work**: save a running dev server, the
+  Terminal's working directory, and whatever's open in the Browser, all
+  together. This works for human-to-human handoff as well as human-to-AI
+  handoff.
 
-$ git clone …
-$ npm install
-$ npm run build
-error[E0277]: the trait bound `Foo: Send` is not satisfied
-  --> src/lib.rs:42:5
-$                                        ← still sitting at the shell
-```
+*What these all have in common: the shared unit is not just "what was used,"
+but "how far the computation got."*
 
-Normally, to get help, Alice would have to send Bob:
+---
 
-- the repository and the exact commit,
-- the install/build commands,
-- a description of the error,
-- and hope Bob's machine reproduces it the same way.
+## Design principle: Everything can be a Capsule
 
-With Ato, she shares the point itself:
+Rather than building a separate sharing model for each kind of target, Ato
+projects whatever elements are involved onto one common Capsule interface.
 
-```sh
-ato encap demo@main --materialize ato.replay@1 -o build-error.capsule
-```
+| What the Capsule contains | Operations available |
+| --- | --- |
+| Data | Pass / Open |
+| Data + application | Open |
+| Data + application + execution state + history | Replay / Continue |
 
-```text
-Alice ──(build-error.capsule)──▶ Bob
-```
+*Everything can be a Capsule* doesn't mean "treat everything as the same
+kind of data." It's a design principle for handling computing targets of
+different natures through the same common operations: save, hand over,
+resume, and compose.
 
-Bob opens it and lands in the *same* place — same files, same failing build,
-same interactive shell — and keeps going:
+---
 
-```sh
-ato run build-error.capsule
-```
+## Core model
 
-```text
-Bob's terminal (after `ato run build-error.capsule`)
+### Capsule / Run / Replay / Continue
 
-$ npm run build
-error[E0277]: the trait bound `Foo: Send` is not satisfied
-  --> src/lib.rs:42:5
-$ vim src/lib.rs        ← Bob edits and keeps debugging from here
-```
-
-That shareable point — "I got here, start from here" — is what Ato calls a
-**Capsule**. In the theory, we call it a **persistent open continuation**: a
-computation point you can preserve, pass to someone else, resume, compose,
-and fork.
-
-## Why not just a VM snapshot or a Docker image?
-
-Those *can* be used to physically reproduce a point, but they aren't what
-Ato treats as identity. Ato separates two questions:
-
-```text
-Capsule            answers: where should I continue from?
-Materialization     answers: how do I get back there, on this machine?
-```
-
-A Capsule is a logical point. A Materialization — Replay, a filesystem
-reconstruction, a future process/VM checkpoint — is one physical way to
-reach it. Swapping the physical method doesn't change which point you're
-at, the same way swapping a file's storage medium doesn't change which
-file it is.
-
-## The lifecycle, in one picture
+- **Capsule**: an immutable, addressable value carved out of a computation,
+  from which you can continue starting at a given point. Multiple Runs can
+  branch off into different futures from a single Capsule.
+- **Run**: a mutable, currently-in-progress computation state resumed from a
+  Capsule. Advancing and saving a Run produces a new Capsule.
+- **Replay**: uses saved Records to replay and apply the interactions that
+  led up to a point — an operation for checking or reconstructing "how did
+  we get here."
+- **Continue**: re-realizes a Capsule's point and starts a new Run — the
+  operation for "keep going from here."
 
 ```text
-work / interaction
-
 C41 ─────▶ C42 ─────▶ C43
             │
-          seal
+           seal
             ▼
-      Capsule C42
-            │
-         resume
-            ▼
-           Run
-            │
-        continue
-            ▼
-      further work
+       Capsule C42
+          /     \
+         ▼       ▼
+       Run A    Run B
+         │       │
+        C43a    C43b
 ```
 
-`C41`, `C42`, `C43` are successive points in Alice's computation — before the
-error, at the error, and after Bob's fix. `seal` freezes `C42` as an
-immutable, addressable Capsule; `resume` turns it back into an active,
-evolving Run. See [how a Capsule gets restored](docs/concepts/materialization.md)
-for the second half of this picture — Replay today, other strategies as
-future work.
+### Core / Kernel and Adapter
 
-## Core concepts
+Ato separates a computation's logical meaning from how it's actually
+executed in the real world.
 
-Everything below uses the same example: `C41` (before the build), `C42` (the
-build error, terminal still interactive), `C43` (after Bob's fix).
+| Element | Role | What it handles |
+| --- | --- | --- |
+| **Core / Kernel** | defines a computation's identity, interaction, and evolution | Computation, Port, Protocol, Evolution, Composition |
+| **Adapter** | connects the logical computation to real-world I/O | Process, PTY, Workspace, HTTP, Binding, etc. |
 
-### Computation
-
-At `C42`, **Computation** means what can still happen from `C42` onward — not
-the list of commands that produced it. Alice's `git clone`/`npm install`
-history is not part of `C42`; what matters is that the shell is still there,
-interactive, waiting for the next command.
+Core handles what a computation *is*, how it changes, and how it composes.
+Adapters connect that to the concrete world — an OS process, a terminal, a
+filesystem, HTTP — and observe and apply interactions as Records.
 
 ```text
-C ──α──▶ C'
+               Computation
+                    │
+                Protocol
+                    │
+          ┌─────────┼─────────┐
+          ▼         ▼         ▼
+       Process     PTY     Workspace
+       Adapter   Adapter     Adapter
+          │         │         │
+          └─────────┼─────────┘
+                    ▼
+                Physical world
 ```
 
-An interaction `α` (Bob typing a command, a process producing output) evolves
-Computation `C` into its successor `C'`. In process-theory terms this is a
-*residual computation*: what remains, not what already ran. Computations
-interact through typed Ports and can be composed into another Computation.
+This separation means the Web, Terminal, AI agents, or future new runtimes
+can all be added without changing what a Capsule itself means.
 
-### Capsule
+---
+
+## Materialization
+
+Ato keeps a clean separation between "which computation point was saved" and
+"how you physically get back to that point." The former is the **Capsule**;
+the latter is the **Materialization**.
 
 ```text
-seal(C42) → Capsule C42
+                    Capsule C42
+                         │
+          ┌──────────────┼──────────────┐
+          ▼              ▼              ▼
+       Replay       Filesystem     VM checkpoint
+          │              │              │
+          └──────────────┼──────────────┘
+                         ▼
+                       ≈ C42
 ```
 
-A Capsule is a point you can save and share, not a copy of a machine. It is
-not a VM, container, snapshot, replay log, manifest, or lockfile — those may
-describe or physically realize it, but none of them defines its identity.
+The same Capsule can, in principle, be re-realized (restored) through
+different means — Replay, filesystem reconstruction, process checkpoints, VM
+snapshots. By not treating the snapshot or container itself as the Capsule's
+identity, the physical execution method stays interchangeable.
 
-### Run
+---
+
+## The computation theory behind it
+
+Ato's model is influenced by existing computation theory and systems
+research. The goal isn't to invent these ideas anew, but to recompose them
+into a systems model for saving, handing over, and continuing computation.
+
+- **λ-calculus / Continuation**: thinking not in terms of past processing,
+  but of "what remains from the current point" (residual computation /
+  continuation).
+- **π-calculus**: treating computation not as a closed process but as one
+  that interacts with other computations and the outside world through
+  Ports, and composing multiple Computations together.
+- **Kell calculus**: giving a computation an explicit boundary, and
+  passivating (suspending and extracting) a bounded process while it runs —
+  what Ato's Capture / Seal corresponds to.
+- **Reversible process calculi**: treating history as a causal relationship
+  rather than a single linear path, as a foundation for safely doing Replay,
+  Rewind, and Fork.
+- **Distributed snapshots**: a foundation for capturing a Computation made
+  up of multiple processes or hosts as one consistent point, including
+  internal communication and in-flight messages.
 
 ```text
-resume(Capsule C42) → Run
+Computation ──▶ capture / seal ──▶ Capsule ──▶ transfer ──▶ another runtime ──▶ materialize ──▶ Run ──▶ Continue
 ```
 
-When Bob opens `build-error.capsule`, resuming it creates a **Run** — the
-active, mutable evaluation whose head advances as Bob works, moving toward
-`C43`. The Capsule `C42` itself never changes; the Run is what evolves from
-it.
+---
 
-### Record
-
-A **Record** is evidence of an observed transition — e.g. that the build ran
-and produced that error. Records explain how Alice's Run reached `C42`; they
-are history, not `C42` itself, and they are how Replay reconstructs a point.
-
-### Materialization
-
-A **Materialization** is a physical way to realize a Capsule. Replay can
-reconstruct `C42` today by replaying recorded interactions. A future
-checkpoint implementation could reach the same logical point by a different
-physical path — same Capsule, different Materialization.
-
-## What Ato is not
-
-- not a VM snapshot format
-- not a container registry
-- not deterministic record/replay for every process
-- not a Git replacement
-- not a universal build system
-
-These can participate in *realizing* or *producing* a Capsule, but none of
-them is the Capsule's identity.
-
-## Try the lifecycle
+## Basic lifecycle
 
 ```sh
-# Create C0 and start a durable authored Run.
+# Create a new lineage and start recording.
 ato init demo
 
-# ...do some work...
-
-# Quiesce the Run and advance the immutable branch head.
+# Save the current point.
 ato stop demo
 
-# Resume that head, or fork a historical point onto a new branch.
+# Resume from a saved point.
 ato resume demo@main
+
+# Create a new branch from a past point.
 ato resume demo@main#42 --branch experiment
 
-# Export one point and consume it as a portable, ephemeral Run.
-ato encap demo@main --materialize ato.replay@1 -o demo.capsule
+# Export one point as a portable Capsule.
+ato encap demo@main \
+  --materialize ato.replay@1 \
+  -o demo.capsule
+
+# Run a portable Capsule.
 ato run demo.capsule
 ```
 
-`ato run` accepts portable `.capsule` files. It does not accept a local
-repository or Git URL — use `ato init` for local authoring. The manifest
-format (`capsule.toml`), Adapters, and schema versioning are covered in
-[Local lifecycle](docs/run.md), not repeated here.
+### `capsule.toml` example
 
-## What works today
+Current authoring makes the processes to start and the Adapters to use
+explicit.
 
-**Implemented in the current tree:**
+```toml
+schema = 1
 
-- immutable `ComputationObject` values and content-addressed `ComputationRef`s;
-- Kernel evolution through typed Ports and registered Protocol semantics;
-- closed Computation composition with explicit connections and internal `Tau`;
-- local immutable objects, branch heads, active Runs, Records, and lineage;
-- the `init`, `resume`, `stop`, `encap`, and portable `run` lifecycle;
-- Process, PTY, Workspace, Binding, and HTTP Adapters;
-- portable `.capsule` bundle v2 with verified object closure;
-- protocol-generic Replay as a restore-capable Materializer.
+[[process]]
+id = "app"
+command = ["python", "app.py"]
+cwd = "."
 
-**Experimental or limited:**
+[[adapter]]
+target = "app"
+use = "ato.process@1"
 
-- the lifecycle and extension APIs are still evolving on `nightly`;
-- `ato.snapshot@1` captures and verifies a workspace/filesystem
-  Materialization, but has no physical restore implementation (verify-only);
-- Adapter coverage and Contract evaluation are narrower than the full model.
+[[adapter]]
+target = "workspace"
+use = "ato.workspace@1"
 
-**Model / future work — not implemented as a general system today:**
-
-heterogeneous Materializations (process checkpoints, VM snapshots),
-contract-equivalent realization, distributed capture, cross-host resume, and
-a persistent, realization-independent Port reference. These are examples of
-where the model is heading, not present product claims.
-
-## Architecture
-
-```text
-lib/
-  computation/      identity, Ports, pure composition wiring
-  kernel/           protocol-aware, payload-opaque evolution
-  compose/          operational small-step composition
-  objects/          verified CAS, Records, lineage, bundle v2
-  ipc/              process-boundary DTOs
-
-extensions/
-  adapters/         physical interaction ↔ Protocol
-  materializers/    physical realization of a selected point
-
-apps/
-  cli/              lifecycle supervisor and product assembly
-  desktop/          separate desktop shell
+[encap]
+materializers = ["ato.replay@1"]
 ```
 
-Placement, distribution, sandboxing, providers, and VMs are realization
-concerns. They do not introduce a second semantic identity.
+---
 
-## Documentation
+## Project scope
 
-Start with the [documentation map](docs/README.md) — it routes by what
-you're trying to do (use Ato, contribute, or study the theory) instead of
-one fixed reading order. Quick links:
+**What Ato handles**
 
-- [Computation](docs/concepts/computation.md)
-- [Capsule and Run](docs/concepts/capsule.md)
-- [Materialization](docs/concepts/materialization.md)
-- [Glossary](docs/glossary-reference.md)
-- [Core architecture](docs/core-architecture.md)
-- [Accepted RFCs](docs/rfcs/README.md)
+- Computation / Capsule / Run identity
+- Capsule lineage and branches
+- Interaction via Port / Protocol
+- Composition of Computations
+- Record / Replay via Adapters
+- Portable encoding of a Capsule
+- Re-realization via Materialization
 
-## Theory / research
+**What Ato does not aim to be**
 
-The [Capsule Process Model](docs/theory/capsule-process-model.md) is an
-optional deep dive: a **design-hypothesis draft**, not a claim of novelty and
-not a statement that every realization or distribution mechanism described
-is implemented.
+- A general-purpose environment-provisioning system replacing Docker / Nix /
+  VMs
+- A full reimplementation of package managers / toolchain provisioning
+- A replacement for Git or a container registry
+- Fully deterministic Replay for every possible process
+- A universal sandbox / orchestration system
 
-## Contributing and license
+*Docker, Nix, VMs, existing runtimes, and AI agents are used to prepare the
+computing environment; Ato's layer is what makes the computation that runs
+on top of it recordable, savable, branchable, transferable, and
+continuable.*
 
-Read [AGENTS.md](AGENTS.md) before changing architecture or implementation.
-The Rust packages currently declare `Apache-2.0 OR MPL-2.0` in their package
-metadata.
+---
+
+## Current implementation status
+
+**Implemented**
+
+- Immutable `ComputationObject`s and content-addressed `ComputationRef`s
+- Computation evolution via Port / Protocol
+- Computation composition
+- Capsule lineage / branch / Run / Record
+- CLI commands (`init`, `stop`, `resume`, `encap`, `run`)
+- Various Adapters (Process, PTY, Workspace, HTTP, Binding)
+- Portable `.capsule` bundle v2
+- Protocol-generic Replay Materializer
+
+**Experimental / in development**
+
+- Physical restore of filesystem/workspace snapshots
+- Heterogeneous Materializations, including process checkpoints and VM
+  snapshots
+- General-purpose Resume across different hosts
+- Distributed Capture across multiple hosts
+- Contract-equivalent realization across different Materializations
+
+Ato is currently an experimental project. Not every part of the model is
+complete; the current focus is on validating, step by step, whether
+heterogeneous Computations can be handled through one unified lifecycle.
