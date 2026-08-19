@@ -24,6 +24,7 @@ pub use protocol::{
     BrowserEvent, BrowserProtocolError, KeyboardKind, Modifiers, PointerKind, PointerType,
     decode_event, encode_event,
 };
+pub use transport::BrowserRuntimeBootstrap;
 
 pub const BROWSER_ADAPTER_ID: &str = "ato.browser@1";
 pub const BROWSER_PROTOCOL_ID: &str = "ato.browser@1";

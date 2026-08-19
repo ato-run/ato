@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Run Browser Adapter acceptance with a real Chrome process over raw CDP.
 
-This is staging/operator tooling, not product runtime. It deliberately avoids
-Playwright and drives trusted physical input through Chrome's CDP Input domain.
+The default mode is the original operator harness.  ``--browser-host`` instead
+starts Ato's host-private Browser Host, which reads runtime discovery and
+performs the isolated-world injection itself.  Both modes drive trusted input
+through Chrome's CDP Input domain; neither uses Playwright.
 """
 
 from __future__ import annotations
@@ -183,15 +185,60 @@ class ChromeSession:
         origin: str,
         delay_ack: bool,
         disconnect_on_apply: bool = False,
+        browser_host: tuple[Path, Path] | None = None,
     ):
         self.closed = False
         self.cdp: Cdp | None = None
         self.browser_context_id: str | None = None
+        self.browser_host = browser_host is not None
         self.work_dir = work_dir
+        self.log_file = (work_dir / "chrome.log").open("wb")
+        if browser_host is not None:
+            ato, runtime_dir = browser_host
+            self.profile = runtime_dir / "browser-host-profile"
+            self.process = subprocess.Popen(
+                [
+                    str(ato),
+                    "__browser-host",
+                    "--runtime-dir",
+                    str(runtime_dir),
+                    "--target-url",
+                    origin,
+                    "--chrome",
+                    str(chrome_binary),
+                    "--headless",
+                ],
+                stdout=self.log_file,
+                stderr=subprocess.STDOUT,
+            )
+            atexit.register(self.close)
+            self.debug_port = wait_for_browser_host_debug_port(self.profile)
+            version = wait_for_json(f"http://127.0.0.1:{self.debug_port}/json/version")
+            self.version = version["Browser"]
+            self.cdp = Cdp(version["webSocketDebuggerUrl"])
+            target = wait_until(
+                lambda: next(
+                    (
+                        value
+                        for value in self.cdp.call("Target.getTargets")["targetInfos"]
+                        if value.get("type") == "page"
+                        and value.get("url", "").startswith(origin)
+                    ),
+                    None,
+                )
+            )
+            attached = self.cdp.call(
+                "Target.attachToTarget", {"targetId": target["targetId"], "flatten": True}
+            )
+            self.session_id = attached["sessionId"]
+            self.cdp.call("Runtime.enable", session_id=self.session_id)
+            self.cdp.call("Page.enable", session_id=self.session_id)
+            self.wait_document_ready()
+            return
+
         self.profile = work_dir / "profile"
         self.profile.mkdir(parents=True)
         self.debug_port = unused_port()
-        self.log_file = (work_dir / "chrome.log").open("wb")
         self.process = subprocess.Popen(
             [
                 str(chrome_binary),
@@ -321,7 +368,7 @@ class ChromeSession:
         atexit.unregister(self.close)
         if self.cdp is not None:
             try:
-                if self.browser_context_id is not None:
+                if self.browser_context_id is not None and not self.browser_host:
                     self.cdp.call(
                         "Target.disposeBrowserContext",
                         {"browserContextId": self.browser_context_id},
@@ -346,6 +393,17 @@ def unused_port() -> int:
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         return listener.getsockname()[1]
+
+
+def wait_for_browser_host_debug_port(profile: Path) -> int:
+    def read() -> int | None:
+        try:
+            value = (profile / "DevToolsActivePort").read_text().splitlines()[0]
+            return int(value)
+        except (FileNotFoundError, IndexError, ValueError):
+            return None
+
+    return wait_until(read)
 
 
 def wait_until(predicate, timeout: float = TIMEOUT_SECONDS):
@@ -447,6 +505,11 @@ def main() -> int:
     parser.add_argument("--repository", type=Path, required=True)
     parser.add_argument("--work-root", type=Path, required=True)
     parser.add_argument("--receipt", type=Path, required=True)
+    parser.add_argument(
+        "--browser-host",
+        action="store_true",
+        help="exercise the internal Browser Host instead of operator injection",
+    )
     args = parser.parse_args()
     work_root = args.work_root.resolve()
     if work_root.exists():
@@ -569,6 +632,7 @@ materializers = ["ato.replay@1"]
         author_bootstrap,
         origin,
         False,
+        browser_host=(args.ato, author_runtime) if args.browser_host else None,
     )
     author_context = author_chrome.isolated_context()
     wait_until(
@@ -581,8 +645,11 @@ materializers = ["ato.replay@1"]
     wait_until(lambda: server_state(port).get("count") == 1)
     author_chrome.click("#increment")
     wait_until(lambda: server_state(port).get("count") == 2)
-    author_chrome.close()
+    if not args.browser_host:
+        author_chrome.close()
     run_ato(args.ato, ["stop", str(project)], author_home, author_runtime)
+    if args.browser_host:
+        author_chrome.close()
     atexit.unregister(stop_author)
     if list(author_runtime.glob("browser-*.json")):
         raise AcceptanceError("author runtime discovery was not cleaned")
@@ -637,18 +704,20 @@ materializers = ["ato.replay@1"]
         recipient_bootstrap,
         origin,
         True,
+        browser_host=(args.ato, recipient_runtime) if args.browser_host else None,
     )
     recipient_context = recipient_chrome.isolated_context()
-    wait_until(
-        lambda: recipient_chrome.evaluate(
-            "globalThis.__ATO_BROWSER_LIFECYCLE__", recipient_context
+    if not args.browser_host:
+        wait_until(
+            lambda: recipient_chrome.evaluate(
+                "globalThis.__ATO_BROWSER_LIFECYCLE__", recipient_context
+            )
+            == "restoring"
         )
-        == "restoring"
-    )
-    recipient_chrome.click("#increment")
-    time.sleep(0.1)
-    if server_state(port).get("count") != 0:
-        raise AcceptanceError("real Chrome input reached the app during Replay")
+        recipient_chrome.click("#increment")
+        time.sleep(0.1)
+        if server_state(port).get("count") != 0:
+            raise AcceptanceError("real Chrome input reached the app during Replay")
     wait_until(
         lambda: recipient_chrome.evaluate(
             "globalThis.__ATO_BROWSER_LIFECYCLE__", recipient_context
@@ -679,9 +748,12 @@ materializers = ["ato.replay@1"]
 
     final_state = wait_until(continued_state)
     recipient_chrome.evaluate("fetch('/__shutdown')")
-    recipient_chrome.close()
+    if not args.browser_host:
+        recipient_chrome.close()
     stdout, stderr = recipient_process.communicate(timeout=TIMEOUT_SECONDS)
     atexit.unregister(stop_child)
+    if args.browser_host:
+        recipient_chrome.close()
     if recipient_process.returncode != 0:
         raise AcceptanceError(f"portable Run failed: {stderr}")
     wait_until(lambda: not list(recipient_runtime.glob("browser-*.json")))
@@ -805,6 +877,7 @@ materializers = ["ato.replay@1"]
         mixed_bootstrap,
         mixed_origin,
         False,
+        browser_host=(args.ato, mixed_runtime) if args.browser_host else None,
     )
     mixed_context = mixed_chrome.isolated_context()
     wait_until(
@@ -821,9 +894,12 @@ materializers = ["ato.replay@1"]
             else None
         )
     )
-    mixed_chrome.close()
+    if not args.browser_host:
+        mixed_chrome.close()
     run_ato(args.ato, ["stop", str(mixed_project)], mixed_home, mixed_runtime)
     atexit.unregister(stop_mixed)
+    if args.browser_host:
+        mixed_chrome.close()
     mixed_records = [
         json.loads(path.read_text())
         for path in sorted((mixed_project / ".capsule/records/main").glob("*.json"))
@@ -891,6 +967,10 @@ materializers = ["ato.replay@1"]
         origin,
         False,
         True,
+        # The failure injection modifies the test Bridge source. Browser Host
+        # deliberately never accepts injected application/Bridge source, so
+        # retain the isolated operator fixture for this negative path.
+        browser_host=None,
     )
     failure_context = failure_chrome.isolated_context()
     wait_until(
@@ -925,6 +1005,7 @@ materializers = ["ato.replay@1"]
         ).stdout.strip(),
         "runner": socket.gethostname(),
         "chrome": recipient_chrome.version,
+        "browser_host": args.browser_host,
         "origin": origin,
         "initial_computation": initial_head,
         "sealed_computation": final_head,
@@ -955,7 +1036,12 @@ materializers = ["ato.replay@1"]
             "credential_absent_from_bundle": True,
             "credential_absent_from_page_realm": True,
             "runtime_discovery_cleanup": True,
-            "real_input_during_replay_blocked": True,
+            "real_input_during_replay_blocked": not args.browser_host,
+            "replay_input_blocking_coverage": (
+                "default operator-injection mode"
+                if args.browser_host
+                else "this run"
+            ),
             "fresh_chrome_process": True,
             "browser_http_double_effect": "absent; mixed descriptors fail closed",
         },

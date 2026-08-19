@@ -3,6 +3,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 mod authoring;
+mod browser_host;
 mod supervisor;
 
 use std::collections::BTreeMap;
@@ -70,6 +71,9 @@ enum Commands {
         token: String,
         descriptor: Option<String>,
     },
+    /// Internal host-side Chrome/CDP bridge for Browser Adapter delivery.
+    #[command(name = "__browser-host", hide = true)]
+    BrowserHost(BrowserHostArgs),
 }
 
 #[derive(Debug, Args)]
@@ -106,6 +110,22 @@ struct RunArgs {
     bindings: Vec<(String, String)>,
 }
 
+#[derive(Debug, Args)]
+struct BrowserHostArgs {
+    /// Absolute host-private directory containing Browser Adapter discovery.
+    #[arg(long)]
+    runtime_dir: PathBuf,
+    /// Browser page to open. Its origin must exactly match Adapter discovery.
+    #[arg(long)]
+    target_url: String,
+    /// Absolute path to the Chrome/Chromium executable owned by the Runner.
+    #[arg(long)]
+    chrome: PathBuf,
+    /// Run Chrome without a display. Intended for Runner smoke tests only.
+    #[arg(long)]
+    headless: bool,
+}
+
 pub fn run() -> Result<()> {
     match Cli::parse().command {
         Commands::Init(args) => init(args),
@@ -125,6 +145,12 @@ pub fn run() -> Result<()> {
             &ComputationRef::parse(head)?,
             &token,
             descriptor.map(ContentRef::parse).transpose()?.as_ref(),
+        ),
+        Commands::BrowserHost(args) => browser_host::run(
+            &args.runtime_dir,
+            &args.target_url,
+            &args.chrome,
+            args.headless,
         ),
     }
 }

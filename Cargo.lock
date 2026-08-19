@@ -233,6 +233,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "toml",
+ "tungstenite",
+ "url",
  "windows",
 ]
 
