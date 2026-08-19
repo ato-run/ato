@@ -213,7 +213,9 @@ class ChromeSession:
                 stderr=subprocess.STDOUT,
             )
             atexit.register(self.close)
-            self.debug_port = wait_for_browser_host_debug_port(self.profile)
+            self.debug_port = wait_for_browser_host_debug_port(
+                self.profile, self.process, self.log_file
+            )
             version = wait_for_json(f"http://127.0.0.1:{self.debug_port}/json/version")
             self.version = version["Browser"]
             self.cdp = Cdp(version["webSocketDebuggerUrl"])
@@ -401,15 +403,32 @@ def unused_port() -> int:
         return listener.getsockname()[1]
 
 
-def wait_for_browser_host_debug_port(profile: Path) -> int:
-    def read() -> int | None:
+def wait_for_browser_host_debug_port(
+    profile: Path, process: subprocess.Popen, log_file
+) -> int:
+    deadline = time.monotonic() + TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
         try:
             value = (profile / "DevToolsActivePort").read_text().splitlines()[0]
             return int(value)
         except (FileNotFoundError, IndexError, ValueError):
-            return None
+            if process.poll() is not None:
+                raise browser_host_start_error(process, log_file)
+        time.sleep(0.05)
 
-    return wait_until(read)
+    raise browser_host_start_error(process, log_file)
+
+
+def browser_host_start_error(process: subprocess.Popen, log_file) -> AcceptanceError:
+    log_file.flush()
+    try:
+        log = Path(log_file.name).read_text(errors="replace")[-4000:]
+    except OSError:
+        log = "<Browser Host log unavailable>"
+    return AcceptanceError(
+        "Browser Host did not expose DevToolsActivePort "
+        f"(exit={process.poll()}): {log or '<no Browser Host output>'}"
+    )
 
 
 def wait_until(predicate, timeout: float = TIMEOUT_SECONDS):
