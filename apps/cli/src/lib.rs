@@ -26,10 +26,13 @@ use ato_adapter_process::ProcessLifecycleAdapter;
 use ato_adapter_pty::PtyAdapter;
 use ato_adapter_workspace::{WorkspaceAdapter, restore_workspace, workspace_snapshot_file_count};
 use ato_compose::{
-    COMPOSE_SEMANTICS_ID, ComposeReferences, MAX_COMPOSITE_RESIDUAL_BYTES,
-    decode_composite_residual,
+    COMPOSE_SEMANTICS_ID, ComposeReferences, CompositeResidual, Endpoint,
+    MAX_COMPOSITE_RESIDUAL_BYTES, decode_composite_residual, encode_composite_residual,
 };
-use ato_computation::{ComputationRef, ContentRef};
+use ato_computation::{
+    ComputationObject, ComputationRef, ContentRef, NodeId, PortId, SemanticsId, computation_ref,
+    encode_computation_object,
+};
 use ato_materializer_api::{
     Compatibility, MaterializerContext, MaterializerRegistry, RealizationVerification,
     RestoreCapability,
@@ -39,9 +42,10 @@ use ato_materializer_replay::{
 };
 use ato_materializer_snapshot::{SnapshotMaterializer, SnapshotReferences};
 use ato_objects::{
-    BranchOrigin, BundleMaterialization, CapsuleSelector, LocalCapsuleRepository, RecordId,
-    ReferenceRegistry, decode_bundle, encode_bundle, export_bundle_with_materializations,
-    read_exact_object, resolve_computation, verify_bundle,
+    BranchOrigin, BundleMaterialization, CapsuleSelector, LocalCapsuleRepository,
+    MemoryObjectStore, ObjectStore, RecordId, ReferenceRegistry, decode_bundle, encode_bundle,
+    export_bundle, export_bundle_with_materializations, import_bundle, read_exact_object,
+    resolve_computation, verify_bundle,
 };
 use ato_runtime::{
     PortableRuntimeFactory, PortableSession, PortableSessionContext, PortableSessionError,
@@ -269,6 +273,17 @@ struct BundleArgs {
 enum BundleCommands {
     Verify(BundleVerifyArgs),
     ValidateQueue(BundleValidateQueueArgs),
+    Compose(BundleComposeArgs),
+}
+
+#[derive(Debug, Args)]
+struct BundleComposeArgs {
+    #[arg(long = "input", required = true, num_args = 2..=8)]
+    inputs: Vec<PathBuf>,
+    #[arg(short, long)]
+    output: PathBuf,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -306,6 +321,7 @@ pub fn run() -> Result<()> {
         Commands::Bundle(args) => match args.command {
             BundleCommands::Verify(args) => verify_bundle_command(args),
             BundleCommands::ValidateQueue(args) => validate_bundle_queue(args),
+            BundleCommands::Compose(args) => compose_bundle_command(args),
         },
         Commands::HostedSession(args) => hosted_session(args),
         Commands::Runner(args) => network_runner::run(args),
@@ -903,6 +919,76 @@ fn verify_bundle_command(args: BundleVerifyArgs) -> Result<()> {
             bail!("bundle verification failed")
         }
     }
+}
+
+fn compose_bundle_command(args: BundleComposeArgs) -> Result<()> {
+    if !args.json {
+        bail!("internal bundle composition requires --json");
+    }
+    if args.output.exists() {
+        bail!("compose output already exists: {}", args.output.display());
+    }
+    let inputs = args
+        .inputs
+        .iter()
+        .map(fs::read)
+        .collect::<std::io::Result<Vec<_>>>()?;
+    let (root, bytes) = compose_portable_bundles(&inputs)?;
+    atomic_write(&args.output, &bytes)?;
+    println!(
+        "{}",
+        serde_json::to_string(&serde_json::json!({
+            "root_computation_ref": root,
+            "input_count": inputs.len(),
+        }))?
+    );
+    Ok(())
+}
+
+fn compose_portable_bundles(inputs: &[Vec<u8>]) -> Result<(String, Vec<u8>)> {
+    if !(2..=8).contains(&inputs.len()) {
+        bail!("Compose requires between 2 and 8 input Capsules");
+    }
+    let references = reference_registry()?;
+    let objects = MemoryObjectStore::default();
+    let mut nodes = BTreeMap::new();
+    let mut exports = BTreeMap::new();
+    let mut boundary = BTreeMap::new();
+    for (index, bytes) in inputs.iter().enumerate() {
+        let bundle = decode_bundle(bytes)?;
+        let root = import_bundle(&bundle, &objects, &references)?;
+        let node = NodeId::parse(format!("capsule{:02}", index + 1))?;
+        let computation = resolve_computation(&objects, &root)?;
+        for (port_index, (port_id, port)) in computation.object().boundary.iter().enumerate() {
+            let exported = PortId::parse(format!("c{:02}.p{:03}", index + 1, port_index + 1))?;
+            boundary.insert(exported.clone(), port.clone());
+            exports.insert(
+                exported,
+                Endpoint {
+                    node: node.clone(),
+                    port: port_id.clone(),
+                },
+            );
+        }
+        nodes.insert(node, root);
+    }
+    let residual = objects.put(&encode_composite_residual(&CompositeResidual {
+        nodes,
+        connections: Vec::new(),
+        exports,
+    })?)?;
+    let computation = ComputationObject {
+        semantics: SemanticsId::parse(COMPOSE_SEMANTICS_ID)?,
+        boundary,
+        residual,
+    };
+    let root = computation_ref(&computation)?;
+    objects.insert(
+        root.content_ref(),
+        &encode_computation_object(&computation)?,
+    )?;
+    let bundle = export_bundle(&root, &objects, &references)?;
+    Ok((root.to_string(), encode_bundle(&bundle)?))
 }
 
 fn build_bundle_verification_report(
@@ -1949,6 +2035,31 @@ mod tests {
                 .to_string()
                 .contains("maximum node count")
         );
+    }
+
+    #[test]
+    fn portable_compose_uses_canonical_compose_semantics_without_mutating_inputs() {
+        let objects = MemoryObjectStore::default();
+        let child = composite(&objects, BTreeMap::new());
+        let references = reference_registry().unwrap();
+        let input = encode_bundle(&export_bundle(&child, &objects, &references).unwrap()).unwrap();
+        let input_before = input.clone();
+        let (root, bytes) = compose_portable_bundles(&[input.clone(), input.clone()]).unwrap();
+        let verified = verify_bundle(&decode_bundle(&bytes).unwrap(), &references).unwrap();
+        assert_eq!(verified.root().to_string(), root);
+        assert_eq!(
+            resolve_computation(verified.objects(), verified.root())
+                .unwrap()
+                .object()
+                .semantics
+                .as_str(),
+            COMPOSE_SEMANTICS_ID
+        );
+        let structure = build_structure_projection(verified.objects(), verified.root()).unwrap();
+        assert_eq!(structure.children.len(), 2);
+        assert_eq!(structure.children[0].label.as_deref(), Some("capsule01"));
+        assert_eq!(structure.children[1].label.as_deref(), Some("capsule02"));
+        assert_eq!(input, input_before, "input bytes remain immutable");
     }
 
     #[test]

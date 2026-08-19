@@ -102,6 +102,18 @@ struct PortableLeaseCommand {
     expected_root_computation_ref: String,
     exported_port_id: String,
     session_surface: SessionSurface,
+    #[serde(default)]
+    compose_inputs: Vec<ComposeInput>,
+    #[serde(default)]
+    output_upload_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ComposeInput {
+    bundle_id: String,
+    transport_digest: String,
+    root_computation_ref: String,
+    download_url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -352,7 +364,11 @@ fn heartbeat(client: &Client, base: &str, args: &ResolvedServeArgs) -> Result<()
     .json(&serde_json::json!({
         "capabilities": [PROCESS_EXECUTION_ABI_CAPABILITY, UNTRUSTED_ISOLATION_CAPABILITY],
         "evaluator": { "implementation": "linux-bwrap", "policy": "untrusted-v1" },
-        "supported_lease_kinds": ["portable_capsule_v2", "portable_capsule_replay_v1"],
+        "supported_lease_kinds": [
+            "portable_capsule_v2",
+            "portable_capsule_replay_v1",
+            "portable_capsule_compose_v1"
+        ],
         "supported_session_surfaces": [
             {
                 "kind": "web",
@@ -405,6 +421,9 @@ fn execute_lease_unix(
     evaluator: &UntrustedProcessEvaluator,
     lease: &ClaimedLease,
 ) -> Result<()> {
+    if lease.command.kind == "portable_capsule_compose_v1" {
+        return execute_compose_lease(client, base, args, lease);
+    }
     if lease.command.kind == "portable_capsule_replay_v1" {
         return execute_replay_lease_unix(client, base, args, evaluator, lease);
     }
@@ -541,6 +560,98 @@ fn execute_lease_unix(
         }
         std::thread::sleep(Duration::from_secs(1));
     }
+}
+
+#[cfg(unix)]
+fn execute_compose_lease(
+    client: &Client,
+    base: &str,
+    args: &ResolvedServeArgs,
+    lease: &ClaimedLease,
+) -> Result<()> {
+    if !(2..=8).contains(&lease.command.compose_inputs.len())
+        || !lease
+            .command
+            .output_upload_url
+            .starts_with(&format!("/v1/runner-leases/{}/compose-output", lease.id))
+    {
+        bail!("portable Compose lease carries an invalid bounded command");
+    }
+    report_status(
+        client,
+        base,
+        &args.runner_token,
+        &lease.id,
+        StatusReport {
+            status: "preparing",
+            execution_id: None,
+            error: None,
+        },
+    )?;
+    let repository = args.state_dir.join("compose-jobs").join(&lease.run_id);
+    fs::create_dir_all(&repository)?;
+    let result = (|| {
+        let mut inputs = Vec::with_capacity(lease.command.compose_inputs.len());
+        for (index, input) in lease.command.compose_inputs.iter().enumerate() {
+            if !input.bundle_id.starts_with("bnd_")
+                || !input.root_computation_ref.starts_with("blake3:")
+                || !input
+                    .download_url
+                    .starts_with(&format!("/v1/runner-leases/{}/compose-inputs/", lease.id))
+            {
+                bail!("portable Compose input is invalid");
+            }
+            let bytes = authorized(
+                client.get(format!("{base}{}", input.download_url)),
+                &args.runner_token,
+            )
+            .send()?
+            .error_for_status()?
+            .bytes()?;
+            let actual_digest = format!("sha256:{:x}", sha2::Sha256::digest(&bytes));
+            if actual_digest != input.transport_digest {
+                bail!("portable Compose input transport digest mismatch");
+            }
+            let path = repository.join(format!("input-{index:02}.capsule"));
+            fs::write(&path, &bytes)?;
+            inputs.push(path);
+        }
+        let output = repository.join("composed.capsule");
+        let mut command = Command::new(std::env::current_exe()?);
+        command.arg("__bundle").arg("compose").arg("--input");
+        command
+            .args(&inputs)
+            .arg("--output")
+            .arg(&output)
+            .arg("--json");
+        command.env_clear();
+        let status = command.status()?;
+        if !status.success() {
+            bail!("canonical ato-compose worker rejected the inputs");
+        }
+        authorized(
+            client.put(format!("{base}{}", lease.command.output_upload_url)),
+            &args.runner_token,
+        )
+        .header("content-type", "application/vnd.ato.capsule")
+        .body(fs::read(&output)?)
+        .send()?
+        .error_for_status()?;
+        let execution_id = format!("compose:{}", lease.run_id);
+        report_status(
+            client,
+            base,
+            &args.runner_token,
+            &lease.id,
+            StatusReport {
+                status: "ready",
+                execution_id: Some(&execution_id),
+                error: None,
+            },
+        )
+    })();
+    let _ = fs::remove_dir_all(&repository);
+    result
 }
 
 #[cfg(unix)]
