@@ -16,6 +16,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "externalBin": ["bin/ato"],
     "icon": [
       "../desktop/assets/icon.png",
       "../desktop/assets/AppIcon.icns",
