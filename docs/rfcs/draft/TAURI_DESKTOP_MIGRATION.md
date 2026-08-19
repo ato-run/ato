@@ -112,7 +112,7 @@ The public CLI keeps exactly five operations (`init`, `resume`, `stop`, `encap`,
 command for active-Run inspection:
 
 ```text
-ato __desktop inspect <project> --json
+ato __desktop inspect <project>
 ```
 
 The command prints a single JSON object to stdout; diagnostics go to stderr.
