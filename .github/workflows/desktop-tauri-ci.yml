@@ -61,13 +61,18 @@ jobs:
         with:
           key: tauri-${{ runner.os }}
 
-      # The Tauri shell resolves the CLI at runtime; build the CLI release so a
-      # future bundle step can stage it as a sibling and to prove it compiles.
+      # The Tauri shell bundles the CLI as a sidecar (tauri.conf.json
+      # `bundle.externalBin`): the root release `ato` binary is staged by
+      # apps/desktop-tauri/build.rs into `bin/ato-<target-triple>`, which
+      # tauri-build then places next to the shell executable inside the .app.
+      # The release build hard-fails without it, so build the CLI first.
       - name: Build ato CLI (release)
         run: cargo build --release -p ato-cli
 
+      # Pin the exact tauri-cli version used to verify the build locally.
+      # A bare `--version 2` is not a valid cargo install requirement.
       - name: Install tauri-cli
-        run: cargo install tauri-cli --version 2 --locked
+        run: cargo install tauri-cli --version 2.5.0 --locked
 
       - name: Format check
         working-directory: apps/desktop-tauri
