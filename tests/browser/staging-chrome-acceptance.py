@@ -409,7 +409,7 @@ def wait_for_browser_host_debug_port(
     deadline = time.monotonic() + TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         try:
-            value = (profile / "DevToolsActivePort").read_text().splitlines()[0]
+            value = (profile / "browser-host-cdp-port").read_text().splitlines()[0]
             return int(value)
         except (FileNotFoundError, IndexError, ValueError):
             if process.poll() is not None:
@@ -426,7 +426,7 @@ def browser_host_start_error(process: subprocess.Popen, log_file) -> AcceptanceE
     except OSError:
         log = "<Browser Host log unavailable>"
     return AcceptanceError(
-        "Browser Host did not expose DevToolsActivePort "
+        "Browser Host did not expose its runtime-only CDP port "
         f"(exit={process.poll()}): {log or '<no Browser Host output>'}"
     )
 

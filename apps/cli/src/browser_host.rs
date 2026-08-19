@@ -26,6 +26,7 @@ const CDP_WAIT: Duration = Duration::from_secs(15);
 const NAVIGATION_WAIT: Duration = Duration::from_secs(15);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const PROFILE_DIR_NAME: &str = "browser-host-profile";
+const CDP_PORT_FILE_NAME: &str = "browser-host-cdp-port";
 const BRIDGE_SOURCE: &str =
     include_str!("../../../extensions/adapters/browser/bridge/browser-bridge.js");
 
@@ -56,10 +57,11 @@ pub(crate) fn run(
             return Err(error);
         }
     };
-    let result = attach_bridge(&profile, target_url, &bootstrap).and_then(|_cdp| {
-        wait_for_run_end(&bootstrap_path, &mut chrome_process)?;
-        Ok(())
-    });
+    let result = attach_bridge(&profile, target_url, &bootstrap, chrome_process.debug_port)
+        .and_then(|_cdp| {
+            wait_for_run_end(&bootstrap_path, &mut chrome_process)?;
+            Ok(())
+        });
     let cleanup = chrome_process
         .cleanup()
         .and_then(|_| fs::remove_dir_all(&profile).context("remove Browser Host private profile"));
@@ -156,6 +158,7 @@ fn validate_target(target_url: &str, expected_origin: &str) -> Result<()> {
 
 struct ChromeProcess {
     child: Child,
+    debug_port: u16,
 }
 
 impl ChromeProcess {
@@ -183,7 +186,7 @@ impl ChromeProcess {
                 .arg("--disable-dev-shm-usage");
         }
         let child = command.spawn().context("launch Browser Host Chrome")?;
-        Ok(Self { child })
+        Ok(Self { child, debug_port })
     }
 
     fn cleanup(&mut self) -> Result<()> {
@@ -236,9 +239,9 @@ fn attach_bridge(
     profile: &Path,
     target_url: &str,
     bootstrap: &BrowserRuntimeBootstrap,
+    debug_port: u16,
 ) -> Result<Cdp> {
-    let port = wait_for_debug_port(profile, CDP_WAIT)?;
-    let ws_url = debugger_websocket_url(port)?;
+    let ws_url = wait_for_debugger_websocket_url(debug_port, CDP_WAIT)?;
     let websocket = connect_cdp(&ws_url)?;
     let mut cdp = Cdp {
         websocket,
@@ -267,11 +270,29 @@ fn attach_bridge(
         "Page.navigate",
         json!({"url": target_url}),
         Some(&session_id),
-    )?;
-    if let Some(error) = navigation.get("errorText").and_then(Value::as_str) {
-        bail!("Browser Host page navigation failed: {error}");
-    }
+    );
+    let mut cdp = match navigation {
+        Ok(navigation) => {
+            if let Some(error) = navigation.get("errorText").and_then(Value::as_str) {
+                bail!("Browser Host page navigation failed: {error}");
+            }
+            cdp
+        }
+        Err(error) => {
+            // Some Chrome builds accept Page.navigate but delay its command
+            // response while the new document initializes. Reconnect only
+            // after the request was written, then independently confirm the
+            // exact target origin below. No unverified navigation succeeds.
+            let websocket = connect_cdp(&ws_url)
+                .with_context(|| format!("recover Browser Host CDP after navigation: {error}"))?;
+            Cdp {
+                websocket,
+                next_id: 1,
+            }
+        }
+    };
     wait_for_target_origin(&mut cdp, &target_id, target_url)?;
+    write_cdp_port(profile, debug_port)?;
     Ok(cdp)
 }
 
@@ -384,14 +405,11 @@ impl Cdp {
     }
 }
 
-fn wait_for_debug_port(profile: &Path, timeout: Duration) -> Result<u16> {
-    let path = profile.join("DevToolsActivePort");
+fn wait_for_debugger_websocket_url(port: u16, timeout: Duration) -> Result<String> {
     let deadline = Instant::now() + timeout;
     loop {
-        if let Ok(value) = fs::read_to_string(&path)
-            && let Some(port) = parse_debug_port(&value)
-        {
-            return Ok(port);
+        if let Ok(url) = debugger_websocket_url(port) {
+            return Ok(url);
         }
         if Instant::now() >= deadline {
             bail!("timed out waiting for Browser Host Chrome CDP");
@@ -400,8 +418,17 @@ fn wait_for_debug_port(profile: &Path, timeout: Duration) -> Result<u16> {
     }
 }
 
-fn parse_debug_port(value: &str) -> Option<u16> {
-    value.lines().next()?.trim().parse().ok()
+fn write_cdp_port(profile: &Path, port: u16) -> Result<()> {
+    let path = profile.join(CDP_PORT_FILE_NAME);
+    fs::write(&path, port.to_string()).context("write Browser Host CDP port")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .context("restrict Browser Host CDP port")?;
+    }
+    Ok(())
 }
 
 fn debugger_websocket_url(port: u16) -> Result<String> {
@@ -495,13 +522,6 @@ mod tests {
         validate_target("https://example.test/app", "https://example.test").expect("same origin");
         assert!(validate_target("https://other.test/", "https://example.test").is_err());
         assert!(validate_target("http://example.test/", "https://example.test").is_err());
-    }
-
-    #[test]
-    fn cdp_port_file_requires_a_valid_port() {
-        assert_eq!(parse_debug_port("9222\n/devtools/browser/id\n"), Some(9222));
-        assert_eq!(parse_debug_port("not-a-port\n"), None);
-        assert_eq!(parse_debug_port("\n"), None);
     }
 
     #[test]
