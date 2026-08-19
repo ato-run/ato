@@ -85,6 +85,20 @@ to connect, the Adapter's existing deadline and fail-closed behavior remain
 authoritative.  If the Host exits, the Bridge disconnect is observed by the
 Adapter and Replay cannot claim successful restoration.
 
+## Validation boundary
+
+The Host is exercised by `tests/browser/staging-chrome-acceptance.py
+--browser-host` and is a required Linux Browser CI case. A host-local staging
+acceptance on `ubuntu-sugamo` at commit `a8bc00f9` used Chrome
+`150.0.7871.186` and verified a fresh-process record, portable replay, and
+continued re-encapsulation against an independent server-state and DOM
+contract. The same run confirmed bundle/page-realm credential isolation,
+Browser-plus-HTTP replay rejection, and a fail-closed Bridge-disconnect path.
+
+It does not prove the PWA's public delivery surface. That requires a Runner to
+provision the Host Chrome behind the existing authenticated Pixel Stream/RFB
+surface; no PWA, API, or ComfyUI-specific implementation is introduced here.
+
 ## Non-goals
 
 This RFC does not add a Browser-specific Materializer, application state

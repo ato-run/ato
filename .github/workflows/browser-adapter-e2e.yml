@@ -50,3 +50,12 @@ jobs:
         working-directory: tests/browser
         env:
           ATO_BIN: ${{ github.workspace }}/target/debug/ato
+      - run: |
+          chrome="$(node -e \"console.log(require('./tests/browser/node_modules/@playwright/test').chromium.executablePath())\")"
+          python3 tests/browser/staging-chrome-acceptance.py \
+            --ato "${{ github.workspace }}/target/debug/ato" \
+            --chrome "$chrome" \
+            --repository "${{ github.workspace }}" \
+            --work-root "${{ github.workspace }}/.tmp/browser-host-acceptance" \
+            --receipt "${{ github.workspace }}/.tmp/browser-host-acceptance/receipt.json" \
+            --browser-host

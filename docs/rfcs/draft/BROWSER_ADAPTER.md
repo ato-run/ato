@@ -138,6 +138,17 @@ real Chrome process with an isolated, disposable profile and does not use
 Playwright. This remains operator/test tooling: Chrome/CDP is not linked into
 the Adapter, Protocol, Materializer, Capsule identity, or product runtime.
 
+`ato __browser-host` is the runtime-owned implementation of this injection
+boundary. It reads only host-private discovery, starts the disposable Chrome,
+and injects the same Bridge in Chrome's named isolated world. The Linux Browser
+CI job runs `staging-chrome-acceptance.py --browser-host`, which proves this
+Host path independently from the legacy raw-injection harness. The staging
+host-local acceptance at commit `a8bc00f9` recorded a server-backed counter to
+`2`, restored a fresh Chrome to the independently verified state, continued to
+`3`, and encapped the continued branch. This is not a public PWA delivery
+claim: Pixel Stream/RFB provisioning remains the missing product delivery
+integration.
+
 The Bridge lifecycle is `restoring -> active -> quiescing -> stopped`. Trusted
 input is captured and suppressed before it reaches application listeners while
 the lifecycle is not active. Apply and lifecycle requests have transport-owned
