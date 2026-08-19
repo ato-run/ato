@@ -563,19 +563,19 @@ pub(crate) fn worker(
             session.activate()?;
         }
     }
-    if let Ok(sequence) = u32::try_from(active.record_seq) {
-        if let Ok(mut archive) = presentation_archive.lock() {
-            capture_archive_keyframe(
-                sequence,
-                &mut archive,
-                &mut restored,
-                &mut sessions,
-                &AdapterContext {
-                    workspace: repository.project(),
-                    objects: repository.objects(),
-                },
-            );
-        }
+    if let Ok(sequence) = u32::try_from(active.record_seq)
+        && let Ok(mut archive) = presentation_archive.lock()
+    {
+        capture_archive_keyframe(
+            sequence,
+            &mut archive,
+            &mut restored,
+            &mut sessions,
+            &AdapterContext {
+                workspace: repository.project(),
+                objects: repository.objects(),
+            },
+        );
     }
 
     let stop_request = repository.root().join(STOP_REQUEST);
