@@ -7,7 +7,7 @@
 
 use std::fs;
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -16,7 +16,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use ato_adapter_browser::BrowserRuntimeBootstrap;
 use serde_json::{Value, json};
-use tungstenite::{Message, WebSocket, connect};
+use tungstenite::client::IntoClientRequest;
+use tungstenite::stream::MaybeTlsStream;
+use tungstenite::{Message, WebSocket, client};
 use url::Url;
 
 const DISCOVERY_WAIT: Duration = Duration::from_secs(30);
@@ -219,7 +221,7 @@ fn attach_bridge(
 ) -> Result<Cdp> {
     let port = wait_for_debug_port(profile, CDP_WAIT)?;
     let ws_url = debugger_websocket_url(port)?;
-    let (websocket, _) = connect(ws_url.as_str()).context("connect Browser Host CDP")?;
+    let websocket = connect_cdp(&ws_url)?;
     let mut cdp = Cdp {
         websocket,
         next_id: 1,
@@ -250,6 +252,32 @@ fn attach_bridge(
     )?;
     wait_for_page_origin(&mut cdp, &session_id, target_url)?;
     Ok(cdp)
+}
+
+fn connect_cdp(ws_url: &str) -> Result<WebSocket<MaybeTlsStream<TcpStream>>> {
+    let url = Url::parse(ws_url).context("parse Browser Host CDP WebSocket URL")?;
+    let port = url
+        .port()
+        .context("Browser Host CDP WebSocket URL has no port")?;
+    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let stream = TcpStream::connect_timeout(&address, CDP_WAIT)
+        .context("connect Browser Host CDP WebSocket")?;
+    stream
+        .set_read_timeout(Some(CDP_WAIT))
+        .context("set Browser Host CDP read deadline")?;
+    stream
+        .set_write_timeout(Some(CDP_WAIT))
+        .context("set Browser Host CDP write deadline")?;
+    let mut request = ws_url
+        .into_client_request()
+        .context("build Browser Host CDP WebSocket request")?;
+    request
+        .headers_mut()
+        .insert("Origin", "http://localhost".parse()?);
+    let (websocket, _) = client(request, MaybeTlsStream::Plain(stream))
+        .map_err(|error| anyhow::anyhow!(error))
+        .context("complete Browser Host CDP WebSocket handshake")?;
+    Ok(websocket)
 }
 
 fn wait_for_page_origin(cdp: &mut Cdp, session_id: &str, target_url: &str) -> Result<()> {
