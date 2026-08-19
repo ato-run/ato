@@ -35,6 +35,7 @@ exclude = [
     "apps/desktop/xtask",
     "apps/desktop/.tmp",
     "apps/desktop/vendor",
+    "apps/desktop-tauri",
     "services/ato-tsnetd",
     "extensions/providers/nacelle",
     "extensions/semantics/workspace",
