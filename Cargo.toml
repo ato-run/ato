@@ -19,6 +19,7 @@ members = [
     "tools/snapshot-builder",
     "tools/arch-check",
     "lib/ipc",
+    "lib/host-control",
     "services/netd",
 ]
 

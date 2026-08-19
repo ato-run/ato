@@ -1,0 +1,33 @@
+[package]
+name = "ato-host-control"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Host-agnostic process supervision — starts, watches, and tears down the ato CLI process tree. The desktop shell is one host."
+homepage = "https://ato.run"
+repository = "https://github.com/ato-run/ato"
+
+# The ato CLI remains the sole owner of Capsule execution, isolation, and
+# runner control. This crate does not execute Capsules — it supervises the CLI
+# child process behind a `RunnerHost` seam so any host (desktop, future shells)
+# can drive it. It deliberately stays free of GUI / webview / CLI / runtime
+# dependencies; the only platform dependency is libc for Unix process-group
+# teardown.
+
+[package.metadata.dist]
+dist = false
+
+[package.metadata.ato-architecture]
+layer = "service"
+
+[lib]
+name = "ato_host_control"
+path = "src/lib.rs"
+
+[dependencies]
+thiserror = "2.0"
+
+# Unix process-group teardown (kill(2) with a negative pid). Windows uses
+# `taskkill /T /F` via std::process, so no platform crate is needed there.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
