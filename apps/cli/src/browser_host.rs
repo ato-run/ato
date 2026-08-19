@@ -290,6 +290,7 @@ impl Cdp {
         if let Some(session_id) = session_id {
             request["sessionId"] = Value::String(session_id.to_owned());
         }
+        eprintln!("Browser Host CDP request: {method}");
         self.websocket
             .send(Message::Text(request.to_string().into()))
             .context("send Browser Host CDP request")?;
@@ -309,6 +310,7 @@ impl Cdp {
             if let Some(error) = response.get("error") {
                 bail!("Browser Host CDP {method} failed: {error}");
             }
+            eprintln!("Browser Host CDP response: {method}");
             return response
                 .get("result")
                 .cloned()
