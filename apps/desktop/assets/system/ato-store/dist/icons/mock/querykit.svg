@@ -1,8 +1,0 @@
-<svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <rect width="64" height="64" rx="32" fill="#f0fdfa"/>
-  <!-- Magnifying glass -->
-  <circle cx="27" cy="27" r="11" stroke="#0d9488" stroke-width="3.5"/>
-  <line x1="35" y1="35" x2="48" y2="48" stroke="#0d9488" stroke-width="3.5" stroke-linecap="round"/>
-  <!-- Data line inside -->
-  <path d="M20 28 L24 24 L28 30 L32 22" stroke="#5eead4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-</svg>
