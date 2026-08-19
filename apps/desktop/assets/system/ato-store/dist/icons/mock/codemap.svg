@@ -1,7 +1,0 @@
-<svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <rect width="64" height="64" rx="14" fill="#0891b2"/>
-  <!-- Terminal prompt -->
-  <rect x="10" y="14" width="44" height="36" rx="6" fill="#0e7490"/>
-  <path d="M18 28 L26 34 L18 40" stroke="#22d3ee" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-  <line x1="30" y1="40" x2="46" y2="40" stroke="#22d3ee" stroke-width="3" stroke-linecap="round"/>
-</svg>
