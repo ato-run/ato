@@ -385,11 +385,20 @@ fn debugger_websocket_url(port: u16) -> Result<String> {
         .get("webSocketDebuggerUrl")
         .and_then(Value::as_str)
         .context("Browser Host CDP version returned no WebSocket URL")?;
-    let parsed = Url::parse(url).context("parse Browser Host CDP WebSocket URL")?;
+    normalize_debugger_websocket_url(url, port)
+}
+
+fn normalize_debugger_websocket_url(url: &str, port: u16) -> Result<String> {
+    let mut parsed = Url::parse(url).context("parse Browser Host CDP WebSocket URL")?;
     if parsed.scheme() != "ws" || parsed.host_str() != Some("127.0.0.1") {
         bail!("Browser Host CDP WebSocket URL must be loopback");
     }
-    Ok(url.to_owned())
+    if parsed.port().is_none() {
+        parsed
+            .set_port(Some(port))
+            .map_err(|()| anyhow::anyhow!("set Browser Host CDP WebSocket port"))?;
+    }
+    Ok(parsed.into())
 }
 
 fn read_http_response(stream: &mut TcpStream) -> Result<String> {
@@ -489,6 +498,19 @@ mod tests {
         assert_eq!(
             page_history_current_url(&history),
             Some("https://example.test/ready")
+        );
+    }
+
+    #[test]
+    fn debugger_websocket_url_uses_the_known_loopback_port_when_omitted() {
+        assert_eq!(
+            normalize_debugger_websocket_url("ws://127.0.0.1/devtools/browser/id", 9222)
+                .expect("loopback URL"),
+            "ws://127.0.0.1:9222/devtools/browser/id"
+        );
+        assert!(
+            normalize_debugger_websocket_url("ws://example.test/devtools/browser/id", 9222)
+                .is_err()
         );
     }
 }
