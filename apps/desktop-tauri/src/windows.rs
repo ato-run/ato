@@ -21,20 +21,17 @@ pub fn verify_main_caller(label: &str) -> Result<(), String> {
     }
 }
 
-/// Derive a stable, safe window label for a guest surface id. Only ASCII
-/// alphanumerics and `-` survive; everything else collapses to `-`.
-pub fn app_window_label(surface_id: &str) -> String {
-    let safe = surface_id
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || character == '-' {
-                character
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>();
-    format!("app-{safe}")
+/// Derive a collision-resistant window label for a guest surface. The label is
+/// a truncated BLAKE3 digest over the canonical project path and the surface
+/// URL, so distinct projects, and distinct surfaces of one project, can never
+/// collide into the same window the way a path sanitizer would.
+pub fn app_window_label(project: &str, surface_url: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(project.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(surface_url.as_bytes());
+    let digest = hasher.finalize().to_string();
+    format!("app-{}", &digest[..16])
 }
 
 #[cfg(test)]
@@ -52,9 +49,28 @@ mod tests {
     }
 
     #[test]
-    fn guest_labels_are_sanitized() {
-        assert_eq!(app_window_label("abc-123"), "app-abc-123");
-        assert_eq!(app_window_label("a/b:c"), "app-a-b-c");
-        assert_eq!(app_window_label("../../etc"), "app-------etc");
+    fn guest_labels_are_collision_resistant() {
+        let label = app_window_label("/projects/a-b/c", "http://127.0.0.1:8000");
+        assert!(label.starts_with("app-"));
+        assert!(
+            label[4..]
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+        );
+        // Same project + surface → same label (stable focus/reuse).
+        assert_eq!(
+            label,
+            app_window_label("/projects/a-b/c", "http://127.0.0.1:8000")
+        );
+        // Different surfaces of one project → different labels.
+        assert_ne!(
+            app_window_label("/projects/a-b/c", "http://127.0.0.1:8000"),
+            app_window_label("/projects/a-b/c", "http://127.0.0.1:8001")
+        );
+        // Path sanitizer collisions stay distinct.
+        assert_ne!(
+            app_window_label("/projects/a-b/c", "http://127.0.0.1:8000"),
+            app_window_label("/projects/a/b-c", "http://127.0.0.1:8000")
+        );
     }
 }
