@@ -21,6 +21,7 @@ use url::Url;
 
 const DISCOVERY_WAIT: Duration = Duration::from_secs(30);
 const CDP_WAIT: Duration = Duration::from_secs(15);
+const NAVIGATION_WAIT: Duration = Duration::from_secs(15);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const PROFILE_DIR_NAME: &str = "browser-host-profile";
 const BRIDGE_SOURCE: &str =
@@ -236,6 +237,7 @@ fn attach_bridge(
         serde_json::to_string(bootstrap).context("encode Browser Host bootstrap")?
     );
     let world_name = format!("ato.browser.bridge.{}", bootstrap.browser_session);
+    cdp.call("Page.enable", json!({}), Some(&session_id))?;
     cdp.call(
         "Page.addScriptToEvaluateOnNewDocument",
         json!({"source": source, "worldName": world_name}),
@@ -246,7 +248,38 @@ fn attach_bridge(
         json!({"url": target_url}),
         Some(&session_id),
     )?;
+    wait_for_page_origin(&mut cdp, &session_id, target_url)?;
     Ok(cdp)
+}
+
+fn wait_for_page_origin(cdp: &mut Cdp, session_id: &str, target_url: &str) -> Result<()> {
+    let expected_origin = Url::parse(target_url)
+        .context("parse Browser Host navigation target")?
+        .origin()
+        .ascii_serialization();
+    let deadline = Instant::now() + NAVIGATION_WAIT;
+    loop {
+        let history = cdp.call("Page.getNavigationHistory", json!({}), Some(session_id))?;
+        if let Some(url) = page_history_current_url(&history)
+            && validate_target(url, &expected_origin).is_ok()
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!("Browser Host page did not navigate to the expected origin");
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+fn page_history_current_url(history: &Value) -> Option<&str> {
+    let index = usize::try_from(history.get("currentIndex")?.as_u64()?).ok()?;
+    history
+        .get("entries")?
+        .as_array()?
+        .get(index)?
+        .get("url")?
+        .as_str()
 }
 
 impl Cdp {
@@ -373,6 +406,21 @@ mod tests {
                 .expect("paths")
                 .len(),
             2
+        );
+    }
+
+    #[test]
+    fn page_history_uses_the_current_entry() {
+        let history = json!({
+            "currentIndex": 1,
+            "entries": [
+                {"url": "about:blank"},
+                {"url": "https://example.test/ready"},
+            ],
+        });
+        assert_eq!(
+            page_history_current_url(&history),
+            Some("https://example.test/ready")
         );
     }
 }
