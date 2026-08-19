@@ -226,8 +226,8 @@ fn attach_bridge(
         websocket,
         next_id: 1,
     };
-    let target = cdp.call("Target.createTarget", json!({"url": "about:blank"}), None)?;
-    let target_id = required_string(&target, "targetId")?.to_owned();
+    let targets = cdp.call("Target.getTargets", json!({}), None)?;
+    let target_id = initial_page_target_id(&targets)?.to_owned();
     let attached = cdp.call(
         "Target.attachToTarget",
         json!({"targetId": target_id, "flatten": true}),
@@ -252,6 +252,23 @@ fn attach_bridge(
     )?;
     wait_for_page_origin(&mut cdp, &session_id, target_url)?;
     Ok(cdp)
+}
+
+fn initial_page_target_id(targets: &Value) -> Result<&str> {
+    let pages: Vec<&Value> = targets
+        .get("targetInfos")
+        .and_then(Value::as_array)
+        .context("Browser Host CDP response has no targetInfos")?
+        .iter()
+        .filter(|target| target.get("type").and_then(Value::as_str) == Some("page"))
+        .collect();
+    let [page] = pages.as_slice() else {
+        bail!("Browser Host expected exactly one initial page target");
+    };
+    if page.get("url").and_then(Value::as_str) != Some("about:blank") {
+        bail!("Browser Host initial page target must be about:blank");
+    }
+    required_string(page, "targetId")
 }
 
 fn connect_cdp(ws_url: &str) -> Result<WebSocket<MaybeTlsStream<TcpStream>>> {
@@ -512,5 +529,24 @@ mod tests {
             normalize_debugger_websocket_url("ws://example.test/devtools/browser/id", 9222)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn initial_page_target_is_the_single_blank_page() {
+        let targets = json!({
+            "targetInfos": [
+                {"targetId": "extension", "type": "background_page", "url": "chrome-extension://id"},
+                {"targetId": "page", "type": "page", "url": "about:blank"},
+            ],
+        });
+        assert_eq!(
+            initial_page_target_id(&targets).expect("initial page"),
+            "page"
+        );
+
+        let non_blank = json!({
+            "targetInfos": [{"targetId": "page", "type": "page", "url": "https://example.test"}],
+        });
+        assert!(initial_page_target_id(&non_blank).is_err());
     }
 }
