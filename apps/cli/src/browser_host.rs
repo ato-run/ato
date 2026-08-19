@@ -371,12 +371,12 @@ fn debugger_websocket_url(port: u16) -> Result<String> {
     let mut stream =
         TcpStream::connect(("127.0.0.1", port)).context("connect Browser Host CDP HTTP")?;
     stream
+        .set_read_timeout(Some(CDP_WAIT))
+        .context("set Browser Host CDP HTTP read deadline")?;
+    stream
         .write_all(b"GET /json/version HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
         .context("request Browser Host CDP version")?;
-    let mut response = String::new();
-    stream
-        .read_to_string(&mut response)
-        .context("read Browser Host CDP version")?;
+    let response = read_http_response(&mut stream)?;
     let (_, body) = response
         .split_once("\r\n\r\n")
         .context("Browser Host CDP version returned no body")?;
@@ -390,6 +390,44 @@ fn debugger_websocket_url(port: u16) -> Result<String> {
         bail!("Browser Host CDP WebSocket URL must be loopback");
     }
     Ok(url.to_owned())
+}
+
+fn read_http_response(stream: &mut TcpStream) -> Result<String> {
+    const MAX_RESPONSE_BYTES: usize = 64 * 1024;
+
+    let mut response = Vec::new();
+    let mut content_length = None;
+    loop {
+        let mut chunk = [0_u8; 4096];
+        let read = stream
+            .read(&mut chunk)
+            .context("read Browser Host CDP version")?;
+        if read == 0 {
+            bail!("Browser Host CDP version closed before a complete HTTP response");
+        }
+        response.extend_from_slice(&chunk[..read]);
+        if response.len() > MAX_RESPONSE_BYTES {
+            bail!("Browser Host CDP version HTTP response is too large");
+        }
+        let Some(header_end) = response.windows(4).position(|window| window == b"\r\n\r\n") else {
+            continue;
+        };
+        if content_length.is_none() {
+            let headers = std::str::from_utf8(&response[..header_end])
+                .context("Browser Host CDP version headers are not UTF-8")?;
+            content_length = headers.lines().find_map(|line| {
+                line.split_once(':').and_then(|(name, value)| {
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+            });
+        }
+        let length = content_length.context("Browser Host CDP version has no Content-Length")?;
+        if response.len() >= header_end + 4 + length {
+            return String::from_utf8(response).context("Browser Host CDP version is not UTF-8");
+        }
+    }
 }
 
 fn required_string<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
