@@ -31,3 +31,6 @@ thiserror = "2.0"
 # `taskkill /T /F` via std::process, so no platform crate is needed there.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

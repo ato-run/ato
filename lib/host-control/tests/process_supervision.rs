@@ -55,6 +55,66 @@ fn short_lived_child_is_reaped_with_its_exit_code() {
     assert_eq!(supervisor.supervised_count(), 0);
 }
 
+/// `sh -c 'sleep 300 & echo $! > pidfile; exec sleep 300'` builds a real
+/// three-level tree: the supervised child (the shell, which execs into the
+/// foreground sleep) and a grandchild (the background sleep). Shutdown must
+/// tear down the whole process group, not just the direct child.
+#[test]
+fn shutdown_reaps_the_whole_process_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("grandchild.pid");
+    let host = NativeHost::with_path_lookup();
+    let shell = host.resolve_binary("sh").expect("sh on PATH for the test");
+    let mut supervisor = ProcessSupervisor::new(host);
+    let spec = SpawnSpec {
+        program: shell,
+        args: vec![
+            "-c".to_owned(),
+            format!(
+                "sleep 300 & echo $! > '{}'; exec sleep 300",
+                pid_file.display()
+            ),
+        ],
+        env: vec![],
+        output: OutputSink::Null,
+    };
+    let child = supervisor.spawn(&spec).unwrap();
+    wait_until(|| pid_file.exists());
+    let grandchild: i32 = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(
+        process_alive(grandchild),
+        "grandchild must be alive before shutdown"
+    );
+
+    supervisor.shutdown().unwrap();
+    assert_eq!(supervisor.supervised_count(), 0);
+
+    wait_until(|| !process_alive(grandchild));
+    assert!(
+        !process_alive(child.0 as i32),
+        "the supervised child must be gone after shutdown"
+    );
+}
+
+fn wait_until(mut predicate: impl FnMut() -> bool) {
+    for _ in 0..200 {
+        if predicate() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("condition did not become true");
+}
+
+fn process_alive(pid: i32) -> bool {
+    // SAFETY: kill(pid, 0) is the standard existence probe; it sends no signal.
+    (unsafe { libc::kill(pid, 0) }) == 0
+}
+
 #[test]
 fn resolves_binary_and_runs_a_short_command() {
     let host = host();
