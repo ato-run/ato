@@ -44,7 +44,10 @@ jobs:
       - run: cargo build --locked -p ato-cli
       - run: npm ci
         working-directory: tests/browser
-      - run: npx playwright install --with-deps chromium
+      # GitHub's Ubuntu image already carries Chromium's shared-library
+      # dependencies. Avoid `--with-deps`: it runs apt update and can stall on
+      # an unavailable runner mirror before either Browser E2E executes.
+      - run: npx playwright install chromium
         working-directory: tests/browser
       - run: npm test
         working-directory: tests/browser
