@@ -42,3 +42,25 @@ without mutating the source bundle or its parent Capsule.
 The canonical machine verifier remains Rust `ato-objects`. Service validation
 may invoke a hidden machine-facing CLI, but may not independently reinterpret
 the bundle security format in TypeScript.
+
+## Hosted Terminal Surface boundary
+
+A hosted `ato.pty@1` Port is projected through `ato.terminal.v1`; it is not a
+raw TCP forwarding target. The public Host gateway validates the exact Origin,
+the short-lived Surface Assertion, its `session_id`/`surface_id` scope, one-time
+`jti`, and the WebSocket subprotocol before it opens the sandbox-local Unix
+socket. Assertion keys and allowed-origin policy remain in the Host process and
+must not enter the sandbox environment, Capsule bundle, Record payload, page
+realm, receipt, or logs.
+
+The sandbox PTY Adapter owns only the terminal protocol endpoint. It negotiates
+`ato.terminal.v1`, emits a bounded `ready` control before terminal bytes, treats
+binary frames as PTY input, and validates typed `resize`/`ack` text controls.
+Text control frames are never shell input. This preserves the Adapter's
+observe/apply/ack/quiesce responsibility while the Host gateway owns product
+access policy and replay protection.
+
+Both ordinary Continue Runs and view-only Hosted Replay use the same gateway.
+An absent, expired, forged, wrong-scope, or already-consumed assertion fails
+closed before any sandbox connection. A direct request to the runner origin is
+therefore not an access capability.

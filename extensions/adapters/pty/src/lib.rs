@@ -13,7 +13,12 @@ use std::time::{Duration, Instant};
 
 use ato_adapter_api::{
     AdapterAttachContext, AdapterCapabilities, AdapterContext, AdapterError, AdapterFactory,
-    AdapterInstance, AttachedAdapter, CaptureGate,
+    AdapterInstance, AttachedAdapter, CaptureGate, PresentationAsset, PresentationCapture,
+    PresentationKind,
+};
+use ato_ipc::terminal_surface::{
+    MAX_TERMINAL_CONTROL_FRAME_BYTES, MAX_TERMINAL_INPUT_FRAME_BYTES,
+    TERMINAL_WEBSOCKET_SUBPROTOCOL, TerminalClientControl, TerminalServerControl,
 };
 use ato_objects::{RecordEnvelope, read_exact_object};
 use serde::{Deserialize, Serialize};
@@ -172,6 +177,7 @@ impl AdapterFactory for PtyAdapter {
             activated: false,
             capture_gate,
             gateway,
+            transcript,
         }))
     }
 }
@@ -188,6 +194,7 @@ struct PtySession {
     activated: bool,
     capture_gate: Arc<CaptureGate>,
     gateway: Option<TerminalGateway>,
+    transcript: Arc<Mutex<VecDeque<u8>>>,
 }
 
 impl AttachedAdapter for PtySession {
@@ -201,6 +208,10 @@ impl AttachedAdapter for PtySession {
 
     fn capabilities(&self) -> AdapterCapabilities {
         AdapterFactory::capabilities(&PtyAdapter)
+    }
+
+    fn presentation_capture(&mut self) -> Option<&mut dyn PresentationCapture> {
+        Some(self)
     }
 
     fn apply(
@@ -292,6 +303,84 @@ impl AttachedAdapter for PtySession {
     }
 }
 
+impl PresentationCapture for PtySession {
+    fn capture_final(
+        &mut self,
+        _context: &AdapterContext<'_>,
+    ) -> Result<Vec<PresentationAsset>, AdapterError> {
+        let transcript: Vec<u8> = self
+            .transcript
+            .lock()
+            .map_err(|_| AdapterError::Operation("PTY transcript was poisoned".to_owned()))?
+            .iter()
+            .copied()
+            .collect();
+        let bytes = terminal_screen_projection(&transcript)?;
+        Ok(vec![PresentationAsset {
+            kind: PresentationKind::TerminalFinal,
+            content_type: "application/vnd.ato.terminal-screen+json".to_owned(),
+            width: None,
+            height: None,
+            sequence: 0,
+            bytes,
+        }])
+    }
+}
+
+fn terminal_screen_projection(transcript: &[u8]) -> Result<Vec<u8>, AdapterError> {
+    const COLUMNS: usize = 80;
+    const ROWS: usize = 24;
+    const MAX_TEXT_BYTES: usize = 64 * 1024;
+
+    let printable = strip_terminal_controls(&String::from_utf8_lossy(transcript));
+    let lines: Vec<&str> = printable.lines().collect();
+    let start = lines.len().saturating_sub(ROWS);
+    let mut text = lines[start..]
+        .iter()
+        .map(|line| line.chars().take(COLUMNS).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+    while text.len() > MAX_TEXT_BYTES {
+        let next = text
+            .char_indices()
+            .nth(1024)
+            .map_or(text.len(), |(index, _)| index);
+        text.drain(..next);
+    }
+    serde_jcs::to_vec(&serde_json::json!({
+        "schema": "ato.terminal-screen@1",
+        "columns": COLUMNS,
+        "rows": ROWS,
+        "text": text,
+    }))
+    .map_err(AdapterError::from)
+}
+
+fn strip_terminal_controls(input: &str) -> String {
+    let mut result = String::new();
+    let mut characters = input.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '\u{1b}' {
+            if characters.peek() == Some(&'[') {
+                characters.next();
+                for suffix in characters.by_ref() {
+                    if ('@'..='~').contains(&suffix) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        match character {
+            '\n' | '\t' => result.push(character),
+            '\r' => {}
+            value if !value.is_control() => result.push(value),
+            _ => {}
+        }
+    }
+    result
+}
+
 impl PtySession {
     fn verify_output(&self, expected: &[u8]) -> Result<(), AdapterError> {
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -344,6 +433,7 @@ fn observation(
             }
             _ => ato_adapter_api::ObservationEffect::Evidence,
         },
+        presentation_hint: ato_adapter_api::PresentationHint::None,
     })
 }
 
@@ -448,16 +538,27 @@ fn spawn_terminal_gateway(
                 set_failure(&failure, error.to_string());
                 continue;
             }
-            let mut socket = match tungstenite::accept(stream) {
+            let mut socket = match accept_terminal_surface(stream) {
                 Ok(socket) => socket,
+                Err(_) => continue,
+            };
+            let _ = socket
+                .get_mut()
+                .set_read_timeout(Some(Duration::from_millis(25)));
+            let ready = TerminalServerControl::Ready { cols: 80, rows: 24 };
+            let ready = match serde_json::to_string(&ready) {
+                Ok(ready) => ready,
                 Err(error) => {
                     set_failure(&failure, error.to_string());
                     continue;
                 }
             };
-            let _ = socket
-                .get_mut()
-                .set_read_timeout(Some(Duration::from_millis(25)));
+            if socket
+                .send(tungstenite::Message::Text(ready.into()))
+                .is_err()
+            {
+                continue;
+            }
             let initial: Vec<u8> = transcript
                 .lock()
                 .map(|history| history.iter().copied().collect())
@@ -476,7 +577,9 @@ fn spawn_terminal_gateway(
                     break;
                 }
                 match socket.read() {
-                    Ok(tungstenite::Message::Binary(bytes)) => {
+                    Ok(tungstenite::Message::Binary(bytes))
+                        if bytes.len() <= MAX_TERMINAL_INPUT_FRAME_BYTES =>
+                    {
                         if let Err(error) =
                             gateway_input(&bytes, &writer, &observations, &port_id, &capture_gate)
                         {
@@ -484,17 +587,45 @@ fn spawn_terminal_gateway(
                             break;
                         }
                     }
-                    Ok(tungstenite::Message::Text(text)) => {
-                        if let Err(error) = gateway_input(
-                            text.as_bytes(),
-                            &writer,
-                            &observations,
-                            &port_id,
-                            &capture_gate,
-                        ) {
+                    Ok(tungstenite::Message::Text(text))
+                        if text.len() <= MAX_TERMINAL_CONTROL_FRAME_BYTES =>
+                    {
+                        let control: TerminalClientControl = match serde_json::from_str(&text) {
+                            Ok(control) => control,
+                            Err(error) => {
+                                set_failure(&failure, error.to_string());
+                                break;
+                            }
+                        };
+                        if let Err(error) = control.validate() {
                             set_failure(&failure, error.to_string());
                             break;
                         }
+                        if let TerminalClientControl::Resize { cols, rows } = control {
+                            let event = PtyEvent::Resize {
+                                columns: cols,
+                                rows,
+                            };
+                            if let Err(error) =
+                                observations.emit(match observation(&port_id, &event) {
+                                    Ok(observation) => observation,
+                                    Err(error) => {
+                                        set_failure(&failure, error.to_string());
+                                        break;
+                                    }
+                                })
+                            {
+                                set_failure(&failure, error.to_string());
+                                break;
+                            }
+                        }
+                    }
+                    Ok(tungstenite::Message::Binary(_)) | Ok(tungstenite::Message::Text(_)) => {
+                        set_failure(
+                            &failure,
+                            "terminal WebSocket frame exceeds v1 bounds".to_owned(),
+                        );
+                        break;
                     }
                     Ok(tungstenite::Message::Close(_)) => break,
                     Ok(tungstenite::Message::Ping(value)) => {
@@ -537,6 +668,40 @@ fn spawn_terminal_gateway(
         stop,
         thread: Some(thread),
     })
+}
+
+#[allow(clippy::result_large_err)]
+fn accept_terminal_surface(
+    stream: std::net::TcpStream,
+) -> Result<tungstenite::WebSocket<std::net::TcpStream>, String> {
+    tungstenite::accept_hdr(
+        stream,
+        |request: &tungstenite::handshake::server::Request,
+         mut response: tungstenite::handshake::server::Response| {
+            let offered = request
+                .headers()
+                .get(tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| {
+                    value
+                        .split(',')
+                        .any(|part| part.trim() == TERMINAL_WEBSOCKET_SUBPROTOCOL)
+                });
+            if !offered {
+                return Err(tungstenite::http::Response::builder()
+                    .status(tungstenite::http::StatusCode::BAD_REQUEST)
+                    .header("cache-control", "no-store")
+                    .body(Some("ato.terminal.v1 is required".to_owned()))
+                    .expect("static rejection is valid"));
+            }
+            response.headers_mut().insert(
+                tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL,
+                tungstenite::http::HeaderValue::from_static(TERMINAL_WEBSOCKET_SUBPROTOCOL),
+            );
+            Ok(response)
+        },
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn gateway_input(
@@ -634,8 +799,26 @@ mod gateway_tests {
     use std::process::Stdio;
 
     use ato_adapter_api::IgnoreObservations;
+    use tungstenite::client::IntoClientRequest;
 
     use super::*;
+
+    #[test]
+    fn terminal_projection_is_bounded_and_removes_ansi_controls() {
+        let mut transcript = b"\x1b[31msecret-looking output\x1b[0m\r\n".to_vec();
+        for index in 0..40 {
+            transcript.extend_from_slice(format!("line-{index:02}\n").as_bytes());
+        }
+        let projection = terminal_screen_projection(&transcript).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&projection).unwrap();
+        let text = value["text"].as_str().unwrap();
+        assert!(!text.contains('\u{1b}'));
+        assert!(!text.contains("line-00"));
+        assert!(text.contains("line-39"));
+        assert_eq!(value["rows"], 24);
+        assert_eq!(value["columns"], 80);
+        assert!(projection.len() < 64 * 1024);
+    }
 
     #[test]
     fn terminal_gateway_replays_diagnostic_and_accepts_input() {
@@ -664,9 +847,34 @@ mod gateway_tests {
             transcript,
         )
         .unwrap();
-        let (mut socket, _) = tungstenite::connect(format!("ws://{address}/")).unwrap();
+        let mut request = format!("ws://{address}/").into_client_request().unwrap();
+        request.headers_mut().insert(
+            tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL,
+            tungstenite::http::HeaderValue::from_static(TERMINAL_WEBSOCKET_SUBPROTOCOL),
+        );
+        let (mut socket, response) = tungstenite::connect(request).unwrap();
+        assert_eq!(
+            response
+                .headers()
+                .get(tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL)
+                .unwrap(),
+            TERMINAL_WEBSOCKET_SUBPROTOCOL
+        );
+        let ready: TerminalServerControl =
+            serde_json::from_slice(&socket.read().unwrap().into_data()).unwrap();
+        assert_eq!(ready, TerminalServerControl::Ready { cols: 80, rows: 24 });
         let diagnostic = socket.read().unwrap().into_data();
         assert!(String::from_utf8_lossy(&diagnostic).contains("rustc error"));
+        socket
+            .send(tungstenite::Message::Text(
+                serde_json::to_string(&TerminalClientControl::Resize {
+                    cols: 120,
+                    rows: 40,
+                })
+                .unwrap()
+                .into(),
+            ))
+            .unwrap();
         socket
             .send(tungstenite::Message::Binary(
                 b"echo fixed\n".to_vec().into(),
@@ -680,5 +888,36 @@ mod gateway_tests {
         child.kill().unwrap();
         child.wait().unwrap();
         assert!(failure.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn terminal_gateway_rejects_missing_v1_subprotocol_without_poisoning_session() {
+        let mut child = Command::new("sh")
+            .args(["-c", "cat"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = probe.local_addr().unwrap();
+        drop(probe);
+        let failure = Arc::new(Mutex::new(None));
+        let gateway = spawn_terminal_gateway(
+            address,
+            Arc::new(Mutex::new(child.stdin.take().unwrap())),
+            Arc::new(IgnoreObservations),
+            ato_computation::PortId::parse("terminal").unwrap(),
+            Arc::clone(&failure),
+            Arc::new(CaptureGate::default()),
+            Arc::new(Mutex::new(VecDeque::new())),
+        )
+        .unwrap();
+        let error = tungstenite::connect(format!("ws://{address}/")).unwrap_err();
+        assert!(error.to_string().contains("400"));
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(failure.lock().unwrap().is_none());
+        drop(gateway);
+        child.kill().unwrap();
+        child.wait().unwrap();
     }
 }

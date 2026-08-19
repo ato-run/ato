@@ -232,6 +232,16 @@ pub struct AdapterObservation {
     pub payload: Vec<u8>,
     pub caused_by: Vec<RecordId>,
     pub effect: ObservationEffect,
+    /// Optional scheduling hint for presentation projections. This never
+    /// enters Record payloads or computation identity.
+    pub presentation_hint: PresentationHint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PresentationHint {
+    #[default]
+    None,
+    Keyframe,
 }
 
 /// Whether an observation is only evidence about a realization or commits a
@@ -261,6 +271,58 @@ pub struct AdapterAttachContext<'a> {
     pub observations: Arc<dyn ObservationSink>,
 }
 
+/// Presentation bytes describe a physical realization at a frontier. They are
+/// deliberately outside ComputationObject, Record payloads, and portable
+/// Bundle identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresentationAsset {
+    pub kind: PresentationKind,
+    pub content_type: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub sequence: u32,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresentationKind {
+    FinalState,
+    ArchiveKeyframe,
+    TerminalFinal,
+}
+
+/// Optional physical projection contract attached to an ordinary Adapter.
+/// Scheduling and identity remain owned by the caller; implementations only
+/// observe an already-paused realization and return bounded private bytes.
+pub trait PresentationCapture: Send {
+    fn attach(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
+        Ok(())
+    }
+
+    fn capture_final(
+        &mut self,
+        context: &AdapterContext<'_>,
+    ) -> Result<Vec<PresentationAsset>, AdapterError>;
+
+    fn capture_keyframe(
+        &mut self,
+        _sequence: u32,
+        _context: &AdapterContext<'_>,
+    ) -> Result<Vec<PresentationAsset>, AdapterError> {
+        Ok(Vec::new())
+    }
+
+    fn detach(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
+        Ok(())
+    }
+}
+
+/// Cloneable, runtime-private capture handle used by the caller's observation
+/// scheduler to capture a discrete frontier before a later action can pass it.
+pub trait PresentationKeyframeCapture: Send + Sync {
+    fn capture_keyframe(&self, sequence: u32) -> Result<Vec<PresentationAsset>, AdapterError>;
+}
+
 pub trait ObservationSink: Send + Sync {
     fn emit(&self, observation: AdapterObservation) -> Result<(), AdapterError>;
 }
@@ -280,6 +342,14 @@ pub trait AttachedAdapter: Send {
     fn instance_id(&self) -> &str;
     fn adapter_id(&self) -> &str;
     fn capabilities(&self) -> AdapterCapabilities;
+
+    fn presentation_capture(&mut self) -> Option<&mut dyn PresentationCapture> {
+        None
+    }
+
+    fn presentation_keyframe_capture(&self) -> Option<Arc<dyn PresentationKeyframeCapture>> {
+        None
+    }
 
     fn accepts(&self, record: &RecordEnvelope) -> bool {
         self.adapter_id() == record.adapter_id

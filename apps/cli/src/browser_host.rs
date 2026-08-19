@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use ato_adapter_browser::BrowserRuntimeBootstrap;
+use base64::Engine;
 use serde_json::{Value, json};
 use tungstenite::client::IntoClientRequest;
 use tungstenite::stream::MaybeTlsStream;
@@ -29,8 +30,11 @@ const CDP_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const PROFILE_DIR_NAME: &str = "browser-host-profile";
 const CDP_PORT_FILE_NAME: &str = "browser-host-cdp-port";
 const CHROME_STDERR_FILE_NAME: &str = "chrome-stderr.log";
+const INITIAL_FRAME_FILE_NAME: &str = "browser-host-initial.png";
+const INITIAL_FRAME_METADATA_FILE_NAME: &str = "browser-host-initial.json";
 const DEVTOOLS_ACTIVE_PORT_FILE_NAME: &str = "DevToolsActivePort";
 const MAX_CHROME_DIAGNOSTIC_BYTES: usize = 16 * 1024;
+const MAX_PRESENTATION_ASSET_BYTES: usize = 8 * 1024 * 1024;
 const BRIDGE_SOURCE: &str =
     include_str!("../../../extensions/adapters/browser/bridge/browser-bridge.js");
 
@@ -335,6 +339,8 @@ fn attach_bridge(
         bail!("Browser Host page navigation failed: {error}");
     }
     wait_for_target_origin(&mut cdp, &target_id, target_url)?;
+    wait_for_document_ready(&mut cdp, &session_id)?;
+    capture_initial_frame(&mut cdp, &session_id, profile)?;
     cdp.call(
         "Target.detachFromTarget",
         json!({"sessionId": session_id}),
@@ -415,6 +421,83 @@ fn wait_for_target_origin(cdp: &mut Cdp, target_id: &str, target_url: &str) -> R
         }
         thread::sleep(POLL_INTERVAL);
     }
+}
+
+fn wait_for_document_ready(cdp: &mut Cdp, session_id: &str) -> Result<()> {
+    let deadline = Instant::now() + NAVIGATION_WAIT;
+    loop {
+        let evaluated = cdp.call(
+            "Runtime.evaluate",
+            json!({"expression": "document.readyState", "returnByValue": true}),
+            Some(session_id),
+        )?;
+        let state = evaluated
+            .get("result")
+            .and_then(|result| result.get("value"))
+            .and_then(Value::as_str);
+        if state == Some("complete") {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!("Browser Host page did not reach document.readyState=complete");
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+fn capture_initial_frame(cdp: &mut Cdp, session_id: &str, profile: &Path) -> Result<()> {
+    let metrics = cdp.call("Page.getLayoutMetrics", json!({}), Some(session_id))?;
+    let viewport = metrics
+        .get("cssVisualViewport")
+        .or_else(|| metrics.get("visualViewport"))
+        .context("Browser Host CDP returned no initial visual viewport")?;
+    let width = presentation_dimension(viewport, "clientWidth")?;
+    let height = presentation_dimension(viewport, "clientHeight")?;
+    let screenshot = cdp.call(
+        "Page.captureScreenshot",
+        json!({
+            "format": "png",
+            "fromSurface": true,
+            "captureBeyondViewport": false
+        }),
+        Some(session_id),
+    )?;
+    let encoded = required_string(&screenshot, "data")?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .context("decode Browser Host initial screenshot")?;
+    if bytes.is_empty() || bytes.len() > MAX_PRESENTATION_ASSET_BYTES {
+        bail!("Browser Host initial screenshot exceeds the bounded asset contract");
+    }
+    write_private_file(&profile.join(INITIAL_FRAME_FILE_NAME), &bytes)?;
+    write_private_file(
+        &profile.join(INITIAL_FRAME_METADATA_FILE_NAME),
+        &serde_jcs::to_vec(&json!({"height": height, "width": width}))?,
+    )
+}
+
+fn presentation_dimension(viewport: &Value, field: &str) -> Result<u32> {
+    let value = viewport
+        .get(field)
+        .and_then(Value::as_f64)
+        .context("Browser Host viewport dimension is missing")?;
+    if !value.is_finite() || !(1.0..=8192.0).contains(&value) {
+        bail!("Browser Host viewport dimension is outside bounds");
+    }
+    Ok(value.ceil() as u32)
+}
+
+fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("create private Browser Host file {}", path.display()))?;
+    #[cfg(unix)]
+    fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+        .with_context(|| format!("restrict private Browser Host file {}", path.display()))?;
+    file.write_all(bytes)
+        .with_context(|| format!("write private Browser Host file {}", path.display()))
 }
 
 impl Cdp {

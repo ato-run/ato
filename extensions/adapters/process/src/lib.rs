@@ -435,6 +435,7 @@ mod tests {
             cwd: PathBuf::from("."),
             environment: BTreeMap::new(),
             isolated_group: true,
+            capture_policy: ProcessCapturePolicy::Unsupported,
         })
         .expect("process adapter should construct");
         let handle = adapter
@@ -450,6 +451,7 @@ mod tests {
         drop(ProcessSession {
             instance_id: "drop-cleanup".to_owned(),
             handle,
+            capture_policy: ProcessCapturePolicy::Unsupported,
         });
         for _ in 0..100 {
             if directory.path().join("terminated").exists() {

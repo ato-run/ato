@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use ato_adapter_api::{AdapterError, AdapterObservation, ObservationEffect, ObservationSink};
+use ato_adapter_api::{
+    AdapterError, AdapterObservation, ObservationEffect, ObservationSink, PresentationHint,
+};
 use ato_computation::{PortId, ProtocolId};
 use ato_objects::Direction;
 use serde::{Deserialize, Serialize};
@@ -38,6 +40,18 @@ pub(crate) enum TransportCommand {
         result: mpsc::Sender<Result<(), AdapterError>>,
     },
     Quiesce {
+        request_id: String,
+        deadline: Instant,
+        ack_timeout: Duration,
+        result: mpsc::Sender<Result<(), AdapterError>>,
+    },
+    Pause {
+        request_id: String,
+        deadline: Instant,
+        ack_timeout: Duration,
+        result: mpsc::Sender<Result<(), AdapterError>>,
+    },
+    Resume {
         request_id: String,
         deadline: Instant,
         ack_timeout: Duration,
@@ -114,6 +128,8 @@ enum PendingKind {
     Apply,
     Quiesce,
     Activate,
+    Pause,
+    Resume,
 }
 
 impl PendingKind {
@@ -122,6 +138,8 @@ impl PendingKind {
             Self::Apply => "apply",
             Self::Quiesce => "quiesce",
             Self::Activate => "activate",
+            Self::Pause => "capture pause",
+            Self::Resume => "capture resume",
         }
     }
 }
@@ -252,6 +270,13 @@ fn run_transport(
                     }
                     queued_commands.push_front(command);
                 }
+                command @ TransportCommand::Pause { .. } => {
+                    lifecycle = BrowserLifecycle::Quiescing;
+                    if let Some(bridge) = socket.as_mut().filter(|_| authenticated) {
+                        send_message(bridge, &AdapterMessage::BlockInput)?;
+                    }
+                    queued_commands.push_front(command);
+                }
                 command => queued_commands.push_back(command),
             }
         }
@@ -363,6 +388,30 @@ fn run_transport(
                         let _ = result.send(Ok(()));
                     }
                 }
+                TransportCommand::Pause {
+                    request_id,
+                    deadline: _,
+                    ack_timeout,
+                    result,
+                } => {
+                    if let Some(bridge) = socket.as_mut().filter(|_| authenticated) {
+                        send_message(
+                            bridge,
+                            &AdapterMessage::Quiesce {
+                                request_id: &request_id,
+                            },
+                        )?;
+                        pending = Some(PendingRequest {
+                            request_id,
+                            kind: PendingKind::Pause,
+                            deadline: Instant::now() + ack_timeout,
+                            result,
+                        });
+                    } else {
+                        flush_events(&mut coalescer, &config, Arc::clone(&observations))?;
+                        let _ = result.send(Ok(()));
+                    }
+                }
                 TransportCommand::Activate {
                     request_id,
                     deadline: _,
@@ -385,6 +434,32 @@ fn run_transport(
                         pending = Some(PendingRequest {
                             request_id,
                             kind: PendingKind::Activate,
+                            deadline: Instant::now() + ack_timeout,
+                            result,
+                        });
+                    } else {
+                        lifecycle = BrowserLifecycle::Active;
+                        let _ = result.send(Ok(()));
+                    }
+                }
+                TransportCommand::Resume {
+                    request_id,
+                    deadline: _,
+                    ack_timeout,
+                    result,
+                } => {
+                    if lifecycle != BrowserLifecycle::Quiescing {
+                        let _ = result.send(Ok(()));
+                    } else if let Some(bridge) = socket.as_mut().filter(|_| authenticated) {
+                        send_message(
+                            bridge,
+                            &AdapterMessage::Activate {
+                                request_id: &request_id,
+                            },
+                        )?;
+                        pending = Some(PendingRequest {
+                            request_id,
+                            kind: PendingKind::Resume,
                             deadline: Instant::now() + ack_timeout,
                             result,
                         });
@@ -450,20 +525,24 @@ fn run_transport(
                         }
                         BridgeMessage::Quiesced { request_id } if authenticated => {
                             flush_events(&mut coalescer, &config, Arc::clone(&observations))?;
-                            complete_pending(
-                                &mut pending,
-                                &request_id,
-                                PendingKind::Quiesce,
-                                Ok(()),
-                            )?;
+                            let expected_kind =
+                                pending.as_ref().map_or(PendingKind::Quiesce, |request| {
+                                    match request.kind {
+                                        PendingKind::Pause => PendingKind::Pause,
+                                        _ => PendingKind::Quiesce,
+                                    }
+                                });
+                            complete_pending(&mut pending, &request_id, expected_kind, Ok(()))?;
                         }
                         BridgeMessage::Activated { request_id } if authenticated => {
-                            complete_pending(
-                                &mut pending,
-                                &request_id,
-                                PendingKind::Activate,
-                                Ok(()),
-                            )?;
+                            let expected_kind =
+                                pending.as_ref().map_or(PendingKind::Activate, |request| {
+                                    match request.kind {
+                                        PendingKind::Resume => PendingKind::Resume,
+                                        _ => PendingKind::Activate,
+                                    }
+                                });
+                            complete_pending(&mut pending, &request_id, expected_kind, Ok(()))?;
                             lifecycle = BrowserLifecycle::Active;
                         }
                         BridgeMessage::Error { request_id, reason } if authenticated => {
@@ -599,6 +678,11 @@ fn emit_event(
             .map_err(|error| AdapterError::Operation(error.to_string()))?,
         caused_by: Vec::new(),
         effect: ObservationEffect::Evolution,
+        presentation_hint: if event.is_archive_keyframe_candidate() {
+            PresentationHint::Keyframe
+        } else {
+            PresentationHint::None
+        },
     })
 }
 
@@ -657,6 +741,8 @@ fn expire_queued(commands: &mut VecDeque<TransportCommand>) {
             TransportCommand::Apply { deadline, .. } => (*deadline, "apply"),
             TransportCommand::Quiesce { deadline, .. } => (*deadline, "quiesce"),
             TransportCommand::Activate { deadline, .. } => (*deadline, "activate"),
+            TransportCommand::Pause { deadline, .. } => (*deadline, "capture pause"),
+            TransportCommand::Resume { deadline, .. } => (*deadline, "capture resume"),
             TransportCommand::Shutdown => {
                 live.push_back(command);
                 continue;
@@ -678,7 +764,9 @@ fn fail_command(command: TransportCommand, reason: &str) {
     match command {
         TransportCommand::Apply { result, .. }
         | TransportCommand::Quiesce { result, .. }
-        | TransportCommand::Activate { result, .. } => {
+        | TransportCommand::Activate { result, .. }
+        | TransportCommand::Pause { result, .. }
+        | TransportCommand::Resume { result, .. } => {
             let _ = result.send(Err(AdapterError::Operation(reason.to_owned())));
         }
         TransportCommand::Shutdown => {}
@@ -979,6 +1067,88 @@ mod tests {
             .expect("shutdown should preempt pending apply");
         assert!(started.elapsed() < Duration::from_secs(1));
         assert!(receiver.recv().expect("apply should resolve").is_err());
+    }
+
+    #[test]
+    fn capture_pause_blocks_input_and_can_resume_the_same_bridge() {
+        let directory = tempfile::tempdir().expect("temporary workspace should open");
+        let mut handle = start_transport(
+            directory.path(),
+            "browser.test",
+            config(),
+            Arc::new(IgnoreObservations),
+        )
+        .expect("transport should start");
+        let mut socket = connect_bridge(&bootstrap(directory.path()));
+
+        let (pause_result, pause_receiver) = mpsc::channel();
+        handle
+            .commands
+            .send(TransportCommand::Pause {
+                request_id: "pause".to_owned(),
+                deadline: Instant::now() + Duration::from_secs(1),
+                ack_timeout: Duration::from_secs(1),
+                result: pause_result,
+            })
+            .expect("pause should queue");
+        let block = socket.read().expect("input block should arrive");
+        assert!(
+            block
+                .to_text()
+                .expect("block should be text")
+                .contains("block_input")
+        );
+        let pause = socket.read().expect("pause quiesce should arrive");
+        assert!(
+            pause
+                .to_text()
+                .expect("pause should be text")
+                .contains("quiesce")
+        );
+        socket
+            .send(Message::Text(
+                serde_json::json!({"type": "quiesced", "request_id": "pause"})
+                    .to_string()
+                    .into(),
+            ))
+            .expect("pause acknowledgement should send");
+        pause_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("pause should resolve")
+            .expect("pause should succeed");
+
+        let (resume_result, resume_receiver) = mpsc::channel();
+        handle
+            .commands
+            .send(TransportCommand::Resume {
+                request_id: "resume".to_owned(),
+                deadline: Instant::now() + Duration::from_secs(1),
+                ack_timeout: Duration::from_secs(1),
+                result: resume_result,
+            })
+            .expect("resume should queue");
+        let resume = socket.read().expect("activate should arrive");
+        assert!(
+            resume
+                .to_text()
+                .expect("resume should be text")
+                .contains("activate")
+        );
+        socket
+            .send(Message::Text(
+                serde_json::json!({"type": "activated", "request_id": "resume"})
+                    .to_string()
+                    .into(),
+            ))
+            .expect("resume acknowledgement should send");
+        resume_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("resume should resolve")
+            .expect("resume should succeed");
+
+        handle
+            .shutdown()
+            .expect("resumed transport should still shut down cleanly");
     }
 
     #[test]

@@ -539,7 +539,7 @@ mod tests {
         AdapterAttachContext, AdapterCapabilities, AdapterError, AdapterFactory, AdapterInstance,
         AttachedAdapter,
     };
-    use ato_materializer_api::{RealizationDriver, ReplayRuntime};
+    use ato_materializer_api::{RealizationDriver, RealizationVerification, ReplayRuntime};
     use ato_objects::{MemoryObjectStore, ObjectStore};
 
     use super::*;
@@ -616,6 +616,9 @@ mod tests {
     impl Realization for TestRealization {
         fn target(&self) -> &ComputationRef {
             &self.0
+        }
+        fn verification(&self) -> RealizationVerification {
+            RealizationVerification::AppliedUnverified
         }
         fn activate(&mut self) -> Result<(), MaterializerError> {
             Ok(())

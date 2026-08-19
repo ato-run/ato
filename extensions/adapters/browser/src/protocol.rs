@@ -62,6 +62,25 @@ pub enum BrowserEvent {
     },
 }
 
+impl BrowserEvent {
+    /// Continuous motion/scroll is intentionally excluded. Keyframes are
+    /// requested only after discrete actions that can leave a useful state.
+    pub(crate) fn is_archive_keyframe_candidate(&self) -> bool {
+        matches!(
+            self,
+            Self::Click { .. }
+                | Self::Pointer {
+                    kind: PointerKind::PointerUp,
+                    ..
+                }
+                | Self::Keyboard {
+                    kind: KeyboardKind::KeyUp,
+                    ..
+                }
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BrowserProtocolError {
     Json(String),
@@ -257,5 +276,26 @@ mod tests {
                 Err(BrowserProtocolError::Invalid(_))
             ));
         }
+    }
+
+    #[test]
+    fn archive_hints_exclude_continuous_motion_and_capture_discrete_completion() {
+        assert!(!BrowserEvent::Scroll { x: 0.0, y: 10.0 }.is_archive_keyframe_candidate());
+        assert!(
+            BrowserEvent::Click {
+                x_normalized: 0.5,
+                y_normalized: 0.5,
+                button: 0,
+            }
+            .is_archive_keyframe_candidate()
+        );
+        assert!(
+            BrowserEvent::Keyboard {
+                kind: KeyboardKind::KeyUp,
+                code: "ArrowRight".to_owned(),
+                modifiers: Modifiers::default(),
+            }
+            .is_archive_keyframe_candidate()
+        );
     }
 }
