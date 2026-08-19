@@ -102,8 +102,14 @@ Marketplace
 | `app-*` | CLI-returned loopback origin  | no            | exact loopback origin only    |
 
 The `main` capability is defense in depth, not the sole authorization check.
-Every `#[tauri::command]` also verifies the caller label is `main`. Remote and
-guest windows cannot invoke native commands regardless of capability file.
+Every `#[tauri::command]` — including `desktop_info` — verifies the caller
+label is `main`. Remote and guest windows cannot invoke native commands
+regardless of capability file.
+
+`app-*` labels are collision-resistant: `app-` plus a truncated BLAKE3 digest
+over the canonical project path and the surface URL. Reusing an existing
+`app-*` window additionally verifies that the window's current URL origin
+still equals the expected surface origin.
 
 ## 7. CLI boundary
 
@@ -116,9 +122,32 @@ ato __desktop inspect <project>
 ```
 
 The command prints a single JSON object to stdout; diagnostics go to stderr.
-It returns only explicit `127.0.0.1:<port>` / `localhost:<port>` listen
-addresses as Web surfaces. `0.0.0.0`, dynamic ports, remote hostnames, and
-non-HTTP surfaces are rejected for the MVP.
+It returns a Web surface only for an explicit `127.0.0.1:<port>` listen with a
+non-zero port. Dynamic ports (`port 0`), `0.0.0.0`, other loopback ranges
+(`::1`, `127.0.0.2`), hostnames, remote addresses, and non-HTTP surfaces are
+all rejected, keeping the CLI and the shell's URL validation (`127.0.0.1` /
+`localhost` hosts only) on one policy.
+
+## 7.1 Process ownership
+
+The shell is a supervisor of the CLI process tree, not a detached launcher.
+Short-lived operations (`init`, `resume`, `stop`, `encap`, inspect) run to
+completion. The portable `run` is long-lived (it blocks inside realization):
+it is spawned through `ato-host-control`'s `ProcessSupervisor` and stays
+supervisor-owned for its whole lifetime. App exit and an explicit cancel both
+terminate the owned process group (`kill -pid` on Unix, `taskkill /T /F` on
+Windows), so no CLI child or grandchild outlives the desktop.
+
+## 7.2 Bundle staging
+
+The release `.app` carries the `ato` CLI as a sidecar next to the shell
+executable (`bundle.externalBin`). `build.rs` stages the root workspace's
+release `ato` binary (or an `ATO_DESKTOP_ATO_STAGE` override) into
+`bin/ato-<target-triple>`; tauri-build then places it next to the shell binary
+inside the bundle. A release build without a staged CLI fails hard — a release
+bundle without a real `ato` sidecar must never be produced. Debug builds fall
+back to a placeholder that delegates to `ato` on PATH so plain
+`cargo build` / `cargo test` keep working.
 
 ## 8. Port / Rewrite / Drop table
 
