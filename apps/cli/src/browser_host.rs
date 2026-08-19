@@ -53,15 +53,8 @@ pub(crate) fn run(
             return Err(error);
         }
     };
-    let result = attach_bridge(&profile, target_url, &bootstrap).and_then(|mut cdp| {
+    let result = attach_bridge(&profile, target_url, &bootstrap).and_then(|_cdp| {
         wait_for_run_end(&bootstrap_path, &mut chrome_process)?;
-        let _ = cdp.call(
-            "Target.disposeBrowserContext",
-            json!({
-                "browserContextId": cdp.browser_context_id,
-            }),
-            None,
-        );
         Ok(())
     });
     let cleanup = chrome_process
@@ -216,7 +209,6 @@ fn wait_for_run_end(discovery_path: &Path, chrome: &mut ChromeProcess) -> Result
 struct Cdp {
     websocket: WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>>,
     next_id: u64,
-    browser_context_id: String,
 }
 
 fn attach_bridge(
@@ -230,15 +222,8 @@ fn attach_bridge(
     let mut cdp = Cdp {
         websocket,
         next_id: 1,
-        browser_context_id: String::new(),
     };
-    let context = cdp.call("Target.createBrowserContext", json!({}), None)?;
-    cdp.browser_context_id = required_string(&context, "browserContextId")?.to_owned();
-    let target = cdp.call(
-        "Target.createTarget",
-        json!({"url": "about:blank", "browserContextId": cdp.browser_context_id}),
-        None,
-    )?;
+    let target = cdp.call("Target.createTarget", json!({"url": "about:blank"}), None)?;
     let target_id = required_string(&target, "targetId")?.to_owned();
     let attached = cdp.call(
         "Target.attachToTarget",
