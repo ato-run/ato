@@ -5,6 +5,7 @@ members = [
     "lib/computation",
     "lib/kernel",
     "lib/objects",
+    "lib/runtime",
     "extensions/adapters/api",
     "extensions/adapters/process",
     "extensions/adapters/pty",

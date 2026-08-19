@@ -52,6 +52,14 @@ pub trait Realization: Send {
     fn wait(&mut self) -> Result<(), MaterializerError>;
     fn quiesce(&mut self) -> Result<(), MaterializerError>;
 
+    fn pause_for_capture(&mut self) -> Result<(), MaterializerError> {
+        Err(MaterializerError::CaptureUnsupported)
+    }
+
+    fn resume_after_capture(&mut self) -> Result<(), MaterializerError> {
+        Err(MaterializerError::CaptureUnsupported)
+    }
+
     fn run(mut self: Box<Self>) -> Result<(), MaterializerError> {
         self.activate()?;
         let result = self.wait();
@@ -63,6 +71,14 @@ pub trait Realization: Send {
 /// Mutable reconstruction owned by a Materializer while it applies evidence.
 pub trait ReplayRuntime: Send {
     fn apply(&mut self, record: &RecordEnvelope) -> Result<(), MaterializerError>;
+
+    /// Best-effort teardown when incremental reconstruction is stopped or an
+    /// apply fails before `finish`. Implementations that own processes must
+    /// override this and terminate their physical resources.
+    fn abort(&mut self) -> Result<(), MaterializerError> {
+        Ok(())
+    }
+
     fn finish(
         self: Box<Self>,
         target: &ComputationRef,
@@ -91,6 +107,16 @@ pub trait Materializer: Send + Sync {
         descriptor: &ContentRef,
         context: &MaterializerContext<'_>,
     ) -> Result<ComputationRef, MaterializerError>;
+
+    /// Validates a descriptor and its closure independently from whether this
+    /// host can restore it. Cross-host validators use this path.
+    fn validate(
+        &self,
+        descriptor: &ContentRef,
+        context: &MaterializerContext<'_>,
+    ) -> Result<ComputationRef, MaterializerError> {
+        self.verify(descriptor, context)
+    }
 
     fn compatibility(
         &self,
@@ -175,6 +201,8 @@ pub enum MaterializerError {
     },
     #[error("materializer operation failed: {0}")]
     Operation(String),
+    #[error("realization does not support a non-destructive capture barrier")]
+    CaptureUnsupported,
     #[error(transparent)]
     Objects(#[from] ato_objects::ObjectError),
     #[error("materializer JSON failed: {0}")]

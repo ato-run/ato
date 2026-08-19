@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use ato_adapter_api::{
     AdapterAttachContext, AdapterCapabilities, AdapterContext, AdapterError, AdapterFactory,
-    AdapterInstance, AttachedAdapter,
+    AdapterInstance, AttachedAdapter, CaptureConsistency,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -51,6 +51,7 @@ impl AdapterFactory for ProcessLifecycleAdapter {
     ) -> Result<Box<dyn AttachedAdapter>, AdapterError> {
         let spec = parse_spec(instance)?;
         let isolated_group = spec.isolated_group;
+        let capture_policy = spec.capture_policy;
         let handle = ProcessAdapter::new(spec)
             .map_err(operation_error)?
             .spawn_with_group(context.runtime.workspace, isolated_group)
@@ -58,6 +59,7 @@ impl AdapterFactory for ProcessLifecycleAdapter {
         Ok(Box::new(ProcessSession {
             instance_id: instance.instance_id.clone(),
             handle,
+            capture_policy,
         }))
     }
 }
@@ -71,6 +73,16 @@ pub struct ProcessSpec {
     pub environment: BTreeMap<String, String>,
     #[serde(default)]
     pub isolated_group: bool,
+    #[serde(default)]
+    pub capture_policy: ProcessCapturePolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessCapturePolicy {
+    #[default]
+    Unsupported,
+    AdapterMediated,
 }
 
 pub struct ProcessHandle {
@@ -193,6 +205,7 @@ impl ProcessAdapter {
 struct ProcessSession {
     instance_id: String,
     handle: ProcessHandle,
+    capture_policy: ProcessCapturePolicy,
 }
 
 impl Drop for ProcessSession {
@@ -213,11 +226,31 @@ impl AttachedAdapter for ProcessSession {
     }
 
     fn capabilities(&self) -> AdapterCapabilities {
-        AdapterFactory::capabilities(&ProcessLifecycleAdapter)
+        AdapterCapabilities {
+            capture_consistency: match self.capture_policy {
+                ProcessCapturePolicy::Unsupported => CaptureConsistency::Unsupported,
+                ProcessCapturePolicy::AdapterMediated => CaptureConsistency::AdapterMediated,
+            },
+            ..AdapterFactory::capabilities(&ProcessLifecycleAdapter)
+        }
     }
 
     fn quiesce(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
         Ok(())
+    }
+
+    fn pause_for_capture(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
+        match self.capture_policy {
+            ProcessCapturePolicy::AdapterMediated => Ok(()),
+            ProcessCapturePolicy::Unsupported => Err(AdapterError::Unsupported {
+                adapter: PROCESS_ADAPTER_ID.to_owned(),
+                operation: "capture_barrier",
+            }),
+        }
+    }
+
+    fn resume_after_capture(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
+        self.pause_for_capture(_context)
     }
 
     fn detach(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
@@ -342,6 +375,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn capture_policy_is_explicit_and_fail_closed() {
+        let defaulted: ProcessSpec = serde_json::from_value(serde_json::json!({
+            "id": "background-worker",
+            "command": ["worker"],
+            "cwd": ".",
+            "environment": {}
+        }))
+        .unwrap();
+        assert_eq!(defaulted.capture_policy, ProcessCapturePolicy::Unsupported);
+
+        let mediated: ProcessSpec = serde_json::from_value(serde_json::json!({
+            "id": "request-driven-worker",
+            "command": ["worker"],
+            "cwd": ".",
+            "environment": {},
+            "capture_policy": "adapter_mediated"
+        }))
+        .unwrap();
+        assert_eq!(
+            mediated.capture_policy,
+            ProcessCapturePolicy::AdapterMediated
+        );
+    }
+
+    #[test]
     fn host_environment_does_not_cross_the_process_boundary() {
         assert!(std::env::var_os("HOME").is_some());
         let adapter = ProcessAdapter::new(ProcessSpec {
@@ -354,6 +412,7 @@ mod tests {
             cwd: PathBuf::from("."),
             environment: BTreeMap::new(),
             isolated_group: false,
+            capture_policy: ProcessCapturePolicy::Unsupported,
         })
         .unwrap();
         let mut handle = adapter

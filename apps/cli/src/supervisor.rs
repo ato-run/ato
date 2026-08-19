@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use ato_adapter_api::{
-    AdapterAttachContext, AdapterContext, AdapterError, AdapterObservation, ObservationSink,
+    AdapterAttachContext, AdapterContext, AdapterError, AdapterObservation, IgnoreObservations,
+    ObservationSink,
 };
 use ato_adapter_process::terminate_process_tree;
 use ato_adapter_workspace::restore_workspace;
@@ -18,10 +19,14 @@ use ato_materializer_api::{
     RealizationVerification, ReplayRuntime,
 };
 use ato_objects::{ActiveRun, LocalCapsuleRepository, ObjectStore, RecordEnvelope, RecordId};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     adapter_registry,
-    authoring::{adapter_instances, evolve_observation, load_runtime_state, workspace_policy},
+    authoring::{
+        adapter_instances, evolve_observation, evolve_workspace_active, load_runtime_state,
+        workspace_policy,
+    },
     materializer_registry,
 };
 
@@ -32,7 +37,126 @@ const STOP_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const _: () = assert!(
     ato_adapter_browser::BROWSER_LIFECYCLE_TIMEOUT_SECONDS < SUPERVISOR_STOP_TIMEOUT_SECONDS
 );
+const CAPTURE_REQUEST: &str = "runs/capture.request.json";
+const CAPTURE_ACK: &str = "runs/capture.ack.json";
+const CAPTURE_RELEASE: &str = "runs/capture.release.json";
 static RUN_TOKEN_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CaptureControl {
+    token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CaptureAck {
+    token: String,
+    branch: String,
+    target: Option<String>,
+    record_seq: Option<u64>,
+    error: Option<String>,
+}
+
+pub(crate) struct CaptureLease {
+    repository_root: std::path::PathBuf,
+    token: String,
+    pub(crate) branch: String,
+    pub(crate) target: ComputationRef,
+    pub(crate) record_seq: u64,
+    released: bool,
+}
+
+impl CaptureLease {
+    pub(crate) fn release(mut self) -> Result<()> {
+        self.signal_release()?;
+        let request = self.repository_root.join(CAPTURE_REQUEST);
+        let ack = self.repository_root.join(CAPTURE_ACK);
+        for _ in 0..250 {
+            if !request.exists() && !ack.exists() {
+                self.released = true;
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        bail!("timed out waiting for capture barrier release")
+    }
+
+    fn signal_release(&self) -> Result<()> {
+        atomic_control_write(
+            &self.repository_root.join(CAPTURE_RELEASE),
+            &serde_jcs::to_vec(&CaptureControl {
+                token: self.token.clone(),
+            })?,
+        )
+    }
+}
+
+impl Drop for CaptureLease {
+    fn drop(&mut self) {
+        if !self.released {
+            let _ = self.signal_release();
+        }
+    }
+}
+
+pub(crate) fn capture_active(
+    repository: &LocalCapsuleRepository,
+    branch: &str,
+) -> Result<CaptureLease> {
+    let run = repository
+        .active_run()?
+        .context("Capsule has no active Run")?;
+    if run.status != "active" || run.branch != branch {
+        bail!("selected branch `{branch}` is not the active Run branch")
+    }
+    let token = format!(
+        "capture-{}-{}-{}",
+        std::process::id(),
+        observed_nanos(),
+        RUN_TOKEN_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let request = repository.root().join(CAPTURE_REQUEST);
+    let ack = repository.root().join(CAPTURE_ACK);
+    let release = repository.root().join(CAPTURE_RELEASE);
+    let _ = fs::remove_file(&ack);
+    let _ = fs::remove_file(&release);
+    atomic_control_write(
+        &request,
+        &serde_jcs::to_vec(&CaptureControl {
+            token: token.clone(),
+        })?,
+    )?;
+    for _ in 0..500 {
+        if let Ok(bytes) = fs::read(&ack) {
+            let response: CaptureAck = serde_json::from_slice(&bytes)?;
+            if serde_jcs::to_vec(&response)? != bytes || response.token != token {
+                bail!("capture worker returned an invalid acknowledgement")
+            }
+            if let Some(error) = response.error {
+                let _ = fs::remove_file(&ack);
+                let _ = fs::remove_file(&request);
+                bail!("current-point capture failed: {error}")
+            }
+            return Ok(CaptureLease {
+                repository_root: repository.root().to_path_buf(),
+                token,
+                branch: response.branch,
+                target: ComputationRef::parse(response.target.context("capture target missing")?)?,
+                record_seq: response
+                    .record_seq
+                    .context("capture Record frontier missing")?,
+                released: false,
+            });
+        }
+        if process_start_time(run.pid).is_none() {
+            bail!("active Run exited before capture acknowledgement")
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = fs::remove_file(request);
+    bail!("timed out waiting for current-point capture barrier")
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SupervisorState {
@@ -54,6 +178,19 @@ pub(crate) fn start_durable(
     head: &ComputationRef,
     bindings: &BTreeMap<String, String>,
     replay_records: Option<&[RecordEnvelope]>,
+) -> Result<()> {
+    let descriptor = replay_records
+        .map(|records| encode_replay(repository, head, records))
+        .transpose()?;
+    start_durable_with_descriptor(repository, branch, head, bindings, descriptor.as_ref())
+}
+
+pub(crate) fn start_durable_with_descriptor(
+    repository: &LocalCapsuleRepository,
+    branch: &str,
+    head: &ComputationRef,
+    bindings: &BTreeMap<String, String>,
+    descriptor: Option<&ContentRef>,
 ) -> Result<()> {
     let token = format!(
         "{}-{}-{}",
@@ -77,24 +214,7 @@ pub(crate) fn start_durable(
         status: "starting".to_owned(),
     };
     repository.claim_active_run(&lease)?;
-    let descriptor = match replay_records
-        .map(|records| encode_replay(repository, head, records))
-        .transpose()
-    {
-        Ok(descriptor) => descriptor,
-        Err(error) => {
-            let _ = repository.release_active_run(&token);
-            return Err(error);
-        }
-    };
-    let result = start_claimed(
-        repository,
-        branch,
-        head,
-        bindings,
-        &token,
-        descriptor.as_ref(),
-    );
+    let result = start_claimed(repository, branch, head, bindings, &token, descriptor);
     if result.is_err() {
         let _ = repository.release_active_run(&token);
     }
@@ -274,6 +394,16 @@ pub(crate) fn worker(
     let stop_request = repository.root().join(STOP_REQUEST);
     let stop_ack = repository.root().join(STOP_ACK);
     loop {
+        if repository.root().join(CAPTURE_REQUEST).exists() {
+            handle_capture_request(
+                &repository,
+                branch,
+                token,
+                &live_head,
+                &mut restored,
+                &mut sessions,
+            )?;
+        }
         if stop_request.exists() {
             enter(SupervisorState::Stopping);
             let result = if let Some(realization) = &mut restored {
@@ -302,6 +432,117 @@ pub(crate) fn worker(
         }
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+fn handle_capture_request(
+    repository: &LocalCapsuleRepository,
+    branch: &str,
+    run_token: &str,
+    live_head: &Arc<Mutex<ComputationRef>>,
+    realization: &mut Option<Box<dyn Realization>>,
+    sessions: &mut [Box<dyn ato_adapter_api::AttachedAdapter>],
+) -> Result<()> {
+    let request_path = repository.root().join(CAPTURE_REQUEST);
+    let ack_path = repository.root().join(CAPTURE_ACK);
+    let release_path = repository.root().join(CAPTURE_RELEASE);
+    let bytes = fs::read(&request_path)?;
+    let request: CaptureControl = serde_json::from_slice(&bytes)?;
+    if serde_jcs::to_vec(&request)? != bytes || request.token.is_empty() {
+        bail!("invalid capture request")
+    }
+    let context = AdapterContext {
+        workspace: repository.project(),
+        objects: repository.objects(),
+    };
+    let paused = match realization.as_deref_mut() {
+        Some(realization) => realization.pause_for_capture().map_err(Into::into),
+        None => pause_for_capture(sessions, &context),
+    };
+    let result = paused.and_then(|()| {
+        let run = repository
+            .active_run()?
+            .context("active Run disappeared during capture")?;
+        if run.token != run_token || run.branch != branch || run.status != "active" {
+            bail!("active Run lease changed during capture")
+        }
+        let target = evolve_workspace_active(repository, branch, run_token, &run.head)?;
+        let frontier = repository
+            .active_run()?
+            .context("active Run disappeared after workspace reconciliation")?;
+        if frontier.head != target {
+            bail!("capture frontier did not commit atomically")
+        }
+        *live_head
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Run head lock was poisoned"))? = target.clone();
+        Ok((target, frontier.record_seq))
+    });
+
+    let ack = match &result {
+        Ok((target, record_seq)) => CaptureAck {
+            token: request.token.clone(),
+            branch: branch.to_owned(),
+            target: Some(target.to_string()),
+            record_seq: Some(*record_seq),
+            error: None,
+        },
+        Err(error) => CaptureAck {
+            token: request.token.clone(),
+            branch: branch.to_owned(),
+            target: None,
+            record_seq: None,
+            error: Some(format!("{error:#}")),
+        },
+    };
+    atomic_control_write(&ack_path, &serde_jcs::to_vec(&ack)?)?;
+
+    if result.is_ok() {
+        let mut released = false;
+        for _ in 0..15_000 {
+            if let Ok(bytes) = fs::read(&release_path)
+                && let Ok(control) = serde_json::from_slice::<CaptureControl>(&bytes)
+                && control.token == request.token
+            {
+                released = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if !released {
+            // A dead CLI must not strand a durable Run behind a capture gate.
+            eprintln!("capture lease expired; resuming live Adapters");
+        }
+    }
+
+    let resume = match realization.as_deref_mut() {
+        Some(realization) => realization.resume_after_capture().map_err(Into::into),
+        None => resume_after_capture(sessions, &context),
+    };
+    let _ = fs::remove_file(&request_path);
+    let _ = fs::remove_file(&ack_path);
+    let _ = fs::remove_file(&release_path);
+    match result {
+        Ok(_) => resume,
+        Err(_) => {
+            resume?;
+            Ok(())
+        }
+    }
+}
+
+fn atomic_control_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path.parent().context("control path has no parent")?;
+    fs::create_dir_all(parent)?;
+    let temporary = parent.join(format!(
+        ".{}.{}.new",
+        path.file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("control"),
+        std::process::id()
+    ));
+    fs::write(&temporary, bytes)?;
+    fs::rename(temporary, path)?;
+    Ok(())
 }
 
 pub(crate) fn stop_active(repository: &LocalCapsuleRepository) -> Result<Option<ActiveRun>> {
@@ -374,6 +615,10 @@ pub(crate) struct CliRealizationDriver {
 }
 
 impl CliRealizationDriver {
+    pub(crate) fn new(project: &Path, bindings: &BTreeMap<String, String>) -> Self {
+        Self::with_observations(project, bindings, Arc::new(IgnoreObservations), true)
+    }
+
     fn with_observations(
         project: &Path,
         bindings: &BTreeMap<String, String>,
@@ -551,6 +796,19 @@ impl ReplayRuntime for CliReplayRuntime {
             .map_err(materializer_operation)
     }
 
+    fn abort(&mut self) -> Result<(), MaterializerError> {
+        let repository =
+            LocalCapsuleRepository::open(&self.project).map_err(materializer_operation)?;
+        quiesce_and_detach(
+            &mut self.sessions,
+            &AdapterContext {
+                workspace: &self.project,
+                objects: repository.objects(),
+            },
+        )
+        .map_err(materializer_operation)
+    }
+
     fn finish(
         self: Box<Self>,
         target: &ComputationRef,
@@ -615,6 +873,32 @@ impl Realization for CliRealization {
         }
         result.map_err(materializer_operation)
     }
+
+    fn pause_for_capture(&mut self) -> Result<(), MaterializerError> {
+        let repository =
+            LocalCapsuleRepository::open(&self.project).map_err(materializer_operation)?;
+        pause_for_capture(
+            &mut self.sessions,
+            &AdapterContext {
+                workspace: &self.project,
+                objects: repository.objects(),
+            },
+        )
+        .map_err(materializer_operation)
+    }
+
+    fn resume_after_capture(&mut self) -> Result<(), MaterializerError> {
+        let repository =
+            LocalCapsuleRepository::open(&self.project).map_err(materializer_operation)?;
+        resume_after_capture(
+            &mut self.sessions,
+            &AdapterContext {
+                workspace: &self.project,
+                objects: repository.objects(),
+            },
+        )
+        .map_err(materializer_operation)
+    }
 }
 
 fn materializer_operation(error: impl std::fmt::Display) -> MaterializerError {
@@ -632,6 +916,48 @@ fn quiesce_and_detach(
         session.detach(context)?;
     }
     Ok(())
+}
+
+fn pause_for_capture(
+    sessions: &mut [Box<dyn ato_adapter_api::AttachedAdapter>],
+    context: &AdapterContext<'_>,
+) -> Result<()> {
+    if let Some(session) = sessions.iter().find(|session| {
+        session.capabilities().capture_consistency
+            == ato_adapter_api::CaptureConsistency::Unsupported
+    }) {
+        bail!(
+            "Adapter `{}` cannot establish a safe current-point capture barrier",
+            session.adapter_id()
+        );
+    }
+    for (paused, session) in sessions.iter_mut().enumerate() {
+        if let Err(error) = session.pause_for_capture(context) {
+            for session in sessions[..paused].iter_mut().rev() {
+                let _ = session.resume_after_capture(context);
+            }
+            return Err(error.into());
+        }
+    }
+    Ok(())
+}
+
+fn resume_after_capture(
+    sessions: &mut [Box<dyn ato_adapter_api::AttachedAdapter>],
+    context: &AdapterContext<'_>,
+) -> Result<()> {
+    let mut first_error = None;
+    for session in sessions.iter_mut().rev() {
+        if let Err(error) = session.resume_after_capture(context)
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+    }
+    match first_error {
+        Some(error) => Err(error.into()),
+        None => Ok(()),
+    }
 }
 
 struct RepositoryObservationSink {

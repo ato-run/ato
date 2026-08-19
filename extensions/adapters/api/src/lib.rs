@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 
 use ato_computation::{PortId, ProtocolId};
 use ato_objects::{Direction, ObjectStore, RecordEnvelope, RecordId};
@@ -126,11 +126,101 @@ fn securely_excluded(path: &str) -> bool {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CaptureConsistency {
+    #[default]
+    Unsupported,
+    /// The workload declares that semantic changes cross attached Adapter
+    /// boundaries. The barrier drains those boundaries but does not freeze
+    /// arbitrary background process state.
+    AdapterMediated,
+    /// The runtime freezes all state producers while the frontier is captured.
+    RuntimeFrozen,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AdapterCapabilities {
     pub observe: bool,
     pub apply: bool,
     pub verify: bool,
     pub quiesce: bool,
+    pub capture_consistency: CaptureConsistency,
+}
+
+#[derive(Debug, Default)]
+struct CaptureGateState {
+    paused: bool,
+    in_flight: usize,
+}
+
+/// A small runtime-only admission gate shared by live Adapters. Work obtains a
+/// permit immediately before it crosses an observable boundary. Capture closes
+/// admission and waits for all already-admitted work to leave.
+#[derive(Debug, Default)]
+pub struct CaptureGate {
+    state: Mutex<CaptureGateState>,
+    changed: Condvar,
+}
+
+impl CaptureGate {
+    pub fn enter(&self) -> Result<CapturePermit<'_>, AdapterError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| AdapterError::Operation("capture gate was poisoned".to_owned()))?;
+        while state.paused {
+            state = self
+                .changed
+                .wait(state)
+                .map_err(|_| AdapterError::Operation("capture gate was poisoned".to_owned()))?;
+        }
+        state.in_flight = state
+            .in_flight
+            .checked_add(1)
+            .ok_or_else(|| AdapterError::Operation("capture gate overflow".to_owned()))?;
+        Ok(CapturePermit { gate: self })
+    }
+
+    pub fn pause_and_drain(&self) -> Result<(), AdapterError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| AdapterError::Operation("capture gate was poisoned".to_owned()))?;
+        state.paused = true;
+        while state.in_flight != 0 {
+            state = self
+                .changed
+                .wait(state)
+                .map_err(|_| AdapterError::Operation("capture gate was poisoned".to_owned()))?;
+        }
+        Ok(())
+    }
+
+    pub fn resume(&self) -> Result<(), AdapterError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| AdapterError::Operation("capture gate was poisoned".to_owned()))?;
+        state.paused = false;
+        self.changed.notify_all();
+        Ok(())
+    }
+
+    fn leave(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.in_flight = state.in_flight.saturating_sub(1);
+            self.changed.notify_all();
+        }
+    }
+}
+
+pub struct CapturePermit<'a> {
+    gate: &'a CaptureGate,
+}
+
+impl Drop for CapturePermit<'_> {
+    fn drop(&mut self) {
+        self.gate.leave();
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -219,6 +309,20 @@ pub trait AttachedAdapter: Send {
 
     fn quiesce(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
         Ok(())
+    }
+
+    fn pause_for_capture(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
+        Err(AdapterError::Unsupported {
+            adapter: self.adapter_id().to_owned(),
+            operation: "capture_barrier",
+        })
+    }
+
+    fn resume_after_capture(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
+        Err(AdapterError::Unsupported {
+            adapter: self.adapter_id().to_owned(),
+            operation: "capture_barrier_release",
+        })
     }
 
     fn detach(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
@@ -438,5 +542,19 @@ mod tests {
         assert!(!policy.captures(Path::new("README.md")));
         assert!(!policy.captures(Path::new("config/.env")));
         assert!(!policy.captures(Path::new("config/signing.key")));
+    }
+
+    #[test]
+    fn capture_gate_drains_admitted_work_and_reopens() {
+        let gate = Arc::new(CaptureGate::default());
+        let permit = gate.enter().unwrap();
+        let waiting = Arc::clone(&gate);
+        let paused = std::thread::spawn(move || waiting.pause_and_drain());
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        assert!(!paused.is_finished());
+        drop(permit);
+        paused.join().unwrap().unwrap();
+        gate.resume().unwrap();
+        drop(gate.enter().unwrap());
     }
 }

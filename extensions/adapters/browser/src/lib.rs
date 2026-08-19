@@ -254,6 +254,7 @@ fn browser_capabilities() -> AdapterCapabilities {
         apply: true,
         verify: true,
         quiesce: true,
+        capture_consistency: ato_adapter_api::CaptureConsistency::Unsupported,
     }
 }
 

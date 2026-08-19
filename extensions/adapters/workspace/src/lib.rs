@@ -33,6 +33,21 @@ pub struct WorkspaceSnapshot {
     pub files: BTreeMap<String, String>,
 }
 
+/// Safe aggregate for network share summaries. This decodes and canonicalizes
+/// the snapshot but never returns paths or file contents.
+pub fn workspace_snapshot_file_count(
+    snapshot: &ContentRef,
+    objects: &dyn ObjectResolver,
+) -> Result<usize, WorkspaceError> {
+    let metadata = objects.metadata(snapshot)?;
+    let bytes = read_exact_object(objects, snapshot, metadata.size, MAX_WORKSPACE_OBJECT_BYTES)?;
+    let snapshot: WorkspaceSnapshot = serde_json::from_slice(&bytes)?;
+    if serde_jcs::to_vec(&snapshot)? != bytes {
+        return Err(WorkspaceError::NonCanonical);
+    }
+    Ok(snapshot.files.len())
+}
+
 pub fn capture_workspace(
     root: &Path,
     objects: &dyn ObjectStore,
@@ -105,6 +120,7 @@ impl AdapterFactory for WorkspaceAdapter {
             apply: true,
             verify: true,
             quiesce: true,
+            capture_consistency: ato_adapter_api::CaptureConsistency::AdapterMediated,
         }
     }
 
@@ -169,6 +185,14 @@ impl AttachedAdapter for WorkspaceSession {
         decode_mutation(&bytes)
             .map(|_| ())
             .map_err(|error| AdapterError::Operation(error.to_string()))
+    }
+
+    fn pause_for_capture(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
+        Ok(())
+    }
+
+    fn resume_after_capture(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
+        Ok(())
     }
 }
 

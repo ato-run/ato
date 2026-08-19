@@ -112,6 +112,17 @@ pub fn verify_materialization(
     expected: &RealizationContract,
     objects: &dyn ObjectResolver,
 ) -> Result<ComputationRef, SnapshotError> {
+    let (materialization, computation) = validate_materialization(reference, objects)?;
+    if &materialization.contract != expected {
+        return Err(SnapshotError::IncompatibleHost);
+    }
+    Ok(computation)
+}
+
+fn validate_materialization(
+    reference: &MaterializationRef,
+    objects: &dyn ObjectResolver,
+) -> Result<(SnapshotMaterialization, ComputationRef), SnapshotError> {
     let metadata = objects.metadata(reference.content_ref())?;
     let bytes = read_exact_object(
         objects,
@@ -128,10 +139,7 @@ pub fn verify_materialization(
     if materialization.version != SNAPSHOT_MATERIALIZATION_VERSION {
         return Err(SnapshotError::Version(materialization.version));
     }
-    if &materialization.contract != expected {
-        return Err(SnapshotError::IncompatibleHost);
-    }
-    for artifact in materialization.artifacts {
+    for artifact in &materialization.artifacts {
         let reference = ContentRef::parse(artifact)
             .map_err(|error| SnapshotError::InvalidReference(error.to_string()))?;
         let metadata = objects.metadata(&reference)?;
@@ -142,10 +150,10 @@ pub fn verify_materialization(
             MAX_MATERIALIZATION_BYTES,
         )?;
     }
-    let computation = ComputationRef::parse(materialization.computation)
+    let computation = ComputationRef::parse(&materialization.computation)
         .map_err(|error| SnapshotError::InvalidReference(error.to_string()))?;
     resolve_computation(objects, &computation)?;
-    Ok(computation)
+    Ok((materialization, computation))
 }
 
 /// Snapshot-owned object graph discovery for generic CAS retention.
@@ -215,6 +223,16 @@ impl Materializer for SnapshotMaterializer {
             context.objects,
         )
         .map_err(|error| MaterializerError::Operation(error.to_string()))
+    }
+
+    fn validate(
+        &self,
+        descriptor: &ContentRef,
+        context: &MaterializerContext<'_>,
+    ) -> Result<ComputationRef, MaterializerError> {
+        validate_materialization(&MaterializationRef(descriptor.clone()), context.objects)
+            .map(|(_, computation)| computation)
+            .map_err(|error| MaterializerError::Operation(error.to_string()))
     }
 
     fn compatibility(
