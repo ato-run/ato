@@ -217,17 +217,22 @@ class ChromeSession:
             version = wait_for_json(f"http://127.0.0.1:{self.debug_port}/json/version")
             self.version = version["Browser"]
             self.cdp = Cdp(version["webSocketDebuggerUrl"])
-            target = wait_until(
-                lambda: next(
-                    (
-                        value
-                        for value in self.cdp.call("Target.getTargets")["targetInfos"]
-                        if value.get("type") == "page"
-                        and value.get("url", "").startswith(origin)
-                    ),
+            def host_page_target() -> dict[str, Any] | None:
+                targets = self.cdp.call("Target.getTargets")["targetInfos"]
+                self.host_target_urls = [
+                    str(value.get("url", "")) for value in targets if value.get("type") == "page"
+                ]
+                return next(
+                    (value for value in targets if value.get("url", "").startswith(origin)),
                     None,
                 )
-            )
+
+            try:
+                target = wait_until(host_page_target)
+            except AcceptanceError as error:
+                raise AcceptanceError(
+                    f"Browser Host did not expose its target page; pages={self.host_target_urls}"
+                ) from error
             attached = self.cdp.call(
                 "Target.attachToTarget", {"targetId": target["targetId"], "flatten": True}
             )
