@@ -7,7 +7,7 @@
 
 use std::fs;
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -160,12 +160,13 @@ struct ChromeProcess {
 
 impl ChromeProcess {
     fn launch(chrome: &Path, profile: &Path, headless: bool) -> Result<Self> {
+        let debug_port = available_loopback_port()?;
         let mut command = Command::new(chrome);
         command
             .arg("--no-first-run")
             .arg("--no-default-browser-check")
             .arg("--remote-debugging-address=127.0.0.1")
-            .arg("--remote-debugging-port=0")
+            .arg(format!("--remote-debugging-port={debug_port}"))
             .arg("--remote-allow-origins=*")
             .arg(format!("--user-data-dir={}", profile.display()))
             .arg("about:blank")
@@ -197,6 +198,17 @@ impl ChromeProcess {
         }
         Ok(())
     }
+}
+
+fn available_loopback_port() -> Result<u16> {
+    let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+        .context("reserve Browser Host Chrome CDP port")?;
+    let port = listener
+        .local_addr()
+        .context("inspect Browser Host Chrome CDP port")?
+        .port();
+    drop(listener);
+    Ok(port)
 }
 
 fn wait_for_run_end(discovery_path: &Path, chrome: &mut ChromeProcess) -> Result<()> {
@@ -490,6 +502,11 @@ mod tests {
         assert_eq!(parse_debug_port("9222\n/devtools/browser/id\n"), Some(9222));
         assert_eq!(parse_debug_port("not-a-port\n"), None);
         assert_eq!(parse_debug_port("\n"), None);
+    }
+
+    #[test]
+    fn allocated_debug_port_is_a_nonzero_loopback_port() {
+        assert_ne!(available_loopback_port().expect("port"), 0);
     }
 
     #[test]
