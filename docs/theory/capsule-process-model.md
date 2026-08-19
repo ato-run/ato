@@ -162,7 +162,7 @@ is testing.
 
 ## 17. Implementation status
 
-For implemented behavior, use [What works today](../../README.md#what-works-today)
+For implemented behavior, use [Current implementation status](../../README.md#current-implementation-status)
 and the [accepted RFCs](../rfcs/README.md), not this theory draft. In short:
 Computation identity, composition, and Replay-based Materialization are
 implemented; process/VM checkpoints, cross-host resume, contract-indexed
