@@ -70,12 +70,15 @@ fn web_surfaces(
         .collect())
 }
 
-/// Maps a configured listen string to a Web surface only when it is an
-/// explicit, numeric loopback address. `0.0.0.0`, remote hosts, hostnames, and
-/// unparsable addresses are refused.
+/// Maps a configured listen string to a Web surface only when it is the exact
+/// IPv4 loopback `127.0.0.1` with an explicit, non-zero port. This keeps the
+/// CLI and the desktop shell's URL validation (which accepts only
+/// `127.0.0.1` / `localhost` hosts) on one policy: `0.0.0.0`, other loopback
+/// ranges, `::1`, dynamic ports, hostnames, and unparsable addresses are all
+/// refused.
 fn loopback_web_surface(listen: &str) -> Option<DesktopSurfaceView> {
     let address = listen.parse::<SocketAddr>().ok()?;
-    if !address.ip().is_loopback() {
+    if address.ip() != std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST) || address.port() == 0 {
         return None;
     }
     Some(DesktopSurfaceView::Web {
@@ -134,5 +137,12 @@ mod tests {
         assert!(loopback_web_surface("localhost:8000").is_none());
         assert!(loopback_web_surface("example.com:8000").is_none());
         assert!(loopback_web_surface("not-an-address").is_none());
+    }
+
+    #[test]
+    fn dynamic_ports_and_other_loopback_ranges_are_refused() {
+        assert!(loopback_web_surface("127.0.0.1:0").is_none());
+        assert!(loopback_web_surface("127.0.0.2:8000").is_none());
+        assert!(loopback_web_surface("[::1]:8000").is_none());
     }
 }
