@@ -81,9 +81,32 @@ document.getElementById("encap").addEventListener("click", () =>
     output: "computation.capsule",
   })
 );
-document.getElementById("run").addEventListener("click", () =>
-  execute({ command: "run_portable", capsule_file: projectValue() })
-);
+document.getElementById("run").addEventListener("click", async () => {
+  const capsule = projectValue();
+  if (!capsule) return;
+  clear();
+  log("running capsule … (Cancel stops the CLI process tree)");
+  const cancel = document.getElementById("cancel");
+  cancel.disabled = false;
+  try {
+    const result = await invoke("computation_execute", {
+      command: { command: "run_portable", capsule_file: capsule },
+    });
+    log(result.success ? result.output : `failed: ${result.output}`);
+  } catch (error) {
+    log(`error: ${error}`);
+  } finally {
+    cancel.disabled = true;
+  }
+});
+document.getElementById("cancel").addEventListener("click", async () => {
+  try {
+    await invoke("run_cancel");
+    log("cancel requested");
+  } catch (error) {
+    log(`error: ${error}`);
+  }
+});
 document.getElementById("open-surface").addEventListener("click", async () => {
   const value = projectValue();
   if (!value) return;
@@ -93,5 +116,12 @@ document.getElementById("open-surface").addEventListener("click", async () => {
     log(`error: ${error}`);
   }
 });
+
+invoke("desktop_info")
+  .then((info) => {
+    document.getElementById("shell-info").textContent =
+      `Ato Desktop ${info.version} · ${info.platform}`;
+  })
+  .catch(() => {});
 
 refreshStatus();

@@ -3,14 +3,23 @@
 //!
 //! Every command verifies its caller label before acting; the capability file
 //! is defense in depth, not the only check. Computation is never advanced by
-//! this shell — the CLI is the sole owner.
+//! this shell — the CLI is the sole owner. Long-lived CLI operations (the
+//! portable `run`, which blocks in realization) are spawned through
+//! [`DesktopHost`]'s [`ProcessSupervisor`], so app exit or an explicit cancel
+//! tears down the whole CLI process tree.
 
-use ato_host_control::{CommandSpec, CompletedCommand, NativeHost, RunnerHost};
+use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
+
+use ato_host_control::{
+    ChildId, CommandSpec, CompletedCommand, HostError, NativeHost, OutputSink, ProcessSupervisor,
+    RunnerHost, SpawnSpec,
+};
 use ato_ipc::computation::{ComputationCommand, ComputationCommandResult};
 use ato_ipc::desktop_control::{DesktopRunStatus, DesktopRunView};
 use ato_ipc::session_surface::WEB_SURFACE_PROFILE;
 use serde::Serialize;
-use tauri::Url;
+use tauri::{Manager, Url};
 
 use crate::{binary, navigation, windows};
 
@@ -19,6 +28,58 @@ use crate::{binary, navigation, windows};
 pub struct DesktopInfo {
     pub version: String,
     pub platform: String,
+}
+
+/// Shell-owned process supervision state. Short-lived CLI commands run to
+/// completion; long-lived commands (portable `run`) are spawned and tracked
+/// here so that app exit or cancellation can terminate their whole process
+/// group.
+pub struct DesktopHost {
+    supervisor: Mutex<ProcessSupervisor<NativeHost>>,
+    run_child: Mutex<Option<ChildId>>,
+}
+
+impl DesktopHost {
+    /// A host whose supervisor resolves the `ato` binary with the shell's
+    /// explicit resolution policy.
+    pub fn new() -> Self {
+        let supervisor = ProcessSupervisor::new(NativeHost::new(move |_name| {
+            binary::resolve_ato_binary()
+                .map_err(|error| HostError::BinaryNotFound(error.to_string()))
+        }));
+        Self {
+            supervisor: Mutex::new(supervisor),
+            run_child: Mutex::new(None),
+        }
+    }
+
+    fn supervisor(&self) -> Result<MutexGuard<'_, ProcessSupervisor<NativeHost>>, String> {
+        self.supervisor
+            .lock()
+            .map_err(|_| "supervisor lock poisoned".to_owned())
+    }
+
+    /// Terminate the tracked portable-run child, if one is running.
+    pub fn cancel_run(&self) -> Result<(), String> {
+        let id = self
+            .run_child
+            .lock()
+            .map_err(|_| "run lock poisoned".to_owned())?
+            .take();
+        if let Some(id) = id {
+            self.supervisor()?
+                .terminate(id)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// Terminate every supervised process group. Idempotent.
+    pub fn shutdown(&self) -> Result<(), String> {
+        self.supervisor()?
+            .shutdown()
+            .map_err(|error| error.to_string())
+    }
 }
 
 /// Map a typed [`ComputationCommand`] to the exact `ato` argv. This is the
@@ -64,13 +125,9 @@ fn combined_output(completed: &CompletedCommand) -> String {
     text
 }
 
-fn cli_host() -> Result<NativeHost, String> {
-    let program = binary::resolve_ato_binary().map_err(|error| error.to_string())?;
-    Ok(NativeHost::new(move |_name| Ok(program.clone())))
-}
-
 fn run_cli(args: Vec<String>) -> Result<CompletedCommand, String> {
-    let host = cli_host()?;
+    let program = binary::resolve_ato_binary().map_err(|error| error.to_string())?;
+    let host = NativeHost::new(move |_name| Ok(program.clone()));
     let program = host
         .resolve_binary(binary::ato_binary_name())
         .map_err(|error| error.to_string())?;
@@ -80,6 +137,65 @@ fn run_cli(args: Vec<String>) -> Result<CompletedCommand, String> {
         env: vec![],
     })
     .map_err(|error| error.to_string())
+}
+
+/// Spawn a long-lived CLI command through the shell's supervisor and wait for
+/// it to exit, reading its combined output from a log file. The child remains
+/// supervisor-owned for the whole wait, so app exit or cancellation can
+/// terminate its process group mid-run.
+fn run_supervised(
+    host: &DesktopHost,
+    args: Vec<String>,
+) -> Result<ComputationCommandResult, String> {
+    let program = binary::resolve_ato_binary().map_err(|error| error.to_string())?;
+    let log_path = std::env::temp_dir()
+        .join("ato-desktop")
+        .join(format!("run-{}.log", std::process::id()));
+    let log_dir = log_path
+        .parent()
+        .ok_or_else(|| "run log path has no parent".to_owned())?;
+    std::fs::create_dir_all(log_dir).map_err(|error| error.to_string())?;
+    let id = host
+        .supervisor()?
+        .spawn(&SpawnSpec {
+            program,
+            args,
+            env: vec![],
+            output: OutputSink::LogFile(log_path.clone()),
+        })
+        .map_err(|error| error.to_string())?;
+    *host
+        .run_child
+        .lock()
+        .map_err(|_| "run lock poisoned".to_owned())? = Some(id);
+
+    let exit_code = loop {
+        let reaped = host.supervisor()?.reap_with_status();
+        if let Some((_, code)) = reaped.iter().find(|(child, _)| *child == id) {
+            break *code;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        if !host
+            .run_child
+            .lock()
+            .map_err(|_| "run lock poisoned".to_owned())?
+            .as_ref()
+            .is_some_and(|current| *current == id)
+        {
+            // Cancelled: terminate() already removed ownership.
+            break None;
+        }
+    };
+    *host
+        .run_child
+        .lock()
+        .map_err(|_| "run lock poisoned".to_owned())? = None;
+
+    let output = std::fs::read(&log_path).unwrap_or_default();
+    Ok(ComputationCommandResult {
+        success: exit_code == Some(0),
+        output: String::from_utf8_lossy(&output).into_owned(),
+    })
 }
 
 /// Inspect the active Run by asking the CLI, and decode its JSON response.
@@ -101,27 +217,45 @@ fn inspect(project: &str) -> Result<DesktopRunView, String> {
 }
 
 #[tauri::command]
-pub fn desktop_info() -> DesktopInfo {
-    DesktopInfo {
+pub fn desktop_info(window: tauri::WebviewWindow) -> Result<DesktopInfo, String> {
+    windows::verify_main_caller(window.label())?;
+    Ok(DesktopInfo {
         version: env!("CARGO_PKG_VERSION").to_owned(),
         platform: std::env::consts::OS.to_owned(),
-    }
+    })
 }
 
 #[tauri::command]
 pub async fn computation_execute(
     window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
     command: ComputationCommand,
 ) -> Result<ComputationCommandResult, String> {
     windows::verify_main_caller(window.label())?;
     let args = argv_for(&command);
-    let completed = tauri::async_runtime::spawn_blocking(move || run_cli(args))
+    match command {
+        // The portable run blocks in realization and can outlive the shell;
+        // it is supervisor-owned so app exit or cancel reaps its process tree.
+        ComputationCommand::RunPortable { .. } => tauri::async_runtime::spawn_blocking(move || {
+            let host = app.state::<DesktopHost>();
+            run_supervised(&host, args)
+        })
         .await
-        .map_err(|error| error.to_string())??;
-    Ok(ComputationCommandResult {
-        success: completed.success(),
-        output: combined_output(&completed),
-    })
+        .map_err(|error| error.to_string())?,
+        _ => tauri::async_runtime::spawn_blocking(move || run_cli(args))
+            .await
+            .map_err(|error| error.to_string())?
+            .map(|completed| ComputationCommandResult {
+                success: completed.success(),
+                output: combined_output(&completed),
+            }),
+    }
+}
+
+#[tauri::command]
+pub fn run_cancel(window: tauri::WebviewWindow, app: tauri::AppHandle) -> Result<(), String> {
+    windows::verify_main_caller(window.label())?;
+    app.state::<DesktopHost>().cancel_run()
 }
 
 #[tauri::command]
@@ -198,7 +332,7 @@ pub async fn open_web_surface(
         return Err("surface URL is not a loopback HTTP(S) origin".to_owned());
     }
     let origin = navigation::url_origin(&url);
-    let label = windows::app_window_label(&view.project);
+    let label = windows::app_window_label(&view.project, &url_string);
     crate::open_app_window(&app, &label, url, &origin)
 }
 

@@ -19,12 +19,14 @@ use navigation::{NavigationAction, NavigationRole};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .manage(host::DesktopHost::new())
         .invoke_handler(tauri::generate_handler![
             host::desktop_info,
             host::computation_execute,
+            host::run_cancel,
             host::run_inspect,
             host::pick_project,
             host::open_home,
@@ -34,8 +36,18 @@ pub fn run() {
             build_main_window(app.handle())?;
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running the Ato desktop shell");
+        .build(tauri::generate_context!())
+        .expect("error while building the Ato desktop shell");
+    app.run(|app_handle, event| {
+        if let tauri::RunEvent::Exit = event {
+            // The shell owns every CLI child process group; exit must reap
+            // them all so no portable run outlives the desktop.
+            let host = app_handle.state::<host::DesktopHost>();
+            if let Err(error) = host.shutdown() {
+                eprintln!("ato-desktop-tauri: shutdown failed: {error}");
+            }
+        }
+    });
 }
 
 fn build_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
@@ -120,6 +132,14 @@ pub(crate) fn open_app_window(
     origin: &str,
 ) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(label) {
+        // Reusing an existing window is only safe when it is still pinned to
+        // the exact origin this surface claims; otherwise fail closed.
+        let current = window.url().map_err(|error| error.to_string())?;
+        if navigation::url_origin(&current) != origin {
+            return Err(format!(
+                "window {label} exists with a different origin ({current})"
+            ));
+        }
         window.show().map_err(|error| error.to_string())?;
         window.set_focus().map_err(|error| error.to_string())?;
         return Ok(());
