@@ -51,7 +51,7 @@ jobs:
         env:
           ATO_BIN: ${{ github.workspace }}/target/debug/ato
       - run: |
-          chrome="$(node -e \"console.log(require('./tests/browser/node_modules/@playwright/test').chromium.executablePath())\")"
+          chrome="$(node -p "require('./tests/browser/node_modules/@playwright/test').chromium.executablePath()")"
           python3 tests/browser/staging-chrome-acceptance.py \
             --ato "${{ github.workspace }}/target/debug/ato" \
             --chrome "$chrome" \
