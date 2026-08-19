@@ -246,6 +246,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ato-host-control"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ato-ipc"
 version = "0.1.0"
 dependencies = [
