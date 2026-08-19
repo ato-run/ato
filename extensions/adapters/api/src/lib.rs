@@ -232,6 +232,16 @@ pub struct AdapterObservation {
     pub payload: Vec<u8>,
     pub caused_by: Vec<RecordId>,
     pub effect: ObservationEffect,
+    /// Optional scheduling hint for presentation projections. This never
+    /// enters Record payloads or computation identity.
+    pub presentation_hint: PresentationHint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PresentationHint {
+    #[default]
+    None,
+    Keyframe,
 }
 
 /// Whether an observation is only evidence about a realization or commits a
@@ -307,6 +317,12 @@ pub trait PresentationCapture: Send {
     }
 }
 
+/// Cloneable, runtime-private capture handle used by the caller's observation
+/// scheduler to capture a discrete frontier before a later action can pass it.
+pub trait PresentationKeyframeCapture: Send + Sync {
+    fn capture_keyframe(&self, sequence: u32) -> Result<Vec<PresentationAsset>, AdapterError>;
+}
+
 pub trait ObservationSink: Send + Sync {
     fn emit(&self, observation: AdapterObservation) -> Result<(), AdapterError>;
 }
@@ -328,6 +344,10 @@ pub trait AttachedAdapter: Send {
     fn capabilities(&self) -> AdapterCapabilities;
 
     fn presentation_capture(&mut self) -> Option<&mut dyn PresentationCapture> {
+        None
+    }
+
+    fn presentation_keyframe_capture(&self) -> Option<Arc<dyn PresentationKeyframeCapture>> {
         None
     }
 

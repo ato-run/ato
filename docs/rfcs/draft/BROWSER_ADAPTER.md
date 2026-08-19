@@ -157,11 +157,35 @@ closes the socket, joins the transport thread, and removes discovery state.
 The Adapter quiesce deadline is strictly shorter than the Supervisor stop
 deadline, so a failed barrier cannot be mistaken for a successful seal.
 
+## Presentation capture and Visual Archive
+
+Presentation capture is an optional physical projection on the generic
+Adapter lifecycle. It does not alter Browser Protocol payloads, Records,
+ComputationRef, Replay scheduling, or Bundle identity. The Supervisor owns
+frontier association and calls the projection contract; the Browser
+implementation uses only the runtime-private Browser Host CDP boundary.
+
+The Browser Adapter marks discrete action completion as a generic keyframe
+hint. Click, pointer-up, and non-text key-up may request a frame. Continuous
+pointer movement and scroll never request a frame. The Supervisor captures an
+initial frame, drains these hints in committed Record order, and captures the
+final frame only after the normal capture barrier has quiesced all Adapter
+boundaries. Final and archive frames carry the committed Record sequence, not
+a new ordering model.
+
+Archive v0 is bounded to 24 frames, 8 MiB per frame, and 32 MiB total. Frames
+are content-digest deduplicated. Retention preserves the initial frame and the
+most recent discrete frontiers; the final frame is included even when it is
+identical to the last discrete frame. Screenshot bytes never enter a Record or
+portable Bundle, and runtime discovery paths, CDP ports, channel credentials,
+and browser sessions are absent from presentation metadata. Delivery remains
+private and authorization is owned by the Capsule Network API.
+
 ## Known limitations and deferred work
 
 Version 1 deliberately excludes text input, touch, multi-tab and multi-frame
 semantics, local/session storage, IndexedDB, cookies, authentication sessions,
-clipboard, browser checkpoints, DOM semantic diffs, selector healing,
+clipboard, restorable browser checkpoints, DOM semantic diffs, selector healing,
 AI-assisted repair, wall-clock deterministic replay, OS-window input, Pixel
 Adapters, viewport adaptation, native/default-action equivalence for every DOM
 event profile, and application-specific semantic/state Adapters. Replay

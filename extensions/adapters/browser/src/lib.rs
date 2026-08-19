@@ -15,6 +15,7 @@ use std::time::Duration;
 use ato_adapter_api::{
     AdapterAttachContext, AdapterCapabilities, AdapterContext, AdapterError, AdapterFactory,
     AdapterInstance, AttachedAdapter, PresentationAsset, PresentationCapture,
+    PresentationKeyframeCapture,
 };
 use ato_objects::{RecordEnvelope, read_exact_object};
 use rand::RngCore;
@@ -94,6 +95,10 @@ impl AdapterFactory for BrowserAdapter {
         let channel_credential = random_credential();
         let browser_session = random_credential();
         let runtime_dir = browser_runtime_dir(context.runtime.workspace)?;
+        let presentation = std::sync::Arc::new(BrowserPresentationCapture {
+            runtime_dir: runtime_dir.clone(),
+            expected_origin: config.expected_origin.clone(),
+        });
         let transport = transport::start_transport(
             &runtime_dir,
             &instance.instance_id,
@@ -114,7 +119,20 @@ impl AdapterFactory for BrowserAdapter {
             next_request_id: 1,
             quiesced: false,
             capture_paused: false,
+            presentation,
         }))
+    }
+}
+
+struct BrowserPresentationCapture {
+    runtime_dir: std::path::PathBuf,
+    expected_origin: String,
+}
+
+impl PresentationKeyframeCapture for BrowserPresentationCapture {
+    fn capture_keyframe(&self, sequence: u32) -> Result<Vec<PresentationAsset>, AdapterError> {
+        presentation::capture_keyframe(&self.runtime_dir, &self.expected_origin, sequence)
+            .map(|asset| asset.into_iter().collect())
     }
 }
 
@@ -123,11 +141,18 @@ impl PresentationCapture for BrowserSession {
         &mut self,
         _context: &AdapterContext<'_>,
     ) -> Result<Vec<PresentationAsset>, AdapterError> {
-        let runtime_dir = self.transport.discovery_path.parent().ok_or_else(|| {
-            AdapterError::Operation("Browser runtime discovery has no parent".to_owned())
-        })?;
-        presentation::capture_final(runtime_dir, &self.config.expected_origin)
-            .map(|asset| asset.into_iter().collect())
+        presentation::capture_final(
+            &self.presentation.runtime_dir,
+            &self.presentation.expected_origin,
+        )
+    }
+
+    fn capture_keyframe(
+        &mut self,
+        sequence: u32,
+        _context: &AdapterContext<'_>,
+    ) -> Result<Vec<PresentationAsset>, AdapterError> {
+        self.presentation.capture_keyframe(sequence)
     }
 }
 
@@ -138,6 +163,7 @@ struct BrowserSession {
     next_request_id: u64,
     quiesced: bool,
     capture_paused: bool,
+    presentation: std::sync::Arc<BrowserPresentationCapture>,
 }
 
 impl BrowserSession {
@@ -178,6 +204,12 @@ impl AttachedAdapter for BrowserSession {
 
     fn presentation_capture(&mut self) -> Option<&mut dyn PresentationCapture> {
         Some(self)
+    }
+
+    fn presentation_keyframe_capture(
+        &self,
+    ) -> Option<std::sync::Arc<dyn PresentationKeyframeCapture>> {
+        Some(self.presentation.clone())
     }
 
     fn accepts(&self, record: &RecordEnvelope) -> bool {

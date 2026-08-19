@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -9,7 +9,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use ato_adapter_api::{
     AdapterAttachContext, AdapterContext, AdapterError, AdapterObservation, IgnoreObservations,
-    ObservationSink,
+    ObservationSink, PresentationAsset, PresentationHint, PresentationKeyframeCapture,
+    PresentationKind,
 };
 use ato_adapter_process::terminate_process_tree;
 use ato_adapter_workspace::restore_workspace;
@@ -41,6 +42,83 @@ const CAPTURE_REQUEST: &str = "runs/capture.request.json";
 const CAPTURE_ACK: &str = "runs/capture.ack.json";
 const CAPTURE_RELEASE: &str = "runs/capture.release.json";
 static RUN_TOKEN_COUNTER: AtomicU64 = AtomicU64::new(1);
+const MAX_ARCHIVE_FRAMES: usize = 24;
+const MAX_ARCHIVE_TOTAL_BYTES: usize = 32 * 1024 * 1024;
+const MAX_PRESENTATION_ASSET_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Default)]
+struct PresentationArchive {
+    assets: Vec<PresentationAsset>,
+    digests: BTreeSet<String>,
+    total_bytes: usize,
+}
+
+impl PresentationArchive {
+    fn ingest(&mut self, asset: PresentationAsset) {
+        self.ingest_with_policy(asset, false);
+    }
+
+    fn ingest_final_keyframe(&mut self, asset: PresentationAsset) {
+        self.ingest_with_policy(asset, true);
+    }
+
+    fn ingest_with_policy(&mut self, asset: PresentationAsset, retain_duplicate: bool) {
+        if asset.kind != PresentationKind::ArchiveKeyframe
+            || asset.bytes.is_empty()
+            || asset.bytes.len() > MAX_PRESENTATION_ASSET_BYTES
+            || asset.bytes.len() > MAX_ARCHIVE_TOTAL_BYTES
+        {
+            return;
+        }
+        let digest = blake3::hash(&asset.bytes).to_hex().to_string();
+        if !retain_duplicate && self.digests.contains(&digest) {
+            return;
+        }
+        while !self.assets.is_empty()
+            && (self.assets.len() >= MAX_ARCHIVE_FRAMES
+                || self.total_bytes.saturating_add(asset.bytes.len()) > MAX_ARCHIVE_TOTAL_BYTES)
+        {
+            let remove_index = usize::from(self.assets.len() > 1);
+            let removed = self.assets.remove(remove_index);
+            self.total_bytes = self.total_bytes.saturating_sub(removed.bytes.len());
+            let removed_digest = blake3::hash(&removed.bytes).to_hex().to_string();
+            if !self
+                .assets
+                .iter()
+                .any(|asset| blake3::hash(&asset.bytes).to_hex().as_str() == removed_digest)
+            {
+                self.digests.remove(&removed_digest);
+            }
+        }
+        self.total_bytes = self.total_bytes.saturating_add(asset.bytes.len());
+        self.digests.insert(digest);
+        self.assets.push(asset);
+    }
+
+    fn capture_assets(
+        &self,
+        final_assets: Vec<PresentationAsset>,
+        sequence: u32,
+    ) -> Vec<PresentationAsset> {
+        let mut archive = Self {
+            assets: self.assets.clone(),
+            digests: self.digests.clone(),
+            total_bytes: self.total_bytes,
+        };
+        let mut finals = Vec::with_capacity(final_assets.len());
+        for mut asset in final_assets {
+            if asset.kind == PresentationKind::FinalState {
+                asset.sequence = sequence;
+                let mut keyframe = asset.clone();
+                keyframe.kind = PresentationKind::ArchiveKeyframe;
+                archive.ingest_final_keyframe(keyframe);
+            }
+            finals.push(asset);
+        }
+        archive.assets.extend(finals);
+        archive.assets
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -388,11 +466,17 @@ pub(crate) fn worker(
         .unwrap_or_default();
     let registry = adapter_registry()?;
     let live_head = Arc::new(Mutex::new(head.clone()));
+    let keyframe_requests = Arc::new(Mutex::new(VecDeque::new()));
+    let presentation_archive = Arc::new(Mutex::new(PresentationArchive::default()));
+    let keyframe_captures = Arc::new(Mutex::new(Vec::new()));
     let sink: Arc<dyn ObservationSink> = Arc::new(RepositoryObservationSink {
         project: repository.project().to_path_buf(),
         branch: branch.to_owned(),
         token: token.to_owned(),
         head: Arc::clone(&live_head),
+        keyframe_requests: Arc::clone(&keyframe_requests),
+        presentation_archive: Arc::clone(&presentation_archive),
+        keyframe_captures: Arc::clone(&keyframe_captures),
     });
     enter(SupervisorState::Starting);
     let mut sessions = Vec::new();
@@ -439,6 +523,16 @@ pub(crate) fn worker(
         };
         sessions = registry.attach_all(&instances, &context)?;
     }
+    *keyframe_captures
+        .lock()
+        .map_err(|_| anyhow::anyhow!("presentation keyframe handles were poisoned"))? =
+        match restored.as_deref() {
+            Some(realization) => realization.presentation_keyframe_captures(),
+            None => sessions
+                .iter()
+                .filter_map(|session| session.presentation_keyframe_capture())
+                .collect(),
+        };
     let attached_head = live_head
         .lock()
         .map_err(|_| anyhow::anyhow!("Run head lock was poisoned"))?
@@ -469,10 +563,36 @@ pub(crate) fn worker(
             session.activate()?;
         }
     }
+    if let Ok(sequence) = u32::try_from(active.record_seq) {
+        if let Ok(mut archive) = presentation_archive.lock() {
+            capture_archive_keyframe(
+                sequence,
+                &mut archive,
+                &mut restored,
+                &mut sessions,
+                &AdapterContext {
+                    workspace: repository.project(),
+                    objects: repository.objects(),
+                },
+            );
+        }
+    }
 
     let stop_request = repository.root().join(STOP_REQUEST);
     let stop_ack = repository.root().join(STOP_ACK);
     loop {
+        if let Ok(mut archive) = presentation_archive.lock() {
+            drain_archive_keyframes(
+                &keyframe_requests,
+                &mut archive,
+                &mut restored,
+                &mut sessions,
+                &AdapterContext {
+                    workspace: repository.project(),
+                    objects: repository.objects(),
+                },
+            );
+        }
         if repository.root().join(CAPTURE_REQUEST).exists() {
             handle_capture_request(
                 &repository,
@@ -481,6 +601,7 @@ pub(crate) fn worker(
                 &live_head,
                 &mut restored,
                 &mut sessions,
+                &presentation_archive,
             )?;
         }
         if stop_request.exists() {
@@ -520,6 +641,7 @@ fn handle_capture_request(
     live_head: &Arc<Mutex<ComputationRef>>,
     realization: &mut Option<Box<dyn Realization>>,
     sessions: &mut [Box<dyn ato_adapter_api::AttachedAdapter>],
+    presentation_archive: &Arc<Mutex<PresentationArchive>>,
 ) -> Result<()> {
     let request_path = repository.root().join(CAPTURE_REQUEST);
     let ack_path = repository.root().join(CAPTURE_ACK);
@@ -557,12 +679,18 @@ fn handle_capture_request(
         *live_head
             .lock()
             .map_err(|_| anyhow::anyhow!("Run head lock was poisoned"))? = target.clone();
-        let assets = match realization.as_deref_mut() {
+        let final_assets = match realization.as_deref_mut() {
             Some(realization) => realization
                 .capture_final_presentation()
                 .map_err(anyhow::Error::from)?,
             None => capture_final_presentation(sessions, &context)?,
         };
+        let sequence = u32::try_from(frontier.record_seq)
+            .context("presentation sequence exceeds the bounded projection contract")?;
+        let assets = presentation_archive
+            .lock()
+            .map_err(|_| anyhow::anyhow!("presentation archive was poisoned"))?
+            .capture_assets(final_assets, sequence);
         eprintln!(
             "current-point capture: collected {} bounded presentation asset(s)",
             assets.len()
@@ -655,6 +783,76 @@ fn capture_final_presentation(
     Ok(assets)
 }
 
+fn capture_presentation_keyframe(
+    sessions: &mut [Box<dyn ato_adapter_api::AttachedAdapter>],
+    sequence: u32,
+    context: &AdapterContext<'_>,
+) -> Result<Vec<PresentationAsset>> {
+    let mut assets = Vec::new();
+    for session in sessions {
+        let Some(capture) = session.presentation_capture() else {
+            continue;
+        };
+        capture.attach(context)?;
+        let result = capture.capture_keyframe(sequence, context);
+        let detach = capture.detach(context);
+        assets.extend(result?);
+        detach?;
+    }
+    Ok(assets)
+}
+
+fn capture_archive_keyframe(
+    sequence: u32,
+    archive: &mut PresentationArchive,
+    realization: &mut Option<Box<dyn Realization>>,
+    sessions: &mut [Box<dyn ato_adapter_api::AttachedAdapter>],
+    context: &AdapterContext<'_>,
+) {
+    let result = match realization.as_deref_mut() {
+        Some(realization) => realization
+            .capture_presentation_keyframe(sequence)
+            .map_err(anyhow::Error::from),
+        None => capture_presentation_keyframe(sessions, sequence, context),
+    };
+    match result {
+        Ok(assets) => {
+            eprintln!(
+                "presentation keyframe {sequence}: collected {} bounded asset(s)",
+                assets.len()
+            );
+            for asset in assets {
+                archive.ingest(asset);
+            }
+        }
+        Err(error) => {
+            eprintln!("presentation keyframe {sequence} unavailable: {error:#}");
+        }
+    }
+}
+
+fn drain_archive_keyframes(
+    requests: &Arc<Mutex<VecDeque<u32>>>,
+    archive: &mut PresentationArchive,
+    realization: &mut Option<Box<dyn Realization>>,
+    sessions: &mut [Box<dyn ato_adapter_api::AttachedAdapter>],
+    context: &AdapterContext<'_>,
+) {
+    loop {
+        let sequence = match requests.lock() {
+            Ok(mut requests) => requests.pop_front(),
+            Err(_) => {
+                eprintln!("presentation keyframe queue was poisoned");
+                return;
+            }
+        };
+        let Some(sequence) = sequence else {
+            return;
+        };
+        capture_archive_keyframe(sequence, archive, realization, sessions, context);
+    }
+}
+
 fn persist_presentation_assets(
     repository: &LocalCapsuleRepository,
     token: &str,
@@ -670,7 +868,7 @@ fn persist_presentation_assets(
     fs::create_dir_all(&directory)?;
     let mut persisted = Vec::with_capacity(assets.len());
     for (index, asset) in assets.iter().enumerate() {
-        if asset.bytes.is_empty() || asset.bytes.len() > 8 * 1024 * 1024 {
+        if asset.bytes.is_empty() || asset.bytes.len() > MAX_PRESENTATION_ASSET_BYTES {
             bail!("presentation asset is outside the bounded size contract")
         }
         let kind = match asset.kind {
@@ -841,11 +1039,15 @@ impl PortableContinuationCapture {
         }
 
         let live_head = Arc::new(Mutex::new(head.clone()));
+        let keyframe_requests = Arc::new(Mutex::new(VecDeque::new()));
         let sink: Arc<dyn ObservationSink> = Arc::new(RepositoryObservationSink {
             project: repository.project().to_path_buf(),
             branch: Self::BRANCH.to_owned(),
             token: token.clone(),
             head: Arc::clone(&live_head),
+            keyframe_requests,
+            presentation_archive: Arc::new(Mutex::new(PresentationArchive::default())),
+            keyframe_captures: Arc::new(Mutex::new(Vec::new())),
         });
         let gate = Arc::new(GatedObservationSink {
             enabled: AtomicBool::new(false),
@@ -1082,6 +1284,30 @@ impl Realization for CliRealization {
         )
         .map_err(materializer_operation)
     }
+
+    fn capture_presentation_keyframe(
+        &mut self,
+        sequence: u32,
+    ) -> Result<Vec<PresentationAsset>, MaterializerError> {
+        let repository =
+            LocalCapsuleRepository::open(&self.project).map_err(materializer_operation)?;
+        capture_presentation_keyframe(
+            &mut self.sessions,
+            sequence,
+            &AdapterContext {
+                workspace: &self.project,
+                objects: repository.objects(),
+            },
+        )
+        .map_err(materializer_operation)
+    }
+
+    fn presentation_keyframe_captures(&self) -> Vec<Arc<dyn PresentationKeyframeCapture>> {
+        self.sessions
+            .iter()
+            .filter_map(|session| session.presentation_keyframe_capture())
+            .collect()
+    }
 }
 
 fn materializer_operation(error: impl std::fmt::Display) -> MaterializerError {
@@ -1148,6 +1374,9 @@ struct RepositoryObservationSink {
     branch: String,
     token: String,
     head: Arc<Mutex<ComputationRef>>,
+    keyframe_requests: Arc<Mutex<VecDeque<u32>>>,
+    presentation_archive: Arc<Mutex<PresentationArchive>>,
+    keyframe_captures: Arc<Mutex<Vec<Arc<dyn PresentationKeyframeCapture>>>>,
 }
 
 struct GatedObservationSink {
@@ -1181,7 +1410,8 @@ impl ObservationSink for RepositoryObservationSink {
                     .map_err(|error| AdapterError::Operation(error.to_string()))?
             }
         };
-        repository
+        let presentation_hint = observation.presentation_hint;
+        let committed = repository
             .commit_observation(
                 &self.token,
                 &head,
@@ -1203,6 +1433,45 @@ impl ObservationSink for RepositoryObservationSink {
             .map_err(|error| AdapterError::Operation(error.to_string()))?;
         if next != *head {
             *head = next;
+        }
+        drop(head);
+        if presentation_hint == PresentationHint::Keyframe
+            && let Ok(sequence) = u32::try_from(committed.id.seq)
+        {
+            let captures = self
+                .keyframe_captures
+                .lock()
+                .map_err(|_| {
+                    AdapterError::Operation(
+                        "presentation keyframe handles were poisoned".to_owned(),
+                    )
+                })?
+                .clone();
+            let mut captured_any = false;
+            for capture in captures {
+                match capture.capture_keyframe(sequence) {
+                    Ok(assets) => {
+                        captured_any |= !assets.is_empty();
+                        let mut archive = self.presentation_archive.lock().map_err(|_| {
+                            AdapterError::Operation("presentation archive was poisoned".to_owned())
+                        })?;
+                        for asset in assets {
+                            archive.ingest(asset);
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("presentation keyframe {sequence} unavailable: {error}");
+                    }
+                }
+            }
+            if !captured_any {
+                let mut requests = self.keyframe_requests.lock().map_err(|_| {
+                    AdapterError::Operation("presentation keyframe queue was poisoned".to_owned())
+                })?;
+                if requests.len() < MAX_ARCHIVE_FRAMES.saturating_mul(2) {
+                    requests.push_back(sequence);
+                }
+            }
         }
         Ok(())
     }
@@ -1303,4 +1572,52 @@ fn command_output(program: &str, args: &[&str]) -> Option<String> {
         .success()
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
         .filter(|value| !value.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(sequence: u32, byte: u8) -> PresentationAsset {
+        PresentationAsset {
+            kind: PresentationKind::ArchiveKeyframe,
+            content_type: "image/png".to_owned(),
+            width: Some(100),
+            height: Some(100),
+            sequence,
+            bytes: vec![byte],
+        }
+    }
+
+    #[test]
+    fn visual_archive_is_deduplicated_bounded_and_retains_initial_and_latest() {
+        let mut archive = PresentationArchive::default();
+        archive.ingest(frame(0, 0));
+        archive.ingest(frame(1, 0));
+        for sequence in 1..=30 {
+            archive.ingest(frame(sequence, sequence as u8));
+        }
+        assert_eq!(archive.assets.len(), MAX_ARCHIVE_FRAMES);
+        assert_eq!(archive.assets.first().map(|asset| asset.sequence), Some(0));
+        assert_eq!(archive.assets.last().map(|asset| asset.sequence), Some(30));
+    }
+
+    #[test]
+    fn final_browser_state_is_also_an_archive_frontier_without_changing_bytes() {
+        let mut archive = PresentationArchive::default();
+        archive.ingest(frame(0, 7));
+        let mut final_asset = frame(0, 7);
+        final_asset.kind = PresentationKind::FinalState;
+        let assets = archive.capture_assets(vec![final_asset], 42);
+        assert_eq!(assets.len(), 3);
+        assert_eq!(assets[0].kind, PresentationKind::ArchiveKeyframe);
+        assert_eq!(assets[1].kind, PresentationKind::ArchiveKeyframe);
+        assert_eq!(assets[2].kind, PresentationKind::FinalState);
+        assert_eq!(assets[0].sequence, 0);
+        assert_eq!(assets[1].sequence, 42);
+        assert_eq!(assets[2].sequence, 42);
+        assert_eq!(assets[0].bytes, assets[1].bytes);
+        assert_eq!(assets[1].bytes, assets[2].bytes);
+        assert_eq!(archive.digests.len(), 1);
+    }
 }

@@ -429,6 +429,7 @@ fn observation(
             }
             _ => ato_adapter_api::ObservationEffect::Evidence,
         },
+        presentation_hint: ato_adapter_api::PresentationHint::None,
     })
 }
 

@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use ato_adapter_api::{AdapterError, AdapterObservation, ObservationEffect, ObservationSink};
+use ato_adapter_api::{
+    AdapterError, AdapterObservation, ObservationEffect, ObservationSink, PresentationHint,
+};
 use ato_computation::{PortId, ProtocolId};
 use ato_objects::Direction;
 use serde::{Deserialize, Serialize};
@@ -676,6 +678,11 @@ fn emit_event(
             .map_err(|error| AdapterError::Operation(error.to_string()))?,
         caused_by: Vec::new(),
         effect: ObservationEffect::Evolution,
+        presentation_hint: if event.is_archive_keyframe_candidate() {
+            PresentationHint::Keyframe
+        } else {
+            PresentationHint::None
+        },
     })
 }
 

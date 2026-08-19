@@ -444,6 +444,7 @@ fn proxy_exchange(
         payload: encode_event(&request).map_err(std::io::Error::other)?,
         caused_by: Vec::new(),
         effect: ObservationEffect::Evolution,
+        presentation_hint: ato_adapter_api::PresentationHint::None,
     });
 
     let mut upstream_stream = connect_with_retry(upstream)?;
@@ -460,6 +461,7 @@ fn proxy_exchange(
         payload: encode_event(&response).map_err(std::io::Error::other)?,
         caused_by: Vec::new(),
         effect: ObservationEffect::Evidence,
+        presentation_hint: ato_adapter_api::PresentationHint::None,
     });
     Ok(())
 }

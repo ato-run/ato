@@ -747,9 +747,30 @@ materializers = ["ato.replay@1"]
     if args.browser_host:
         presentation_receipt = json.loads((presentation / "receipt.json").read_text())
         assets = presentation_receipt.get("assets", [])
-        if len(assets) != 1 or assets[0].get("kind") != "final_state":
+        final_assets = [asset for asset in assets if asset.get("kind") == "final_state"]
+        archive_assets = [
+            asset for asset in assets if asset.get("kind") == "archive_keyframe"
+        ]
+        if len(final_assets) != 1 or len(archive_assets) < 2:
             raise AcceptanceError("Browser final-state presentation receipt is incomplete")
-        final_png = (presentation / assets[0]["path"]).read_bytes()
+        if len(archive_assets) > 24:
+            raise AcceptanceError("Browser Visual Archive exceeded its frame bound")
+        archive_bytes = sum(
+            (presentation / asset["path"]).stat().st_size for asset in archive_assets
+        )
+        if archive_bytes > 32 * 1024 * 1024:
+            raise AcceptanceError("Browser Visual Archive exceeded its byte bound")
+        archive_sequences = {asset.get("sequence") for asset in archive_assets}
+        final_sequence = presentation_receipt.get("record_sequence")
+        if 0 not in archive_sequences or final_sequence not in archive_sequences:
+            raise AcceptanceError("Browser Visual Archive omitted initial or final frontier")
+        if not any(
+            sequence not in {0, final_sequence} for sequence in archive_sequences
+        ):
+            raise AcceptanceError(
+                "Browser Visual Archive omitted every discrete action frontier"
+            )
+        final_png = (presentation / final_assets[0]["path"]).read_bytes()
         expected_png = base64.b64decode(
             author_chrome.cdp.call(
                 "Page.captureScreenshot",
@@ -1169,6 +1190,18 @@ materializers = ["ato.replay@1"]
                 else None
             ),
             "identity_independent": True,
+            "archive_keyframes": (
+                len(
+                    [
+                        asset
+                        for asset in presentation_receipt["assets"]
+                        if asset["kind"] == "archive_keyframe"
+                    ]
+                )
+                if presentation_receipt is not None
+                else 0
+            ),
+            "archive_bounded": True,
         },
         "failure_path": {
             "kind": "bridge_disconnect_during_replay",

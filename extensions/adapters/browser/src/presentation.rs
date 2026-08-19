@@ -16,12 +16,43 @@ use url::Url;
 
 const PROFILE_DIR_NAME: &str = "browser-host-profile";
 const CDP_PORT_FILE_NAME: &str = "browser-host-cdp-port";
+const INITIAL_FRAME_FILE_NAME: &str = "browser-host-initial.png";
+const INITIAL_FRAME_METADATA_FILE_NAME: &str = "browser-host-initial.json";
 const IO_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_SCREENSHOT_BYTES: usize = 8 * 1024 * 1024;
 
 pub(crate) fn capture_final(
     runtime_dir: &Path,
     expected_origin: &str,
+) -> Result<Vec<PresentationAsset>, AdapterError> {
+    let mut assets = initial_frame(runtime_dir)?.into_iter().collect::<Vec<_>>();
+    assets.extend(capture(
+        runtime_dir,
+        expected_origin,
+        PresentationKind::FinalState,
+        0,
+    )?);
+    Ok(assets)
+}
+
+pub(crate) fn capture_keyframe(
+    runtime_dir: &Path,
+    expected_origin: &str,
+    sequence: u32,
+) -> Result<Option<PresentationAsset>, AdapterError> {
+    capture(
+        runtime_dir,
+        expected_origin,
+        PresentationKind::ArchiveKeyframe,
+        sequence,
+    )
+}
+
+fn capture(
+    runtime_dir: &Path,
+    expected_origin: &str,
+    kind: PresentationKind,
+    sequence: u32,
 ) -> Result<Option<PresentationAsset>, AdapterError> {
     let port_path = runtime_dir.join(PROFILE_DIR_NAME).join(CDP_PORT_FILE_NAME);
     if !port_path.exists() {
@@ -92,13 +123,61 @@ pub(crate) fn capture_final(
         None,
     );
     Ok(Some(PresentationAsset {
-        kind: PresentationKind::FinalState,
+        kind,
+        content_type: "image/png".to_owned(),
+        width: Some(width),
+        height: Some(height),
+        sequence,
+        bytes,
+    }))
+}
+
+fn initial_frame(runtime_dir: &Path) -> Result<Option<PresentationAsset>, AdapterError> {
+    let profile = runtime_dir.join(PROFILE_DIR_NAME);
+    let image_path = profile.join(INITIAL_FRAME_FILE_NAME);
+    let metadata_path = profile.join(INITIAL_FRAME_METADATA_FILE_NAME);
+    if !image_path.exists() && !metadata_path.exists() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(image_path)?;
+    if bytes.is_empty() || bytes.len() > MAX_SCREENSHOT_BYTES {
+        return Err(operation(
+            "Browser Host initial screenshot exceeds the bounded asset contract",
+        ));
+    }
+    let metadata_bytes = std::fs::read(metadata_path)?;
+    if metadata_bytes.len() > 1024 {
+        return Err(operation(
+            "Browser Host initial frame metadata is too large",
+        ));
+    }
+    let metadata: Value = serde_json::from_slice(&metadata_bytes)?;
+    if serde_jcs::to_vec(&metadata)? != metadata_bytes {
+        return Err(operation(
+            "Browser Host initial frame metadata is not canonical",
+        ));
+    }
+    let width = bounded_integer_dimension(&metadata, "width")?;
+    let height = bounded_integer_dimension(&metadata, "height")?;
+    Ok(Some(PresentationAsset {
+        kind: PresentationKind::ArchiveKeyframe,
         content_type: "image/png".to_owned(),
         width: Some(width),
         height: Some(height),
         sequence: 0,
         bytes,
     }))
+}
+
+fn bounded_integer_dimension(value: &Value, field: &str) -> Result<u32, AdapterError> {
+    let dimension = value
+        .get(field)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| operation("Browser Host initial viewport dimension is missing"))?;
+    u32::try_from(dimension)
+        .ok()
+        .filter(|dimension| (1..=8192).contains(dimension))
+        .ok_or_else(|| operation("Browser Host initial viewport dimension is outside bounds"))
 }
 
 fn select_page_target<'a>(
