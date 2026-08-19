@@ -192,6 +192,7 @@ class ChromeSession:
         self.browser_context_id: str | None = None
         self.browser_host = browser_host is not None
         self.work_dir = work_dir
+        self.work_dir.mkdir(parents=True, exist_ok=False)
         self.log_file = (work_dir / "chrome.log").open("wb")
         if browser_host is not None:
             ato, runtime_dir = browser_host
