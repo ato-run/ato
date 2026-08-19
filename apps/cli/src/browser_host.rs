@@ -230,7 +230,7 @@ fn attach_bridge(
     let target_id = initial_page_target_id(&targets)?.to_owned();
     let attached = cdp.call(
         "Target.attachToTarget",
-        json!({"targetId": target_id, "flatten": true}),
+        json!({"targetId": target_id.clone(), "flatten": true}),
         None,
     )?;
     let session_id = required_string(&attached, "sessionId")?.to_owned();
@@ -245,12 +245,15 @@ fn attach_bridge(
         json!({"source": source, "worldName": world_name}),
         Some(&session_id),
     )?;
-    cdp.call(
+    let navigation = cdp.call(
         "Page.navigate",
         json!({"url": target_url}),
         Some(&session_id),
     )?;
-    wait_for_page_origin(&mut cdp, &session_id, target_url)?;
+    if let Some(error) = navigation.get("errorText").and_then(Value::as_str) {
+        bail!("Browser Host page navigation failed: {error}");
+    }
+    wait_for_target_origin(&mut cdp, &target_id, target_url)?;
     Ok(cdp)
 }
 
@@ -297,15 +300,24 @@ fn connect_cdp(ws_url: &str) -> Result<WebSocket<MaybeTlsStream<TcpStream>>> {
     Ok(websocket)
 }
 
-fn wait_for_page_origin(cdp: &mut Cdp, session_id: &str, target_url: &str) -> Result<()> {
+fn wait_for_target_origin(cdp: &mut Cdp, target_id: &str, target_url: &str) -> Result<()> {
     let expected_origin = Url::parse(target_url)
         .context("parse Browser Host navigation target")?
         .origin()
         .ascii_serialization();
     let deadline = Instant::now() + NAVIGATION_WAIT;
     loop {
-        let history = cdp.call("Page.getNavigationHistory", json!({}), Some(session_id))?;
-        if let Some(url) = page_history_current_url(&history)
+        let targets = cdp.call("Target.getTargets", json!({}), None)?;
+        let url = targets
+            .get("targetInfos")
+            .and_then(Value::as_array)
+            .and_then(|targets| {
+                targets.iter().find(|target| {
+                    target.get("targetId").and_then(Value::as_str) == Some(target_id)
+                })
+            })
+            .and_then(|target| target.get("url").and_then(Value::as_str));
+        if let Some(url) = url
             && validate_target(url, &expected_origin).is_ok()
         {
             return Ok(());
@@ -315,16 +327,6 @@ fn wait_for_page_origin(cdp: &mut Cdp, session_id: &str, target_url: &str) -> Re
         }
         thread::sleep(POLL_INTERVAL);
     }
-}
-
-fn page_history_current_url(history: &Value) -> Option<&str> {
-    let index = usize::try_from(history.get("currentIndex")?.as_u64()?).ok()?;
-    history
-        .get("entries")?
-        .as_array()?
-        .get(index)?
-        .get("url")?
-        .as_str()
 }
 
 impl Cdp {
@@ -500,21 +502,6 @@ mod tests {
                 .expect("paths")
                 .len(),
             2
-        );
-    }
-
-    #[test]
-    fn page_history_uses_the_current_entry() {
-        let history = json!({
-            "currentIndex": 1,
-            "entries": [
-                {"url": "about:blank"},
-                {"url": "https://example.test/ready"},
-            ],
-        });
-        assert_eq!(
-            page_history_current_url(&history),
-            Some("https://example.test/ready")
         );
     }
 
