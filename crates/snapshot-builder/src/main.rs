@@ -2794,7 +2794,7 @@ fn process_source_materialize_job(
                 "the claimed local source and exact-source params disagree".to_string(),
             ));
         }
-        let upload_id = source.upload_id.as_deref().ok_or_else(|| {
+        source.upload_id.as_deref().ok_or_else(|| {
             SourceMaterializeFail::internal(
                 "source_plan_invalid",
                 "local source omitted upload_id".to_string(),
@@ -2806,6 +2806,18 @@ fn process_source_materialize_job(
                 "local source omitted archive_digest".to_string(),
             )
         })?;
+        let expected_repository = local_archive_repository(expected_digest).ok_or_else(|| {
+            SourceMaterializeFail::internal(
+                "source_plan_invalid",
+                "local source archive_digest is not canonical sha256".to_string(),
+            )
+        })?;
+        if params.canonical_repository != expected_repository {
+            return Err(SourceMaterializeFail::internal(
+                "source_plan_mismatch",
+                "the claimed local source and canonical repository disagree".to_string(),
+            ));
+        }
         let url = format!(
             "{}/v1/capsule-snapshots/jobs/{}/local-source-archive",
             cfg.api_url.trim_end_matches('/'),
@@ -2902,7 +2914,7 @@ fn process_source_materialize_job(
         )
         .map_err(|error| SourceMaterializeFail::internal(error.code(), error.to_string()))?;
         let source_receipt = snapshot::source_receipt::SourceReceiptV1 {
-            canonical_repository: format!("ato-local://{upload_id}"),
+            canonical_repository: expected_repository,
             commit_algorithm: "sha256".to_string(),
             provider: "local_archive".to_string(),
             resolved_commit_sha: source.commit_sha.clone(),
@@ -3017,6 +3029,19 @@ fn process_source_materialize_job(
         materialization_receipt: outcome.materialization,
         archive,
     })
+}
+
+fn local_archive_repository(archive_digest: &str) -> Option<String> {
+    let digest = archive_digest.strip_prefix("sha256:")?;
+    if digest.len() != 64
+        || !digest
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+    {
+        return None;
+    }
+    Some(format!("ato-local://sha256/{digest}"))
 }
 
 fn verify_local_authoring_archive(root: &Path, source: &ClaimedSource) -> Result<(), String> {
@@ -7053,6 +7078,31 @@ targets = ["web"]
             measured_file_count_hint: Some(file_count),
             measured_uncompressed_bytes_hint: Some(byte_count),
         }
+    }
+
+    #[test]
+    fn local_archive_repository_is_bound_to_the_archive_digest() {
+        let digest = "a".repeat(64);
+        assert_eq!(
+            local_archive_repository(&format!("sha256:{digest}")),
+            Some(format!("ato-local://sha256/{digest}"))
+        );
+    }
+
+    #[test]
+    fn local_archive_repository_rejects_noncanonical_digests() {
+        assert_eq!(
+            local_archive_repository(&format!("sha256:{}", "A".repeat(64))),
+            None
+        );
+        assert_eq!(
+            local_archive_repository(&format!("sha256:{}", "a".repeat(63))),
+            None
+        );
+        assert_eq!(
+            local_archive_repository(&format!("blake3:{}", "a".repeat(64))),
+            None
+        );
     }
 
     const LOCAL_MANIFEST: &str = r#"schema_version = "1"
