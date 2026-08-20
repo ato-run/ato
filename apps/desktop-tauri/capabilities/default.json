@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "launcher",
+  "description": "Native capabilities for the bundled local Launcher only. Remote Home and guest app windows are intentionally excluded.",
+  "windows": ["main"],
+  "permissions": ["core:default", "dialog:allow-open"]
+}
