@@ -10,6 +10,7 @@
 pub mod binding_control;
 pub mod binding_lease;
 pub mod computation;
+pub mod desktop_control;
 pub mod error;
 pub mod net;
 pub mod session_surface;
