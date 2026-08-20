@@ -36,8 +36,20 @@ pub struct DesktopInfo {
 pub enum RunError {
     #[error("a portable run is already active")]
     AlreadyActive,
+    #[error("the desktop host is shut down")]
+    Closed,
     #[error("{0}")]
     Supervisor(String),
+}
+
+/// The single portable-run slot. `Closed` is terminal: once the host is shut
+/// down it can never accept a new run, so a spawn that raced app exit can
+/// never leave a child that outlives the shell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunSlot {
+    Idle,
+    Active(ChildId),
+    Closed,
 }
 
 /// Monotonic suffix for per-run log files, so one run's output can never bleed
@@ -51,7 +63,7 @@ static RUN_LOG_SEQ: AtomicU64 = AtomicU64::new(0);
 /// two concurrent runs can never both own the supervisor slot.
 pub struct DesktopHost {
     supervisor: Mutex<ProcessSupervisor<NativeHost>>,
-    run_child: Mutex<Option<ChildId>>,
+    run_child: Mutex<RunSlot>,
 }
 
 impl DesktopHost {
@@ -64,7 +76,7 @@ impl DesktopHost {
         }));
         Self {
             supervisor: Mutex::new(supervisor),
-            run_child: Mutex::new(None),
+            run_child: Mutex::new(RunSlot::Idle),
         }
     }
 
@@ -76,22 +88,25 @@ impl DesktopHost {
 
     /// Atomically claim the single portable-run slot and spawn the child under
     /// supervision. Returns [`RunError::AlreadyActive`] when a run is already
-    /// in flight; check, spawn, and slot registration happen under one lock so
-    /// two callers can never both win.
+    /// in flight and [`RunError::Closed`] after the host is shut down; check,
+    /// spawn, and slot registration happen under one lock so two callers can
+    /// never both win and a spawn that races app exit is rejected.
     pub fn spawn_run(&self, spec: &SpawnSpec) -> Result<ChildId, RunError> {
         let mut slot = self
             .run_child
             .lock()
             .map_err(|_| RunError::Supervisor("run lock poisoned".to_owned()))?;
-        if slot.is_some() {
-            return Err(RunError::AlreadyActive);
+        match *slot {
+            RunSlot::Closed => return Err(RunError::Closed),
+            RunSlot::Active(_) => return Err(RunError::AlreadyActive),
+            RunSlot::Idle => {}
         }
         let id = self
             .supervisor()
             .map_err(RunError::Supervisor)?
             .spawn(spec)
             .map_err(|error| RunError::Supervisor(error.to_string()))?;
-        *slot = Some(id);
+        *slot = RunSlot::Active(id);
         Ok(id)
     }
 
@@ -99,7 +114,7 @@ impl DesktopHost {
     pub fn is_run_owned(&self, id: ChildId) -> bool {
         self.run_child
             .lock()
-            .map(|slot| slot.as_ref() == Some(&id))
+            .map(|slot| matches!(*slot, RunSlot::Active(owned) if owned == id))
             .unwrap_or(false)
     }
 
@@ -107,32 +122,38 @@ impl DesktopHost {
     /// already been superseded or cancelled must not clear a newer run's slot.
     pub fn finish_run(&self, id: ChildId) {
         if let Ok(mut slot) = self.run_child.lock()
-            && slot.as_ref() == Some(&id)
+            && matches!(*slot, RunSlot::Active(owned) if owned == id)
         {
-            *slot = None;
+            *slot = RunSlot::Idle;
         }
     }
 
     /// Terminate the tracked portable-run child, if one is running.
     pub fn cancel_run(&self) -> Result<(), String> {
-        let id = self
+        let mut slot = self
             .run_child
             .lock()
-            .map_err(|_| "run lock poisoned".to_owned())?
-            .take();
-        if let Some(id) = id {
-            self.supervisor()?
-                .terminate(id)
-                .map_err(|error| error.to_string())?;
-        }
+            .map_err(|_| "run lock poisoned".to_owned())?;
+        let RunSlot::Active(id) = *slot else {
+            return Ok(());
+        };
+        *slot = RunSlot::Idle;
+        self.supervisor()?
+            .terminate(id)
+            .map_err(|error| error.to_string())?;
         Ok(())
     }
 
-    /// Terminate every supervised process group. Idempotent.
+    /// Terminate every supervised process group and close the run slot for
+    /// good. Idempotent. Holds the run slot across supervisor shutdown so a
+    /// spawn racing app exit is serialized behind it and rejected once the
+    /// host is closed.
     pub fn shutdown(&self) -> Result<(), String> {
-        if let Ok(mut slot) = self.run_child.lock() {
-            *slot = None;
-        }
+        let mut slot = self
+            .run_child
+            .lock()
+            .map_err(|_| "run lock poisoned".to_owned())?;
+        *slot = RunSlot::Closed;
         self.supervisor()?
             .shutdown()
             .map_err(|error| error.to_string())
@@ -500,6 +521,41 @@ mod tests {
         let second = host.spawn_run(&sleep_spec("0")).unwrap();
         assert!(host.is_run_owned(second));
         host.shutdown().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_after_shutdown_is_rejected_and_leaves_no_children() {
+        let host = DesktopHost::new();
+        host.shutdown().unwrap();
+        // A run that raced app exit can no longer be admitted, and the
+        // supervisor is empty — the "no child outlives the shell" invariant.
+        assert_eq!(
+            host.spawn_run(&sleep_spec("30")).unwrap_err(),
+            RunError::Closed
+        );
+        assert_eq!(host.supervisor().unwrap().supervised_count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_racing_shutdown_never_leaves_a_child_after_shutdown() {
+        let host = std::sync::Arc::new(DesktopHost::new());
+        let racer = std::sync::Arc::clone(&host);
+        let handle = std::thread::spawn(move || {
+            for _ in 0..200 {
+                let _ = racer.spawn_run(&sleep_spec("30"));
+            }
+        });
+        host.shutdown().unwrap();
+        handle.join().unwrap();
+        // Whatever the interleaving, once shutdown returns the supervisor is
+        // empty and the slot is closed for good.
+        assert_eq!(host.supervisor().unwrap().supervised_count(), 0);
+        assert_eq!(
+            host.spawn_run(&sleep_spec("30")).unwrap_err(),
+            RunError::Closed
+        );
     }
 
     #[test]
