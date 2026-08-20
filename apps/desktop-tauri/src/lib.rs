@@ -7,7 +7,7 @@
 //! browser, or Rust-side intent parsing.
 
 mod binary;
-mod host;
+pub mod host;
 mod navigation;
 mod windows;
 
@@ -83,7 +83,7 @@ fn build_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-pub(crate) fn build_home_window(app: &tauri::AppHandle) -> tauri::Result<()> {
+pub(crate) fn build_home_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
     if let Some(home) = app.get_webview_window(navigation::HOME_WINDOW_LABEL) {
         home.show()?;
         home.set_focus()?;
@@ -125,8 +125,8 @@ pub(crate) fn build_home_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-pub(crate) fn open_app_window(
-    app: &tauri::AppHandle,
+pub(crate) fn open_app_window<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     label: &str,
     url: Url,
     origin: &str,
@@ -176,7 +176,7 @@ pub(crate) fn open_app_window(
         .map_err(|error| error.to_string())
 }
 
-fn dispatch_intent(app: &tauri::AppHandle, url: &Url) {
+fn dispatch_intent<R: tauri::Runtime>(app: &tauri::AppHandle<R>, url: &Url) {
     match navigation::parse_intent(url) {
         Some(navigation::Intent::OpenHome) => {
             let _ = build_home_window(app);
@@ -187,7 +187,7 @@ fn dispatch_intent(app: &tauri::AppHandle, url: &Url) {
     }
 }
 
-fn open_external(app: &tauri::AppHandle, url: &Url) {
+fn open_external<R: tauri::Runtime>(app: &tauri::AppHandle<R>, url: &Url) {
     if matches!(url.scheme(), "http" | "https" | "mailto")
         && let Err(error) = app.opener().open_url(url.as_str(), None::<&str>)
     {
