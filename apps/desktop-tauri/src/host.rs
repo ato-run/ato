@@ -139,6 +139,12 @@ impl DesktopHost {
     }
 }
 
+impl Default for DesktopHost {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Map a typed [`ComputationCommand`] to the exact `ato` argv. This is the
 /// only boundary where a command becomes a process — arbitrary shell strings
 /// are never accepted.
@@ -270,7 +276,9 @@ fn inspect(project: &str) -> Result<DesktopRunView, String> {
 }
 
 #[tauri::command]
-pub fn desktop_info(window: tauri::WebviewWindow) -> Result<DesktopInfo, String> {
+pub fn desktop_info<R: tauri::Runtime>(
+    window: tauri::WebviewWindow<R>,
+) -> Result<DesktopInfo, String> {
     windows::verify_main_caller(window.label())?;
     Ok(DesktopInfo {
         version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -279,9 +287,9 @@ pub fn desktop_info(window: tauri::WebviewWindow) -> Result<DesktopInfo, String>
 }
 
 #[tauri::command]
-pub async fn computation_execute(
-    window: tauri::WebviewWindow,
-    app: tauri::AppHandle,
+pub async fn computation_execute<R: tauri::Runtime>(
+    window: tauri::WebviewWindow<R>,
+    app: tauri::AppHandle<R>,
     command: ComputationCommand,
 ) -> Result<ComputationCommandResult, String> {
     windows::verify_main_caller(window.label())?;
@@ -306,14 +314,17 @@ pub async fn computation_execute(
 }
 
 #[tauri::command]
-pub fn run_cancel(window: tauri::WebviewWindow, app: tauri::AppHandle) -> Result<(), String> {
+pub fn run_cancel<R: tauri::Runtime>(
+    window: tauri::WebviewWindow<R>,
+    app: tauri::AppHandle<R>,
+) -> Result<(), String> {
     windows::verify_main_caller(window.label())?;
     app.state::<DesktopHost>().cancel_run()
 }
 
 #[tauri::command]
-pub async fn run_inspect(
-    window: tauri::WebviewWindow,
+pub async fn run_inspect<R: tauri::Runtime>(
+    window: tauri::WebviewWindow<R>,
     project: String,
 ) -> Result<DesktopRunView, String> {
     windows::verify_main_caller(window.label())?;
@@ -323,9 +334,9 @@ pub async fn run_inspect(
 }
 
 #[tauri::command]
-pub async fn pick_project(
-    window: tauri::WebviewWindow,
-    app: tauri::AppHandle,
+pub async fn pick_project<R: tauri::Runtime>(
+    window: tauri::WebviewWindow<R>,
+    app: tauri::AppHandle<R>,
 ) -> Result<Option<String>, String> {
     windows::verify_main_caller(window.label())?;
     use tauri_plugin_dialog::DialogExt;
@@ -342,15 +353,18 @@ pub async fn pick_project(
 }
 
 #[tauri::command]
-pub fn open_home(window: tauri::WebviewWindow, app: tauri::AppHandle) -> Result<(), String> {
+pub fn open_home<R: tauri::Runtime>(
+    window: tauri::WebviewWindow<R>,
+    app: tauri::AppHandle<R>,
+) -> Result<(), String> {
     windows::verify_main_caller(window.label())?;
     crate::build_home_window(&app).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-pub async fn open_web_surface(
-    window: tauri::WebviewWindow,
-    app: tauri::AppHandle,
+pub async fn open_web_surface<R: tauri::Runtime>(
+    window: tauri::WebviewWindow<R>,
+    app: tauri::AppHandle<R>,
     project: String,
 ) -> Result<(), String> {
     windows::verify_main_caller(window.label())?;
