@@ -268,6 +268,8 @@ fn report_status(input: &ActivityExecutorInput<'_>, status: &str) -> Result<()> 
 }
 
 fn restrict_private_directory(path: &Path) -> Result<()> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
