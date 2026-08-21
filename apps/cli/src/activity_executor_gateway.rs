@@ -1,3 +1,5 @@
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
+
 use std::fs;
 use std::path::Path;
 use std::thread;
