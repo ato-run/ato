@@ -527,11 +527,26 @@ impl Cdp {
 
     fn call(&mut self, method: &str, params: Value, session_id: Option<&str>) -> Result<Value> {
         let request_id = self.send(method, params, session_id)?;
+        let deadline = Instant::now() + CDP_WAIT;
         loop {
-            let message = self
-                .websocket
-                .read()
-                .context("read Browser Host CDP response")?;
+            let message = match self.websocket.read() {
+                Ok(message) => message,
+                Err(tungstenite::Error::Io(error))
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    if Instant::now() >= deadline {
+                        return Err(error)
+                            .context("read Browser Host CDP response before deadline");
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    return Err(error).context("read Browser Host CDP response");
+                }
+            };
             let Message::Text(text) = message else {
                 continue;
             };
