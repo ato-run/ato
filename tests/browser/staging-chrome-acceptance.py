@@ -290,17 +290,18 @@ class ChromeSession:
         self.cdp.call("Runtime.enable", session_id=self.session_id)
         self.cdp.call("Page.enable", session_id=self.session_id)
         if delay_ack:
-            original = 'send({ type: "ack", request_id: value.request_id });'
+            original = '.then(() => send({ type: "ack", request_id: value.request_id }))'
             replacement = (
-                'setTimeout(() => send({ type: "ack", request_id: value.request_id }), 200);'
+                '.then(() => setTimeout(() => send({ type: "ack", request_id: value.request_id }), 200))'
             )
             if original not in bridge_source:
                 raise AcceptanceError("Bridge ACK hook not found")
             bridge_source = bridge_source.replace(original, replacement)
         if disconnect_on_apply:
-            original = "dispatch(value.event);"
+            original = "Promise.resolve(dispatch(value.event, value.request_id))"
             replacement = (
-                'socket.close(4000, "injected staging replay disconnect"); return;'
+                'Promise.resolve((socket.close(4000, "injected staging replay disconnect"), '
+                'Promise.reject(new Error("injected staging replay disconnect"))))'
             )
             if original not in bridge_source:
                 raise AcceptanceError("Bridge dispatch hook not found")
