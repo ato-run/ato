@@ -31,6 +31,7 @@
   ]);
   const socket = new WebSocket(bootstrap.control_url);
   const pointerTargets = new Map();
+  const hostApplyProtocol = "ato.browser.host-apply@1";
   let lifecycle = "connected";
   globalThis.__ATO_BROWSER_READY__ = false;
   globalThis.__ATO_BROWSER_LIFECYCLE__ = lifecycle;
@@ -75,16 +76,15 @@
       return;
     }
     if (value.type === "apply" && typeof value.request_id === "string") {
-      try {
-        dispatch(value.event);
-        send({ type: "ack", request_id: value.request_id });
-      } catch (error) {
-        send({
-          type: "error",
-          request_id: value.request_id,
-          reason: error instanceof Error ? error.message : "apply failed",
+      Promise.resolve(dispatch(value.event, value.request_id))
+        .then(() => send({ type: "ack", request_id: value.request_id }))
+        .catch((error) => {
+          send({
+            type: "error",
+            request_id: value.request_id,
+            reason: error instanceof Error ? error.message : "apply failed",
+          });
         });
-      }
       return;
     }
     if (value.type === "quiesce" && typeof value.request_id === "string") {
@@ -186,8 +186,11 @@
     globalThis.__ATO_BROWSER_READY__ = next === "active";
   }
 
-  function dispatch(event) {
+  function dispatch(event, requestId) {
     if (!isObject(event) || typeof event.type !== "string") throw new Error("invalid Browser event");
+    if (document.documentElement?.dataset.atoBrowserApplyBridge === "post-message") {
+      return dispatchThroughHost(event, requestId);
+    }
     if (event.type === "keyboard") {
       const target = document.activeElement || document.body;
       target.dispatchEvent(new KeyboardEvent(
@@ -239,6 +242,38 @@
       return;
     }
     throw new Error("unsupported Browser event");
+  }
+
+  function dispatchThroughHost(event, requestId) {
+    return new Promise((resolve, reject) => {
+      const timeout = globalThis.setTimeout(() => {
+        cleanup();
+        reject(new Error("Browser host apply timed out"));
+      }, 4000);
+      const onMessage = (message) => {
+        const value = message.data;
+        if (
+          message.source !== globalThis ||
+          message.origin !== globalThis.location.origin ||
+          !isObject(value) ||
+          value.protocol !== hostApplyProtocol ||
+          value.request_id !== requestId ||
+          !["applied", "error"].includes(value.type)
+        ) return;
+        cleanup();
+        if (value.type === "applied") resolve();
+        else reject(new Error("Browser host rejected apply"));
+      };
+      function cleanup() {
+        globalThis.clearTimeout(timeout);
+        globalThis.removeEventListener("message", onMessage);
+      }
+      globalThis.addEventListener("message", onMessage);
+      globalThis.postMessage(
+        { protocol: hostApplyProtocol, type: "apply", request_id: requestId, event },
+        globalThis.location.origin,
+      );
+    });
   }
 
   function send(value) {

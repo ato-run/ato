@@ -4,6 +4,7 @@
 
 mod activity_executor;
 mod activity_executor_gateway;
+mod activity_executor_host;
 mod authoring;
 mod browser_host;
 mod network_runner;
