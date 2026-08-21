@@ -2,6 +2,8 @@
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
+mod activity_executor;
+mod activity_executor_gateway;
 mod authoring;
 mod browser_host;
 mod network_runner;
@@ -109,6 +111,9 @@ enum Commands {
     /// Internal host-side Chrome/CDP bridge for Browser Adapter delivery.
     #[command(name = "__browser-host", hide = true)]
     BrowserHost(BrowserHostArgs),
+    /// Internal idle workload used by the Activity Browser Adapter Run.
+    #[command(name = "__activity-idle", hide = true)]
+    ActivityIdle,
 }
 
 #[derive(Debug, Args)]
@@ -344,6 +349,9 @@ pub fn run() -> Result<()> {
             &args.chrome,
             args.headless,
         ),
+        Commands::ActivityIdle => loop {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+        },
     }
 }
 

@@ -35,6 +35,7 @@ use reqwest::blocking::{Client, RequestBuilder};
 use serde::{Deserialize, Serialize};
 use tungstenite::client::IntoClientRequest;
 
+use crate::activity_executor::{self, ActivityExecutorInput};
 use crate::supervisor::PresentationCaptureReceipt;
 
 #[derive(Debug, Args)]
@@ -60,6 +61,9 @@ struct ServeArgs {
     public_base_url: String,
     #[arg(long, env = "ATO_RUNNER_STATE_DIR")]
     state_dir: Option<PathBuf>,
+    /// Absolute Chrome/Chromium executable for hosted Browser Activity leases.
+    #[arg(long, env = "ATO_RUNNER_CHROME")]
+    chrome: Option<PathBuf>,
     #[arg(long, default_value = "127.0.0.1:8420")]
     proxy_listen: SocketAddr,
     #[arg(long)]
@@ -72,6 +76,7 @@ struct ResolvedServeArgs {
     runner_token: String,
     public_base_url: String,
     state_dir: PathBuf,
+    chrome: Option<PathBuf>,
     proxy_listen: SocketAddr,
     once: bool,
 }
@@ -101,7 +106,8 @@ struct ClaimedLease {
     command: PortableLeaseCommand,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 struct PortableLeaseCommand {
     kind: String,
     bundle_id: String,
@@ -115,6 +121,8 @@ struct PortableLeaseCommand {
     compose_inputs: Vec<ComposeInput>,
     #[serde(default)]
     output_upload_url: String,
+    activity_id: String,
+    activity_run_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -125,7 +133,7 @@ struct ComposeInput {
     download_url: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct SessionSurface {
     kind: String,
     surface_id: String,
@@ -335,6 +343,7 @@ fn resolve_serve_args_from_home(args: ServeArgs, ato_home: PathBuf) -> Result<Re
         state_dir: args
             .state_dir
             .unwrap_or_else(|| ato_home.join("network-runner")),
+        chrome: args.chrome,
         proxy_listen: args.proxy_listen,
         once: args.once,
     })
@@ -377,7 +386,8 @@ fn heartbeat(client: &Client, base: &str, args: &ResolvedServeArgs) -> Result<()
         "supported_lease_kinds": [
             "portable_capsule_v2",
             "portable_capsule_replay_v1",
-            "portable_capsule_compose_v1"
+            "portable_capsule_compose_v1",
+            "activity_browser_executor_v0"
         ],
         "supported_session_surfaces": [
             {
@@ -431,6 +441,29 @@ fn execute_lease_unix(
     evaluator: &UntrustedProcessEvaluator,
     lease: &ClaimedLease,
 ) -> Result<()> {
+    if lease.command.kind == "activity_browser_executor_v0" {
+        let chrome = args
+            .chrome
+            .as_deref()
+            .context("ATO_RUNNER_CHROME is required for hosted Browser Activities")?;
+        if !chrome.is_absolute() || !chrome.is_file() {
+            bail!("Activity Runner Chrome must be an absolute existing file");
+        }
+        if lease.command.activity_id.is_empty() || lease.command.activity_run_id.is_empty() {
+            bail!("Activity executor lease has incomplete Run identity");
+        }
+        return activity_executor::execute(ActivityExecutorInput {
+            client,
+            api_base: base,
+            runner_token: &args.runner_token,
+            lease_id: &lease.id,
+            run_id: &lease.run_id,
+            activity_id: &lease.command.activity_id,
+            activity_run_id: &lease.command.activity_run_id,
+            state_dir: &args.state_dir,
+            chrome,
+        });
+    }
     if lease.command.kind == "portable_capsule_compose_v1" {
         return execute_compose_lease(client, base, args, lease);
     }
@@ -1712,6 +1745,7 @@ mod tests {
                 runner_token: None,
                 public_base_url: "https://runner.example".to_owned(),
                 state_dir: None,
+                chrome: None,
                 proxy_listen: "127.0.0.1:8420".parse().unwrap(),
                 once: true,
             },
