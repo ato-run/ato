@@ -14,6 +14,7 @@ import atexit
 import base64
 import hashlib
 import http.client
+import http.server
 import json
 import os
 import re
@@ -24,6 +25,7 @@ import struct
 import subprocess
 import sys
 import time
+import threading
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -37,6 +39,52 @@ FAILURE_TIMEOUT_SECONDS = 45
 
 class AcceptanceError(RuntimeError):
     pass
+
+
+class FrameSink:
+    def __init__(self):
+        self.credential = secrets.token_urlsafe(32)
+        self.frame_count = 0
+        owner = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, format, *args):
+                pass
+
+            def do_POST(self):
+                if (
+                    self.path != "/frame"
+                    or self.headers.get("x-ato-browser-presentation")
+                    != owner.credential
+                    or self.headers.get("content-type") != "image/jpeg"
+                ):
+                    self.send_error(403)
+                    return
+                length = int(self.headers.get("content-length", "0"))
+                if length <= 0 or length > 8 * 1024 * 1024:
+                    self.send_error(413)
+                    return
+                body = self.rfile.read(length)
+                if not body.startswith(b"\xff\xd8"):
+                    self.send_error(400)
+                    return
+                owner.frame_count += 1
+                self.send_response(200)
+                self.send_header("content-length", "0")
+                self.end_headers()
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    @property
+    def endpoint(self) -> str:
+        return f"http://127.0.0.1:{self.server.server_port}/frame"
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
 
 
 class WebSocket:
@@ -185,7 +233,7 @@ class ChromeSession:
         origin: str,
         delay_ack: bool,
         disconnect_on_apply: bool = False,
-        browser_host: tuple[Path, Path] | None = None,
+        browser_host: tuple[Path, Path, FrameSink | None] | None = None,
     ):
         self.closed = False
         self.cdp: Cdp | None = None
@@ -196,22 +244,30 @@ class ChromeSession:
         self.work_dir.mkdir(parents=True, exist_ok=False)
         self.log_file = (work_dir / "chrome.log").open("wb")
         if browser_host is not None:
-            ato, runtime_dir = browser_host
+            ato, runtime_dir, frame_sink = browser_host
             self.profile = runtime_dir / "browser-host-profile"
+            command = [
+                str(ato),
+                "__browser-host",
+                "--runtime-dir",
+                str(runtime_dir),
+                "--target-url",
+                origin,
+                "--chrome",
+                str(chrome_binary),
+                "--headless",
+            ]
+            environment = os.environ.copy()
+            if frame_sink is not None:
+                command.extend(["--presentation-sink-url", frame_sink.endpoint])
+                environment["ATO_BROWSER_PRESENTATION_SINK_CREDENTIAL"] = (
+                    frame_sink.credential
+                )
             self.process = subprocess.Popen(
-                [
-                    str(ato),
-                    "__browser-host",
-                    "--runtime-dir",
-                    str(runtime_dir),
-                    "--target-url",
-                    origin,
-                    "--chrome",
-                    str(chrome_binary),
-                    "--headless",
-                ],
+                command,
                 stdout=self.log_file,
                 stderr=subprocess.STDOUT,
+                env=environment,
             )
             atexit.register(self.close)
             self.debug_port = wait_for_browser_host_debug_port(
@@ -219,6 +275,7 @@ class ChromeSession:
             )
             version = wait_for_json(f"http://127.0.0.1:{self.debug_port}/json/version")
             self.version = version["Browser"]
+
             def host_page_target() -> dict[str, Any] | None:
                 targets = wait_for_json(
                     f"http://127.0.0.1:{self.debug_port}/json/list"
@@ -710,6 +767,9 @@ materializers = ["ato.replay@1"]
     initial_head = (project / ".capsule/refs/heads/main").read_text().strip()
     _, author_bootstrap = wait_for_bootstrap(author_runtime)
     wait_until(lambda: server_state(port))
+    author_frame_sink = FrameSink() if args.browser_host else None
+    if author_frame_sink is not None:
+        atexit.register(author_frame_sink.close)
     author_chrome = ChromeSession(
         args.chrome,
         work_root / "author-chrome",
@@ -717,7 +777,9 @@ materializers = ["ato.replay@1"]
         author_bootstrap,
         origin,
         False,
-        browser_host=(args.ato, author_runtime) if args.browser_host else None,
+        browser_host=(args.ato, author_runtime, author_frame_sink)
+        if args.browser_host
+        else None,
     )
     author_context = author_chrome.isolated_context()
     wait_until(
@@ -726,6 +788,8 @@ materializers = ["ato.replay@1"]
         )
         == "active"
     )
+    if author_frame_sink is not None:
+        wait_until(lambda: author_frame_sink.frame_count > 0)
     author_chrome.click("#increment")
     wait_until(lambda: server_state(port).get("count") == 1)
     author_chrome.click("#increment")
@@ -790,6 +854,9 @@ materializers = ["ato.replay@1"]
     run_ato(args.ato, ["stop", str(project)], author_home, author_runtime)
     if args.browser_host:
         author_chrome.close()
+    if author_frame_sink is not None:
+        author_frame_sink.close()
+        atexit.unregister(author_frame_sink.close)
     atexit.unregister(stop_author)
     if list(author_runtime.glob("browser-*.json")):
         raise AcceptanceError("author runtime discovery was not cleaned")
@@ -812,6 +879,11 @@ materializers = ["ato.replay@1"]
         author_bootstrap["channel_credential"],
         author_bootstrap["browser_session"],
         author_bootstrap["control_url"],
+        *(
+            [author_frame_sink.credential]
+            if author_frame_sink is not None
+            else []
+        ),
     ]:
         if secret_value in portable_text:
             raise AcceptanceError("runtime Browser credential leaked into portable Capsule")
@@ -837,7 +909,7 @@ materializers = ["ato.replay@1"]
         recipient_bootstrap,
         origin,
         True,
-        browser_host=(args.ato, recipient_runtime) if args.browser_host else None,
+        browser_host=(args.ato, recipient_runtime, None) if args.browser_host else None,
     )
     recipient_context = recipient_chrome.isolated_context()
     if not args.browser_host:
@@ -1010,7 +1082,7 @@ materializers = ["ato.replay@1"]
         mixed_bootstrap,
         mixed_origin,
         False,
-        browser_host=(args.ato, mixed_runtime) if args.browser_host else None,
+        browser_host=(args.ato, mixed_runtime, None) if args.browser_host else None,
     )
     mixed_context = mixed_chrome.isolated_context()
     wait_until(
@@ -1203,6 +1275,12 @@ materializers = ["ato.replay@1"]
                 else 0
             ),
             "archive_bounded": True,
+            "live_viewport_frames": (
+                author_frame_sink.frame_count if author_frame_sink is not None else 0
+            ),
+            "live_viewport_source": (
+                "cdp_page_capture_screenshot" if author_frame_sink is not None else None
+            ),
         },
         "failure_path": {
             "kind": "bridge_disconnect_during_replay",
