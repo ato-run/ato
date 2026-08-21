@@ -1,0 +1,33 @@
+{
+  "schema": "ato.activity.browser-media.acceptance/v1",
+  "tested_at": "2026-08-22T07:30:00+09:00",
+  "result": "PASS",
+  "scope": "browser-viewport-to-product-runtime-frame-sink",
+  "commit": "caa582977bc586fd40d834533ee5de5f1d1935d9",
+  "browser": "Chrome/151.0.7922.173",
+  "browser_host": true,
+  "adapter_id": "ato.browser@1",
+  "viewport_capture": "cdp_page_capture_screenshot",
+  "live_viewport_frames_received": 4,
+  "frame_sink": {
+    "transport": "credentialed_loopback_http",
+    "exact_path_scoped": true,
+    "credential_in_argv": false,
+    "credential_in_url": false,
+    "credential_absent_from_bundle": true,
+    "frame_size_bounded": true
+  },
+  "browser_records": 6,
+  "continuation": {
+    "browser_records": 3,
+    "sealed": true
+  },
+  "cleanup": {
+    "runtime_discovery_removed": true,
+    "workload_process_stopped": true,
+    "fresh_browser_profile": true
+  },
+  "webrtc_two_subscriber_acceptance": "not_tested",
+  "source_capsule_activity_dispatch": "not_connected",
+  "production_unchanged": true
+}
