@@ -13,7 +13,7 @@ on:
       - "Cargo.lock"
       - ".github/workflows/browser-adapter-e2e.yml"
   pull_request:
-    branches: [main, dev, nightly, feat/browser-adapter]
+    branches: [main, dev, nightly, feat/browser-adapter, feat/capsule-presentation-capture-v1]
     paths:
       - "apps/cli/**"
       - "extensions/adapters/**"

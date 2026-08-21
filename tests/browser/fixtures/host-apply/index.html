@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en" data-ato-browser-apply-bridge="post-message">
+  <head>
+    <meta charset="utf-8">
+    <title>Hosted Browser apply fixture</title>
+  </head>
+  <body data-host-applies="0">
+    <output id="count">0</output>
+    <script>
+      (() => {
+        const protocol = "ato.browser.host-apply@1";
+        let count = 0;
+        let hostApplies = 0;
+        const render = () => {
+          document.querySelector("#count").textContent = String(count);
+          document.body.dataset.hostApplies = String(hostApplies);
+        };
+        addEventListener("keydown", (event) => {
+          if (event.isTrusted && event.code === "ArrowRight") {
+            count += 1;
+            render();
+          }
+        });
+        addEventListener("message", (event) => {
+          const value = event.data;
+          if (
+            event.source !== window ||
+            event.origin !== location.origin ||
+            value?.protocol !== protocol ||
+            value.type !== "apply" ||
+            typeof value.request_id !== "string"
+          ) {
+            return;
+          }
+          if (
+            value.event?.type !== "keyboard" ||
+            !["key_down", "key_up"].includes(value.event.kind) ||
+            value.event.code !== "ArrowRight"
+          ) {
+            postMessage(
+              { protocol, type: "error", request_id: value.request_id },
+              location.origin,
+            );
+            return;
+          }
+          if (value.event.kind === "key_down") {
+            count += 1;
+            hostApplies += 1;
+          }
+          render();
+          postMessage(
+            { protocol, type: "applied", request_id: value.request_id },
+            location.origin,
+          );
+        });
+      })();
+    </script>
+  </body>
+</html>

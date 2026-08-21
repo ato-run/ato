@@ -1,0 +1,34 @@
+name: Activity Runner CI
+
+on:
+  pull_request:
+    paths:
+      - "apps/cli/**"
+      - "extensions/adapters/browser/**"
+      - "lib/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/activity-runner-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  hosted-browser-executor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - run: cargo fmt --all -- --check
+      - run: cargo check --workspace --all-targets --locked
+      - run: cargo test -p ato-cli activity --locked
+      - run: cargo test --test computation_architecture --locked
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo run --locked -p arch-check

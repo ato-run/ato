@@ -15,13 +15,13 @@ const bridgeSource = await readFile(
   "utf8",
 );
 const delayedAckBridgeSource = bridgeSource.replace(
-  'send({ type: "ack", request_id: value.request_id });',
-  'setTimeout(() => send({ type: "ack", request_id: value.request_id }), 75);',
+  '.then(() => send({ type: "ack", request_id: value.request_id }))',
+  '.then(() => setTimeout(() => send({ type: "ack", request_id: value.request_id }), 75))',
 );
 if (delayedAckBridgeSource === bridgeSource) throw new Error("Browser Bridge ACK hook was not found");
 const disconnectingBridgeSource = bridgeSource.replace(
-  "dispatch(value.event);",
-  'socket.close(4000, "injected replay disconnect"); return;',
+  "Promise.resolve(dispatch(value.event, value.request_id))",
+  'Promise.resolve((socket.close(4000, "injected replay disconnect"), Promise.reject(new Error("injected replay disconnect"))))',
 );
 if (disconnectingBridgeSource === bridgeSource) throw new Error("Browser Bridge dispatch hook was not found");
 const atoBin = process.env.ATO_BIN ?? join(repository, "target/debug/ato");
@@ -119,6 +119,23 @@ test("DOM event profile preserves focus and safe KeyboardEvent.key", async ({ br
     async continue(page) {
       await page.keyboard.press("Enter");
       await expect(page.locator("#status")).toHaveText("2");
+    },
+  });
+});
+
+test("hosted page apply bridge acknowledges only after the application applies", async ({ browser }) => {
+  await runScenario(browser, "host-apply", {
+    async record(page) {
+      await page.keyboard.press("ArrowRight");
+      await expect(page.locator("#count")).toHaveText("1");
+    },
+    async assertReplayed(page) {
+      await expect(page.locator("#count")).toHaveText("1");
+      await expect(page.locator("body")).toHaveAttribute("data-host-applies", "1");
+    },
+    async continue(page) {
+      await page.keyboard.press("ArrowRight");
+      await expect(page.locator("#count")).toHaveText("2");
     },
   });
 });
