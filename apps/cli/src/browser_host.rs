@@ -7,7 +7,7 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
@@ -35,6 +35,7 @@ const INITIAL_FRAME_METADATA_FILE_NAME: &str = "browser-host-initial.json";
 const DEVTOOLS_ACTIVE_PORT_FILE_NAME: &str = "DevToolsActivePort";
 const MAX_CHROME_DIAGNOSTIC_BYTES: usize = 16 * 1024;
 const MAX_PRESENTATION_ASSET_BYTES: usize = 8 * 1024 * 1024;
+const LIVE_FRAME_INTERVAL: Duration = Duration::from_millis(100);
 const BRIDGE_SOURCE: &str =
     include_str!("../../../extensions/adapters/browser/bridge/browser-bridge.js");
 
@@ -43,6 +44,7 @@ pub(crate) fn run(
     target_url: &str,
     chrome: &Path,
     headless: bool,
+    presentation_sink: Option<BrowserPresentationSink>,
 ) -> Result<()> {
     validate_runtime_dir(runtime_dir)?;
     let bootstrap_path = wait_for_discovery(runtime_dir, DISCOVERY_WAIT)?;
@@ -65,11 +67,17 @@ pub(crate) fn run(
             return Err(error);
         }
     };
-    let result =
-        attach_bridge(&profile, target_url, &bootstrap, &mut chrome_process).and_then(|()| {
-            wait_for_run_end(&bootstrap_path, &mut chrome_process)?;
+    let result = attach_bridge(&profile, target_url, &bootstrap, &mut chrome_process).and_then(
+        |mut attachment| {
+            wait_for_run_end(
+                &bootstrap_path,
+                &mut chrome_process,
+                &mut attachment,
+                presentation_sink.as_ref(),
+            )?;
             Ok(())
-        });
+        },
+    );
     let failure_diagnostic = result
         .as_ref()
         .err()
@@ -92,6 +100,25 @@ pub(crate) fn run(
                 "Browser Host Chrome exit status after cleanup: {exit_status}; {diagnostic}"
             )))
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct BrowserPresentationSink {
+    pub endpoint: String,
+    pub credential: String,
+}
+
+impl BrowserPresentationSink {
+    pub(crate) fn from_environment(endpoint: String) -> Result<Self> {
+        let credential = std::env::var("ATO_BROWSER_PRESENTATION_SINK_CREDENTIAL")
+            .context("Browser presentation sink credential is missing")?;
+        let sink = Self {
+            endpoint,
+            credential,
+        };
+        validate_presentation_sink(&sink)?;
+        Ok(sink)
     }
 }
 
@@ -265,7 +292,16 @@ impl ChromeProcess {
     }
 }
 
-fn wait_for_run_end(discovery_path: &Path, chrome: &mut ChromeProcess) -> Result<()> {
+fn wait_for_run_end(
+    discovery_path: &Path,
+    chrome: &mut ChromeProcess,
+    attachment: &mut BrowserAttachment,
+    presentation_sink: Option<&BrowserPresentationSink>,
+) -> Result<()> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(CDP_WAIT)
+        .build()
+        .context("build Browser presentation sink client")?;
     loop {
         if !discovery_path.exists() {
             return Ok(());
@@ -277,7 +313,12 @@ fn wait_for_run_end(discovery_path: &Path, chrome: &mut ChromeProcess) -> Result
         {
             bail!("Browser Host Chrome exited before Browser Adapter detached: {status}");
         }
-        thread::sleep(POLL_INTERVAL);
+        if let Some(sink) = presentation_sink {
+            publish_live_frame(attachment, sink, &client)?;
+            thread::sleep(LIVE_FRAME_INTERVAL);
+        } else {
+            thread::sleep(POLL_INTERVAL);
+        }
     }
 }
 
@@ -286,12 +327,17 @@ struct Cdp {
     next_id: u64,
 }
 
+struct BrowserAttachment {
+    cdp: Cdp,
+    session_id: String,
+}
+
 fn attach_bridge(
     profile: &Path,
     target_url: &str,
     bootstrap: &BrowserRuntimeBootstrap,
     chrome: &mut ChromeProcess,
-) -> Result<()> {
+) -> Result<BrowserAttachment> {
     let (debug_port, browser_ws_url) = wait_for_debugger_websocket_url(profile, chrome, CDP_WAIT)?;
     let websocket = connect_cdp(&browser_ws_url)?;
     let mut cdp = Cdp {
@@ -341,13 +387,57 @@ fn attach_bridge(
     wait_for_target_origin(&mut cdp, &target_id, target_url)?;
     wait_for_document_ready(&mut cdp, &session_id)?;
     capture_initial_frame(&mut cdp, &session_id, profile)?;
-    cdp.call(
-        "Target.detachFromTarget",
-        json!({"sessionId": session_id}),
-        None,
-    )?;
-    cdp.close()?;
     write_cdp_port(profile, debug_port)?;
+    Ok(BrowserAttachment { cdp, session_id })
+}
+
+fn publish_live_frame(
+    attachment: &mut BrowserAttachment,
+    sink: &BrowserPresentationSink,
+    client: &reqwest::blocking::Client,
+) -> Result<()> {
+    validate_presentation_sink(sink)?;
+    let screenshot = attachment.cdp.call(
+        "Page.captureScreenshot",
+        json!({
+            "format": "jpeg",
+            "quality": 65,
+            "fromSurface": true,
+            "captureBeyondViewport": false
+        }),
+        Some(&attachment.session_id),
+    )?;
+    let encoded = required_string(&screenshot, "data")?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .context("decode Browser Host live frame")?;
+    if bytes.is_empty() || bytes.len() > MAX_PRESENTATION_ASSET_BYTES {
+        bail!("Browser Host live frame exceeds the bounded asset contract");
+    }
+    client
+        .post(&sink.endpoint)
+        .header("content-type", "image/jpeg")
+        .header("x-ato-browser-presentation", &sink.credential)
+        .body(bytes)
+        .send()
+        .context("publish Browser Host live frame")?
+        .error_for_status()
+        .context("Browser presentation sink rejected live frame")?;
+    Ok(())
+}
+
+fn validate_presentation_sink(sink: &BrowserPresentationSink) -> Result<()> {
+    let endpoint = Url::parse(&sink.endpoint).context("parse Browser presentation sink URL")?;
+    if endpoint.scheme() != "http"
+        || !matches!(endpoint.host_str(), Some("127.0.0.1") | Some("localhost"))
+        || endpoint.port().is_none()
+        || endpoint.path() != "/frame"
+        || endpoint.query().is_some()
+        || endpoint.fragment().is_some()
+        || sink.credential.len() < 32
+    {
+        bail!("Browser presentation sink must be a credentialed loopback /frame endpoint");
+    }
     Ok(())
 }
 
@@ -501,16 +591,6 @@ fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 impl Cdp {
-    fn close(mut self) -> Result<()> {
-        let _ = self.websocket.close(None);
-        if let MaybeTlsStream::Plain(stream) = self.websocket.get_mut() {
-            stream
-                .shutdown(Shutdown::Both)
-                .context("close Browser Host CDP socket")?;
-        }
-        Ok(())
-    }
-
     fn send(&mut self, method: &str, params: Value, session_id: Option<&str>) -> Result<u64> {
         let request_id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
@@ -818,5 +898,28 @@ mod tests {
             ]
         });
         assert!(initial_page_target_id(&multiple_pages).is_err());
+    }
+
+    #[test]
+    fn presentation_sink_is_loopback_credentialed_and_path_scoped() {
+        let valid = BrowserPresentationSink {
+            endpoint: "http://127.0.0.1:49152/frame".to_owned(),
+            credential: "s".repeat(32),
+        };
+        validate_presentation_sink(&valid).expect("loopback sink");
+        for endpoint in [
+            "https://127.0.0.1:49152/frame",
+            "http://example.test:49152/frame",
+            "http://127.0.0.1:49152/other",
+            "http://127.0.0.1:49152/frame?token=secret",
+        ] {
+            assert!(
+                validate_presentation_sink(&BrowserPresentationSink {
+                    endpoint: endpoint.to_owned(),
+                    credential: "s".repeat(32),
+                })
+                .is_err()
+            );
+        }
     }
 }

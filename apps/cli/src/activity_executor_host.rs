@@ -4,9 +4,9 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -20,6 +20,7 @@ use crate::activity_executor_gateway::{ActivityInputRequest, exchange};
 
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_BODY_BYTES: usize = 64 * 1024;
+const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const BROWSER_PROTOCOL: &str = "ato.browser@1";
 
 #[derive(Debug)]
@@ -43,6 +44,8 @@ pub(crate) struct ActivityHostPageConfig {
 pub(crate) struct ActivityHostServer {
     target_url: String,
     expected_origin: String,
+    presentation_sink_url: String,
+    presentation_sink_credential: String,
     events: Receiver<ActivityHostEvent>,
     stopping: Arc<AtomicBool>,
     thread: Option<JoinHandle<Result<()>>>,
@@ -73,16 +76,19 @@ impl ActivityHostServer {
         let context = ActivityHostContext {
             html,
             csp,
-            secret,
+            secret: secret.clone(),
             bootstrap_path,
             run_id: config.run_id,
             repository_root,
             events: event_tx,
+            frame: Arc::new(Mutex::new(None)),
         };
         let thread = thread::spawn(move || serve(listener, &context, &thread_stopping));
         Ok(Self {
             target_url,
             expected_origin,
+            presentation_sink_url: format!("http://{address}/frame"),
+            presentation_sink_credential: secret,
             events,
             stopping,
             thread: Some(thread),
@@ -95,6 +101,14 @@ impl ActivityHostServer {
 
     pub(crate) fn expected_origin(&self) -> &str {
         &self.expected_origin
+    }
+
+    pub(crate) fn presentation_sink_url(&self) -> &str {
+        &self.presentation_sink_url
+    }
+
+    pub(crate) fn presentation_sink_credential(&self) -> &str {
+        &self.presentation_sink_credential
     }
 
     pub(crate) fn recv_timeout(
@@ -142,6 +156,7 @@ struct ActivityHostContext {
     run_id: String,
     repository_root: PathBuf,
     events: Sender<ActivityHostEvent>,
+    frame: Arc<Mutex<Option<Vec<u8>>>>,
 }
 
 fn serve(
@@ -189,6 +204,40 @@ fn handle_request(stream: &mut TcpStream, context: &ActivityHostContext) -> Resu
             context.html.as_bytes(),
             &[("Content-Security-Policy", &context.csp)],
         );
+    }
+    if request.path == "/frame" {
+        if request.method == "POST" {
+            if request
+                .headers
+                .get("x-ato-browser-presentation")
+                .map(String::as_str)
+                != Some(context.secret.as_str())
+                || request.headers.get("content-type").map(String::as_str) != Some("image/jpeg")
+                || request.body.is_empty()
+            {
+                return respond_json(stream, 403, &serde_json::json!({"error":"forbidden"}));
+            }
+            *context.frame.lock().expect("Activity frame lock poisoned") = Some(request.body);
+            return respond_json(stream, 200, &serde_json::json!({"ok":true}));
+        }
+        if request.method == "GET"
+            && request
+                .headers
+                .get("x-ato-activity-host")
+                .map(String::as_str)
+                == Some(context.secret.as_str())
+        {
+            let frame = context
+                .frame
+                .lock()
+                .expect("Activity frame lock poisoned")
+                .take();
+            return match frame {
+                Some(frame) => respond(stream, 200, "image/jpeg", &frame, &[]),
+                None => respond(stream, 204, "application/octet-stream", &[], &[]),
+            };
+        }
+        return respond_json(stream, 403, &serde_json::json!({"error":"forbidden"}));
     }
     if request
         .headers
@@ -257,7 +306,7 @@ fn read_request(stream: &mut TcpStream) -> Result<HttpRequest> {
             bail!("Activity controller request closed before headers");
         }
         bytes.extend_from_slice(&chunk[..read]);
-        if bytes.len() > MAX_HEADER_BYTES + MAX_BODY_BYTES {
+        if bytes.len() > MAX_HEADER_BYTES + MAX_FRAME_BYTES {
             bail!("Activity controller request exceeds bounds");
         }
         if let Some(position) = bytes.windows(4).position(|value| value == b"\r\n\r\n") {
@@ -296,7 +345,12 @@ fn read_request(stream: &mut TcpStream) -> Result<HttpRequest> {
         .transpose()
         .context("invalid Content-Length")?
         .unwrap_or(0);
-    if content_length > MAX_BODY_BYTES {
+    let max_body = if method == "POST" && path == "/frame" {
+        MAX_FRAME_BYTES
+    } else {
+        MAX_BODY_BYTES
+    };
+    if content_length > max_body {
         bail!("Activity controller request body exceeds bounds");
     }
     while bytes.len() - header_end < content_length {
@@ -336,6 +390,7 @@ fn respond(
 ) -> Result<()> {
     let reason = match status {
         200 => "OK",
+        204 => "No Content",
         400 => "Bad Request",
         403 => "Forbidden",
         404 => "Not Found",
@@ -388,10 +443,11 @@ const ACTIVITY_HOST_HTML: &str = r#"<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Ato Activity Run</title>
-  <style nonce="__ATO_NONCE__">html,body,iframe{width:100%;height:100%;margin:0;border:0;background:#030503}body{overflow:hidden}</style>
+  <style nonce="__ATO_NONCE__">html,body,iframe{width:100%;height:100%;margin:0;border:0;background:#030503}body{overflow:hidden}canvas{position:fixed;width:1px;height:1px;opacity:0;pointer-events:none}</style>
 </head>
 <body>
   <iframe id="experience" title="Hosted Browser Experience" allow="autoplay" sandbox="allow-scripts allow-same-origin"></iframe>
+  <canvas id="activity-media"></canvas>
   <script nonce="__ATO_NONCE__">
   (() => {
     "use strict";
@@ -401,6 +457,8 @@ const ACTIVITY_HOST_HTML: &str = r#"<!doctype html>
     const experienceProtocol = "ato.activity-experience@1";
     const hostApplyProtocol = "ato.browser.host-apply@1";
     const frame = document.getElementById("experience");
+    const mediaCanvas = document.getElementById("activity-media");
+    const mediaContext = mediaCanvas.getContext("2d", { alpha: false });
     const channelToken = cryptoToken();
     const instanceId = `ahex_${cryptoToken()}`;
     const experienceUrl = new URL(config.experienceUrl);
@@ -419,6 +477,8 @@ const ACTIVITY_HOST_HTML: &str = r#"<!doctype html>
     let experienceInboundSequence = 0;
     let experienceOutboundSequence = 0;
     let experienceReady = false;
+    let mediaReady = false;
+    let mediaStream = null;
     let readyReported = false;
     let ending = false;
     let activeInput = null;
@@ -437,6 +497,7 @@ const ACTIVITY_HOST_HTML: &str = r#"<!doctype html>
     });
 
     connectRoom();
+    pumpFrame();
 
     function connectRoom() {
       room = new WebSocket(config.roomUrl, [
@@ -480,7 +541,7 @@ const ACTIVITY_HOST_HTML: &str = r#"<!doctype html>
       }
       if (type === "run.media.answer" || type === "run.media.ice") {
         if (matchesPublishedPeer(payload)) {
-          sendExperience(type === "run.media.answer" ? "experience.media.answer" : "experience.media.ice", payload);
+          void applyMediaSignal(type, payload).catch(() => stopPeer(payload.peer_id, true));
         }
         return;
       }
@@ -512,12 +573,6 @@ const ACTIVITY_HOST_HTML: &str = r#"<!doctype html>
       } else if (value.type === "experience.browser.applied") {
         const applied = activeInput && value.payload.operation_id === activeInput.operation_id && value.payload.applied === true;
         postMessage({ protocol: hostApplyProtocol, type: applied ? "applied" : "error", request_id: activeInput?.browserRequestId ?? "" }, location.origin);
-      } else if (value.type === "experience.media.offer") {
-        sendRoom("run.media.offer", value.payload);
-      } else if (value.type === "experience.media.ice") {
-        sendRoom("run.media.ice", value.payload);
-      } else if (value.type === "experience.media.error") {
-        stopPeer(value.payload.peer_id, true);
       }
     }
 
@@ -556,9 +611,9 @@ const ACTIVITY_HOST_HTML: &str = r#"<!doctype html>
       }
     }
 
-    function startPeer(participantId) {
+    async function startPeer(participantId) {
       subscribers.add(participantId);
-      if (!roomIdentity || !experienceReady || peers.has(participantId)) return;
+      if (!roomIdentity || !experienceReady || !mediaReady || peers.has(participantId)) return;
       const signal = {
         run_id: config.runId,
         peer_id: `peer_${cryptoToken()}`,
@@ -566,13 +621,24 @@ const ACTIVITY_HOST_HTML: &str = r#"<!doctype html>
         publisher_connection_id: roomIdentity.connectionId,
         subscriber_participant_id: participantId,
       };
-      peers.set(participantId, signal);
-      sendExperience("experience.media.start", { ...signal, ice_servers: config.iceServers });
+      const connection = new RTCPeerConnection({ iceServers: config.iceServers });
+      peers.set(participantId, { signal, connection });
+      if (!mediaStream) mediaStream = mediaCanvas.captureStream(30);
+      for (const track of mediaStream.getTracks()) connection.addTrack(track, mediaStream);
+      connection.addEventListener("icecandidate", (event) => {
+        if (event.candidate) sendRoom("run.media.ice", { ...signal, candidate: event.candidate.toJSON() });
+      });
+      connection.addEventListener("connectionstatechange", () => {
+        if (["failed", "closed"].includes(connection.connectionState)) stopPeer(signal.peer_id, true);
+      });
+      const offer = await connection.createOffer();
+      await connection.setLocalDescription(offer);
+      sendRoom("run.media.offer", { ...signal, sdp: { type: offer.type, sdp: offer.sdp } });
     }
 
     function announceReady() {
-      if (!experienceReady || !roomIdentity) return;
-      for (const participantId of subscribers) startPeer(participantId);
+      if (!experienceReady || !mediaReady || !roomIdentity) return;
+      for (const participantId of subscribers) void startPeer(participantId).catch(fail);
       sendRoom("run.state", { run_id: config.runId, state: "paused" });
       if (!readyReported) {
         readyReported = true;
@@ -582,21 +648,49 @@ const ACTIVITY_HOST_HTML: &str = r#"<!doctype html>
 
     function stopParticipant(participantId, publish) {
       subscribers.delete(participantId);
-      const signal = peers.get(participantId);
-      if (signal) stopPeer(signal.peer_id, publish);
+      const peer = peers.get(participantId);
+      if (peer) stopPeer(peer.signal.peer_id, publish);
     }
 
     function stopPeer(peerId, publish) {
-      const entry = [...peers.entries()].find(([, signal]) => signal.peer_id === peerId);
+      const entry = [...peers.entries()].find(([, peer]) => peer.signal.peer_id === peerId);
       if (!entry) return;
-      const [participantId, signal] = entry;
+      const [participantId, peer] = entry;
       peers.delete(participantId);
-      if (publish) sendRoom("run.media.stop", signal);
-      sendExperience("experience.media.stop", signal);
+      peer.connection.close();
+      if (publish) sendRoom("run.media.stop", peer.signal);
     }
 
     function matchesPublishedPeer(payload) {
-      return isObject(payload) && [...peers.values()].some((signal) => signal.peer_id === payload.peer_id && signal.publisher_connection_id === payload.publisher_connection_id && signal.subscriber_participant_id === payload.subscriber_participant_id);
+      return isObject(payload) && [...peers.values()].some(({ signal }) => signal.peer_id === payload.peer_id && signal.publisher_connection_id === payload.publisher_connection_id && signal.subscriber_participant_id === payload.subscriber_participant_id);
+    }
+
+    async function applyMediaSignal(type, payload) {
+      const peer = [...peers.values()].find(({ signal }) => signal.peer_id === payload.peer_id);
+      if (!peer) return;
+      if (type === "run.media.answer") await peer.connection.setRemoteDescription(payload.sdp);
+      else if (payload.candidate) await peer.connection.addIceCandidate(payload.candidate);
+    }
+
+    async function pumpFrame() {
+      if (ending) return;
+      try {
+        const response = await fetch("/frame", { headers: { "x-ato-activity-host": config.hostSecret }, cache: "no-store" });
+        if (response.ok && response.status !== 204) {
+          const bitmap = await createImageBitmap(await response.blob());
+          if (mediaCanvas.width !== bitmap.width || mediaCanvas.height !== bitmap.height) {
+            mediaCanvas.width = bitmap.width;
+            mediaCanvas.height = bitmap.height;
+          }
+          mediaContext.drawImage(bitmap, 0, 0);
+          bitmap.close();
+          if (!mediaReady) {
+            mediaReady = true;
+            announceReady();
+          }
+        }
+      } catch { return fail(); }
+      setTimeout(pumpFrame, 50);
     }
 
     function sendExperience(type, payload) {
@@ -611,11 +705,12 @@ const ACTIVITY_HOST_HTML: &str = r#"<!doctype html>
     async function end() {
       if (ending) return;
       ending = true;
-      for (const signal of [...peers.values()]) {
+      for (const { signal, connection } of [...peers.values()]) {
         sendRoom("run.media.stop", signal);
-        sendExperience("experience.media.stop", signal);
+        connection.close();
       }
       peers.clear();
+      for (const track of mediaStream?.getTracks() ?? []) track.stop();
       sendExperience("experience.dispose", {});
       room?.close(1000, "Activity ended");
       await hostFetch("/end", {});
@@ -663,10 +758,47 @@ mod tests {
         let config = page_config();
         let html = activity_host_html(&config, "local_secret", "nonce").unwrap();
         assert!(html.contains("activity-executor.${config.executorCredential}"));
-        assert!(html.contains("experience.media.start"));
+        assert!(html.contains("mediaCanvas.captureStream(30)"));
+        assert!(!html.contains("Page.captureScreenshot"));
+        assert!(!html.contains("experience.media.start"));
         assert!(html.contains("const subscribers = new Set()"));
         assert!(!config.room_url.contains(&config.executor_credential));
         assert!(!html.contains("turn:"));
+    }
+
+    #[test]
+    fn loopback_frame_exchange_requires_the_private_sink_credential() {
+        let repository = tempfile::tempdir().unwrap();
+        let server =
+            ActivityHostServer::start(page_config(), repository.path().to_owned()).unwrap();
+        let client = reqwest::blocking::Client::new();
+        let denied = client
+            .post(server.presentation_sink_url())
+            .header("content-type", "image/jpeg")
+            .body(vec![1_u8, 2, 3])
+            .send()
+            .unwrap();
+        assert_eq!(denied.status(), reqwest::StatusCode::FORBIDDEN);
+
+        let accepted = client
+            .post(server.presentation_sink_url())
+            .header("content-type", "image/jpeg")
+            .header(
+                "x-ato-browser-presentation",
+                server.presentation_sink_credential(),
+            )
+            .body(vec![1_u8, 2, 3])
+            .send()
+            .unwrap();
+        assert_eq!(accepted.status(), reqwest::StatusCode::OK);
+        let frame = client
+            .get(server.presentation_sink_url())
+            .header("x-ato-activity-host", server.presentation_sink_credential())
+            .send()
+            .unwrap();
+        assert_eq!(frame.status(), reqwest::StatusCode::OK);
+        assert_eq!(frame.bytes().unwrap().as_ref(), &[1_u8, 2, 3]);
+        server.stop().unwrap();
     }
 
     #[test]

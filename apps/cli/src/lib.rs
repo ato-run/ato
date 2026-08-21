@@ -246,6 +246,9 @@ struct BrowserHostArgs {
     /// Run Chrome without a display. Intended for Runner smoke tests only.
     #[arg(long)]
     headless: bool,
+    /// Optional loopback sink for Product-runtime Browser viewport media.
+    #[arg(long)]
+    presentation_sink_url: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -344,12 +347,19 @@ pub fn run() -> Result<()> {
             &token,
             descriptor.map(ContentRef::parse).transpose()?.as_ref(),
         ),
-        Commands::BrowserHost(args) => browser_host::run(
-            &args.runtime_dir,
-            &args.target_url,
-            &args.chrome,
-            args.headless,
-        ),
+        Commands::BrowserHost(args) => {
+            let presentation_sink = args
+                .presentation_sink_url
+                .map(browser_host::BrowserPresentationSink::from_environment)
+                .transpose()?;
+            browser_host::run(
+                &args.runtime_dir,
+                &args.target_url,
+                &args.chrome,
+                args.headless,
+                presentation_sink,
+            )
+        }
         Commands::ActivityIdle => loop {
             std::thread::sleep(std::time::Duration::from_secs(60));
         },

@@ -105,6 +105,8 @@ pub(crate) fn execute(input: ActivityExecutorInput<'_>) -> Result<()> {
         )?;
         write_activity_manifest(&project, controller.expected_origin())?;
         let target_url = controller.target_url().to_owned();
+        let presentation_sink_url = controller.presentation_sink_url().to_owned();
+        let presentation_sink_credential = controller.presentation_sink_credential().to_owned();
         host = Some(controller);
         let init = Command::new(&executable)
             .arg("init")
@@ -127,6 +129,12 @@ pub(crate) fn execute(input: ActivityExecutorInput<'_>) -> Result<()> {
             .arg("--chrome")
             .arg(input.chrome)
             .arg("--headless")
+            .arg("--presentation-sink-url")
+            .arg(presentation_sink_url)
+            .env(
+                "ATO_BROWSER_PRESENTATION_SINK_CREDENTIAL",
+                presentation_sink_credential,
+            )
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
