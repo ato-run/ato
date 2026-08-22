@@ -1,6 +1,8 @@
 use std::collections::{BTreeSet, VecDeque};
 use std::io::ErrorKind;
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+#[cfg(unix)]
+use std::net::{Shutdown, SocketAddr};
+use std::net::{TcpListener, TcpStream};
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};

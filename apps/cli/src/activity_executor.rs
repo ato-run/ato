@@ -215,6 +215,16 @@ fn run_host_loop(
     }
 }
 
+#[cfg(not(unix))]
+fn execute_capsule_source(
+    _input: &ActivityExecutorInput<'_>,
+    _job: &ActivityExecutorJob,
+    _source: &ActivityCapsuleSource,
+) -> Result<()> {
+    bail!("generic Activity Capsule execution requires a Unix Runner")
+}
+
+#[cfg(unix)]
 fn execute_capsule_source(
     input: &ActivityExecutorInput<'_>,
     job: &ActivityExecutorJob,

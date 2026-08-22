@@ -52,15 +52,19 @@ pub(crate) fn run(
 ) -> Result<()> {
     validate_runtime_dir(runtime_dir)?;
     let bootstrap_path = wait_for_discovery(runtime_dir, DISCOVERY_WAIT)?;
-    let mut bootstrap = read_bootstrap(&bootstrap_path)?;
+    let bootstrap = read_bootstrap(&bootstrap_path)?;
     #[cfg(unix)]
-    let _control_proxy = if let Some(file_name) = bootstrap.control_socket.as_deref() {
-        let socket = validated_control_socket(runtime_dir, file_name)?;
-        let proxy = TcpProxy::start_unix(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), socket)?;
-        bootstrap.control_url = format!("ws://{}", proxy.local_addr());
-        Some(proxy)
-    } else {
-        None
+    let (bootstrap, _control_proxy) = {
+        let mut bootstrap = bootstrap;
+        let proxy = if let Some(file_name) = bootstrap.control_socket.as_deref() {
+            let socket = validated_control_socket(runtime_dir, file_name)?;
+            let proxy = TcpProxy::start_unix(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), socket)?;
+            bootstrap.control_url = format!("ws://{}", proxy.local_addr());
+            Some(proxy)
+        } else {
+            None
+        };
+        (bootstrap, proxy)
     };
     #[cfg(not(unix))]
     if bootstrap.control_socket.is_some() {
