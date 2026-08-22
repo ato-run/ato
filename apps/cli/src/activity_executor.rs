@@ -20,6 +20,23 @@ use crate::network_runner::{TcpProxy, UntrustedProcessEvaluator, read_session_re
 
 const BROWSER_READY_WAIT: Duration = Duration::from_secs(30);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SourceCleanupStep {
+    Quiesce,
+    Browser,
+    MediaHost,
+    SurfaceProxy,
+    Capsule,
+}
+
+const SOURCE_CLEANUP_ORDER: [SourceCleanupStep; 5] = [
+    SourceCleanupStep::Quiesce,
+    SourceCleanupStep::Browser,
+    SourceCleanupStep::MediaHost,
+    SourceCleanupStep::SurfaceProxy,
+    SourceCleanupStep::Capsule,
+];
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ActivityExecutorJob {
@@ -357,18 +374,35 @@ fn execute_capsule_source(
         )
     })();
 
-    if let Some(browser) = browser.as_mut() {
-        let _ = browser.kill();
-        let _ = browser.wait();
-    }
-    if let Some(host) = host {
-        let _ = host.stop();
-    }
-    drop(surface_proxy);
-    if let Some(capsule) = capsule.as_mut() {
-        request_capsule_quiesce(&session_root);
-        let _ = capsule.kill();
-        let _ = capsule.wait();
+    // The host loop has stopped accepting Activity input. Preserve the live
+    // Browser Bridge until the Capsule supervisor has quiesced its Adapters and
+    // sealed the final observation frontier.
+    for step in SOURCE_CLEANUP_ORDER {
+        match step {
+            SourceCleanupStep::Quiesce => {
+                if capsule.is_some() {
+                    request_capsule_quiesce(&session_root);
+                }
+            }
+            SourceCleanupStep::Browser => {
+                if let Some(browser) = browser.as_mut() {
+                    let _ = browser.kill();
+                    let _ = browser.wait();
+                }
+            }
+            SourceCleanupStep::MediaHost => {
+                if let Some(host) = host.take() {
+                    let _ = host.stop();
+                }
+            }
+            SourceCleanupStep::SurfaceProxy => drop(surface_proxy.take()),
+            SourceCleanupStep::Capsule => {
+                if let Some(capsule) = capsule.as_mut() {
+                    let _ = capsule.kill();
+                    let _ = capsule.wait();
+                }
+            }
+        }
     }
     let _ = fs::remove_dir_all(&session_root);
     result
@@ -533,6 +567,20 @@ fn restrict_private_directory(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_cleanup_quiesces_before_stopping_browser_and_media() {
+        assert_eq!(
+            SOURCE_CLEANUP_ORDER,
+            [
+                SourceCleanupStep::Quiesce,
+                SourceCleanupStep::Browser,
+                SourceCleanupStep::MediaHost,
+                SourceCleanupStep::SurfaceProxy,
+                SourceCleanupStep::Capsule,
+            ]
+        );
+    }
 
     #[test]
     fn manifest_uses_one_generic_browser_adapter() {
