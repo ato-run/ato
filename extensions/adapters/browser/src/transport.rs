@@ -300,12 +300,16 @@ pub(crate) fn start_transport(
     listener.set_nonblocking(true)?;
     let address = listener.local_addr()?;
     #[cfg(unix)]
-    let control_relay = ControlRelay::start(runtime_dir, instance_id, address)?;
+    let control_relay = if std::env::var("ATO_BROWSER_CONTROL_RELAY").as_deref() == Ok("unix") {
+        Some(ControlRelay::start(runtime_dir, instance_id, address)?)
+    } else {
+        None
+    };
     let bootstrap = BrowserRuntimeBootstrap {
         protocol: BROWSER_PROTOCOL_ID.to_owned(),
         control_url: format!("ws://{address}"),
         #[cfg(unix)]
-        control_socket: Some(control_relay.file_name.clone()),
+        control_socket: control_relay.as_ref().map(|relay| relay.file_name.clone()),
         #[cfg(not(unix))]
         control_socket: None,
         channel_credential: config.channel_credential.clone(),
@@ -332,7 +336,7 @@ pub(crate) fn start_transport(
         failure,
         join: Some(join),
         #[cfg(unix)]
-        control_relay: Some(control_relay),
+        control_relay,
     })
 }
 
@@ -1051,21 +1055,18 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn discovery_exposes_a_workspace_scoped_control_relay_and_cleans_it_up() {
+    fn workspace_scoped_control_relay_cleans_up_its_unix_socket() {
         use std::os::unix::fs::FileTypeExt;
 
         let directory = tempfile::tempdir().expect("temporary workspace should open");
-        let mut handle = start_transport(
+        let target = TcpListener::bind("127.0.0.1:0").expect("target should bind");
+        let relay = ControlRelay::start(
             directory.path(),
             "browser.test",
-            config(),
-            Arc::new(IgnoreObservations),
+            target.local_addr().expect("target address"),
         )
-        .expect("transport should start");
-        let bootstrap = bootstrap(directory.path());
-        let file_name = bootstrap
-            .control_socket
-            .expect("Unix discovery should carry a control socket");
+        .expect("relay should start");
+        let file_name = relay.file_name.clone();
         assert!(!file_name.contains('/'));
         let socket = directory.path().join(&file_name);
         assert!(
@@ -1074,7 +1075,7 @@ mod tests {
                 .file_type()
                 .is_socket()
         );
-        handle.shutdown().expect("transport should shut down");
+        drop(relay);
         assert!(!socket.exists());
     }
 

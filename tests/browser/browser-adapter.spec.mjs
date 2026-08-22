@@ -140,6 +140,39 @@ test("hosted page apply bridge acknowledges only after the application applies",
   });
 });
 
+test("generic collaboration DOM needs no Activity or Experience application API", async ({ browser }) => {
+  await runScenario(browser, "generic-collaboration", {
+    async record(page) {
+      await page.locator("#increment").click();
+      await page.locator("#command").click();
+      await page.keyboard.press("Enter");
+      const box = await page.locator("#drag").boundingBox();
+      if (!box) throw new Error("draggable fixture box is missing");
+      await page.mouse.move(box.x + 20, box.y + 20);
+      await page.mouse.down();
+      await page.mouse.move(box.x + 70, box.y + 55, { steps: 4 });
+      await page.mouse.up();
+      await page.locator("#scrollable").hover();
+      await page.mouse.wheel(0, 180);
+      await expect(page.locator("body")).toHaveAttribute("data-counter", "1");
+      await expect(page.locator("body")).toHaveAttribute("data-submitted", "1");
+      await expect.poll(async () => Number(await page.locator("body").getAttribute("data-scroll"))).toBeGreaterThan(0);
+      await expect(page.locator("body")).not.toHaveAttribute("data-drag-x", "40");
+    },
+    async assertReplayed(page) {
+      await expect(page.locator("body")).toHaveAttribute("data-counter", "1");
+      await expect(page.locator("body")).toHaveAttribute("data-submitted", "1");
+      await expect.poll(async () => Number(await page.locator("body").getAttribute("data-scroll"))).toBeGreaterThan(0);
+      await expect(page.locator("body")).not.toHaveAttribute("data-drag-x", "40");
+      await expect(page.locator("html")).not.toHaveAttribute("data-ato-browser-apply-bridge");
+    },
+    async continue(page) {
+      await page.locator("#increment").click();
+      await expect(page.locator("body")).toHaveAttribute("data-counter", "2");
+    },
+  });
+});
+
 test("Bridge disconnect during Replay fails the Run and cleans control state", async ({ browser }) => {
   await runScenario(browser, "click-counter", {
     replayFailure: "disconnect",

@@ -995,6 +995,7 @@ impl UntrustedProcessEvaluator {
                 "ATO_BROWSER_RUNTIME_DIR",
                 "/workspace/browser-runtime",
             ])
+            .args(["--setenv", "ATO_BROWSER_CONTROL_RELAY", "unix"])
             .arg("/opt/ato/bin/ato")
             .args(["__hosted-session", "start"])
             .arg("/workspace/input.capsule")
