@@ -28,7 +28,7 @@
           output.textContent = String(counter);
           body.dataset.counter = String(counter);
         });
-        document.querySelector("#command").addEventListener("keydown", (event) => {
+        addEventListener("keydown", (event) => {
           if (event.code === "Enter") body.dataset.submitted = "1";
         });
         addEventListener("scroll", () => {
