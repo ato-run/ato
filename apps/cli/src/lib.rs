@@ -249,6 +249,9 @@ struct BrowserHostArgs {
     /// Optional loopback sink for Product-runtime Browser viewport media.
     #[arg(long)]
     presentation_sink_url: Option<String>,
+    /// Optional separate Product controller page. It never becomes the app target.
+    #[arg(long)]
+    product_controller_url: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -358,6 +361,7 @@ pub fn run() -> Result<()> {
                 &args.chrome,
                 args.headless,
                 presentation_sink,
+                args.product_controller_url.as_deref(),
             )
         }
         Commands::ActivityIdle => loop {

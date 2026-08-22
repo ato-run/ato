@@ -1,6 +1,8 @@
 use std::collections::{BTreeSet, VecDeque};
 use std::io::ErrorKind;
-use std::net::{TcpListener, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+#[cfg(unix)]
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
@@ -25,6 +27,8 @@ const POLL_INTERVAL: Duration = Duration::from_millis(2);
 pub struct BrowserRuntimeBootstrap {
     pub protocol: String,
     pub control_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_socket: Option<String>,
     pub channel_credential: String,
     pub browser_session: String,
     pub expected_origin: String,
@@ -158,6 +162,8 @@ pub(crate) struct TransportHandle {
     pub commands: mpsc::Sender<TransportCommand>,
     pub failure: Arc<Mutex<Option<String>>>,
     pub join: Option<JoinHandle<()>>,
+    #[cfg(unix)]
+    control_relay: Option<ControlRelay>,
 }
 
 impl TransportHandle {
@@ -165,6 +171,8 @@ impl TransportHandle {
         let _ = self.commands.send(TransportCommand::Shutdown);
         let join_result = self.join.take().map(JoinHandle::join);
         remove_discovery(&self.discovery_path)?;
+        #[cfg(unix)]
+        self.control_relay.take();
         if join_result.is_some_and(|result| result.is_err()) {
             return Err(AdapterError::Operation(
                 "Browser transport thread panicked".to_owned(),
@@ -182,6 +190,85 @@ impl TransportHandle {
         }
         Ok(())
     }
+}
+
+#[cfg(unix)]
+struct ControlRelay {
+    file_name: String,
+    path: PathBuf,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    join: Option<JoinHandle<()>>,
+}
+
+#[cfg(unix)]
+impl ControlRelay {
+    fn start(
+        runtime_dir: &Path,
+        instance_id: &str,
+        target: SocketAddr,
+    ) -> Result<Self, AdapterError> {
+        let file_name = format!("browser-{instance_id}.sock");
+        let path = runtime_dir.join(&file_name);
+        if path.exists() {
+            return Err(AdapterError::Operation(
+                "Browser control relay socket already exists".to_owned(),
+            ));
+        }
+        let listener = UnixListener::bind(&path)?;
+        listener.set_nonblocking(true)?;
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let join = thread::spawn(move || {
+            while !thread_stop.load(std::sync::atomic::Ordering::Acquire) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        thread::spawn(move || relay_unix_to_tcp(stream, target));
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        thread::sleep(POLL_INTERVAL);
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Ok(Self {
+            file_name,
+            path,
+            stop,
+            join: Some(join),
+        })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ControlRelay {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(unix)]
+fn relay_unix_to_tcp(mut client: UnixStream, target: SocketAddr) {
+    let Ok(mut upstream) = TcpStream::connect(target) else {
+        return;
+    };
+    let Ok(mut client_read) = client.try_clone() else {
+        return;
+    };
+    let Ok(mut upstream_write) = upstream.try_clone() else {
+        return;
+    };
+    let forward = thread::spawn(move || {
+        let _ = std::io::copy(&mut client_read, &mut upstream_write);
+        let _ = upstream_write.shutdown(Shutdown::Write);
+    });
+    let _ = std::io::copy(&mut upstream, &mut client);
+    let _ = client.shutdown(Shutdown::Write);
+    let _ = forward.join();
 }
 
 impl Drop for TransportHandle {
@@ -208,12 +295,19 @@ pub(crate) fn start_transport(
     config: TransportConfig,
     observations: Arc<dyn ObservationSink>,
 ) -> Result<TransportHandle, AdapterError> {
+    std::fs::create_dir_all(runtime_dir)?;
     let listener = TcpListener::bind("127.0.0.1:0")?;
     listener.set_nonblocking(true)?;
     let address = listener.local_addr()?;
+    #[cfg(unix)]
+    let control_relay = ControlRelay::start(runtime_dir, instance_id, address)?;
     let bootstrap = BrowserRuntimeBootstrap {
         protocol: BROWSER_PROTOCOL_ID.to_owned(),
         control_url: format!("ws://{address}"),
+        #[cfg(unix)]
+        control_socket: Some(control_relay.file_name.clone()),
+        #[cfg(not(unix))]
+        control_socket: None,
         channel_credential: config.channel_credential.clone(),
         browser_session: config.browser_session.clone(),
         expected_origin: config.expected_origin.clone(),
@@ -237,6 +331,8 @@ pub(crate) fn start_transport(
         commands,
         failure,
         join: Some(join),
+        #[cfg(unix)]
+        control_relay: Some(control_relay),
     })
 }
 
@@ -951,6 +1047,35 @@ mod tests {
         ] {
             assert!(validate_hello(&config, values.0, values.1, values.2, values.3).is_err());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_exposes_a_workspace_scoped_control_relay_and_cleans_it_up() {
+        use std::os::unix::fs::FileTypeExt;
+
+        let directory = tempfile::tempdir().expect("temporary workspace should open");
+        let mut handle = start_transport(
+            directory.path(),
+            "browser.test",
+            config(),
+            Arc::new(IgnoreObservations),
+        )
+        .expect("transport should start");
+        let bootstrap = bootstrap(directory.path());
+        let file_name = bootstrap
+            .control_socket
+            .expect("Unix discovery should carry a control socket");
+        assert!(!file_name.contains('/'));
+        let socket = directory.path().join(&file_name);
+        assert!(
+            std::fs::symlink_metadata(&socket)
+                .expect("control socket should exist")
+                .file_type()
+                .is_socket()
+        );
+        handle.shutdown().expect("transport should shut down");
+        assert!(!socket.exists());
     }
 
     #[test]

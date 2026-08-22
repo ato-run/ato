@@ -34,6 +34,7 @@ pub(crate) enum ActivityHostEvent {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ActivityHostPageConfig {
     pub run_id: String,
+    pub generic_browser: bool,
     pub experience_url: String,
     pub experience_origin: String,
     pub room_url: String,
@@ -66,9 +67,13 @@ impl ActivityHostServer {
         let nonce = random_secret();
         let html = activity_host_html(&config, &secret, &nonce)?;
         let room_origin = websocket_origin(&config.room_url)?;
+        let frame_source = if config.generic_browser {
+            "'none'"
+        } else {
+            config.experience_origin.as_str()
+        };
         let csp = format!(
-            "default-src 'none'; script-src 'nonce-{nonce}'; style-src 'nonce-{nonce}'; frame-src {}; connect-src 'self' {room_origin}; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
-            config.experience_origin
+            "default-src 'none'; script-src 'nonce-{nonce}'; style-src 'nonce-{nonce}'; frame-src {frame_source}; connect-src 'self' {room_origin}; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
         );
         let stopping = Arc::new(AtomicBool::new(false));
         let thread_stopping = Arc::clone(&stopping);
@@ -456,19 +461,24 @@ const ACTIVITY_HOST_HTML: &str = r#"<!doctype html>
     const roomWebSocketProtocol = "ato.activity.room.v1";
     const experienceProtocol = "ato.activity-experience@1";
     const hostApplyProtocol = "ato.browser.host-apply@1";
-    const frame = document.getElementById("experience");
+    let frame = document.getElementById("experience");
     const mediaCanvas = document.getElementById("activity-media");
     const mediaContext = mediaCanvas.getContext("2d", { alpha: false });
     const channelToken = cryptoToken();
     const instanceId = `ahex_${cryptoToken()}`;
-    const experienceUrl = new URL(config.experienceUrl);
-    experienceUrl.hash = new URLSearchParams({
-      channel_token: channelToken,
-      instance_id: instanceId,
-      parent_origin: location.origin,
-      run_id: config.runId,
-    }).toString();
-    frame.src = experienceUrl.toString();
+    if (config.genericBrowser) {
+      frame.remove();
+      frame = null;
+    } else {
+      const experienceUrl = new URL(config.experienceUrl);
+      experienceUrl.hash = new URLSearchParams({
+        channel_token: channelToken,
+        instance_id: instanceId,
+        parent_origin: location.origin,
+        run_id: config.runId,
+      }).toString();
+      frame.src = experienceUrl.toString();
+    }
 
     let room = null;
     let roomOutboundSequence = 0;
@@ -476,7 +486,7 @@ const ACTIVITY_HOST_HTML: &str = r#"<!doctype html>
     let roomIdentity = null;
     let experienceInboundSequence = 0;
     let experienceOutboundSequence = 0;
-    let experienceReady = false;
+    let experienceReady = config.genericBrowser;
     let mediaReady = false;
     let mediaStream = null;
     let readyReported = false;
@@ -487,7 +497,7 @@ const ACTIVITY_HOST_HTML: &str = r#"<!doctype html>
     const peers = new Map();
 
     addEventListener("message", (event) => {
-      if (event.source === frame.contentWindow && event.origin === config.experienceOrigin) {
+      if (frame && event.source === frame.contentWindow && event.origin === config.experienceOrigin) {
         receiveExperience(event.data);
         return;
       }
@@ -552,7 +562,10 @@ const ACTIVITY_HOST_HTML: &str = r#"<!doctype html>
       if (type === "activity.started") {
         const delay = Math.max(0, Date.parse(payload.starts_at) - Date.parse(payload.server_now));
         if (!Number.isFinite(delay)) return fail();
-        setTimeout(() => sendExperience("experience.resume", {}), delay);
+        setTimeout(() => {
+          if (config.genericBrowser) sendRoom("run.state", { run_id: config.runId, state: "live" });
+          else sendExperience("experience.resume", {});
+        }, delay);
         return;
       }
       if (type === "activity.ended") end();
@@ -577,6 +590,7 @@ const ACTIVITY_HOST_HTML: &str = r#"<!doctype html>
     }
 
     function receiveBrowserApply(value) {
+      if (config.genericBrowser) return;
       if (!isObject(value) || value.protocol !== hostApplyProtocol || value.type !== "apply" || typeof value.request_id !== "string" || !activeInput) return;
       activeInput.browserRequestId = value.request_id;
       sendExperience("experience.browser.apply", {
@@ -694,7 +708,7 @@ const ACTIVITY_HOST_HTML: &str = r#"<!doctype html>
     }
 
     function sendExperience(type, payload) {
-      frame.contentWindow?.postMessage({ protocol: experienceProtocol, channelToken, instanceId, sequence: ++experienceInboundSequence, type, payload }, config.experienceOrigin);
+      frame?.contentWindow?.postMessage({ protocol: experienceProtocol, channelToken, instanceId, sequence: ++experienceInboundSequence, type, payload }, config.experienceOrigin);
     }
 
     function sendRoom(type, payload) {
@@ -711,7 +725,7 @@ const ACTIVITY_HOST_HTML: &str = r#"<!doctype html>
       }
       peers.clear();
       for (const track of mediaStream?.getTracks() ?? []) track.stop();
-      sendExperience("experience.dispose", {});
+      if (!config.genericBrowser) sendExperience("experience.dispose", {});
       room?.close(1000, "Activity ended");
       await hostFetch("/end", {});
     }
@@ -745,6 +759,7 @@ mod tests {
     fn page_config() -> ActivityHostPageConfig {
         ActivityHostPageConfig {
             run_id: "arun_01KAAAAAAAAAAAAAAAAAAAAA0".to_owned(),
+            generic_browser: false,
             experience_url: "https://experience.example/index.html".to_owned(),
             experience_origin: "https://experience.example".to_owned(),
             room_url: "wss://activity.example/runner-room".to_owned(),
@@ -764,6 +779,19 @@ mod tests {
         assert!(html.contains("const subscribers = new Set()"));
         assert!(!config.room_url.contains(&config.executor_credential));
         assert!(!html.contains("turn:"));
+    }
+
+    #[test]
+    fn generic_host_page_needs_no_experience_readiness_or_apply_wrapper() {
+        let mut config = page_config();
+        config.generic_browser = true;
+        config.experience_url.clear();
+        config.experience_origin.clear();
+        let html = activity_host_html(&config, "local_secret", "nonce").unwrap();
+        assert!(html.contains("let experienceReady = config.genericBrowser"));
+        assert!(html.contains("if (config.genericBrowser)"));
+        assert!(html.contains("if (config.genericBrowser) return"));
+        assert!(html.contains("mediaCanvas.captureStream(30)"));
     }
 
     #[test]

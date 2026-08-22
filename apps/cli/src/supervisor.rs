@@ -14,13 +14,14 @@ use ato_adapter_api::{
 };
 use ato_adapter_process::terminate_process_tree;
 use ato_adapter_workspace::restore_workspace;
-use ato_computation::{ComputationRef, ContentRef, PortId, ProtocolId};
+use ato_computation::{ComputationRef, ContentRef, ProtocolId};
 use ato_materializer_api::{
     MaterializerContext, MaterializerError, Realization, RealizationDriver,
     RealizationVerification, ReplayRuntime,
 };
 use ato_objects::{
     ActiveRun, Direction, LocalCapsuleRepository, ObjectStore, RecordEnvelope, RecordId,
+    resolve_computation,
 };
 use serde::{Deserialize, Serialize};
 
@@ -694,31 +695,37 @@ fn handle_activity_input_request(
         .lock()
         .map_err(|_| anyhow::anyhow!("Run head lock was poisoned"))?
         .clone();
-    let port_id = PortId::parse("activity.browser")?;
     let protocol_id = ProtocolId::parse(ato_adapter_browser::BROWSER_PROTOCOL_ID)?;
-    let candidate = RecordEnvelope {
-        id: RecordId::new(branch, 0),
-        adapter_id: request.adapter_id.clone(),
-        protocol_id: protocol_id.clone(),
-        port_id: port_id.clone(),
-        direction: Direction::Inbound,
-        payload_ref,
-        head_before: head.clone(),
-        head_after: head,
-        caused_by: Vec::new(),
-        observed_at: "0".to_owned(),
-    };
-    let mut matches = sessions
-        .iter_mut()
-        .filter(|session| session.accepts(&candidate));
-    let session = matches
-        .next()
-        .context("Activity Run has no Browser Adapter for activity.browser")?;
-    if matches.next().is_some() {
-        bail!("Activity Run has multiple Browser Adapters for activity.browser");
+    let computation = resolve_computation(repository.objects(), &head)?;
+    let mut matches = Vec::new();
+    for (port_id, port) in &computation.object().boundary {
+        if port.protocol != protocol_id {
+            continue;
+        }
+        let candidate = RecordEnvelope {
+            id: RecordId::new(branch, 0),
+            adapter_id: request.adapter_id.clone(),
+            protocol_id: protocol_id.clone(),
+            port_id: port_id.clone(),
+            direction: Direction::Inbound,
+            payload_ref: payload_ref.clone(),
+            head_before: head.clone(),
+            head_after: head.clone(),
+            caused_by: Vec::new(),
+            observed_at: "0".to_owned(),
+        };
+        for (session_index, session) in sessions.iter().enumerate() {
+            if session.accepts(&candidate) {
+                matches.push((session_index, candidate.clone()));
+            }
+        }
     }
-    session.apply(
-        &candidate,
+    let [(session_index, candidate)] = matches.as_slice() else {
+        bail!("Activity Run must have exactly one attached Browser Adapter");
+    };
+    let port_id = candidate.port_id.clone();
+    sessions[*session_index].apply(
+        candidate,
         &AdapterContext {
             workspace: repository.project(),
             objects: repository.objects(),

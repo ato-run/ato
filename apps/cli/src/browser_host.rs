@@ -22,6 +22,9 @@ use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Message, WebSocket, client};
 use url::Url;
 
+#[cfg(unix)]
+use crate::network_runner::TcpProxy;
+
 const DISCOVERY_WAIT: Duration = Duration::from_secs(30);
 const CDP_WAIT: Duration = Duration::from_secs(15);
 const NAVIGATION_WAIT: Duration = Duration::from_secs(15);
@@ -45,10 +48,24 @@ pub(crate) fn run(
     chrome: &Path,
     headless: bool,
     presentation_sink: Option<BrowserPresentationSink>,
+    product_controller_url: Option<&str>,
 ) -> Result<()> {
     validate_runtime_dir(runtime_dir)?;
     let bootstrap_path = wait_for_discovery(runtime_dir, DISCOVERY_WAIT)?;
-    let bootstrap = read_bootstrap(&bootstrap_path)?;
+    let mut bootstrap = read_bootstrap(&bootstrap_path)?;
+    #[cfg(unix)]
+    let _control_proxy = if let Some(file_name) = bootstrap.control_socket.as_deref() {
+        let socket = validated_control_socket(runtime_dir, file_name)?;
+        let proxy = TcpProxy::start_unix(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), socket)?;
+        bootstrap.control_url = format!("ws://{}", proxy.local_addr());
+        Some(proxy)
+    } else {
+        None
+    };
+    #[cfg(not(unix))]
+    if bootstrap.control_socket.is_some() {
+        bail!("Browser Adapter Unix control relay is unsupported on this host");
+    }
     validate_target(target_url, &bootstrap.expected_origin)?;
     if !chrome.is_absolute() || !chrome.is_file() {
         bail!("Browser Host Chrome executable must be an absolute existing file");
@@ -67,17 +84,22 @@ pub(crate) fn run(
             return Err(error);
         }
     };
-    let result = attach_bridge(&profile, target_url, &bootstrap, &mut chrome_process).and_then(
-        |mut attachment| {
-            wait_for_run_end(
-                &bootstrap_path,
-                &mut chrome_process,
-                &mut attachment,
-                presentation_sink.as_ref(),
-            )?;
-            Ok(())
-        },
-    );
+    let result = attach_bridge(
+        &profile,
+        target_url,
+        &bootstrap,
+        &mut chrome_process,
+        product_controller_url,
+    )
+    .and_then(|mut attachment| {
+        wait_for_run_end(
+            &bootstrap_path,
+            &mut chrome_process,
+            &mut attachment,
+            presentation_sink.as_ref(),
+        )?;
+        Ok(())
+    });
     let failure_diagnostic = result
         .as_ref()
         .err()
@@ -198,6 +220,24 @@ fn read_bootstrap(path: &Path) -> Result<BrowserRuntimeBootstrap> {
     }
     validate_target(&bootstrap.expected_origin, &bootstrap.expected_origin)?;
     Ok(bootstrap)
+}
+
+#[cfg(unix)]
+fn validated_control_socket(runtime_dir: &Path, file_name: &str) -> Result<PathBuf> {
+    if file_name.is_empty()
+        || file_name.contains('/')
+        || file_name.contains('\\')
+        || matches!(file_name, "." | "..")
+    {
+        bail!("Browser Adapter control relay has an unsafe socket name");
+    }
+    let path = runtime_dir.join(file_name);
+    let metadata =
+        fs::symlink_metadata(&path).context("inspect Browser Adapter control relay socket")?;
+    if !std::os::unix::fs::FileTypeExt::is_socket(&metadata.file_type()) {
+        bail!("Browser Adapter control relay is not a Unix socket");
+    }
+    Ok(path)
 }
 
 fn validate_target(target_url: &str, expected_origin: &str) -> Result<()> {
@@ -337,6 +377,7 @@ fn attach_bridge(
     target_url: &str,
     bootstrap: &BrowserRuntimeBootstrap,
     chrome: &mut ChromeProcess,
+    product_controller_url: Option<&str>,
 ) -> Result<BrowserAttachment> {
     let (debug_port, browser_ws_url) = wait_for_debugger_websocket_url(profile, chrome, CDP_WAIT)?;
     let websocket = connect_cdp(&browser_ws_url)?;
@@ -386,9 +427,31 @@ fn attach_bridge(
     }
     wait_for_target_origin(&mut cdp, &target_id, target_url)?;
     wait_for_document_ready(&mut cdp, &session_id)?;
+    if let Some(controller_url) = product_controller_url {
+        validate_product_controller(controller_url)?;
+        cdp.call(
+            "Target.createTarget",
+            json!({"url": controller_url, "browserContextId": browser_context_id}),
+            None,
+        )?;
+    }
     capture_initial_frame(&mut cdp, &session_id, profile)?;
     write_cdp_port(profile, debug_port)?;
     Ok(BrowserAttachment { cdp, session_id })
+}
+
+fn validate_product_controller(value: &str) -> Result<()> {
+    let url = Url::parse(value).context("parse Product controller URL")?;
+    if url.scheme() != "http"
+        || !matches!(url.host_str(), Some("127.0.0.1") | Some("localhost"))
+        || url.port().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        bail!("Product controller URL must be a credential-free loopback HTTP URL");
+    }
+    Ok(())
 }
 
 fn publish_live_frame(
@@ -920,6 +983,20 @@ mod tests {
                 })
                 .is_err()
             );
+        }
+    }
+
+    #[test]
+    fn product_controller_is_a_separate_credential_free_loopback_target() {
+        validate_product_controller("http://127.0.0.1:49152/bootstrap/opaque")
+            .expect("loopback controller");
+        for value in [
+            "https://127.0.0.1:49152/bootstrap/opaque",
+            "http://example.test:49152/bootstrap/opaque",
+            "http://secret@127.0.0.1:49152/bootstrap/opaque",
+            "http://127.0.0.1:49152/bootstrap/opaque#secret",
+        ] {
+            assert!(validate_product_controller(value).is_err());
         }
     }
 }
