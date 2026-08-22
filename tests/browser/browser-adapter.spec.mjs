@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { execFile, spawn } from "node:child_process";
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile, copyFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,13 +15,13 @@ const bridgeSource = await readFile(
   "utf8",
 );
 const delayedAckBridgeSource = bridgeSource.replace(
-  'send({ type: "ack", request_id: value.request_id });',
-  'setTimeout(() => send({ type: "ack", request_id: value.request_id }), 75);',
+  '.then(() => send({ type: "ack", request_id: value.request_id }))',
+  '.then(() => setTimeout(() => send({ type: "ack", request_id: value.request_id }), 75))',
 );
 if (delayedAckBridgeSource === bridgeSource) throw new Error("Browser Bridge ACK hook was not found");
 const disconnectingBridgeSource = bridgeSource.replace(
-  "dispatch(value.event);",
-  'socket.close(4000, "injected replay disconnect"); return;',
+  "Promise.resolve(dispatch(value.event, value.request_id))",
+  'Promise.resolve((socket.close(4000, "injected replay disconnect"), Promise.reject(new Error("injected replay disconnect"))))',
 );
 if (disconnectingBridgeSource === bridgeSource) throw new Error("Browser Bridge dispatch hook was not found");
 const atoBin = process.env.ATO_BIN ?? join(repository, "target/debug/ato");
@@ -123,6 +123,100 @@ test("DOM event profile preserves focus and safe KeyboardEvent.key", async ({ br
   });
 });
 
+test("hosted page apply bridge acknowledges only after the application applies", async ({ browser }) => {
+  await runScenario(browser, "host-apply", {
+    async record(page) {
+      await page.keyboard.press("ArrowRight");
+      await expect(page.locator("#count")).toHaveText("1");
+    },
+    async assertReplayed(page) {
+      await expect(page.locator("#count")).toHaveText("1");
+      await expect(page.locator("body")).toHaveAttribute("data-host-applies", "1");
+    },
+    async continue(page) {
+      await page.keyboard.press("ArrowRight");
+      await expect(page.locator("#count")).toHaveText("2");
+    },
+  });
+});
+
+test("generic collaboration DOM needs no Activity or Experience application API", async ({ browser }) => {
+  await runScenario(browser, "generic-collaboration", {
+    async record(page, activity) {
+      const button = await page.locator("#increment").boundingBox();
+      if (!button) throw new Error("increment fixture button is missing");
+      const hostReceipt = await activity.apply({
+        actor: "host-participant",
+        operationId: "operation-host-click",
+        event: {
+          type: "click",
+          x_normalized: (button.x + button.width / 2) / 800,
+          y_normalized: (button.y + button.height / 2) / 600,
+          button: 0,
+        },
+      });
+      const guestReceipt = await activity.apply({
+        actor: "guest-participant",
+        operationId: "operation-guest-enter",
+        event: {
+          type: "keyboard",
+          kind: "key_down",
+          code: "Enter",
+          modifiers: { alt: false, control: false, meta: false, shift: false },
+        },
+      });
+      expect(hostReceipt).toMatchObject({
+        run_sequence: 1,
+        actor_participant_id: "host-participant",
+        adapter_id: "ato.browser@1",
+        result: "applied",
+      });
+      expect(guestReceipt).toMatchObject({
+        run_sequence: 2,
+        actor_participant_id: "guest-participant",
+        adapter_id: "ato.browser@1",
+        result: "applied",
+      });
+      expect(hostReceipt.record_ref).toBeTruthy();
+      expect(guestReceipt.record_ref).toBeTruthy();
+      expect(guestReceipt.record_ref).not.toBe(hostReceipt.record_ref);
+      const duplicate = await activity.apply({
+        actor: "host-participant",
+        operationId: "operation-host-click",
+        event: {
+          type: "click",
+          x_normalized: 0.5,
+          y_normalized: 0.5,
+          button: 0,
+        },
+      });
+      expect(duplicate).toMatchObject({ run_sequence: 1, result: "duplicate" });
+      const box = await page.locator("#drag").boundingBox();
+      if (!box) throw new Error("draggable fixture box is missing");
+      await page.mouse.move(box.x + 20, box.y + 20);
+      await page.mouse.down();
+      await page.mouse.move(box.x + 70, box.y + 55, { steps: 4 });
+      await page.mouse.up();
+      await page.locator("#scrollable").hover();
+      await page.mouse.wheel(0, 180);
+      await expect(page.locator("body")).toHaveAttribute("data-counter", "1");
+      await expect(page.locator("body")).toHaveAttribute("data-submitted", "1");
+      await expect.poll(async () => Number(await page.locator("body").getAttribute("data-scroll"))).toBeGreaterThan(0);
+      await expect(page.locator("body")).not.toHaveAttribute("data-drag-x", "40");
+    },
+    async assertReplayed(page) {
+      await expect(page.locator("body")).toHaveAttribute("data-counter", "1");
+      await expect(page.locator("body")).toHaveAttribute("data-submitted", "1");
+      await expect(page.locator("body")).not.toHaveAttribute("data-drag-x", "40");
+      await expect(page.locator("html")).not.toHaveAttribute("data-ato-browser-apply-bridge");
+    },
+    async continue(page) {
+      await page.locator("#increment").click();
+      await expect(page.locator("body")).toHaveAttribute("data-counter", "2");
+    },
+  });
+});
+
 test("Bridge disconnect during Replay fails the Run and cleans control state", async ({ browser }) => {
   await runScenario(browser, "click-counter", {
     replayFailure: "disconnect",
@@ -167,7 +261,10 @@ async function runScenario(browser, fixtureName, scenario) {
     const authorBrowser = await openRecordedBrowser(browser, project, origin, undefined, authorRuntime);
     authorContext = authorBrowser.context;
     const authorPage = authorContext.pages()[0];
-    await scenario.record(authorPage);
+    await scenario.record(authorPage, {
+      project,
+      apply: (operation) => activityApply(project, operation),
+    });
 
     // The final physical interaction has completed in the page, but may still
     // be in the Bridge/socket/coalescing frontier when stop begins.
@@ -400,6 +497,32 @@ async function recordedEvents(project, stream = "main") {
   const names = (await readdir(directory)).sort();
   const records = await Promise.all(names.map(async (name) => JSON.parse(await readFile(join(directory, name), "utf8"))));
   return records.sort((left, right) => left.id.seq - right.id.seq);
+}
+
+async function activityApply(project, { actor, operationId, event }) {
+  const runs = join(project, ".capsule/runs");
+  const request = join(runs, "activity-input.request.json");
+  const pending = join(runs, `activity-input.${operationId}.pending`);
+  const response = join(runs, "activity-input.response.json");
+  await writeFile(pending, JSON.stringify({
+    request_id: `request-${operationId}-${Date.now()}`,
+    operation_id: operationId,
+    actor_participant_id: actor,
+    client_sequence: 1,
+    adapter_id: "ato.browser@1",
+    protocol_id: "ato.browser@1",
+    event,
+  }));
+  await rename(pending, request);
+  const receipt = await waitFor(async () => {
+    try {
+      return JSON.parse(await readFile(response, "utf8"));
+    } catch {
+      return null;
+    }
+  });
+  await unlink(response);
+  return receipt;
 }
 
 async function waitForPortableProject(home, runtimeDir) {

@@ -35,6 +35,7 @@ use reqwest::blocking::{Client, RequestBuilder};
 use serde::{Deserialize, Serialize};
 use tungstenite::client::IntoClientRequest;
 
+use crate::activity_executor::{self, ActivityExecutorInput};
 use crate::supervisor::PresentationCaptureReceipt;
 
 #[derive(Debug, Args)]
@@ -60,6 +61,9 @@ struct ServeArgs {
     public_base_url: String,
     #[arg(long, env = "ATO_RUNNER_STATE_DIR")]
     state_dir: Option<PathBuf>,
+    /// Absolute Chrome/Chromium executable for hosted Browser Activity leases.
+    #[arg(long, env = "ATO_RUNNER_CHROME")]
+    chrome: Option<PathBuf>,
     #[arg(long, default_value = "127.0.0.1:8420")]
     proxy_listen: SocketAddr,
     #[arg(long)]
@@ -72,6 +76,7 @@ struct ResolvedServeArgs {
     runner_token: String,
     public_base_url: String,
     state_dir: PathBuf,
+    chrome: Option<PathBuf>,
     proxy_listen: SocketAddr,
     once: bool,
 }
@@ -101,7 +106,8 @@ struct ClaimedLease {
     command: PortableLeaseCommand,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 struct PortableLeaseCommand {
     kind: String,
     bundle_id: String,
@@ -115,6 +121,8 @@ struct PortableLeaseCommand {
     compose_inputs: Vec<ComposeInput>,
     #[serde(default)]
     output_upload_url: String,
+    activity_id: String,
+    activity_run_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -125,25 +133,25 @@ struct ComposeInput {
     download_url: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct SessionSurface {
     kind: String,
     surface_id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-struct HostedSessionReport {
-    root_computation_ref: String,
-    branch: String,
-    exported_ports: Vec<HostedPort>,
+pub(crate) struct HostedSessionReport {
+    pub(crate) root_computation_ref: String,
+    pub(crate) branch: String,
+    pub(crate) exported_ports: Vec<HostedPort>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-struct HostedPort {
-    port_id: String,
-    protocol: String,
-    role: String,
-    local_endpoint: Option<String>,
+pub(crate) struct HostedPort {
+    pub(crate) port_id: String,
+    pub(crate) protocol: String,
+    pub(crate) role: String,
+    pub(crate) local_endpoint: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -197,7 +205,7 @@ struct CaptureRequest {
 const UNTRUSTED_ISOLATION_CAPABILITY: &str = "isolation=untrusted-v1";
 const PROCESS_EXECUTION_ABI_CAPABILITY: &str = "execution_abi=process";
 
-struct UntrustedProcessEvaluator {
+pub(crate) struct UntrustedProcessEvaluator {
     bwrap: PathBuf,
 }
 
@@ -335,6 +343,7 @@ fn resolve_serve_args_from_home(args: ServeArgs, ato_home: PathBuf) -> Result<Re
         state_dir: args
             .state_dir
             .unwrap_or_else(|| ato_home.join("network-runner")),
+        chrome: args.chrome,
         proxy_listen: args.proxy_listen,
         once: args.once,
     })
@@ -377,7 +386,8 @@ fn heartbeat(client: &Client, base: &str, args: &ResolvedServeArgs) -> Result<()
         "supported_lease_kinds": [
             "portable_capsule_v2",
             "portable_capsule_replay_v1",
-            "portable_capsule_compose_v1"
+            "portable_capsule_compose_v1",
+            "activity_browser_executor_v0"
         ],
         "supported_session_surfaces": [
             {
@@ -431,6 +441,30 @@ fn execute_lease_unix(
     evaluator: &UntrustedProcessEvaluator,
     lease: &ClaimedLease,
 ) -> Result<()> {
+    if lease.command.kind == "activity_browser_executor_v0" {
+        let chrome = args
+            .chrome
+            .as_deref()
+            .context("ATO_RUNNER_CHROME is required for hosted Browser Activities")?;
+        if !chrome.is_absolute() || !chrome.is_file() {
+            bail!("Activity Runner Chrome must be an absolute existing file");
+        }
+        if lease.command.activity_id.is_empty() || lease.command.activity_run_id.is_empty() {
+            bail!("Activity executor lease has incomplete Run identity");
+        }
+        return activity_executor::execute(ActivityExecutorInput {
+            client,
+            api_base: base,
+            runner_token: &args.runner_token,
+            lease_id: &lease.id,
+            run_id: &lease.run_id,
+            activity_id: &lease.command.activity_id,
+            activity_run_id: &lease.command.activity_run_id,
+            state_dir: &args.state_dir,
+            chrome,
+            evaluator,
+        });
+    }
     if lease.command.kind == "portable_capsule_compose_v1" {
         return execute_compose_lease(client, base, args, lease);
     }
@@ -896,7 +930,7 @@ impl Drop for ReplaySandbox {
 }
 
 impl UntrustedProcessEvaluator {
-    fn spawn_session(
+    pub(crate) fn spawn_session(
         &self,
         bundle: &Path,
         repository: &Path,
@@ -936,6 +970,51 @@ impl UntrustedProcessEvaluator {
             .context("sandbox stdin unavailable")?
             .write_all(&payload)?;
         payload.fill(0);
+        Ok(child)
+    }
+
+    pub(crate) fn spawn_activity_session(
+        &self,
+        bundle: &Path,
+        repository: &Path,
+        root: &str,
+        surface_port: &str,
+    ) -> Result<Child> {
+        fs::create_dir_all(repository.join("browser-runtime"))?;
+        let executable = std::env::current_exe()?;
+        let repository = repository.canonicalize()?;
+        let bundle = bundle.canonicalize()?;
+        if bundle != repository.join("input.capsule") {
+            bail!("portable Activity Bundle must be inside the isolated workspace");
+        }
+        let arguments = sandbox_arguments(&executable, &repository)?;
+        let mut child = evaluator_command(&self.bwrap, arguments)
+            .args(["--setenv", "ATO_EXTERNAL_SANDBOX_PROFILE", "untrusted-v1"])
+            .args([
+                "--setenv",
+                "ATO_BROWSER_RUNTIME_DIR",
+                "/workspace/browser-runtime",
+            ])
+            .args(["--setenv", "ATO_BROWSER_CONTROL_RELAY", "unix"])
+            .arg("/opt/ato/bin/ato")
+            .args(["__hosted-session", "start"])
+            .arg("/workspace/input.capsule")
+            .args(["--expected-root", root, "--repository"])
+            .arg("/workspace")
+            .args(["--surface-port", surface_port])
+            .args(["--surface-relay", "/workspace/surface.sock"])
+            .arg("--bindings-stdin")
+            .arg("--hold")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("failed to enter generic Activity Evaluator")?;
+        child
+            .stdin
+            .take()
+            .context("Activity sandbox stdin unavailable")?
+            .write_all(b"{}")?;
         Ok(child)
     }
 
@@ -1059,7 +1138,7 @@ fn append_read_only_runtime_path(arguments: &mut Vec<OsString>, path: &Path) -> 
     Ok(())
 }
 
-fn read_session_report(child: &mut Child) -> Result<HostedSessionReport> {
+pub(crate) fn read_session_report(child: &mut Child) -> Result<HostedSessionReport> {
     let stdout = child.stdout.take().context("sandbox stdout unavailable")?;
     let mut line = String::new();
     BufReader::new(stdout).read_line(&mut line)?;
@@ -1454,7 +1533,8 @@ impl Drop for TerminalSurfaceProxy {
     }
 }
 
-struct TcpProxy {
+pub(crate) struct TcpProxy {
+    address: SocketAddr,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
@@ -1463,6 +1543,7 @@ impl TcpProxy {
     #[cfg(test)]
     fn start(listen: SocketAddr, target: SocketAddr) -> Result<Self> {
         let listener = TcpListener::bind(listen)?;
+        let address = listener.local_addr()?;
         listener.set_nonblocking(true)?;
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
@@ -1480,14 +1561,16 @@ impl TcpProxy {
             }
         });
         Ok(Self {
+            address,
             stop,
             worker: Some(worker),
         })
     }
 
     #[cfg(unix)]
-    fn start_unix(listen: SocketAddr, target: PathBuf) -> Result<Self> {
+    pub(crate) fn start_unix(listen: SocketAddr, target: PathBuf) -> Result<Self> {
         let listener = TcpListener::bind(listen)?;
+        let address = listener.local_addr()?;
         listener.set_nonblocking(true)?;
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
@@ -1506,9 +1589,14 @@ impl TcpProxy {
             }
         });
         Ok(Self {
+            address,
             stop,
             worker: Some(worker),
         })
+    }
+
+    pub(crate) fn local_addr(&self) -> SocketAddr {
+        self.address
     }
 }
 
@@ -1712,6 +1800,7 @@ mod tests {
                 runner_token: None,
                 public_base_url: "https://runner.example".to_owned(),
                 state_dir: None,
+                chrome: None,
                 proxy_listen: "127.0.0.1:8420".parse().unwrap(),
                 once: true,
             },

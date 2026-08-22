@@ -9,20 +9,26 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use ato_adapter_api::{
     AdapterAttachContext, AdapterContext, AdapterError, AdapterObservation, IgnoreObservations,
-    ObservationSink, PresentationAsset, PresentationHint, PresentationKeyframeCapture,
-    PresentationKind,
+    ObservationEffect, ObservationSink, PresentationAsset, PresentationHint,
+    PresentationKeyframeCapture, PresentationKind,
 };
 use ato_adapter_process::terminate_process_tree;
 use ato_adapter_workspace::restore_workspace;
-use ato_computation::{ComputationRef, ContentRef};
+use ato_computation::{ComputationRef, ContentRef, ProtocolId};
 use ato_materializer_api::{
     MaterializerContext, MaterializerError, Realization, RealizationDriver,
     RealizationVerification, ReplayRuntime,
 };
-use ato_objects::{ActiveRun, LocalCapsuleRepository, ObjectStore, RecordEnvelope, RecordId};
+use ato_objects::{
+    ActiveRun, Direction, LocalCapsuleRepository, ObjectStore, RecordEnvelope, RecordId,
+    resolve_computation,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    activity_executor_gateway::{
+        ACTIVITY_INPUT_REQUEST, ACTIVITY_INPUT_RESPONSE, ActivityInputReceipt, ActivityInputRequest,
+    },
     adapter_registry,
     authoring::{
         adapter_instances, evolve_observation, evolve_workspace_active, load_runtime_state,
@@ -585,6 +591,8 @@ pub(crate) fn worker(
 
     let stop_request = repository.root().join(STOP_REQUEST);
     let stop_ack = repository.root().join(STOP_ACK);
+    let mut activity_receipts = BTreeMap::<String, ActivityInputReceipt>::new();
+    let mut activity_run_sequence = 0_u64;
     loop {
         if let Ok(mut archive) = presentation_archive.lock() {
             drain_archive_keyframes(
@@ -607,6 +615,17 @@ pub(crate) fn worker(
                 &mut restored,
                 &mut sessions,
                 &presentation_archive,
+            )?;
+        }
+        if repository.root().join(ACTIVITY_INPUT_REQUEST).exists() {
+            handle_activity_input_request(
+                &repository,
+                branch,
+                &live_head,
+                &mut sessions,
+                sink.as_ref(),
+                &mut activity_receipts,
+                &mut activity_run_sequence,
             )?;
         }
         if stop_request.exists() {
@@ -637,6 +656,122 @@ pub(crate) fn worker(
         }
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+fn handle_activity_input_request(
+    repository: &LocalCapsuleRepository,
+    branch: &str,
+    live_head: &Arc<Mutex<ComputationRef>>,
+    sessions: &mut [Box<dyn ato_adapter_api::AttachedAdapter>],
+    sink: &dyn ObservationSink,
+    receipts: &mut BTreeMap<String, ActivityInputReceipt>,
+    run_sequence: &mut u64,
+) -> Result<()> {
+    let request_path = repository.root().join(ACTIVITY_INPUT_REQUEST);
+    let response_path = repository.root().join(ACTIVITY_INPUT_RESPONSE);
+    let bytes = fs::read(&request_path).context("read Activity input gateway request")?;
+    fs::remove_file(&request_path).context("consume Activity input gateway request")?;
+    let request: ActivityInputRequest =
+        serde_json::from_slice(&bytes).context("decode Activity input gateway request")?;
+    if request.adapter_id != ato_adapter_browser::BROWSER_ADAPTER_ID
+        || request.protocol_id != ato_adapter_browser::BROWSER_PROTOCOL_ID
+        || request.request_id.len() > 128
+        || request.operation_id.len() > 128
+        || request.actor_participant_id.len() > 128
+    {
+        bail!("Activity input gateway request is outside its Run authority");
+    }
+    if let Some(previous) = receipts.get(&request.operation_id) {
+        let mut duplicate = previous.clone();
+        duplicate.request_id = request.request_id;
+        duplicate.result = "duplicate".to_owned();
+        write_activity_input_response(&response_path, &duplicate)?;
+        return Ok(());
+    }
+    let payload =
+        serde_jcs::to_vec(&request.event).context("canonicalize Activity Browser event")?;
+    let payload_ref = repository.objects().put(&payload)?;
+    let head = live_head
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Run head lock was poisoned"))?
+        .clone();
+    let protocol_id = ProtocolId::parse(ato_adapter_browser::BROWSER_PROTOCOL_ID)?;
+    let computation = resolve_computation(repository.objects(), &head)?;
+    let mut matches = Vec::new();
+    for (port_id, port) in &computation.object().boundary {
+        if port.protocol != protocol_id {
+            continue;
+        }
+        let candidate = RecordEnvelope {
+            id: RecordId::new(branch, 0),
+            adapter_id: request.adapter_id.clone(),
+            protocol_id: protocol_id.clone(),
+            port_id: port_id.clone(),
+            direction: Direction::Inbound,
+            payload_ref: payload_ref.clone(),
+            head_before: head.clone(),
+            head_after: head.clone(),
+            caused_by: Vec::new(),
+            observed_at: "0".to_owned(),
+        };
+        for (session_index, session) in sessions.iter().enumerate() {
+            if session.accepts(&candidate) {
+                matches.push((session_index, candidate.clone()));
+            }
+        }
+    }
+    let [(session_index, candidate)] = matches.as_slice() else {
+        bail!("Activity Run must have exactly one attached Browser Adapter");
+    };
+    let port_id = candidate.port_id.clone();
+    sessions[*session_index].apply(
+        candidate,
+        &AdapterContext {
+            workspace: repository.project(),
+            objects: repository.objects(),
+        },
+    )?;
+    sink.emit(AdapterObservation {
+        adapter_id: request.adapter_id.clone(),
+        protocol_id,
+        port_id,
+        direction: Direction::Inbound,
+        payload,
+        caused_by: Vec::new(),
+        effect: ObservationEffect::Evolution,
+        presentation_hint: PresentationHint::None,
+    })?;
+    *run_sequence = run_sequence
+        .checked_add(1)
+        .context("Activity Run sequence exhausted")?;
+    let committed = repository
+        .records_for_stream(branch, None)?
+        .last()
+        .cloned()
+        .context("Activity Browser event was applied without a committed Record")?;
+    let receipt = ActivityInputReceipt {
+        request_id: request.request_id,
+        operation_id: request.operation_id.clone(),
+        actor_participant_id: request.actor_participant_id,
+        client_sequence: request.client_sequence,
+        run_sequence: *run_sequence,
+        result: "applied".to_owned(),
+        adapter_id: request.adapter_id,
+        record_ref: Some(format!("{}:{}", committed.id.stream, committed.id.seq)),
+        error: None,
+    };
+    receipts.insert(request.operation_id, receipt.clone());
+    write_activity_input_response(&response_path, &receipt)
+}
+
+fn write_activity_input_response(path: &Path, receipt: &ActivityInputReceipt) -> Result<()> {
+    let pending = path.with_extension("pending");
+    fs::write(
+        &pending,
+        serde_json::to_vec(receipt).context("encode Activity input gateway response")?,
+    )
+    .context("write Activity input gateway response")?;
+    fs::rename(pending, path).context("publish Activity input gateway response")
 }
 
 fn handle_capture_request(

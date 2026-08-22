@@ -2,6 +2,9 @@
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
+mod activity_executor;
+mod activity_executor_gateway;
+mod activity_executor_host;
 mod authoring;
 mod browser_host;
 mod network_runner;
@@ -109,6 +112,9 @@ enum Commands {
     /// Internal host-side Chrome/CDP bridge for Browser Adapter delivery.
     #[command(name = "__browser-host", hide = true)]
     BrowserHost(BrowserHostArgs),
+    /// Internal idle workload used by the Activity Browser Adapter Run.
+    #[command(name = "__activity-idle", hide = true)]
+    ActivityIdle,
 }
 
 #[derive(Debug, Args)]
@@ -240,6 +246,12 @@ struct BrowserHostArgs {
     /// Run Chrome without a display. Intended for Runner smoke tests only.
     #[arg(long)]
     headless: bool,
+    /// Optional loopback sink for Product-runtime Browser viewport media.
+    #[arg(long)]
+    presentation_sink_url: Option<String>,
+    /// Optional separate Product controller page. It never becomes the app target.
+    #[arg(long)]
+    product_controller_url: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -338,12 +350,23 @@ pub fn run() -> Result<()> {
             &token,
             descriptor.map(ContentRef::parse).transpose()?.as_ref(),
         ),
-        Commands::BrowserHost(args) => browser_host::run(
-            &args.runtime_dir,
-            &args.target_url,
-            &args.chrome,
-            args.headless,
-        ),
+        Commands::BrowserHost(args) => {
+            let presentation_sink = args
+                .presentation_sink_url
+                .map(browser_host::BrowserPresentationSink::from_environment)
+                .transpose()?;
+            browser_host::run(
+                &args.runtime_dir,
+                &args.target_url,
+                &args.chrome,
+                args.headless,
+                presentation_sink,
+                args.product_controller_url.as_deref(),
+            )
+        }
+        Commands::ActivityIdle => loop {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+        },
     }
 }
 

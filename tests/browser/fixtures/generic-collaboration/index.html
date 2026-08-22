@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Generic Browser collaboration fixture</title>
+    <style>
+      #scrollable { width: 320px; height: 600px; border: 1px solid #333; }
+      #scroll-content { height: 600px; }
+      #drag { width: 48px; height: 48px; background: #4a7; touch-action: none; transform: translate(40px, 40px); }
+    </style>
+  </head>
+  <body data-counter="0" data-submitted="0" data-scroll="0" data-drag-x="40" data-drag-y="40">
+    <button id="increment" type="button">increment</button>
+    <input id="command" aria-label="Command" placeholder="Press Enter">
+    <output id="counter" data-counter>0</output>
+    <div id="drag" aria-label="Draggable box"></div>
+    <div id="scrollable"><div id="scroll-content">scrollable area</div></div>
+    <script>
+      (() => {
+        let counter = 0;
+        let drag = null;
+        const body = document.body;
+        const output = document.querySelector("#counter");
+        const box = document.querySelector("#drag");
+        document.querySelector("#increment").addEventListener("click", () => {
+          counter += 1;
+          output.textContent = String(counter);
+          body.dataset.counter = String(counter);
+        });
+        addEventListener("keydown", (event) => {
+          if (event.code === "Enter") body.dataset.submitted = "1";
+        });
+        addEventListener("scroll", () => {
+          body.dataset.scroll = String(scrollY);
+        });
+        box.addEventListener("pointerdown", (event) => {
+          drag = { pointerId: event.pointerId };
+        });
+        box.addEventListener("pointermove", (event) => {
+          if (!drag || drag.pointerId !== event.pointerId || event.buttons === 0) return;
+          body.dataset.dragX = String(Math.round(event.clientX));
+          body.dataset.dragY = String(Math.round(event.clientY));
+          box.style.transform = `translate(${event.clientX}px, ${event.clientY}px)`;
+        });
+        const end = (event) => {
+          if (drag?.pointerId === event.pointerId) drag = null;
+        };
+        box.addEventListener("pointerup", end);
+        box.addEventListener("pointercancel", end);
+      })();
+    </script>
+  </body>
+</html>

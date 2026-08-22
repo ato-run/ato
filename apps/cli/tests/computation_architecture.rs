@@ -196,7 +196,7 @@ fn compiler_error_is_a_valid_portable_handoff_point() {
     let recipient_home = tempfile::tempdir().unwrap();
     write_project(
         project.path(),
-        r#"["sh"]"#,
+        r#"["sh", "-c", "sleep 0.5; exec sh"]"#,
         r#"[[adapter]]
 target = "app"
 use = "ato.pty@1"
