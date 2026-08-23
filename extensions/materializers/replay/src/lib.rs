@@ -8,8 +8,8 @@ use std::collections::BTreeSet;
 use ato_adapter_api::OperationRequirement;
 use ato_computation::{ComputationRef, ContentRef, OperationId, PortId, ProtocolId};
 use ato_materializer_api::{
-    Compatibility, Materializer, MaterializerContext, MaterializerError, Realization,
-    RestoreCapability,
+    Compatibility, ContractDescriptor, Materializer, MaterializerContext, MaterializerError,
+    Realization, RestoreCapability,
 };
 use ato_objects::{
     BundleError, Direction, MaterializationReferences, ObjectLink, ObjectResolver, RecordBodyV2,
@@ -61,7 +61,7 @@ struct ReplayDescriptorV2 {
     records: Vec<RecordWireV2>,
     required_operations: Vec<RequiredOperationWire>,
     required_bindings: Vec<String>,
-    contracts: Vec<String>,
+    contracts: Vec<ContractDescriptor>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,7 +144,7 @@ impl Materializer for ReplayMaterializerV2 {
             records: context.records_v2.iter().map(RecordWireV2::from).collect(),
             required_operations: derive_required_operations(context.records_v2),
             required_bindings: Vec::new(),
-            contracts: Vec::new(),
+            contracts: context.contracts.to_vec(),
         };
         Ok(context.objects.put(&serde_jcs::to_vec(&descriptor)?)?)
     }
@@ -172,6 +172,16 @@ impl Materializer for ReplayMaterializerV2 {
             Err(MaterializerError::OperationReplayUnsupported) => Compatibility::Incompatible,
             Err(_) => Compatibility::Unknown,
         }
+    }
+
+    fn contracts(
+        &self,
+        descriptor: &ContentRef,
+        context: &MaterializerContext<'_>,
+    ) -> Result<Vec<ContractDescriptor>, MaterializerError> {
+        let (descriptor, _) = load_descriptor_v2(descriptor, context.objects)
+            .map_err(|error| MaterializerError::Operation(error.to_string()))?;
+        Ok(descriptor.contracts)
     }
 
     fn restore(
@@ -474,6 +484,11 @@ fn load_descriptor_v2(
             "ato.replay@2 required_operations does not match the Record closure",
         ));
     }
+    for contract in &descriptor.contracts {
+        contract
+            .validate()
+            .map_err(|error| invalid_descriptor(&error.to_string()))?;
+    }
     if let Some(reference) = &descriptor.record_frontier_ref {
         let reference =
             ContentRef::parse(reference).map_err(|error| invalid_descriptor(&error.to_string()))?;
@@ -675,6 +690,14 @@ mod tests {
         let anchor = computation("b");
         let adapters = AdapterRegistry::default();
         let policy = WorkspaceCapturePolicy::secure_default();
+        let contracts =
+            [
+                ContractDescriptor::new(
+                    "example.ready@1",
+                    serde_json::json!({ "marker": "ready" }),
+                )
+                .unwrap(),
+            ];
         let context = MaterializerContext {
             objects: &objects,
             adapters: &adapters,
@@ -685,6 +708,7 @@ mod tests {
             workspace: Path::new("."),
             workspace_policy: &policy,
             realization: None,
+            contracts: &contracts,
         };
 
         let descriptor_ref = ReplayMaterializerV2.encode(&target, &context).unwrap();
@@ -705,6 +729,13 @@ mod tests {
             Some(frontier_ref.to_string())
         );
         assert_eq!(decoded, records);
+        assert_eq!(descriptor.contracts, contracts);
+        assert_eq!(
+            ReplayMaterializerV2
+                .contracts(&descriptor_ref, &context)
+                .unwrap(),
+            contracts
+        );
         assert!(!json.contains("head_before"));
         assert!(!json.contains("head_after"));
         assert!(!json.contains("semantic_frontier"));

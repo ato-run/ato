@@ -595,6 +595,12 @@ pub trait AttachedAdapter: Send {
     fn activate(&mut self) -> Result<(), AdapterError> {
         Ok(())
     }
+
+    /// Publishes externally reachable Surfaces after Contract acceptance.
+    /// Attach and activate implementations must keep those Surfaces hidden.
+    fn publish(&mut self) -> Result<(), AdapterError> {
+        Ok(())
+    }
 }
 
 /// Creates configured live instances. Built-ins and third parties enter the
