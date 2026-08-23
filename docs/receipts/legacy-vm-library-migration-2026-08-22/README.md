@@ -6,10 +6,15 @@ Status: partial; Draft PR stack implemented, staging VM acceptance blocked
 
 - repository: `ato-run/ato`
 - branch: `feat/legacy-vm-library-migration-v1`
+- Draft PR: `https://github.com/ato-run/ato/pull/1297`
 - base: `feat/capsule-object-transport-client-v1`
 - base head after the final uploader receipt update: `29128c0b`
 - legacy compatibility base retained in ancestry: `ato#1291` at
   `509a05028448dccc684be7769e9d085d39102b6a`
+- restack commits:
+  - `c34f0312` — VM uploader receipt binds descriptor/frontier
+  - `dbd90df7` — uploader receipt documentation
+  - `5918cfdd` — blocked staging acceptance receipt
 - expected initial heads were fetched and matched on 2026-08-23:
   - `ato#1291`: `509a05028448dccc684be7769e9d085d39102b6a`
   - `ato-api#518`: `b457e2db9b311ec5d28a9f3ed9d5f95a30ec66f1`
