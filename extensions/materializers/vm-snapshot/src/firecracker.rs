@@ -46,6 +46,28 @@ pub trait FirecrackerRecordCaptureBarrier: Send + Sync {
     fn pause_and_seal(&self) -> Result<Box<dyn FirecrackerRecordCaptureLease>, VmSnapshotError>;
 }
 
+struct WriterCaptureLease {
+    frontier: ato_computation::ContentRef,
+    _paused: ato_record_writer::PausedCapture,
+}
+
+impl FirecrackerRecordCaptureLease for WriterCaptureLease {
+    fn frontier_ref(&self) -> &ato_computation::ContentRef {
+        &self.frontier
+    }
+}
+
+impl FirecrackerRecordCaptureBarrier for ato_record_writer::CaptureBarrier {
+    fn pause_and_seal(&self) -> Result<Box<dyn FirecrackerRecordCaptureLease>, VmSnapshotError> {
+        let paused = ato_record_writer::CaptureBarrier::pause_and_seal(self)
+            .map_err(|error| VmSnapshotError::Backend(error.to_string()))?;
+        Ok(Box::new(WriterCaptureLease {
+            frontier: paused.frontier.frontier_digest.clone(),
+            _paused: paused,
+        }))
+    }
+}
+
 /// Capture facts owned by the active Firecracker runtime. They describe the
 /// physical backend and never participate in ComputationRef identity.
 #[derive(Debug, Clone)]
