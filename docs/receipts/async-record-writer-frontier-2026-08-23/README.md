@@ -1,6 +1,6 @@
 # Async Record Writer / RecordFrontier receipt — 2026-08-23
 
-Status: implementation in progress; Draft PR not yet created
+Status: implementation complete; Draft PR pending creation
 
 ## Stack
 
@@ -28,14 +28,19 @@ Status: implementation in progress; Draft PR not yet created
 
 ## Focused verification
 
-- Record Writer unit tests: PASS (6/6)
+- Record Writer unit tests: PASS (8/8)
 - operation replay/frontier CLI acceptance: PASS
 - HTTP/PTy/Binding/CLI compile and focused tests: PASS
 - focused clippy with `-D warnings`: PASS
 - architecture check: PASS (22 workspace packages)
 - `git diff --check`: PASS
-
-Full required gates and CI status are recorded before publishing the Draft PR.
+- `cargo fmt --all -- --check`: PASS
+- `cargo check --workspace --all-targets --locked`: PASS
+- `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`: PASS
+- `cargo run -p arch-check --locked`: PASS
+- `cargo test -p ato-cli --test computation_architecture --locked -- --test-threads=1`: PASS (13/13)
+- full workspace: all targets PASS except the two known macOS netd tests in the long worktree path (`SUN_LEN`)
+- the same two netd tests at this exact head in the short `.tmp/a2s` worktree: PASS (2/2)
 
 ## Identity
 
