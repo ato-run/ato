@@ -494,11 +494,69 @@ pub(crate) fn load_state(
     let residual = &computation.object().residual;
     let metadata = objects.metadata(residual)?;
     let bytes = read_exact_object(objects, residual, metadata.size, MAX_AUTHORING_STATE_BYTES)?;
-    let state: AuthoringState = serde_json::from_slice(&bytes)?;
-    if serde_jcs::to_vec(&state)? != bytes || state.version != AUTHORING_STATE_VERSION {
+    let canonical_value: serde_json::Value = serde_json::from_slice(&bytes)?;
+    if serde_jcs::to_vec(&canonical_value)? != bytes {
+        bail!("authoring state is non-canonical or unsupported");
+    }
+    let state = match serde_json::from_value::<AuthoringState>(canonical_value.clone()) {
+        Ok(state) => state,
+        Err(current_error) => {
+            decode_legacy_authoring_state(canonical_value).with_context(|| {
+                format!("authoring state is unsupported by the current schema: {current_error}")
+            })?
+        }
+    };
+    if state.version != AUTHORING_STATE_VERSION {
         bail!("authoring state is non-canonical or unsupported");
     }
     Ok(state)
+}
+
+/// Reads the schema-1 authoring residual emitted by the pre-Record-v2 CLI.
+///
+/// That writer serialized an adapter-level `config: null` member.  The member
+/// never carried protocol semantics for these objects, but it remains part of
+/// their already-sealed ComputationRef preimage.  We therefore verify the
+/// original canonical bytes first, accept only a literal null, and remove it
+/// solely in the runtime projection.  The ComputationRef is never resealed or
+/// derived from this compatibility step.
+fn decode_legacy_authoring_state(mut value: serde_json::Value) -> Result<AuthoringState> {
+    let adapters = value
+        .get_mut("config")
+        .and_then(|config| config.get_mut("adapter"))
+        .and_then(serde_json::Value::as_array_mut)
+        .context("legacy authoring state has no adapter array")?;
+    let mut removed = false;
+    for adapter in adapters {
+        let object = adapter
+            .as_object_mut()
+            .context("legacy authoring adapter is not an object")?;
+        if let Some(config) = object.remove("config") {
+            if !config.is_null() {
+                bail!("legacy authoring adapter config must be null");
+            }
+            removed = true;
+        }
+    }
+    if !removed {
+        bail!("legacy authoring adapter config marker is absent");
+    }
+    let processes = value
+        .get_mut("config")
+        .and_then(|config| config.get_mut("process"))
+        .and_then(serde_json::Value::as_array_mut)
+        .context("legacy authoring state has no process array")?;
+    for process in processes {
+        let object = process
+            .as_object_mut()
+            .context("legacy authoring process is not an object")?;
+        if let Some(capture) = object.remove("capture")
+            && capture != serde_json::Value::String("unsupported".to_owned())
+        {
+            bail!("legacy authoring process capture mode is unsupported");
+        }
+    }
+    Ok(serde_json::from_value(value)?)
 }
 
 pub(crate) fn load_runtime_state(
@@ -953,5 +1011,50 @@ impl ComputationReferences for AuthoringReferences {
             )?));
         }
         Ok(links)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn legacy_state(adapter_config: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "config": {
+                "adapter": [{
+                    "config": adapter_config,
+                    "input": null,
+                    "listen": null,
+                    "port": null,
+                    "ready_path": null,
+                    "target": "app",
+                    "upstream": null,
+                    "use": "ato.process@1"
+                }],
+                "binding": [],
+                "connection": [],
+                "encap": { "materializers": ["ato.replay@1"] },
+                "port": [],
+                "process": [{ "command": ["true"], "cwd": ".", "id": "app" }],
+                "schema": 1,
+                "workspace": { "exclude": [], "include": [] }
+            },
+            "version": 1,
+            "workspace_snapshot": format!("blake3:{}", "a".repeat(64))
+        })
+    }
+
+    #[test]
+    fn legacy_null_adapter_config_is_a_projection_only_compatibility_field() {
+        let state = decode_legacy_authoring_state(legacy_state(serde_json::Value::Null)).unwrap();
+        assert_eq!(state.config.adapter.len(), 1);
+        assert_eq!(state.config.adapter[0].use_adapter, "ato.process@1");
+    }
+
+    #[test]
+    fn legacy_non_null_adapter_config_is_not_silently_discarded() {
+        let error = decode_legacy_authoring_state(legacy_state(serde_json::json!({"secret": 1})))
+            .unwrap_err();
+        assert!(error.to_string().contains("must be null"));
     }
 }
