@@ -1,6 +1,6 @@
 # Contract verifier registry receipt — 2026-08-23
 
-Status: implementation in progress; Draft PR not yet created
+Status: implementation complete; Draft PR pending creation
 
 ## Stack
 
@@ -35,8 +35,12 @@ already-known target.
 - HTTP hidden-Surface lifecycle test: PASS
 - replay v2 Contract roundtrip: PASS
 - computation architecture: PASS (13/13)
-
-Required gates and full workspace status are recorded before Draft PR creation.
+- `cargo fmt --all -- --check`: PASS
+- `cargo check --workspace --all-targets --locked`: PASS
+- `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`: PASS
+- `cargo run -p arch-check --locked`: PASS (23 workspace packages)
+- full workspace: all targets PASS except the two known macOS netd tests in the long worktree path (`SUN_LEN`)
+- the same two netd tests at this exact head in the short `.tmp/a3s` worktree: PASS (2/2)
 
 ## Production
 
