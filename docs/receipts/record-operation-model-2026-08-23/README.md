@@ -1,6 +1,6 @@
 # Record operation model receipt — 2026-08-23
 
-Status: implementation verified locally; Draft PR not yet created
+Status: implementation verified locally; Draft PR open
 
 ## Base
 
@@ -8,6 +8,7 @@ Status: implementation verified locally; Draft PR not yet created
 - base PR: `ato-run/ato#1291` (Draft)
 - verified base head: `509a05028448dccc684be7769e9d085d39102b6a`
 - branch: `feat/record-operation-model-v1`
+- Draft PR: `https://github.com/ato-run/ato/pull/1292`
 - implementation commits:
   - `760424dc7bfb04780110c39d883cc626c5fc2365`
   - `f252f1478314e514e777e1a38bd9216deb2114fd`
