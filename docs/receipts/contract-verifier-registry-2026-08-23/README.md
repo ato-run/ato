@@ -1,6 +1,6 @@
 # Contract verifier registry receipt — 2026-08-23
 
-Status: implementation complete; Draft PR pending creation
+Status: implementation complete; Draft PR open
 
 ## Stack
 
@@ -9,6 +9,7 @@ Status: implementation complete; Draft PR pending creation
 - verified base head: `49fdc82a09a857e58324ea921942e43da4398745`
 - dependency: Draft PR `ato-run/ato#1293`
 - branch: `feat/contract-verifier-registry-v1`
+- Draft PR: `https://github.com/ato-run/ato/pull/1294`
 
 ## Implemented boundary
 
