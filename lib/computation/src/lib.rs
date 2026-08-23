@@ -168,6 +168,7 @@ macro_rules! versioned_id {
 }
 
 component_id!(PortId, "port id");
+component_id!(OperationId, "operation id");
 component_id!(RoleId, "role id");
 versioned_id!(SemanticsId, "semantics id");
 versioned_id!(ProtocolId, "protocol id");
@@ -428,5 +429,12 @@ mod tests {
         };
 
         assert_eq!(object.boundary[&port].role.as_str(), "server");
+    }
+
+    #[test]
+    fn operation_id_identifies_an_operation_within_a_protocol() {
+        let operation = OperationId::parse("replace").unwrap();
+
+        assert_eq!(operation.as_str(), "replace");
     }
 }
