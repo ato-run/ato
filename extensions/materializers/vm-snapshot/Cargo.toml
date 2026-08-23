@@ -15,7 +15,6 @@ layer = "materializer"
 ato-computation = { path = "../../../lib/computation", version = "0.1.0" }
 ato-materializer-api = { path = "../api", version = "0.1.0" }
 ato-objects = { path = "../../../lib/objects", version = "0.1.0" }
-ato-record-writer = { path = "../../record-writer", version = "0.1.0" }
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -25,3 +24,4 @@ thiserror = "2"
 
 [dev-dependencies]
 ato-adapter-api = { path = "../../adapters/api", version = "0.1.0" }
+ato-record-writer = { path = "../../record-writer", version = "0.1.0" }
