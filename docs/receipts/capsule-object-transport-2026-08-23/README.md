@@ -10,6 +10,8 @@ Status: implementation verified locally; no staging upload
 - Branch: `feat/capsule-object-transport-client-v1`
 - Initial implementation commit:
   `d60bd41f4f81b0ce6c38d372fa9e706090f94ec2`
+- VM/frontier-bound uploader receipt commit:
+  `8bd6630f`
 - Depends on generic VM Materializer Draft PR:
   `https://github.com/ato-run/ato/pull/1295`
 - Depends on server transport Draft PR:
@@ -29,6 +31,9 @@ Status: implementation verified locally; no staging upload
 - Direct presigned PUT without bearer leakage; authenticated fallback PUT.
 - Idempotent finalize and bounded validation polling.
 - Canonical receipt with client PUT and server CAS accounting.
+- VM uploads re-read the canonical descriptor from the local closure and bind
+  its existing target ComputationRef, VM descriptor ref, and sealed
+  RecordFrontier ref into the uploader receipt before publication can proceed.
 - Existing `ato encap` / local `.capsule` compatibility retained.
 
 ## Local verification
@@ -44,8 +49,8 @@ cargo clippy -p ato-cli -p ato-objects \
   --all-targets --all-features --locked -- -D warnings
   PASS
 
-cargo test -p ato-cli --locked
-  PASS — 18/18 (5 unit + 13 computation architecture)
+cargo test -p ato-cli object_transport --locked
+  PASS — 3/3 focused uploader tests
 
 cargo test -p ato-objects --locked
   PASS — 23/23
@@ -54,7 +59,8 @@ cargo test -p ato-objects --locked
 Focused coverage includes exact instruction-set validation, bounded
 concurrency, retry, validation polling, upload accounting, and the invariant
 that changing VM physical bytes changes the object graph but not the supplied
-root ComputationRef.
+root ComputationRef. The VM receipt test also verifies that the descriptor's
+target equals that root and derives `record_frontier_ref` without changing it.
 
 ## Upload accounting
 
