@@ -9,6 +9,7 @@ Status: implementation verified locally; Linux/KVM and staging acceptance pendin
 - base commit: `9f7a9dff`
 - branch: `feat/vm-snapshot-materializer-v1`
 - implementation commit: `e96d123d0b920ccafd171ad8b323532d867bd8f1`
+- Draft PR: https://github.com/ato-run/ato/pull/1295
 - initial `ato#1291` head after fetch: `509a05028448dccc684be7769e9d085d39102b6a` (matched instruction)
 - initial `ato-api#518` head after fetch: `b457e2db9b311ec5d28a9f3ed9d5f95a30ec66f1` (matched instruction)
 
