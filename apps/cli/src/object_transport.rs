@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use ato_computation::ContentRef;
+use ato_materializer_vm_snapshot::{VM_SNAPSHOT_MATERIALIZER_ID, VmSnapshotDescriptor};
 use ato_objects::{
     GraphMaterialization, GraphObjectDescriptor, ObjectGraphClosure, ObjectResolver,
     read_exact_object,
@@ -149,6 +150,45 @@ pub(crate) struct ObjectUploadReceipt {
     pub unique_stored_bytes: u64,
     pub object_digests: Vec<String>,
     pub validation_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vm_materialization_descriptor_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_frontier_ref: Option<String>,
+}
+
+pub(crate) fn vm_capture_receipt_refs(
+    index: &ObjectGraphIndexV1,
+    objects: &dyn ObjectResolver,
+) -> Result<(Option<String>, Option<String>)> {
+    let Some(materialization) = index
+        .materializations
+        .iter()
+        .find(|item| item.id == VM_SNAPSHOT_MATERIALIZER_ID)
+    else {
+        return Ok((None, None));
+    };
+    let object = index
+        .objects
+        .iter()
+        .find(|item| item.content_ref == materialization.descriptor_ref)
+        .context("VM materialization descriptor is absent from object closure")?;
+    let reference = ContentRef::parse(&materialization.descriptor_ref)?;
+    let bytes = read_exact_object(
+        objects,
+        &reference,
+        object.size_bytes,
+        MAX_UPLOAD_OBJECT_BYTES,
+    )?;
+    let descriptor: VmSnapshotDescriptor = serde_json::from_slice(&bytes)
+        .context("VM materialization descriptor is not canonical descriptor JSON")?;
+    if descriptor.target_computation_ref != index.root_computation_ref {
+        bail!("VM materialization target does not match graph root ComputationRef");
+    }
+    let frontier = descriptor
+        .record_frontier_ref
+        .context("VM materialization descriptor omitted record_frontier_ref")?;
+    ContentRef::parse(&frontier).context("VM materialization RecordFrontier ref is invalid")?;
+    Ok((Some(materialization.descriptor_ref.clone()), Some(frontier)))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -508,6 +548,8 @@ fn upload_object_graph(
             .map(|object| object.content_ref.clone())
             .collect(),
         validation_status: finalized.status,
+        vm_materialization_descriptor_ref: None,
+        record_frontier_ref: None,
     })
 }
 
@@ -698,5 +740,74 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("declared closure"));
         assert!(api.attempts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn derives_vm_descriptor_and_record_frontier_refs_without_changing_root() {
+        let objects = MemoryObjectStore::default();
+        let root = objects.put(b"known-computation").unwrap();
+        let frontier = objects.put(b"sealed-frontier").unwrap();
+        let descriptor_bytes = serde_jcs::to_vec(&serde_json::json!({
+            "version": 1,
+            "target_computation_ref": root.to_string(),
+            "record_frontier_ref": frontier.to_string(),
+            "backend": "firecracker",
+            "snapshot_format": "fc-vmstate-v1",
+            "architecture": "x86_64",
+            "guest_os": "linux",
+            "host_backend_contract": {
+                "backend_id": "firecracker", "host_os": "linux", "required_features": []
+            },
+            "cpu_contract": { "vcpu_count": 1, "required_features": [] },
+            "firecracker_version": "1.7.0",
+            "device_contract": { "required_features": [] },
+            "network_contract": { "required_features": [], "tap_device": null },
+            "vsock_contract": { "required_features": [], "uds_path": null },
+            "memory_contract": { "guest_memory_mib": 128, "minimum_host_memory_mib": 256 },
+            "artifacts": [],
+            "state_contract_refs": [],
+            "contracts": [],
+            "capture_provenance": {
+                "captured_at": "2026-08-23T00:00:00Z",
+                "backend_implementation_id": "test-firecracker",
+                "source_realization_id": "realization-test",
+                "capture_barrier_complete": true,
+                "realization_quiesced": true,
+                "placement_hint": null
+            }
+        }))
+        .unwrap();
+        let descriptor = objects.put(&descriptor_bytes).unwrap();
+        let index = ObjectGraphIndexV1 {
+            version: 1,
+            root_computation_ref: root.to_string(),
+            objects: vec![
+                GraphObjectDescriptor {
+                    content_ref: root.to_string(),
+                    size_bytes: b"known-computation".len() as u64,
+                    kind: GraphObjectKind::Computation,
+                    references: vec![descriptor.to_string()],
+                },
+                GraphObjectDescriptor {
+                    content_ref: descriptor.to_string(),
+                    size_bytes: descriptor_bytes.len() as u64,
+                    kind: GraphObjectKind::Materialization,
+                    references: Vec::new(),
+                },
+            ],
+            materializations: vec![GraphMaterialization {
+                id: VM_SNAPSHOT_MATERIALIZER_ID.to_owned(),
+                descriptor_ref: descriptor.to_string(),
+                restore_capability: ato_objects::GraphRestoreCapability::Supported,
+            }],
+            exported_ports: Vec::new(),
+            required_bindings: Vec::new(),
+            visibility_policy: VisibilityPolicy::Private,
+        };
+
+        let (descriptor_ref, frontier_ref) = vm_capture_receipt_refs(&index, &objects).unwrap();
+        assert_eq!(descriptor_ref, Some(descriptor.to_string()));
+        assert_eq!(frontier_ref, Some(frontier.to_string()));
+        assert_eq!(index.root_computation_ref, root.to_string());
     }
 }
