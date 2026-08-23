@@ -39,6 +39,7 @@ ato-materializer-snapshot = { path = "../../extensions/materializers/snapshot", 
 ato-materializer-api = { path = "../../extensions/materializers/api", version = "0.1.0" }
 ato-materializer-replay = { path = "../../extensions/materializers/replay", version = "0.1.0" }
 ato-compose = { path = "../../lib/compose", version = "0.1.0" }
+ato-contracts = { path = "../../extensions/contracts", version = "0.1.0" }
 blake3 = "1"
 clap = { version = "4.5", features = ["derive", "env"] }
 dirs = "5"
