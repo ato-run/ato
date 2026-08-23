@@ -35,6 +35,7 @@ ato-ipc = { path = "../../lib/ipc", version = "0.1.0" }
 ato-kernel = { path = "../../lib/kernel", version = "0.1.0" }
 ato-objects = { path = "../../lib/objects", version = "0.1.0" }
 ato-record-writer = { path = "../../extensions/record-writer", version = "0.1.0" }
+ato-runtime-object-graph = { path = "../runtime-object-graph", version = "0.1.0" }
 ato-materializer-snapshot = { path = "../../extensions/materializers/snapshot", version = "0.1.0" }
 ato-materializer-api = { path = "../../extensions/materializers/api", version = "0.1.0" }
 ato-materializer-replay = { path = "../../extensions/materializers/replay", version = "0.1.0" }
