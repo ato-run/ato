@@ -24,7 +24,11 @@ use thiserror::Error;
 
 mod firecracker;
 
-pub use firecracker::{ActiveVmCaptureSource, FirecrackerBackend, FirecrackerBackendConfig};
+pub use firecracker::{
+    ActiveFirecrackerCaptureSpec, ActiveFirecrackerRealization, ActiveVmCaptureSource,
+    FirecrackerActiveVmCaptureSource, FirecrackerBackend, FirecrackerBackendConfig,
+    FirecrackerRecordCaptureBarrier, FirecrackerRecordCaptureLease, FirecrackerRestoreLayout,
+};
 
 pub const VM_SNAPSHOT_MATERIALIZER_ID: &str = "ato.materialize.vm.snapshot@1";
 pub const VM_SNAPSHOT_DESCRIPTOR_VERSION: u32 = 1;
@@ -477,6 +481,16 @@ fn validate_capture_result(
             "capture did not prove a barrier-synchronized quiesced active Realization".to_owned(),
         ));
     }
+    if backend_id == "firecracker"
+        && !captured
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.role == ArtifactRole::Metadata)
+    {
+        return Err(VmSnapshotError::InvalidDescriptor(
+            "Firecracker capture omitted its backend restore layout metadata".to_owned(),
+        ));
+    }
     Ok(())
 }
 
@@ -665,6 +679,41 @@ fn validate_descriptor(
         return Err(VmSnapshotError::InvalidDescriptor(
             "VM snapshot requires memory, rootfs, and vmstate artifacts".to_owned(),
         ));
+    }
+    if descriptor.backend == "firecracker" && !roles.contains(&ArtifactRole::Metadata) {
+        return Err(VmSnapshotError::InvalidDescriptor(
+            "Firecracker snapshot requires restore layout metadata".to_owned(),
+        ));
+    }
+    if descriptor.backend == "firecracker" {
+        let metadata = descriptor
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.role == ArtifactRole::Metadata)
+            .expect("metadata role was checked");
+        if metadata.logical_size > 1024 * 1024 {
+            return Err(VmSnapshotError::InvalidDescriptor(
+                "Firecracker restore layout metadata exceeds 1 MiB".to_owned(),
+            ));
+        }
+        let mut bytes = Vec::with_capacity(metadata.logical_size as usize);
+        for chunk in &metadata.chunks {
+            let reference = ContentRef::parse(&chunk.content_ref)
+                .map_err(|error| VmSnapshotError::InvalidReference(error.to_string()))?;
+            bytes.extend(read_exact_object(
+                objects,
+                &reference,
+                chunk.size,
+                MAX_CHUNK_BYTES as u64,
+            )?);
+        }
+        let layout = FirecrackerRestoreLayout::decode(&bytes)?;
+        if layout.vsock_uds_path.as_deref() != descriptor.vsock_contract.uds_path.as_deref() {
+            return Err(VmSnapshotError::InvalidDescriptor(
+                "Firecracker restore layout vsock path disagrees with descriptor contract"
+                    .to_owned(),
+            ));
+        }
     }
     let mut states = BTreeSet::new();
     for reference in &descriptor.state_contract_refs {
@@ -937,7 +986,7 @@ mod tests {
                 },
                 vsock_contract: VsockContract {
                     required_features: BTreeSet::from(["vsock-uds".to_owned()]),
-                    uds_path: Some(".capsule/vsock/test.sock".to_owned()),
+                    uds_path: Some("vsock/guest.sock".to_owned()),
                 },
                 memory_contract: MemoryContract {
                     guest_memory_mib: 512,
@@ -955,6 +1004,10 @@ mod tests {
                     CapturedArtifact {
                         role: ArtifactRole::Vmstate,
                         path: self.root.join("vmstate.bin"),
+                    },
+                    CapturedArtifact {
+                        role: ArtifactRole::Metadata,
+                        path: self.root.join("restore-layout.json"),
                     },
                 ],
                 state_contract_refs: Vec::new(),
@@ -1109,6 +1162,11 @@ mod tests {
             ] {
                 fs::write(temporary.path().join(name), bytes).unwrap();
             }
+            fs::write(
+                temporary.path().join("restore-layout.json"),
+                FirecrackerRestoreLayout::default().encode().unwrap(),
+            )
+            .unwrap();
             let objects = Arc::new(MemoryObjectStore::default());
             let target = computation(objects.as_ref());
             let frontier = frontier(Arc::clone(&objects), temporary.path());
