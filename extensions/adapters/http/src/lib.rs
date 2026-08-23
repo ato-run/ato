@@ -112,6 +112,7 @@ impl AdapterFactory for HttpAdapter {
         let observed_responses = Arc::new(Mutex::new(VecDeque::new()));
         Ok(Box::new(HttpSession {
             instance_id: instance.instance_id.clone(),
+            stream_id: format!("http.{}", instance.instance_id),
             config,
             listener: Some(listener),
             stylus: Arc::clone(&context.stylus),
@@ -158,6 +159,7 @@ fn wait_until_ready(upstream: SocketAddr, path: &str) -> Result<(), AdapterError
 
 struct HttpSession {
     instance_id: String,
+    stream_id: String,
     config: HttpAdapterConfig,
     listener: Option<TcpListener>,
     stylus: Arc<dyn Stylus>,
@@ -192,6 +194,7 @@ impl AttachedAdapter for HttpSession {
         self.join = Some(spawn_proxy(
             listener,
             self.config.clone(),
+            self.stream_id.clone(),
             Arc::clone(&self.stylus),
             Arc::clone(&self.observations),
             Arc::clone(&self.stop),
@@ -297,6 +300,7 @@ fn read_event(
 fn spawn_proxy(
     listener: TcpListener,
     config: HttpAdapterConfig,
+    stream_id: String,
     stylus: Arc<dyn Stylus>,
     observations: Arc<dyn ObservationSink>,
     stop: Arc<std::sync::atomic::AtomicBool>,
@@ -324,7 +328,7 @@ fn spawn_proxy(
                                 payload_version: 1,
                                 required_features: BTreeSet::new(),
                                 recorded_by: Some(HTTP_ADAPTER_ID.to_owned()),
-                                stream: "http".to_owned(),
+                                stream: stream_id.clone(),
                                 local_seq: local_seq.fetch_add(1, Ordering::Relaxed) + 1,
                                 caused_by: Vec::new(),
                                 observed_at: observed_now(),
@@ -589,6 +593,7 @@ mod tests {
                 port_id: "app.http".to_owned(),
                 ready_path: None,
             },
+            "http.test".to_owned(),
             stylus.clone(),
             Arc::new(ato_adapter_api::IgnoreObservations),
             Arc::clone(&stop),

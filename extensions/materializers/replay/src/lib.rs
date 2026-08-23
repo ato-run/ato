@@ -57,6 +57,7 @@ struct ReplayDescriptorV2 {
     version: u32,
     target: String,
     anchor: String,
+    record_frontier_ref: Option<String>,
     records: Vec<RecordWireV2>,
     required_operations: Vec<RequiredOperationWire>,
     required_bindings: Vec<String>,
@@ -120,10 +121,26 @@ impl Materializer for ReplayMaterializerV2 {
                 )
             })?
         };
+        let record_frontier_ref = if context.records_v2.is_empty() {
+            context.record_frontier_ref.map(ToString::to_string)
+        } else {
+            Some(
+                context
+                    .record_frontier_ref
+                    .ok_or_else(|| {
+                        MaterializerError::Operation(
+                            "ato.replay@2 requires a sealed RecordFrontier for a non-empty Record closure"
+                                .to_owned(),
+                        )
+                    })?
+                    .to_string(),
+            )
+        };
         let descriptor = ReplayDescriptorV2 {
             version: REPLAY_V2_VERSION,
             target: target.to_string(),
             anchor: anchor.to_string(),
+            record_frontier_ref,
             records: context.records_v2.iter().map(RecordWireV2::from).collect(),
             required_operations: derive_required_operations(context.records_v2),
             required_bindings: Vec::new(),
@@ -457,6 +474,11 @@ fn load_descriptor_v2(
             "ato.replay@2 required_operations does not match the Record closure",
         ));
     }
+    if let Some(reference) = &descriptor.record_frontier_ref {
+        let reference =
+            ContentRef::parse(reference).map_err(|error| invalid_descriptor(&error.to_string()))?;
+        objects.metadata(&reference).map_err(BundleError::Object)?;
+    }
     Ok((descriptor, records))
 }
 
@@ -533,6 +555,14 @@ impl MaterializationReferences for ReplayV2References {
                 }
             })?),
         ];
+        if let Some(reference) = descriptor.record_frontier_ref {
+            links.push(ObjectLink::Content(ContentRef::parse(reference).map_err(
+                |error| BundleError::InvalidReference {
+                    value: "record_frontier_ref".to_owned(),
+                    reason: error.to_string(),
+                },
+            )?));
+        }
         links.extend(
             records
                 .into_iter()
@@ -640,6 +670,7 @@ mod tests {
     fn v2_roundtrips_without_computation_head_fields() {
         let objects = MemoryObjectStore::default();
         let records = [record(&objects, 1)];
+        let frontier_ref = objects.put(b"sealed RecordFrontier").unwrap();
         let target = computation("a");
         let anchor = computation("b");
         let adapters = AdapterRegistry::default();
@@ -650,6 +681,7 @@ mod tests {
             records: &[],
             records_v2: &records,
             replay_anchor: Some(&anchor),
+            record_frontier_ref: Some(&frontier_ref),
             workspace: Path::new("."),
             workspace_policy: &policy,
             realization: None,
@@ -668,6 +700,10 @@ mod tests {
 
         assert_eq!(descriptor.target, target.to_string());
         assert_eq!(descriptor.anchor, anchor.to_string());
+        assert_eq!(
+            descriptor.record_frontier_ref,
+            Some(frontier_ref.to_string())
+        );
         assert_eq!(decoded, records);
         assert!(!json.contains("head_before"));
         assert!(!json.contains("head_after"));
@@ -682,6 +718,7 @@ mod tests {
             version: REPLAY_V2_VERSION,
             target: computation("a").to_string(),
             anchor: computation("b").to_string(),
+            record_frontier_ref: None,
             records: records.iter().map(RecordWireV2::from).collect(),
             required_operations: Vec::new(),
             required_bindings: Vec::new(),
@@ -704,6 +741,7 @@ mod tests {
             version: REPLAY_V2_VERSION,
             target: computation("a").to_string(),
             anchor: computation("b").to_string(),
+            record_frontier_ref: None,
             records: records.iter().map(RecordWireV2::from).collect(),
             required_operations: derive_required_operations(&records),
             required_bindings: Vec::new(),

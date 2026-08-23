@@ -17,12 +17,15 @@ use ato_computation::{ComputationRef, ContentRef};
 use ato_materializer_api::{
     MaterializerContext, MaterializerError, Realization, RealizationDriver, ReplayRuntime,
 };
-use ato_objects::{ActiveRun, LocalCapsuleRepository, ObjectStore, RecordEnvelope, RecordId};
+use ato_objects::{
+    ActiveRun, FsObjectStore, LocalCapsuleRepository, ObjectStore, RecordEnvelope, RecordId,
+};
+use ato_record_writer::{RecordPipeline, RecordWriterConfig};
 
 use crate::{
     adapter_registry,
     authoring::{adapter_instances, evolve_observation, load_runtime_state, workspace_policy},
-    materializer_registry,
+    materializer_registry, record_schema_registry,
 };
 
 const STOP_REQUEST: &str = "runs/stop.request";
@@ -161,6 +164,7 @@ fn encode_replay(
         records,
         records_v2: &[],
         replay_anchor: records.first().map(|record| &record.head_before),
+        record_frontier_ref: None,
         workspace: repository.project(),
         workspace_policy: &policy,
         realization: None,
@@ -180,18 +184,34 @@ pub(crate) fn worker(
     let repository = LocalCapsuleRepository::open(project)?;
     enter(SupervisorState::Preparing);
     let config = load_runtime_state(head, repository.objects())?.config;
+    let record_objects: Arc<dyn ObjectStore> =
+        Arc::new(FsObjectStore::open(repository.root().join("objects"))?);
+    let record_pipeline = RecordPipeline::start(
+        RecordWriterConfig::at(repository.root().join("records"), token),
+        record_objects,
+        record_schema_registry()?,
+    )?;
     let bindings: BTreeMap<String, String> = std::env::var("ATO_RUNTIME_BINDINGS")
         .ok()
         .and_then(|value| serde_json::from_str(&value).ok())
         .unwrap_or_default();
     let registry = adapter_registry()?;
     let live_head = Arc::new(Mutex::new(head.clone()));
-    let sink: Arc<dyn ObservationSink> = Arc::new(RepositoryObservationSink {
-        project: repository.project().to_path_buf(),
-        branch: branch.to_owned(),
-        token: token.to_owned(),
-        head: Arc::clone(&live_head),
-    });
+    let operation_recording = config
+        .encap
+        .materializers
+        .iter()
+        .any(|materializer| materializer == "ato.replay@2");
+    let sink: Arc<dyn ObservationSink> = if operation_recording {
+        Arc::new(IgnoreObservations)
+    } else {
+        Arc::new(RepositoryObservationSink {
+            project: repository.project().to_path_buf(),
+            branch: branch.to_owned(),
+            token: token.to_owned(),
+            head: Arc::clone(&live_head),
+        })
+    };
     enter(SupervisorState::Starting);
     let mut sessions = Vec::new();
     let mut restored = None;
@@ -214,6 +234,7 @@ pub(crate) fn worker(
             records: &[],
             records_v2: &[],
             replay_anchor: None,
+            record_frontier_ref: None,
             workspace: repository.project(),
             workspace_policy: &policy,
             realization: Some(&driver),
@@ -235,7 +256,7 @@ pub(crate) fn worker(
                 workspace: repository.project(),
                 objects: repository.objects(),
             },
-            stylus: Arc::new(IgnoreRecords),
+            stylus: record_pipeline.stylus.clone(),
             observations: Arc::clone(&sink),
         };
         sessions = registry.attach_all(&instances, &context)?;
@@ -276,7 +297,11 @@ pub(crate) fn worker(
     loop {
         if stop_request.exists() {
             enter(SupervisorState::Stopping);
-            let result = if let Some(realization) = &mut restored {
+            let capture = record_pipeline
+                .barrier
+                .pause_and_seal()
+                .map_err(anyhow::Error::from);
+            let quiesce = if let Some(realization) = &mut restored {
                 realization
                     .quiesce()
                     .map_err(|error| anyhow::anyhow!(error))
@@ -290,6 +315,16 @@ pub(crate) fn worker(
                 )
             };
             observation_gate.enabled.store(false, Ordering::Release);
+            if let Ok(capture) = &capture {
+                fs::write(
+                    repository
+                        .root()
+                        .join("runs")
+                        .join(format!("{token}.record-frontier")),
+                    format!("{}\n", capture.frontier.frontier_digest),
+                )?;
+            }
+            let result = capture.map(|_| ()).and(quiesce);
             let message = match &result {
                 Ok(()) => "ok".to_owned(),
                 Err(error) => format!("error:{error:#}"),
