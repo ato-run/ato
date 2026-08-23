@@ -16,12 +16,12 @@ use ato_compose::{
     decode_composite_residual, encode_composite_residual,
 };
 use ato_computation::{
-    Boundary, ComputationObject, ComputationRef, ContentRef, PortDef, PortId, ProtocolId,
-    ResolvedComputation, RoleId, SemanticsId, computation_ref, encode_computation_object,
+    Boundary, ComputationObject, ComputationRef, ContentRef, PortDef, PortId, ProtocolId, RoleId,
+    SemanticsId, computation_ref, encode_computation_object,
 };
 use ato_objects::{
-    BundleError, ComputationReferences, Direction, LocalCapsuleRepository, ObjectLink,
-    ObjectResolver, ObjectStore, RecordEnvelope, RecordId, read_exact_object, resolve_computation,
+    Direction, LocalCapsuleRepository, ObjectResolver, ObjectStore, RecordEnvelope, RecordId,
+    read_exact_object, resolve_computation,
 };
 use serde::{Deserialize, Serialize};
 
@@ -964,54 +964,6 @@ fn observed_at() -> String {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or_else(|_| "0".to_owned(), |value| value.as_secs().to_string())
-}
-
-#[derive(Default)]
-pub(crate) struct AuthoringReferences {
-    id: Option<SemanticsId>,
-}
-
-impl AuthoringReferences {
-    pub(crate) fn new() -> Self {
-        Self {
-            id: Some(SemanticsId::parse(AUTHORING_SEMANTICS_ID).expect("valid static id")),
-        }
-    }
-}
-
-impl ComputationReferences for AuthoringReferences {
-    fn semantics(&self) -> &SemanticsId {
-        self.id.as_ref().expect("initialized authoring references")
-    }
-
-    fn outgoing(
-        &self,
-        computation: &ResolvedComputation,
-        objects: &dyn ObjectResolver,
-    ) -> Result<Vec<ObjectLink>, BundleError> {
-        let state = load_state(computation.reference(), objects).map_err(|error| {
-            BundleError::Object(ato_objects::ObjectError::Storage(error.to_string()))
-        })?;
-        let snapshot_ref = ContentRef::parse(&state.workspace_snapshot).map_err(|error| {
-            BundleError::InvalidReference {
-                value: state.workspace_snapshot.clone(),
-                reason: error.to_string(),
-            }
-        })?;
-        let snapshot = load_snapshot(&state.workspace_snapshot, objects).map_err(|error| {
-            BundleError::Object(ato_objects::ObjectError::Storage(error.to_string()))
-        })?;
-        let mut links = vec![ObjectLink::Content(snapshot_ref)];
-        for content in snapshot.files.into_values() {
-            links.push(ObjectLink::Content(ContentRef::parse(&content).map_err(
-                |error| BundleError::InvalidReference {
-                    value: content,
-                    reason: error.to_string(),
-                },
-            )?));
-        }
-        Ok(links)
-    }
 }
 
 #[cfg(test)]

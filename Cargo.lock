@@ -211,6 +211,7 @@ dependencies = [
  "ato-player",
  "ato-realization-planner",
  "ato-record-writer",
+ "ato-runtime-object-graph",
  "base64 0.22.1",
  "blake3",
  "clap",
@@ -389,6 +390,29 @@ dependencies = [
  "ato-adapter-api",
  "ato-computation",
  "ato-objects",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ato-runtime-object-graph"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ato-adapter-workspace",
+ "ato-compose",
+ "ato-computation",
+ "ato-materializer-replay",
+ "ato-materializer-snapshot",
+ "ato-materializer-vm-snapshot",
+ "ato-objects",
+ "ato-record-writer",
+ "blake3",
+ "clap",
+ "reqwest",
  "serde",
  "serde_jcs",
  "serde_json",
