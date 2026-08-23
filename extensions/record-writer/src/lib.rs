@@ -1517,4 +1517,91 @@ mod tests {
             Err(RecordWriterError::SegmentByteLength { .. })
         ));
     }
+
+    #[test]
+    fn writer_order_remains_global_across_immutable_segments() {
+        let directory = tempfile::tempdir().unwrap();
+        let objects = Arc::new(MemoryObjectStore::default());
+        let mut writer_config = config(directory.path());
+        writer_config.max_segment_records = 1;
+        let pipeline =
+            RecordPipeline::start(writer_config, objects.clone(), schemas(|_| Ok(()))).unwrap();
+        for order in 1..=3 {
+            pipeline
+                .stylus
+                .record(candidate("pty.main", order, order.to_string().as_bytes()))
+                .unwrap();
+        }
+
+        let frontier = pipeline.barrier.seal().unwrap();
+        let records = records_for_frontier(
+            &directory.path().join("records"),
+            &frontier,
+            objects.as_ref(),
+        )
+        .unwrap();
+
+        assert_eq!(frontier.sealed_segments.len(), 3);
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.writer_order)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn record_and_frontier_identities_remain_distinct_for_the_same_record_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let objects = Arc::new(MemoryObjectStore::default());
+        let first = RecordPipeline::start(
+            config(directory.path()),
+            objects.clone(),
+            schemas(|_| Ok(())),
+        )
+        .unwrap();
+        first
+            .stylus
+            .record(candidate("pty.main", 1, b"same"))
+            .unwrap();
+        let first_frontier = first.barrier.seal().unwrap();
+        let first_records = records_for_frontier(
+            &directory.path().join("records"),
+            &first_frontier,
+            objects.as_ref(),
+        )
+        .unwrap();
+        drop(first);
+
+        let mut second_config = config(directory.path());
+        second_config.run_id = "run-2".to_owned();
+        let second =
+            RecordPipeline::start(second_config, objects.clone(), schemas(|_| Ok(()))).unwrap();
+        second
+            .stylus
+            .record(candidate("pty.main", 1, b"same"))
+            .unwrap();
+        let second_frontier = second.barrier.seal().unwrap();
+        let second_records = records_for_frontier(
+            &directory.path().join("records"),
+            &second_frontier,
+            objects.as_ref(),
+        )
+        .unwrap();
+
+        assert_eq!(first_records[0].id, second_records[0].id);
+        assert_eq!(
+            first_frontier.sealed_segments[0].digest,
+            second_frontier.sealed_segments[0].digest
+        );
+        assert_ne!(
+            first_frontier.frontier_digest,
+            second_frontier.frontier_digest
+        );
+        assert_ne!(
+            first_records[0].id.to_string(),
+            first_frontier.frontier_digest.to_string()
+        );
+    }
 }
