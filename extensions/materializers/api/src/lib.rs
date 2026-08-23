@@ -30,6 +30,7 @@ pub struct MaterializerContext<'a> {
     pub records: &'a [RecordEnvelope],
     pub records_v2: &'a [RecordEnvelopeV2],
     pub replay_anchor: Option<&'a ComputationRef>,
+    pub record_frontier_ref: Option<&'a ContentRef>,
     pub workspace: &'a Path,
     pub workspace_policy: &'a WorkspaceCapturePolicy,
     pub realization: Option<&'a dyn RealizationDriver>,
