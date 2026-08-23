@@ -10,9 +10,11 @@ mod repository;
 
 pub use bundle::{
     BUNDLE_VERSION, BundleError, BundleIndex, BundleMaterialization, BundleObjectDescriptor,
-    BundleObjectKind, CapsuleBundle, ComputationReferences, MaterializationReferences, ObjectLink,
-    ReferenceRegistry, bundle_root, decode_bundle, encode_bundle, export_bundle,
-    export_bundle_with_materializations, import_bundle, sign_bundle,
+    BundleObjectKind, CapsuleBundle, ComputationReferences, GraphMaterialization,
+    GraphObjectDescriptor, GraphObjectKind, GraphRestoreCapability, MaterializationReferences,
+    ObjectGraphClosure, ObjectLink, ReferenceRegistry, bundle_root, decode_bundle, encode_bundle,
+    export_bundle, export_bundle_with_materializations, export_object_graph, import_bundle,
+    sign_bundle,
 };
 pub use repository::{
     ActiveRun, BranchOrigin, CapsuleSelector, Direction, LocalCapsuleRepository, RecordBodyV2,
