@@ -438,6 +438,7 @@ fn upload(args: UploadArgs) -> Result<()> {
         &api,
         &index,
         repository.objects(),
+        &references,
         &idempotency_key,
         UploadConfig {
             concurrency: usize::from(args.concurrency),

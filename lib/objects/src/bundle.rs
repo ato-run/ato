@@ -231,6 +231,8 @@ pub enum BundleError {
     DuplicateMaterializer(String),
     #[error("bundle contains duplicate materializer `{0}`")]
     DuplicateMaterialization(String),
+    #[error("declared object graph does not equal references decoded from object content")]
+    DeclaredGraphMismatch,
     #[error("bundle signature is malformed")]
     MalformedSignature,
     #[error("bundle signature verification failed")]
@@ -410,6 +412,22 @@ pub fn export_object_graph(
             .collect(),
         materializations: materializations.to_vec(),
     })
+}
+
+/// Recomputes the complete semantic closure from decoded object content and
+/// requires byte-for-byte descriptor equality with the declared graph.
+/// Client-provided `references` are never used as traversal input.
+pub fn verify_declared_object_graph(
+    declared: &ObjectGraphClosure,
+    objects: &dyn ObjectResolver,
+    references: &ReferenceRegistry,
+) -> Result<ObjectGraphClosure, BundleError> {
+    let root = parse_computation(&declared.root_computation_ref)?;
+    let derived = export_object_graph(&root, &declared.materializations, objects, references)?;
+    if &derived != declared {
+        return Err(BundleError::DeclaredGraphMismatch);
+    }
+    Ok(derived)
 }
 
 pub fn sign_bundle(
@@ -803,6 +821,25 @@ mod tests {
                 && object.kind == GraphObjectKind::Materialization
                 && object.references == vec![first_vm.to_string()]
         }));
+    }
+
+    #[test]
+    fn object_graph_validation_rejects_client_reference_claims() {
+        let (objects, references, root) = fixture();
+        let closure = export_object_graph(&root, &[], &objects, &references).unwrap();
+        assert_eq!(
+            verify_declared_object_graph(&closure, &objects, &references).unwrap(),
+            closure
+        );
+
+        let mut forged = closure;
+        forged.objects[0]
+            .references
+            .push(format!("blake3:{}", "f".repeat(64)));
+        assert!(matches!(
+            verify_declared_object_graph(&forged, &objects, &references),
+            Err(BundleError::DeclaredGraphMismatch)
+        ));
     }
 
     #[test]
