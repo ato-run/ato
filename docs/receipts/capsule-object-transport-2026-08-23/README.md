@@ -14,7 +14,7 @@ Status: implementation verified locally; no staging upload
   `https://github.com/ato-run/ato/pull/1295`
 - Depends on server transport Draft PR:
   `https://github.com/ato-run/ato-api/pull/519`
-- Draft PR: pending at this receipt revision
+- Draft PR: `https://github.com/ato-run/ato/pull/1296`
 
 ## Implemented boundary
 
