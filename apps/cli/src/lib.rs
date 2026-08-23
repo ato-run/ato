@@ -64,7 +64,7 @@ use ato_realization_planner::{
     TrustBoundary,
 };
 use ato_record_writer::RecordSchemaRegistry;
-use ato_record_writer::{RecordFrontier, load_frontier, records_for_frontier};
+use ato_record_writer::{load_frontier, records_for_frontier, verify_frontier_object};
 use clap::{Args, Parser, Subcommand};
 
 use crate::authoring::{
@@ -803,10 +803,7 @@ impl SealedRecordFrontierVerifier for RecordWriterFrontierVerifier {
         reference: &ContentRef,
         objects: &dyn ato_objects::ObjectResolver,
     ) -> std::result::Result<(), VmSnapshotError> {
-        let metadata = objects.metadata(reference)?;
-        let bytes =
-            ato_objects::read_exact_object(objects, reference, metadata.size, 16 * 1024 * 1024)?;
-        RecordFrontier::decode_identity(reference, &bytes)
+        verify_frontier_object(reference, objects)
             .map(|_| ())
             .map_err(|error| VmSnapshotError::InvalidDescriptor(error.to_string()))
     }
