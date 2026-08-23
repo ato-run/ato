@@ -261,6 +261,64 @@ input = "rustc broken.rs 2>&1 || true\n""#,
 }
 
 #[test]
+fn operation_replay_encap_uses_the_capture_barrier_frontier() {
+    let project = tempfile::tempdir().unwrap();
+    let ato_home = tempfile::tempdir().unwrap();
+    write_project(
+        project.path(),
+        r#"["sh"]"#,
+        r#"[[adapter]]
+target = "app"
+use = "ato.pty@1"
+input = "printf record-v2\\n\n""#,
+    );
+    let config_path = project.path().join("capsule.toml");
+    fs::write(
+        &config_path,
+        fs::read_to_string(&config_path)
+            .unwrap()
+            .replace("ato.replay@1", "ato.replay@2"),
+    )
+    .unwrap();
+    ato(ato_home.path())
+        .args(["init", project.path().to_str().unwrap()])
+        .assert()
+        .success();
+    ato(ato_home.path())
+        .args(["stop", project.path().to_str().unwrap()])
+        .assert()
+        .success();
+    assert!(
+        LocalCapsuleRepository::open(project.path())
+            .unwrap()
+            .records_for_stream("main", None)
+            .unwrap()
+            .is_empty(),
+        "operation recording must not use the legacy per-Record commit/head path"
+    );
+    let bundle = project.path().join("record-v2.capsule");
+
+    ato(ato_home.path())
+        .args([
+            "encap",
+            project.path().to_str().unwrap(),
+            "--materialize",
+            "ato.replay@2",
+            "-o",
+            bundle.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let bundle: serde_json::Value = serde_json::from_slice(&fs::read(bundle).unwrap()).unwrap();
+    assert_eq!(
+        bundle["index"]["materializations"][0]["materializer_id"],
+        "ato.replay@2"
+    );
+    assert!(bundle["index"]["objects"].as_array().unwrap().len() >= 4);
+}
+
+#[test]
 fn stateful_protocol_state_survives_nonzero_process_and_replay() {
     let _network = NETWORK_TEST_LOCK.lock().unwrap();
     let project = tempfile::tempdir().unwrap();
@@ -1072,6 +1130,37 @@ fn stop_seals_the_quiesced_observation_frontier() {
         "stop must seal the head observed after live Adapters finish quiescing"
     );
     assert_ne!(final_evolution.head_before, final_evolution.head_after);
+
+    let writer_run = project
+        .path()
+        .join(".capsule/records/runs")
+        .join(&active.token);
+    assert_eq!(
+        fs::metadata(writer_run.join("active.open")).unwrap().len(),
+        0
+    );
+    let segments: Vec<_> = fs::read_dir(writer_run.join("segments"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .collect();
+    assert_eq!(segments.len(), 1);
+    assert_eq!(segments[0].path().extension().unwrap(), "seg");
+    let frontiers: Vec<_> = fs::read_dir(writer_run.join("frontiers"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .collect();
+    assert_eq!(frontiers.len(), 1);
+    let frontier_ref = fs::read_to_string(
+        project
+            .path()
+            .join(".capsule/runs")
+            .join(format!("{}.record-frontier", active.token)),
+    )
+    .unwrap();
+    assert_eq!(
+        frontiers[0].path().file_stem().unwrap(),
+        frontier_ref.trim().split_once(':').unwrap().1
+    );
 }
 
 #[test]
