@@ -114,6 +114,7 @@ fn allowed(source: &str, target: &str) -> bool {
             "adapter-api" | "materializer-api" | "computation" | "objects"
         ),
         "record-writer" => matches!(target, "adapter-api" | "computation" | "objects"),
+        "contract-verifier" => matches!(target, "materializer-api" | "computation" | "objects"),
         "service" => matches!(target, "computation" | "objects" | "ipc"),
         "app" | "tool" => true,
         _ => false,

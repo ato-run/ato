@@ -18,6 +18,7 @@ members = [
     "extensions/materializers/snapshot/guest-agent",
     "extensions/materializers/api",
     "extensions/materializers/replay",
+    "extensions/contracts",
     "tools/snapshot-builder",
     "tools/legacy-vm-inspector",
     "tools/arch-check",
