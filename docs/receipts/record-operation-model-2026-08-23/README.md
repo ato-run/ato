@@ -8,6 +8,9 @@ Status: implementation verified locally; Draft PR not yet created
 - base PR: `ato-run/ato#1291` (Draft)
 - verified base head: `509a05028448dccc684be7769e9d085d39102b6a`
 - branch: `feat/record-operation-model-v1`
+- implementation commits:
+  - `760424dc7bfb04780110c39d883cc626c5fc2365`
+  - `f252f1478314e514e777e1a38bd9216deb2114fd`
 - existing worktrees and receipts were preserved
 
 The remote head matched the expected SHA at the beginning of work. See
@@ -44,8 +47,18 @@ The remote head matched the expected SHA at the beginning of work. See
   `-D warnings`: PASS
 - `cargo run -p arch-check --locked`: PASS (21 packages)
 - `git diff --check`: PASS
+- `cargo fmt --all -- --check`: PASS
+- `cargo check --workspace --all-targets --locked`: PASS
+- `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`: PASS
+- `cargo test --workspace --no-fail-fast --locked`: all changed and broader
+  targets PASS; two existing netd terminal gateway tests FAIL in the long
+  worktree with macOS `SUN_LEN`
+- the same two netd tests at the same commit in the short workspace worktree
+  `/Users/egamikohsuke/Ekoh/projects/ato-run/.tmp/a1s`: PASS (2/2); the
+  temporary worktree was removed after verification
 
-Full workspace gates are run again before the Draft PR is published.
+GitHub checks are recorded after the Draft PR is published; no local result is
+reported as a substitute for CI.
 
 ## Production
 
