@@ -36,24 +36,18 @@ use ato_adapter_workspace::{
     WORKSPACE_RENAME_OPERATION, WorkspaceAdapter, WorkspaceMutation, decode_mutation,
     restore_workspace,
 };
-use ato_compose::ComposeReferences;
 use ato_computation::{ComputationRef, ContentRef};
 use ato_contracts::{HttpEndpointVerifier, WorkspaceContentVerifier};
 use ato_materializer_api::{
     ContractContext, ContractVerifierRegistry, MaterializerContext, MaterializerRegistry,
     accept_candidate,
 };
-use ato_materializer_replay::{
-    ReplayMaterializer, ReplayMaterializerV2, ReplayReferences, ReplayV2References,
-};
-use ato_materializer_snapshot::{
-    SnapshotMaterializer, SnapshotReferences, WorkspaceSnapshotMaterializer,
-    WorkspaceSnapshotReferences,
-};
+use ato_materializer_replay::{ReplayMaterializer, ReplayMaterializerV2};
+use ato_materializer_snapshot::{SnapshotMaterializer, WorkspaceSnapshotMaterializer};
 use ato_materializer_vm_snapshot::{
     FirecrackerBackend, FirecrackerBackendConfig, FirecrackerRecordCaptureBarrier,
     FirecrackerRecordCaptureLease, SealedRecordFrontierVerifier, VmSnapshotError,
-    VmSnapshotMaterializer, VmSnapshotReferences,
+    VmSnapshotMaterializer,
 };
 use ato_objects::{
     BranchOrigin, BundleMaterialization, CapsuleSelector, GraphMaterialization,
@@ -68,11 +62,11 @@ use ato_record_writer::RecordSchemaRegistry;
 use ato_record_writer::{
     CaptureBarrier, PausedCapture, load_frontier, records_for_frontier, verify_frontier_object,
 };
+use ato_runtime_object_graph::standard_reference_registry;
 use clap::{Args, Parser, Subcommand};
 
 use crate::authoring::{
-    AuthoringReferences, evolve_workspace, initial_computation, load_config, load_runtime_state,
-    workspace_policy,
+    evolve_workspace, initial_computation, load_config, load_runtime_state, workspace_policy,
 };
 use crate::object_transport::{
     ExportedPort, HttpObjectTransportApi, ObjectGraphIndexV1, RequiredBinding, UploadConfig,
@@ -859,15 +853,7 @@ fn contract_verifier_registry() -> Result<ContractVerifierRegistry> {
 }
 
 fn reference_registry() -> Result<ReferenceRegistry> {
-    let mut registry = ReferenceRegistry::default();
-    registry.register(Arc::new(AuthoringReferences::new()))?;
-    registry.register(Arc::new(ComposeReferences::default()))?;
-    registry.register_materializer(Arc::new(ReplayReferences))?;
-    registry.register_materializer(Arc::new(ReplayV2References))?;
-    registry.register_materializer(Arc::new(SnapshotReferences))?;
-    registry.register_materializer(Arc::new(WorkspaceSnapshotReferences))?;
-    registry.register_materializer(Arc::new(VmSnapshotReferences))?;
-    Ok(registry)
+    standard_reference_registry()
 }
 
 fn preflight(

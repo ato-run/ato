@@ -5,87 +5,17 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use ato_computation::{ComputationRef, ContentRef};
-use ato_materializer_vm_snapshot::{VM_SNAPSHOT_MATERIALIZER_ID, VmSnapshotDescriptor};
-use ato_objects::{
-    GraphMaterialization, GraphObjectDescriptor, ObjectGraphClosure, ObjectResolver,
-    ReferenceRegistry, read_exact_object, verify_declared_object_graph,
+use ato_computation::ContentRef;
+use ato_objects::{ObjectResolver, ReferenceRegistry, read_exact_object};
+pub(crate) use ato_runtime_object_graph::{
+    ExportedPort, ObjectGraphIndexV1, RequiredBinding, VisibilityPolicy,
 };
-use ato_record_writer::verify_frontier_object;
-use clap::ValueEnum;
+use ato_runtime_object_graph::{validate_runtime_object_graph, vm_capture_refs};
 use reqwest::blocking::{Client, RequestBuilder};
 use reqwest::header::{HeaderName, HeaderValue, ORIGIN};
 use serde::{Deserialize, Serialize};
 
 const MAX_UPLOAD_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum VisibilityPolicy {
-    Private,
-    Public,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ExportedPort {
-    pub port_id: String,
-    pub protocol: String,
-    pub role: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RequiredBinding {
-    pub id: String,
-    pub schema: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ObjectGraphIndexV1 {
-    pub version: u32,
-    pub root_computation_ref: String,
-    pub objects: Vec<GraphObjectDescriptor>,
-    pub materializations: Vec<GraphMaterialization>,
-    pub exported_ports: Vec<ExportedPort>,
-    pub required_bindings: Vec<RequiredBinding>,
-    pub visibility_policy: VisibilityPolicy,
-}
-
-impl ObjectGraphIndexV1 {
-    pub(crate) fn new(
-        closure: ObjectGraphClosure,
-        exported_ports: Vec<ExportedPort>,
-        required_bindings: Vec<RequiredBinding>,
-        visibility_policy: VisibilityPolicy,
-    ) -> Self {
-        Self {
-            version: 1,
-            root_computation_ref: closure.root_computation_ref,
-            objects: closure.objects,
-            materializations: closure.materializations,
-            exported_ports,
-            required_bindings,
-            visibility_policy,
-        }
-    }
-
-    pub(crate) fn digest(&self) -> Result<String> {
-        Ok(format!(
-            "blake3:{}",
-            blake3::hash(&serde_jcs::to_vec(self)?).to_hex()
-        ))
-    }
-
-    fn logical_bytes(&self) -> Result<u64> {
-        self.objects.iter().try_fold(0_u64, |total, object| {
-            total
-                .checked_add(object.size_bytes)
-                .context("object graph logical byte count overflow")
-        })
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -171,63 +101,11 @@ pub(crate) fn vm_capture_receipt_refs(
     index: &ObjectGraphIndexV1,
     objects: &dyn ObjectResolver,
 ) -> Result<(Option<String>, Option<String>)> {
-    let Some(materialization) = index
-        .materializations
-        .iter()
-        .find(|item| item.id == VM_SNAPSHOT_MATERIALIZER_ID)
-    else {
-        return Ok((None, None));
-    };
-    let object = index
-        .objects
-        .iter()
-        .find(|item| item.content_ref == materialization.descriptor_ref)
-        .context("VM materialization descriptor is absent from object closure")?;
-    let reference = ContentRef::parse(&materialization.descriptor_ref)?;
-    let bytes = read_exact_object(
-        objects,
-        &reference,
-        object.size_bytes,
-        MAX_UPLOAD_OBJECT_BYTES,
-    )?;
-    let descriptor: VmSnapshotDescriptor = serde_json::from_slice(&bytes)
-        .context("VM materialization descriptor is not canonical descriptor JSON")?;
-    if descriptor.target_computation_ref != index.root_computation_ref {
-        bail!("VM materialization target does not match graph root ComputationRef");
-    }
-    let frontier = descriptor
-        .record_frontier_ref
-        .context("VM materialization descriptor omitted record_frontier_ref")?;
-    ContentRef::parse(&frontier).context("VM materialization RecordFrontier ref is invalid")?;
-    Ok((Some(materialization.descriptor_ref.clone()), Some(frontier)))
-}
-
-/// Validator/Runner semantic closure check. The traversal is rebuilt from
-/// object bytes via extension reference extractors; declared references are
-/// compared only after derivation and can never expand or suppress traversal.
-pub(crate) fn validate_semantic_object_graph(
-    index: &ObjectGraphIndexV1,
-    objects: &dyn ObjectResolver,
-    references: &ReferenceRegistry,
-) -> Result<()> {
-    let declared = ObjectGraphClosure {
-        root_computation_ref: index.root_computation_ref.clone(),
-        objects: index.objects.clone(),
-        materializations: index.materializations.clone(),
-    };
-    let root = ComputationRef::parse(&index.root_computation_ref)?;
-    let derived = verify_declared_object_graph(&declared, objects, references)
-        .context("decoded semantic closure differs from declared object graph")?;
-    if derived.root_computation_ref != root.to_string() {
-        bail!("decoded object graph changed root ComputationRef");
-    }
-    let (_, frontier) = vm_capture_receipt_refs(index, objects)?;
-    if let Some(frontier) = frontier {
-        let frontier = ContentRef::parse(frontier)?;
-        verify_frontier_object(&frontier, objects)
-            .context("VM materialization RecordFrontier closure is invalid")?;
-    }
-    Ok(())
+    Ok(
+        vm_capture_refs(index, objects)?.map_or((None, None), |(descriptor, frontier)| {
+            (Some(descriptor.to_string()), Some(frontier.to_string()))
+        }),
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -611,7 +489,7 @@ pub(crate) fn upload_http_object_graph(
     idempotency_key: &str,
     config: UploadConfig,
 ) -> Result<ObjectUploadReceipt> {
-    validate_semantic_object_graph(index, objects, references)?;
+    validate_runtime_object_graph(index, objects, references)?;
     upload_object_graph(api, index, objects, idempotency_key, config)
 }
 
@@ -619,7 +497,11 @@ pub(crate) fn upload_http_object_graph(
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use ato_objects::{GraphObjectKind, MemoryObjectStore, ObjectStore};
+    use ato_materializer_vm_snapshot::VM_SNAPSHOT_MATERIALIZER_ID;
+    use ato_objects::{
+        GraphMaterialization, GraphObjectDescriptor, GraphObjectKind, MemoryObjectStore,
+        ObjectStore,
+    };
 
     use super::*;
 
