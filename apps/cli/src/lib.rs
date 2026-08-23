@@ -432,7 +432,9 @@ fn upload(args: UploadArgs) -> Result<()> {
         bail!("idempotency key must contain between 16 and 160 bytes");
     }
     let api = HttpObjectTransportApi::new(&args.api_url, args.auth_token)?;
-    let receipt = upload_http_object_graph(
+    let (vm_materialization_descriptor_ref, record_frontier_ref) =
+        object_transport::vm_capture_receipt_refs(&index, repository.objects())?;
+    let mut receipt = upload_http_object_graph(
         &api,
         &index,
         repository.objects(),
@@ -444,6 +446,8 @@ fn upload(args: UploadArgs) -> Result<()> {
             validation_poll_interval: Duration::from_millis(args.validation_poll_ms),
         },
     )?;
+    receipt.vm_materialization_descriptor_ref = vm_materialization_descriptor_ref;
+    receipt.record_frontier_ref = record_frontier_ref;
     atomic_write(&args.receipt, &serde_jcs::to_vec(&receipt)?)?;
     println!("{} {}", receipt.bundle_id, receipt.root_computation_ref);
     Ok(())
