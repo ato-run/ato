@@ -1,16 +1,21 @@
-//! Binding evidence contains logical/safe provider identities, never values.
+//! Replayable Binding operations contain logical provider identities, never values.
 
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeSet;
+
 use ato_adapter_api::{
     AdapterAttachContext, AdapterCapabilities, AdapterContext, AdapterError, AdapterFactory,
-    AdapterInstance, AttachedAdapter,
+    AdapterInstance, AttachedAdapter, SupportedOperation,
 };
-use ato_objects::{RecordEnvelope, read_exact_object};
+use ato_objects::{RecordCandidate, RecordEnvelope, read_exact_object};
 use serde::{Deserialize, Serialize};
 
 pub const BINDING_ADAPTER_ID: &str = "ato.binding@1";
 pub const BINDING_PROTOCOL_ID: &str = "ato.binding@1";
+pub const BINDING_ATTACH_OPERATION: &str = "attach";
+pub const BINDING_REPLACE_OPERATION: &str = "replace";
+pub const BINDING_DETACH_OPERATION: &str = "detach";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -71,6 +76,20 @@ impl AdapterFactory for BindingAdapter {
         }
     }
 
+    fn supported_operations(&self) -> Vec<SupportedOperation> {
+        [
+            BINDING_ATTACH_OPERATION,
+            BINDING_REPLACE_OPERATION,
+            BINDING_DETACH_OPERATION,
+        ]
+        .into_iter()
+        .map(|operation| {
+            SupportedOperation::new(BINDING_PROTOCOL_ID, operation, 1, BTreeSet::new())
+                .expect("valid static Binding operation")
+        })
+        .collect()
+    }
+
     fn attach(
         &self,
         instance: &AdapterInstance,
@@ -83,16 +102,33 @@ impl AdapterFactory for BindingAdapter {
             provider_ref: config.provider_ref,
         };
         reject_secret_like_fields(&event)?;
+        let port_id = ato_computation::PortId::parse(config.port_id)
+            .map_err(|error| AdapterError::InvalidConfig(error.to_string()))?;
+        let payload = encode_event(&event)?;
+        context.stylus.record(RecordCandidate {
+            protocol_id: ato_computation::ProtocolId::parse(BINDING_PROTOCOL_ID)
+                .expect("valid static Binding protocol"),
+            operation_id: ato_computation::OperationId::parse(BINDING_ATTACH_OPERATION)
+                .expect("valid static Binding operation"),
+            port_id: port_id.clone(),
+            payload: payload.clone(),
+            payload_version: 1,
+            required_features: BTreeSet::new(),
+            recorded_by: Some(BINDING_ADAPTER_ID.to_owned()),
+            stream: "binding".to_owned(),
+            local_seq: 1,
+            caused_by: Vec::new(),
+            observed_at: observed_now(),
+        })?;
         context
             .observations
             .emit(ato_adapter_api::AdapterObservation {
                 adapter_id: BINDING_ADAPTER_ID.to_owned(),
                 protocol_id: ato_computation::ProtocolId::parse(BINDING_PROTOCOL_ID)
                     .map_err(|error| AdapterError::InvalidConfig(error.to_string()))?,
-                port_id: ato_computation::PortId::parse(config.port_id)
-                    .map_err(|error| AdapterError::InvalidConfig(error.to_string()))?,
+                port_id,
                 direction: ato_objects::Direction::Inbound,
-                payload: encode_event(&event)?,
+                payload,
                 caused_by: Vec::new(),
                 effect: ato_adapter_api::ObservationEffect::Evolution,
             })?;
@@ -100,6 +136,12 @@ impl AdapterFactory for BindingAdapter {
             instance_id: instance.instance_id.clone(),
         }))
     }
+}
+
+fn observed_now() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or_else(|_| "0".to_owned(), |value| value.as_secs().to_string())
 }
 
 struct BindingSession {

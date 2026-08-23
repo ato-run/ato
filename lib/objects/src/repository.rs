@@ -115,6 +115,42 @@ pub struct RecordBodyV2 {
     pub observed_at: String,
 }
 
+/// Unpersisted operation emitted by a Stylus.
+///
+/// Payload bytes stay in memory until a Record Writer validates and stores
+/// them. In particular, constructing this value performs no CAS or filesystem
+/// I/O and cannot update a ComputationRef.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordCandidate {
+    pub protocol_id: ProtocolId,
+    pub operation_id: OperationId,
+    pub port_id: PortId,
+    pub payload: Vec<u8>,
+    pub payload_version: u32,
+    pub required_features: BTreeSet<String>,
+    pub recorded_by: Option<String>,
+    pub stream: String,
+    pub local_seq: u64,
+    pub caused_by: Vec<RecordIdV2>,
+    pub observed_at: String,
+}
+
+impl RecordCandidate {
+    pub fn validate(&self) -> Result<(), RepositoryError> {
+        validate_name("record stream", &self.stream)?;
+        if self.local_seq == 0 || self.payload_version == 0 {
+            return Err(RepositoryError::InvalidRecordV2Position);
+        }
+        for feature in &self.required_features {
+            validate_name("required feature", feature)?;
+        }
+        if let Some(recorded_by) = &self.recorded_by {
+            validate_name("recording implementation id", recorded_by)?;
+        }
+        Ok(())
+    }
+}
+
 /// Portable semantic operation that an Actuator can apply to another
 /// Realization.
 ///
@@ -1145,6 +1181,25 @@ mod tests {
             observed_at: "2030-01-01T00:00:00Z".to_owned(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn record_candidate_validation_does_not_persist_or_assign_global_order() {
+        let candidate = RecordCandidate {
+            protocol_id: ProtocolId::parse("ato.pty@1").unwrap(),
+            operation_id: OperationId::parse("input").unwrap(),
+            port_id: PortId::parse("terminal.main").unwrap(),
+            payload: b"input".to_vec(),
+            payload_version: 1,
+            required_features: BTreeSet::new(),
+            recorded_by: Some("ato.pty.local@1".to_owned()),
+            stream: "main".to_owned(),
+            local_seq: 1,
+            caused_by: Vec::new(),
+            observed_at: "2030-01-01T00:00:00Z".to_owned(),
+        };
+
+        assert!(candidate.validate().is_ok());
     }
 
     #[test]
