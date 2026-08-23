@@ -9,7 +9,8 @@ use std::path::Path;
 
 use ato_computation::{ComputationRef, ContentRef};
 use ato_materializer_api::{
-    Compatibility, Materializer, MaterializerContext, MaterializerError, RestoreCapability,
+    Compatibility, MaterializationPathKind, Materializer, MaterializerContext, MaterializerError,
+    RestoreCapability,
 };
 use ato_objects::{
     BundleError, MaterializationReferences, ObjectError, ObjectLink, ObjectResolver, ObjectStore,
@@ -20,6 +21,7 @@ use thiserror::Error;
 
 pub const SNAPSHOT_MATERIALIZATION_VERSION: u32 = 1;
 pub const SNAPSHOT_MATERIALIZER_ID: &str = "ato.snapshot@1";
+pub const WORKSPACE_SNAPSHOT_MATERIALIZER_ID: &str = "ato.materialize.workspace.snapshot@1";
 const MAX_MATERIALIZATION_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,6 +154,9 @@ pub fn verify_materialization(
 #[derive(Default)]
 pub struct SnapshotReferences;
 
+#[derive(Default)]
+pub struct WorkspaceSnapshotReferences;
+
 impl RetainedObjectReferences for SnapshotReferences {
     fn outgoing(
         &self,
@@ -176,9 +181,16 @@ impl RetainedObjectReferences for SnapshotReferences {
 #[derive(Default)]
 pub struct SnapshotMaterializer;
 
+#[derive(Default)]
+pub struct WorkspaceSnapshotMaterializer;
+
 impl Materializer for SnapshotMaterializer {
     fn id(&self) -> &str {
         SNAPSHOT_MATERIALIZER_ID
+    }
+
+    fn path_kind(&self) -> MaterializationPathKind {
+        MaterializationPathKind::WorkspaceSnapshot
     }
 
     fn restore_capability(&self) -> RestoreCapability {
@@ -212,6 +224,63 @@ impl Materializer for SnapshotMaterializer {
         verify_materialization(
             &MaterializationRef(descriptor.clone()),
             &RealizationContract::host(SNAPSHOT_MATERIALIZER_ID),
+            context.objects,
+        )
+        .map_err(|error| MaterializerError::Operation(error.to_string()))
+    }
+
+    fn compatibility(
+        &self,
+        descriptor: &ContentRef,
+        context: &MaterializerContext<'_>,
+    ) -> Compatibility {
+        match self.verify(descriptor, context) {
+            Ok(_) => Compatibility::Compatible,
+            Err(_) => Compatibility::Incompatible,
+        }
+    }
+}
+
+impl Materializer for WorkspaceSnapshotMaterializer {
+    fn id(&self) -> &str {
+        WORKSPACE_SNAPSHOT_MATERIALIZER_ID
+    }
+
+    fn path_kind(&self) -> MaterializationPathKind {
+        MaterializationPathKind::WorkspaceSnapshot
+    }
+
+    fn restore_capability(&self) -> RestoreCapability {
+        RestoreCapability::VerifyOnly
+    }
+
+    fn encode(
+        &self,
+        target: &ComputationRef,
+        context: &MaterializerContext<'_>,
+    ) -> Result<ContentRef, MaterializerError> {
+        let artifact = encode_workspace_artifact(context.workspace, context.workspace_policy)
+            .map_err(|error| MaterializerError::Operation(error.to_string()))?;
+        reject_plaintext_secret(&artifact)
+            .map_err(|error| MaterializerError::Operation(error.to_string()))?;
+        let artifact = context.objects.put(&artifact)?;
+        let descriptor = SnapshotMaterialization {
+            version: SNAPSHOT_MATERIALIZATION_VERSION,
+            computation: target.to_string(),
+            contract: RealizationContract::host(WORKSPACE_SNAPSHOT_MATERIALIZER_ID),
+            artifacts: vec![artifact.to_string()],
+        };
+        Ok(context.objects.put(&serde_jcs::to_vec(&descriptor)?)?)
+    }
+
+    fn verify(
+        &self,
+        descriptor: &ContentRef,
+        context: &MaterializerContext<'_>,
+    ) -> Result<ComputationRef, MaterializerError> {
+        verify_materialization(
+            &MaterializationRef(descriptor.clone()),
+            &RealizationContract::host(WORKSPACE_SNAPSHOT_MATERIALIZER_ID),
             context.objects,
         )
         .map_err(|error| MaterializerError::Operation(error.to_string()))
@@ -324,6 +393,20 @@ impl MaterializationReferences for SnapshotReferences {
     }
 }
 
+impl MaterializationReferences for WorkspaceSnapshotReferences {
+    fn materializer_id(&self) -> &str {
+        WORKSPACE_SNAPSHOT_MATERIALIZER_ID
+    }
+
+    fn outgoing(
+        &self,
+        root: &ContentRef,
+        objects: &dyn ObjectResolver,
+    ) -> Result<Vec<ObjectLink>, BundleError> {
+        MaterializationReferences::outgoing(&SnapshotReferences, root, objects)
+    }
+}
+
 fn reject_plaintext_secret(bytes: &[u8]) -> Result<(), SnapshotError> {
     let lower = String::from_utf8_lossy(bytes).to_ascii_lowercase();
     if ["private_key=", "secret_key=", "authorization: bearer "]
@@ -339,6 +422,7 @@ fn reject_plaintext_secret(bytes: &[u8]) -> Result<(), SnapshotError> {
 mod tests {
     use std::collections::BTreeMap;
 
+    use ato_adapter_api::WorkspaceCapturePolicy;
     use ato_computation::{
         ComputationObject, SemanticsId, computation_ref, encode_computation_object,
     };
@@ -379,6 +463,50 @@ mod tests {
 
         assert_eq!(
             verify_materialization(&materialization, &contract, &store).unwrap(),
+            computation
+        );
+    }
+
+    #[test]
+    fn canonical_workspace_snapshot_id_coexists_with_legacy_alias() {
+        let store = MemoryObjectStore::default();
+        let computation = computation(&store);
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("main.txt"), b"portable workspace").unwrap();
+        let adapters = ato_adapter_api::AdapterRegistry::default();
+        let policy = WorkspaceCapturePolicy::secure_default();
+        let context = MaterializerContext {
+            objects: &store,
+            adapters: &adapters,
+            records: &[],
+            records_v2: &[],
+            replay_anchor: None,
+            record_frontier_ref: None,
+            workspace: workspace.path(),
+            workspace_policy: &policy,
+            realization: None,
+            contracts: &[],
+            runner_capabilities: None,
+        };
+
+        let legacy = SnapshotMaterializer.encode(&computation, &context).unwrap();
+        let canonical = WorkspaceSnapshotMaterializer
+            .encode(&computation, &context)
+            .unwrap();
+
+        assert_eq!(SnapshotMaterializer.id(), "ato.snapshot@1");
+        assert_eq!(
+            WorkspaceSnapshotMaterializer.id(),
+            "ato.materialize.workspace.snapshot@1"
+        );
+        assert_eq!(
+            SnapshotMaterializer.verify(&legacy, &context).unwrap(),
+            computation
+        );
+        assert_eq!(
+            WorkspaceSnapshotMaterializer
+                .verify(&canonical, &context)
+                .unwrap(),
             computation
         );
     }

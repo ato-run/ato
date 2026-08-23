@@ -38,6 +38,9 @@ ato-record-writer = { path = "../../extensions/record-writer", version = "0.1.0"
 ato-materializer-snapshot = { path = "../../extensions/materializers/snapshot", version = "0.1.0" }
 ato-materializer-api = { path = "../../extensions/materializers/api", version = "0.1.0" }
 ato-materializer-replay = { path = "../../extensions/materializers/replay", version = "0.1.0" }
+ato-materializer-vm-snapshot = { path = "../../extensions/materializers/vm-snapshot", version = "0.1.0" }
+ato-player = { path = "../../extensions/player", version = "0.1.0" }
+ato-realization-planner = { path = "../../extensions/planner", version = "0.1.0" }
 ato-compose = { path = "../../lib/compose", version = "0.1.0" }
 ato-contracts = { path = "../../extensions/contracts", version = "0.1.0" }
 blake3 = "1"
