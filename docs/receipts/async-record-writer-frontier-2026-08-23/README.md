@@ -1,6 +1,6 @@
 # Async Record Writer / RecordFrontier receipt — 2026-08-23
 
-Status: implementation complete; Draft PR pending creation
+Status: implementation complete; Draft PR open
 
 ## Stack
 
@@ -9,6 +9,7 @@ Status: implementation complete; Draft PR pending creation
 - verified base head: `5d39069e7c8dfeb34c2aa25a1c8ac8a6f2274ba4`
 - dependency: Draft PR `ato-run/ato#1292`
 - branch: `feat/async-record-writer-frontier-v1`
+- Draft PR: `https://github.com/ato-run/ato/pull/1293`
 
 ## Implemented boundary
 
