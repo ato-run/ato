@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use ato_adapter_api::{
     AdapterAttachContext, AdapterContext, AdapterError, AdapterObservation, IgnoreObservations,
-    ObservationSink,
+    IgnoreRecords, ObservationSink,
 };
 use ato_adapter_process::terminate_process_tree;
 use ato_adapter_workspace::restore_workspace;
@@ -159,6 +159,8 @@ fn encode_replay(
         objects: repository.objects(),
         adapters: &adapters,
         records,
+        records_v2: &[],
+        replay_anchor: records.first().map(|record| &record.head_before),
         workspace: repository.project(),
         workspace_policy: &policy,
         realization: None,
@@ -210,6 +212,8 @@ pub(crate) fn worker(
             objects: repository.objects(),
             adapters: &registry,
             records: &[],
+            records_v2: &[],
+            replay_anchor: None,
             workspace: repository.project(),
             workspace_policy: &policy,
             realization: Some(&driver),
@@ -231,6 +235,7 @@ pub(crate) fn worker(
                 workspace: repository.project(),
                 objects: repository.objects(),
             },
+            stylus: Arc::new(IgnoreRecords),
             observations: Arc::clone(&sink),
         };
         sessions = registry.attach_all(&instances, &context)?;
@@ -412,6 +417,7 @@ impl RealizationDriver for CliRealizationDriver {
                 workspace: &self.project,
                 objects: repository.objects(),
             },
+            stylus: Arc::new(IgnoreRecords),
             observations: Arc::clone(&self.observations),
         };
         let sessions = registry

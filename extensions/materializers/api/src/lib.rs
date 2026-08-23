@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use ato_adapter_api::{AdapterRegistry, WorkspaceCapturePolicy};
 use ato_computation::{ComputationRef, ContentRef};
-use ato_objects::{ObjectStore, RecordEnvelope};
+use ato_objects::{ObjectStore, RecordEnvelope, RecordEnvelopeV2};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +28,8 @@ pub struct MaterializerContext<'a> {
     pub objects: &'a dyn ObjectStore,
     pub adapters: &'a AdapterRegistry,
     pub records: &'a [RecordEnvelope],
+    pub records_v2: &'a [RecordEnvelopeV2],
+    pub replay_anchor: Option<&'a ComputationRef>,
     pub workspace: &'a Path,
     pub workspace_policy: &'a WorkspaceCapturePolicy,
     pub realization: Option<&'a dyn RealizationDriver>,
@@ -59,10 +61,31 @@ pub trait ReplayRuntime: Send {
     ) -> Result<Box<dyn Realization>, MaterializerError>;
 }
 
+/// Operation-based replay runtime. Record application is intentionally
+/// separate from legacy computation-head chaining.
+pub trait OperationReplayRuntime: Send {
+    fn apply(&mut self, record: &RecordEnvelopeV2) -> Result<(), MaterializerError>;
+    fn finish(
+        self: Box<Self>,
+        target: &ComputationRef,
+    ) -> Result<Box<dyn Realization>, MaterializerError>;
+}
+
 /// Product-specific realization implementation injected into generic
 /// Materializers. Only this boundary may materialize a computation into a Run.
 pub trait RealizationDriver: Send + Sync {
     fn begin(&self, anchor: &ComputationRef) -> Result<Box<dyn ReplayRuntime>, MaterializerError>;
+
+    fn preflight_operations(&self, _records: &[RecordEnvelopeV2]) -> Result<(), MaterializerError> {
+        Err(MaterializerError::OperationReplayUnsupported)
+    }
+
+    fn begin_operations(
+        &self,
+        _anchor: &ComputationRef,
+    ) -> Result<Box<dyn OperationReplayRuntime>, MaterializerError> {
+        Err(MaterializerError::OperationReplayUnsupported)
+    }
 }
 
 pub trait Materializer: Send + Sync {
@@ -165,6 +188,8 @@ pub enum MaterializerError {
     },
     #[error("materializer operation failed: {0}")]
     Operation(String),
+    #[error("the realization driver does not support operation-based replay")]
+    OperationReplayUnsupported,
     #[error(transparent)]
     Objects(#[from] ato_objects::ObjectError),
     #[error("materializer JSON failed: {0}")]

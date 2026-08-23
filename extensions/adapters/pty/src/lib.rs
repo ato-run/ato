@@ -1,24 +1,28 @@
-//! Byte-level PTY evidence. It deliberately does not infer shell commands.
+//! PTY input, resize, and signal operations. Output is written only to run logs.
 
 #![forbid(unsafe_code)]
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use ato_adapter_api::{
     AdapterAttachContext, AdapterCapabilities, AdapterContext, AdapterError, AdapterFactory,
-    AdapterInstance, AttachedAdapter,
+    AdapterInstance, AttachedAdapter, Stylus, SupportedOperation,
 };
-use ato_objects::{RecordEnvelope, read_exact_object};
+use ato_objects::{RecordCandidate, RecordEnvelope, read_exact_object};
 use serde::{Deserialize, Serialize};
 
 pub const PTY_ADAPTER_ID: &str = "ato.pty@1";
 pub const PTY_PROTOCOL_ID: &str = "ato.pty@1";
+pub const PTY_INPUT_OPERATION: &str = "input";
+pub const PTY_RESIZE_OPERATION: &str = "resize";
+pub const PTY_SIGNAL_OPERATION: &str = "signal";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -73,6 +77,20 @@ impl AdapterFactory for PtyAdapter {
         }
     }
 
+    fn supported_operations(&self) -> Vec<SupportedOperation> {
+        [
+            PTY_INPUT_OPERATION,
+            PTY_RESIZE_OPERATION,
+            PTY_SIGNAL_OPERATION,
+        ]
+        .into_iter()
+        .map(|operation| {
+            SupportedOperation::new(PTY_PROTOCOL_ID, operation, 1, BTreeSet::new())
+                .expect("valid static PTY operation")
+        })
+        .collect()
+    }
+
     fn attach(
         &self,
         instance: &AdapterInstance,
@@ -102,21 +120,15 @@ impl AdapterFactory for PtyAdapter {
         let failure = Arc::new(Mutex::new(None));
         let port_id = ato_computation::PortId::parse(format!("terminal.{}", instance.instance_id))
             .map_err(|error| AdapterError::InvalidConfig(error.to_string()))?;
-        context
-            .observations
-            .emit(observation(&port_id, &PtyEvent::Attach)?)?;
+        let local_seq = Arc::new(AtomicU64::new(0));
         let readers = vec![
             spawn_output_reader(
                 child.stdout.take().expect("piped stdout"),
-                Arc::clone(&context.observations),
-                port_id.clone(),
                 Arc::clone(&output),
                 Arc::clone(&failure),
             ),
             spawn_output_reader(
                 child.stderr.take().expect("piped stderr"),
-                Arc::clone(&context.observations),
-                port_id.clone(),
                 Arc::clone(&output),
                 Arc::clone(&failure),
             ),
@@ -125,6 +137,11 @@ impl AdapterFactory for PtyAdapter {
             let event = PtyEvent::Input {
                 bytes: input.as_bytes().to_vec(),
             };
+            context.stylus.record(candidate(
+                &port_id,
+                &event,
+                local_seq.fetch_add(1, Ordering::Relaxed) + 1,
+            )?)?;
             context.observations.emit(observation(&port_id, &event)?)?;
             writer
                 .lock()
@@ -138,8 +155,10 @@ impl AdapterFactory for PtyAdapter {
             output,
             failure,
             readers,
+            stylus: Arc::clone(&context.stylus),
             observations: Arc::clone(&context.observations),
             port_id,
+            local_seq,
             activated: false,
         }))
     }
@@ -152,8 +171,10 @@ struct PtySession {
     output: Arc<Mutex<VecDeque<u8>>>,
     failure: Arc<Mutex<Option<String>>>,
     readers: Vec<JoinHandle<()>>,
+    stylus: Arc<dyn Stylus>,
     observations: Arc<dyn ato_adapter_api::ObservationSink>,
     port_id: ato_computation::PortId,
+    local_seq: Arc<AtomicU64>,
     activated: bool,
 }
 
@@ -238,8 +259,10 @@ impl AttachedAdapter for PtySession {
         if !self.activated {
             spawn_input_reader(
                 Arc::clone(&self.writer),
+                Arc::clone(&self.stylus),
                 Arc::clone(&self.observations),
                 self.port_id.clone(),
+                Arc::clone(&self.local_seq),
                 Arc::clone(&self.failure),
             );
             self.activated = true;
@@ -303,10 +326,46 @@ fn observation(
     })
 }
 
+fn candidate(
+    port_id: &ato_computation::PortId,
+    event: &PtyEvent,
+    local_seq: u64,
+) -> Result<RecordCandidate, AdapterError> {
+    let operation = match event {
+        PtyEvent::Input { .. } => PTY_INPUT_OPERATION,
+        PtyEvent::Resize { .. } => PTY_RESIZE_OPERATION,
+        PtyEvent::Signal { .. } => PTY_SIGNAL_OPERATION,
+        PtyEvent::Output { .. } | PtyEvent::Attach | PtyEvent::Detach => {
+            return Err(AdapterError::InvalidPayload(
+                "PTY output and lifecycle observations are not Records".to_owned(),
+            ));
+        }
+    };
+    Ok(RecordCandidate {
+        protocol_id: ato_computation::ProtocolId::parse(PTY_PROTOCOL_ID)
+            .expect("valid static PTY protocol"),
+        operation_id: ato_computation::OperationId::parse(operation)
+            .expect("valid static PTY operation"),
+        port_id: port_id.clone(),
+        payload: encode_event(event)?,
+        payload_version: 1,
+        required_features: BTreeSet::new(),
+        recorded_by: Some(PTY_ADAPTER_ID.to_owned()),
+        stream: "pty".to_owned(),
+        local_seq,
+        caused_by: Vec::new(),
+        observed_at: observed_now(),
+    })
+}
+
+fn observed_now() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or_else(|_| "0".to_owned(), |value| value.as_secs().to_string())
+}
+
 fn spawn_output_reader(
     mut reader: impl Read + Send + 'static,
-    observations: Arc<dyn ato_adapter_api::ObservationSink>,
-    port_id: ato_computation::PortId,
     output: Arc<Mutex<VecDeque<u8>>>,
     failure: Arc<Mutex<Option<String>>>,
 ) -> JoinHandle<()> {
@@ -320,13 +379,6 @@ fn spawn_output_reader(
                     let _ = std::io::stdout().write_all(&bytes);
                     if let Ok(mut queue) = output.lock() {
                         queue.extend(bytes.iter().copied());
-                    }
-                    if let Err(error) = observations.emit(
-                        observation(&port_id, &PtyEvent::Output { bytes })
-                            .expect("PTY event serialization cannot fail"),
-                    ) && let Ok(mut slot) = failure.lock()
-                    {
-                        *slot = Some(error.to_string());
                     }
                 }
                 Err(error) => {
@@ -342,8 +394,10 @@ fn spawn_output_reader(
 
 fn spawn_input_reader(
     writer: Arc<Mutex<ChildStdin>>,
+    stylus: Arc<dyn Stylus>,
     observations: Arc<dyn ato_adapter_api::ObservationSink>,
     port_id: ato_computation::PortId,
+    local_seq: Arc<AtomicU64>,
     failure: Arc<Mutex<Option<String>>>,
 ) {
     std::thread::spawn(move || {
@@ -354,16 +408,23 @@ fn spawn_input_reader(
                 break;
             }
             let bytes = buffer[..size].to_vec();
-            if let Err(error) = observations
-                .emit(
-                    observation(
+            let event = PtyEvent::Input {
+                bytes: bytes.clone(),
+            };
+            if let Err(error) = stylus
+                .record(
+                    candidate(
                         &port_id,
-                        &PtyEvent::Input {
-                            bytes: bytes.clone(),
-                        },
+                        &event,
+                        local_seq.fetch_add(1, Ordering::Relaxed) + 1,
                     )
-                    .expect("PTY event serialization cannot fail"),
+                    .expect("PTY input is always a Record operation"),
                 )
+                .and_then(|_| {
+                    observations.emit(
+                        observation(&port_id, &event).expect("PTY event serialization cannot fail"),
+                    )
+                })
                 .and_then(|_| {
                     writer
                         .lock()
@@ -390,4 +451,24 @@ fn explicit_base_environment() -> BTreeMap<String, String> {
                 .map(|value| (name.to_owned(), value))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_applicable_pty_events_become_record_candidates() {
+        let port = ato_computation::PortId::parse("terminal.main").unwrap();
+        let input = candidate(&port, &PtyEvent::Input { bytes: vec![1] }, 1).unwrap();
+        assert_eq!(input.operation_id.as_str(), PTY_INPUT_OPERATION);
+        assert!(matches!(
+            candidate(&port, &PtyEvent::Output { bytes: vec![1] }, 2),
+            Err(AdapterError::InvalidPayload(_))
+        ));
+        assert!(matches!(
+            candidate(&port, &PtyEvent::Attach, 3),
+            Err(AdapterError::InvalidPayload(_))
+        ));
+    }
 }
