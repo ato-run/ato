@@ -15,8 +15,8 @@ use std::sync::{Arc, Mutex, RwLock};
 use ato_adapter_api::{AdapterError, OperationRequirement, Stylus, SupportedOperation};
 use ato_computation::{ContentRef, OperationId, ProtocolId};
 use ato_objects::{
-    ObjectStore, RecordBodyV2, RecordCandidate, RecordEnvelopeV2, RecordIdV2, decode_record_v2,
-    encode_record_v2,
+    ObjectResolver, ObjectStore, RecordBodyV2, RecordCandidate, RecordEnvelopeV2, RecordIdV2,
+    decode_record_v2, encode_record_v2, read_exact_object,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -24,6 +24,8 @@ use thiserror::Error;
 const SEGMENT_MAGIC: &[u8] = b"ATO-RECORD-SEGMENT-V1\n";
 const FRONTIER_VERSION: u32 = 1;
 const SEGMENT_METADATA_FIELDS: usize = 5;
+const MAX_FRONTIER_OBJECT_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_SEALED_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
 
 type Validator = dyn Fn(&[u8]) -> Result<(), String> + Send + Sync;
 
@@ -826,7 +828,55 @@ pub fn records_for_frontier(
         }
         records.extend(segment_records);
     }
-    verify_contiguous_orders(&records)?;
+    verify_frontier_records(frontier, &records)?;
+    Ok(records)
+}
+
+/// Independently resolves and verifies a RecordFrontier and its complete
+/// immutable segment/payload closure from CAS. This is the validator/Runner
+/// boundary; filesystem projections and client-provided summaries are ignored.
+pub fn verify_frontier_object(
+    reference: &ContentRef,
+    objects: &dyn ObjectResolver,
+) -> Result<(RecordFrontier, Vec<RecordEnvelopeV2>), RecordWriterError> {
+    let metadata = objects.metadata(reference)?;
+    let identity = read_exact_object(objects, reference, metadata.size, MAX_FRONTIER_OBJECT_BYTES)?;
+    let frontier = RecordFrontier::decode_identity(reference, &identity)?;
+    let mut records = Vec::new();
+    for expected in &frontier.sealed_segments {
+        if expected.byte_length > MAX_SEALED_SEGMENT_BYTES {
+            return Err(RecordWriterError::SegmentLengthOverflow);
+        }
+        let metadata = objects.metadata(&expected.digest)?;
+        if metadata.size != expected.byte_length {
+            return Err(RecordWriterError::SegmentByteLength {
+                expected: expected.byte_length,
+                actual: metadata.size,
+            });
+        }
+        let bytes = read_exact_object(
+            objects,
+            &expected.digest,
+            metadata.size,
+            MAX_SEALED_SEGMENT_BYTES,
+        )?;
+        let (actual, segment_records) = decode_segment(&bytes, objects)?;
+        if &actual != expected {
+            return Err(RecordWriterError::FrontierSegmentMismatch(
+                expected.digest.to_string(),
+            ));
+        }
+        records.extend(segment_records);
+    }
+    verify_frontier_records(&frontier, &records)?;
+    Ok((frontier, records))
+}
+
+fn verify_frontier_records(
+    frontier: &RecordFrontier,
+    records: &[RecordEnvelopeV2],
+) -> Result<(), RecordWriterError> {
+    verify_contiguous_orders(records)?;
     if records.last().map_or(0, |record| record.writer_order) != frontier.last_writer_order {
         return Err(RecordWriterError::FrontierWriterOrderMismatch);
     }
@@ -840,7 +890,7 @@ pub fn records_for_frontier(
         return Err(RecordWriterError::FrontierCausalCutMismatch);
     }
     let mut observed: BTreeMap<String, u64> = BTreeMap::new();
-    for record in &records {
+    for record in records {
         observed
             .entry(record.stream.clone())
             .and_modify(|value| *value = (*value).max(record.local_seq))
@@ -849,7 +899,7 @@ pub fn records_for_frontier(
     if observed != frontier.observed_through {
         return Err(RecordWriterError::FrontierWatermarkMismatch);
     }
-    Ok(records)
+    Ok(())
 }
 
 impl From<&RecordFrontierBody> for FrontierIdentityWire {
@@ -993,7 +1043,7 @@ fn encode_segment(records: &[RecordEnvelopeV2]) -> Result<Vec<u8>, RecordWriterE
 
 fn decode_segment(
     bytes: &[u8],
-    objects: &dyn ObjectStore,
+    objects: &dyn ObjectResolver,
 ) -> Result<(SealedSegment, Vec<RecordEnvelopeV2>), RecordWriterError> {
     if !bytes.starts_with(SEGMENT_MAGIC) {
         return Err(RecordWriterError::InvalidSegment("bad magic".to_owned()));
@@ -1256,9 +1306,10 @@ pub enum RecordWriterError {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
     use std::sync::{Condvar, Mutex};
 
-    use ato_objects::{MemoryObjectStore, ObjectResolver};
+    use ato_objects::{MemoryObjectStore, ObjectError, ObjectMetadata, ObjectResolver};
 
     use super::*;
 
@@ -1456,9 +1507,79 @@ mod tests {
                 .len(),
             2
         );
+        let (verified, verified_records) =
+            verify_frontier_object(&frontier.frontier_digest, objects.as_ref()).unwrap();
+        assert_eq!(verified, frontier);
+        assert_eq!(verified_records.len(), 2);
         let json = String::from_utf8(frontier_bytes).unwrap();
         assert!(!json.contains("computation"));
         assert!(!json.contains("snapshot"));
+    }
+
+    struct MissingObjectResolver<'a> {
+        inner: &'a dyn ObjectResolver,
+        missing: ContentRef,
+    }
+
+    impl ObjectResolver for MissingObjectResolver<'_> {
+        fn metadata(&self, reference: &ContentRef) -> Result<ObjectMetadata, ObjectError> {
+            if reference == &self.missing {
+                Err(ObjectError::NotFound(reference.clone()))
+            } else {
+                self.inner.metadata(reference)
+            }
+        }
+
+        fn open(&self, reference: &ContentRef) -> Result<Box<dyn Read + Send + '_>, ObjectError> {
+            if reference == &self.missing {
+                Err(ObjectError::NotFound(reference.clone()))
+            } else {
+                self.inner.open(reference)
+            }
+        }
+    }
+
+    #[test]
+    fn cas_frontier_verification_rejects_forged_cut_and_missing_payload() {
+        let directory = tempfile::tempdir().unwrap();
+        let objects = Arc::new(MemoryObjectStore::default());
+        let pipeline = RecordPipeline::start(
+            config(directory.path()),
+            objects.clone(),
+            schemas(|_| Ok(())),
+        )
+        .unwrap();
+        pipeline
+            .stylus
+            .record(candidate("pty.main", 1, b"one"))
+            .unwrap();
+        let frontier = pipeline.barrier.seal().unwrap();
+
+        let forged = RecordFrontier::seal(RecordFrontierBody {
+            run_id: frontier.run_id.clone(),
+            sealed_segments: frontier.sealed_segments.clone(),
+            last_writer_order: frontier.last_writer_order,
+            observed_through: BTreeMap::from([("pty.main".to_owned(), 99)]),
+            causal_cut: frontier.causal_cut.clone(),
+        })
+        .unwrap();
+        objects
+            .insert(&forged.frontier_digest, &forged.identity_bytes().unwrap())
+            .unwrap();
+        assert!(matches!(
+            verify_frontier_object(&forged.frontier_digest, objects.as_ref()),
+            Err(RecordWriterError::FrontierWatermarkMismatch)
+        ));
+
+        let missing = frontier.sealed_segments[0].payload_closure[0].clone();
+        let filtered = MissingObjectResolver {
+            inner: objects.as_ref(),
+            missing,
+        };
+        assert!(matches!(
+            verify_frontier_object(&frontier.frontier_digest, &filtered),
+            Err(RecordWriterError::Object(ObjectError::NotFound(_)))
+        ));
     }
 
     #[test]

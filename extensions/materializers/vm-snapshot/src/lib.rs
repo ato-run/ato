@@ -909,9 +909,7 @@ mod tests {
         accept_candidate,
     };
     use ato_objects::{MemoryObjectStore, ObjectMetadata, ObjectStore, RecordCandidate};
-    use ato_record_writer::{
-        RecordFrontier, RecordPipeline, RecordSchemaRegistry, RecordWriterConfig,
-    };
+    use ato_record_writer::{RecordPipeline, RecordSchemaRegistry, RecordWriterConfig};
 
     use super::*;
 
@@ -1143,9 +1141,7 @@ mod tests {
             reference: &ContentRef,
             objects: &dyn ObjectResolver,
         ) -> Result<(), VmSnapshotError> {
-            let metadata = objects.metadata(reference)?;
-            let bytes = read_exact_object(objects, reference, metadata.size, 16 * 1024 * 1024)?;
-            RecordFrontier::decode_identity(reference, &bytes)
+            ato_record_writer::verify_frontier_object(reference, objects)
                 .map(|_| ())
                 .map_err(|error| VmSnapshotError::InvalidDescriptor(error.to_string()))
         }
