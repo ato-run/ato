@@ -62,7 +62,9 @@ impl RecordSchemaRegistry {
         Ok(())
     }
 
-    fn validate(&self, candidate: &RecordCandidate) -> Result<(), RecordWriterError> {
+    /// Validates one candidate without persisting it. Actuator Providers use
+    /// the same extension-owned schema boundary during Player preflight.
+    pub fn validate_candidate(&self, candidate: &RecordCandidate) -> Result<(), RecordWriterError> {
         let key = SchemaKey {
             protocol_id: candidate.protocol_id.clone(),
             operation_id: candidate.operation_id.clone(),
@@ -501,7 +503,7 @@ impl WriterState {
 
     fn append(&mut self, candidate: RecordCandidate) -> Result<(), RecordWriterError> {
         candidate.validate()?;
-        self.schemas.validate(&candidate)?;
+        self.schemas.validate_candidate(&candidate)?;
         for cause in &candidate.caused_by {
             if !self.seen.contains(cause) {
                 return Err(RecordWriterError::UnknownCause(cause.to_string()));
@@ -751,6 +753,35 @@ impl RecordFrontier {
         let body = RecordFrontierBody::try_from(wire)?;
         let frontier = Self::seal(body)?;
         if frontier.frontier_digest != actual_digest {
+            return Err(RecordWriterError::FrontierIdentityMismatch);
+        }
+        Ok(frontier)
+    }
+
+    /// Decodes the canonical identity body stored in CAS. The digest is supplied
+    /// by the object reference instead of being duplicated inside the body.
+    pub fn decode_identity(
+        reference: &ContentRef,
+        bytes: &[u8],
+    ) -> Result<Self, RecordWriterError> {
+        let wire: FrontierIdentityWire = serde_json::from_slice(bytes)?;
+        if wire.version != FRONTIER_VERSION || serde_jcs::to_vec(&wire)? != bytes {
+            return Err(RecordWriterError::NonCanonicalFrontier);
+        }
+        if &ato_objects::blake3_reference(bytes) != reference {
+            return Err(RecordWriterError::FrontierIdentityMismatch);
+        }
+        let body = RecordFrontierBody::try_from(FrontierWire {
+            version: wire.version,
+            run_id: wire.run_id,
+            sealed_segments: wire.sealed_segments,
+            last_writer_order: wire.last_writer_order,
+            observed_through: wire.observed_through,
+            causal_cut: wire.causal_cut,
+            frontier_digest: reference.to_string(),
+        })?;
+        let frontier = Self::seal(body)?;
+        if &frontier.frontier_digest != reference {
             return Err(RecordWriterError::FrontierIdentityMismatch);
         }
         Ok(frontier)
