@@ -16,8 +16,8 @@ pub use bundle::{
 };
 pub use repository::{
     ActiveRun, BranchOrigin, CapsuleSelector, Direction, LocalCapsuleRepository, RecordBodyV2,
-    RecordEnvelope, RecordEnvelopeV2, RecordId, RecordIdV2, RepositoryError, decode_record_v2,
-    encode_record_v2,
+    RecordCandidate, RecordEnvelope, RecordEnvelopeV2, RecordId, RecordIdV2, RepositoryError,
+    decode_record_v2, encode_record_v2,
 };
 
 use std::collections::BTreeMap;
