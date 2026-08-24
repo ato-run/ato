@@ -1284,6 +1284,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
+name = "legacy-vm-inspector"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"

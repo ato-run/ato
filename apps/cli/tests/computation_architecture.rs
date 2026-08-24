@@ -203,11 +203,19 @@ input = "rustc broken.rs 2>&1 || true\n""#,
     );
     fs::write(project.path().join("broken.rs"), "fn main() { missing( }\n").unwrap();
 
-    ato(author_home.path())
-        .args(["init", project.path().to_str().unwrap()])
-        .assert()
-        .success();
     let log = project.path().join(".capsule/runs/output.log");
+    let init = ato(author_home.path())
+        .args(["init", project.path().to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        init.status.success(),
+        "init failed: status={:?} stdout={} stderr={} worker_log={}",
+        init.status.code(),
+        String::from_utf8_lossy(&init.stdout),
+        String::from_utf8_lossy(&init.stderr),
+        fs::read_to_string(&log).unwrap_or_else(|error| format!("<unavailable: {error}>")),
+    );
     wait_until(|| fs::read_to_string(&log).is_ok_and(|text| text.contains("error")));
     ato(author_home.path())
         .args(["stop", project.path().to_str().unwrap()])

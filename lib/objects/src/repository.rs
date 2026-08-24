@@ -527,6 +527,18 @@ impl LocalCapsuleRepository {
 
     pub fn activate_run(&self, token: &str, run: &ActiveRun) -> Result<(), RepositoryError> {
         let _transaction = self.lock_transaction()?;
+        let claimed_bytes = match fs::read(self.root.join("runs/active.json")) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(RepositoryError::ActiveRunConflict {
+                    token: token.to_owned(),
+                    status: "missing".to_owned(),
+                });
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let claimed_at_start: ActiveRun =
+            serde_json::from_slice::<ActiveRunWire>(&claimed_bytes)?.try_into()?;
         let claimed = self
             .active_run()?
             .ok_or_else(|| RepositoryError::ActiveRunConflict {
@@ -539,15 +551,30 @@ impl LocalCapsuleRepository {
                 status: claimed.status,
             });
         }
+        let supplied_head_is_in_claimed_history = if run.record_seq == claimed_at_start.record_seq {
+            run.head == claimed_at_start.head
+        } else if run.record_seq == claimed.record_seq {
+            run.head == claimed.head
+        } else if run.record_seq < claimed.record_seq {
+            self.records_for_stream(&run.branch, None)?
+                .iter()
+                .find(|record| record.id.seq == run.record_seq)
+                .is_some_and(|record| record.head_after == run.head)
+        } else {
+            false
+        };
         if run.token != token
             || run.status != "active"
+            || run.branch != claimed.branch
             || run.branch_base != claimed.branch_base
-            || run.head != claimed.head
-            || run.record_seq != claimed.record_seq
+            || !supplied_head_is_in_claimed_history
         {
             return Err(RepositoryError::InvalidRunStatus(run.status.clone()));
         }
-        let bytes = serde_jcs::to_vec(&ActiveRunWire::from(run))?;
+        let mut activated = run.clone();
+        activated.head = claimed.head;
+        activated.record_seq = claimed.record_seq;
+        let bytes = serde_jcs::to_vec(&ActiveRunWire::from(&activated))?;
         atomic_write(&self.root.join("runs/active.json"), &bytes)
     }
 
@@ -1021,5 +1048,51 @@ mod tests {
         let recovered = repository.active_run().unwrap().unwrap();
         assert_eq!(recovered.head, c1);
         assert_eq!(recovered.record_seq, 1);
+    }
+
+    #[test]
+    fn activation_catches_up_observations_recorded_while_starting() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = LocalCapsuleRepository::open(directory.path()).unwrap();
+        let c0 = reference("a");
+        let c1 = reference("b");
+        repository.create_branch("main", &c0, None).unwrap();
+        repository
+            .claim_active_run(&ActiveRun {
+                token: "test-token".to_owned(),
+                branch: "main".to_owned(),
+                branch_base: c0.clone(),
+                head: c0.clone(),
+                record_seq: 0,
+                pid: 0,
+                process_start_time: String::new(),
+                process_group: 0,
+                boot_session: String::new(),
+                status: "starting".to_owned(),
+            })
+            .unwrap();
+        let activation = ActiveRun {
+            token: "test-token".to_owned(),
+            branch: "main".to_owned(),
+            branch_base: c0.clone(),
+            head: c0.clone(),
+            record_seq: 0,
+            pid: 42,
+            process_start_time: "start".to_owned(),
+            process_group: 42,
+            boot_session: "boot".to_owned(),
+            status: "active".to_owned(),
+        };
+        repository
+            .append_record(evidence("main", &c0, &c1))
+            .unwrap();
+
+        repository.activate_run("test-token", &activation).unwrap();
+
+        let active = repository.active_run().unwrap().unwrap();
+        assert_eq!(active.status, "active");
+        assert_eq!(active.head, c1);
+        assert_eq!(active.record_seq, 1);
+        assert_eq!(active.pid, 42);
     }
 }
