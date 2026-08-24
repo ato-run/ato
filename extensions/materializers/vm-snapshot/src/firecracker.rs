@@ -132,6 +132,21 @@ pub struct FreshFirecrackerRealization {
 
 #[cfg(target_os = "linux")]
 impl FreshFirecrackerRealization {
+    /// Physical process identifier exposed for operational receipts only.
+    pub fn process_id(&self) -> Option<u32> {
+        self.child.as_ref().map(Child::id)
+    }
+
+    /// Per-realization resource root exposed for cleanup verification only.
+    pub fn session_root(&self) -> &Path {
+        self.session.path()
+    }
+
+    /// Isolated physical network namespace used by this realization.
+    pub fn network_namespace(&self) -> &str {
+        &self.netns_name
+    }
+
     pub fn boot(
         target: ato_computation::ComputationRef,
         realization_id: String,
