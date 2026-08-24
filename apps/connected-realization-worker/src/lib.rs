@@ -261,9 +261,10 @@ struct RunControlClaims {
     session_id: String,
     run_id: String,
     lease_id: String,
+    runner_id: String,
     protocol: String,
     port: String,
-    exp: i64,
+    expires_at: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -311,15 +312,16 @@ impl RunControlServer {
         ingress: Arc<I>,
         run_id: String,
         lease_id: String,
+        runner_id: String,
         capability: BrowserControlCapability,
-        signing_secret: String,
+        verification_key: String,
     ) -> Result<Self>
     where
         I: BrowserControlIngress + 'static,
     {
         ensure!(
-            signing_secret.len() >= 32,
-            "Run control signing secret is too short"
+            verification_key.len() >= 32,
+            "Run control verification key is too short"
         );
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
         listener.set_nonblocking(true)?;
@@ -334,16 +336,18 @@ impl RunControlServer {
                         let ingress = Arc::clone(&ingress);
                         let run_id = run_id.clone();
                         let lease_id = lease_id.clone();
+                        let runner_id = runner_id.clone();
                         let capability = capability.clone();
-                        let signing_secret = signing_secret.clone();
+                        let verification_key = verification_key.clone();
                         thread::spawn(move || {
                             let _ = serve_run_control_connection(
                                 stream,
                                 ingress,
                                 &run_id,
                                 &lease_id,
+                                &runner_id,
                                 &capability,
-                                &signing_secret,
+                                &verification_key,
                             );
                         });
                     }
@@ -382,16 +386,18 @@ fn serve_run_control_connection(
     ingress: Arc<dyn BrowserControlIngress>,
     run_id: &str,
     lease_id: &str,
+    runner_id: &str,
     capability: &BrowserControlCapability,
-    signing_secret: &str,
+    verification_key: &str,
 ) -> Result<()> {
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(15)))?;
     stream.set_write_timeout(Some(Duration::from_secs(15)))?;
     let expected_run = run_id.to_owned();
     let expected_lease = lease_id.to_owned();
+    let expected_runner = runner_id.to_owned();
     let expected_capability = capability.clone();
-    let signing_secret = signing_secret.to_owned();
+    let verification_key = verification_key.to_owned();
     let mut socket = accept_hdr(
         stream,
         move |request: &WebSocketRequest, mut response: WebSocketResponse| {
@@ -407,10 +413,11 @@ fn serve_run_control_connection(
             let accepted = credential
                 .and_then(|credential| {
                     verify_run_control_credential(
-                        &signing_secret,
+                        &verification_key,
                         credential,
                         &expected_run,
                         &expected_lease,
+                        &expected_runner,
                         &expected_capability,
                     )
                     .ok()
@@ -536,10 +543,11 @@ fn run_control_credential_from_protocols(protocols: &str) -> Option<&str> {
 }
 
 fn verify_run_control_credential(
-    secret: &str,
+    verification_key: &str,
     credential: &str,
     run_id: &str,
     lease_id: &str,
+    runner_id: &str,
     capability: &BrowserControlCapability,
 ) -> Result<()> {
     let (encoded, signature) = credential
@@ -551,8 +559,8 @@ fn verify_run_control_credential(
     );
     let signature =
         hex::decode(signature).context("Run control credential signature is invalid")?;
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-        .map_err(|_| anyhow::anyhow!("Run control signing secret is invalid"))?;
+    let mut mac = HmacSha256::new_from_slice(verification_key.as_bytes())
+        .map_err(|_| anyhow::anyhow!("Run control verification key is invalid"))?;
     mac.update(encoded.as_bytes());
     mac.verify_slice(&signature)
         .map_err(|_| anyhow::anyhow!("Run control credential signature is invalid"))?;
@@ -563,7 +571,7 @@ fn verify_run_control_credential(
         serde_json::from_slice(&payload).context("Run control credential claims are invalid")?;
     ensure!(claims.v == 1, "Run control credential version is invalid");
     ensure!(
-        claims.exp > OffsetDateTime::now_utc().unix_timestamp(),
+        claims.expires_at > OffsetDateTime::now_utc().unix_timestamp(),
         "Run control credential expired"
     );
     ensure!(
@@ -571,7 +579,7 @@ fn verify_run_control_credential(
         "Run control session id is invalid"
     );
     ensure!(
-        claims.run_id == run_id && claims.lease_id == lease_id,
+        claims.run_id == run_id && claims.lease_id == lease_id && claims.runner_id == runner_id,
         "Run control credential scope mismatch"
     );
     ensure!(
@@ -749,10 +757,11 @@ pub struct WorkerConfig {
     /// Required only by roots that explicitly compose a Browser Computation.
     #[arg(long, env = "ATO_BROWSER_CHROME")]
     pub browser_chrome: Option<PathBuf>,
-    /// HMAC verification key for short-lived API-issued Run-control
-    /// capabilities. It is required only for Browser-aware Hosted Runs.
-    #[arg(long, env = "ATO_RUN_CONTROL_SIGNING_SECRET", hide_env_values = true)]
-    pub run_control_signing_secret: Option<String>,
+    /// Runner-scoped HMAC verification key for short-lived API-issued
+    /// Run-control capabilities. The control-plane root is never installed on
+    /// a Runner. Required only for Browser-aware Hosted Runs.
+    #[arg(long, env = "ATO_RUN_CONTROL_VERIFICATION_KEY", hide_env_values = true)]
+    pub run_control_verification_key: Option<String>,
     #[arg(long)]
     pub once: bool,
 }
@@ -842,7 +851,8 @@ impl ConnectedWorker {
                 Arc::clone(&evolution),
                 self.api.clone(),
                 self.config.browser_chrome.as_deref(),
-                self.config.run_control_signing_secret.as_deref(),
+                self.config.run_control_verification_key.as_deref(),
+                &self.config.runner_id,
                 &format!("http://{}/", self.config.hidden_surface_listen),
             )?;
 
@@ -1084,7 +1094,8 @@ fn start_hosted_browser_runtime(
     evolution: Arc<RunEvolutionAuthority>,
     api: HttpRunnerApi,
     chrome: Option<&Path>,
-    run_control_signing_secret: Option<&str>,
+    run_control_verification_key: Option<&str>,
+    runner_id: &str,
     browser_target_url: &str,
 ) -> Result<Option<HostedBrowserRuntime>> {
     let root = ComputationRef::parse(&graph.report().root_computation_ref)?;
@@ -1094,8 +1105,8 @@ fn start_hosted_browser_runtime(
     let chrome = chrome.context(
         "Browser-aware Hosted Run requires ATO_BROWSER_CHROME to name an absolute Chrome executable",
     )?;
-    let run_control_signing_secret = run_control_signing_secret
-        .context("Browser-aware Hosted Run requires ATO_RUN_CONTROL_SIGNING_SECRET")?;
+    let run_control_verification_key = run_control_verification_key
+        .context("Browser-aware Hosted Run requires ATO_RUN_CONTROL_VERIFICATION_KEY")?;
     let browser_target_url = url::Url::parse(browser_target_url)
         .context("Hosted Browser document endpoint is invalid")?;
     ensure!(
@@ -1197,8 +1208,9 @@ fn start_hosted_browser_runtime(
         Arc::clone(&ingress),
         lease.run_id.clone(),
         lease.id.clone(),
+        runner_id.to_owned(),
         control_capability.clone(),
-        run_control_signing_secret.to_owned(),
+        run_control_verification_key.to_owned(),
     ) {
         Ok(control) => control,
         Err(error) => {
@@ -2062,9 +2074,10 @@ mod tests {
     }
 
     fn control_credential(
-        secret: &str,
+        verification_key: &str,
         run_id: &str,
         lease_id: &str,
+        runner_id: &str,
         capability: &BrowserControlCapability,
     ) -> String {
         let claims = serde_json::json!({
@@ -2072,12 +2085,13 @@ mod tests {
             "session_id": "rcs_test",
             "run_id": run_id,
             "lease_id": lease_id,
+            "runner_id": runner_id,
             "protocol": capability.protocol,
             "port": capability.port,
-            "exp": OffsetDateTime::now_utc().unix_timestamp() + 60,
+            "expires_at": OffsetDateTime::now_utc().unix_timestamp() + 60,
         });
         let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        let mut mac = HmacSha256::new_from_slice(verification_key.as_bytes()).unwrap();
         mac.update(encoded.as_bytes());
         format!("{encoded}.{}", hex::encode(mac.finalize().into_bytes()))
     }
@@ -2102,11 +2116,12 @@ mod tests {
             Arc::clone(&ingress),
             "run_1".to_owned(),
             "lease_1".to_owned(),
+            "runner_1".to_owned(),
             capability.clone(),
             secret.clone(),
         )
         .unwrap();
-        let credential = control_credential(&secret, "run_1", "lease_1", &capability);
+        let credential = control_credential(&secret, "run_1", "lease_1", "runner_1", &capability);
         let mut request = format!("ws://{}/{}", control.address(), &RUN_CONTROL_PATH[1..])
             .into_client_request()
             .unwrap();
@@ -2146,6 +2161,33 @@ mod tests {
         assert_eq!(submitted.lock().unwrap().len(), 1);
         drop(socket);
         drop(control);
+    }
+
+    #[test]
+    fn control_credential_is_rejected_by_a_different_runner() {
+        let capability = BrowserControlCapability {
+            protocol: BROWSER_PROTOCOL_ID.to_owned(),
+            port: "browser".to_owned(),
+        };
+        let verification_key = "v".repeat(32);
+        let credential = control_credential(
+            &verification_key,
+            "run_1",
+            "lease_1",
+            "runner_a",
+            &capability,
+        );
+        assert!(
+            verify_run_control_credential(
+                &verification_key,
+                &credential,
+                "run_1",
+                "lease_1",
+                "runner_b",
+                &capability,
+            )
+            .is_err()
+        );
     }
 
     fn browser_authority() -> Arc<RunEvolutionAuthority> {
@@ -2401,7 +2443,7 @@ mod tests {
             tap_host_cidr: "172.16.0.1/24".to_owned(),
             slot_id: "0".to_owned(),
             browser_chrome: None,
-            run_control_signing_secret: None,
+            run_control_verification_key: None,
             once: true,
         };
         assert!(validate_config(&config).is_err());
@@ -2429,7 +2471,7 @@ mod tests {
             tap_host_cidr: "172.30.0.1/24".to_owned(),
             slot_id: "0".to_owned(),
             browser_chrome: None,
-            run_control_signing_secret: None,
+            run_control_verification_key: None,
             once: true,
         };
         resolve_runner_credentials(&mut config).unwrap();
@@ -2479,7 +2521,7 @@ mod tests {
             tap_host_cidr: "172.30.0.1/24".to_owned(),
             slot_id: "0".to_owned(),
             browser_chrome: None,
-            run_control_signing_secret: None,
+            run_control_verification_key: None,
             once: true,
         };
         assert_eq!(ready_local_port(&config), 8420);
