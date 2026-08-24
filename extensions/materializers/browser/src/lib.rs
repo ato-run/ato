@@ -214,7 +214,7 @@ mod tests {
             }],
         };
         let state_ref = store_state(&state, &objects).unwrap();
-        let target = ComputationRef::parse(&format!("blake3:{}", "11".repeat(32))).unwrap();
+        let target = ComputationRef::parse(format!("blake3:{}", "11".repeat(32))).unwrap();
         let descriptor_ref = store_descriptor(&target, &state_ref, &objects).unwrap();
         assert_eq!(load_state(&state_ref, &objects).unwrap(), state);
         let descriptor = load_descriptor(&descriptor_ref, &objects).unwrap();
