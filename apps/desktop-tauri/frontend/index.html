@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ato</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Ato</h1>
+
+      <section class="field">
+        <label for="project">Project / Capsule</label>
+        <div class="row">
+          <input id="project" type="text" placeholder="/path/to/project" />
+          <button id="browse">Browse</button>
+        </div>
+      </section>
+
+      <section class="actions">
+        <button id="init">Init</button>
+        <button id="resume">Resume</button>
+        <button id="stop">Stop</button>
+        <button id="encap">Encap</button>
+        <button id="run">Run .capsule</button>
+        <button id="cancel" disabled>Cancel Run</button>
+      </section>
+
+      <section class="status">
+        <h2>Status</h2>
+        <pre id="status">inactive</pre>
+        <button id="open-surface" disabled>Open Web Surface</button>
+      </section>
+
+      <section class="output">
+        <h2>Output / Error</h2>
+        <pre id="output"></pre>
+      </section>
+
+      <footer id="shell-info"></footer>
+    </main>
+
+    <script src="main.js"></script>
+  </body>
+</html>
