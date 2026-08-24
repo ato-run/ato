@@ -68,9 +68,10 @@ use clap::{Args, Parser, Subcommand};
 use crate::authoring::{
     evolve_workspace, initial_computation, load_config, load_runtime_state, workspace_policy,
 };
-use crate::object_transport::{
-    ExportedPort, HttpObjectTransportApi, ObjectGraphIndexV1, RequiredBinding, UploadConfig,
-    VisibilityPolicy, upload_http_object_graph,
+pub use crate::object_transport::{
+    ExportedPort, HttpObjectTransportApi, ObjectGraphIndexV1, ObjectUploadReceipt, RequiredBinding,
+    UploadConfig, VisibilityPolicy, upload_http_object_graph,
+    upload_staging_negative_test_object_graph, vm_capture_receipt_refs,
 };
 use crate::supervisor::{
     CliRealizationDriver, preflight_actuator_provider_registry, start_durable, stop_active,
