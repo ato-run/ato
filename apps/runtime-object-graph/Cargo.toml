@@ -6,6 +6,9 @@ description = "Shared runtime object graph download and independent validation"
 license = "Apache-2.0 OR MPL-2.0"
 repository = "https://github.com/ato-run/ato"
 
+[package.metadata.dist]
+dist = false
+
 [package.metadata.ato-architecture]
 layer = "app"
 
