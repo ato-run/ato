@@ -28,6 +28,19 @@ const PROFILE_NAME: &str = "browser-profile";
 const DEVTOOLS_ACTIVE_PORT: &str = "DevToolsActivePort";
 const BRIDGE_SOURCE: &str = include_str!("../../adapters/browser/bridge/browser-bridge.js");
 
+const MAX_LOCAL_STORAGE_ITEMS: usize = 4096;
+const MAX_LOCAL_STORAGE_KEY_BYTES: usize = 16 * 1024;
+const MAX_LOCAL_STORAGE_VALUE_BYTES: usize = 1024 * 1024;
+const MAX_LOCAL_STORAGE_TOTAL_BYTES: usize = 8 * 1024 * 1024;
+
+/// Origin-scoped physical Browser state. It is never a Computation residual.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalStorageEntry {
+    pub key: String,
+    pub value: String,
+}
+
 /// Physical configuration only. None of these values participate in a
 /// Computation identity.
 #[derive(Debug, Clone)]
@@ -46,6 +59,7 @@ pub struct BrowserHost {
     profile: PathBuf,
     cdp: Cdp,
     session_id: String,
+    origin: String,
     stopped: bool,
 }
 
@@ -83,6 +97,9 @@ impl BrowserHost {
                     profile,
                     cdp,
                     session_id,
+                    origin: Url::parse(&config.target_url)?
+                        .origin()
+                        .ascii_serialization(),
                     stopped: false,
                 })
             }
@@ -113,6 +130,85 @@ impl BrowserHost {
         )
     }
 
+    /// Captures only the active target's origin-scoped localStorage through
+    /// CDP's DOMStorage domain. Cookies, sessionStorage, IndexedDB, console,
+    /// DOM projections, and arbitrary page evaluation are deliberately absent.
+    pub fn capture_local_storage(&mut self) -> Result<Vec<LocalStorageEntry>> {
+        let value = self.cdp.call(
+            "DOMStorage.getDOMStorageItems",
+            json!({"storageId":{"securityOrigin":self.origin,"isLocalStorage":true}}),
+            None,
+        )?;
+        let entries = value
+            .get("entries")
+            .and_then(Value::as_array)
+            .context("CDP localStorage response lacks entries")?;
+        ensure!(
+            entries.len() <= MAX_LOCAL_STORAGE_ITEMS,
+            "Browser localStorage item count exceeds bound"
+        );
+        let mut total = 0usize;
+        let mut output = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let pair = entry
+                .as_array()
+                .context("CDP localStorage entry is invalid")?;
+            let [key, value] = pair.as_slice() else {
+                bail!("CDP localStorage entry is invalid");
+            };
+            let key = key.as_str().context("CDP localStorage key is not text")?;
+            let value = value
+                .as_str()
+                .context("CDP localStorage value is not text")?;
+            ensure!(
+                key.len() <= MAX_LOCAL_STORAGE_KEY_BYTES,
+                "Browser localStorage key exceeds bound"
+            );
+            ensure!(
+                value.len() <= MAX_LOCAL_STORAGE_VALUE_BYTES,
+                "Browser localStorage value exceeds bound"
+            );
+            total = total
+                .checked_add(key.len() + value.len())
+                .context("Browser localStorage size overflow")?;
+            ensure!(
+                total <= MAX_LOCAL_STORAGE_TOTAL_BYTES,
+                "Browser localStorage total exceeds bound"
+            );
+            output.push(LocalStorageEntry {
+                key: key.to_owned(),
+                value: value.to_owned(),
+            });
+        }
+        output.sort_by(|left, right| left.key.cmp(&right.key));
+        ensure!(
+            output.windows(2).all(|pair| pair[0].key != pair[1].key),
+            "CDP localStorage contains duplicate keys"
+        );
+        Ok(output)
+    }
+
+    /// Restores bounded localStorage to the already-established exact origin,
+    /// then reloads the document so the application performs its normal
+    /// bootstrap. The caller owns the fresh-profile lifecycle.
+    pub fn restore_local_storage(&mut self, entries: &[LocalStorageEntry]) -> Result<()> {
+        validate_local_storage(entries)?;
+        self.cdp.call(
+            "DOMStorage.clear",
+            json!({"storageId":{"securityOrigin":self.origin,"isLocalStorage":true}}),
+            None,
+        )?;
+        for entry in entries {
+            self.cdp.call("DOMStorage.setDOMStorageItem", json!({"storageId":{"securityOrigin":self.origin,"isLocalStorage":true},"key":entry.key,"value":entry.value}), None)?;
+        }
+        self.cdp.call(
+            "Page.reload",
+            json!({"ignoreCache":true}),
+            Some(&self.session_id),
+        )?;
+        wait_for_document_ready(&mut self.cdp, &self.session_id)
+    }
+
     /// Stops the process before removing its profile. The explicit ordering is
     /// part of the hosted Run cleanup contract.
     pub fn stop(mut self) -> Result<()> {
@@ -131,6 +227,40 @@ impl BrowserHost {
         self.stopped = true;
         Ok(())
     }
+}
+
+fn validate_local_storage(entries: &[LocalStorageEntry]) -> Result<()> {
+    ensure!(
+        entries.len() <= MAX_LOCAL_STORAGE_ITEMS,
+        "Browser localStorage item count exceeds bound"
+    );
+    let mut previous = None;
+    let mut total = 0usize;
+    for entry in entries {
+        ensure!(
+            entry.key.len() <= MAX_LOCAL_STORAGE_KEY_BYTES,
+            "Browser localStorage key exceeds bound"
+        );
+        ensure!(
+            entry.value.len() <= MAX_LOCAL_STORAGE_VALUE_BYTES,
+            "Browser localStorage value exceeds bound"
+        );
+        if let Some(previous) = previous {
+            ensure!(
+                previous < entry.key.as_str(),
+                "Browser localStorage entries must be sorted and unique"
+            );
+        }
+        previous = Some(entry.key.as_str());
+        total = total
+            .checked_add(entry.key.len() + entry.value.len())
+            .context("Browser localStorage size overflow")?;
+        ensure!(
+            total <= MAX_LOCAL_STORAGE_TOTAL_BYTES,
+            "Browser localStorage total exceeds bound"
+        );
+    }
+    Ok(())
 }
 
 impl Drop for BrowserHost {
