@@ -9,8 +9,8 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::io;
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::io::{self, Read, Write};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -59,11 +59,18 @@ use ato_runtime_object_graph::{
     GraphDownloadExpectation, ObjectGraphIndexV1, RuntimeGraphSource, ValidatedRuntimeGraph,
     download_and_validate_graph,
 };
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use clap::Parser;
+use hmac::{Hmac, Mac};
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use tungstenite::handshake::server::{
+    ErrorResponse, Request as WebSocketRequest, Response as WebSocketResponse,
+};
+use tungstenite::{Message, accept_hdr};
 
 const PORTABLE_CAPSULE_LEASE_KIND: &str = "portable_capsule_v2";
 const RUNNER_CAPABILITIES: &[&str] = &[
@@ -75,6 +82,10 @@ const RUNNER_CAPABILITIES: &[&str] = &[
 const ACTIVE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const GUEST_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const GUEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const RUN_CONTROL_PATH: &str = "/.well-known/ato/control";
+const RUN_CONTROL_MAX_FRAME_BYTES: usize = 32 * 1024;
+const RUN_CONTROL_REQUEST_HEADER_MAX_BYTES: usize = 16 * 1024;
+type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Debug, Clone)]
 struct HostedBrowserBinding {
@@ -211,8 +222,376 @@ type HostedBrowserIngress = BrowserOperationIngress<
     RunnerBrowserRecordSubmission,
 >;
 
+/// Object-safe control boundary used by the generic WebSocket server. The
+/// concrete BrowserOperationIngress remains the sole authority owner; this
+/// trait prevents the listener from depending on its Adapter/Persistence types.
+trait BrowserControlIngress: Send + Sync {
+    fn accept_control_operation(
+        &self,
+        operation_id: String,
+        event: ato_adapter_browser::BrowserEvent,
+    ) -> std::result::Result<ato_kernel::AcceptedOperation, ato_kernel::EvolutionError>;
+}
+
+impl<A, P, R> BrowserControlIngress for BrowserOperationIngress<A, P, R>
+where
+    A: BrowserOperationActuator + Send,
+    P: BrowserHeadPersistence + Send + Sync,
+    R: BrowserRecordSubmission + Send + Sync,
+{
+    fn accept_control_operation(
+        &self,
+        operation_id: String,
+        event: ato_adapter_browser::BrowserEvent,
+    ) -> std::result::Result<ato_kernel::AcceptedOperation, ato_kernel::EvolutionError> {
+        self.accept_with_operation_id(operation_id, event)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct BrowserControlCapability {
+    protocol: String,
+    port: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunControlClaims {
+    v: u8,
+    session_id: String,
+    run_id: String,
+    lease_id: String,
+    protocol: String,
+    port: String,
+    exp: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunControlRequest {
+    operation_id: String,
+    client_seq: u64,
+    protocol: String,
+    operation: String,
+    port: String,
+    /// Canonical `ato.browser@1` JSON. Keeping the operation payload as its
+    /// protocol encoding avoids a second, control-product schema.
+    payload: String,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum RunControlResponse {
+    Applied {
+        operation_id: String,
+        client_seq: u64,
+        run_seq: u64,
+        head_after: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        record_error: Option<String>,
+    },
+    Rejected {
+        operation_id: String,
+        client_seq: u64,
+        reason: String,
+    },
+}
+
+/// Loopback-only generic Run-control listener. The public surface mux routes
+/// only `RUN_CONTROL_PATH` here; it has no Activity/Product vocabulary and it
+/// never persists raw input events.
+struct RunControlServer {
+    address: SocketAddr,
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl RunControlServer {
+    fn start<I>(
+        ingress: Arc<I>,
+        run_id: String,
+        lease_id: String,
+        capability: BrowserControlCapability,
+        signing_secret: String,
+    ) -> Result<Self>
+    where
+        I: BrowserControlIngress + 'static,
+    {
+        ensure!(
+            signing_secret.len() >= 32,
+            "Run control signing secret is too short"
+        );
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        listener.set_nonblocking(true)?;
+        let address = listener.local_addr()?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let ingress: Arc<dyn BrowserControlIngress> = ingress;
+        let thread_stop = Arc::clone(&stop);
+        let worker = thread::spawn(move || {
+            while !thread_stop.load(Ordering::Acquire) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let ingress = Arc::clone(&ingress);
+                        let run_id = run_id.clone();
+                        let lease_id = lease_id.clone();
+                        let capability = capability.clone();
+                        let signing_secret = signing_secret.clone();
+                        thread::spawn(move || {
+                            let _ = serve_run_control_connection(
+                                stream,
+                                ingress,
+                                &run_id,
+                                &lease_id,
+                                &capability,
+                                &signing_secret,
+                            );
+                        });
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Ok(Self {
+            address,
+            stop,
+            worker: Some(worker),
+        })
+    }
+
+    fn address(&self) -> SocketAddr {
+        self.address
+    }
+}
+
+impl Drop for RunControlServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+// tungstenite fixes the HTTP rejection response type in its handshake callback.
+#[allow(clippy::result_large_err)]
+fn serve_run_control_connection(
+    stream: TcpStream,
+    ingress: Arc<dyn BrowserControlIngress>,
+    run_id: &str,
+    lease_id: &str,
+    capability: &BrowserControlCapability,
+    signing_secret: &str,
+) -> Result<()> {
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(Duration::from_secs(15)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(15)))?;
+    let expected_run = run_id.to_owned();
+    let expected_lease = lease_id.to_owned();
+    let expected_capability = capability.clone();
+    let signing_secret = signing_secret.to_owned();
+    let mut socket = accept_hdr(
+        stream,
+        move |request: &WebSocketRequest, mut response: WebSocketResponse| {
+            let requested_protocol = request
+                .headers()
+                .get("sec-websocket-protocol")
+                .and_then(|value| value.to_str().ok());
+            let credential = request
+                .headers()
+                .get("sec-websocket-protocol")
+                .and_then(|value| value.to_str().ok())
+                .and_then(run_control_credential_from_protocols);
+            let accepted = credential
+                .and_then(|credential| {
+                    verify_run_control_credential(
+                        &signing_secret,
+                        credential,
+                        &expected_run,
+                        &expected_lease,
+                        &expected_capability,
+                    )
+                    .ok()
+                })
+                .is_some();
+            if request.uri().path() != RUN_CONTROL_PATH || !accepted {
+                return Err(run_control_forbidden());
+            }
+            if let Some(protocol) = requested_protocol.and_then(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .find(|value| value.starts_with("ato-control."))
+            }) {
+                response.headers_mut().insert(
+                    "sec-websocket-protocol",
+                    protocol
+                        .parse()
+                        .expect("validated control subprotocol is a header value"),
+                );
+            }
+            Ok(response)
+        },
+    )
+    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    loop {
+        let message = match socket.read() {
+            Ok(message) => message,
+            Err(
+                tungstenite::Error::ConnectionClosed
+                | tungstenite::Error::AlreadyClosed
+                | tungstenite::Error::Protocol(
+                    tungstenite::error::ProtocolError::ResetWithoutClosingHandshake,
+                ),
+            ) => break,
+            Err(error) => return Err(anyhow::anyhow!(error.to_string())),
+        };
+        match message {
+            Message::Text(text) => {
+                if text.len() > RUN_CONTROL_MAX_FRAME_BYTES {
+                    socket.send(Message::Close(None))?;
+                    break;
+                }
+                let request = serde_json::from_str::<RunControlRequest>(&text);
+                let response = match request {
+                    Ok(request) => {
+                        handle_run_control_request(ingress.as_ref(), capability, &request)
+                    }
+                    Err(_) => RunControlResponse::Rejected {
+                        operation_id: String::new(),
+                        client_seq: 0,
+                        reason: "invalid_operation".to_owned(),
+                    },
+                };
+                socket.send(Message::Text(serde_json::to_string(&response)?.into()))?;
+            }
+            Message::Ping(payload) => socket.send(Message::Pong(payload))?,
+            Message::Close(_) => break,
+            Message::Binary(_) => socket.send(Message::Close(None))?,
+            Message::Pong(_) | Message::Frame(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn handle_run_control_request(
+    ingress: &dyn BrowserControlIngress,
+    capability: &BrowserControlCapability,
+    request: &RunControlRequest,
+) -> RunControlResponse {
+    if request.protocol != capability.protocol || request.port != capability.port {
+        return RunControlResponse::Rejected {
+            operation_id: request.operation_id.clone(),
+            client_seq: request.client_seq,
+            reason: "protocol_or_port_forbidden".to_owned(),
+        };
+    }
+    if request.payload.len() > RUN_CONTROL_MAX_FRAME_BYTES {
+        return RunControlResponse::Rejected {
+            operation_id: request.operation_id.clone(),
+            client_seq: request.client_seq,
+            reason: "payload_too_large".to_owned(),
+        };
+    }
+    let event = match ato_adapter_browser::decode_event(request.payload.as_bytes()) {
+        Ok(event) => event,
+        Err(_) => {
+            return RunControlResponse::Rejected {
+                operation_id: request.operation_id.clone(),
+                client_seq: request.client_seq,
+                reason: "invalid_payload".to_owned(),
+            };
+        }
+    };
+    if request.operation != ato_adapter_browser::operation_for_event(&event) {
+        return RunControlResponse::Rejected {
+            operation_id: request.operation_id.clone(),
+            client_seq: request.client_seq,
+            reason: "operation_mismatch".to_owned(),
+        };
+    }
+    match ingress.accept_control_operation(request.operation_id.clone(), event) {
+        Ok(accepted) => RunControlResponse::Applied {
+            operation_id: request.operation_id.clone(),
+            client_seq: request.client_seq,
+            run_seq: accepted.run_seq,
+            head_after: accepted.transition.to.to_string(),
+            record_error: accepted.record_error,
+        },
+        Err(_) => RunControlResponse::Rejected {
+            operation_id: request.operation_id.clone(),
+            client_seq: request.client_seq,
+            reason: "operation_rejected".to_owned(),
+        },
+    }
+}
+
+fn run_control_credential_from_protocols(protocols: &str) -> Option<&str> {
+    protocols
+        .split(',')
+        .map(str::trim)
+        .find_map(|value| value.strip_prefix("ato-control."))
+}
+
+fn verify_run_control_credential(
+    secret: &str,
+    credential: &str,
+    run_id: &str,
+    lease_id: &str,
+    capability: &BrowserControlCapability,
+) -> Result<()> {
+    let (encoded, signature) = credential
+        .split_once('.')
+        .context("Run control credential format is invalid")?;
+    ensure!(
+        !signature.contains('.'),
+        "Run control credential format is invalid"
+    );
+    let signature =
+        hex::decode(signature).context("Run control credential signature is invalid")?;
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+        .map_err(|_| anyhow::anyhow!("Run control signing secret is invalid"))?;
+    mac.update(encoded.as_bytes());
+    mac.verify_slice(&signature)
+        .map_err(|_| anyhow::anyhow!("Run control credential signature is invalid"))?;
+    let payload = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .context("Run control credential payload is invalid")?;
+    let claims: RunControlClaims =
+        serde_json::from_slice(&payload).context("Run control credential claims are invalid")?;
+    ensure!(claims.v == 1, "Run control credential version is invalid");
+    ensure!(
+        claims.exp > OffsetDateTime::now_utc().unix_timestamp(),
+        "Run control credential expired"
+    );
+    ensure!(
+        claims.session_id.starts_with("rcs_"),
+        "Run control session id is invalid"
+    );
+    ensure!(
+        claims.run_id == run_id && claims.lease_id == lease_id,
+        "Run control credential scope mismatch"
+    );
+    ensure!(
+        claims.protocol == capability.protocol && claims.port == capability.port,
+        "Run control credential capability mismatch"
+    );
+    Ok(())
+}
+
+fn run_control_forbidden() -> ErrorResponse {
+    tungstenite::http::Response::builder()
+        .status(tungstenite::http::StatusCode::FORBIDDEN)
+        .body(Some("Run control authorization failed".to_owned()))
+        .expect("static Run control rejection is valid")
+}
+
 struct HostedBrowserRuntime {
     ingress: Arc<HostedBrowserIngress>,
+    control: Option<RunControlServer>,
+    control_capability: BrowserControlCapability,
     adapter: Option<Arc<Mutex<Box<dyn AttachedAdapter>>>>,
     host: Option<BrowserHost>,
     pipeline: Option<ato_record_writer::RecordPipeline>,
@@ -221,6 +600,17 @@ struct HostedBrowserRuntime {
 }
 
 impl HostedBrowserRuntime {
+    fn control_capability(&self) -> BrowserControlCapability {
+        self.control_capability.clone()
+    }
+
+    fn control_address(&self) -> SocketAddr {
+        self.control
+            .as_ref()
+            .expect("Browser runtime always owns its control listener")
+            .address()
+    }
+
     /// Future capture coordination freezes this logical gate before it asks
     /// the Browser Host to quiesce. No physical Browser state is captured in
     /// P0-B.
@@ -237,6 +627,7 @@ impl HostedBrowserRuntime {
     }
 
     fn cleanup(&mut self) -> Result<()> {
+        self.control.take();
         if let Some(adapter) = self.adapter.take() {
             let mut adapter = adapter
                 .lock()
@@ -358,6 +749,10 @@ pub struct WorkerConfig {
     /// Required only by roots that explicitly compose a Browser Computation.
     #[arg(long, env = "ATO_BROWSER_CHROME")]
     pub browser_chrome: Option<PathBuf>,
+    /// HMAC verification key for short-lived API-issued Run-control
+    /// capabilities. It is required only for Browser-aware Hosted Runs.
+    #[arg(long, env = "ATO_RUN_CONTROL_SIGNING_SECRET", hide_env_values = true)]
+    pub run_control_signing_secret: Option<String>,
     #[arg(long)]
     pub once: bool,
 }
@@ -447,14 +842,16 @@ impl ConnectedWorker {
                 Arc::clone(&evolution),
                 self.api.clone(),
                 self.config.browser_chrome.as_deref(),
+                self.config.run_control_signing_secret.as_deref(),
                 &format!("http://{}/", self.config.hidden_surface_listen),
             )?;
 
             // The externally reachable listener does not exist until the VM is
             // active, every Contract passed, and the Realization published.
-            let proxy = TcpProxy::start(
+            let proxy = TcpProxy::start_with_control(
                 self.config.surface_listen,
                 ProxyTarget::Tcp(self.config.hidden_surface_listen),
+                browser.as_ref().map(|runtime| runtime.control_address()),
             )?;
             let execution_id = format!("vm:{}:{}", lease.run_id, lease.id);
             ensure!(
@@ -467,6 +864,7 @@ impl ConnectedWorker {
                 &execution_id,
                 &self.config.public_base_url,
                 ready_local_port(&self.config),
+                browser.as_ref().map(|runtime| runtime.control_capability()),
             )?;
             let mut last_heartbeat = Instant::now();
             loop {
@@ -677,6 +1075,7 @@ fn hosted_record_schema_registry() -> Result<ato_record_writer::RecordSchemaRegi
     Ok(schemas)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start_hosted_browser_runtime(
     graph: &ValidatedRuntimeGraph,
     lease: &ClaimedLease,
@@ -685,6 +1084,7 @@ fn start_hosted_browser_runtime(
     evolution: Arc<RunEvolutionAuthority>,
     api: HttpRunnerApi,
     chrome: Option<&Path>,
+    run_control_signing_secret: Option<&str>,
     browser_target_url: &str,
 ) -> Result<Option<HostedBrowserRuntime>> {
     let root = ComputationRef::parse(&graph.report().root_computation_ref)?;
@@ -694,6 +1094,8 @@ fn start_hosted_browser_runtime(
     let chrome = chrome.context(
         "Browser-aware Hosted Run requires ATO_BROWSER_CHROME to name an absolute Chrome executable",
     )?;
+    let run_control_signing_secret = run_control_signing_secret
+        .context("Browser-aware Hosted Run requires ATO_RUN_CONTROL_SIGNING_SECRET")?;
     let browser_target_url = url::Url::parse(browser_target_url)
         .context("Hosted Browser document endpoint is invalid")?;
     ensure!(
@@ -782,13 +1184,41 @@ fn start_hosted_browser_runtime(
         },
         RunnerBrowserRecordSubmission {
             stylus: pipeline.stylus.clone(),
-            port: binding.port,
+            port: binding.port.clone(),
             stream: format!("browser-{}", lease.id),
             next_local_seq: Arc::new(AtomicU64::new(0)),
         },
     ));
+    let control_capability = BrowserControlCapability {
+        protocol: BROWSER_PROTOCOL_ID.to_owned(),
+        port: binding.port.to_string(),
+    };
+    let control = match RunControlServer::start(
+        Arc::clone(&ingress),
+        lease.run_id.clone(),
+        lease.id.clone(),
+        control_capability.clone(),
+        run_control_signing_secret.to_owned(),
+    ) {
+        Ok(control) => control,
+        Err(error) => {
+            if let Ok(mut adapter) = adapter.lock() {
+                let context = AdapterContext {
+                    workspace,
+                    objects: graph.objects(),
+                };
+                let _ = adapter.detach(&context);
+            }
+            drop(adapter);
+            let _ = host.stop();
+            let _ = pipeline.shutdown();
+            return Err(error);
+        }
+    };
     Ok(Some(HostedBrowserRuntime {
         ingress,
+        control: Some(control),
+        control_capability,
         adapter: Some(adapter),
         host: Some(host),
         pipeline: Some(pipeline),
@@ -1020,6 +1450,21 @@ struct ComputationHeadReport<'a> {
     head_after: &'a str,
 }
 
+#[derive(Serialize)]
+struct BrowserControlReport<'a> {
+    protocol: &'a str,
+    port: &'a str,
+}
+
+#[derive(Serialize)]
+struct ReadyReport<'a> {
+    execution_id: &'a str,
+    ready_url: &'a str,
+    local_port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    control: Option<BrowserControlReport<'a>>,
+}
+
 #[derive(Clone)]
 pub struct HttpRunnerApi {
     client: Client,
@@ -1109,16 +1554,21 @@ impl HttpRunnerApi {
         execution_id: &str,
         ready_url: &str,
         local_port: u16,
+        control: Option<BrowserControlCapability>,
     ) -> Result<()> {
         self.authorized(
             self.client
                 .post(format!("{}/v1/runner-leases/{lease_id}/ready", self.base)),
         )
-        .json(&serde_json::json!({
-            "execution_id": execution_id,
-            "ready_url": ready_url,
-            "local_port": local_port,
-        }))
+        .json(&ReadyReport {
+            execution_id,
+            ready_url,
+            local_port,
+            control: control.as_ref().map(|capability| BrowserControlReport {
+                protocol: &capability.protocol,
+                port: &capability.port,
+            }),
+        })
         .send()?
         .error_for_status()?;
         Ok(())
@@ -1319,6 +1769,17 @@ enum ProxyTarget {
 
 impl TcpProxy {
     fn start(listen: SocketAddr, target: ProxyTarget) -> Result<Self> {
+        Self::start_with_control(listen, target, None)
+    }
+
+    /// The Browser control listener is intentionally not a second public
+    /// socket. A bounded request prelude routes its one exact WebSocket path;
+    /// every other request keeps the existing VM Surface proxy unchanged.
+    fn start_with_control(
+        listen: SocketAddr,
+        target: ProxyTarget,
+        control_target: Option<SocketAddr>,
+    ) -> Result<Self> {
         let listener = TcpListener::bind(listen)?;
         listener.set_nonblocking(true)?;
         let stop = Arc::new(AtomicBool::new(false));
@@ -1328,7 +1789,13 @@ impl TcpProxy {
                 match listener.accept() {
                     Ok((client, _)) => {
                         let target = target.clone();
-                        thread::spawn(move || proxy_connection(client, &target));
+                        thread::spawn(move || {
+                            if let Some(control_target) = control_target {
+                                proxy_surface_or_control(client, &target, control_target);
+                            } else {
+                                proxy_connection(client, &target);
+                            }
+                        });
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(20));
@@ -1354,20 +1821,80 @@ impl Drop for TcpProxy {
 }
 
 fn proxy_connection(mut client: TcpStream, target: &ProxyTarget) {
+    proxy_connection_with_prelude(&mut client, target, &[]);
+}
+
+fn proxy_surface_or_control(
+    mut client: TcpStream,
+    surface_target: &ProxyTarget,
+    control_target: SocketAddr,
+) {
+    let Ok(prelude) = read_http_request_prelude(&mut client) else {
+        return;
+    };
+    let target = if control_request_path(&prelude) == Some(RUN_CONTROL_PATH) {
+        ProxyTarget::Tcp(control_target)
+    } else {
+        surface_target.clone()
+    };
+    proxy_connection_with_prelude(&mut client, &target, &prelude);
+}
+
+fn read_http_request_prelude(client: &mut TcpStream) -> io::Result<Vec<u8>> {
+    client.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let mut bytes = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 1024];
+    while bytes.len() < RUN_CONTROL_REQUEST_HEADER_MAX_BYTES {
+        let read = client.read(&mut chunk)?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "HTTP request ended before headers",
+            ));
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+        if bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+            client.set_read_timeout(None)?;
+            return Ok(bytes);
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "HTTP request headers exceed bound",
+    ))
+}
+
+fn control_request_path(prelude: &[u8]) -> Option<&str> {
+    let headers = std::str::from_utf8(prelude).ok()?;
+    let request = headers.lines().next()?;
+    let mut fields = request.split_whitespace();
+    let method = fields.next()?;
+    let target = fields.next()?;
+    if method != "GET" || !target.starts_with('/') {
+        return None;
+    }
+    Some(target.split('?').next().unwrap_or(target))
+}
+
+fn proxy_connection_with_prelude(client: &mut TcpStream, target: &ProxyTarget, prelude: &[u8]) {
     match target {
         ProxyTarget::Tcp(target) => {
-            let Ok(upstream) = TcpStream::connect(target) else {
+            let Ok(mut upstream) = TcpStream::connect(target) else {
                 return;
             };
-            proxy_tcp_pair(&mut client, upstream);
+            if upstream.write_all(prelude).is_ok() {
+                proxy_tcp_pair(client, upstream);
+            }
         }
         ProxyTarget::Unix(path) => {
             #[cfg(unix)]
             {
-                let Ok(upstream) = UnixStream::connect(path) else {
+                let Ok(mut upstream) = UnixStream::connect(path) else {
                     return;
                 };
-                proxy_tcp_unix_pair(&mut client, upstream);
+                if upstream.write_all(prelude).is_ok() {
+                    proxy_tcp_unix_pair(client, upstream);
+                }
             }
             #[cfg(not(unix))]
             let _ = path;
@@ -1492,6 +2019,7 @@ mod tests {
     use std::io::{Read, Write};
 
     use super::*;
+    use tungstenite::client::IntoClientRequest;
 
     #[derive(Default)]
     struct TestStylus;
@@ -1522,6 +2050,102 @@ mod tests {
             self.0.lock().unwrap().push(operation.clone());
             Ok(())
         }
+    }
+
+    #[derive(Default)]
+    struct TestBrowserActuator;
+
+    impl BrowserOperationActuator for TestBrowserActuator {
+        fn apply(&mut self, _operation: &LiveOperation) -> std::result::Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn control_credential(
+        secret: &str,
+        run_id: &str,
+        lease_id: &str,
+        capability: &BrowserControlCapability,
+    ) -> String {
+        let claims = serde_json::json!({
+            "v": 1,
+            "session_id": "rcs_test",
+            "run_id": run_id,
+            "lease_id": lease_id,
+            "protocol": capability.protocol,
+            "port": capability.port,
+            "exp": OffsetDateTime::now_utc().unix_timestamp() + 60,
+        });
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(encoded.as_bytes());
+        format!("{encoded}.{}", hex::encode(mac.finalize().into_bytes()))
+    }
+
+    #[test]
+    fn control_websocket_is_idempotent_and_routes_only_through_ingress() {
+        let capability = BrowserControlCapability {
+            protocol: BROWSER_PROTOCOL_ID.to_owned(),
+            port: "browser".to_owned(),
+        };
+        let secret = "s".repeat(32);
+        let records = TestRecords::default();
+        let submitted = Arc::clone(&records.0);
+        let ingress = Arc::new(BrowserOperationIngress::new(
+            browser_authority(),
+            PortId::parse("browser").unwrap(),
+            TestBrowserActuator,
+            TestPersistence,
+            records,
+        ));
+        let control = RunControlServer::start(
+            Arc::clone(&ingress),
+            "run_1".to_owned(),
+            "lease_1".to_owned(),
+            capability.clone(),
+            secret.clone(),
+        )
+        .unwrap();
+        let credential = control_credential(&secret, "run_1", "lease_1", &capability);
+        let mut request = format!("ws://{}/{}", control.address(), &RUN_CONTROL_PATH[1..])
+            .into_client_request()
+            .unwrap();
+        request.headers_mut().insert(
+            "sec-websocket-protocol",
+            format!("ato-control.{credential}").parse().unwrap(),
+        );
+        let (mut socket, _) = tungstenite::connect(request).unwrap();
+        let event = ato_adapter_browser::BrowserEvent::Keyboard {
+            kind: ato_adapter_browser::KeyboardKind::KeyDown,
+            code: "ArrowRight".to_owned(),
+            modifiers: ato_adapter_browser::Modifiers::default(),
+        };
+        let request = serde_json::json!({
+            "operation_id": "op_1",
+            "client_seq": 1,
+            "protocol": BROWSER_PROTOCOL_ID,
+            "operation": "keyboard",
+            "port": "browser",
+            "payload": String::from_utf8(ato_adapter_browser::encode_event(&event).unwrap()).unwrap(),
+        });
+        socket
+            .send(Message::Text(request.to_string().into()))
+            .unwrap();
+        let first: serde_json::Value =
+            serde_json::from_str(socket.read().unwrap().into_text().unwrap().as_str()).unwrap();
+        assert_eq!(first["status"], "applied");
+        assert_eq!(first["run_seq"], 1);
+        socket
+            .send(Message::Text(request.to_string().into()))
+            .unwrap();
+        let retry: serde_json::Value =
+            serde_json::from_str(socket.read().unwrap().into_text().unwrap().as_str()).unwrap();
+        assert_eq!(retry["status"], "applied");
+        assert_eq!(retry["run_seq"], 1);
+        assert_eq!(ingress.freeze().unwrap().run_seq, 1);
+        assert_eq!(submitted.lock().unwrap().len(), 1);
+        drop(socket);
+        drop(control);
     }
 
     fn browser_authority() -> Arc<RunEvolutionAuthority> {
@@ -1777,6 +2401,7 @@ mod tests {
             tap_host_cidr: "172.16.0.1/24".to_owned(),
             slot_id: "0".to_owned(),
             browser_chrome: None,
+            run_control_signing_secret: None,
             once: true,
         };
         assert!(validate_config(&config).is_err());
@@ -1804,6 +2429,7 @@ mod tests {
             tap_host_cidr: "172.30.0.1/24".to_owned(),
             slot_id: "0".to_owned(),
             browser_chrome: None,
+            run_control_signing_secret: None,
             once: true,
         };
         resolve_runner_credentials(&mut config).unwrap();
@@ -1853,6 +2479,7 @@ mod tests {
             tap_host_cidr: "172.30.0.1/24".to_owned(),
             slot_id: "0".to_owned(),
             browser_chrome: None,
+            run_control_signing_secret: None,
             once: true,
         };
         assert_eq!(ready_local_port(&config), 8420);
