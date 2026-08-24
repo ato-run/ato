@@ -17,10 +17,15 @@ layer = "app"
 name = "ato-firecracker-guest-image"
 path = "src/bin/ato-firecracker-guest-image.rs"
 
+[[bin]]
+name = "ato-firecracker-smoke"
+path = "src/bin/ato-firecracker-smoke.rs"
+
 [dependencies]
 anyhow = "1"
 ato-adapter-workspace = { path = "../../extensions/adapters/workspace", version = "0.1.0" }
 ato-computation = { path = "../../lib/computation", version = "0.1.0" }
+ato-materializer-vm-snapshot = { path = "../../extensions/materializers/vm-snapshot", version = "0.1.0" }
 ato-objects = { path = "../../lib/objects", version = "0.1.0" }
 ato-runtime-object-graph = { path = "../runtime-object-graph", version = "0.1.0" }
 blake3 = "1"
