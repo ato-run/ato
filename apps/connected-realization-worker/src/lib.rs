@@ -7,6 +7,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -14,7 +15,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -23,25 +24,34 @@ use ato_adapter_api::{ActuatorProviderRegistry, AdapterRegistry, WorkspaceCaptur
 use ato_computation::{ComputationRef, ContentRef};
 use ato_contracts::{HttpEndpointVerifier, WorkspaceContentVerifier};
 use ato_materializer_api::{
-    AcceptedRealization, ContractContext, ContractVerifierRegistry, MaterializerContext,
-    MaterializerError, MaterializerRegistry, Realization, accept_candidate,
+    AcceptedRealization, ContractContext, ContractVerifierRegistry, Materializer,
+    MaterializerContext, MaterializerError, MaterializerRegistry, Realization, RunnerCapabilities,
+    accept_candidate,
 };
 use ato_materializer_vm_snapshot::{
     ActiveFirecrackerRealization, FirecrackerActiveVmCaptureSource, FirecrackerBackend,
-    FirecrackerBackendConfig, FirecrackerRecordCaptureBarrier, FirecrackerRecordCaptureLease,
-    FirecrackerSurfaceRelayConfig, VM_SNAPSHOT_MATERIALIZER_ID, VmSnapshotError,
-    VmSnapshotMaterializer,
+    FirecrackerBackendConfig, FirecrackerIngressGate, FirecrackerRecordCaptureBarrier,
+    FirecrackerRecordCaptureLease, FirecrackerSurfaceRelayConfig, VM_SNAPSHOT_MATERIALIZER_ID,
+    VmSnapshotError, VmSnapshotMaterializer, load_descriptor,
+};
+use ato_objects::{
+    GraphMaterialization, GraphRestoreCapability, ObjectResolver, ObjectStore, read_exact_object,
 };
 use ato_planner::{
     MaterializationCandidate, Placement, PlannerPolicy, RealizationPlanner, TargetEnvironment,
     TrustBoundary,
 };
+use ato_record_writer::{
+    AsyncRecordStylus, RecordPipeline, RecordSchemaRegistry, RecordWriterConfig,
+};
 use ato_runtime_object_graph::{
     GraphDownloadExpectation, ObjectGraphIndexV1, RuntimeGraphSource, ValidatedRuntimeGraph,
-    download_and_validate_graph,
+    VisibilityPolicy, build_runtime_object_graph_index, download_and_validate_graph,
+    standard_reference_registry, vm_capture_refs,
 };
 use clap::Parser;
 use reqwest::blocking::{Client, RequestBuilder, Response};
+use reqwest::header::{HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -57,8 +67,45 @@ const ACTIVE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const GUEST_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const GUEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
+#[derive(Default)]
+struct IngressState {
+    frozen: AtomicBool,
+    active_connections: AtomicUsize,
+}
+
+#[derive(Clone)]
+struct WorkerIngressGate {
+    state: Arc<IngressState>,
+}
+
+impl FirecrackerIngressGate for WorkerIngressGate {
+    fn freeze(&mut self) -> std::result::Result<(), VmSnapshotError> {
+        self.state.frozen.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    fn quiesce(&mut self) -> std::result::Result<(), VmSnapshotError> {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while self.state.active_connections.load(Ordering::Acquire) > 0 {
+            if Instant::now() >= deadline {
+                return Err(VmSnapshotError::Backend(
+                    "interaction ingress did not quiesce before capture".to_owned(),
+                ));
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        Ok(())
+    }
+
+    fn unfreeze(&mut self) -> std::result::Result<(), VmSnapshotError> {
+        self.state.frozen.store(false, Ordering::Release);
+        Ok(())
+    }
+}
+
 struct WorkerRecordCaptureBarrier {
     inner: ato_record_writer::CaptureBarrier,
+    calls: Arc<AtomicUsize>,
 }
 
 struct WorkerRecordCaptureLease {
@@ -76,6 +123,7 @@ impl FirecrackerRecordCaptureBarrier for WorkerRecordCaptureBarrier {
     fn pause_and_seal(
         &self,
     ) -> std::result::Result<Box<dyn FirecrackerRecordCaptureLease>, VmSnapshotError> {
+        self.calls.fetch_add(1, Ordering::AcqRel);
         let paused = self
             .inner
             .pause_and_seal()
@@ -96,7 +144,10 @@ pub fn capture_capable_firecracker_backend(
     barrier: ato_record_writer::CaptureBarrier,
     capture_root: PathBuf,
 ) -> FirecrackerBackend {
-    let barrier = Arc::new(WorkerRecordCaptureBarrier { inner: barrier });
+    let barrier = Arc::new(WorkerRecordCaptureBarrier {
+        inner: barrier,
+        calls: Arc::new(AtomicUsize::new(0)),
+    });
     let source = Arc::new(FirecrackerActiveVmCaptureSource::new(
         active,
         barrier,
@@ -210,14 +261,15 @@ impl ConnectedWorker {
                 guest_surface_target: self.config.surface_target,
                 tap_host_cidr: &self.config.tap_host_cidr,
             };
-            let running = restore_vm_path(graph, &lease_root, &lease.id, &physical)?;
+            let mut running = restore_vm_path(graph, &lease_root, &lease.id, &physical)?;
             self.api.report_status(&lease.id, "running")?;
 
             // The externally reachable listener does not exist until the VM is
             // active, every Contract passed, and the Realization published.
-            let proxy = TcpProxy::start(
+            let proxy = TcpProxy::start_with_ingress(
                 self.config.surface_listen,
                 ProxyTarget::Tcp(self.config.hidden_surface_listen),
+                Some(Arc::clone(&running.ingress)),
             )?;
             let execution_id = format!("vm:{}:{}", lease.run_id, lease.id);
             self.api.report_ready(
@@ -227,6 +279,7 @@ impl ConnectedWorker {
                 ready_local_port(&self.config),
             )?;
             let mut last_heartbeat = Instant::now();
+            let mut observed_captures = BTreeSet::new();
             loop {
                 let control = self.api.control(&lease.id)?;
                 if control.stop_requested {
@@ -234,6 +287,37 @@ impl ConnectedWorker {
                     running.quiesce()?;
                     self.api.report_stopped(&lease.id, &execution_id)?;
                     return Ok(());
+                }
+                if let Some(capture) = control.capture
+                    && observed_captures.insert(capture.request_id.clone())
+                {
+                    let started = Instant::now();
+                    let outcome = (|| {
+                        let point = running.capture_current_point()?;
+                        self.api.report_capture_uploading(
+                            &lease.id,
+                            &capture.request_id,
+                            started.elapsed(),
+                            point.capture_barrier_count,
+                        )?;
+                        self.api.upload_capture_graph(
+                            &lease.id,
+                            &capture,
+                            &point,
+                            running.graph.objects(),
+                        )
+                    })();
+                    if let Err(error) = outcome {
+                        let _ = self.api.report_capture_failed(
+                            &lease.id,
+                            &capture.request_id,
+                            "current_point_capture_failed",
+                        );
+                        eprintln!(
+                            "current-point capture {} failed: {:#}",
+                            capture.request_id, error
+                        );
+                    }
                 }
                 if last_heartbeat.elapsed() >= ACTIVE_HEARTBEAT_INTERVAL {
                     self.api.heartbeat(&self.config, 1)?;
@@ -398,12 +482,152 @@ struct RestorePhysicalConfig<'a> {
     tap_host_cidr: &'a str,
 }
 
+struct RunningHostedRealization {
+    accepted: Option<AcceptedRealization>,
+    graph: ValidatedRuntimeGraph,
+    target: ComputationRef,
+    materializer: Arc<VmSnapshotMaterializer>,
+    source_descriptor: ContentRef,
+    capabilities: RunnerCapabilities,
+    workspace: PathBuf,
+    ingress: Arc<IngressState>,
+    barrier_calls: Arc<AtomicUsize>,
+    _record_stylus: Arc<AsyncRecordStylus>,
+}
+
+impl RunningHostedRealization {
+    fn capture_current_point(&mut self) -> Result<CapturedPoint> {
+        let adapters = AdapterRegistry::default();
+        let workspace_policy = WorkspaceCapturePolicy::secure_default();
+        let base_context = MaterializerContext {
+            objects: self.graph.objects(),
+            adapters: &adapters,
+            records: &[],
+            records_v2: &[],
+            replay_anchor: None,
+            record_frontier_ref: None,
+            workspace: &self.workspace,
+            workspace_policy: &workspace_policy,
+            realization: None,
+            contracts: &[],
+            runner_capabilities: Some(&self.capabilities),
+        };
+        let contracts = self
+            .materializer
+            .contracts(&self.source_descriptor, &base_context)?;
+        let capture_context = MaterializerContext {
+            contracts: &contracts,
+            ..base_context
+        };
+        let calls_before = self.barrier_calls.load(Ordering::Acquire);
+        let descriptor = self.materializer.encode(&self.target, &capture_context)?;
+        let calls_after = self.barrier_calls.load(Ordering::Acquire);
+        ensure!(
+            calls_after == calls_before + 1,
+            "current-point capture did not cross exactly one Capture Barrier"
+        );
+
+        let mut materializations = self.graph.index().materializations.clone();
+        materializations.retain(|item| item.id != VM_SNAPSHOT_MATERIALIZER_ID);
+        materializations.push(GraphMaterialization {
+            id: VM_SNAPSHOT_MATERIALIZER_ID.to_owned(),
+            descriptor_ref: descriptor.to_string(),
+            restore_capability: GraphRestoreCapability::Supported,
+        });
+        let references = standard_reference_registry()?;
+        let index = build_runtime_object_graph_index(
+            &self.target,
+            &materializations,
+            self.graph.objects(),
+            &references,
+            VisibilityPolicy::Private,
+        )?;
+        let (verified_descriptor, frontier) = vm_capture_refs(&index, self.graph.objects())?
+            .context("captured graph omitted VM descriptor or RecordFrontier")?;
+        ensure!(
+            verified_descriptor == descriptor,
+            "captured VM descriptor changed"
+        );
+        scan_vm_capture(&verified_descriptor, self.graph.objects())?;
+        Ok(CapturedPoint {
+            index,
+            descriptor,
+            frontier,
+            capture_barrier_count: calls_after - calls_before,
+        })
+    }
+
+    fn quiesce(mut self) -> Result<()> {
+        self.accepted
+            .take()
+            .context("hosted Realization already stopped")?
+            .quiesce()
+            .map_err(Into::into)
+    }
+}
+
+struct CapturedPoint {
+    index: ObjectGraphIndexV1,
+    descriptor: ContentRef,
+    frontier: ContentRef,
+    capture_barrier_count: usize,
+}
+
+fn scan_vm_capture(descriptor_ref: &ContentRef, objects: &dyn ObjectResolver) -> Result<()> {
+    const SCAN_PATTERNS: &[&[u8]] = &[
+        b"-----begin private key",
+        b"authorization: bearer",
+        b"cloudflare_api_token",
+        b"cf_api_token",
+        b"ato_runner_token",
+        b"aws_access_key_id",
+        b"aws_secret_access_key",
+        b"x-api-key:",
+        b"set-cookie:",
+        b"session_token",
+        b"sessionid=",
+        b"user_notes",
+        b"notes.db",
+    ];
+    let descriptor = load_descriptor(descriptor_ref, objects)?;
+    let overlap = SCAN_PATTERNS
+        .iter()
+        .map(|pattern| pattern.len())
+        .max()
+        .unwrap_or(1)
+        .saturating_sub(1);
+    for artifact in descriptor.artifacts {
+        let mut tail = Vec::new();
+        for chunk in artifact.chunks {
+            let reference = ContentRef::parse(&chunk.content_ref)?;
+            let bytes = read_exact_object(objects, &reference, chunk.size, 64 * 1024 * 1024)?;
+            let mut window = Vec::with_capacity(tail.len() + bytes.len());
+            window.extend_from_slice(&tail);
+            window.extend(bytes.iter().map(u8::to_ascii_lowercase));
+            if SCAN_PATTERNS.iter().any(|pattern| {
+                window
+                    .windows(pattern.len())
+                    .any(|candidate| candidate == *pattern)
+            }) {
+                bail!(
+                    "new VM artifact failed bounded private-data scan ({:?})",
+                    artifact.role
+                );
+            }
+            let keep = overlap.min(window.len());
+            tail.clear();
+            tail.extend_from_slice(&window[window.len() - keep..]);
+        }
+    }
+    Ok(())
+}
+
 fn restore_vm_path(
     graph: ValidatedRuntimeGraph,
     lease_root: &Path,
     lease_id: &str,
     physical: &RestorePhysicalConfig<'_>,
-) -> Result<AcceptedRealization> {
+) -> Result<RunningHostedRealization> {
     let root = ComputationRef::parse(&graph.report().root_computation_ref)?;
     let workspace = lease_root.join("workspace");
     fs::create_dir_all(&workspace)?;
@@ -423,7 +647,30 @@ fn restore_vm_path(
         tap_host_cidr: Some(physical.tap_host_cidr.to_owned()),
         ..FirecrackerBackendConfig::default()
     };
-    let backend = Arc::new(FirecrackerBackend::new(backend_config));
+    let graph_objects = Arc::new(graph.objects().clone());
+    let RecordPipeline {
+        stylus,
+        barrier,
+        published: _,
+    } = RecordPipeline::start(
+        RecordWriterConfig::at(lease_root.join("records"), safe_component(lease_id)),
+        Arc::clone(&graph_objects) as Arc<dyn ObjectStore>,
+        RecordSchemaRegistry::default(),
+    )?;
+    let barrier_calls = Arc::new(AtomicUsize::new(0));
+    let capture_barrier = Arc::new(WorkerRecordCaptureBarrier {
+        inner: barrier,
+        calls: Arc::clone(&barrier_calls),
+    });
+    let ingress = Arc::new(IngressState::default());
+    let backend = Arc::new(FirecrackerBackend::with_restored_capture(
+        backend_config,
+        capture_barrier,
+        lease_root.join("captures"),
+        Box::new(WorkerIngressGate {
+            state: Arc::clone(&ingress),
+        }),
+    ));
     let capabilities = backend.probe();
     ensure!(
         capabilities.backends.contains("firecracker"),
@@ -431,10 +678,11 @@ fn restore_vm_path(
     );
 
     let mut materializers = MaterializerRegistry::default();
-    materializers.register(Arc::new(VmSnapshotMaterializer::new(
+    let vm_materializer = Arc::new(VmSnapshotMaterializer::new(
         backend,
         Arc::new(FrontierVerifier),
-    )))?;
+    ));
+    materializers.register(vm_materializer.clone())?;
     let actuator_providers = ActuatorProviderRegistry::default();
     let mut contract_verifiers = ContractVerifierRegistry::default();
     contract_verifiers.register(Arc::new(HttpEndpointVerifier))?;
@@ -518,13 +766,25 @@ fn restore_vm_path(
         objects: graph.objects(),
         workspace: &workspace,
     };
-    accept_candidate(
+    let source_descriptor = selected.descriptor_ref.clone();
+    let accepted = accept_candidate(
         realization,
         &contracts,
         &contract_verifiers,
         &contract_context,
-    )
-    .map_err(Into::into)
+    )?;
+    Ok(RunningHostedRealization {
+        accepted: Some(accepted),
+        graph,
+        target: root,
+        materializer: vm_materializer,
+        source_descriptor,
+        capabilities,
+        workspace,
+        ingress,
+        barrier_calls,
+        _record_stylus: stylus,
+    })
 }
 
 struct SurfaceGatewayRealization {
@@ -607,11 +867,41 @@ struct PortableLeaseCommand {
 #[derive(Debug, Deserialize)]
 struct ControlResponse {
     stop_requested: bool,
+    capture: Option<CaptureInstruction>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CaptureInstruction {
+    request_id: String,
+    prepare_url: String,
 }
 
 #[derive(Serialize)]
 struct StatusReport<'a> {
     status: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+struct CaptureGraphResponse {
+    graph_id: String,
+    root_computation_ref: String,
+    bundle_index_digest: String,
+    status: String,
+    object_count: usize,
+    logical_bytes: u64,
+    bundle_id: Option<String>,
+    rejection_code: Option<String>,
+    #[serde(default)]
+    uploads: Vec<CaptureUploadInstruction>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CaptureUploadInstruction {
+    content_ref: String,
+    size_bytes: u64,
+    upload_url: String,
+    upload_direct: bool,
+    upload_headers: std::collections::BTreeMap<String, String>,
 }
 
 pub struct HttpRunnerApi {
@@ -728,6 +1018,159 @@ impl HttpRunnerApi {
             .json()?)
     }
 
+    fn report_capture_uploading(
+        &self,
+        lease_id: &str,
+        capture_id: &str,
+        capture_elapsed: Duration,
+        barrier_count: usize,
+    ) -> Result<()> {
+        ensure!(
+            barrier_count == 1,
+            "capture crossed an invalid barrier count"
+        );
+        self.authorized(self.client.post(format!(
+            "{}/v1/runner-leases/{lease_id}/captures/{capture_id}/status",
+            self.base
+        )))
+        .json(&serde_json::json!({
+            "status": "uploading",
+            "capture_ms": capture_elapsed.as_millis().min(u128::from(u32::MAX)) as u32,
+            "capture_barrier_count": 1,
+        }))
+        .send()?
+        .error_for_status()?;
+        Ok(())
+    }
+
+    fn report_capture_failed(
+        &self,
+        lease_id: &str,
+        capture_id: &str,
+        error_code: &str,
+    ) -> Result<()> {
+        self.authorized(self.client.post(format!(
+            "{}/v1/runner-leases/{lease_id}/captures/{capture_id}/status",
+            self.base
+        )))
+        .json(&serde_json::json!({
+            "status": "failed",
+            "error_code": error_code,
+        }))
+        .send()?
+        .error_for_status()?;
+        Ok(())
+    }
+
+    fn upload_capture_graph(
+        &self,
+        lease_id: &str,
+        instruction: &CaptureInstruction,
+        point: &CapturedPoint,
+        objects: &dyn ObjectResolver,
+    ) -> Result<()> {
+        let expected_prepare = format!(
+            "/v1/runner-leases/{lease_id}/captures/{}/object-graph/prepare",
+            instruction.request_id
+        );
+        ensure!(
+            instruction.prepare_url == expected_prepare,
+            "capture prepare route is not bound to the claimed lease"
+        );
+        let graph_base = instruction
+            .prepare_url
+            .strip_suffix("/prepare")
+            .context("capture prepare route is malformed")?;
+        let index_digest = point.index.digest()?;
+        let prepare = self
+            .authorized(
+                self.client
+                    .post(format!("{}{}", self.base, instruction.prepare_url)),
+            )
+            .json(&serde_json::json!({
+                "idempotency_key": instruction.request_id,
+                "index_digest": index_digest,
+                "index": point.index,
+            }))
+            .send()?
+            .error_for_status()?
+            .json::<CaptureGraphResponse>()?;
+        ensure_capture_graph_response(&prepare, point, &index_digest)?;
+
+        if prepare.status == "uploading" {
+            let expected = point
+                .index
+                .objects
+                .iter()
+                .map(|object| (object.content_ref.as_str(), object.size_bytes))
+                .collect::<std::collections::BTreeMap<_, _>>();
+            let actual = prepare
+                .uploads
+                .iter()
+                .map(|upload| (upload.content_ref.as_str(), upload.size_bytes))
+                .collect::<std::collections::BTreeMap<_, _>>();
+            ensure!(expected == actual, "capture upload closure mismatch");
+            for upload in &prepare.uploads {
+                let reference = ContentRef::parse(&upload.content_ref)?;
+                let bytes =
+                    read_exact_object(objects, &reference, upload.size_bytes, 64 * 1024 * 1024)?;
+                let upload_url = if upload.upload_url.starts_with('/') {
+                    format!("{}{}", self.base, upload.upload_url)
+                } else {
+                    upload.upload_url.clone()
+                };
+                let mut request = self.client.put(upload_url).body(bytes);
+                for (name, value) in &upload.upload_headers {
+                    let name = HeaderName::from_bytes(name.to_ascii_lowercase().as_bytes())?;
+                    let value = HeaderValue::from_str(value)?;
+                    request = request.header(name, value);
+                }
+                if !upload.upload_direct || upload.upload_url.starts_with('/') {
+                    request = self.authorized(request);
+                }
+                request.send()?.error_for_status()?;
+            }
+        }
+
+        let mut status = if prepare.status == "ready" {
+            prepare
+        } else {
+            self.authorized(self.client.post(format!(
+                "{}{}",
+                self.base,
+                format!("{graph_base}/finalize")
+            )))
+            .send()?
+            .error_for_status()?
+            .json::<CaptureGraphResponse>()?
+        };
+        for _ in 0..300 {
+            ensure_capture_graph_response(&status, point, &index_digest)?;
+            match status.status.as_str() {
+                "ready" => {
+                    ensure!(status.bundle_id.is_some(), "ready capture omitted Bundle");
+                    eprintln!(
+                        "current-point capture ready: request={} graph={} descriptor={} frontier={}",
+                        instruction.request_id, status.graph_id, point.descriptor, point.frontier
+                    );
+                    return Ok(());
+                }
+                "rejected" | "failed" => bail!(
+                    "capture graph validation rejected ({:?})",
+                    status.rejection_code
+                ),
+                "validating" => thread::sleep(Duration::from_secs(2)),
+                other => bail!("capture graph entered unexpected state `{other}`"),
+            }
+            status = self
+                .authorized(self.client.get(format!("{}{}", self.base, graph_base)))
+                .send()?
+                .error_for_status()?
+                .json::<CaptureGraphResponse>()?;
+        }
+        bail!("capture graph validation timed out")
+    }
+
     fn report_stopped(&self, lease_id: &str, execution_id: &str) -> Result<()> {
         self.authorized(
             self.client
@@ -749,6 +1192,31 @@ impl HttpRunnerApi {
             &lease.command.expected_root_computation_ref,
         )
     }
+}
+
+fn ensure_capture_graph_response(
+    response: &CaptureGraphResponse,
+    point: &CapturedPoint,
+    index_digest: &str,
+) -> Result<()> {
+    ensure!(
+        response.root_computation_ref == point.index.root_computation_ref,
+        "capture graph root mismatch"
+    );
+    ensure!(
+        response.bundle_index_digest == index_digest,
+        "capture graph index mismatch"
+    );
+    ensure!(
+        response.object_count == point.index.objects.len(),
+        "capture graph object count mismatch"
+    );
+    ensure!(
+        response.logical_bytes == point.index.logical_bytes()?,
+        "capture graph byte count mismatch"
+    );
+    ensure!(!response.graph_id.is_empty(), "capture graph id is empty");
+    Ok(())
 }
 
 fn truncate(value: &str, max: usize) -> String {
@@ -891,6 +1359,14 @@ enum ProxyTarget {
 
 impl TcpProxy {
     fn start(listen: SocketAddr, target: ProxyTarget) -> Result<Self> {
+        Self::start_with_ingress(listen, target, None)
+    }
+
+    fn start_with_ingress(
+        listen: SocketAddr,
+        target: ProxyTarget,
+        ingress: Option<Arc<IngressState>>,
+    ) -> Result<Self> {
         let listener = TcpListener::bind(listen)?;
         listener.set_nonblocking(true)?;
         let stop = Arc::new(AtomicBool::new(false));
@@ -899,8 +1375,25 @@ impl TcpProxy {
             while !thread_stop.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((client, _)) => {
+                        let connection = match ingress.as_ref() {
+                            Some(state) if state.frozen.load(Ordering::Acquire) => continue,
+                            Some(state) => {
+                                state.active_connections.fetch_add(1, Ordering::AcqRel);
+                                if state.frozen.load(Ordering::Acquire) {
+                                    state.active_connections.fetch_sub(1, Ordering::AcqRel);
+                                    continue;
+                                }
+                                Some(ConnectionLease {
+                                    state: Arc::clone(state),
+                                })
+                            }
+                            None => None,
+                        };
                         let target = target.clone();
-                        thread::spawn(move || proxy_connection(client, &target));
+                        thread::spawn(move || {
+                            let _connection = connection;
+                            proxy_connection(client, &target);
+                        });
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(20));
@@ -913,6 +1406,16 @@ impl TcpProxy {
             stop,
             worker: Some(worker),
         })
+    }
+}
+
+struct ConnectionLease {
+    state: Arc<IngressState>,
+}
+
+impl Drop for ConnectionLease {
+    fn drop(&mut self) {
+        self.state.active_connections.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
