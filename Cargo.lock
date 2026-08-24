@@ -294,6 +294,7 @@ dependencies = [
  "anyhow",
  "ato-adapter-workspace",
  "ato-computation",
+ "ato-materializer-vm-snapshot",
  "ato-objects",
  "ato-runtime-object-graph",
  "blake3",
