@@ -23,7 +23,9 @@ use ato_computation::{ComputationRef, ContentRef};
 use ato_materializer_api::{
     Compatibility, MaterializerContext, MaterializerRegistry, RestoreCapability,
 };
-use ato_materializer_replay::{ReplayMaterializer, ReplayReferences};
+use ato_materializer_replay::{
+    ReplayMaterializer, ReplayMaterializerV2, ReplayReferences, ReplayV2References,
+};
 use ato_materializer_snapshot::{SnapshotMaterializer, SnapshotReferences};
 use ato_objects::{
     BranchOrigin, BundleMaterialization, CapsuleSelector, LocalCapsuleRepository, RecordId,
@@ -263,6 +265,8 @@ fn encap(args: EncapArgs) -> Result<()> {
         objects: repository.objects(),
         adapters: &adapters,
         records: &records,
+        records_v2: &[],
+        replay_anchor: records.first().map(|record| &record.head_before),
         workspace: repository.project(),
         workspace_policy: &capture_policy,
         realization: None,
@@ -327,6 +331,8 @@ fn run_capsule(args: RunArgs) -> Result<()> {
         objects: repository.objects(),
         adapters: &adapters,
         records: &[],
+        records_v2: &[],
+        replay_anchor: None,
         workspace: &project,
         workspace_policy: &capture_policy,
         realization: Some(&driver),
@@ -386,6 +392,7 @@ pub(crate) fn adapter_registry() -> Result<AdapterRegistry> {
 fn materializer_registry() -> Result<MaterializerRegistry> {
     let mut registry = MaterializerRegistry::default();
     registry.register(Arc::new(ReplayMaterializer))?;
+    registry.register(Arc::new(ReplayMaterializerV2))?;
     registry.register(Arc::new(SnapshotMaterializer))?;
     Ok(registry)
 }
@@ -395,6 +402,7 @@ fn reference_registry() -> Result<ReferenceRegistry> {
     registry.register(Arc::new(AuthoringReferences::new()))?;
     registry.register(Arc::new(ComposeReferences::default()))?;
     registry.register_materializer(Arc::new(ReplayReferences))?;
+    registry.register_materializer(Arc::new(ReplayV2References))?;
     registry.register_materializer(Arc::new(SnapshotReferences))?;
     Ok(registry)
 }

@@ -1,0 +1,21 @@
+[package]
+name = "ato-player"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MPL-2.0"
+description = "Protocol-generic Record dispatcher for Ato"
+
+[package.metadata.dist]
+dist = false
+
+[package.metadata.ato-architecture]
+layer = "player"
+
+[dependencies]
+ato-adapter-api = { path = "../adapters/api", version = "0.1.0" }
+ato-objects = { path = "../../lib/objects", version = "0.1.0" }
+thiserror = "2"
+
+[dev-dependencies]
+ato-computation = { path = "../../lib/computation", version = "0.1.0" }
+

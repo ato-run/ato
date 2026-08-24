@@ -2,13 +2,13 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use ato_adapter_api::{
     AdapterAttachContext, AdapterCapabilities, AdapterContext, AdapterError, AdapterFactory,
-    AdapterInstance, AttachedAdapter, WorkspaceCapturePolicy,
+    AdapterInstance, AttachedAdapter, SupportedOperation, WorkspaceCapturePolicy,
 };
 use ato_computation::ContentRef;
 use ato_objects::{ObjectResolver, ObjectStore, RecordEnvelope, read_exact_object};
@@ -17,6 +17,9 @@ use thiserror::Error;
 
 pub const WORKSPACE_ADAPTER_ID: &str = "ato.workspace@1";
 pub const WORKSPACE_PROTOCOL_ID: &str = "ato.workspace@1";
+pub const WORKSPACE_PUT_OPERATION: &str = "put";
+pub const WORKSPACE_DELETE_OPERATION: &str = "delete";
+pub const WORKSPACE_RENAME_OPERATION: &str = "rename";
 const MAX_WORKSPACE_OBJECT_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +109,20 @@ impl AdapterFactory for WorkspaceAdapter {
             verify: true,
             quiesce: true,
         }
+    }
+
+    fn supported_operations(&self) -> Vec<SupportedOperation> {
+        [
+            WORKSPACE_PUT_OPERATION,
+            WORKSPACE_DELETE_OPERATION,
+            WORKSPACE_RENAME_OPERATION,
+        ]
+        .into_iter()
+        .map(|operation| {
+            SupportedOperation::new(WORKSPACE_PROTOCOL_ID, operation, 1, BTreeSet::new())
+                .expect("valid static workspace operation")
+        })
+        .collect()
     }
 
     fn attach(
