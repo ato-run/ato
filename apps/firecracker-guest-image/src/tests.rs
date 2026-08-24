@@ -18,9 +18,15 @@ fn fixture() -> Result<(MemoryObjectStore, ComputationRef)> {
         "version": 1,
         "config": {
             "schema": 1,
-            "process": [{"id":"app","command":["python3","server.py"],"cwd":"."}],
+            "process": [{
+                "id":"app",
+                "command":["python3","server.py"],
+                "cwd":".",
+                "capture":"unsupported"
+            }],
             "adapter": [{
                 "use":"ato.http@1",
+                "config":null,
                 "target":"app",
                 "port":"web",
                 "listen":"127.0.0.1:38865",
