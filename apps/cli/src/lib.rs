@@ -12,12 +12,29 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use ato_adapter_api::{AdapterContext, AdapterRegistry};
-use ato_adapter_binding::BindingAdapter;
-use ato_adapter_http::HttpAdapter;
+use ato_adapter_api::{
+    ADAPTER_ADD_OPERATION, ADAPTER_CONFIGURE_OPERATION, ADAPTER_PROTOCOL_ID,
+    ADAPTER_REMOVE_OPERATION, AdapterContext, AdapterControlPayload, AdapterRegistry,
+    SupportedOperation, decode_adapter_control_payload,
+};
+use ato_adapter_binding::{
+    BINDING_ATTACH_OPERATION, BINDING_DETACH_OPERATION, BINDING_PROTOCOL_ID,
+    BINDING_REPLACE_OPERATION, BindingAdapter, BindingEvent, decode_event as decode_binding_event,
+};
+use ato_adapter_http::{
+    HTTP_PROTOCOL_ID, HTTP_REQUEST_OPERATION, HttpAdapter, HttpEvent,
+    decode_event as decode_http_event,
+};
 use ato_adapter_process::ProcessLifecycleAdapter;
-use ato_adapter_pty::PtyAdapter;
-use ato_adapter_workspace::{WorkspaceAdapter, restore_workspace};
+use ato_adapter_pty::{
+    PTY_INPUT_OPERATION, PTY_PROTOCOL_ID, PTY_RESIZE_OPERATION, PTY_SIGNAL_OPERATION, PtyAdapter,
+    PtyEvent, decode_event as decode_pty_event,
+};
+use ato_adapter_workspace::{
+    WORKSPACE_DELETE_OPERATION, WORKSPACE_PROTOCOL_ID, WORKSPACE_PUT_OPERATION,
+    WORKSPACE_RENAME_OPERATION, WorkspaceAdapter, WorkspaceMutation, decode_mutation,
+    restore_workspace,
+};
 use ato_compose::ComposeReferences;
 use ato_computation::{ComputationRef, ContentRef};
 use ato_materializer_api::{
@@ -32,6 +49,8 @@ use ato_objects::{
     ReferenceRegistry, decode_bundle, encode_bundle, export_bundle_with_materializations,
     import_bundle,
 };
+use ato_record_writer::RecordSchemaRegistry;
+use ato_record_writer::{load_frontier, records_for_frontier};
 use clap::{Args, Parser, Subcommand};
 
 use crate::authoring::{
@@ -236,6 +255,7 @@ fn stop(capsule: &str) -> Result<()> {
         .context("Capsule has no active Run")?;
     let stopped = stop_active(&repository)?.context("Capsule has no active Run")?;
     let head = evolve_workspace(&repository, &stopped.branch, &stopped.head)?;
+    seal_run_record_frontier(&repository, &stopped, &head)?;
     repository.update_head(&stopped.branch, Some(&stopped.branch_base), &head)?;
     repository.release_active_run(&stopped.token)?;
     println!("sealed {} at {head}", stopped.branch);
@@ -261,12 +281,25 @@ fn encap(args: EncapArgs) -> Result<()> {
     } else {
         args.materializers
     };
+    let (records_v2, replay_anchor, record_frontier_ref) = if selected
+        .iter()
+        .any(|materializer| materializer == "ato.replay@2")
+    {
+        let (records, anchor, frontier) =
+            load_run_record_frontier(&repository, &selector.branch, &target)?;
+        (records, Some(anchor), Some(frontier))
+    } else {
+        (Vec::new(), None, None)
+    };
     let context = MaterializerContext {
         objects: repository.objects(),
         adapters: &adapters,
         records: &records,
-        records_v2: &[],
-        replay_anchor: records.first().map(|record| &record.head_before),
+        records_v2: &records_v2,
+        replay_anchor: replay_anchor
+            .as_ref()
+            .or_else(|| records.first().map(|record| &record.head_before)),
+        record_frontier_ref: record_frontier_ref.as_ref(),
         workspace: repository.project(),
         workspace_policy: &capture_policy,
         realization: None,
@@ -290,6 +323,114 @@ fn encap(args: EncapArgs) -> Result<()> {
     atomic_write(&args.output, &encode_bundle(&bundle)?)?;
     println!("{target}");
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SealedRunRecordFrontier {
+    version: u32,
+    run_id: String,
+    branch: String,
+    anchor_computation_ref: String,
+    target_computation_ref: String,
+    record_frontier_ref: String,
+}
+
+fn seal_run_record_frontier(
+    repository: &LocalCapsuleRepository,
+    run: &ato_objects::ActiveRun,
+    target: &ComputationRef,
+) -> Result<()> {
+    let frontier_ref_path = repository
+        .root()
+        .join("runs")
+        .join(format!("{}.record-frontier", run.token));
+    let record_frontier_ref = fs::read_to_string(&frontier_ref_path).with_context(|| {
+        format!(
+            "missing Capture Barrier receipt at {}",
+            frontier_ref_path.display()
+        )
+    })?;
+    let record_frontier_ref = ContentRef::parse(record_frontier_ref.trim())?;
+    let frontier = load_frontier(
+        &repository.root().join("records"),
+        &run.token,
+        &record_frontier_ref,
+    )?;
+    if frontier.frontier_digest != record_frontier_ref {
+        bail!("Capture Barrier returned a different RecordFrontier identity");
+    }
+    let association = SealedRunRecordFrontier {
+        version: 1,
+        run_id: run.token.clone(),
+        branch: run.branch.clone(),
+        anchor_computation_ref: run.branch_base.to_string(),
+        target_computation_ref: target.to_string(),
+        record_frontier_ref: record_frontier_ref.to_string(),
+    };
+    atomic_write(
+        &repository
+            .root()
+            .join("runs")
+            .join(format!("{}.sealed-record-frontier.json", run.token)),
+        &serde_jcs::to_vec(&association)?,
+    )
+}
+
+fn load_run_record_frontier(
+    repository: &LocalCapsuleRepository,
+    branch: &str,
+    target: &ComputationRef,
+) -> Result<(
+    Vec<ato_objects::RecordEnvelopeV2>,
+    ComputationRef,
+    ContentRef,
+)> {
+    let mut matches = Vec::new();
+    for entry in fs::read_dir(repository.root().join("runs"))? {
+        let path = entry?.path();
+        if !path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.ends_with(".sealed-record-frontier.json"))
+        {
+            continue;
+        }
+        let bytes = fs::read(&path)?;
+        let association: SealedRunRecordFrontier = serde_json::from_slice(&bytes)?;
+        if association.version != 1 || serde_jcs::to_vec(&association)? != bytes {
+            bail!(
+                "non-canonical sealed Run/RecordFrontier association at {}",
+                path.display()
+            );
+        }
+        if association.branch == branch && association.target_computation_ref == target.to_string()
+        {
+            matches.push(association);
+        }
+    }
+    let [association] = matches.as_slice() else {
+        bail!(
+            "ato.replay@2 requires exactly one sealed RecordFrontier for {target}; found {}",
+            matches.len()
+        );
+    };
+    let reference = ContentRef::parse(&association.record_frontier_ref)?;
+    let frontier = load_frontier(
+        &repository.root().join("records"),
+        &association.run_id,
+        &reference,
+    )?;
+    let records = records_for_frontier(
+        &repository.root().join("records"),
+        &frontier,
+        repository.objects(),
+    )?;
+    Ok((
+        records,
+        ComputationRef::parse(&association.anchor_computation_ref)?,
+        reference,
+    ))
 }
 
 fn run_capsule(args: RunArgs) -> Result<()> {
@@ -333,6 +474,7 @@ fn run_capsule(args: RunArgs) -> Result<()> {
         records: &[],
         records_v2: &[],
         replay_anchor: None,
+        record_frontier_ref: None,
         workspace: &project,
         workspace_policy: &capture_policy,
         realization: Some(&driver),
@@ -387,6 +529,98 @@ pub(crate) fn adapter_registry() -> Result<AdapterRegistry> {
     registry.register(Arc::new(BindingAdapter))?;
     registry.register(Arc::new(HttpAdapter))?;
     Ok(registry)
+}
+
+pub(crate) fn record_schema_registry() -> Result<RecordSchemaRegistry> {
+    let mut registry = RecordSchemaRegistry::default();
+    registry.register(
+        operation(HTTP_PROTOCOL_ID, HTTP_REQUEST_OPERATION),
+        |bytes| match decode_http_event(bytes).map_err(|error| error.to_string())? {
+            HttpEvent::Request { .. } => Ok(()),
+            HttpEvent::Response { .. } => Err("HTTP responses are runtime output".to_owned()),
+        },
+    )?;
+    for operation_id in [
+        PTY_INPUT_OPERATION,
+        PTY_RESIZE_OPERATION,
+        PTY_SIGNAL_OPERATION,
+    ] {
+        registry.register(operation(PTY_PROTOCOL_ID, operation_id), move |bytes| {
+            let event = decode_pty_event(bytes).map_err(|error| error.to_string())?;
+            let actual = match event {
+                PtyEvent::Input { .. } => PTY_INPUT_OPERATION,
+                PtyEvent::Resize { .. } => PTY_RESIZE_OPERATION,
+                PtyEvent::Signal { .. } => PTY_SIGNAL_OPERATION,
+                PtyEvent::Output { .. } | PtyEvent::Attach | PtyEvent::Detach => {
+                    return Err("PTY output and lifecycle observations are not Records".to_owned());
+                }
+            };
+            (actual == operation_id)
+                .then_some(())
+                .ok_or_else(|| format!("PTY payload kind does not match `{operation_id}`"))
+        })?;
+    }
+    for operation_id in [
+        BINDING_ATTACH_OPERATION,
+        BINDING_REPLACE_OPERATION,
+        BINDING_DETACH_OPERATION,
+    ] {
+        registry.register(operation(BINDING_PROTOCOL_ID, operation_id), move |bytes| {
+            let event = decode_binding_event(bytes).map_err(|error| error.to_string())?;
+            let actual = match event {
+                BindingEvent::Attach { .. } => BINDING_ATTACH_OPERATION,
+                BindingEvent::Replace { .. } => BINDING_REPLACE_OPERATION,
+                BindingEvent::Detach { .. } => BINDING_DETACH_OPERATION,
+            };
+            (actual == operation_id)
+                .then_some(())
+                .ok_or_else(|| format!("Binding payload kind does not match `{operation_id}`"))
+        })?;
+    }
+    for operation_id in [
+        WORKSPACE_PUT_OPERATION,
+        WORKSPACE_DELETE_OPERATION,
+        WORKSPACE_RENAME_OPERATION,
+    ] {
+        registry.register(
+            operation(WORKSPACE_PROTOCOL_ID, operation_id),
+            move |bytes| {
+                let mutation = decode_mutation(bytes).map_err(|error| error.to_string())?;
+                let actual = match mutation {
+                    WorkspaceMutation::Put { .. } => WORKSPACE_PUT_OPERATION,
+                    WorkspaceMutation::Delete { .. } => WORKSPACE_DELETE_OPERATION,
+                    WorkspaceMutation::Rename { .. } => WORKSPACE_RENAME_OPERATION,
+                };
+                (actual == operation_id).then_some(()).ok_or_else(|| {
+                    format!("Workspace payload kind does not match `{operation_id}`")
+                })
+            },
+        )?;
+    }
+    for operation_id in [
+        ADAPTER_ADD_OPERATION,
+        ADAPTER_REMOVE_OPERATION,
+        ADAPTER_CONFIGURE_OPERATION,
+    ] {
+        registry.register(operation(ADAPTER_PROTOCOL_ID, operation_id), move |bytes| {
+            let payload =
+                decode_adapter_control_payload(bytes).map_err(|error| error.to_string())?;
+            let actual = match payload {
+                AdapterControlPayload::Add { .. } => ADAPTER_ADD_OPERATION,
+                AdapterControlPayload::Remove { .. } => ADAPTER_REMOVE_OPERATION,
+                AdapterControlPayload::Configure { .. } => ADAPTER_CONFIGURE_OPERATION,
+            };
+            (actual == operation_id)
+                .then_some(())
+                .ok_or_else(|| format!("Adapter payload kind does not match `{operation_id}`"))
+        })?;
+    }
+    Ok(registry)
+}
+
+fn operation(protocol_id: &str, operation_id: &str) -> SupportedOperation {
+    SupportedOperation::new(protocol_id, operation_id, 1, Default::default())
+        .expect("built-in Record operation identifiers are valid")
 }
 
 fn materializer_registry() -> Result<MaterializerRegistry> {

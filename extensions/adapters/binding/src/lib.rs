@@ -115,7 +115,7 @@ impl AdapterFactory for BindingAdapter {
             payload_version: 1,
             required_features: BTreeSet::new(),
             recorded_by: Some(BINDING_ADAPTER_ID.to_owned()),
-            stream: "binding".to_owned(),
+            stream: format!("binding.{}", instance.instance_id),
             local_seq: 1,
             caused_by: Vec::new(),
             observed_at: observed_now(),
