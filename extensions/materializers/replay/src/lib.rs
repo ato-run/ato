@@ -8,8 +8,8 @@ use std::collections::BTreeSet;
 use ato_adapter_api::OperationRequirement;
 use ato_computation::{ComputationRef, ContentRef, OperationId, PortId, ProtocolId};
 use ato_materializer_api::{
-    Compatibility, ContractDescriptor, Materializer, MaterializerContext, MaterializerError,
-    Realization, RestoreCapability,
+    Compatibility, ContractDescriptor, MaterializationPathKind, Materializer, MaterializerContext,
+    MaterializerError, Realization, RestoreCapability,
 };
 use ato_objects::{
     BundleError, Direction, MaterializationReferences, ObjectLink, ObjectResolver, RecordBodyV2,
@@ -102,6 +102,10 @@ impl Materializer for ReplayMaterializerV2 {
         REPLAY_MATERIALIZER_V2_ID
     }
 
+    fn path_kind(&self) -> MaterializationPathKind {
+        MaterializationPathKind::ReconstructionReplay
+    }
+
     fn restore_capability(&self) -> RestoreCapability {
         RestoreCapability::Supported
     }
@@ -184,6 +188,16 @@ impl Materializer for ReplayMaterializerV2 {
         Ok(descriptor.contracts)
     }
 
+    fn operation_records(
+        &self,
+        descriptor: &ContentRef,
+        context: &MaterializerContext<'_>,
+    ) -> Result<Vec<RecordEnvelopeV2>, MaterializerError> {
+        let (_, records) = load_descriptor_v2(descriptor, context.objects)
+            .map_err(|error| MaterializerError::Operation(error.to_string()))?;
+        Ok(records)
+    }
+
     fn restore(
         &self,
         descriptor: &ContentRef,
@@ -208,6 +222,10 @@ impl Materializer for ReplayMaterializerV2 {
 impl Materializer for ReplayMaterializer {
     fn id(&self) -> &str {
         REPLAY_MATERIALIZER_ID
+    }
+
+    fn path_kind(&self) -> MaterializationPathKind {
+        MaterializationPathKind::ReconstructionReplay
     }
 
     fn restore_capability(&self) -> RestoreCapability {
@@ -709,6 +727,7 @@ mod tests {
             workspace_policy: &policy,
             realization: None,
             contracts: &contracts,
+            runner_capabilities: None,
         };
 
         let descriptor_ref = ReplayMaterializerV2.encode(&target, &context).unwrap();

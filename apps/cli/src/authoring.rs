@@ -16,12 +16,12 @@ use ato_compose::{
     decode_composite_residual, encode_composite_residual,
 };
 use ato_computation::{
-    Boundary, ComputationObject, ComputationRef, ContentRef, PortDef, PortId, ProtocolId,
-    ResolvedComputation, RoleId, SemanticsId, computation_ref, encode_computation_object,
+    Boundary, ComputationObject, ComputationRef, ContentRef, PortDef, PortId, ProtocolId, RoleId,
+    SemanticsId, computation_ref, encode_computation_object,
 };
 use ato_objects::{
-    BundleError, ComputationReferences, Direction, LocalCapsuleRepository, ObjectLink,
-    ObjectResolver, ObjectStore, RecordEnvelope, RecordId, read_exact_object, resolve_computation,
+    Direction, LocalCapsuleRepository, ObjectResolver, ObjectStore, RecordEnvelope, RecordId,
+    read_exact_object, resolve_computation,
 };
 use serde::{Deserialize, Serialize};
 
@@ -76,6 +76,8 @@ pub(crate) struct AdapterConfig {
     pub input: Option<String>,
     #[serde(default)]
     pub ready_path: Option<String>,
+    #[serde(default)]
+    pub config: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -405,7 +407,7 @@ pub(crate) fn adapter_instances(
                     initial_input: emit_initial_events.then(|| adapter.input.clone()).flatten(),
                 })?
             }
-            _ => serde_json::Value::Object(Default::default()),
+            _ => lower_generic_adapter_config(adapter)?,
         };
         instances.push(AdapterInstance {
             instance_id: format!("configured.{index}"),
@@ -428,6 +430,30 @@ pub(crate) fn adapter_instances(
         }
     }
     Ok(instances)
+}
+
+fn lower_generic_adapter_config(adapter: &AdapterConfig) -> Result<serde_json::Value> {
+    let mut value = match adapter.config.clone() {
+        serde_json::Value::Null => serde_json::Value::Object(Default::default()),
+        serde_json::Value::Object(value) => serde_json::Value::Object(value),
+        _ => bail!("Adapter config must be a table"),
+    };
+    if let Some(port) = &adapter.port {
+        let object = value.as_object_mut().expect("generic config is an object");
+        match object.get("port_id") {
+            Some(existing) if existing != port => {
+                bail!("Adapter port and config.port_id must match")
+            }
+            Some(_) => {}
+            None => {
+                object.insert(
+                    "port_id".to_owned(),
+                    serde_json::Value::String(port.clone()),
+                );
+            }
+        }
+    }
+    Ok(value)
 }
 
 fn process_environment(
@@ -494,11 +520,69 @@ pub(crate) fn load_state(
     let residual = &computation.object().residual;
     let metadata = objects.metadata(residual)?;
     let bytes = read_exact_object(objects, residual, metadata.size, MAX_AUTHORING_STATE_BYTES)?;
-    let state: AuthoringState = serde_json::from_slice(&bytes)?;
-    if serde_jcs::to_vec(&state)? != bytes || state.version != AUTHORING_STATE_VERSION {
+    let canonical_value: serde_json::Value = serde_json::from_slice(&bytes)?;
+    if serde_jcs::to_vec(&canonical_value)? != bytes {
+        bail!("authoring state is non-canonical or unsupported");
+    }
+    let state = match serde_json::from_value::<AuthoringState>(canonical_value.clone()) {
+        Ok(state) => state,
+        Err(current_error) => {
+            decode_legacy_authoring_state(canonical_value).with_context(|| {
+                format!("authoring state is unsupported by the current schema: {current_error}")
+            })?
+        }
+    };
+    if state.version != AUTHORING_STATE_VERSION {
         bail!("authoring state is non-canonical or unsupported");
     }
     Ok(state)
+}
+
+/// Reads the schema-1 authoring residual emitted by the pre-Record-v2 CLI.
+///
+/// That writer serialized an adapter-level `config: null` member.  The member
+/// never carried protocol semantics for these objects, but it remains part of
+/// their already-sealed ComputationRef preimage.  We therefore verify the
+/// original canonical bytes first, accept only a literal null, and remove it
+/// solely in the runtime projection.  The ComputationRef is never resealed or
+/// derived from this compatibility step.
+fn decode_legacy_authoring_state(mut value: serde_json::Value) -> Result<AuthoringState> {
+    let adapters = value
+        .get_mut("config")
+        .and_then(|config| config.get_mut("adapter"))
+        .and_then(serde_json::Value::as_array_mut)
+        .context("legacy authoring state has no adapter array")?;
+    let mut removed = false;
+    for adapter in adapters {
+        let object = adapter
+            .as_object_mut()
+            .context("legacy authoring adapter is not an object")?;
+        if let Some(config) = object.remove("config") {
+            if !config.is_null() {
+                bail!("legacy authoring adapter config must be null");
+            }
+            removed = true;
+        }
+    }
+    if !removed {
+        bail!("legacy authoring adapter config marker is absent");
+    }
+    let processes = value
+        .get_mut("config")
+        .and_then(|config| config.get_mut("process"))
+        .and_then(serde_json::Value::as_array_mut)
+        .context("legacy authoring state has no process array")?;
+    for process in processes {
+        let object = process
+            .as_object_mut()
+            .context("legacy authoring process is not an object")?;
+        if let Some(capture) = object.remove("capture")
+            && capture != serde_json::Value::String("unsupported".to_owned())
+        {
+            bail!("legacy authoring process capture mode is unsupported");
+        }
+    }
+    Ok(serde_json::from_value(value)?)
 }
 
 pub(crate) fn load_runtime_state(
@@ -883,6 +967,49 @@ fn boundary(config: &AuthoringConfig) -> Result<Boundary> {
         .collect()
 }
 
+#[cfg(test)]
+mod generic_adapter_tests {
+    use super::*;
+
+    #[test]
+    fn generic_adapter_config_lowers_port_without_an_adapter_id_branch() {
+        let project = tempfile::tempdir().expect("temporary project should open");
+        std::fs::write(
+            project.path().join("capsule.toml"),
+            r#"schema = 1
+
+[[process]]
+id = "app"
+command = ["app"]
+
+[[port]]
+id = "app.browser"
+node = "app"
+protocol = "ato.browser@1"
+role = "server"
+
+[[adapter]]
+use = "ato.browser@1"
+port = "app.browser"
+
+[adapter.config]
+expected_origin = "http://127.0.0.1:3000"
+"#,
+        )
+        .expect("authoring config should write");
+        let config = load_config(project.path()).expect("authoring config should load");
+        let instances = adapter_instances(&config, &BTreeMap::new(), false, false)
+            .expect("generic Adapter should lower");
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].adapter_id, "ato.browser@1");
+        assert_eq!(instances[0].config["port_id"], "app.browser");
+        assert_eq!(
+            instances[0].config["expected_origin"],
+            "http://127.0.0.1:3000"
+        );
+    }
+}
+
 pub(crate) fn load_snapshot(
     reference: &str,
     objects: &dyn ObjectResolver,
@@ -908,50 +1035,93 @@ fn observed_at() -> String {
         .map_or_else(|_| "0".to_owned(), |value| value.as_secs().to_string())
 }
 
-#[derive(Default)]
-pub(crate) struct AuthoringReferences {
-    id: Option<SemanticsId>,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ato_objects::MemoryObjectStore;
 
-impl AuthoringReferences {
-    pub(crate) fn new() -> Self {
-        Self {
-            id: Some(SemanticsId::parse(AUTHORING_SEMANTICS_ID).expect("valid static id")),
-        }
+    fn legacy_state(adapter_config: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "config": {
+                "adapter": [{
+                    "config": adapter_config,
+                    "input": null,
+                    "listen": null,
+                    "port": null,
+                    "ready_path": null,
+                    "target": "app",
+                    "upstream": null,
+                    "use": "ato.process@1"
+                }],
+                "binding": [],
+                "connection": [],
+                "encap": { "materializers": ["ato.replay@1"] },
+                "port": [],
+                "process": [{ "command": ["true"], "cwd": ".", "id": "app" }],
+                "schema": 1,
+                "workspace": { "exclude": [], "include": [] }
+            },
+            "version": 1,
+            "workspace_snapshot": format!("blake3:{}", "a".repeat(64))
+        })
     }
-}
 
-impl ComputationReferences for AuthoringReferences {
-    fn semantics(&self) -> &SemanticsId {
-        self.id.as_ref().expect("initialized authoring references")
+    #[test]
+    fn legacy_null_adapter_config_is_a_projection_only_compatibility_field() {
+        let state = decode_legacy_authoring_state(legacy_state(serde_json::Value::Null)).unwrap();
+        assert_eq!(state.config.adapter.len(), 1);
+        assert_eq!(state.config.adapter[0].use_adapter, "ato.process@1");
     }
 
-    fn outgoing(
-        &self,
-        computation: &ResolvedComputation,
-        objects: &dyn ObjectResolver,
-    ) -> Result<Vec<ObjectLink>, BundleError> {
-        let state = load_state(computation.reference(), objects).map_err(|error| {
-            BundleError::Object(ato_objects::ObjectError::Storage(error.to_string()))
-        })?;
-        let snapshot_ref = ContentRef::parse(&state.workspace_snapshot).map_err(|error| {
-            BundleError::InvalidReference {
-                value: state.workspace_snapshot.clone(),
-                reason: error.to_string(),
-            }
-        })?;
-        let snapshot = load_snapshot(&state.workspace_snapshot, objects).map_err(|error| {
-            BundleError::Object(ato_objects::ObjectError::Storage(error.to_string()))
-        })?;
-        let mut links = vec![ObjectLink::Content(snapshot_ref)];
-        for content in snapshot.files.into_values() {
-            links.push(ObjectLink::Content(ContentRef::parse(&content).map_err(
-                |error| BundleError::InvalidReference {
-                    value: content,
-                    reason: error.to_string(),
-                },
-            )?));
-        }
-        Ok(links)
+    #[test]
+    fn legacy_non_null_adapter_config_is_not_silently_discarded() {
+        let error = decode_legacy_authoring_state(legacy_state(serde_json::json!({"secret": 1})))
+            .unwrap_err();
+        assert!(error.to_string().contains("must be null"));
+    }
+
+    #[test]
+    fn direct_authoring_evolution_keeps_its_existing_identity_rule() {
+        let objects = MemoryObjectStore::default();
+        let snapshot = objects.put(b"workspace-v1").unwrap();
+        let root = seal_state(
+            &objects,
+            AuthoringConfig {
+                schema: 1,
+                process: Vec::new(),
+                adapter: Vec::new(),
+                port: Vec::new(),
+                connection: Vec::new(),
+                binding: Vec::new(),
+                workspace: WorkspaceConfig::default(),
+                encap: EncapConfig::default(),
+            },
+            snapshot,
+        )
+        .unwrap();
+        let payload = objects.put(b"ArrowLeft").unwrap();
+        let observation = AdapterObservation {
+            adapter_id: "ato.browser@1".to_owned(),
+            protocol_id: ProtocolId::parse("ato.browser.keyboard@1").unwrap(),
+            port_id: PortId::parse("keyboard").unwrap(),
+            direction: Direction::Inbound,
+            payload: b"ArrowLeft".to_vec(),
+            caused_by: Vec::new(),
+            effect: ato_adapter_api::ObservationEffect::Evolution,
+        };
+
+        let first = evolve_observation(&objects, &root, &observation, &payload).unwrap();
+        let same_first = evolve_observation(&objects, &root, &observation, &payload).unwrap();
+        let second = evolve_observation(&objects, &first, &observation, &payload).unwrap();
+
+        assert_eq!(first, same_first);
+        assert_ne!(root, first);
+        assert_ne!(first, second);
+        assert!(
+            load_state(&second, &objects)
+                .unwrap()
+                .semantic_frontier
+                .is_some()
+        );
     }
 }

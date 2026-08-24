@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -26,6 +26,31 @@ pub enum RestoreCapability {
     VerifyOnly,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaterializationPathKind {
+    VmSnapshot,
+    ReconstructionReplay,
+    WorkspaceSnapshot,
+    Other,
+}
+
+/// Physical runner facts used for fail-closed Materializer compatibility.
+/// Product labels such as runner class are deliberately excluded.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RunnerCapabilities {
+    pub architecture: String,
+    pub host_os: String,
+    pub backends: BTreeSet<String>,
+    pub backend_versions: BTreeMap<String, String>,
+    pub guest_os: BTreeSet<String>,
+    pub snapshot_formats: BTreeSet<String>,
+    pub cpu_features: BTreeSet<String>,
+    pub memory_mib: u64,
+    pub device_features: BTreeSet<String>,
+    pub network_features: BTreeSet<String>,
+    pub vsock_features: BTreeSet<String>,
+}
+
 pub struct MaterializerContext<'a> {
     pub objects: &'a dyn ObjectStore,
     pub adapters: &'a AdapterRegistry,
@@ -39,6 +64,7 @@ pub struct MaterializerContext<'a> {
     /// Realization acceptance requirements selected by the enclosing Capsule.
     /// Materializers may carry these descriptors but never interpret them.
     pub contracts: &'a [ContractDescriptor],
+    pub runner_capabilities: Option<&'a RunnerCapabilities>,
 }
 
 /// Extension-defined acceptance assertion for a candidate Realization.
@@ -163,6 +189,16 @@ impl AcceptedRealization {
 
     pub fn contract_results(&self) -> &[ContractResult] {
         &self.contract_results
+    }
+
+    /// Explicitly tears down an accepted hosted Realization without waiting
+    /// for the underlying workload to exit on its own. Connected workers use
+    /// this when the control plane requests that a lease stop. The operation
+    /// remains idempotent through the same `cleaned` guard used by `Drop`.
+    pub fn quiesce(mut self) -> Result<(), MaterializerError> {
+        let result = self.inner.quiesce();
+        self.cleaned = true;
+        result
     }
 
     pub fn run(mut self) -> Result<(), MaterializerError> {
@@ -304,6 +340,10 @@ pub trait RealizationDriver: Send + Sync {
 pub trait Materializer: Send + Sync {
     fn id(&self) -> &str;
 
+    fn path_kind(&self) -> MaterializationPathKind {
+        MaterializationPathKind::Other
+    }
+
     fn restore_capability(&self) -> RestoreCapability;
 
     fn encode(
@@ -329,6 +369,14 @@ pub trait Materializer: Send + Sync {
         _descriptor: &ContentRef,
         _context: &MaterializerContext<'_>,
     ) -> Result<Vec<ContractDescriptor>, MaterializerError> {
+        Ok(Vec::new())
+    }
+
+    fn operation_records(
+        &self,
+        _descriptor: &ContentRef,
+        _context: &MaterializerContext<'_>,
+    ) -> Result<Vec<RecordEnvelopeV2>, MaterializerError> {
         Ok(Vec::new())
     }
 
