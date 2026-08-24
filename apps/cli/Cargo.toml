@@ -48,13 +48,16 @@ ato-player = { path = "../../extensions/player", version = "0.1.0" }
 ato-realization-planner = { path = "../../extensions/planner", version = "0.1.0" }
 ato-compose = { path = "../../lib/compose", version = "0.1.0" }
 ato-contracts = { path = "../../extensions/contracts", version = "0.1.0" }
+base64 = "0.22"
 blake3 = "1"
 clap = { version = "4.5", features = ["derive", "env"] }
 dirs = "5"
+getrandom = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_jcs = "0.1"
+sha2 = "0.10"
 tempfile = "3"
 toml = "0.8"
 
@@ -63,6 +66,5 @@ windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", 
 
 [dev-dependencies]
 assert_cmd = "2"
-base64 = "0.22"
 predicates = "3"
 tempfile = "3"
