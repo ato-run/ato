@@ -25,6 +25,7 @@ members = [
     "extensions/materializers/api",
     "extensions/materializers/replay",
     "extensions/materializers/vm-snapshot",
+    "extensions/materializers/browser",
     "extensions/contracts",
     "extensions/planner",
     "tools/snapshot-builder",

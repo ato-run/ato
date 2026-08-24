@@ -405,6 +405,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ato-materializer-browser"
+version = "0.1.0"
+dependencies = [
+ "ato-computation",
+ "ato-objects",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ato-materializer-replay"
 version = "0.1.0"
 dependencies = [
