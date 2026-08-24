@@ -62,6 +62,7 @@ const RUNNER_CAPABILITIES: &[&str] = &[
     "isolation=untrusted-v1",
     "materializer=ato.materialize.vm.snapshot@1",
     "backend=firecracker",
+    "capture=current-point-vm-v1",
 ];
 const ACTIVE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const GUEST_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
@@ -1723,5 +1724,51 @@ mod tests {
         assert!(RUNNER_CAPABILITIES.contains(&"isolation=untrusted-v1"));
         assert!(RUNNER_CAPABILITIES.contains(&"materializer=ato.materialize.vm.snapshot@1"));
         assert!(RUNNER_CAPABILITIES.contains(&"backend=firecracker"));
+        assert!(RUNNER_CAPABILITIES.contains(&"capture=current-point-vm-v1"));
+    }
+
+    #[test]
+    fn control_decodes_current_point_capture_instruction() {
+        let control: ControlResponse = serde_json::from_value(serde_json::json!({
+            "stop_requested": false,
+            "capture": {
+                "request_id": "cap_1",
+                "prepare_url": "/v1/runner-leases/lease_1/captures/cap_1/object-graph/prepare"
+            }
+        }))
+        .unwrap();
+        let capture = control.capture.unwrap();
+        assert_eq!(capture.request_id, "cap_1");
+        assert!(capture.prepare_url.ends_with("/object-graph/prepare"));
+    }
+
+    #[test]
+    fn ingress_gate_rejects_new_connections_while_capture_is_frozen() {
+        let state = Arc::new(IngressState::default());
+        let target_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let target = target_listener.local_addr().unwrap();
+        let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+        let published = reservation.local_addr().unwrap();
+        drop(reservation);
+        let _proxy = TcpProxy::start_with_ingress(
+            published,
+            ProxyTarget::Tcp(target),
+            Some(Arc::clone(&state)),
+        )
+        .unwrap();
+        let mut gate = WorkerIngressGate {
+            state: Arc::clone(&state),
+        };
+        gate.freeze().unwrap();
+        let mut client = TcpStream::connect(published).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        client.write_all(b"x").unwrap();
+        let mut reply = [0_u8; 1];
+        assert!(client.read_exact(&mut reply).is_err());
+        assert!(target_listener.set_nonblocking(true).is_ok());
+        assert!(target_listener.accept().is_err());
+        gate.unfreeze().unwrap();
     }
 }
