@@ -16,10 +16,11 @@ auto-merge.
 
 - ato #1299 (Draft), `feat/runtime-object-graph-validator-v1`, base
   `feat/staging-firecracker-realization-v1`, implementation commit
-  `60c659abbfefb7f4a47d23b34dfca65798beb136`
+  `60c659abbfefb7f4a47d23b34dfca65798beb136`, dist exclusion
+  `158cc281`
 - ato #1300 (Draft), `feat/connected-realization-worker-v1`, base
   `feat/runtime-object-graph-validator-v1`, implementation commits
-  `182c63e5`, `bc5f053c`, `062b8d5c`, and `badd855e`
+  `182c63e5`, `bc5f053c`, `062b8d5c`, `badd855e`, and `632953ae`
 
 ## Target identity
 
@@ -78,11 +79,15 @@ VM bytes.
 - ato-api `pnpm typecheck`: PASS
 - ato-api focused object transport, runner lease/runner routes, importer, and
   Capsule Network suite: PASS (121/121)
+- local `dist plan --output-format=json`: PASS after both staging-only agents
+  were explicitly excluded from release packaging
 
-GitHub computation CLI and architecture checks passed for #1299. #1300 checks
-were still settling when recorded. The Release workflow `plan` job failed for
-both PRs and its descendants were skipped, so the overall CI state is not
-reported as green.
+GitHub computation CLI and architecture checks passed on the pre-fix heads. The
+Release workflow `plan` job initially failed because the two staging-only agent
+binaries were treated as distributable Windows installers and had no WiX GUIDs.
+That repository configuration defect was corrected with
+`package.metadata.dist = false`; replacement GitHub checks were still settling
+when recorded, so the overall CI state is not reported as green.
 
 ## Staging gate
 
