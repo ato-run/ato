@@ -20,6 +20,10 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail, ensure};
 use ato_adapter_api::{ActuatorProviderRegistry, AdapterRegistry, WorkspaceCapturePolicy};
+use ato_adapter_browser::{
+    BrowserAdapter, register_record_schemas as register_browser_record_schemas,
+};
+use ato_browser_semantics::{BrowserComputationSemantics, BrowserProtocolSemantics};
 use ato_computation::{ComputationRef, ContentRef};
 use ato_contracts::{HttpEndpointVerifier, WorkspaceContentVerifier};
 use ato_kernel::{Kernel, RunEvolutionAuthority};
@@ -424,9 +428,26 @@ fn initialize_hosted_run_evolution_authority(
         "validated graph root does not match the assigned lease root"
     );
     Ok(RunEvolutionAuthority::new(
-        Kernel::new(Arc::new(graph.objects().clone())),
+        hosted_evolution_kernel(Arc::new(graph.objects().clone()))?,
         expected,
     ))
+}
+
+/// Shared hosted registration point. Browser interaction is available only to
+/// an explicit Browser Computation/Port; registering it never mutates legacy
+/// source Computations or grants a Browser capability by itself.
+fn hosted_evolution_kernel(objects: Arc<dyn ato_objects::ObjectStore>) -> Result<Kernel> {
+    let mut kernel = Kernel::new(objects);
+    kernel.register(Arc::new(BrowserComputationSemantics::default()))?;
+    kernel.register_protocol(Arc::new(BrowserProtocolSemantics::default()))?;
+    Ok(kernel)
+}
+
+fn hosted_record_schema_registry() -> Result<ato_record_writer::RecordSchemaRegistry> {
+    let mut schemas = ato_record_writer::RecordSchemaRegistry::default();
+    register_browser_record_schemas(&mut schemas)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    Ok(schemas)
 }
 
 fn restore_vm_path(
@@ -438,7 +459,12 @@ fn restore_vm_path(
     let root = ComputationRef::parse(&graph.report().root_computation_ref)?;
     let workspace = lease_root.join("workspace");
     fs::create_dir_all(&workspace)?;
-    let adapters = AdapterRegistry::default();
+    let mut adapters = AdapterRegistry::default();
+    adapters.register(Arc::new(BrowserAdapter))?;
+    // P0-B establishes the same schema registration boundary used by future
+    // hosted Record Pipelines. It intentionally does not start a pipeline
+    // before a Browser-aware Capsule supplies an explicit Browser port.
+    let _record_schemas = hosted_record_schema_registry()?;
     let workspace_policy = WorkspaceCapturePolicy::secure_default();
     let backend_config = FirecrackerBackendConfig {
         // Firecracker's API/vsock Unix socket paths are bounded by SUN_LEN.
@@ -645,6 +671,14 @@ struct StatusReport<'a> {
     status: &'a str,
 }
 
+#[derive(Serialize)]
+struct ComputationHeadReport<'a> {
+    operation_id: &'a str,
+    run_seq: u64,
+    head_before: &'a str,
+    head_after: &'a str,
+}
+
 pub struct HttpRunnerApi {
     client: Client,
     base: String,
@@ -743,6 +777,27 @@ impl HttpRunnerApi {
             "ready_url": ready_url,
             "local_port": local_port,
         }))
+        .send()?
+        .error_for_status()?;
+        Ok(())
+    }
+
+    pub fn persist_computation_head(
+        &self,
+        lease_id: &str,
+        operation_id: &str,
+        pending: &ato_kernel::PendingHeadPersistence,
+    ) -> Result<()> {
+        self.authorized(self.client.post(format!(
+            "{}/v1/runner-leases/{lease_id}/computation-head",
+            self.base
+        )))
+        .json(&ComputationHeadReport {
+            operation_id,
+            run_seq: pending.run_seq,
+            head_before: pending.transition.from.as_str(),
+            head_after: pending.transition.to.as_str(),
+        })
         .send()?
         .error_for_status()?;
         Ok(())

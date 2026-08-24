@@ -220,6 +220,17 @@ pub trait Stylus: Send + Sync {
     fn record(&self, candidate: RecordCandidate) -> Result<(), AdapterError>;
 }
 
+/// A live operation is the non-persistent counterpart of a portable Record.
+/// Runner ingress may apply it directly; Player reaches the same Adapter
+/// boundary only after decoding a stored Record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveOperation {
+    pub protocol_id: ProtocolId,
+    pub operation_id: OperationId,
+    pub port_id: PortId,
+    pub payload: Vec<u8>,
+}
+
 #[derive(Default)]
 pub struct IgnoreRecords;
 
@@ -556,6 +567,13 @@ pub trait AttachedAdapter: Send {
 
     fn accepts(&self, record: &RecordEnvelope) -> bool {
         self.adapter_id() == record.adapter_id
+    }
+
+    fn apply_operation(&mut self, _operation: &LiveOperation) -> Result<(), AdapterError> {
+        Err(AdapterError::Unsupported {
+            adapter: self.adapter_id().to_owned(),
+            operation: "apply_operation",
+        })
     }
 
     fn apply(
