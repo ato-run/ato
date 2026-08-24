@@ -66,6 +66,9 @@ The v2 Record path admits only operations that have an Actuator contract.
 
 - HTTP records inbound requests. Application-generated responses are runtime
   output.
+- Browser records canonical `keyboard`, `pointer`, `click`, and `scroll`
+  operations from the Browser input boundary. Screenshots, DOM snapshots,
+  console output, and presentation media remain outside the Record Store.
 - PTY records input, resize, and signal. Output, attach/detach observations,
   stdout, and stderr are runtime logs.
 - Workspace records put, delete, and rename while retaining boundary and CAS

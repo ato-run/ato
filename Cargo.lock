@@ -139,6 +139,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ato-adapter-browser"
+version = "0.1.0"
+dependencies = [
+ "ato-adapter-api",
+ "ato-computation",
+ "ato-objects",
+ "ato-record-writer",
+ "rand 0.8.6",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "tempfile",
+ "tungstenite",
+ "url",
+]
+
+[[package]]
 name = "ato-adapter-http"
 version = "0.1.0"
 dependencies = [
@@ -194,6 +211,7 @@ dependencies = [
  "assert_cmd",
  "ato-adapter-api",
  "ato-adapter-binding",
+ "ato-adapter-browser",
  "ato-adapter-http",
  "ato-adapter-process",
  "ato-adapter-pty",
