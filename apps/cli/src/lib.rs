@@ -3,6 +3,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 mod authoring;
+mod desktop_control;
 mod object_transport;
 mod supervisor;
 
@@ -22,10 +23,12 @@ use ato_adapter_binding::{
     BINDING_ATTACH_OPERATION, BINDING_DETACH_OPERATION, BINDING_PROTOCOL_ID,
     BINDING_REPLACE_OPERATION, BindingAdapter, BindingEvent, decode_event as decode_binding_event,
 };
+#[cfg(test)]
 use ato_adapter_browser::{
-    BROWSER_CLICK_OPERATION, BROWSER_KEYBOARD_OPERATION, BROWSER_POINTER_OPERATION,
-    BROWSER_PROTOCOL_ID, BROWSER_SCROLL_OPERATION, BrowserAdapter,
-    decode_event as decode_browser_event, operation_for_event as browser_operation_for_event,
+    BROWSER_CLICK_OPERATION, BROWSER_KEYBOARD_OPERATION, BROWSER_PROTOCOL_ID,
+};
+use ato_adapter_browser::{
+    BrowserAdapter, register_record_schemas as register_browser_record_schemas,
 };
 use ato_adapter_http::{
     HTTP_PROTOCOL_ID, HTTP_REQUEST_OPERATION, HttpAdapter, HttpEvent,
@@ -115,6 +118,17 @@ enum Commands {
         token: String,
         descriptor: Option<String>,
     },
+    #[command(name = "__desktop", hide = true)]
+    Desktop {
+        #[command(subcommand)]
+        command: DesktopCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum DesktopCommands {
+    /// Inspect the active Run of a Capsule project as a single JSON object.
+    Inspect { project: String },
 }
 
 #[derive(Debug, Args)]
@@ -197,7 +211,17 @@ pub fn run() -> Result<()> {
             &token,
             descriptor.map(ContentRef::parse).transpose()?.as_ref(),
         ),
+        Commands::Desktop { command } => match command {
+            DesktopCommands::Inspect { project } => desktop_inspect(&project),
+        },
     }
+}
+
+fn desktop_inspect(project: &str) -> Result<()> {
+    let path = project_path(project, false)?;
+    let view = desktop_control::inspect(&path)?;
+    println!("{}", serde_json::to_string(&view)?);
+    Ok(())
 }
 
 fn init(args: InitArgs) -> Result<()> {
@@ -704,19 +728,7 @@ pub(crate) fn record_schema_registry() -> Result<RecordSchemaRegistry> {
             HttpEvent::Response { .. } => Err("HTTP responses are runtime output".to_owned()),
         },
     )?;
-    for operation_id in [
-        BROWSER_KEYBOARD_OPERATION,
-        BROWSER_POINTER_OPERATION,
-        BROWSER_CLICK_OPERATION,
-        BROWSER_SCROLL_OPERATION,
-    ] {
-        registry.register(operation(BROWSER_PROTOCOL_ID, operation_id), move |bytes| {
-            let event = decode_browser_event(bytes).map_err(|error| error.to_string())?;
-            (browser_operation_for_event(&event) == operation_id)
-                .then_some(())
-                .ok_or_else(|| format!("Browser payload kind does not match `{operation_id}`"))
-        })?;
-    }
+    register_browser_record_schemas(&mut registry)?;
     for operation_id in [
         PTY_INPUT_OPERATION,
         PTY_RESIZE_OPERATION,
@@ -963,6 +975,17 @@ mod tests {
             ])
             .is_ok()
         );
+    }
+
+    #[test]
+    fn hidden_machine_commands_do_not_appear_in_help() {
+        use clap::CommandFactory;
+        let help = Cli::command().render_long_help().to_string();
+        assert!(!help.contains("__worker"));
+        assert!(!help.contains("__desktop"));
+        for public in ["init", "resume", "stop", "encap", "run"] {
+            assert!(help.contains(public));
+        }
     }
 
     #[test]

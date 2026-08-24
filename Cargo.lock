@@ -204,6 +204,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "ato-browser-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ato-adapter-browser",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tungstenite",
+ "url",
+]
+
+[[package]]
+name = "ato-browser-semantics"
+version = "0.1.0"
+dependencies = [
+ "ato-adapter-api",
+ "ato-adapter-browser",
+ "ato-computation",
+ "ato-kernel",
+ "ato-objects",
+ "blake3",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ato-cli"
 version = "0.7.9"
 dependencies = [
@@ -279,20 +308,31 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "ato-adapter-api",
+ "ato-adapter-browser",
+ "ato-browser-host",
+ "ato-browser-semantics",
+ "ato-compose",
  "ato-computation",
  "ato-contracts",
+ "ato-kernel",
  "ato-materializer-api",
  "ato-materializer-vm-snapshot",
  "ato-objects",
  "ato-realization-planner",
  "ato-record-writer",
  "ato-runtime-object-graph",
+ "base64 0.22.1",
  "clap",
+ "hex",
+ "hmac",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "time",
+ "tungstenite",
+ "url",
 ]
 
 [[package]]
@@ -332,6 +372,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ato-host-control"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ato-ipc"
 version = "0.1.0"
 dependencies = [
@@ -361,6 +410,18 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ato-materializer-browser"
+version = "0.1.0"
+dependencies = [
+ "ato-computation",
+ "ato-objects",
+ "serde",
+ "serde_jcs",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 
@@ -470,6 +531,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "ato-adapter-workspace",
+ "ato-browser-semantics",
  "ato-compose",
  "ato-computation",
  "ato-materializer-replay",
