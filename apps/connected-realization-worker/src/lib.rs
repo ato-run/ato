@@ -202,15 +202,15 @@ impl ConnectedWorker {
                 logical_bytes: index.logical_bytes()?,
             };
             let graph = download_and_validate_graph(&source, &expectation, &lease_root)?;
-            let running = restore_vm_path(
-                graph,
-                &lease_root,
-                &lease.id,
-                &self.config.slot_id,
-                self.config.hidden_surface_listen,
-                self.config.surface_target,
-                &self.config.tap_host_cidr,
-            )?;
+            let firecracker_work_root = self.config.work_root.join("fc");
+            let physical = RestorePhysicalConfig {
+                firecracker_work_root: &firecracker_work_root,
+                slot_id: &self.config.slot_id,
+                hidden_surface_listen: self.config.hidden_surface_listen,
+                guest_surface_target: self.config.surface_target,
+                tap_host_cidr: &self.config.tap_host_cidr,
+            };
+            let running = restore_vm_path(graph, &lease_root, &lease.id, &physical)?;
             self.api.report_status(&lease.id, "running")?;
 
             // The externally reachable listener does not exist until the VM is
@@ -390,14 +390,19 @@ impl ato_materializer_vm_snapshot::SealedRecordFrontierVerifier for FrontierVeri
     }
 }
 
+struct RestorePhysicalConfig<'a> {
+    firecracker_work_root: &'a Path,
+    slot_id: &'a str,
+    hidden_surface_listen: SocketAddr,
+    guest_surface_target: SocketAddr,
+    tap_host_cidr: &'a str,
+}
+
 fn restore_vm_path(
     graph: ValidatedRuntimeGraph,
     lease_root: &Path,
     lease_id: &str,
-    slot_id: &str,
-    hidden_surface_listen: SocketAddr,
-    guest_surface_target: SocketAddr,
-    tap_host_cidr: &str,
+    physical: &RestorePhysicalConfig<'_>,
 ) -> Result<AcceptedRealization> {
     let root = ComputationRef::parse(&graph.report().root_computation_ref)?;
     let workspace = lease_root.join("workspace");
@@ -405,14 +410,17 @@ fn restore_vm_path(
     let adapters = AdapterRegistry::default();
     let workspace_policy = WorkspaceCapturePolicy::secure_default();
     let backend_config = FirecrackerBackendConfig {
-        work_root: lease_root.join("firecracker"),
-        slot_id: format!("{slot_id}-{}", safe_component(lease_id)),
+        // Firecracker's API/vsock Unix socket paths are bounded by SUN_LEN.
+        // Object downloads remain lease-scoped, while backend-owned physical
+        // sessions live under this short, process-wide restore root.
+        work_root: physical.firecracker_work_root.to_owned(),
+        slot_id: format!("{}-{}", physical.slot_id, safe_component(lease_id)),
         surface_relay: Some(FirecrackerSurfaceRelayConfig {
             binary: std::env::current_exe()?,
-            guest_target: guest_surface_target,
+            guest_target: physical.guest_surface_target,
             uds_path: lease_root.join("surface-relay.sock"),
         }),
-        tap_host_cidr: Some(tap_host_cidr.to_owned()),
+        tap_host_cidr: Some(physical.tap_host_cidr.to_owned()),
         ..FirecrackerBackendConfig::default()
     };
     let backend = Arc::new(FirecrackerBackend::new(backend_config));
@@ -502,7 +510,7 @@ fn restore_vm_path(
     ensure!(realization.target() == &root, "restored VM target mismatch");
     let realization: Box<dyn Realization> = Box::new(SurfaceGatewayRealization {
         inner: realization,
-        hidden_listen: hidden_surface_listen,
+        hidden_listen: physical.hidden_surface_listen,
         guest_target: ProxyTarget::Unix(lease_root.join("surface-relay.sock")),
         hidden_proxy: None,
     });
