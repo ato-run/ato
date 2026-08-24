@@ -9,6 +9,8 @@ use std::fs::{File, OpenOptions};
 #[cfg(target_os = "linux")]
 use std::io::{Read, Seek, SeekFrom, Write};
 #[cfg(target_os = "linux")]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(target_os = "linux")]
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
@@ -1035,6 +1037,7 @@ impl FirecrackerResources {
                 .tempdir_in(&sessions)?;
             let api_socket = session_dir.path().join(&layout.api_socket_path);
             let console_path = session_dir.path().join(&layout.console_log_path);
+            validate_unix_socket_path(&api_socket, "Firecracker API socket")?;
             create_parent(&api_socket)?;
             create_parent(&console_path)?;
             let console = File::create(&console_path)?;
@@ -1130,6 +1133,7 @@ impl FirecrackerResources {
         }
         if let Some(relative) = &layout.vsock_uds_path {
             let path = resources.session_dir.path().join(relative);
+            validate_unix_socket_path(&path, "Firecracker vsock UDS")?;
             if path.exists() {
                 return Err(VmSnapshotError::Backend(format!(
                     "vsock path already exists: {}",
@@ -1143,6 +1147,7 @@ impl FirecrackerResources {
             resources.vsock_path = Some(path);
         }
         if let (Some(netns), Some(relay)) = (&resources.netns_created, &config.surface_relay) {
+            validate_unix_socket_path(&relay.uds_path, "Surface relay socket")?;
             if relay.uds_path.exists() {
                 return Err(VmSnapshotError::Backend(format!(
                     "Surface relay socket already exists: {}",
@@ -1407,6 +1412,17 @@ fn wait_for_path(
     Err(VmSnapshotError::Backend(format!(
         "{label} readiness timed out"
     )))
+}
+
+#[cfg(target_os = "linux")]
+fn validate_unix_socket_path(path: &Path, label: &str) -> Result<(), VmSnapshotError> {
+    const SUN_PATH_BYTES: usize = 108;
+    if path.as_os_str().as_bytes().len() >= SUN_PATH_BYTES {
+        return Err(VmSnapshotError::Backend(format!(
+            "{label} path exceeds SUN_LEN"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
