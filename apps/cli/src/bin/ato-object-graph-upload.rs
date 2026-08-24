@@ -28,6 +28,9 @@ struct Args {
     /// Use the canonical browser-approved PKCE bridge instead of a stored Ato credential.
     #[arg(long)]
     device_login: bool,
+    /// Use the authenticated staging API object PUT fallback instead of direct R2 PUTs.
+    #[arg(long)]
+    staging_api_proxy_upload: bool,
     #[arg(long)]
     receipt: PathBuf,
     #[arg(long)]
@@ -86,7 +89,10 @@ fn main() -> Result<()> {
     } else {
         load_auth_handoff(&args.auth_handoff_binary, &args.api_url)?
     };
-    let api = HttpObjectTransportApi::new(&args.api_url, token)?;
+    let mut api = HttpObjectTransportApi::new(&args.api_url, token)?;
+    if args.staging_api_proxy_upload {
+        api = api.with_staging_proxy_upload()?;
+    }
     let idempotency_key = args.idempotency_key.unwrap_or_else(|| {
         if args.negative_validator_test {
             format!(
