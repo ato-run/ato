@@ -16,7 +16,7 @@ use tungstenite::{Message, WebSocket, accept_hdr};
 
 use crate::coalescer::ContinuousCoalescer;
 use crate::protocol::{BrowserEvent, encode_event_with_policy, validate_event};
-use crate::{BROWSER_ADAPTER_ID, BROWSER_PROTOCOL_ID};
+use crate::{BROWSER_ADAPTER_ID, BROWSER_PROTOCOL_ID, BrowserStylus};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(2);
 
@@ -115,6 +115,7 @@ pub(crate) fn start_transport(
     workspace: &Path,
     instance_id: &str,
     config: TransportConfig,
+    stylus: Arc<BrowserStylus>,
     observations: Arc<dyn ObservationSink>,
 ) -> Result<TransportHandle, AdapterError> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
@@ -134,7 +135,7 @@ pub(crate) fn start_transport(
     let failure = Arc::new(Mutex::new(None));
     let thread_failure = Arc::clone(&failure);
     let join = thread::spawn(move || {
-        if let Err(error) = run_transport(listener, config, observations, receiver)
+        if let Err(error) = run_transport(listener, config, stylus, observations, receiver)
             && let Ok(mut slot) = thread_failure.lock()
         {
             *slot = Some(error.to_string());
@@ -151,6 +152,7 @@ pub(crate) fn start_transport(
 fn run_transport(
     listener: TcpListener,
     config: TransportConfig,
+    stylus: Arc<BrowserStylus>,
     observations: Arc<dyn ObservationSink>,
     commands: mpsc::Receiver<TransportCommand>,
 ) -> Result<(), AdapterError> {
@@ -222,7 +224,12 @@ fn run_transport(
                             result,
                         });
                     } else {
-                        flush_events(&mut coalescer, &config, Arc::clone(&observations))?;
+                        flush_events(
+                            &mut coalescer,
+                            &config,
+                            Arc::clone(&stylus),
+                            Arc::clone(&observations),
+                        )?;
                         let _ = result.send(Ok(()));
                     }
                 }
@@ -262,7 +269,12 @@ fn run_transport(
                         BridgeMessage::Event { event } if authenticated && accepting_input => {
                             if validate_event(&event, &config.allowed_non_text_codes).is_ok() {
                                 for ready in coalescer.ingest(event) {
-                                    emit_event(&config, Arc::clone(&observations), &ready)?;
+                                    emit_event(
+                                        &config,
+                                        Arc::clone(&stylus),
+                                        Arc::clone(&observations),
+                                        &ready,
+                                    )?;
                                 }
                             }
                         }
@@ -276,7 +288,12 @@ fn run_transport(
                         }
                         BridgeMessage::Quiesced { request_id } if authenticated => {
                             accepting_input = false;
-                            flush_events(&mut coalescer, &config, Arc::clone(&observations))?;
+                            flush_events(
+                                &mut coalescer,
+                                &config,
+                                Arc::clone(&stylus),
+                                Arc::clone(&observations),
+                            )?;
                             complete_pending(
                                 &mut pending,
                                 &request_id,
@@ -410,9 +427,11 @@ fn send_message(
 
 fn emit_event(
     config: &TransportConfig,
+    stylus: Arc<BrowserStylus>,
     observations: Arc<dyn ObservationSink>,
     event: &BrowserEvent,
 ) -> Result<(), AdapterError> {
+    stylus.record(event)?;
     observations.emit(AdapterObservation {
         adapter_id: BROWSER_ADAPTER_ID.to_owned(),
         protocol_id: ProtocolId::parse(BROWSER_PROTOCOL_ID)
@@ -429,10 +448,16 @@ fn emit_event(
 fn flush_events(
     coalescer: &mut ContinuousCoalescer,
     config: &TransportConfig,
+    stylus: Arc<BrowserStylus>,
     observations: Arc<dyn ObservationSink>,
 ) -> Result<(), AdapterError> {
     for event in coalescer.flush() {
-        emit_event(config, Arc::clone(&observations), &event)?;
+        emit_event(
+            config,
+            Arc::clone(&stylus),
+            Arc::clone(&observations),
+            &event,
+        )?;
     }
     Ok(())
 }

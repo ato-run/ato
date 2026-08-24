@@ -968,7 +968,7 @@ fn boundary(config: &AuthoringConfig) -> Result<Boundary> {
 }
 
 #[cfg(test)]
-mod tests {
+mod generic_adapter_tests {
     use super::*;
 
     #[test]

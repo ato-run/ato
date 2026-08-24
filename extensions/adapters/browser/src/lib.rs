@@ -8,14 +8,15 @@ mod transport;
 
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use ato_adapter_api::{
     AdapterAttachContext, AdapterCapabilities, AdapterContext, AdapterError, AdapterFactory,
-    AdapterInstance, AttachedAdapter,
+    AdapterInstance, AttachedAdapter, Stylus, SupportedOperation,
 };
-use ato_objects::{RecordEnvelope, read_exact_object};
+use ato_objects::{RecordCandidate, RecordEnvelope, read_exact_object};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -27,6 +28,10 @@ pub use protocol::{
 
 pub const BROWSER_ADAPTER_ID: &str = "ato.browser@1";
 pub const BROWSER_PROTOCOL_ID: &str = "ato.browser@1";
+pub const BROWSER_KEYBOARD_OPERATION: &str = "keyboard";
+pub const BROWSER_POINTER_OPERATION: &str = "pointer";
+pub const BROWSER_CLICK_OPERATION: &str = "click";
+pub const BROWSER_SCROLL_OPERATION: &str = "scroll";
 
 const MAX_BROWSER_EVENT_BYTES: u64 = 64 * 1024;
 const ACK_TIMEOUT: Duration = Duration::from_secs(30);
@@ -43,6 +48,74 @@ pub struct BrowserAdapterConfig {
 #[derive(Default)]
 pub struct BrowserAdapter;
 
+/// Converts physical Browser input into portable operation Records.
+///
+/// The wrapped Stylus is the non-persisting submission boundary. Presentation
+/// output (screenshots, DOM, console, and media) never enters this component.
+pub struct BrowserStylus {
+    inner: Arc<dyn Stylus>,
+    port_id: ato_computation::PortId,
+    stream: String,
+    recorded_by: String,
+    allowed_non_text_codes: BTreeSet<String>,
+    local_seq: AtomicU64,
+}
+
+impl BrowserStylus {
+    pub fn new(
+        inner: Arc<dyn Stylus>,
+        port_id: ato_computation::PortId,
+        stream: impl Into<String>,
+        recorded_by: impl Into<String>,
+        allowed_non_text_codes: BTreeSet<String>,
+    ) -> Result<Self, AdapterError> {
+        let stream = stream.into();
+        if stream.is_empty() {
+            return Err(AdapterError::InvalidConfig(
+                "Browser Record stream must not be empty".to_owned(),
+            ));
+        }
+        Ok(Self {
+            inner,
+            port_id,
+            stream,
+            recorded_by: recorded_by.into(),
+            allowed_non_text_codes,
+            local_seq: AtomicU64::new(0),
+        })
+    }
+
+    pub fn record(&self, event: &BrowserEvent) -> Result<(), AdapterError> {
+        let payload = protocol::encode_event_with_policy(event, &self.allowed_non_text_codes)
+            .map_err(|error| AdapterError::InvalidPayload(error.to_string()))?;
+        let local_seq = self.local_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        self.inner.record(RecordCandidate {
+            protocol_id: ato_computation::ProtocolId::parse(BROWSER_PROTOCOL_ID)
+                .expect("valid static Browser Protocol ID"),
+            operation_id: ato_computation::OperationId::parse(operation_for_event(event))
+                .expect("valid static Browser operation ID"),
+            port_id: self.port_id.clone(),
+            payload,
+            payload_version: 1,
+            required_features: BTreeSet::new(),
+            recorded_by: Some(self.recorded_by.clone()),
+            stream: self.stream.clone(),
+            local_seq,
+            caused_by: Vec::new(),
+            observed_at: observed_now(),
+        })
+    }
+}
+
+pub fn operation_for_event(event: &BrowserEvent) -> &'static str {
+    match event {
+        BrowserEvent::Keyboard { .. } => BROWSER_KEYBOARD_OPERATION,
+        BrowserEvent::Pointer { .. } => BROWSER_POINTER_OPERATION,
+        BrowserEvent::Click { .. } => BROWSER_CLICK_OPERATION,
+        BrowserEvent::Scroll { .. } => BROWSER_SCROLL_OPERATION,
+    }
+}
+
 impl AdapterFactory for BrowserAdapter {
     fn id(&self) -> &str {
         BROWSER_ADAPTER_ID
@@ -50,6 +123,21 @@ impl AdapterFactory for BrowserAdapter {
 
     fn capabilities(&self) -> AdapterCapabilities {
         browser_capabilities()
+    }
+
+    fn supported_operations(&self) -> Vec<SupportedOperation> {
+        [
+            BROWSER_KEYBOARD_OPERATION,
+            BROWSER_POINTER_OPERATION,
+            BROWSER_CLICK_OPERATION,
+            BROWSER_SCROLL_OPERATION,
+        ]
+        .into_iter()
+        .map(|operation| {
+            SupportedOperation::new(BROWSER_PROTOCOL_ID, operation, 1, BTreeSet::new())
+                .expect("valid static Browser operation")
+        })
+        .collect()
     }
 
     fn preflight(
@@ -68,17 +156,26 @@ impl AdapterFactory for BrowserAdapter {
         let config = parse_config(instance)?;
         let channel_credential = random_credential();
         let browser_session = random_credential();
+        let port_id = ato_computation::PortId::parse(&config.port_id)
+            .map_err(|error| AdapterError::InvalidConfig(error.to_string()))?;
+        let stylus = Arc::new(BrowserStylus::new(
+            Arc::clone(&context.stylus),
+            port_id.clone(),
+            format!("browser.{}", instance.instance_id),
+            BROWSER_ADAPTER_ID,
+            config.allowed_non_text_codes.clone(),
+        )?);
         let transport = transport::start_transport(
             context.runtime.workspace,
             &instance.instance_id,
             transport::TransportConfig {
                 expected_origin: config.expected_origin.clone(),
-                port_id: ato_computation::PortId::parse(&config.port_id)
-                    .map_err(|error| AdapterError::InvalidConfig(error.to_string()))?,
+                port_id,
                 allowed_non_text_codes: config.allowed_non_text_codes.clone(),
                 channel_credential,
                 browser_session,
             },
+            stylus,
             context.observations.clone(),
         )?;
         Ok(Box::new(BrowserSession {
@@ -272,6 +369,12 @@ fn random_credential() -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+fn observed_now() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or_else(|_| "0".to_owned(), |value| value.as_secs().to_string())
+}
+
 fn read_event(
     record: &RecordEnvelope,
     context: &AdapterContext<'_>,
@@ -318,15 +421,36 @@ pub fn runtime_discovery_path(workspace: &Path, instance_id: &str) -> std::path:
 mod tests {
     use std::sync::{Arc, mpsc};
 
-    use ato_adapter_api::{AdapterAttachContext, AdapterRegistry, ObservationSink};
+    use ato_adapter_api::{AdapterAttachContext, AdapterRegistry, ObservationSink, Stylus};
     use ato_computation::{ComputationRef, ProtocolId};
     use ato_objects::{Direction, FsObjectStore, ObjectStore, RecordId};
+    use ato_record_writer::{
+        RecordPipeline, RecordSchemaRegistry, RecordWriterConfig, records_for_frontier,
+    };
     use tungstenite::client::IntoClientRequest;
     use tungstenite::{Message, connect};
 
     use super::*;
 
     struct ChannelSink(mpsc::Sender<ato_adapter_api::AdapterObservation>);
+
+    struct ChannelStylus(mpsc::Sender<RecordCandidate>);
+
+    impl Stylus for ChannelStylus {
+        fn record(&self, candidate: RecordCandidate) -> Result<(), AdapterError> {
+            self.0
+                .send(candidate)
+                .map_err(|error| AdapterError::Operation(error.to_string()))
+        }
+    }
+
+    struct RejectingStylus;
+
+    impl Stylus for RejectingStylus {
+        fn record(&self, _candidate: RecordCandidate) -> Result<(), AdapterError> {
+            Err(AdapterError::Operation("Record queue is full".to_owned()))
+        }
+    }
 
     impl ObservationSink for ChannelSink {
         fn emit(
@@ -346,6 +470,161 @@ mod tests {
         assert!(capabilities.apply);
         assert!(capabilities.verify);
         assert!(capabilities.quiesce);
+        let operations = AdapterFactory::supported_operations(&BrowserAdapter);
+        assert_eq!(operations.len(), 4);
+        assert_eq!(
+            operations
+                .iter()
+                .map(|operation| operation.operation_id.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                BROWSER_CLICK_OPERATION,
+                BROWSER_KEYBOARD_OPERATION,
+                BROWSER_POINTER_OPERATION,
+                BROWSER_SCROLL_OPERATION,
+            ])
+        );
+    }
+
+    #[test]
+    fn browser_stylus_emits_operation_candidates_with_monotonic_local_order() {
+        let (sender, receiver) = mpsc::channel();
+        let stylus = BrowserStylus::new(
+            Arc::new(ChannelStylus(sender)),
+            ato_computation::PortId::parse("ui.main").unwrap(),
+            "browser.run-1",
+            "example.chrome-adapter@1",
+            BTreeSet::new(),
+        )
+        .unwrap();
+        let events = [
+            BrowserEvent::Keyboard {
+                kind: KeyboardKind::KeyDown,
+                code: "ArrowLeft".to_owned(),
+                modifiers: Modifiers::default(),
+            },
+            BrowserEvent::Click {
+                x_normalized: 0.25,
+                y_normalized: 0.75,
+                button: 0,
+            },
+            BrowserEvent::Scroll { x: 0.0, y: 120.0 },
+        ];
+        for event in &events {
+            stylus.record(event).unwrap();
+        }
+        for (index, expected_operation) in [
+            BROWSER_KEYBOARD_OPERATION,
+            BROWSER_CLICK_OPERATION,
+            BROWSER_SCROLL_OPERATION,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let candidate = receiver.recv().unwrap();
+            assert_eq!(candidate.protocol_id.as_str(), BROWSER_PROTOCOL_ID);
+            assert_eq!(candidate.operation_id.as_str(), expected_operation);
+            assert_eq!(candidate.port_id.as_str(), "ui.main");
+            assert_eq!(candidate.local_seq, index as u64 + 1);
+            assert_eq!(candidate.stream, "browser.run-1");
+            assert_eq!(
+                candidate.recorded_by.as_deref(),
+                Some("example.chrome-adapter@1")
+            );
+            assert_eq!(decode_event(&candidate.payload).unwrap(), events[index]);
+        }
+    }
+
+    #[test]
+    fn browser_stylus_propagates_drop_forbidden_queue_failure() {
+        let stylus = BrowserStylus::new(
+            Arc::new(RejectingStylus),
+            ato_computation::PortId::parse("ui.main").unwrap(),
+            "browser.run-1",
+            BROWSER_ADAPTER_ID,
+            BTreeSet::new(),
+        )
+        .unwrap();
+        let error = stylus
+            .record(&BrowserEvent::Keyboard {
+                kind: KeyboardKind::KeyDown,
+                code: "ArrowUp".to_owned(),
+                modifiers: Modifiers::default(),
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("queue is full"));
+    }
+
+    #[test]
+    fn browser_stylus_flows_through_async_writer_to_a_sealed_frontier() {
+        let directory = tempfile::tempdir().unwrap();
+        let objects = Arc::new(FsObjectStore::open(directory.path().join("objects")).unwrap());
+        let mut schemas = RecordSchemaRegistry::default();
+        for operation_id in [
+            BROWSER_KEYBOARD_OPERATION,
+            BROWSER_POINTER_OPERATION,
+            BROWSER_CLICK_OPERATION,
+            BROWSER_SCROLL_OPERATION,
+        ] {
+            schemas
+                .register(
+                    SupportedOperation::new(BROWSER_PROTOCOL_ID, operation_id, 1, BTreeSet::new())
+                        .unwrap(),
+                    move |bytes| {
+                        let event = decode_event(bytes).map_err(|error| error.to_string())?;
+                        (operation_for_event(&event) == operation_id)
+                            .then_some(())
+                            .ok_or_else(|| "Browser payload operation mismatch".to_owned())
+                    },
+                )
+                .unwrap();
+        }
+        let records_root = directory.path().join("records");
+        let pipeline = RecordPipeline::start(
+            RecordWriterConfig::at(&records_root, "run-1"),
+            objects.clone(),
+            schemas,
+        )
+        .unwrap();
+        let stylus = BrowserStylus::new(
+            pipeline.stylus.clone(),
+            ato_computation::PortId::parse("ui.main").unwrap(),
+            "browser.run-1",
+            BROWSER_ADAPTER_ID,
+            BTreeSet::new(),
+        )
+        .unwrap();
+        stylus
+            .record(&BrowserEvent::Keyboard {
+                kind: KeyboardKind::KeyDown,
+                code: "ArrowRight".to_owned(),
+                modifiers: Modifiers::default(),
+            })
+            .unwrap();
+        stylus
+            .record(&BrowserEvent::Click {
+                x_normalized: 0.4,
+                y_normalized: 0.6,
+                button: 0,
+            })
+            .unwrap();
+
+        let paused = pipeline.barrier.pause_and_seal().unwrap();
+        assert_eq!(paused.frontier.last_writer_order, 2);
+        assert_eq!(
+            paused.frontier.observed_through.get("browser.run-1"),
+            Some(&2)
+        );
+        let records =
+            records_for_frontier(&records_root, &paused.frontier, objects.as_ref()).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.operation_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![BROWSER_KEYBOARD_OPERATION, BROWSER_CLICK_OPERATION]
+        );
     }
 
     #[test]
@@ -374,6 +653,7 @@ mod tests {
         let objects_path = directory.path().join(".capsule/objects");
         let objects = FsObjectStore::open(&objects_path).expect("object store should open");
         let (observations_tx, observations_rx) = mpsc::channel();
+        let (records_tx, records_rx) = mpsc::channel();
         let mut registry = AdapterRegistry::default();
         registry
             .register(Arc::new(BrowserAdapter))
@@ -396,6 +676,7 @@ mod tests {
                         workspace: directory.path(),
                         objects: &objects,
                     },
+                    stylus: Arc::new(ChannelStylus(records_tx)),
                     observations: Arc::new(ChannelSink(observations_tx)),
                 },
             )
@@ -505,6 +786,13 @@ mod tests {
         let observed = observations_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("Browser observation should arrive");
+        let candidate = records_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("Browser Record candidate should arrive");
+        assert_eq!(candidate.operation_id.as_str(), BROWSER_KEYBOARD_OPERATION);
+        assert_eq!(candidate.local_seq, 1);
+        assert_eq!(candidate.stream, "browser.browser.test");
+        assert_eq!(candidate.payload, observed.payload);
         assert_eq!(observed.adapter_id, BROWSER_ADAPTER_ID);
         assert_eq!(observed.protocol_id.as_str(), BROWSER_PROTOCOL_ID);
         assert_eq!(
@@ -566,6 +854,15 @@ mod tests {
         let frontier = observations_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("quiesce should persist the final event before returning");
+        let frontier_candidate = records_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("quiesce should submit the final Record before returning");
+        assert_eq!(
+            frontier_candidate.operation_id.as_str(),
+            BROWSER_CLICK_OPERATION
+        );
+        assert_eq!(frontier_candidate.local_seq, 2);
+        assert_eq!(frontier_candidate.payload, frontier.payload);
         assert!(matches!(
             decode_event(&frontier.payload),
             Ok(BrowserEvent::Click { .. })
