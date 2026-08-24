@@ -19,7 +19,6 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
-use url::Url;
 
 pub const BROWSER_COMPUTATION_SEMANTICS_ID: &str = "ato.browser.computation@1";
 
@@ -67,7 +66,6 @@ impl ComputationReferences for BrowserComputationReferences {
 #[serde(deny_unknown_fields)]
 pub struct BrowserResidualV1 {
     pub version: u32,
-    pub expected_origin: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interaction_frontier: Option<String>,
 }
@@ -243,14 +241,9 @@ fn residual_for(
 }
 
 fn validate_residual(residual: &BrowserResidualV1) -> Result<(), BrowserSemanticsError> {
-    let origin = Url::parse(&residual.expected_origin)
-        .map_err(|error| BrowserSemanticsError::Residual(error.to_string()))?;
-    if residual.version != 1
-        || !matches!(origin.scheme(), "http" | "https")
-        || origin.origin().ascii_serialization() != residual.expected_origin
-    {
+    if residual.version != 1 {
         return Err(BrowserSemanticsError::Residual(
-            "expected_origin must be an exact HTTP(S) origin".to_owned(),
+            "unsupported Browser residual version".to_owned(),
         ));
     }
     Ok(())
@@ -577,7 +570,6 @@ mod tests {
             .put(
                 &encode_residual(&BrowserResidualV1 {
                     version: 1,
-                    expected_origin: "http://127.0.0.1:8080".to_owned(),
                     interaction_frontier: None,
                 })
                 .unwrap(),
