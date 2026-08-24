@@ -62,7 +62,6 @@ const RUNNER_CAPABILITIES: &[&str] = &[
     "isolation=untrusted-v1",
     "materializer=ato.materialize.vm.snapshot@1",
     "backend=firecracker",
-    "capture=current-point-vm-v1",
 ];
 const ACTIVE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const GUEST_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
@@ -1829,7 +1828,10 @@ mod tests {
         assert!(RUNNER_CAPABILITIES.contains(&"isolation=untrusted-v1"));
         assert!(RUNNER_CAPABILITIES.contains(&"materializer=ato.materialize.vm.snapshot@1"));
         assert!(RUNNER_CAPABILITIES.contains(&"backend=firecracker"));
-        assert!(RUNNER_CAPABILITIES.contains(&"capture=current-point-vm-v1"));
+        // VM capture alone is not a complete current point for a Run whose
+        // Browser realization owns state (for example localStorage). This is
+        // enabled only after the Runner-owned Browser capture closure lands.
+        assert!(!RUNNER_CAPABILITIES.contains(&"capture=current-point-vm-v1"));
     }
 
     #[test]
