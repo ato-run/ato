@@ -18,10 +18,14 @@ use ato_adapter_api::{
     ADAPTER_REMOVE_OPERATION, AdapterContext, AdapterControlPayload, AdapterRegistry,
     SupportedOperation, decode_adapter_control_payload,
 };
-use ato_adapter_browser::BrowserAdapter;
 use ato_adapter_binding::{
     BINDING_ATTACH_OPERATION, BINDING_DETACH_OPERATION, BINDING_PROTOCOL_ID,
     BINDING_REPLACE_OPERATION, BindingAdapter, BindingEvent, decode_event as decode_binding_event,
+};
+use ato_adapter_browser::{
+    BROWSER_CLICK_OPERATION, BROWSER_KEYBOARD_OPERATION, BROWSER_POINTER_OPERATION,
+    BROWSER_PROTOCOL_ID, BROWSER_SCROLL_OPERATION, BrowserAdapter,
+    decode_event as decode_browser_event, operation_for_event as browser_operation_for_event,
 };
 use ato_adapter_http::{
     HTTP_PROTOCOL_ID, HTTP_REQUEST_OPERATION, HttpAdapter, HttpEvent,
@@ -701,6 +705,19 @@ pub(crate) fn record_schema_registry() -> Result<RecordSchemaRegistry> {
         },
     )?;
     for operation_id in [
+        BROWSER_KEYBOARD_OPERATION,
+        BROWSER_POINTER_OPERATION,
+        BROWSER_CLICK_OPERATION,
+        BROWSER_SCROLL_OPERATION,
+    ] {
+        registry.register(operation(BROWSER_PROTOCOL_ID, operation_id), move |bytes| {
+            let event = decode_browser_event(bytes).map_err(|error| error.to_string())?;
+            (browser_operation_for_event(&event) == operation_id)
+                .then_some(())
+                .ok_or_else(|| format!("Browser payload kind does not match `{operation_id}`"))
+        })?;
+    }
+    for operation_id in [
         PTY_INPUT_OPERATION,
         PTY_RESIZE_OPERATION,
         PTY_SIGNAL_OPERATION,
@@ -967,6 +984,41 @@ mod tests {
         assert_eq!(
             ato_materializer_snapshot::SNAPSHOT_MATERIALIZER_ID,
             "ato.snapshot@1"
+        );
+    }
+
+    #[test]
+    fn browser_record_schema_is_operation_specific() {
+        let payload =
+            ato_adapter_browser::encode_event(&ato_adapter_browser::BrowserEvent::Click {
+                x_normalized: 0.5,
+                y_normalized: 0.5,
+                button: 0,
+            })
+            .unwrap();
+        let candidate = |operation_id: &str| ato_objects::RecordCandidate {
+            protocol_id: ato_computation::ProtocolId::parse(BROWSER_PROTOCOL_ID).unwrap(),
+            operation_id: ato_computation::OperationId::parse(operation_id).unwrap(),
+            port_id: ato_computation::PortId::parse("ui.main").unwrap(),
+            payload: payload.clone(),
+            payload_version: 1,
+            required_features: Default::default(),
+            recorded_by: Some("example.browser-adapter@1".to_owned()),
+            stream: "browser.test".to_owned(),
+            local_seq: 1,
+            caused_by: Vec::new(),
+            observed_at: "0".to_owned(),
+        };
+        let schemas = record_schema_registry().unwrap();
+        schemas
+            .validate_candidate(&candidate(BROWSER_CLICK_OPERATION))
+            .expect("click payload should match the click operation");
+        assert!(
+            schemas
+                .validate_candidate(&candidate(BROWSER_KEYBOARD_OPERATION))
+                .unwrap_err()
+                .to_string()
+                .contains("does not match")
         );
     }
 }

@@ -48,8 +48,9 @@ select silent drop.
 `RecordSchemaRegistry` is extension-owned and keyed by Protocol, operation, and
 payload version. Required features must be a subset of the registered
 operation features. The built-in registry checks the exact variant for HTTP
-request, PTY input/resize/signal, Workspace put/delete/rename, Binding
-attach/replace/detach, and Adapter add/remove/configure.
+request, Browser keyboard/pointer/click/scroll, PTY input/resize/signal,
+Workspace put/delete/rename, Binding attach/replace/detach, and Adapter
+add/remove/configure.
 
 Application-generated HTTP responses and PTY output have no registered Record
 schema and do not enter the Stylus path.

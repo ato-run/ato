@@ -23,4 +23,5 @@ tungstenite = "0.28"
 url = "2"
 
 [dev-dependencies]
+ato-record-writer = { path = "../../record-writer", version = "0.1.0" }
 tempfile = "3"
