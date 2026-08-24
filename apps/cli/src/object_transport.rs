@@ -286,7 +286,19 @@ impl ObjectTransportApi for HttpObjectTransportApi {
             let status = response.status();
             let retryable =
                 status.as_u16() == 408 || status.as_u16() == 429 || status.is_server_error();
-            let message = format!("object PUT returned {status}");
+            let body = response.text().unwrap_or_default();
+            let r2_code = body
+                .split_once("<Code>")
+                .and_then(|(_, suffix)| suffix.split_once("</Code>"))
+                .map(|(code, _)| code)
+                .filter(|code| {
+                    !code.is_empty()
+                        && code
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                })
+                .unwrap_or("unknown");
+            let message = format!("object PUT returned {status} (r2_code={r2_code})");
             Err(if retryable {
                 ApiError::retryable(message)
             } else {
