@@ -15,6 +15,7 @@ members = [
     "extensions/adapters/binding",
     "extensions/adapters/http",
     "extensions/adapters/browser",
+    "extensions/semantics/browser",
     "extensions/player",
     "extensions/record-writer",
     "lib/compose",

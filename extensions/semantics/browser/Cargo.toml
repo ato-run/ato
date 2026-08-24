@@ -1,27 +1,25 @@
 [package]
-name = "ato-adapter-browser"
+name = "ato-browser-semantics"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0 OR MPL-2.0"
-description = "Browser physical-input protocol Adapter for Ato"
+description = "Logical Browser interaction frontier semantics for Ato"
 
 [package.metadata.dist]
 dist = false
 
 [package.metadata.ato-architecture]
-layer = "adapter"
+layer = "extension"
 
 [dependencies]
-ato-adapter-api = { path = "../api", version = "0.1.0" }
+ato-adapter-api = { path = "../../adapters/api", version = "0.1.0" }
+ato-adapter-browser = { path = "../../adapters/browser", version = "0.1.0" }
 ato-computation = { path = "../../../lib/computation", version = "0.1.0" }
+ato-kernel = { path = "../../../lib/kernel", version = "0.1.0" }
 ato-objects = { path = "../../../lib/objects", version = "0.1.0" }
-ato-record-writer = { path = "../../record-writer", version = "0.1.0" }
-rand = "0.8"
+blake3 = "1"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 serde_jcs = "0.1"
-tungstenite = "0.28"
+serde_json = "1"
+thiserror = "2.0"
 url = "2"
-
-[dev-dependencies]
-tempfile = "3"
