@@ -1,0 +1,34 @@
+{
+  "recorded_at": "2026-08-23T19:33:05+09:00",
+  "repositories": {
+    "ato": {
+      "pr": "https://github.com/ato-run/ato/pull/1291",
+      "expected_head": "509a05028448dccc684be7769e9d085d39102b6a",
+      "actual_head_after_fetch": "509a05028448dccc684be7769e9d085d39102b6a",
+      "branch": "feat/legacy-vm-materialization-v0",
+      "base": "main",
+      "draft": true,
+      "legacy_worktree_clean": true
+    },
+    "ato_api": {
+      "pr": "https://github.com/ato-run/ato-api/pull/518",
+      "expected_head": "b457e2db9b311ec5d28a9f3ed9d5f95a30ec66f1",
+      "actual_head_after_fetch": "b457e2db9b311ec5d28a9f3ed9d5f95a30ec66f1",
+      "branch": "feat/legacy-vm-library-migration-v0",
+      "base": "feat/activity-control-plane-v0",
+      "draft": true,
+      "legacy_worktree_clean": true
+    }
+  },
+  "preservation": {
+    "existing_worktrees_removed": 0,
+    "existing_uncommitted_changes_overwritten": 0,
+    "existing_receipts_removed_or_overwritten": 0,
+    "unrelated_user_change_not_touched": "apps/ato/tests/browser/ (untracked in the main worktree)"
+  },
+  "production": {
+    "writes": 0,
+    "objects_uploaded": 0,
+    "approval_requested": false
+  }
+}
