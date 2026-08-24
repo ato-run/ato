@@ -120,6 +120,7 @@ impl AdapterFactory for PtyAdapter {
         let failure = Arc::new(Mutex::new(None));
         let port_id = ato_computation::PortId::parse(format!("terminal.{}", instance.instance_id))
             .map_err(|error| AdapterError::InvalidConfig(error.to_string()))?;
+        let stream_id = format!("pty.{}", instance.instance_id);
         let local_seq = Arc::new(AtomicU64::new(0));
         let readers = vec![
             spawn_output_reader(
@@ -139,6 +140,7 @@ impl AdapterFactory for PtyAdapter {
             };
             context.stylus.record(candidate(
                 &port_id,
+                &stream_id,
                 &event,
                 local_seq.fetch_add(1, Ordering::Relaxed) + 1,
             )?)?;
@@ -158,6 +160,7 @@ impl AdapterFactory for PtyAdapter {
             stylus: Arc::clone(&context.stylus),
             observations: Arc::clone(&context.observations),
             port_id,
+            stream_id,
             local_seq,
             activated: false,
         }))
@@ -174,6 +177,7 @@ struct PtySession {
     stylus: Arc<dyn Stylus>,
     observations: Arc<dyn ato_adapter_api::ObservationSink>,
     port_id: ato_computation::PortId,
+    stream_id: String,
     local_seq: Arc<AtomicU64>,
     activated: bool,
 }
@@ -262,6 +266,7 @@ impl AttachedAdapter for PtySession {
                 Arc::clone(&self.stylus),
                 Arc::clone(&self.observations),
                 self.port_id.clone(),
+                self.stream_id.clone(),
                 Arc::clone(&self.local_seq),
                 Arc::clone(&self.failure),
             );
@@ -328,6 +333,7 @@ fn observation(
 
 fn candidate(
     port_id: &ato_computation::PortId,
+    stream_id: &str,
     event: &PtyEvent,
     local_seq: u64,
 ) -> Result<RecordCandidate, AdapterError> {
@@ -351,7 +357,7 @@ fn candidate(
         payload_version: 1,
         required_features: BTreeSet::new(),
         recorded_by: Some(PTY_ADAPTER_ID.to_owned()),
-        stream: "pty".to_owned(),
+        stream: stream_id.to_owned(),
         local_seq,
         caused_by: Vec::new(),
         observed_at: observed_now(),
@@ -397,6 +403,7 @@ fn spawn_input_reader(
     stylus: Arc<dyn Stylus>,
     observations: Arc<dyn ato_adapter_api::ObservationSink>,
     port_id: ato_computation::PortId,
+    stream_id: String,
     local_seq: Arc<AtomicU64>,
     failure: Arc<Mutex<Option<String>>>,
 ) {
@@ -415,6 +422,7 @@ fn spawn_input_reader(
                 .record(
                     candidate(
                         &port_id,
+                        &stream_id,
                         &event,
                         local_seq.fetch_add(1, Ordering::Relaxed) + 1,
                     )
@@ -460,14 +468,14 @@ mod tests {
     #[test]
     fn only_applicable_pty_events_become_record_candidates() {
         let port = ato_computation::PortId::parse("terminal.main").unwrap();
-        let input = candidate(&port, &PtyEvent::Input { bytes: vec![1] }, 1).unwrap();
+        let input = candidate(&port, "pty.main", &PtyEvent::Input { bytes: vec![1] }, 1).unwrap();
         assert_eq!(input.operation_id.as_str(), PTY_INPUT_OPERATION);
         assert!(matches!(
-            candidate(&port, &PtyEvent::Output { bytes: vec![1] }, 2),
+            candidate(&port, "pty.main", &PtyEvent::Output { bytes: vec![1] }, 2),
             Err(AdapterError::InvalidPayload(_))
         ));
         assert!(matches!(
-            candidate(&port, &PtyEvent::Attach, 3),
+            candidate(&port, "pty.main", &PtyEvent::Attach, 3),
             Err(AdapterError::InvalidPayload(_))
         ));
     }
