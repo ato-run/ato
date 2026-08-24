@@ -31,6 +31,9 @@ struct Args {
     /// Use the authenticated staging API object PUT fallback instead of direct R2 PUTs.
     #[arg(long)]
     staging_api_proxy_upload: bool,
+    /// Delete an owned non-ready graph before starting this upload.
+    #[arg(long)]
+    cleanup_owned_graph: Option<String>,
     #[arg(long)]
     receipt: PathBuf,
     #[arg(long)]
@@ -92,6 +95,10 @@ fn main() -> Result<()> {
     let mut api = HttpObjectTransportApi::new(&args.api_url, token)?;
     if args.staging_api_proxy_upload {
         api = api.with_staging_proxy_upload()?;
+    }
+    if let Some(graph_id) = &args.cleanup_owned_graph {
+        let objects_deleted = api.delete_rejected_graph(graph_id)?;
+        eprintln!("Cleaned owned non-ready graph {graph_id} ({objects_deleted} objects deleted)");
     }
     let idempotency_key = args.idempotency_key.unwrap_or_else(|| {
         if args.negative_validator_test {
@@ -290,24 +297,19 @@ fn forge_declared_reference(index: &mut ObjectGraphIndexV1) -> Result<()> {
         .iter()
         .position(|object| object.content_ref == index.root_computation_ref)
         .context("negative fixture root descriptor is absent")?;
-    let original_references = index.objects[root_position].references.clone();
-    let replacement = index
-        .objects
-        .iter()
-        .map(|object| object.content_ref.clone())
-        .find(|reference| {
-            reference != &index.root_computation_ref && !original_references.contains(reference)
-        })
-        .context("negative fixture has no replacement object")?;
-    let root = &mut index.objects[root_position];
+    let mut root = index.objects[root_position].clone();
     ensure!(
         !root.references.is_empty(),
         "negative fixture root has no references"
     );
-    // Preserve the complete declared traversal so prepare accepts the graph;
-    // the independent semantic validator must reject this extra forged edge.
-    root.references.push(replacement);
-    root.references.sort();
+    // Deliberately omit decoded semantic references while keeping a complete,
+    // structurally reachable one-object transport graph. The API shape check
+    // accepts it; the independent validator must derive and reject the gap.
+    root.references.clear();
+    index.objects = vec![root];
+    index.materializations.clear();
+    index.exported_ports.clear();
+    index.required_bindings.clear();
     Ok(())
 }
 
