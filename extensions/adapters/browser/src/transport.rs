@@ -16,7 +16,7 @@ use tungstenite::{Message, WebSocket, accept_hdr};
 
 use crate::coalescer::ContinuousCoalescer;
 use crate::protocol::{BrowserEvent, encode_event_with_policy, validate_event};
-use crate::{BROWSER_ADAPTER_ID, BROWSER_PROTOCOL_ID, BrowserStylus};
+use crate::{BROWSER_ADAPTER_ID, BROWSER_PROTOCOL_ID, BrowserInputMode, BrowserStylus};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(2);
 
@@ -28,6 +28,7 @@ pub struct BrowserRuntimeBootstrap {
     pub browser_session: String,
     pub expected_origin: String,
     pub allowed_non_text_codes: BTreeSet<String>,
+    pub input_mode: BrowserInputMode,
 }
 
 pub(crate) enum TransportCommand {
@@ -98,6 +99,7 @@ enum PendingKind {
 
 pub(crate) struct TransportHandle {
     pub discovery_path: PathBuf,
+    pub readiness_path: PathBuf,
     pub commands: mpsc::Sender<TransportCommand>,
     pub failure: Arc<Mutex<Option<String>>>,
     pub join: Option<JoinHandle<()>>,
@@ -109,6 +111,7 @@ pub(crate) struct TransportConfig {
     pub allowed_non_text_codes: BTreeSet<String>,
     pub channel_credential: String,
     pub browser_session: String,
+    pub input_mode: BrowserInputMode,
 }
 
 pub(crate) fn start_transport(
@@ -128,21 +131,31 @@ pub(crate) fn start_transport(
         browser_session: config.browser_session.clone(),
         expected_origin: config.expected_origin.clone(),
         allowed_non_text_codes: config.allowed_non_text_codes.clone(),
+        input_mode: config.input_mode,
     };
     let discovery_path = discovery_path(workspace, instance_id)?;
     write_runtime_discovery(&discovery_path, &bootstrap)?;
+    let readiness_path = discovery_path.with_extension("ready");
     let (commands, receiver) = mpsc::channel();
     let failure = Arc::new(Mutex::new(None));
     let thread_failure = Arc::clone(&failure);
+    let thread_readiness_path = readiness_path.clone();
     let join = thread::spawn(move || {
-        if let Err(error) = run_transport(listener, config, stylus, observations, receiver)
-            && let Ok(mut slot) = thread_failure.lock()
+        if let Err(error) = run_transport(
+            listener,
+            config,
+            stylus,
+            observations,
+            receiver,
+            thread_readiness_path,
+        ) && let Ok(mut slot) = thread_failure.lock()
         {
             *slot = Some(error.to_string());
         }
     });
     Ok(TransportHandle {
         discovery_path,
+        readiness_path,
         commands,
         failure,
         join: Some(join),
@@ -155,6 +168,7 @@ fn run_transport(
     stylus: Arc<BrowserStylus>,
     observations: Arc<dyn ObservationSink>,
     commands: mpsc::Receiver<TransportCommand>,
+    readiness_path: PathBuf,
 ) -> Result<(), AdapterError> {
     let mut socket = None;
     let mut authenticated = false;
@@ -265,8 +279,13 @@ fn run_transport(
                                     browser_session: &config.browser_session,
                                 },
                             )?;
+                            write_owner_only(&readiness_path, b"ready")?;
                         }
-                        BridgeMessage::Event { event } if authenticated && accepting_input => {
+                        BridgeMessage::Event { event }
+                            if authenticated
+                                && accepting_input
+                                && config.input_mode.observes_trusted_events() =>
+                        {
                             if validate_event(&event, &config.allowed_non_text_codes).is_ok() {
                                 for ready in coalescer.ingest(event) {
                                     emit_event(
@@ -566,6 +585,7 @@ mod tests {
             allowed_non_text_codes: BTreeSet::new(),
             channel_credential: "credential".to_owned(),
             browser_session: "session".to_owned(),
+            input_mode: BrowserInputMode::ObserveAndApply,
         }
     }
 

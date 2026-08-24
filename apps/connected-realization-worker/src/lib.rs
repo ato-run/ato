@@ -7,6 +7,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -14,17 +15,29 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail, ensure};
-use ato_adapter_api::{ActuatorProviderRegistry, AdapterRegistry, WorkspaceCapturePolicy};
-use ato_adapter_browser::{
-    BrowserAdapter, register_record_schemas as register_browser_record_schemas,
+use ato_adapter_api::{
+    ActuatorProviderRegistry, AdapterAttachContext, AdapterContext, AdapterInstance,
+    AdapterRegistry, AttachedAdapter, IgnoreObservations, LiveOperation, Stylus,
+    WorkspaceCapturePolicy,
 };
-use ato_browser_semantics::{BrowserComputationSemantics, BrowserProtocolSemantics};
-use ato_computation::{ComputationRef, ContentRef};
+use ato_adapter_browser::{
+    BROWSER_PROTOCOL_ID, BrowserAdapter, BrowserAdapterConfig, BrowserInputMode,
+    register_record_schemas as register_browser_record_schemas,
+};
+use ato_browser_host::{BrowserHost, BrowserHostConfig};
+use ato_browser_semantics::{
+    AcceptedBrowserOperation, BROWSER_COMPUTATION_SEMANTICS_ID, BrowserComputationSemantics,
+    BrowserHeadPersistence, BrowserOperationActuator, BrowserOperationIngress,
+    BrowserProtocolSemantics, BrowserRecordSubmission,
+};
+use ato_compose::{COMPOSE_SEMANTICS_ID, ComposeSemantics, decode_composite_residual};
+use ato_computation::{ComputationRef, ContentRef, PortId, ProtocolId, SemanticsId};
 use ato_contracts::{HttpEndpointVerifier, WorkspaceContentVerifier};
 use ato_kernel::{Kernel, RunEvolutionAuthority};
 use ato_materializer_api::{
@@ -37,6 +50,7 @@ use ato_materializer_vm_snapshot::{
     FirecrackerSurfaceRelayConfig, VM_SNAPSHOT_MATERIALIZER_ID, VmSnapshotError,
     VmSnapshotMaterializer,
 };
+use ato_objects::{ObjectResolver, ObjectStore, RecordCandidate, resolve_computation};
 use ato_planner::{
     MaterializationCandidate, Placement, PlannerPolicy, RealizationPlanner, TargetEnvironment,
     TrustBoundary,
@@ -61,6 +75,210 @@ const RUNNER_CAPABILITIES: &[&str] = &[
 const ACTIVE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const GUEST_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const GUEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
+#[derive(Debug, Clone)]
+struct HostedBrowserBinding {
+    port: PortId,
+    expected_origin: String,
+}
+
+/// Finds the single explicitly composed Browser continuation. This never
+/// injects a Port into an existing source/2048 Computation: no Browser leaf
+/// means no hosted Chrome lifecycle.
+fn hosted_browser_binding(
+    root: &ComputationRef,
+    objects: &dyn ObjectResolver,
+) -> Result<Option<HostedBrowserBinding>> {
+    let mut leaves = Vec::new();
+    collect_browser_leaves(root, objects, &mut leaves)?;
+    if leaves.is_empty() {
+        return Ok(None);
+    }
+    ensure!(
+        leaves.len() == 1,
+        "multiple Browser Computations are not supported by one Hosted Run"
+    );
+    let root = resolve_computation(objects, root)?;
+    let ports = root
+        .object()
+        .boundary
+        .iter()
+        .filter(|(_, definition)| {
+            definition.protocol.as_str() == BROWSER_PROTOCOL_ID
+                && definition.role.as_str() == "controller"
+        })
+        .map(|(port, _)| port.clone())
+        .collect::<Vec<_>>();
+    let [port] = ports.as_slice() else {
+        bail!("Browser Computation must be explicitly exported as one controller Port");
+    };
+    Ok(Some(HostedBrowserBinding {
+        port: port.clone(),
+        expected_origin: leaves.pop().expect("one Browser leaf"),
+    }))
+}
+
+fn collect_browser_leaves(
+    reference: &ComputationRef,
+    objects: &dyn ObjectResolver,
+    leaves: &mut Vec<String>,
+) -> Result<()> {
+    let resolved = resolve_computation(objects, reference)?;
+    if resolved.object().semantics == SemanticsId::parse(BROWSER_COMPUTATION_SEMANTICS_ID)? {
+        let metadata = objects.metadata(&resolved.object().residual)?;
+        let bytes = ato_objects::read_exact_object(
+            objects,
+            &resolved.object().residual,
+            metadata.size,
+            64 * 1024,
+        )?;
+        leaves.push(ato_browser_semantics::decode_residual(&bytes)?.expected_origin);
+        return Ok(());
+    }
+    if resolved.object().semantics == SemanticsId::parse(COMPOSE_SEMANTICS_ID)? {
+        let metadata = objects.metadata(&resolved.object().residual)?;
+        let bytes = ato_objects::read_exact_object(
+            objects,
+            &resolved.object().residual,
+            metadata.size,
+            ato_compose::MAX_COMPOSITE_RESIDUAL_BYTES,
+        )?;
+        for child in decode_composite_residual(&bytes)?.nodes.values() {
+            collect_browser_leaves(child, objects, leaves)?;
+        }
+    }
+    Ok(())
+}
+
+struct AttachedBrowserActuator(Arc<Mutex<Box<dyn AttachedAdapter>>>);
+
+impl BrowserOperationActuator for AttachedBrowserActuator {
+    fn apply(&mut self, operation: &LiveOperation) -> std::result::Result<(), String> {
+        self.0
+            .lock()
+            .map_err(|_| "Browser Adapter session mutex poisoned".to_owned())?
+            .apply_operation(operation)
+            .map_err(|error| error.to_string())
+    }
+}
+
+#[derive(Clone)]
+struct RunnerBrowserHeadPersistence {
+    api: HttpRunnerApi,
+    lease_id: String,
+}
+
+impl BrowserHeadPersistence for RunnerBrowserHeadPersistence {
+    fn persist(&self, operation: &AcceptedBrowserOperation) -> std::result::Result<(), String> {
+        let pending = ato_kernel::PendingHeadPersistence {
+            transition: operation.transition.clone(),
+            run_seq: operation.run_seq,
+        };
+        self.api
+            .persist_computation_head(&self.lease_id, &operation.operation_id, &pending)
+            .map_err(|error| error.to_string())
+    }
+}
+
+#[derive(Clone)]
+struct RunnerBrowserRecordSubmission {
+    stylus: Arc<ato_record_writer::AsyncRecordStylus>,
+    port: PortId,
+    stream: String,
+    next_local_seq: Arc<AtomicU64>,
+}
+
+impl BrowserRecordSubmission for RunnerBrowserRecordSubmission {
+    fn submit(&self, operation: &AcceptedBrowserOperation) -> std::result::Result<(), String> {
+        // `operation` contains the exact event/transition/run_seq/operation_id
+        // accepted by the authority. Record metadata stays outside semantic
+        // identity; the portable Record itself remains only the Browser action.
+        self.stylus
+            .record(RecordCandidate {
+                protocol_id: ProtocolId::parse(BROWSER_PROTOCOL_ID)
+                    .expect("static Browser Protocol ID"),
+                operation_id: ato_computation::OperationId::parse(
+                    ato_adapter_browser::operation_for_event(&operation.event),
+                )
+                .expect("static Browser operation ID"),
+                port_id: self.port.clone(),
+                payload: ato_adapter_browser::encode_event(&operation.event)
+                    .map_err(|error| error.to_string())?,
+                payload_version: 1,
+                required_features: BTreeSet::new(),
+                recorded_by: Some("ato.browser@1".to_owned()),
+                stream: self.stream.clone(),
+                local_seq: self.next_local_seq.fetch_add(1, Ordering::Relaxed) + 1,
+                caused_by: Vec::new(),
+                observed_at: OffsetDateTime::now_utc().unix_timestamp().to_string(),
+            })
+            .map_err(|error| error.to_string())
+    }
+}
+
+type HostedBrowserIngress = BrowserOperationIngress<
+    AttachedBrowserActuator,
+    RunnerBrowserHeadPersistence,
+    RunnerBrowserRecordSubmission,
+>;
+
+struct HostedBrowserRuntime {
+    ingress: Arc<HostedBrowserIngress>,
+    adapter: Option<Arc<Mutex<Box<dyn AttachedAdapter>>>>,
+    host: Option<BrowserHost>,
+    pipeline: Option<ato_record_writer::RecordPipeline>,
+    objects: Arc<dyn ObjectStore>,
+    workspace: PathBuf,
+}
+
+impl HostedBrowserRuntime {
+    /// Future capture coordination freezes this logical gate before it asks
+    /// the Browser Host to quiesce. No physical Browser state is captured in
+    /// P0-B.
+    fn freeze(&self) -> Result<ato_kernel::RunHeadSnapshot> {
+        self.ingress
+            .freeze()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
+    }
+
+    fn stop(mut self) -> Result<()> {
+        self.freeze()?;
+        self.cleanup()?;
+        Ok(())
+    }
+
+    fn cleanup(&mut self) -> Result<()> {
+        if let Some(adapter) = self.adapter.take() {
+            let mut adapter = adapter
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Browser Adapter session mutex poisoned"))?;
+            adapter.quiesce(&AdapterContext {
+                workspace: &self.workspace,
+                objects: self.objects.as_ref(),
+            })?;
+            adapter.detach(&AdapterContext {
+                workspace: &self.workspace,
+                objects: self.objects.as_ref(),
+            })?;
+        }
+        if let Some(host) = self.host.take() {
+            host.stop()?;
+        }
+        if let Some(pipeline) = self.pipeline.take() {
+            pipeline.shutdown()?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for HostedBrowserRuntime {
+    fn drop(&mut self) {
+        // Error paths may bypass the normal stop request. Do not leave a
+        // private profile, bridge transport, or writer behind merely because
+        // the control-plane request which followed readiness failed.
+        let _ = self.cleanup();
+    }
+}
 
 struct WorkerRecordCaptureBarrier {
     inner: ato_record_writer::CaptureBarrier,
@@ -148,6 +366,9 @@ pub struct WorkerConfig {
     pub tap_host_cidr: String,
     #[arg(long, env = "ATO_RUNNER_SLOT_ID", default_value = "0")]
     pub slot_id: String,
+    /// Required only by roots that explicitly compose a Browser Computation.
+    #[arg(long, env = "ATO_BROWSER_CHROME")]
+    pub browser_chrome: Option<PathBuf>,
     #[arg(long)]
     pub once: bool,
 }
@@ -212,10 +433,10 @@ impl ConnectedWorker {
             // this authority yet: Browser composition and its registered
             // Semantics arrive in P0-B. Keeping it alive here establishes the
             // hosted lifecycle without inventing an authoring/hash fallback.
-            let evolution = initialize_hosted_run_evolution_authority(
+            let evolution = Arc::new(initialize_hosted_run_evolution_authority(
                 &graph,
                 &lease.command.expected_root_computation_ref,
-            )?;
+            )?);
             let firecracker_work_root = self.config.work_root.join("fc");
             let physical = RestorePhysicalConfig {
                 firecracker_work_root: &firecracker_work_root,
@@ -226,6 +447,18 @@ impl ConnectedWorker {
             };
             let running = restore_vm_path(&graph, &lease_root, &lease.id, &physical)?;
             self.api.report_status(&lease.id, "running")?;
+
+            // An explicit Browser Computation receives one private Chrome
+            // realization. Ordinary VM-only roots take the unchanged path.
+            let mut browser = start_hosted_browser_runtime(
+                &graph,
+                lease,
+                &lease_root,
+                &lease_root.join("workspace"),
+                Arc::clone(&evolution),
+                self.api.clone(),
+                self.config.browser_chrome.as_deref(),
+            )?;
 
             // The externally reachable listener does not exist until the VM is
             // active, every Contract passed, and the Realization published.
@@ -249,6 +482,9 @@ impl ConnectedWorker {
             loop {
                 let control = self.api.control(&lease.id)?;
                 if control.stop_requested {
+                    if let Some(browser) = browser.take() {
+                        browser.stop()?;
+                    }
                     drop(proxy);
                     running.quiesce()?;
                     self.api.report_stopped(&lease.id, &execution_id)?;
@@ -438,6 +674,7 @@ fn initialize_hosted_run_evolution_authority(
 /// source Computations or grants a Browser capability by itself.
 fn hosted_evolution_kernel(objects: Arc<dyn ato_objects::ObjectStore>) -> Result<Kernel> {
     let mut kernel = Kernel::new(objects);
+    kernel.register(Arc::new(ComposeSemantics::default()))?;
     kernel.register(Arc::new(BrowserComputationSemantics::default()))?;
     kernel.register_protocol(Arc::new(BrowserProtocolSemantics::default()))?;
     Ok(kernel)
@@ -450,6 +687,116 @@ fn hosted_record_schema_registry() -> Result<ato_record_writer::RecordSchemaRegi
     Ok(schemas)
 }
 
+fn start_hosted_browser_runtime(
+    graph: &ValidatedRuntimeGraph,
+    lease: &ClaimedLease,
+    lease_root: &Path,
+    workspace: &Path,
+    evolution: Arc<RunEvolutionAuthority>,
+    api: HttpRunnerApi,
+    chrome: Option<&Path>,
+) -> Result<Option<HostedBrowserRuntime>> {
+    let root = ComputationRef::parse(&graph.report().root_computation_ref)?;
+    let Some(binding) = hosted_browser_binding(&root, graph.objects())? else {
+        return Ok(None);
+    };
+    let chrome = chrome.context(
+        "Browser-aware Hosted Run requires ATO_BROWSER_CHROME to name an absolute Chrome executable",
+    )?;
+    ensure!(
+        chrome.is_absolute() && chrome.is_file(),
+        "Browser-aware Hosted Run requires ATO_BROWSER_CHROME to name an absolute Chrome executable"
+    );
+    let records_root = lease_root.join("records");
+    let pipeline = ato_record_writer::RecordPipeline::start(
+        ato_record_writer::RecordWriterConfig::at(&records_root, &lease.run_id),
+        Arc::new(graph.objects().clone()),
+        hosted_record_schema_registry()?,
+    )?;
+    let mut registry = AdapterRegistry::default();
+    registry.register(Arc::new(BrowserAdapter))?;
+    let instance = AdapterInstance {
+        instance_id: "hosted.browser".to_owned(),
+        adapter_id: ato_adapter_browser::BROWSER_ADAPTER_ID.to_owned(),
+        config: serde_json::to_value(BrowserAdapterConfig {
+            port_id: binding.port.to_string(),
+            expected_origin: binding.expected_origin.clone(),
+            allowed_non_text_codes: BTreeSet::new(),
+            input_mode: BrowserInputMode::ApplyOnly,
+        })?,
+    };
+    let mut attached = registry.attach_all(
+        &[instance],
+        &AdapterAttachContext {
+            runtime: AdapterContext {
+                workspace,
+                objects: graph.objects(),
+            },
+            stylus: pipeline.stylus.clone(),
+            observations: Arc::new(IgnoreObservations),
+        },
+    )?;
+    let adapter = Arc::new(Mutex::new(
+        attached.pop().context("Browser Adapter did not attach")?,
+    ));
+    ensure!(
+        attached.is_empty(),
+        "unexpected additional Browser Adapter session"
+    );
+    let host_root = lease_root.join("browser");
+    fs::create_dir_all(&host_root)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&host_root, fs::Permissions::from_mode(0o700))?;
+    }
+    let bootstrap_path = ato_adapter_browser::runtime_discovery_path(workspace, "hosted.browser");
+    let host = match BrowserHost::start(BrowserHostConfig {
+        runtime_dir: host_root,
+        bootstrap_path,
+        target_url: format!("{}/", binding.expected_origin),
+        chrome: chrome.to_owned(),
+        headless: true,
+    }) {
+        Ok(host) => host,
+        Err(error) => {
+            if let Ok(mut adapter) = adapter.lock() {
+                let context = AdapterContext {
+                    workspace,
+                    objects: graph.objects(),
+                };
+                let _ = adapter.detach(&context);
+            }
+            drop(adapter);
+            let _ = pipeline.shutdown();
+            return Err(error);
+        }
+    };
+    let ingress = Arc::new(BrowserOperationIngress::new(
+        evolution,
+        binding.port.clone(),
+        AttachedBrowserActuator(Arc::clone(&adapter)),
+        RunnerBrowserHeadPersistence {
+            api,
+            lease_id: lease.id.clone(),
+        },
+        RunnerBrowserRecordSubmission {
+            stylus: pipeline.stylus.clone(),
+            port: binding.port,
+            stream: format!("browser-{}", lease.id),
+            next_local_seq: Arc::new(AtomicU64::new(0)),
+        },
+    ));
+    Ok(Some(HostedBrowserRuntime {
+        ingress,
+        adapter: Some(adapter),
+        host: Some(host),
+        pipeline: Some(pipeline),
+        objects: Arc::new(graph.objects().clone()),
+        workspace: workspace.to_owned(),
+    }))
+}
+
 fn restore_vm_path(
     graph: &ValidatedRuntimeGraph,
     lease_root: &Path,
@@ -459,12 +806,6 @@ fn restore_vm_path(
     let root = ComputationRef::parse(&graph.report().root_computation_ref)?;
     let workspace = lease_root.join("workspace");
     fs::create_dir_all(&workspace)?;
-    let mut adapters = AdapterRegistry::default();
-    adapters.register(Arc::new(BrowserAdapter))?;
-    // P0-B establishes the same schema registration boundary used by future
-    // hosted Record Pipelines. It intentionally does not start a pipeline
-    // before a Browser-aware Capsule supplies an explicit Browser port.
-    let _record_schemas = hosted_record_schema_registry()?;
     let workspace_policy = WorkspaceCapturePolicy::secure_default();
     let backend_config = FirecrackerBackendConfig {
         // Firecracker's API/vsock Unix socket paths are bounded by SUN_LEN.
@@ -498,7 +839,7 @@ fn restore_vm_path(
     contract_verifiers.register(Arc::new(WorkspaceContentVerifier))?;
     let context = MaterializerContext {
         objects: graph.objects(),
-        adapters: &adapters,
+        adapters: &AdapterRegistry::default(),
         records: &[],
         records_v2: &[],
         replay_anchor: None,
@@ -679,6 +1020,7 @@ struct ComputationHeadReport<'a> {
     head_after: &'a str,
 }
 
+#[derive(Clone)]
 pub struct HttpRunnerApi {
     client: Client,
     base: String,
@@ -1151,6 +1493,224 @@ mod tests {
 
     use super::*;
 
+    #[derive(Default)]
+    struct TestStylus;
+
+    impl Stylus for TestStylus {
+        fn record(&self, _candidate: RecordCandidate) -> Result<(), ato_adapter_api::AdapterError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct TestPersistence;
+
+    impl BrowserHeadPersistence for TestPersistence {
+        fn persist(
+            &self,
+            _operation: &AcceptedBrowserOperation,
+        ) -> std::result::Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct TestRecords(Arc<Mutex<Vec<AcceptedBrowserOperation>>>);
+
+    impl BrowserRecordSubmission for TestRecords {
+        fn submit(&self, operation: &AcceptedBrowserOperation) -> std::result::Result<(), String> {
+            self.0.lock().unwrap().push(operation.clone());
+            Ok(())
+        }
+    }
+
+    fn browser_authority(origin: String) -> Arc<RunEvolutionAuthority> {
+        let objects = Arc::new(ato_objects::MemoryObjectStore::default());
+        let mut kernel = Kernel::new(objects.clone());
+        kernel
+            .register(Arc::new(BrowserComputationSemantics::default()))
+            .unwrap();
+        kernel
+            .register_protocol(Arc::new(BrowserProtocolSemantics::default()))
+            .unwrap();
+        let residual = objects
+            .put(
+                &ato_browser_semantics::encode_residual(
+                    &ato_browser_semantics::BrowserResidualV1 {
+                        version: 1,
+                        expected_origin: origin,
+                        interaction_frontier: None,
+                    },
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let root = kernel
+            .seal(&ato_computation::ComputationObject {
+                semantics: SemanticsId::parse(BROWSER_COMPUTATION_SEMANTICS_ID).unwrap(),
+                boundary: ato_computation::Boundary::from([(
+                    PortId::parse("browser").unwrap(),
+                    ato_computation::PortDef {
+                        protocol: ProtocolId::parse(BROWSER_PROTOCOL_ID).unwrap(),
+                        role: ato_computation::RoleId::parse("controller").unwrap(),
+                    },
+                )]),
+                residual,
+            })
+            .unwrap();
+        Arc::new(RunEvolutionAuthority::new(kernel, root))
+    }
+
+    fn e2e_chrome() -> PathBuf {
+        std::env::var_os("ATO_BROWSER_E2E_CHROME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_file())
+            .or_else(|| {
+                [
+                    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                    "/usr/bin/google-chrome",
+                    "/usr/bin/chromium",
+                    "/usr/bin/chromium-browser",
+                ]
+                .into_iter()
+                .map(PathBuf::from)
+                .find(|path| path.is_file())
+            })
+            .expect("P0-B Browser E2E requires Chrome; set ATO_BROWSER_E2E_CHROME")
+    }
+
+    fn counter_server() -> (SocketAddr, Arc<AtomicBool>, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::clone(&stop);
+        let thread = thread::spawn(move || {
+            const PAGE: &str = "<!doctype html><button id='button' style='width:100vw;height:100vh'>counter</button><output id='counter'>0</output><script>let n=0;const inc=()=>document.querySelector('#counter').textContent=String(++n);document.addEventListener('keydown',e=>{if(e.code==='ArrowRight')inc()});document.addEventListener('click',inc)</script>";
+            while !stopped.load(Ordering::Acquire) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut request = [0_u8; 1024];
+                        let _ = stream.read(&mut request);
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            PAGE.len(),
+                            PAGE
+                        );
+                        let _ = stream.write_all(response.as_bytes());
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10))
+                    }
+                    Err(_) => return,
+                }
+            }
+        });
+        (address, stop, thread)
+    }
+
+    #[test]
+    fn browser_e2e_routes_keyboard_and_click_through_authority_then_ack_then_record() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (address, stop_server, server) = counter_server();
+        let origin = format!("http://{address}");
+        let objects = Arc::new(ato_objects::MemoryObjectStore::default());
+        let mut registry = AdapterRegistry::default();
+        registry.register(Arc::new(BrowserAdapter)).unwrap();
+        let mut sessions = registry
+            .attach_all(
+                &[AdapterInstance {
+                    instance_id: "hosted.browser".to_owned(),
+                    adapter_id: ato_adapter_browser::BROWSER_ADAPTER_ID.to_owned(),
+                    config: serde_json::to_value(BrowserAdapterConfig {
+                        port_id: "browser".to_owned(),
+                        expected_origin: origin.clone(),
+                        allowed_non_text_codes: BTreeSet::new(),
+                        input_mode: BrowserInputMode::ApplyOnly,
+                    })
+                    .unwrap(),
+                }],
+                &AdapterAttachContext {
+                    runtime: AdapterContext {
+                        workspace: workspace.path(),
+                        objects: objects.as_ref(),
+                    },
+                    stylus: Arc::new(TestStylus),
+                    observations: Arc::new(IgnoreObservations),
+                },
+            )
+            .unwrap();
+        let adapter = Arc::new(Mutex::new(sessions.pop().unwrap()));
+        let host_root = workspace.path().join("browser-host");
+        fs::create_dir(&host_root).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&host_root, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let mut host = BrowserHost::start(BrowserHostConfig {
+            runtime_dir: host_root,
+            bootstrap_path: ato_adapter_browser::runtime_discovery_path(
+                workspace.path(),
+                "hosted.browser",
+            ),
+            target_url: format!("{origin}/"),
+            chrome: e2e_chrome(),
+            headless: true,
+        })
+        .unwrap();
+        let records = TestRecords::default();
+        let submitted = Arc::clone(&records.0);
+        let ingress = BrowserOperationIngress::new(
+            browser_authority(origin),
+            PortId::parse("browser").unwrap(),
+            AttachedBrowserActuator(Arc::clone(&adapter)),
+            TestPersistence,
+            records,
+        );
+        let first = ingress
+            .accept(ato_adapter_browser::BrowserEvent::Keyboard {
+                kind: ato_adapter_browser::KeyboardKind::KeyDown,
+                code: "ArrowRight".to_owned(),
+                modifiers: ato_adapter_browser::Modifiers::default(),
+            })
+            .unwrap();
+        assert_eq!(first.run_seq, 1);
+        assert_eq!(
+            host.evaluate("document.querySelector('#counter').textContent")
+                .unwrap()
+                .pointer("/result/value")
+                .and_then(serde_json::Value::as_str),
+            Some("1")
+        );
+        let second = ingress
+            .accept(ato_adapter_browser::BrowserEvent::Click {
+                x_normalized: 0.5,
+                y_normalized: 0.5,
+                button: 0,
+            })
+            .unwrap();
+        assert_eq!(second.run_seq, 2);
+        assert_eq!(submitted.lock().unwrap().len(), 2);
+        assert_eq!(
+            host.evaluate("document.querySelector('#counter').textContent")
+                .unwrap()
+                .pointer("/result/value")
+                .and_then(serde_json::Value::as_str),
+            Some("2")
+        );
+        ingress.freeze().unwrap();
+        let context = AdapterContext {
+            workspace: workspace.path(),
+            objects: objects.as_ref(),
+        };
+        adapter.lock().unwrap().quiesce(&context).unwrap();
+        adapter.lock().unwrap().detach(&context).unwrap();
+        host.stop().unwrap();
+        stop_server.store(true, Ordering::Release);
+        server.join().unwrap();
+    }
+
     fn lease(expires_at: Option<String>) -> ClaimedLease {
         ClaimedLease {
             id: "lease_1".to_owned(),
@@ -1217,6 +1777,7 @@ mod tests {
             surface_target: "127.0.0.1:8080".parse().unwrap(),
             tap_host_cidr: "172.16.0.1/24".to_owned(),
             slot_id: "0".to_owned(),
+            browser_chrome: None,
             once: true,
         };
         assert!(validate_config(&config).is_err());
@@ -1243,6 +1804,7 @@ mod tests {
             surface_target: "172.30.0.2:38865".parse().unwrap(),
             tap_host_cidr: "172.30.0.1/24".to_owned(),
             slot_id: "0".to_owned(),
+            browser_chrome: None,
             once: true,
         };
         resolve_runner_credentials(&mut config).unwrap();
@@ -1291,6 +1853,7 @@ mod tests {
             surface_target: "172.30.0.2:38865".parse().unwrap(),
             tap_host_cidr: "172.30.0.1/24".to_owned(),
             slot_id: "0".to_owned(),
+            browser_chrome: None,
             once: true,
         };
         assert_eq!(ready_local_port(&config), 8420);
