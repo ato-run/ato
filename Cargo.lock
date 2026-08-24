@@ -209,6 +209,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "ato-adapter-browser",
+ "serde",
  "serde_json",
  "tempfile",
  "tungstenite",
