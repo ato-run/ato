@@ -1,0 +1,40 @@
+[package]
+name = "ato-runtime-object-graph"
+version = "0.1.0"
+edition = "2024"
+description = "Shared runtime object graph download and independent validation"
+license = "Apache-2.0 OR MPL-2.0"
+repository = "https://github.com/ato-run/ato"
+
+[package.metadata.dist]
+dist = false
+
+[package.metadata.ato-architecture]
+layer = "app"
+
+[[bin]]
+name = "ato-runtime-validator"
+path = "src/bin/ato-runtime-validator.rs"
+
+[dependencies]
+anyhow = "1"
+ato-adapter-workspace = { path = "../../extensions/adapters/workspace", version = "0.1.0" }
+ato-browser-semantics = { path = "../../extensions/semantics/browser", version = "0.1.0" }
+ato-compose = { path = "../../lib/compose", version = "0.1.0" }
+ato-computation = { path = "../../lib/computation", version = "0.1.0" }
+ato-materializer-replay = { path = "../../extensions/materializers/replay", version = "0.1.0" }
+ato-materializer-snapshot = { path = "../../extensions/materializers/snapshot", version = "0.1.0" }
+ato-materializer-vm-snapshot = { path = "../../extensions/materializers/vm-snapshot", version = "0.1.0" }
+ato-objects = { path = "../../lib/objects", version = "0.1.0" }
+ato-record-writer = { path = "../../extensions/record-writer", version = "0.1.0" }
+blake3 = "1"
+clap = { version = "4.5", features = ["derive", "env"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_jcs = "0.1"
+tempfile = "3"
+thiserror = "2"
+
+[dev-dependencies]
+ato-objects = { path = "../../lib/objects", version = "0.1.0" }

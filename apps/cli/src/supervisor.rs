@@ -8,18 +8,22 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use ato_adapter_api::{
-    AdapterAttachContext, AdapterContext, AdapterError, AdapterObservation, IgnoreObservations,
-    IgnoreRecords, ObservationSink,
+    Actuator, ActuatorProvider, ActuatorProviderRegistry, ActuatorRoute, AdapterAttachContext,
+    AdapterContext, AdapterError, AdapterObservation, IgnoreObservations, IgnoreRecords,
+    ObservationSink, SupportedOperation,
 };
 use ato_adapter_process::terminate_process_tree;
 use ato_adapter_workspace::restore_workspace;
 use ato_computation::{ComputationRef, ContentRef};
 use ato_materializer_api::{
-    MaterializerContext, MaterializerError, Realization, RealizationDriver, ReplayRuntime,
+    MaterializerContext, MaterializerError, OperationReplayRuntime, Realization, RealizationDriver,
+    ReplayRuntime,
 };
 use ato_objects::{
-    ActiveRun, FsObjectStore, LocalCapsuleRepository, ObjectStore, RecordEnvelope, RecordId,
+    ActiveRun, Direction, FsObjectStore, LocalCapsuleRepository, ObjectStore, RecordCandidate,
+    RecordEnvelope, RecordEnvelopeV2, RecordId, read_exact_object,
 };
+use ato_player::Player;
 use ato_record_writer::{RecordPipeline, RecordWriterConfig};
 
 use crate::{
@@ -169,6 +173,7 @@ fn encode_replay(
         workspace_policy: &policy,
         realization: None,
         contracts: &[],
+        runner_capabilities: None,
     };
     Ok(materializers
         .get("ato.replay@1")?
@@ -240,6 +245,7 @@ pub(crate) fn worker(
             workspace_policy: &policy,
             realization: Some(&driver),
             contracts: &[],
+            runner_capabilities: None,
         };
         let realization = materializers
             .get("ato.replay@1")?
@@ -466,6 +472,316 @@ impl RealizationDriver for CliRealizationDriver {
             project: self.project.clone(),
             sessions,
         }))
+    }
+
+    fn preflight_operations(&self, records: &[RecordEnvelopeV2]) -> Result<(), MaterializerError> {
+        let repository =
+            LocalCapsuleRepository::open(&self.project).map_err(materializer_operation)?;
+        let providers = actuator_provider_registry(None, None).map_err(materializer_operation)?;
+        Player::new(
+            &providers,
+            &[],
+            AdapterContext {
+                workspace: &self.project,
+                objects: repository.objects(),
+            },
+        )
+        .preflight(records)
+        .map(|_| ())
+        .map_err(materializer_operation)
+    }
+
+    fn begin_operations(
+        &self,
+        anchor: &ComputationRef,
+    ) -> Result<Box<dyn OperationReplayRuntime>, MaterializerError> {
+        let repository =
+            LocalCapsuleRepository::open(&self.project).map_err(materializer_operation)?;
+        let state =
+            load_runtime_state(anchor, repository.objects()).map_err(materializer_operation)?;
+        restore_workspace(
+            &ContentRef::parse(&state.workspace_snapshot).map_err(materializer_operation)?,
+            &self.project,
+            repository.objects(),
+        )
+        .map_err(materializer_operation)?;
+        let instances = adapter_instances(
+            &state.config,
+            &self.bindings,
+            self.isolated_processes,
+            false,
+        )
+        .map_err(materializer_operation)?;
+        let registry = adapter_registry().map_err(materializer_operation)?;
+        let context = AdapterAttachContext {
+            runtime: AdapterContext {
+                workspace: &self.project,
+                objects: repository.objects(),
+            },
+            stylus: Arc::new(IgnoreRecords),
+            observations: Arc::clone(&self.observations),
+        };
+        let sessions = registry
+            .attach_all(&instances, &context)
+            .map_err(materializer_operation)?;
+        Ok(Box::new(CliOperationReplayRuntime {
+            project: self.project.clone(),
+            anchor: anchor.clone(),
+            sessions: Arc::new(Mutex::new(sessions)),
+            records: Vec::new(),
+        }))
+    }
+}
+
+type SharedAdapterSessions = Arc<Mutex<Vec<Box<dyn ato_adapter_api::AttachedAdapter>>>>;
+
+pub(crate) fn preflight_actuator_provider_registry() -> Result<ActuatorProviderRegistry> {
+    actuator_provider_registry(None, None)
+}
+
+fn actuator_provider_registry(
+    sessions: Option<SharedAdapterSessions>,
+    anchor: Option<ComputationRef>,
+) -> Result<ActuatorProviderRegistry> {
+    let adapters = adapter_registry()?;
+    let mut providers = ActuatorProviderRegistry::default();
+    for id in adapters.ids() {
+        let operations = adapters.get(id)?.supported_operations();
+        if !operations.is_empty() {
+            providers.register(Arc::new(CliAttachedActuatorProvider {
+                id: id.to_owned(),
+                adapter_id: id.to_owned(),
+                operations,
+                sessions: sessions.clone(),
+                anchor: anchor.clone(),
+            }))?;
+        }
+    }
+    Ok(providers)
+}
+
+struct CliAttachedActuatorProvider {
+    id: String,
+    adapter_id: String,
+    operations: Vec<SupportedOperation>,
+    sessions: Option<SharedAdapterSessions>,
+    anchor: Option<ComputationRef>,
+}
+
+impl ActuatorProvider for CliAttachedActuatorProvider {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn supported_operations(&self) -> &[SupportedOperation] {
+        &self.operations
+    }
+
+    fn validate_payload(
+        &self,
+        record: &RecordEnvelopeV2,
+        context: &AdapterContext<'_>,
+    ) -> Result<(), AdapterError> {
+        let metadata = context.objects.metadata(&record.payload_ref)?;
+        let payload = read_exact_object(
+            context.objects,
+            &record.payload_ref,
+            metadata.size,
+            16 * 1024 * 1024,
+        )?;
+        record_schema_registry()
+            .map_err(|error| AdapterError::InvalidPayload(error.to_string()))?
+            .validate_candidate(&RecordCandidate {
+                protocol_id: record.protocol_id.clone(),
+                operation_id: record.operation_id.clone(),
+                port_id: record.port_id.clone(),
+                payload,
+                payload_version: record.payload_version,
+                required_features: record.required_features.clone(),
+                recorded_by: record.recorded_by.clone(),
+                stream: record.stream.clone(),
+                local_seq: record.local_seq,
+                caused_by: record.caused_by.clone(),
+                observed_at: record.observed_at.clone(),
+            })
+            .map_err(|error| AdapterError::InvalidPayload(error.to_string()))
+    }
+
+    fn provision(
+        &self,
+        route: &ActuatorRoute,
+        _context: &AdapterContext<'_>,
+    ) -> Result<Box<dyn Actuator>, AdapterError> {
+        Ok(Box::new(CliAttachedActuator {
+            route: route.clone(),
+            adapter_id: self.adapter_id.clone(),
+            sessions: self.sessions.clone().ok_or_else(|| {
+                AdapterError::Operation("Actuator route was only preflighted".to_owned())
+            })?,
+            anchor: self.anchor.clone().ok_or_else(|| {
+                AdapterError::Operation("Actuator route has no replay anchor".to_owned())
+            })?,
+        }))
+    }
+}
+
+struct CliAttachedActuator {
+    route: ActuatorRoute,
+    adapter_id: String,
+    sessions: SharedAdapterSessions,
+    anchor: ComputationRef,
+}
+
+impl Actuator for CliAttachedActuator {
+    fn route(&self) -> &ActuatorRoute {
+        &self.route
+    }
+
+    fn apply(
+        &mut self,
+        record: &RecordEnvelopeV2,
+        context: &AdapterContext<'_>,
+    ) -> Result<(), AdapterError> {
+        // This envelope exists only at the legacy AttachedAdapter boundary. It
+        // is never persisted and its placeholder heads never participate in
+        // Computation identity.
+        let compatibility = RecordEnvelope {
+            id: RecordId::new(record.stream.clone(), record.local_seq),
+            adapter_id: self.adapter_id.clone(),
+            protocol_id: record.protocol_id.clone(),
+            port_id: record.port_id.clone(),
+            direction: Direction::Inbound,
+            payload_ref: record.payload_ref.clone(),
+            head_before: self.anchor.clone(),
+            head_after: self.anchor.clone(),
+            caused_by: Vec::new(),
+            observed_at: record.observed_at.clone(),
+        };
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| AdapterError::Operation("Adapter sessions poisoned".to_owned()))?;
+        let mut matches = sessions
+            .iter_mut()
+            .filter(|session| session.accepts(&compatibility));
+        let session = matches.next().ok_or_else(|| {
+            AdapterError::Operation(format!(
+                "no provisioned {} Actuator accepts port {}",
+                self.adapter_id, record.port_id
+            ))
+        })?;
+        if matches.next().is_some() {
+            return Err(AdapterError::Operation(format!(
+                "multiple provisioned {} Actuators accept port {}",
+                self.adapter_id, record.port_id
+            )));
+        }
+        session.apply(&compatibility, context)
+    }
+}
+
+struct CliOperationReplayRuntime {
+    project: std::path::PathBuf,
+    anchor: ComputationRef,
+    sessions: SharedAdapterSessions,
+    records: Vec<RecordEnvelopeV2>,
+}
+
+impl OperationReplayRuntime for CliOperationReplayRuntime {
+    fn apply(&mut self, record: &RecordEnvelopeV2) -> Result<(), MaterializerError> {
+        self.records.push(record.clone());
+        Ok(())
+    }
+
+    fn finish(
+        self: Box<Self>,
+        target: &ComputationRef,
+    ) -> Result<Box<dyn Realization>, MaterializerError> {
+        let repository =
+            LocalCapsuleRepository::open(&self.project).map_err(materializer_operation)?;
+        let providers =
+            actuator_provider_registry(Some(Arc::clone(&self.sessions)), Some(self.anchor.clone()))
+                .map_err(materializer_operation)?;
+        Player::new(
+            &providers,
+            &[],
+            AdapterContext {
+                workspace: &self.project,
+                objects: repository.objects(),
+            },
+        )
+        .play(&self.records)
+        .map_err(materializer_operation)?;
+        Ok(Box::new(CliOperationRealization {
+            project: self.project,
+            sessions: self.sessions,
+            target: target.clone(),
+        }))
+    }
+}
+
+struct CliOperationRealization {
+    project: std::path::PathBuf,
+    sessions: SharedAdapterSessions,
+    target: ComputationRef,
+}
+
+impl Realization for CliOperationRealization {
+    fn target(&self) -> &ComputationRef {
+        &self.target
+    }
+
+    fn activate(&mut self) -> Result<(), MaterializerError> {
+        for session in self
+            .sessions
+            .lock()
+            .map_err(materializer_operation)?
+            .iter_mut()
+        {
+            session.activate().map_err(materializer_operation)?;
+        }
+        Ok(())
+    }
+
+    fn publish(&mut self) -> Result<(), MaterializerError> {
+        for session in self
+            .sessions
+            .lock()
+            .map_err(materializer_operation)?
+            .iter_mut()
+        {
+            session.publish().map_err(materializer_operation)?;
+        }
+        Ok(())
+    }
+
+    fn wait(&mut self) -> Result<(), MaterializerError> {
+        for session in self
+            .sessions
+            .lock()
+            .map_err(materializer_operation)?
+            .iter_mut()
+        {
+            session.wait().map_err(materializer_operation)?;
+        }
+        Ok(())
+    }
+
+    fn quiesce(&mut self) -> Result<(), MaterializerError> {
+        let repository =
+            LocalCapsuleRepository::open(&self.project).map_err(materializer_operation)?;
+        let context = AdapterContext {
+            workspace: &self.project,
+            objects: repository.objects(),
+        };
+        quiesce_and_detach(
+            self.sessions
+                .lock()
+                .map_err(materializer_operation)?
+                .as_mut_slice(),
+            &context,
+        )
+        .map_err(materializer_operation)
     }
 }
 
