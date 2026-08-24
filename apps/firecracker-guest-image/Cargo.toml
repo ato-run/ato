@@ -1,0 +1,35 @@
+[package]
+name = "ato-firecracker-guest-image"
+version = "0.1.0"
+edition = "2024"
+description = "Build bootable Firecracker guest images from resolved Computations"
+license = "Apache-2.0 OR MPL-2.0"
+repository = "https://github.com/ato-run/ato"
+publish = false
+
+[package.metadata.dist]
+dist = false
+
+[package.metadata.ato-architecture]
+layer = "app"
+
+[[bin]]
+name = "ato-firecracker-guest-image"
+path = "src/bin/ato-firecracker-guest-image.rs"
+
+[dependencies]
+anyhow = "1"
+ato-adapter-workspace = { path = "../../extensions/adapters/workspace", version = "0.1.0" }
+ato-computation = { path = "../../lib/computation", version = "0.1.0" }
+ato-objects = { path = "../../lib/objects", version = "0.1.0" }
+ato-runtime-object-graph = { path = "../runtime-object-graph", version = "0.1.0" }
+blake3 = "1"
+clap = { version = "4.5", features = ["derive"] }
+guest-agent = { path = "../../extensions/materializers/snapshot/guest-agent", version = "0.1.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_jcs = "0.1"
+tempfile = "3"
+
+[dev-dependencies]
+ato-objects = { path = "../../lib/objects", version = "0.1.0" }
