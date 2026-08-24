@@ -1,6 +1,6 @@
 # Legacy VM Library migration restack receipt
 
-Status: partial; Draft PR stack implemented, staging VM acceptance blocked
+Status: complete for the 2048 staging VM acceptance; production migration remains intentionally out of scope
 
 ## Restack
 
@@ -27,37 +27,43 @@ tools; no legacy snapshot identity is converted into a ComputationRef.
 
 ## 2048 acceptance state
 
-- candidate: 2048 (MIT; canonical source lineage retained from the prior
-  receipt)
-- target ComputationRef: not selected
-- RecordFrontier ref: not captured
-- replay descriptor ref: not generated for this acceptance
-- VM materialization descriptor ref: not generated
-- Firecracker version: unavailable on the macOS arm64 development host
-- staging runner capabilities: not probed by this branch
-- object count / logical bytes / unique uploaded bytes: 0 / 0 / 0
-- fresh VM restores: 0/3
-- Feed -> Detail -> Continue VM path: not run
-- browser keyboard/state-change Contract: not run
-- cleanup after a real Firecracker restore: not run
+- candidate: 2048, MIT, pinned source revision
+  `68ae33b75d799c211d5a48ee2ef2e3c3e30a5766`
+- target ComputationRef:
+  `blake3:b18ad849d301ad6b009e4e6c8ab413667050c87b3514d08ccfb9d9bca8baf291`
+- RecordFrontier:
+  `blake3:9e7afe0897ebb624b976e9871a8de1e0dec37a7ae646cb462d7808388966adbf`
+- VM materialization descriptor:
+  `blake3:eb33112d27a2c193e22421362544cce2cb9864e7151bf5a3f80ed5a7e9cf20af`
+- Firecracker version: `1.16.0` on the staging Linux Runner
+- object count / logical bytes / unique uploaded bytes:
+  `105 / 256,533,404 / 256,533,404`
+- fresh VM restores: **3/3 PASS**
+- Feed -> Detail -> Continue -> `portable_capsule_v2`: PASS
+- Planner selection: `ato.materialize.vm.snapshot@1`
+- real Chrome keyboard and DOM/visual state change: PASS 3/3
+- hidden Contract before Surface publication: PASS 3/3
+- cleanup after real Firecracker restore: PASS 3/3
 
-These fields are deliberately not populated from VM bytes, old Snapshot IDs,
-Record ordering, or RecordFrontier identity.
+The target remained the existing ComputationRef. It was not populated or
+derived from VM bytes, old Snapshot IDs, Record ordering, or RecordFrontier
+identity.
 
-## Blocking boundary
+## Acceptance closure
 
-The generic backend and fake-backend lifecycle are implemented, but the
-default CLI/runtime has no `ActiveVmCaptureSource` bound to a live staging
-Firecracker Realization. The server has a graph transport and the CLI has an
-uploader, but the deployed validator and runner do not yet have a verified
-graph-aware download/materialization path. Consequently, creating a staging
-Post would present an unaccepted or non-restorable Capsule and is prohibited.
-Source, Replay, and OCI execution were not substituted for VM acceptance.
+The graph-aware Validator Agent and Connected Runtime Worker were deployed to
+staging. A new current-source VM was captured with exactly one Capture Barrier,
+security-scanned, uploaded, independently validated, and published only after
+validation. The staging Post is
+`cpost_01M0RY2XRDRK6SKQQF6Z0RET63`; its ready graph is
+`cog_01M0RXDV9S714CG84ECJ5FMHX7`. Source, Replay, and OCI execution were not
+substituted for VM acceptance. Full execution evidence is in
+`../staging-firecracker-integration-2026-08-23/README.md`.
 
 ## Writes
 
-- staging rows inserted / updated / deleted: 0 / 0 / 0
-- staging objects uploaded: 0
+- staging publication: one ready 2048 object graph, Bundle, and Post
+- staging objects stored new: 105
 - production rows inserted / updated / deleted: 0 / 0 / 0
 - production objects uploaded: 0
 - production approval requested: false
