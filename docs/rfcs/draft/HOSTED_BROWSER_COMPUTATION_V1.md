@@ -3,6 +3,11 @@
 ## Decision
 
 `ato.browser@1` remains the interaction Protocol and Adapter identifier.
+
+The Protocol keeps the authoring vocabulary already used by generic Capsules:
+the application endpoint is `server` and the Browser computation endpoint is
+`controller`. `browser` is not a new role alias. This is intentionally
+compatible with existing `ato.browser@1` Capsule declarations.
 `ato.browser.computation@1` is the separate logical Semantics identifier.
 Its residual contains only an exact expected origin and an interaction
 frontier. Chrome profile paths, DOM, cookies, localStorage, VM data, Record
@@ -19,11 +24,20 @@ canonical Browser event
 → one Record submission
 ```
 
-The Browser bridge accepts only trusted local input events for observation.
-Its own synthetic actuator events are not observed back as Records. Player can
-continue to use `AttachedAdapter::apply(RecordEnvelope)`, while live Runner
-ingress uses the new `AttachedAdapter::apply_operation(LiveOperation)` boundary
-and never creates a fake persisted Record.
+`BrowserInputMode::ObserveAndApply` preserves the existing local CLI
+observation path. Hosted Runs explicitly select `ApplyOnly`: the bridge does
+not install trusted-event capture listeners and silently cannot create a
+second Record from an actuator echo. Player can continue to use
+`AttachedAdapter::apply(RecordEnvelope)`, while live Runner ingress uses the
+new `AttachedAdapter::apply_operation(LiveOperation)` boundary and never
+creates a fake persisted Record.
+
+The Runner assigns a stable bounded `operation_id` before derivation. The
+accepted operation context carries that id, event, transition and `run_seq` to
+both the current-head CAS and Record submission. These values are operational
+context, not Computation identity. A CAS failure retains exactly this context
+for retry, fail-closes later input and capture, and does not replay the
+physical Browser operation.
 
 ## Composition and lifecycle
 
@@ -33,10 +47,11 @@ when an explicit Browser Computation/Port is present. Existing source and
 composition assembles source and Browser children through `ComposeSemantics`.
 
 The Activity-specific controller, participants, media, WebRTC, and credentials
-from #1290 are not dependencies of this design. Its generic Chrome/profile/CDP
-host is the extraction source for the next implementation slice; Connected
-Worker must not depend on `ato-cli`. Browser Materialization and all Browser
-state capture remain intentionally absent.
+from #1290 are not dependencies of this design. `ato-browser-host` owns the
+generic private Chrome profile, loopback CDP, exact-origin navigation, bridge
+injection/handshake, and bounded cleanup; Connected Worker does not depend on
+`ato-cli`. Browser Materialization and all Browser state capture remain
+intentionally absent.
 
 ## CI receipt
 
