@@ -333,13 +333,15 @@ impl FreshFirecrackerRealization {
                 config.api_timeout,
             )?;
             if let Some(path) = &spec.restore_layout.vsock_uds_path {
+                let physical_vsock_path = session.path().join(path);
+                create_parent(&physical_vsock_path)?;
                 firecracker_api(
                     &api_socket,
                     "PUT",
                     "/vsock",
                     &serde_json::to_vec(&serde_json::json!({
                         "guest_cid": 3,
-                        "uds_path": path,
+                        "uds_path": physical_vsock_path,
                     }))?,
                     config.api_timeout,
                 )?;
