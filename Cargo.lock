@@ -320,12 +320,17 @@ dependencies = [
  "ato-realization-planner",
  "ato-record-writer",
  "ato-runtime-object-graph",
+ "base64 0.22.1",
  "clap",
+ "hex",
+ "hmac",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "time",
+ "tungstenite",
  "url",
 ]
 
