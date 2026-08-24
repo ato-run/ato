@@ -1408,7 +1408,27 @@ fn firecracker_api(
     )?;
     stream.write_all(body)?;
     let mut response = Vec::new();
-    stream.take(1024 * 1024).read_to_end(&mut response)?;
+    let mut buffer = [0_u8; 8192];
+    while response.len() < 1024 * 1024 {
+        match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => {
+                response.extend_from_slice(&buffer[..read]);
+                if firecracker_http_response_complete(&response) {
+                    break;
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) && response.windows(4).any(|window| window == b"\r\n\r\n") =>
+            {
+                break;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
     let status = String::from_utf8_lossy(&response)
         .lines()
         .next()
@@ -1422,6 +1442,22 @@ fn firecracker_api(
             "Firecracker API {method} {path} returned {status}"
         )))
     }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn firecracker_http_response_complete(response: &[u8]) -> bool {
+    let Some(header_end) = response.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return false;
+    };
+    let header_end = header_end + 4;
+    let headers = String::from_utf8_lossy(&response[..header_end]);
+    let content_length = headers.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("content-length")
+            .then(|| value.trim().parse::<usize>().ok())
+            .flatten()
+    });
+    content_length.is_none_or(|length| response.len() >= header_end + length)
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -1654,6 +1690,19 @@ mod tests {
             Some("1.7.0".to_owned())
         );
         assert_eq!(parse_firecracker_version("Firecracker unknown"), None);
+    }
+
+    #[test]
+    fn detects_firecracker_http_response_without_waiting_for_socket_close() {
+        assert!(firecracker_http_response_complete(
+            b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"
+        ));
+        assert!(!firecracker_http_response_complete(
+            b"HTTP/1.1 400 Bad Request\r\nContent-Length: 4\r\n\r\nerr"
+        ));
+        assert!(firecracker_http_response_complete(
+            b"HTTP/1.1 400 Bad Request\r\nContent-Length: 4\r\n\r\nerr!"
+        ));
     }
 
     #[test]
