@@ -292,10 +292,14 @@ name = "ato-firecracker-guest-image"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ato-adapter-api",
  "ato-adapter-workspace",
  "ato-computation",
+ "ato-contracts",
+ "ato-materializer-api",
  "ato-materializer-vm-snapshot",
  "ato-objects",
+ "ato-record-writer",
  "ato-runtime-object-graph",
  "blake3",
  "clap",
@@ -304,6 +308,7 @@ dependencies = [
  "serde_jcs",
  "serde_json",
  "tempfile",
+ "time",
 ]
 
 [[package]]
