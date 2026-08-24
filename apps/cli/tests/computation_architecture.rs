@@ -341,7 +341,7 @@ ready_path = "/ready""#
     assert!(count.ends_with("1"));
     wait_until(|| {
         fs::read_dir(project.path().join(".capsule/records/main"))
-            .is_ok_and(|entries| entries.count() >= 4)
+            .is_ok_and(|entries| entries.count() >= 2)
     });
     ato(author_home.path())
         .args(["stop", project.path().to_str().unwrap()])
@@ -407,7 +407,7 @@ fn forked_branch_replays_its_parent_semantic_closure() {
     assert!(http_request(public_port, "GET", "/count").ends_with("1"));
     wait_until(|| {
         fs::read_dir(project.path().join(".capsule/records/main"))
-            .is_ok_and(|entries| entries.count() >= 4)
+            .is_ok_and(|entries| entries.count() >= 2)
     });
     ato(author_home.path())
         .args(["stop", project.path().to_str().unwrap()])

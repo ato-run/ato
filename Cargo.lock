@@ -120,6 +120,7 @@ dependencies = [
  "ato-computation",
  "ato-objects",
  "serde",
+ "serde_jcs",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
@@ -329,6 +330,16 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ato-player"
+version = "0.1.0"
+dependencies = [
+ "ato-adapter-api",
+ "ato-computation",
+ "ato-objects",
  "thiserror 2.0.18",
 ]
 
