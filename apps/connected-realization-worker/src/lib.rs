@@ -195,6 +195,10 @@ pub struct WorkerConfig {
     pub tap_host_cidr: String,
     #[arg(long, env = "ATO_RUNNER_SLOT_ID", default_value = "0")]
     pub slot_id: String,
+    /// Stable execution slots owned by this single Runner process. Each slot
+    /// receives a distinct ingress port and Firecracker physical layout.
+    #[arg(long, env = "ATO_RUNNER_MAX_SLOTS", default_value_t = 2)]
+    pub max_slots: u16,
     #[arg(long)]
     pub once: bool,
 }
@@ -214,25 +218,40 @@ impl ConnectedWorker {
     }
 
     pub fn run(&self) -> Result<()> {
-        self.api.heartbeat(&self.config, 0)?;
+        let active_slots = Arc::new(AtomicUsize::new(0));
+        self.api.heartbeat(
+            &self.config,
+            active_slots.load(Ordering::Acquire) as u32,
+            self.config.max_slots,
+        )?;
+        let worker_count = if self.config.once {
+            1
+        } else {
+            usize::from(self.config.max_slots)
+        };
+        let mut slots = Vec::with_capacity(worker_count);
+        for slot_index in 0..worker_count {
+            let config = slot_config(&self.config, slot_index as u16)?;
+            let api = self.api.clone();
+            let active_slots = Arc::clone(&active_slots);
+            slots.push(thread::spawn(move || run_slot(config, api, active_slots)));
+        }
+        if self.config.once {
+            return slots
+                .pop()
+                .expect("one slot was created")
+                .join()
+                .map_err(|_| anyhow::anyhow!("Runner slot thread panicked"))?;
+        }
         loop {
-            let claim = self.api.claim_next()?;
-            let Some(lease) = claim.lease else {
-                if self.config.once {
-                    return Ok(());
-                }
-                thread::sleep(Duration::from_secs(claim.next_poll_seconds.clamp(1, 30)));
-                self.api.heartbeat(&self.config, 0)?;
-                continue;
-            };
-            self.api.heartbeat(&self.config, 1)?;
-            if let Err(error) = self.execute_lease(&lease) {
-                let message = format!("connected Realization failed: {error:#}");
-                let _ = self.api.report_failed(&lease.id, &message);
-            }
-            self.api.heartbeat(&self.config, 0)?;
-            if self.config.once {
-                return Ok(());
+            thread::sleep(ACTIVE_HEARTBEAT_INTERVAL);
+            self.api.heartbeat(
+                &self.config,
+                active_slots.load(Ordering::Acquire) as u32,
+                self.config.max_slots,
+            )?;
+            if slots.iter().any(JoinHandle::is_finished) {
+                bail!("a stable Runner slot stopped unexpectedly");
             }
         }
     }
@@ -279,7 +298,6 @@ impl ConnectedWorker {
                 &self.config.public_base_url,
                 ready_local_port(&self.config),
             )?;
-            let mut last_heartbeat = Instant::now();
             let mut observed_captures = BTreeSet::new();
             loop {
                 let control = self.api.control(&lease.id)?;
@@ -320,10 +338,6 @@ impl ConnectedWorker {
                         );
                     }
                 }
-                if last_heartbeat.elapsed() >= ACTIVE_HEARTBEAT_INTERVAL {
-                    self.api.heartbeat(&self.config, 1)?;
-                    last_heartbeat = Instant::now();
-                }
                 thread::sleep(Duration::from_secs(1));
             }
         })();
@@ -335,6 +349,75 @@ impl ConnectedWorker {
             (Ok(()), Err(error)) => Err(error),
         }
     }
+}
+
+fn run_slot(
+    config: WorkerConfig,
+    api: HttpRunnerApi,
+    active_slots: Arc<AtomicUsize>,
+) -> Result<()> {
+    let worker = ConnectedWorker { config, api };
+    loop {
+        let claim = worker.api.claim_next()?;
+        let Some(lease) = claim.lease else {
+            if worker.config.once {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_secs(claim.next_poll_seconds.clamp(1, 30)));
+            continue;
+        };
+        let _slot_lease = ActiveSlotLease::acquire(Arc::clone(&active_slots));
+        if let Err(error) = worker.execute_lease(&lease) {
+            let message = format!("connected Realization failed: {error:#}");
+            let _ = worker.api.report_failed(&lease.id, &message);
+        }
+        if worker.config.once {
+            return Ok(());
+        }
+    }
+}
+
+struct ActiveSlotLease {
+    active_slots: Arc<AtomicUsize>,
+}
+
+impl ActiveSlotLease {
+    fn acquire(active_slots: Arc<AtomicUsize>) -> Self {
+        active_slots.fetch_add(1, Ordering::AcqRel);
+        Self { active_slots }
+    }
+}
+
+impl Drop for ActiveSlotLease {
+    fn drop(&mut self) {
+        self.active_slots.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn slot_config(base: &WorkerConfig, slot_index: u16) -> Result<WorkerConfig> {
+    ensure!(
+        slot_index < base.max_slots,
+        "Runner slot index is out of range"
+    );
+    let mut config = base.clone();
+    config.surface_listen.set_port(
+        base.surface_listen
+            .port()
+            .checked_add(slot_index)
+            .context("Runner Surface port range overflow")?,
+    );
+    config.hidden_surface_listen.set_port(
+        base.hidden_surface_listen
+            .port()
+            .checked_add(slot_index)
+            .context("Runner hidden Surface port range overflow")?,
+    );
+    config.slot_id = if base.slot_id == "0" {
+        slot_index.to_string()
+    } else {
+        format!("{}-{slot_index}", base.slot_id)
+    };
+    Ok(config)
 }
 
 #[derive(Deserialize)]
@@ -397,6 +480,24 @@ fn validate_config(config: &WorkerConfig) -> Result<()> {
     ensure!(
         config.hidden_surface_listen != config.surface_listen,
         "hidden and published Surface listeners must be distinct"
+    );
+    ensure!(
+        (1..=16).contains(&config.max_slots),
+        "Runner max slots must be between 1 and 16"
+    );
+    let final_offset = config.max_slots - 1;
+    ensure!(
+        config
+            .surface_listen
+            .port()
+            .checked_add(final_offset)
+            .is_some()
+            && config
+                .hidden_surface_listen
+                .port()
+                .checked_add(final_offset)
+                .is_some(),
+        "Runner slot port range overflows"
     );
     ensure!(
         !config.tap_host_cidr.trim().is_empty() && config.tap_host_cidr.contains('/'),
@@ -905,6 +1006,7 @@ struct CaptureUploadInstruction {
     upload_headers: std::collections::BTreeMap<String, String>,
 }
 
+#[derive(Clone)]
 pub struct HttpRunnerApi {
     client: Client,
     base: String,
@@ -926,7 +1028,7 @@ impl HttpRunnerApi {
         request.bearer_auth(&self.token)
     }
 
-    fn heartbeat(&self, config: &WorkerConfig, active_slots: u32) -> Result<()> {
+    fn heartbeat(&self, config: &WorkerConfig, active_slots: u32, max_slots: u16) -> Result<()> {
         self.authorized(self.client.post(format!(
             "{}/v1/runners/{}/heartbeat",
             self.base, self.runner_id
@@ -942,7 +1044,7 @@ impl HttpRunnerApi {
             "public_base_url": config.public_base_url,
             "os": std::env::consts::OS,
             "arch": std::env::consts::ARCH,
-            "max_slots": 1,
+            "max_slots": max_slots,
             "active_slots": active_slots,
             "agent_version": env!("CARGO_PKG_VERSION"),
         }))
@@ -1635,6 +1737,7 @@ mod tests {
             surface_target: "127.0.0.1:8080".parse().unwrap(),
             tap_host_cidr: "172.16.0.1/24".to_owned(),
             slot_id: "0".to_owned(),
+            max_slots: 2,
             once: true,
         };
         assert!(validate_config(&config).is_err());
@@ -1661,6 +1764,7 @@ mod tests {
             surface_target: "172.30.0.2:38865".parse().unwrap(),
             tap_host_cidr: "172.30.0.1/24".to_owned(),
             slot_id: "0".to_owned(),
+            max_slots: 2,
             once: true,
         };
         resolve_runner_credentials(&mut config).unwrap();
@@ -1709,6 +1813,7 @@ mod tests {
             surface_target: "172.30.0.2:38865".parse().unwrap(),
             tap_host_cidr: "172.30.0.1/24".to_owned(),
             slot_id: "0".to_owned(),
+            max_slots: 2,
             once: true,
         };
         assert_eq!(ready_local_port(&config), 8420);
@@ -1770,5 +1875,32 @@ mod tests {
         assert!(target_listener.set_nonblocking(true).is_ok());
         assert!(target_listener.accept().is_err());
         gate.unfreeze().unwrap();
+    }
+
+    #[test]
+    fn stable_slots_receive_distinct_surface_and_firecracker_layouts() {
+        let base = WorkerConfig {
+            api_base: "https://staging.api.ato.run".to_owned(),
+            runner_id: "runner".to_owned(),
+            runner_token: "token".to_owned(),
+            runner_credentials_file: None,
+            public_base_url: "https://runner.example".to_owned(),
+            work_root: PathBuf::from(".tmp/worker-slots"),
+            surface_listen: "127.0.0.1:8420".parse().unwrap(),
+            hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
+            surface_target: "172.30.0.2:38865".parse().unwrap(),
+            tap_host_cidr: "172.30.0.1/24".to_owned(),
+            slot_id: "0".to_owned(),
+            max_slots: 2,
+            once: false,
+        };
+        let slot0 = slot_config(&base, 0).unwrap();
+        let slot1 = slot_config(&base, 1).unwrap();
+        assert_eq!(slot0.slot_id, "0");
+        assert_eq!(slot1.slot_id, "1");
+        assert_eq!(slot0.surface_listen.port(), 8420);
+        assert_eq!(slot1.surface_listen.port(), 8421);
+        assert_eq!(slot0.hidden_surface_listen.port(), 18420);
+        assert_eq!(slot1.hidden_surface_listen.port(), 18421);
     }
 }
