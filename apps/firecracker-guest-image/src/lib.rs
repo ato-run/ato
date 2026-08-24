@@ -123,6 +123,8 @@ struct ProcessConfig {
     command: Vec<String>,
     #[serde(default = "default_cwd")]
     cwd: PathBuf,
+    #[serde(default)]
+    capture: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -142,6 +144,8 @@ struct AdapterConfig {
     input: Option<String>,
     #[serde(default)]
     ready_path: Option<String>,
+    #[serde(default)]
+    config: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -203,6 +207,13 @@ pub fn derive_guest_build_plan(
             process_ids.insert(process.id.clone()),
             "duplicate process id"
         );
+        ensure!(
+            process
+                .capture
+                .as_deref()
+                .is_none_or(|value| value == "unsupported"),
+            "unsupported process capture policy"
+        );
         validate_relative_path(&process.cwd)?;
         let cwd = if process.cwd == Path::new(".") {
             "/workspace".to_owned()
@@ -231,6 +242,10 @@ pub fn derive_guest_build_plan(
         .into_iter()
         .filter(|adapter| adapter.use_adapter == HTTP_ADAPTER_ID)
     {
+        ensure!(
+            adapter.config.is_none(),
+            "HTTP Adapter has unsupported implementation config"
+        );
         let port_id = adapter.port.context("HTTP Adapter omitted semantic Port")?;
         let port = ports
             .get(&port_id)
