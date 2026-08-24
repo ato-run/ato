@@ -204,6 +204,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ato-browser-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ato-adapter-browser",
+ "serde_json",
+ "tempfile",
+ "tungstenite",
+ "url",
+]
+
+[[package]]
 name = "ato-browser-semantics"
 version = "0.1.0"
 dependencies = [
@@ -297,7 +309,9 @@ dependencies = [
  "anyhow",
  "ato-adapter-api",
  "ato-adapter-browser",
+ "ato-browser-host",
  "ato-browser-semantics",
+ "ato-compose",
  "ato-computation",
  "ato-contracts",
  "ato-kernel",
@@ -489,6 +503,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "ato-adapter-workspace",
+ "ato-browser-semantics",
  "ato-compose",
  "ato-computation",
  "ato-materializer-replay",

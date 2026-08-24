@@ -9,7 +9,7 @@ description = "Logical Browser interaction frontier semantics for Ato"
 dist = false
 
 [package.metadata.ato-architecture]
-layer = "extension"
+layer = "app"
 
 [dependencies]
 ato-adapter-api = { path = "../../adapters/api", version = "0.1.0" }

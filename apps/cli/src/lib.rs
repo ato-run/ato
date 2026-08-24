@@ -22,6 +22,10 @@ use ato_adapter_binding::{
     BINDING_ATTACH_OPERATION, BINDING_DETACH_OPERATION, BINDING_PROTOCOL_ID,
     BINDING_REPLACE_OPERATION, BindingAdapter, BindingEvent, decode_event as decode_binding_event,
 };
+#[cfg(test)]
+use ato_adapter_browser::{
+    BROWSER_CLICK_OPERATION, BROWSER_KEYBOARD_OPERATION, BROWSER_PROTOCOL_ID,
+};
 use ato_adapter_browser::{
     BrowserAdapter, register_record_schemas as register_browser_record_schemas,
 };

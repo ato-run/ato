@@ -162,6 +162,7 @@ pub struct RecordPipeline {
     pub stylus: Arc<AsyncRecordStylus>,
     pub barrier: CaptureBarrier,
     pub published: PublishedWatermark,
+    writer: std::thread::JoinHandle<()>,
 }
 
 impl RecordPipeline {
@@ -193,7 +194,7 @@ impl RecordPipeline {
             failure: Arc::clone(&failure),
         };
         let state = WriterState::open(config, objects, schemas, published.clone())?;
-        std::thread::Builder::new()
+        let writer = std::thread::Builder::new()
             .name("ato-record-writer".to_owned())
             .spawn(move || writer_loop(receiver, state, failure))
             .map_err(RecordWriterError::Io)?;
@@ -201,6 +202,25 @@ impl RecordPipeline {
             stylus,
             barrier,
             published,
+            writer,
+        })
+    }
+
+    /// Ends the writer after all Adapter Stylus handles have been dropped.
+    /// Hosted runtimes call this during teardown before removing their private
+    /// run directory, preventing an orphan writer from recreating files.
+    pub fn shutdown(self) -> Result<(), RecordWriterError> {
+        let Self {
+            stylus,
+            barrier,
+            published,
+            writer,
+        } = self;
+        drop(stylus);
+        drop(barrier);
+        drop(published);
+        writer.join().map_err(|_| {
+            RecordWriterError::Io(std::io::Error::other("Record Writer thread panicked"))
         })
     }
 }
