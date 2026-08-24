@@ -1,0 +1,798 @@
+//! Logical Browser interaction frontier. Chrome state remains physical.
+
+#![forbid(unsafe_code)]
+
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+use ato_adapter_api::LiveOperation;
+use ato_adapter_browser::{BROWSER_PROTOCOL_ID, decode_event, operation_for_event};
+use ato_computation::{
+    ComputationObject, OperationId, PortId, ProtocolId, ResolvedComputation, RoleId, SemanticsId,
+};
+use ato_kernel::{
+    AcceptedOperation, Action, EvolutionError, KernelError, ProtocolError, ProtocolPayload,
+    ProtocolSemantics, RunEvolutionAuthority, SemanticError, SemanticHost, SemanticStep, Semantics,
+    TransitionOffer,
+};
+use ato_objects::{BundleError, ComputationReferences, ObjectLink, ObjectResolver};
+use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use thiserror::Error;
+
+pub const BROWSER_COMPUTATION_SEMANTICS_ID: &str = "ato.browser.computation@1";
+
+/// Browser residuals contain no further object links. Registering this
+/// extractor still makes the residual an explicit, validated part of a graph
+/// closure rather than relying on an unknown-semantics fallback.
+pub struct BrowserComputationReferences {
+    id: SemanticsId,
+}
+
+impl Default for BrowserComputationReferences {
+    fn default() -> Self {
+        Self {
+            id: SemanticsId::parse(BROWSER_COMPUTATION_SEMANTICS_ID)
+                .expect("static Browser Semantics ID"),
+        }
+    }
+}
+
+impl ComputationReferences for BrowserComputationReferences {
+    fn semantics(&self) -> &SemanticsId {
+        &self.id
+    }
+
+    fn outgoing(
+        &self,
+        computation: &ResolvedComputation,
+        objects: &dyn ObjectResolver,
+    ) -> Result<Vec<ObjectLink>, BundleError> {
+        let metadata = objects.metadata(&computation.object().residual)?;
+        let bytes = ato_objects::read_exact_object(
+            objects,
+            &computation.object().residual,
+            metadata.size,
+            64 * 1024,
+        )?;
+        decode_residual(&bytes).map_err(|error| {
+            BundleError::Object(ato_objects::ObjectError::Storage(error.to_string()))
+        })?;
+        Ok(Vec::new())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserResidualV1 {
+    pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction_frontier: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum BrowserSemanticsError {
+    #[error("invalid Browser residual: {0}")]
+    Residual(String),
+}
+
+pub fn encode_residual(residual: &BrowserResidualV1) -> Result<Vec<u8>, BrowserSemanticsError> {
+    validate_residual(residual)?;
+    serde_jcs::to_vec(residual).map_err(|error| BrowserSemanticsError::Residual(error.to_string()))
+}
+
+pub fn decode_residual(bytes: &[u8]) -> Result<BrowserResidualV1, BrowserSemanticsError> {
+    let residual: BrowserResidualV1 = serde_json::from_slice(bytes)
+        .map_err(|error| BrowserSemanticsError::Residual(error.to_string()))?;
+    if serde_jcs::to_vec(&residual)
+        .map_err(|error| BrowserSemanticsError::Residual(error.to_string()))?
+        != bytes
+    {
+        return Err(BrowserSemanticsError::Residual(
+            "residual is not canonical JCS".to_owned(),
+        ));
+    }
+    validate_residual(&residual)?;
+    Ok(residual)
+}
+
+pub struct BrowserComputationSemantics {
+    id: SemanticsId,
+}
+
+impl Default for BrowserComputationSemantics {
+    fn default() -> Self {
+        Self {
+            id: SemanticsId::parse(BROWSER_COMPUTATION_SEMANTICS_ID)
+                .expect("static Browser Semantics ID"),
+        }
+    }
+}
+
+impl Semantics for BrowserComputationSemantics {
+    fn id(&self) -> &SemanticsId {
+        &self.id
+    }
+
+    fn validate(
+        &self,
+        current: &ResolvedComputation,
+        host: &dyn SemanticHost,
+    ) -> Result<(), SemanticError> {
+        residual_for(current, host)
+            .map(|_| ())
+            .map_err(|error| SemanticError::new(error.to_string()))
+    }
+
+    fn step(
+        &self,
+        current: &ResolvedComputation,
+        offer: &TransitionOffer,
+        host: &dyn SemanticHost,
+    ) -> Result<SemanticStep, SemanticError> {
+        let Action::Input { port, payload } = &offer.action else {
+            return Err(SemanticError::new(
+                "Browser Computation accepts external input only",
+            ));
+        };
+        let definition = current
+            .object()
+            .boundary
+            .get(port)
+            .ok_or_else(|| SemanticError::new("Browser input names no boundary port"))?;
+        if definition.protocol.as_str() != BROWSER_PROTOCOL_ID {
+            return Err(SemanticError::new("Browser input must use ato.browser@1"));
+        }
+        let event = decode_event(payload.as_bytes())
+            .map_err(|error| SemanticError::new(error.to_string()))?;
+        let residual =
+            residual_for(current, host).map_err(|error| SemanticError::new(error.to_string()))?;
+        let transition = BrowserInteractionV1 {
+            version: 1,
+            prior_frontier: residual.interaction_frontier.as_deref(),
+            protocol_id: BROWSER_PROTOCOL_ID,
+            port_id: port.as_str(),
+            operation: operation_for_event(&event),
+            payload: event,
+        };
+        let frontier = format!(
+            "blake3:{}",
+            blake3::hash(
+                &serde_jcs::to_vec(&transition)
+                    .map_err(|error| SemanticError::new(error.to_string()))?
+            )
+            .to_hex()
+        );
+        let next = BrowserResidualV1 {
+            interaction_frontier: Some(frontier),
+            ..residual
+        };
+        let residual = host
+            .put_object(
+                &encode_residual(&next).map_err(|error| SemanticError::new(error.to_string()))?,
+            )
+            .map_err(|error| SemanticError::new(error.to_string()))?;
+        Ok(SemanticStep {
+            offer: offer.clone(),
+            successor: ComputationObject {
+                semantics: current.object().semantics.clone(),
+                boundary: current.object().boundary.clone(),
+                residual,
+            },
+        })
+    }
+}
+
+#[derive(Serialize)]
+struct BrowserInteractionV1<'a> {
+    version: u32,
+    prior_frontier: Option<&'a str>,
+    protocol_id: &'a str,
+    port_id: &'a str,
+    operation: &'a str,
+    payload: ato_adapter_browser::BrowserEvent,
+}
+
+pub struct BrowserProtocolSemantics {
+    id: ProtocolId,
+}
+
+impl Default for BrowserProtocolSemantics {
+    fn default() -> Self {
+        Self {
+            id: ProtocolId::parse(BROWSER_PROTOCOL_ID).expect("static Browser protocol ID"),
+        }
+    }
+}
+
+impl ProtocolSemantics for BrowserProtocolSemantics {
+    fn id(&self) -> &ProtocolId {
+        &self.id
+    }
+    fn roles_compatible(&self, left: &RoleId, right: &RoleId) -> Result<bool, ProtocolError> {
+        Ok(BTreeSet::from([left.as_str(), right.as_str()])
+            == BTreeSet::from(["server", "controller"]))
+    }
+    fn validate_input(
+        &self,
+        _role: &RoleId,
+        payload: &ProtocolPayload,
+    ) -> Result<(), ProtocolError> {
+        decode_event(payload.as_bytes())
+            .map(|_| ())
+            .map_err(|error| ProtocolError::new(error.to_string()))
+    }
+    fn validate_output(
+        &self,
+        _role: &RoleId,
+        _payload: &ProtocolPayload,
+    ) -> Result<(), ProtocolError> {
+        Err(ProtocolError::new("ato.browser@1 has no output operation"))
+    }
+}
+
+fn residual_for(
+    current: &ResolvedComputation,
+    host: &dyn SemanticHost,
+) -> Result<BrowserResidualV1, KernelError> {
+    let bytes = host.get_object(&current.object().residual, 64 * 1024)?;
+    decode_residual(&bytes)
+        .map_err(|error| KernelError::Semantic(SemanticError::new(error.to_string())))
+}
+
+fn validate_residual(residual: &BrowserResidualV1) -> Result<(), BrowserSemanticsError> {
+    if residual.version != 1 {
+        return Err(BrowserSemanticsError::Residual(
+            "unsupported Browser residual version".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Physical Browser boundary used by hosted operation ingress. Implementations
+/// send the canonical live operation to Chrome and return only after its ACK.
+pub trait BrowserOperationActuator: Send {
+    fn apply(&mut self, operation: &LiveOperation) -> Result<(), String>;
+}
+
+/// Runner control-plane projection port. Its failure is intentionally kept
+/// separate from physical Browser success.
+pub trait BrowserHeadPersistence: Send + Sync {
+    fn persist(&self, operation: &AcceptedBrowserOperation) -> Result<(), String>;
+}
+
+/// Non-persisting Record submission port. The caller decides whether a Record
+/// Writer queue or a test probe receives the accepted candidate.
+pub trait BrowserRecordSubmission: Send + Sync {
+    fn submit(&self, operation: &AcceptedBrowserOperation) -> Result<(), String>;
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AcceptedBrowserOperation {
+    pub operation_id: String,
+    pub event: ato_adapter_browser::BrowserEvent,
+    pub transition: ato_kernel::Transition,
+    pub run_seq: u64,
+}
+
+#[derive(Debug, Clone)]
+struct PendingBrowserOperation {
+    operation_id: String,
+    event: ato_adapter_browser::BrowserEvent,
+}
+
+/// One canonical hosted Browser operation path. It is not a Player: it takes a
+/// live event, derives the logical transition, obtains a physical ACK, commits
+/// the head, persists the runner projection, then submits exactly one Record.
+pub struct BrowserOperationIngress<A, P, R> {
+    authority: Arc<RunEvolutionAuthority>,
+    browser_port: PortId,
+    actuator: Mutex<A>,
+    persistence: P,
+    records: R,
+    operation_gate: Mutex<()>,
+    pending_operation: Mutex<Option<PendingBrowserOperation>>,
+    accepted_operations: Mutex<AcceptedOperationCache>,
+    next_operation_id: AtomicU64,
+}
+
+const ACCEPTED_OPERATION_CACHE_LIMIT: usize = 1024;
+
+/// Bounded live-run idempotency cache. It is deliberately operational state:
+/// operation IDs and client retries never enter the Browser residual.
+#[derive(Default)]
+struct AcceptedOperationCache {
+    by_id: BTreeMap<String, (Vec<u8>, AcceptedOperation)>,
+    insertion_order: VecDeque<String>,
+}
+
+impl AcceptedOperationCache {
+    fn get(
+        &self,
+        operation_id: &str,
+        payload: &[u8],
+    ) -> Result<Option<AcceptedOperation>, EvolutionError> {
+        let Some((known_payload, accepted)) = self.by_id.get(operation_id) else {
+            return Ok(None);
+        };
+        if known_payload != payload {
+            return Err(EvolutionError::Apply(
+                "Browser operation id was reused with a different payload".to_owned(),
+            ));
+        }
+        Ok(Some(accepted.clone()))
+    }
+
+    fn insert(&mut self, operation_id: String, payload: Vec<u8>, accepted: AcceptedOperation) {
+        if self.by_id.contains_key(&operation_id) {
+            return;
+        }
+        self.insertion_order.push_back(operation_id.clone());
+        self.by_id.insert(operation_id, (payload, accepted));
+        while self.insertion_order.len() > ACCEPTED_OPERATION_CACHE_LIMIT {
+            if let Some(expired) = self.insertion_order.pop_front() {
+                self.by_id.remove(&expired);
+            }
+        }
+    }
+}
+
+impl<A, P, R> BrowserOperationIngress<A, P, R>
+where
+    A: BrowserOperationActuator,
+    P: BrowserHeadPersistence,
+    R: BrowserRecordSubmission,
+{
+    pub fn new(
+        authority: Arc<RunEvolutionAuthority>,
+        browser_port: PortId,
+        actuator: A,
+        persistence: P,
+        records: R,
+    ) -> Self {
+        Self {
+            authority,
+            browser_port,
+            actuator: Mutex::new(actuator),
+            persistence,
+            records,
+            operation_gate: Mutex::new(()),
+            pending_operation: Mutex::new(None),
+            accepted_operations: Mutex::new(AcceptedOperationCache::default()),
+            next_operation_id: AtomicU64::new(0),
+        }
+    }
+
+    pub fn accept(
+        &self,
+        event: ato_adapter_browser::BrowserEvent,
+    ) -> Result<AcceptedOperation, EvolutionError> {
+        let operation_id = format!(
+            "browser-{}",
+            self.next_operation_id.fetch_add(1, Ordering::Relaxed) + 1
+        );
+        self.accept_with_operation_id(operation_id, event)
+    }
+
+    pub fn accept_with_operation_id(
+        &self,
+        operation_id: String,
+        event: ato_adapter_browser::BrowserEvent,
+    ) -> Result<AcceptedOperation, EvolutionError> {
+        if !valid_operation_id(&operation_id) {
+            return Err(EvolutionError::Apply(
+                "invalid Browser operation id".to_owned(),
+            ));
+        }
+        let _gate = self
+            .operation_gate
+            .lock()
+            .expect("Browser operation gate poisoned");
+        if let Some(pending) = self.authority.pending_persistence() {
+            return Err(EvolutionError::PersistencePending(pending.run_seq));
+        }
+        let payload = ato_adapter_browser::encode_event(&event)
+            .map_err(|error| EvolutionError::Apply(error.to_string()))?;
+        if let Some(accepted) = self
+            .accepted_operations
+            .lock()
+            .expect("Browser accepted operation cache mutex poisoned")
+            .get(&operation_id, &payload)?
+        {
+            return Ok(accepted);
+        }
+        let operation = LiveOperation {
+            protocol_id: ProtocolId::parse(BROWSER_PROTOCOL_ID)
+                .expect("static Browser Protocol ID"),
+            operation_id: OperationId::parse(operation_for_event(&event))
+                .expect("static Browser operation ID"),
+            port_id: self.browser_port.clone(),
+            payload: payload.clone(),
+        };
+        let offer = TransitionOffer::external_input(
+            self.browser_port.clone(),
+            ProtocolPayload::from(payload.clone()),
+        );
+        *self
+            .pending_operation
+            .lock()
+            .expect("Browser pending operation mutex poisoned") = Some(PendingBrowserOperation {
+            operation_id: operation_id.clone(),
+            event: event.clone(),
+        });
+        let result = self.authority.accept(
+            &offer,
+            || {
+                self.actuator
+                    .lock()
+                    .map_err(|_| "Browser actuator mutex poisoned".to_owned())?
+                    .apply(&operation)
+            },
+            |pending| {
+                self.persistence.persist(&AcceptedBrowserOperation {
+                    operation_id: operation_id.clone(),
+                    event: event.clone(),
+                    transition: pending.transition.clone(),
+                    run_seq: pending.run_seq,
+                })
+            },
+            |transition, run_seq| {
+                self.records.submit(&AcceptedBrowserOperation {
+                    operation_id: operation_id.clone(),
+                    event: event.clone(),
+                    transition: transition.clone(),
+                    run_seq,
+                })
+            },
+        );
+        if let Ok(accepted) = &result {
+            self.accepted_operations
+                .lock()
+                .expect("Browser accepted operation cache mutex poisoned")
+                .insert(operation_id, payload, accepted.clone());
+        }
+        if !matches!(result, Err(EvolutionError::Persist(_))) {
+            *self
+                .pending_operation
+                .lock()
+                .expect("Browser pending operation mutex poisoned") = None;
+        }
+        result
+    }
+
+    pub fn retry_pending_persistence(&self) -> Result<BrowserPersistenceRetry, EvolutionError> {
+        let _gate = self
+            .operation_gate
+            .lock()
+            .expect("Browser operation gate poisoned");
+        let operation = self
+            .pending_operation
+            .lock()
+            .expect("Browser pending operation mutex poisoned")
+            .clone()
+            .ok_or_else(|| EvolutionError::Apply("no Browser operation is pending".to_owned()))?;
+        let pending = self.authority.pending_persistence().ok_or_else(|| {
+            EvolutionError::Apply(
+                "Browser operation context is pending without a head transition".to_owned(),
+            )
+        })?;
+        let result = self.authority.retry_pending_persistence(|pending| {
+            self.persistence.persist(&AcceptedBrowserOperation {
+                operation_id: operation.operation_id.clone(),
+                event: operation.event.clone(),
+                transition: pending.transition.clone(),
+                run_seq: pending.run_seq,
+            })
+        });
+        let retried = result?;
+        if !retried {
+            return Ok(BrowserPersistenceRetry {
+                persisted: false,
+                record_error: None,
+            });
+        }
+        let accepted_operation = AcceptedBrowserOperation {
+            operation_id: operation.operation_id.clone(),
+            event: operation.event.clone(),
+            transition: pending.transition.clone(),
+            run_seq: pending.run_seq,
+        };
+        let record_error = self.records.submit(&accepted_operation).err();
+        let accepted = AcceptedOperation {
+            transition: pending.transition.clone(),
+            run_seq: pending.run_seq,
+            record_error: record_error.clone(),
+        };
+        let payload = ato_adapter_browser::encode_event(&operation.event)
+            .map_err(|error| EvolutionError::Apply(error.to_string()))?;
+        self.accepted_operations
+            .lock()
+            .expect("Browser accepted operation cache mutex poisoned")
+            .insert(operation.operation_id.clone(), payload, accepted);
+        *self
+            .pending_operation
+            .lock()
+            .expect("Browser pending operation mutex poisoned") = None;
+        Ok(BrowserPersistenceRetry {
+            persisted: true,
+            record_error,
+        })
+    }
+
+    pub fn freeze(&self) -> Result<ato_kernel::RunHeadSnapshot, EvolutionError> {
+        self.authority.freeze()
+    }
+
+    pub fn unfreeze(&self) {
+        self.authority.unfreeze();
+    }
+}
+
+/// Result of retrying the single control-plane write which followed a physical
+/// Browser ACK. A Record failure never reopens that accepted transition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserPersistenceRetry {
+    pub persisted: bool,
+    pub record_error: Option<String>,
+}
+
+fn valid_operation_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 160
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':'))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use ato_adapter_browser::{BrowserEvent, KeyboardKind, Modifiers};
+    use ato_computation::{Boundary, PortDef};
+    use ato_kernel::Kernel;
+    use ato_objects::{MemoryObjectStore, ObjectStore};
+
+    use super::*;
+
+    #[derive(Default)]
+    struct Actuator {
+        calls: Vec<LiveOperation>,
+        reject: bool,
+    }
+    impl BrowserOperationActuator for Actuator {
+        fn apply(&mut self, operation: &LiveOperation) -> Result<(), String> {
+            if self.reject {
+                return Err("Browser ACK timeout".to_owned());
+            }
+            self.calls.push(operation.clone());
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct Persistence(Mutex<Vec<AcceptedBrowserOperation>>);
+    impl BrowserHeadPersistence for Persistence {
+        fn persist(&self, operation: &AcceptedBrowserOperation) -> Result<(), String> {
+            self.0.lock().unwrap().push(operation.clone());
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct Records(Arc<Mutex<Vec<AcceptedBrowserOperation>>>);
+    impl BrowserRecordSubmission for Records {
+        fn submit(&self, operation: &AcceptedBrowserOperation) -> Result<(), String> {
+            self.0.lock().unwrap().push(operation.clone());
+            Ok(())
+        }
+    }
+
+    struct FailingRecords;
+
+    impl BrowserRecordSubmission for FailingRecords {
+        fn submit(&self, _operation: &AcceptedBrowserOperation) -> Result<(), String> {
+            Err("Record Writer is unavailable".to_owned())
+        }
+    }
+
+    #[derive(Default)]
+    struct FailOncePersistence {
+        fail: AtomicBool,
+        received: Mutex<Vec<AcceptedBrowserOperation>>,
+    }
+
+    impl FailOncePersistence {
+        fn failing() -> Self {
+            Self {
+                fail: AtomicBool::new(true),
+                received: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl BrowserHeadPersistence for FailOncePersistence {
+        fn persist(&self, operation: &AcceptedBrowserOperation) -> Result<(), String> {
+            self.received.lock().unwrap().push(operation.clone());
+            if self.fail.swap(false, Ordering::SeqCst) {
+                Err("temporary API outage".to_owned())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn authority() -> Arc<RunEvolutionAuthority> {
+        let objects = Arc::new(MemoryObjectStore::default());
+        let mut kernel = Kernel::new(objects.clone());
+        kernel
+            .register(Arc::new(BrowserComputationSemantics::default()))
+            .unwrap();
+        kernel
+            .register_protocol(Arc::new(BrowserProtocolSemantics::default()))
+            .unwrap();
+        let residual = objects
+            .put(
+                &encode_residual(&BrowserResidualV1 {
+                    version: 1,
+                    interaction_frontier: None,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        let root = kernel
+            .seal(&ComputationObject {
+                semantics: SemanticsId::parse(BROWSER_COMPUTATION_SEMANTICS_ID).unwrap(),
+                boundary: Boundary::from([(
+                    PortId::parse("browser").unwrap(),
+                    PortDef {
+                        protocol: ProtocolId::parse(BROWSER_PROTOCOL_ID).unwrap(),
+                        role: RoleId::parse("controller").unwrap(),
+                    },
+                )]),
+                residual,
+            })
+            .unwrap();
+        Arc::new(RunEvolutionAuthority::new(kernel, root))
+    }
+
+    fn key() -> BrowserEvent {
+        BrowserEvent::Keyboard {
+            kind: KeyboardKind::KeyDown,
+            code: "ArrowRight".to_owned(),
+            modifiers: Modifiers::default(),
+        }
+    }
+
+    #[test]
+    fn accepted_browser_operations_share_one_head_chain_and_one_record_each() {
+        let authority = authority();
+        let persistence = Persistence::default();
+        let records = Records::default();
+        let submitted = Arc::clone(&records.0);
+        let ingress = BrowserOperationIngress::new(
+            authority.clone(),
+            PortId::parse("browser").unwrap(),
+            Actuator::default(),
+            persistence,
+            records,
+        );
+        let first = ingress.accept(key()).unwrap();
+        let second = ingress
+            .accept(BrowserEvent::Click {
+                x_normalized: 0.5,
+                y_normalized: 0.5,
+                button: 0,
+            })
+            .unwrap();
+        assert_eq!(first.run_seq, 1);
+        assert_eq!(second.run_seq, 2);
+        assert_eq!(authority.current_head().head, second.transition.to);
+        assert_eq!(authority.current_head().run_seq, 2);
+        assert_ne!(first.transition.to, second.transition.to);
+        assert_eq!(submitted.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn rejected_browser_ack_does_not_advance_or_record() {
+        let authority = authority();
+        let before = authority.current_head();
+        let ingress = BrowserOperationIngress::new(
+            authority.clone(),
+            PortId::parse("browser").unwrap(),
+            Actuator {
+                calls: Vec::new(),
+                reject: true,
+            },
+            Persistence::default(),
+            Records::default(),
+        );
+        assert!(matches!(
+            ingress.accept(key()),
+            Err(EvolutionError::Apply(_))
+        ));
+        assert_eq!(authority.current_head(), before);
+    }
+
+    #[test]
+    fn persistence_retry_keeps_the_same_operation_context_and_submits_one_record() {
+        let authority = authority();
+        let persistence = FailOncePersistence::failing();
+        let records = Records::default();
+        let ingress = BrowserOperationIngress::new(
+            authority.clone(),
+            PortId::parse("browser").unwrap(),
+            Actuator::default(),
+            persistence,
+            records,
+        );
+        assert!(matches!(
+            ingress.accept_with_operation_id("op-browser-1".to_owned(), key()),
+            Err(EvolutionError::Persist(_))
+        ));
+        assert!(matches!(
+            ingress.accept(key()),
+            Err(EvolutionError::PersistencePending(1))
+        ));
+
+        let retry = ingress.retry_pending_persistence().unwrap();
+        assert!(retry.persisted);
+        assert_eq!(retry.record_error, None);
+        let accepted = ingress.accept(key()).unwrap();
+        assert_eq!(accepted.run_seq, 2);
+    }
+
+    #[test]
+    fn duplicate_operation_id_returns_the_first_acceptance_without_reapplying() {
+        let authority = authority();
+        let records = Records::default();
+        let submitted = Arc::clone(&records.0);
+        let ingress = BrowserOperationIngress::new(
+            authority.clone(),
+            PortId::parse("browser").unwrap(),
+            Actuator::default(),
+            Persistence::default(),
+            records,
+        );
+        let first = ingress
+            .accept_with_operation_id("op-reconnect-1".to_owned(), key())
+            .unwrap();
+        let retry = ingress
+            .accept_with_operation_id("op-reconnect-1".to_owned(), key())
+            .unwrap();
+        assert_eq!(retry, first);
+        assert_eq!(authority.current_head().run_seq, 1);
+        assert_eq!(submitted.lock().unwrap().len(), 1);
+        assert!(matches!(
+            ingress.accept_with_operation_id(
+                "op-reconnect-1".to_owned(),
+                BrowserEvent::Click {
+                    x_normalized: 0.5,
+                    y_normalized: 0.5,
+                    button: 0,
+                },
+            ),
+            Err(EvolutionError::Apply(_))
+        ));
+    }
+
+    #[test]
+    fn record_failure_is_reported_without_rolling_back_the_accepted_head() {
+        let authority = authority();
+        let ingress = BrowserOperationIngress::new(
+            authority.clone(),
+            PortId::parse("browser").unwrap(),
+            Actuator::default(),
+            Persistence::default(),
+            FailingRecords,
+        );
+        let accepted = ingress.accept(key()).unwrap();
+        assert_eq!(accepted.run_seq, 1);
+        assert_eq!(
+            accepted.record_error.as_deref(),
+            Some("Record Writer is unavailable")
+        );
+        assert_eq!(authority.current_head().head, accepted.transition.to);
+    }
+}

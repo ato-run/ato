@@ -108,7 +108,10 @@ fn allowed(source: &str, target: &str) -> bool {
         "adapter-api" => matches!(target, "computation" | "objects"),
         "materializer-api" => matches!(target, "adapter-api" | "computation" | "objects"),
         "player" => matches!(target, "adapter-api" | "objects"),
-        "adapter" => matches!(target, "adapter-api" | "computation" | "objects" | "ipc"),
+        "adapter" => matches!(
+            target,
+            "adapter-api" | "computation" | "objects" | "ipc" | "record-writer"
+        ),
         "materializer" => matches!(
             target,
             "adapter-api" | "materializer-api" | "computation" | "objects"

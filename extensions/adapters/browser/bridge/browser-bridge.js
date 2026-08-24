@@ -10,7 +10,8 @@
     typeof bootstrap.control_url !== "string" ||
     typeof bootstrap.channel_credential !== "string" ||
     typeof bootstrap.browser_session !== "string" ||
-    !Array.isArray(bootstrap.allowed_non_text_codes)
+    !Array.isArray(bootstrap.allowed_non_text_codes) ||
+    !["observe_and_apply", "apply_only"].includes(bootstrap.input_mode)
   ) {
     return;
   }
@@ -74,14 +75,16 @@
     }
   });
 
-  globalThis.addEventListener("keydown", captureKeyboard, true);
-  globalThis.addEventListener("keyup", captureKeyboard, true);
-  globalThis.addEventListener("pointerdown", capturePointer, true);
-  globalThis.addEventListener("pointerup", capturePointer, true);
-  globalThis.addEventListener("pointercancel", capturePointer, true);
-  globalThis.addEventListener("pointermove", capturePointer, true);
-  globalThis.addEventListener("click", captureClick, true);
-  globalThis.addEventListener("scroll", captureScroll, true);
+  if (bootstrap.input_mode === "observe_and_apply") {
+    globalThis.addEventListener("keydown", captureKeyboard, true);
+    globalThis.addEventListener("keyup", captureKeyboard, true);
+    globalThis.addEventListener("pointerdown", capturePointer, true);
+    globalThis.addEventListener("pointerup", capturePointer, true);
+    globalThis.addEventListener("pointercancel", capturePointer, true);
+    globalThis.addEventListener("pointermove", capturePointer, true);
+    globalThis.addEventListener("click", captureClick, true);
+    globalThis.addEventListener("scroll", captureScroll, true);
+  }
 
   function captureKeyboard(event) {
     if (!canCapture(event) || !allowedCodes.has(event.code)) return;

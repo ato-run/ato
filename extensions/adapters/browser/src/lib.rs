@@ -14,9 +14,10 @@ use std::time::Duration;
 
 use ato_adapter_api::{
     AdapterAttachContext, AdapterCapabilities, AdapterContext, AdapterError, AdapterFactory,
-    AdapterInstance, AttachedAdapter, Stylus, SupportedOperation,
+    AdapterInstance, AttachedAdapter, LiveOperation, Stylus, SupportedOperation,
 };
 use ato_objects::{RecordCandidate, RecordEnvelope, read_exact_object};
+use ato_record_writer::RecordSchemaRegistry;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -25,6 +26,7 @@ pub use protocol::{
     BrowserEvent, BrowserProtocolError, KeyboardKind, Modifiers, PointerKind, PointerType,
     decode_event, encode_event,
 };
+pub use transport::BrowserRuntimeBootstrap;
 
 pub const BROWSER_ADAPTER_ID: &str = "ato.browser@1";
 pub const BROWSER_PROTOCOL_ID: &str = "ato.browser@1";
@@ -36,6 +38,24 @@ pub const BROWSER_SCROLL_OPERATION: &str = "scroll";
 const MAX_BROWSER_EVENT_BYTES: u64 = 64 * 1024;
 const ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Selects whether trusted DOM events are merely observed by a local CLI, or
+/// whether this Adapter accepts only Runner-authorized physical operations.
+/// Hosted Runs must use `ApplyOnly`: a trusted event has already changed the
+/// page, so observing it cannot be an authoritative operation ingress.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserInputMode {
+    #[default]
+    ObserveAndApply,
+    ApplyOnly,
+}
+
+impl BrowserInputMode {
+    pub(crate) fn observes_trusted_events(self) -> bool {
+        matches!(self, Self::ObserveAndApply)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BrowserAdapterConfig {
@@ -43,6 +63,8 @@ pub struct BrowserAdapterConfig {
     pub expected_origin: String,
     #[serde(default)]
     pub allowed_non_text_codes: BTreeSet<String>,
+    #[serde(default)]
+    pub input_mode: BrowserInputMode,
 }
 
 #[derive(Default)]
@@ -116,6 +138,33 @@ pub fn operation_for_event(event: &BrowserEvent) -> &'static str {
     }
 }
 
+/// Registers the extension-owned payload validators used by both the Record
+/// Writer and hosted Runner wiring. This keeps operation validation out of CLI.
+pub fn register_record_schemas(registry: &mut RecordSchemaRegistry) -> Result<(), AdapterError> {
+    for operation_id in [
+        BROWSER_KEYBOARD_OPERATION,
+        BROWSER_POINTER_OPERATION,
+        BROWSER_CLICK_OPERATION,
+        BROWSER_SCROLL_OPERATION,
+    ] {
+        registry
+            .register(
+                SupportedOperation::new(BROWSER_PROTOCOL_ID, operation_id, 1, BTreeSet::new())
+                    .expect("valid static Browser operation"),
+                move |bytes| {
+                    let event = decode_event(bytes).map_err(|error| error.to_string())?;
+                    (operation_for_event(&event) == operation_id)
+                        .then_some(())
+                        .ok_or_else(|| {
+                            format!("Browser payload kind does not match `{operation_id}`")
+                        })
+                },
+            )
+            .map_err(|error| AdapterError::InvalidConfig(error.to_string()))?;
+    }
+    Ok(())
+}
+
 impl AdapterFactory for BrowserAdapter {
     fn id(&self) -> &str {
         BROWSER_ADAPTER_ID
@@ -172,6 +221,7 @@ impl AdapterFactory for BrowserAdapter {
                 expected_origin: config.expected_origin.clone(),
                 port_id,
                 allowed_non_text_codes: config.allowed_non_text_codes.clone(),
+                input_mode: config.input_mode,
                 channel_credential,
                 browser_session,
             },
@@ -217,6 +267,26 @@ impl BrowserSession {
         }
         Ok(())
     }
+
+    fn apply_event(&mut self, event: BrowserEvent) -> Result<(), AdapterError> {
+        self.transport_failure()?;
+        if self.quiesced {
+            return Err(AdapterError::Operation(
+                "Browser Adapter is already quiesced".to_owned(),
+            ));
+        }
+        let request_id = self.request_id();
+        let (sender, receiver) = mpsc::channel();
+        self.transport
+            .commands
+            .send(transport::TransportCommand::Apply {
+                request_id,
+                event,
+                result: sender,
+            })
+            .map_err(|error| AdapterError::Operation(error.to_string()))?;
+        transport::wait_for_result(receiver, ACK_TIMEOUT, "apply")
+    }
 }
 
 impl AttachedAdapter for BrowserSession {
@@ -243,24 +313,29 @@ impl AttachedAdapter for BrowserSession {
         record: &RecordEnvelope,
         context: &AdapterContext<'_>,
     ) -> Result<(), AdapterError> {
-        self.transport_failure()?;
-        if self.quiesced {
+        let event = read_event(record, context, &self.config)?;
+        self.apply_event(event)
+    }
+
+    fn apply_operation(&mut self, operation: &LiveOperation) -> Result<(), AdapterError> {
+        if operation.protocol_id.as_str() != BROWSER_PROTOCOL_ID
+            || operation.port_id.as_str() != self.config.port_id
+        {
             return Err(AdapterError::Operation(
-                "Browser Adapter is already quiesced".to_owned(),
+                "Browser live operation has wrong protocol or port".to_owned(),
             ));
         }
-        let event = read_event(record, context, &self.config)?;
-        let request_id = self.request_id();
-        let (sender, receiver) = mpsc::channel();
-        self.transport
-            .commands
-            .send(transport::TransportCommand::Apply {
-                request_id,
-                event,
-                result: sender,
-            })
-            .map_err(|error| AdapterError::Operation(error.to_string()))?;
-        transport::wait_for_result(receiver, ACK_TIMEOUT, "apply")
+        let event = protocol::decode_event_with_policy(
+            &operation.payload,
+            &self.config.allowed_non_text_codes,
+        )
+        .map_err(|error| AdapterError::Operation(error.to_string()))?;
+        if operation.operation_id.as_str() != operation_for_event(&event) {
+            return Err(AdapterError::Operation(
+                "Browser live operation kind does not match payload".to_owned(),
+            ));
+        }
+        self.apply_event(event)
     }
 
     fn verify(
@@ -301,6 +376,11 @@ impl AttachedAdapter for BrowserSession {
             })?;
         }
         match std::fs::remove_file(&self.transport.discovery_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        match std::fs::remove_file(&self.transport.readiness_path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
@@ -640,6 +720,7 @@ mod tests {
                     port_id: "app.browser".to_owned(),
                     expected_origin: origin.to_owned(),
                     allowed_non_text_codes: codes,
+                    input_mode: BrowserInputMode::ObserveAndApply,
                 })
                 .expect("test config should serialize"),
             };
@@ -665,6 +746,7 @@ mod tests {
                 port_id: "app.browser".to_owned(),
                 expected_origin: "http://127.0.0.1:3000".to_owned(),
                 allowed_non_text_codes: BTreeSet::new(),
+                input_mode: BrowserInputMode::ObserveAndApply,
             })
             .expect("test config should serialize"),
         };
