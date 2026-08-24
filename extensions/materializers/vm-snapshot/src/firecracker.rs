@@ -7,7 +7,9 @@ use std::fs;
 #[cfg(target_os = "linux")]
 use std::fs::{File, OpenOptions};
 #[cfg(target_os = "linux")]
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(target_os = "linux")]
+use std::os::unix::ffi::OsStrExt;
 #[cfg(target_os = "linux")]
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -85,6 +87,391 @@ pub trait ActiveFirecrackerRealization: Send {
     fn unfreeze_ingress(&mut self) -> Result<(), VmSnapshotError>;
 }
 
+/// Runtime-owned ingress gate used by the generic fresh VM bootstrap. It is a
+/// physical lifecycle dependency, not part of the VM descriptor or any
+/// semantic identity.
+pub trait FirecrackerIngressGate: Send {
+    fn freeze(&mut self) -> Result<(), VmSnapshotError>;
+    fn quiesce(&mut self) -> Result<(), VmSnapshotError>;
+    fn unfreeze(&mut self) -> Result<(), VmSnapshotError>;
+}
+
+/// Generic inputs for booting a current rootfs into an active Firecracker VM.
+/// Source/replay construction remains outside this backend; callers provide a
+/// bootable rootfs already associated with the requested ComputationRef.
+#[derive(Debug, Clone)]
+pub struct FreshFirecrackerConfig {
+    pub binary: PathBuf,
+    pub ip_binary: PathBuf,
+    pub work_root: PathBuf,
+    pub kernel: PathBuf,
+    pub rootfs: PathBuf,
+    pub netns_name: String,
+    pub tap_device: String,
+    pub tap_host_cidr: String,
+    pub boot_args: String,
+    pub vcpu_count: u32,
+    pub memory_mib: u64,
+    pub api_timeout: Duration,
+}
+
+/// Active VM owner produced by the generic fresh bootstrap. This is the
+/// concrete staging bridge consumed by `FirecrackerActiveVmCaptureSource`.
+#[cfg(target_os = "linux")]
+pub struct FreshFirecrackerRealization {
+    target: ato_computation::ComputationRef,
+    realization_id: String,
+    spec: ActiveFirecrackerCaptureSpec,
+    ingress: Box<dyn FirecrackerIngressGate>,
+    session: TempDir,
+    api_socket: PathBuf,
+    rootfs: PathBuf,
+    console: File,
+    child: Option<Child>,
+    ip_binary: PathBuf,
+    netns_name: String,
+}
+
+#[cfg(target_os = "linux")]
+impl FreshFirecrackerRealization {
+    /// Physical process identifier exposed for operational receipts only.
+    pub fn process_id(&self) -> Option<u32> {
+        self.child.as_ref().map(Child::id)
+    }
+
+    /// Per-realization resource root exposed for cleanup verification only.
+    pub fn session_root(&self) -> &Path {
+        self.session.path()
+    }
+
+    /// Isolated physical network namespace used by this realization.
+    pub fn network_namespace(&self) -> &str {
+        &self.netns_name
+    }
+
+    pub fn boot(
+        target: ato_computation::ComputationRef,
+        realization_id: String,
+        config: FreshFirecrackerConfig,
+        spec: ActiveFirecrackerCaptureSpec,
+        ingress: Box<dyn FirecrackerIngressGate>,
+    ) -> Result<Self, VmSnapshotError> {
+        spec.restore_layout.validate()?;
+        if spec.network_contract.tap_device.as_deref() != Some(config.tap_device.as_str()) {
+            return Err(VmSnapshotError::Backend(
+                "fresh VM TAP does not match capture contract".to_owned(),
+            ));
+        }
+        if !config.kernel.is_file() || !config.rootfs.is_file() {
+            return Err(VmSnapshotError::Backend(
+                "fresh VM kernel and rootfs must be regular files".to_owned(),
+            ));
+        }
+        if config.netns_name.is_empty()
+            || config.tap_device.is_empty()
+            || config.vcpu_count == 0
+            || config.memory_mib == 0
+        {
+            return Err(VmSnapshotError::Backend(
+                "fresh VM physical configuration is incomplete".to_owned(),
+            ));
+        }
+        fs::create_dir_all(&config.work_root)?;
+        let session = tempfile::Builder::new()
+            .prefix("firecracker-fresh-")
+            .tempdir_in(&config.work_root)?;
+        let api_socket = session.path().join(&spec.restore_layout.api_socket_path);
+        let console_path = session.path().join(&spec.restore_layout.console_log_path);
+        let rootfs = session
+            .path()
+            .join(&spec.restore_layout.rootfs_backing_path);
+        for path in [&api_socket, &console_path, &rootfs] {
+            create_parent(path)?;
+        }
+        fs::copy(&config.rootfs, &rootfs)?;
+        File::open(&rootfs)?.sync_all()?;
+        let console = File::create(console_path)?;
+        let console_stdout = console.try_clone()?;
+        let console_stderr = console.try_clone()?;
+
+        command_ok(
+            &config.ip_binary,
+            &["netns", "add", &config.netns_name],
+            "create fresh VM network namespace",
+        )?;
+        let setup = (|| {
+            command_ok(
+                &config.ip_binary,
+                &[
+                    "netns",
+                    "exec",
+                    &config.netns_name,
+                    "ip",
+                    "link",
+                    "set",
+                    "lo",
+                    "up",
+                ],
+                "activate fresh VM loopback",
+            )?;
+            command_ok(
+                &config.ip_binary,
+                &[
+                    "netns",
+                    "exec",
+                    &config.netns_name,
+                    "ip",
+                    "tuntap",
+                    "add",
+                    "dev",
+                    &config.tap_device,
+                    "mode",
+                    "tap",
+                ],
+                "create fresh VM TAP",
+            )?;
+            command_ok(
+                &config.ip_binary,
+                &[
+                    "netns",
+                    "exec",
+                    &config.netns_name,
+                    "ip",
+                    "addr",
+                    "add",
+                    &config.tap_host_cidr,
+                    "dev",
+                    &config.tap_device,
+                ],
+                "address fresh VM TAP",
+            )?;
+            command_ok(
+                &config.ip_binary,
+                &[
+                    "netns",
+                    "exec",
+                    &config.netns_name,
+                    "ip",
+                    "link",
+                    "set",
+                    "dev",
+                    &config.tap_device,
+                    "up",
+                ],
+                "activate fresh VM TAP",
+            )?;
+            Ok::<(), VmSnapshotError>(())
+        })();
+        if let Err(error) = setup {
+            let _ = Command::new(&config.ip_binary)
+                .args(["netns", "del", &config.netns_name])
+                .status();
+            return Err(error);
+        }
+
+        let mut command = Command::new(&config.ip_binary);
+        command
+            .args(["netns", "exec", &config.netns_name])
+            .arg(&config.binary)
+            .current_dir(session.path())
+            .arg("--api-sock")
+            .arg(&api_socket)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(console_stdout))
+            .stderr(Stdio::from(console_stderr));
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = Command::new(&config.ip_binary)
+                    .args(["netns", "del", &config.netns_name])
+                    .status();
+                return Err(VmSnapshotError::Backend(format!(
+                    "fresh Firecracker spawn: {error}"
+                )));
+            }
+        };
+        let configured = (|| {
+            wait_for_socket(&api_socket, &mut child, config.api_timeout)?;
+            firecracker_api(
+                &api_socket,
+                "PUT",
+                "/machine-config",
+                &serde_json::to_vec(&serde_json::json!({
+                    "vcpu_count": config.vcpu_count,
+                    "mem_size_mib": config.memory_mib,
+                }))?,
+                config.api_timeout,
+            )?;
+            firecracker_api(
+                &api_socket,
+                "PUT",
+                "/boot-source",
+                &serde_json::to_vec(&serde_json::json!({
+                    "kernel_image_path": config.kernel,
+                    "boot_args": config.boot_args,
+                }))?,
+                config.api_timeout,
+            )?;
+            firecracker_api(
+                &api_socket,
+                "PUT",
+                "/drives/rootfs",
+                &serde_json::to_vec(&serde_json::json!({
+                    "drive_id": "rootfs",
+                    "path_on_host": spec.restore_layout.rootfs_backing_path,
+                    "is_root_device": true,
+                    "is_read_only": false,
+                }))?,
+                config.api_timeout,
+            )?;
+            firecracker_api(
+                &api_socket,
+                "PUT",
+                "/network-interfaces/eth0",
+                &serde_json::to_vec(&serde_json::json!({
+                    "iface_id": "eth0",
+                    "host_dev_name": config.tap_device,
+                }))?,
+                config.api_timeout,
+            )?;
+            if let Some(path) = &spec.restore_layout.vsock_uds_path {
+                let physical_vsock_path = session.path().join(path);
+                create_parent(&physical_vsock_path)?;
+                firecracker_api(
+                    &api_socket,
+                    "PUT",
+                    "/vsock",
+                    &serde_json::to_vec(&serde_json::json!({
+                        "guest_cid": 3,
+                        "uds_path": physical_vsock_path,
+                    }))?,
+                    config.api_timeout,
+                )?;
+            }
+            firecracker_api(
+                &api_socket,
+                "PUT",
+                "/actions",
+                br#"{"action_type":"InstanceStart"}"#,
+                config.api_timeout,
+            )
+        })();
+        if let Err(error) = configured {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = Command::new(&config.ip_binary)
+                .args(["netns", "del", &config.netns_name])
+                .status();
+            return Err(error);
+        }
+        Ok(Self {
+            target,
+            realization_id,
+            spec,
+            ingress,
+            session,
+            api_socket,
+            rootfs,
+            console,
+            child: Some(child),
+            ip_binary: config.ip_binary,
+            netns_name: config.netns_name,
+        })
+    }
+
+    fn cleanup(&mut self) {
+        if let Some(child) = &mut self.child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        self.child = None;
+        let _ = Command::new(&self.ip_binary)
+            .args(["netns", "del", &self.netns_name])
+            .status();
+        let _ = fs::remove_file(&self.api_socket);
+        let _ = self.console.sync_all();
+        let _ = self.session.path();
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl ActiveFirecrackerRealization for FreshFirecrackerRealization {
+    fn target(&self) -> &ato_computation::ComputationRef {
+        &self.target
+    }
+
+    fn realization_id(&self) -> &str {
+        &self.realization_id
+    }
+
+    fn capture_spec(&self) -> ActiveFirecrackerCaptureSpec {
+        self.spec.clone()
+    }
+
+    fn freeze_ingress(&mut self) -> Result<(), VmSnapshotError> {
+        self.ingress.freeze()
+    }
+
+    fn quiesce_interactions(&mut self) -> Result<(), VmSnapshotError> {
+        self.ingress.quiesce()
+    }
+
+    fn pause_vm(&mut self) -> Result<(), VmSnapshotError> {
+        firecracker_api(
+            &self.api_socket,
+            "PATCH",
+            "/vm",
+            br#"{"state":"Paused"}"#,
+            Duration::from_secs(15),
+        )
+    }
+
+    fn create_full_snapshot(
+        &mut self,
+        memory_path: &Path,
+        vmstate_path: &Path,
+    ) -> Result<(), VmSnapshotError> {
+        firecracker_api(
+            &self.api_socket,
+            "PUT",
+            "/snapshot/create",
+            &serde_json::to_vec(&serde_json::json!({
+                "snapshot_type": "Full",
+                "snapshot_path": vmstate_path,
+                "mem_file_path": memory_path,
+            }))?,
+            Duration::from_secs(15),
+        )
+    }
+
+    fn copy_rootfs_backing(&mut self, destination: &Path) -> Result<(), VmSnapshotError> {
+        fs::copy(&self.rootfs, destination)?;
+        File::open(destination)?.sync_all()?;
+        Ok(())
+    }
+
+    fn resume_vm(&mut self) -> Result<(), VmSnapshotError> {
+        firecracker_api(
+            &self.api_socket,
+            "PATCH",
+            "/vm",
+            br#"{"state":"Resumed"}"#,
+            Duration::from_secs(15),
+        )
+    }
+
+    fn unfreeze_ingress(&mut self) -> Result<(), VmSnapshotError> {
+        self.ingress.unfreeze()
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for FreshFirecrackerRealization {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
 /// Active VM capture integration used by a hosted Runner.
 ///
 /// The source serializes captures for one active Realization and owns rollback
@@ -139,11 +526,7 @@ impl ActiveVmCaptureSource for FirecrackerActiveVmCaptureSource {
             active.pause_vm()?;
             vm_paused = true;
             let record_lease = self.barrier.pause_and_seal()?;
-            if record_lease.frontier_ref() != &request.record_frontier_ref {
-                return Err(VmSnapshotError::Backend(
-                    "sealed RecordFrontier does not match requested frontier".to_owned(),
-                ));
-            }
+            let record_frontier_ref = record_lease.frontier_ref().clone();
 
             fs::create_dir_all(&self.capture_root)?;
             let capture_dir = tempfile::Builder::new()
@@ -166,15 +549,15 @@ impl ActiveVmCaptureSource for FirecrackerActiveVmCaptureSource {
             sync_capture_artifact(&rootfs_path)?;
             sync_capture_artifact(&metadata_path)?;
 
+            drop(record_lease);
             active.resume_vm()?;
             vm_paused = false;
-            drop(record_lease);
             active.unfreeze_ingress()?;
             ingress_frozen = false;
 
             Ok(CapturedVm {
                 target: request.target.clone(),
-                record_frontier_ref: request.record_frontier_ref.clone(),
+                record_frontier_ref,
                 snapshot_format: spec.snapshot_format,
                 architecture: spec.architecture,
                 guest_os: spec.guest_os,
@@ -381,6 +764,21 @@ pub struct FirecrackerBackendConfig {
     pub work_root: PathBuf,
     pub slot_id: String,
     pub api_timeout: Duration,
+    /// Address assigned to the logical TAP inside each per-run namespace.
+    /// Identical values are safe because the namespaces are isolated.
+    pub tap_host_cidr: Option<String>,
+    /// Optional process injected by a hosted runtime to relay a guest TCP
+    /// Surface through a unique Unix socket. The relay runs inside the VM's
+    /// network namespace, so identical guest addresses remain safe across
+    /// concurrent restores of the same snapshot.
+    pub surface_relay: Option<FirecrackerSurfaceRelayConfig>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FirecrackerSurfaceRelayConfig {
+    pub binary: PathBuf,
+    pub guest_target: std::net::SocketAddr,
+    pub uds_path: PathBuf,
 }
 
 impl Default for FirecrackerBackendConfig {
@@ -401,6 +799,8 @@ impl Default for FirecrackerBackendConfig {
             work_root,
             slot_id: "0".to_owned(),
             api_timeout: Duration::from_secs(15),
+            tap_host_cidr: None,
+            surface_relay: None,
         }
     }
 }
@@ -534,11 +934,17 @@ impl FirecrackerBackend {
         fs::create_dir_all(&self.config.work_root)?;
         let mut resources = FirecrackerResources::allocate(&self.config, request)?;
         resources.child = Some(resources.spawn_firecracker()?);
-        wait_for_socket(
+        if let Err(error) = wait_for_socket(
             &resources.api_socket,
             resources.child.as_mut().expect("child was stored"),
             self.config.api_timeout,
-        )?;
+        ) {
+            let diagnostic = bounded_diagnostic_tail(&resources.console_path, 4096)
+                .unwrap_or_else(|_| "unavailable".to_owned());
+            return Err(VmSnapshotError::Backend(format!(
+                "{error}; Firecracker startup diagnostic: {diagnostic}"
+            )));
+        }
         let body = snapshot_load_body(
             &resources.vmstate,
             &resources.memory,
@@ -577,10 +983,12 @@ struct FirecrackerResources {
     session_dir: TempDir,
     api_socket: PathBuf,
     console: File,
+    console_path: PathBuf,
     memory: PathBuf,
     vmstate: PathBuf,
     rootfs: PathBuf,
     child: Option<Child>,
+    surface_relay: Option<Child>,
     tap_created: Option<String>,
     netns_created: Option<String>,
     vsock_path: Option<PathBuf>,
@@ -629,9 +1037,10 @@ impl FirecrackerResources {
                 .tempdir_in(&sessions)?;
             let api_socket = session_dir.path().join(&layout.api_socket_path);
             let console_path = session_dir.path().join(&layout.console_log_path);
+            validate_unix_socket_path(&api_socket, "Firecracker API socket")?;
             create_parent(&api_socket)?;
             create_parent(&console_path)?;
-            let console = File::create(console_path)?;
+            let console = File::create(&console_path)?;
             let memory = materialize_layout_artifact(
                 required_artifact(request, ArtifactRole::Memory)?,
                 session_dir.path().join(&layout.memory_path),
@@ -644,25 +1053,36 @@ impl FirecrackerResources {
                 required_artifact(request, ArtifactRole::Rootfs)?,
                 session_dir.path().join(&layout.rootfs_backing_path),
             )?;
-            Ok::<_, VmSnapshotError>((session_dir, api_socket, console, memory, vmstate, rootfs))
+            Ok::<_, VmSnapshotError>((
+                session_dir,
+                api_socket,
+                console,
+                console_path,
+                memory,
+                vmstate,
+                rootfs,
+            ))
         })();
-        let (session_dir, api_socket, console, memory, vmstate, rootfs) = match allocated_session {
-            Ok(allocated) => allocated,
-            Err(error) => {
-                drop(slot_file);
-                let _ = fs::remove_file(&slot_path);
-                return Err(error);
-            }
-        };
+        let (session_dir, api_socket, console, console_path, memory, vmstate, rootfs) =
+            match allocated_session {
+                Ok(allocated) => allocated,
+                Err(error) => {
+                    drop(slot_file);
+                    let _ = fs::remove_file(&slot_path);
+                    return Err(error);
+                }
+            };
         let mut resources = Self {
             config: config.clone(),
             session_dir,
             api_socket,
             console,
+            console_path,
             memory,
             vmstate,
             rootfs,
             child: None,
+            surface_relay: None,
             tap_created: None,
             netns_created: None,
             vsock_path: None,
@@ -690,6 +1110,19 @@ impl FirecrackerResources {
                 "create namespaced TAP",
             )?;
             resources.tap_created = Some(tap.clone());
+            if let Some(cidr) = &config.tap_host_cidr {
+                command_ok(
+                    &config.ip_binary,
+                    &[
+                        "netns", "exec", &netns, "ip", "addr", "add", cidr, "dev", tap,
+                    ],
+                    "address namespaced TAP",
+                )?;
+            } else if config.surface_relay.is_some() {
+                return Err(VmSnapshotError::Backend(
+                    "Surface relay requires a namespaced TAP host address".to_owned(),
+                ));
+            }
             command_ok(
                 &config.ip_binary,
                 &[
@@ -700,6 +1133,7 @@ impl FirecrackerResources {
         }
         if let Some(relative) = &layout.vsock_uds_path {
             let path = resources.session_dir.path().join(relative);
+            validate_unix_socket_path(&path, "Firecracker vsock UDS")?;
             if path.exists() {
                 return Err(VmSnapshotError::Backend(format!(
                     "vsock path already exists: {}",
@@ -711,6 +1145,44 @@ impl FirecrackerResources {
                 .ok_or_else(|| VmSnapshotError::Backend("vsock path has no parent".to_owned()))?;
             fs::create_dir_all(parent)?;
             resources.vsock_path = Some(path);
+        }
+        if let (Some(netns), Some(relay)) = (&resources.netns_created, &config.surface_relay) {
+            validate_unix_socket_path(&relay.uds_path, "Surface relay socket")?;
+            if relay.uds_path.exists() {
+                return Err(VmSnapshotError::Backend(format!(
+                    "Surface relay socket already exists: {}",
+                    relay.uds_path.display()
+                )));
+            }
+            let parent = relay.uds_path.parent().ok_or_else(|| {
+                VmSnapshotError::Backend("Surface relay socket has no parent".to_owned())
+            })?;
+            fs::create_dir_all(parent)?;
+            let child = Command::new(&config.ip_binary)
+                .args(["netns", "exec", netns])
+                .arg(&relay.binary)
+                .arg("__netns-surface-relay")
+                .arg("--listen-unix")
+                .arg(&relay.uds_path)
+                .arg("--target")
+                .arg(relay.guest_target.to_string())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::from(resources.console.try_clone()?))
+                .spawn()
+                .map_err(|error| {
+                    VmSnapshotError::Backend(format!("Surface relay spawn: {error}"))
+                })?;
+            resources.surface_relay = Some(child);
+            wait_for_path(
+                &relay.uds_path,
+                resources
+                    .surface_relay
+                    .as_mut()
+                    .expect("Surface relay child was stored"),
+                config.api_timeout,
+                "Surface relay socket",
+            )?;
         }
         Ok(resources)
     }
@@ -741,6 +1213,14 @@ impl FirecrackerResources {
     }
 
     fn cleanup(&mut self) {
+        if let Some(child) = &mut self.surface_relay {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        self.surface_relay = None;
+        if let Some(relay) = &self.config.surface_relay {
+            let _ = fs::remove_file(&relay.uds_path);
+        }
         if let Some(child) = &mut self.child {
             let _ = child.kill();
             let _ = child.wait();
@@ -907,6 +1387,16 @@ fn wait_for_socket(
     child: &mut Child,
     timeout: Duration,
 ) -> Result<(), VmSnapshotError> {
+    wait_for_path(path, child, timeout, "Firecracker API socket")
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_path(
+    path: &Path,
+    child: &mut Child,
+    timeout: Duration,
+    label: &str,
+) -> Result<(), VmSnapshotError> {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         if path.exists() {
@@ -914,14 +1404,44 @@ fn wait_for_socket(
         }
         if let Some(status) = child.try_wait()? {
             return Err(VmSnapshotError::Backend(format!(
-                "Firecracker exited before API readiness: {status}"
+                "{label} owner exited before readiness: {status}"
             )));
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    Err(VmSnapshotError::Backend(
-        "Firecracker API socket readiness timed out".to_owned(),
-    ))
+    Err(VmSnapshotError::Backend(format!(
+        "{label} readiness timed out"
+    )))
+}
+
+#[cfg(target_os = "linux")]
+fn validate_unix_socket_path(path: &Path, label: &str) -> Result<(), VmSnapshotError> {
+    const SUN_PATH_BYTES: usize = 108;
+    if path.as_os_str().as_bytes().len() >= SUN_PATH_BYTES {
+        return Err(VmSnapshotError::Backend(format!(
+            "{label} path exceeds SUN_LEN"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn bounded_diagnostic_tail(path: &Path, max_bytes: u64) -> std::io::Result<String> {
+    let mut file = File::open(path)?;
+    let length = file.metadata()?.len();
+    file.seek(SeekFrom::Start(length.saturating_sub(max_bytes)))?;
+    let mut bytes = Vec::with_capacity(length.min(max_bytes) as usize);
+    file.take(max_bytes).read_to_end(&mut bytes)?;
+    Ok(String::from_utf8_lossy(&bytes)
+        .chars()
+        .map(|character| match character {
+            '\n' | '\r' | '\t' => character,
+            character if character.is_control() => ' ',
+            character => character,
+        })
+        .collect::<String>()
+        .trim()
+        .to_owned())
 }
 
 #[cfg(target_os = "linux")]
@@ -942,7 +1462,27 @@ fn firecracker_api(
     )?;
     stream.write_all(body)?;
     let mut response = Vec::new();
-    stream.take(1024 * 1024).read_to_end(&mut response)?;
+    let mut buffer = [0_u8; 8192];
+    while response.len() < 1024 * 1024 {
+        match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => {
+                response.extend_from_slice(&buffer[..read]);
+                if firecracker_http_response_complete(&response) {
+                    break;
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) && response.windows(4).any(|window| window == b"\r\n\r\n") =>
+            {
+                break;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
     let status = String::from_utf8_lossy(&response)
         .lines()
         .next()
@@ -956,6 +1496,22 @@ fn firecracker_api(
             "Firecracker API {method} {path} returned {status}"
         )))
     }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn firecracker_http_response_complete(response: &[u8]) -> bool {
+    let Some(header_end) = response.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return false;
+    };
+    let header_end = header_end + 4;
+    let headers = String::from_utf8_lossy(&response[..header_end]);
+    let content_length = headers.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("content-length")
+            .then(|| value.trim().parse::<usize>().ok())
+            .flatten()
+    });
+    content_length.is_none_or(|length| response.len() >= header_end + length)
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -1178,15 +1734,7 @@ mod tests {
             }),
             root.path().to_path_buf(),
         );
-        (
-            source,
-            VmCaptureRequest {
-                target,
-                record_frontier_ref: frontier,
-            },
-            events,
-            root,
-        )
+        (source, VmCaptureRequest { target }, events, root)
     }
 
     #[test]
@@ -1196,6 +1744,19 @@ mod tests {
             Some("1.7.0".to_owned())
         );
         assert_eq!(parse_firecracker_version("Firecracker unknown"), None);
+    }
+
+    #[test]
+    fn detects_firecracker_http_response_without_waiting_for_socket_close() {
+        assert!(firecracker_http_response_complete(
+            b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"
+        ));
+        assert!(!firecracker_http_response_complete(
+            b"HTTP/1.1 400 Bad Request\r\nContent-Length: 4\r\n\r\nerr"
+        ));
+        assert!(firecracker_http_response_complete(
+            b"HTTP/1.1 400 Bad Request\r\nContent-Length: 4\r\n\r\nerr!"
+        ));
     }
 
     #[test]
@@ -1267,7 +1828,10 @@ mod tests {
         let (source, request, events, _root) = capture_harness(false);
         let captured = source.capture_active(&request).unwrap();
         assert_eq!(captured.target, request.target);
-        assert_eq!(captured.record_frontier_ref, request.record_frontier_ref);
+        assert_eq!(
+            captured.record_frontier_ref,
+            ContentRef::parse(FRONTIER).unwrap()
+        );
         assert!(
             captured
                 .artifacts
@@ -1283,10 +1847,19 @@ mod tests {
                 "barrier.seal",
                 "snapshot.create",
                 "rootfs.copy",
-                "vm.resume",
                 "barrier.release",
+                "vm.resume",
                 "ingress.unfreeze",
             ]
+        );
+        assert_eq!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| event.as_str() == "barrier.seal")
+                .count(),
+            1
         );
     }
 

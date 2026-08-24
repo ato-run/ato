@@ -1,0 +1,35 @@
+[package]
+name = "ato-connected-realization-worker"
+version = "0.1.0"
+edition = "2024"
+description = "Connected Runtime Worker for portable Capsule realizations"
+license = "Apache-2.0 OR MPL-2.0"
+repository = "https://github.com/ato-run/ato"
+
+[package.metadata.dist]
+dist = false
+
+[package.metadata.ato-architecture]
+layer = "app"
+
+[[bin]]
+name = "ato-connected-realization-worker"
+path = "src/bin/ato-connected-realization-worker.rs"
+
+[dependencies]
+anyhow = "1"
+ato-adapter-api = { path = "../../extensions/adapters/api", version = "0.1.0" }
+ato-computation = { path = "../../lib/computation", version = "0.1.0" }
+ato-contracts = { path = "../../extensions/contracts", version = "0.1.0" }
+ato-materializer-api = { path = "../../extensions/materializers/api", version = "0.1.0" }
+ato-materializer-vm-snapshot = { path = "../../extensions/materializers/vm-snapshot", version = "0.1.0" }
+ato-objects = { path = "../../lib/objects", version = "0.1.0" }
+ato-planner = { package = "ato-realization-planner", path = "../../extensions/planner", version = "0.1.0" }
+ato-record-writer = { path = "../../extensions/record-writer", version = "0.1.0" }
+ato-runtime-object-graph = { path = "../runtime-object-graph", version = "0.1.0" }
+clap = { version = "4.5", features = ["derive", "env"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+time = { version = "0.3", features = ["formatting", "parsing"] }

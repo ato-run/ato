@@ -4,10 +4,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use ato_computation::ContentRef;
 use ato_objects::{ObjectResolver, ReferenceRegistry, read_exact_object};
-pub(crate) use ato_runtime_object_graph::{
+pub use ato_runtime_object_graph::{
     ExportedPort, ObjectGraphIndexV1, RequiredBinding, VisibilityPolicy,
 };
 use ato_runtime_object_graph::{validate_runtime_object_graph, vm_capture_refs};
@@ -71,7 +71,7 @@ struct StatusEnvelope {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ObjectUploadReceipt {
+pub struct ObjectUploadReceipt {
     pub version: u32,
     pub graph_id: String,
     pub root_computation_ref: String,
@@ -97,7 +97,7 @@ pub(crate) struct ObjectUploadReceipt {
     pub record_frontier_ref: Option<String>,
 }
 
-pub(crate) fn vm_capture_receipt_refs(
+pub fn vm_capture_receipt_refs(
     index: &ObjectGraphIndexV1,
     objects: &dyn ObjectResolver,
 ) -> Result<(Option<String>, Option<String>)> {
@@ -109,7 +109,7 @@ pub(crate) fn vm_capture_receipt_refs(
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct UploadConfig {
+pub struct UploadConfig {
     pub concurrency: usize,
     pub retry_attempts: usize,
     pub validation_poll_attempts: usize,
@@ -153,15 +153,17 @@ trait ObjectTransportApi: Sync {
     fn status(&self, graph_id: &str) -> Result<GraphResponse, ApiError>;
 }
 
-pub(crate) struct HttpObjectTransportApi {
+pub struct HttpObjectTransportApi {
     client: Client,
     base_url: String,
     token: String,
     origin: HeaderValue,
+    prepared_graph_id: Mutex<Option<String>>,
+    staging_proxy_upload: bool,
 }
 
 impl HttpObjectTransportApi {
-    pub(crate) fn new(base_url: &str, token: String) -> Result<Self> {
+    pub fn new(base_url: &str, token: String) -> Result<Self> {
         let parsed = reqwest::Url::parse(base_url).context("invalid object transport API URL")?;
         if parsed.scheme() != "https" && parsed.host_str() != Some("localhost") {
             bail!("object transport API must use HTTPS (except localhost)");
@@ -180,13 +182,26 @@ impl HttpObjectTransportApi {
         let base_url = base_url.trim_end_matches('/').to_owned();
         Ok(Self {
             client: Client::builder()
-                .timeout(Duration::from_secs(180))
+                .timeout(Duration::from_secs(900))
                 .build()
                 .context("failed to construct object transport HTTP client")?,
             base_url,
             token,
             origin,
+            prepared_graph_id: Mutex::new(None),
+            staging_proxy_upload: false,
         })
+    }
+
+    /// Route object PUTs through the authenticated staging API fallback when
+    /// direct R2 presigned PUTs are unavailable from the staging runner.
+    pub fn with_staging_proxy_upload(mut self) -> Result<Self> {
+        ensure!(
+            self.base_url == "https://staging.api.ato.run",
+            "proxy upload override is restricted to the staging API"
+        );
+        self.staging_proxy_upload = true;
+        Ok(self)
     }
 
     fn authenticated(&self, request: RequestBuilder) -> RequestBuilder {
@@ -222,8 +237,34 @@ impl HttpObjectTransportApi {
 
     fn send(&self, request: RequestBuilder) -> Result<reqwest::blocking::Response, ApiError> {
         request.send().map_err(|error| {
-            ApiError::retryable(format!("object transport request failed: {error}"))
+            ApiError::retryable(if error.is_timeout() {
+                "object transport request timed out"
+            } else {
+                "object transport request failed"
+            })
         })
+    }
+
+    /// Remove an owned non-ready graph and return the number of tenant CAS
+    /// objects deleted by the server's graph-aware garbage collector.
+    pub fn delete_rejected_graph(&self, graph_id: &str) -> Result<u64> {
+        #[derive(Deserialize)]
+        struct DeleteResponse {
+            objects_deleted: u64,
+        }
+
+        ensure!(
+            !graph_id.is_empty()
+                && graph_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'),
+            "invalid object graph id"
+        );
+        let response = self
+            .send(self.authenticated(self.client.delete(self.graph_url(&format!("/{graph_id}")))))
+            .map_err(anyhow::Error::from)?;
+        let deleted: DeleteResponse = Self::response(response).map_err(anyhow::Error::from)?;
+        Ok(deleted.objects_deleted)
     }
 }
 
@@ -231,11 +272,29 @@ impl ObjectTransportApi for HttpObjectTransportApi {
     fn prepare(&self, request: &PrepareRequest<'_>) -> Result<GraphResponse, ApiError> {
         let response = self
             .send(self.authenticated(self.client.post(self.graph_url("/prepare")).json(request)))?;
-        Self::response(response)
+        let graph: GraphResponse = Self::response(response)?;
+        *self
+            .prepared_graph_id
+            .lock()
+            .map_err(|_| ApiError::terminal("object transport graph lock is poisoned"))? =
+            Some(graph.graph_id.clone());
+        Ok(graph)
     }
 
     fn upload(&self, instruction: &UploadInstruction, bytes: Vec<u8>) -> Result<(), ApiError> {
-        let mut request = self.client.put(&instruction.upload_url);
+        let proxy_upload = instruction.upload_direct && self.staging_proxy_upload;
+        let upload_url = if proxy_upload {
+            let graph_id = self
+                .prepared_graph_id
+                .lock()
+                .map_err(|_| ApiError::terminal("object transport graph lock is poisoned"))?
+                .clone()
+                .ok_or_else(|| ApiError::terminal("object transport graph was not prepared"))?;
+            self.graph_url(&format!("/{graph_id}/objects/{}", instruction.content_ref))
+        } else {
+            instruction.upload_url.clone()
+        };
+        let mut request = self.client.put(upload_url);
         for (name, value) in &instruction.upload_headers {
             let lower = name.to_ascii_lowercase();
             if lower != "content-type" && !lower.starts_with("x-amz-meta-") {
@@ -250,7 +309,7 @@ impl ObjectTransportApi for HttpObjectTransportApi {
             })?;
             request = request.header(name, value);
         }
-        if !instruction.upload_direct {
+        if !instruction.upload_direct || proxy_upload {
             request = self.authenticated(request);
         }
         let response = self.send(request.body(bytes))?;
@@ -260,7 +319,19 @@ impl ObjectTransportApi for HttpObjectTransportApi {
             let status = response.status();
             let retryable =
                 status.as_u16() == 408 || status.as_u16() == 429 || status.is_server_error();
-            let message = format!("object PUT returned {status}");
+            let body = response.text().unwrap_or_default();
+            let r2_code = body
+                .split_once("<Code>")
+                .and_then(|(_, suffix)| suffix.split_once("</Code>"))
+                .map(|(code, _)| code)
+                .filter(|code| {
+                    !code.is_empty()
+                        && code
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                })
+                .unwrap_or("unknown");
+            let message = format!("object PUT returned {status} (r2_code={r2_code})");
             Err(if retryable {
                 ApiError::retryable(message)
             } else {
@@ -432,7 +503,8 @@ fn upload_object_graph(
         match finalized.status.as_str() {
             "ready" => break,
             "rejected" => bail!(
-                "object graph validation rejected: {:?}",
+                "object graph {} validation rejected: {:?}",
+                finalized.graph_id,
                 finalized.rejection_code
             ),
             "validating" if attempt + 1 < config.validation_poll_attempts.max(1) => {
@@ -481,7 +553,7 @@ fn upload_object_graph(
     })
 }
 
-pub(crate) fn upload_http_object_graph(
+pub fn upload_http_object_graph(
     api: &HttpObjectTransportApi,
     index: &ObjectGraphIndexV1,
     objects: &dyn ObjectResolver,
@@ -490,6 +562,31 @@ pub(crate) fn upload_http_object_graph(
     config: UploadConfig,
 ) -> Result<ObjectUploadReceipt> {
     validate_runtime_object_graph(index, objects, references)?;
+    upload_object_graph(api, index, objects, idempotency_key, config)
+}
+
+/// Staging-only negative acceptance hook. It deliberately bypasses the local
+/// semantic validator so the independently deployed Validator Agent receives
+/// a malformed private graph. Production hosts and public graphs are refused.
+pub fn upload_staging_negative_test_object_graph(
+    api: &HttpObjectTransportApi,
+    index: &ObjectGraphIndexV1,
+    objects: &dyn ObjectResolver,
+    idempotency_key: &str,
+    config: UploadConfig,
+) -> Result<ObjectUploadReceipt> {
+    ensure!(
+        api.base_url == "https://staging.api.ato.run",
+        "negative validator test is restricted to the staging API"
+    );
+    ensure!(
+        index.visibility_policy == VisibilityPolicy::Private,
+        "negative validator test graph must be private"
+    );
+    ensure!(
+        idempotency_key.starts_with("staging-negative-validator-"),
+        "negative validator test idempotency key is invalid"
+    );
     upload_object_graph(api, index, objects, idempotency_key, config)
 }
 
@@ -676,6 +773,23 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("declared closure"));
         assert!(api.attempts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn proxy_upload_override_is_staging_only() {
+        let production = HttpObjectTransportApi::new(
+            "https://api.ato.run",
+            "ato_dev_test-only-placeholder".to_owned(),
+        )
+        .unwrap();
+        assert!(production.with_staging_proxy_upload().is_err());
+
+        let staging = HttpObjectTransportApi::new(
+            "https://staging.api.ato.run",
+            "ato_dev_test-only-placeholder".to_owned(),
+        )
+        .unwrap();
+        assert!(staging.with_staging_proxy_upload().is_ok());
     }
 
     #[test]

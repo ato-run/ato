@@ -191,6 +191,16 @@ impl AcceptedRealization {
         &self.contract_results
     }
 
+    /// Explicitly tears down an accepted hosted Realization without waiting
+    /// for the underlying workload to exit on its own. Connected workers use
+    /// this when the control plane requests that a lease stop. The operation
+    /// remains idempotent through the same `cleaned` guard used by `Drop`.
+    pub fn quiesce(mut self) -> Result<(), MaterializerError> {
+        let result = self.inner.quiesce();
+        self.cleaned = true;
+        result
+    }
+
     pub fn run(mut self) -> Result<(), MaterializerError> {
         let waited = self.inner.wait();
         let cleanup = self.inner.quiesce();
