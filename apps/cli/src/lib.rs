@@ -37,8 +37,10 @@ use ato_adapter_workspace::{
 };
 use ato_compose::ComposeReferences;
 use ato_computation::{ComputationRef, ContentRef};
+use ato_contracts::{HttpEndpointVerifier, WorkspaceContentVerifier};
 use ato_materializer_api::{
-    Compatibility, MaterializerContext, MaterializerRegistry, RestoreCapability,
+    Compatibility, ContractContext, ContractVerifierRegistry, MaterializerContext,
+    MaterializerRegistry, RestoreCapability, accept_candidate,
 };
 use ato_materializer_replay::{
     ReplayMaterializer, ReplayMaterializerV2, ReplayReferences, ReplayV2References,
@@ -303,6 +305,7 @@ fn encap(args: EncapArgs) -> Result<()> {
         workspace: repository.project(),
         workspace_policy: &capture_policy,
         realization: None,
+        contracts: &[],
     };
     let mut entries = Vec::new();
     for id in selected {
@@ -478,6 +481,7 @@ fn run_capsule(args: RunArgs) -> Result<()> {
         workspace: &project,
         workspace_policy: &capture_policy,
         realization: Some(&driver),
+        contracts: &[],
     };
     let mut candidates = bundle.index.materializations.clone();
     candidates.sort_by(|left, right| left.materializer_id.cmp(&right.materializer_id));
@@ -503,10 +507,11 @@ fn run_capsule(args: RunArgs) -> Result<()> {
             diagnostics.push(format!("{}: incompatible", candidate.materializer_id));
             continue;
         }
-        restored = Some(materializer.restore(&descriptor, &context)?);
+        let contracts = materializer.contracts(&descriptor, &context)?;
+        restored = Some((materializer.restore(&descriptor, &context)?, contracts));
         break;
     }
-    let realization = restored.ok_or_else(|| {
+    let (realization, contracts) = restored.ok_or_else(|| {
         anyhow::anyhow!(
             "no compatible restore-capable Materialization: {}",
             diagnostics.join("; ")
@@ -518,7 +523,17 @@ fn run_capsule(args: RunArgs) -> Result<()> {
             realization.target()
         );
     }
-    realization.run().map_err(Into::into)
+    let contract_context = ContractContext {
+        objects: repository.objects(),
+        workspace: &project,
+    };
+    let accepted = accept_candidate(
+        realization,
+        &contracts,
+        &contract_verifier_registry()?,
+        &contract_context,
+    )?;
+    accepted.run().map_err(Into::into)
 }
 
 pub(crate) fn adapter_registry() -> Result<AdapterRegistry> {
@@ -628,6 +643,13 @@ fn materializer_registry() -> Result<MaterializerRegistry> {
     registry.register(Arc::new(ReplayMaterializer))?;
     registry.register(Arc::new(ReplayMaterializerV2))?;
     registry.register(Arc::new(SnapshotMaterializer))?;
+    Ok(registry)
+}
+
+fn contract_verifier_registry() -> Result<ContractVerifierRegistry> {
+    let mut registry = ContractVerifierRegistry::default();
+    registry.register(Arc::new(HttpEndpointVerifier))?;
+    registry.register(Arc::new(WorkspaceContentVerifier))?;
     Ok(registry)
 }
 
