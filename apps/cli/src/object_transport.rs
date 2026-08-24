@@ -180,7 +180,7 @@ impl HttpObjectTransportApi {
         let base_url = base_url.trim_end_matches('/').to_owned();
         Ok(Self {
             client: Client::builder()
-                .timeout(Duration::from_secs(180))
+                .timeout(Duration::from_secs(900))
                 .build()
                 .context("failed to construct object transport HTTP client")?,
             base_url,
@@ -222,7 +222,11 @@ impl HttpObjectTransportApi {
 
     fn send(&self, request: RequestBuilder) -> Result<reqwest::blocking::Response, ApiError> {
         request.send().map_err(|error| {
-            ApiError::retryable(format!("object transport request failed: {error}"))
+            ApiError::retryable(if error.is_timeout() {
+                "object transport request timed out"
+            } else {
+                "object transport request failed"
+            })
         })
     }
 
