@@ -30,7 +30,7 @@ use ato_materializer_vm_snapshot::{
 use ato_objects::{
     BundleError, ComputationReferences, FsObjectStore, GraphMaterialization, GraphObjectDescriptor,
     ObjectGraphClosure, ObjectLink, ObjectResolver, ObjectStore, ReferenceRegistry,
-    read_exact_object, resolve_computation, verify_declared_object_graph,
+    export_object_graph, read_exact_object, resolve_computation, verify_declared_object_graph,
 };
 use ato_record_writer::verify_frontier_object;
 use clap::ValueEnum;
@@ -110,6 +110,28 @@ impl ObjectGraphIndexV1 {
                 .context("object graph logical byte count overflow")
         })
     }
+}
+
+/// Builds the transport index from decoded semantic content and validates the
+/// exact graph before any upload is attempted. Callers never supply cached
+/// Port or Binding summaries.
+pub fn build_runtime_object_graph_index(
+    root: &ComputationRef,
+    materializations: &[GraphMaterialization],
+    objects: &dyn ObjectStore,
+    references: &ReferenceRegistry,
+    visibility_policy: VisibilityPolicy,
+) -> Result<ObjectGraphIndexV1> {
+    let closure = export_object_graph(root, materializations, objects, references)?;
+    let summary = derive_runtime_summary(root, objects)?;
+    let index = ObjectGraphIndexV1::new(
+        closure,
+        summary.exported_ports,
+        summary.required_bindings,
+        visibility_policy,
+    );
+    validate_runtime_object_graph(&index, objects, references)?;
+    Ok(index)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
