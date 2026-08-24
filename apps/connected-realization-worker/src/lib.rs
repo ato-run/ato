@@ -47,6 +47,12 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 const PORTABLE_CAPSULE_LEASE_KIND: &str = "portable_capsule_v2";
+const RUNNER_CAPABILITIES: &[&str] = &[
+    "execution_abi=process",
+    "isolation=untrusted-v1",
+    "materializer=ato.materialize.vm.snapshot@1",
+    "backend=firecracker",
+];
 const ACTIVE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const GUEST_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const GUEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -627,7 +633,7 @@ impl HttpRunnerApi {
             self.base, self.runner_id
         )))
         .json(&serde_json::json!({
-            "capabilities": ["materializer=ato.materialize.vm.snapshot@1", "backend=firecracker"],
+            "capabilities": RUNNER_CAPABILITIES,
             "supported_lease_kinds": [PORTABLE_CAPSULE_LEASE_KIND],
             "supported_session_surfaces": [{
                 "kind": "web",
@@ -1198,5 +1204,13 @@ mod tests {
             ready_local_port(&config),
             config.hidden_surface_listen.port()
         );
+    }
+
+    #[test]
+    fn heartbeat_advertises_dispatch_and_vm_requirements() {
+        assert!(RUNNER_CAPABILITIES.contains(&"execution_abi=process"));
+        assert!(RUNNER_CAPABILITIES.contains(&"isolation=untrusted-v1"));
+        assert!(RUNNER_CAPABILITIES.contains(&"materializer=ato.materialize.vm.snapshot@1"));
+        assert!(RUNNER_CAPABILITIES.contains(&"backend=firecracker"));
     }
 }
