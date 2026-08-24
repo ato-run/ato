@@ -22,6 +22,7 @@ use anyhow::{Context, Result, bail, ensure};
 use ato_adapter_api::{ActuatorProviderRegistry, AdapterRegistry, WorkspaceCapturePolicy};
 use ato_computation::{ComputationRef, ContentRef};
 use ato_contracts::{HttpEndpointVerifier, WorkspaceContentVerifier};
+use ato_kernel::{Kernel, RunEvolutionAuthority};
 use ato_materializer_api::{
     AcceptedRealization, ContractContext, ContractVerifierRegistry, MaterializerContext,
     MaterializerError, MaterializerRegistry, Realization, accept_candidate,
@@ -202,6 +203,15 @@ impl ConnectedWorker {
                 logical_bytes: index.logical_bytes()?,
             };
             let graph = download_and_validate_graph(&source, &expectation, &lease_root)?;
+            // The Worker owns the live logical Run head from the same immutable
+            // root that its assigned lease authorizes. No operation is wired to
+            // this authority yet: Browser composition and its registered
+            // Semantics arrive in P0-B. Keeping it alive here establishes the
+            // hosted lifecycle without inventing an authoring/hash fallback.
+            let evolution = initialize_hosted_run_evolution_authority(
+                &graph,
+                &lease.command.expected_root_computation_ref,
+            )?;
             let firecracker_work_root = self.config.work_root.join("fc");
             let physical = RestorePhysicalConfig {
                 firecracker_work_root: &firecracker_work_root,
@@ -210,7 +220,7 @@ impl ConnectedWorker {
                 guest_surface_target: self.config.surface_target,
                 tap_host_cidr: &self.config.tap_host_cidr,
             };
-            let running = restore_vm_path(graph, &lease_root, &lease.id, &physical)?;
+            let running = restore_vm_path(&graph, &lease_root, &lease.id, &physical)?;
             self.api.report_status(&lease.id, "running")?;
 
             // The externally reachable listener does not exist until the VM is
@@ -220,6 +230,11 @@ impl ConnectedWorker {
                 ProxyTarget::Tcp(self.config.hidden_surface_listen),
             )?;
             let execution_id = format!("vm:{}:{}", lease.run_id, lease.id);
+            ensure!(
+                evolution.current_head().head.as_str()
+                    == lease.command.expected_root_computation_ref,
+                "hosted evolution authority root changed before the first operation"
+            );
             self.api.report_ready(
                 &lease.id,
                 &execution_id,
@@ -398,8 +413,24 @@ struct RestorePhysicalConfig<'a> {
     tap_host_cidr: &'a str,
 }
 
+fn initialize_hosted_run_evolution_authority(
+    graph: &ValidatedRuntimeGraph,
+    expected_root: &str,
+) -> Result<RunEvolutionAuthority> {
+    let expected = ComputationRef::parse(expected_root)?;
+    let validated = ComputationRef::parse(&graph.report().root_computation_ref)?;
+    ensure!(
+        expected == validated,
+        "validated graph root does not match the assigned lease root"
+    );
+    Ok(RunEvolutionAuthority::new(
+        Kernel::new(Arc::new(graph.objects().clone())),
+        expected,
+    ))
+}
+
 fn restore_vm_path(
-    graph: ValidatedRuntimeGraph,
+    graph: &ValidatedRuntimeGraph,
     lease_root: &Path,
     lease_id: &str,
     physical: &RestorePhysicalConfig<'_>,

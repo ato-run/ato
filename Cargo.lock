@@ -281,6 +281,7 @@ dependencies = [
  "ato-adapter-api",
  "ato-computation",
  "ato-contracts",
+ "ato-kernel",
  "ato-materializer-api",
  "ato-materializer-vm-snapshot",
  "ato-objects",
