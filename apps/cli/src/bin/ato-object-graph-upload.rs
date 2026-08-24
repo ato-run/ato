@@ -298,7 +298,10 @@ fn forge_declared_reference(index: &mut ObjectGraphIndexV1) -> Result<()> {
         !root.references.is_empty(),
         "negative fixture root has no references"
     );
-    root.references[0] = replacement;
+    // Preserve the complete declared traversal so prepare accepts the graph;
+    // the independent semantic validator must reject this extra forged edge.
+    root.references.push(replacement);
+    root.references.sort();
     Ok(())
 }
 
