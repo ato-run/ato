@@ -145,6 +145,7 @@ dependencies = [
  "ato-adapter-api",
  "ato-computation",
  "ato-objects",
+ "ato-record-writer",
  "rand 0.8.6",
  "serde",
  "serde_jcs",
