@@ -288,6 +288,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ato-firecracker-guest-image"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ato-adapter-workspace",
+ "ato-computation",
+ "ato-objects",
+ "ato-runtime-object-graph",
+ "blake3",
+ "clap",
+ "guest-agent",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "ato-ipc"
 version = "0.1.0"
 dependencies = [
