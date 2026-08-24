@@ -9,9 +9,9 @@ the application endpoint is `server` and the Browser computation endpoint is
 `controller`. `browser` is not a new role alias. This is intentionally
 compatible with existing `ato.browser@1` Capsule declarations.
 `ato.browser.computation@1` is the separate logical Semantics identifier.
-Its residual contains only an exact expected origin and an interaction
-frontier. Chrome profile paths, DOM, cookies, localStorage, VM data, Record
-metadata, actor provenance, and network identifiers are excluded.
+Its residual contains only an interaction frontier. Origin/URL, Chrome profile
+paths, DOM, cookies, localStorage, VM data, Record metadata, actor provenance,
+and network identifiers are physical Binding or realization data and excluded.
 
 For every accepted Browser event, `BrowserOperationIngress` performs:
 
