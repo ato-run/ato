@@ -5,12 +5,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use ato_computation::ContentRef;
+use ato_computation::{ComputationRef, ContentRef};
 use ato_materializer_vm_snapshot::{VM_SNAPSHOT_MATERIALIZER_ID, VmSnapshotDescriptor};
 use ato_objects::{
     GraphMaterialization, GraphObjectDescriptor, ObjectGraphClosure, ObjectResolver,
-    read_exact_object,
+    ReferenceRegistry, read_exact_object, verify_declared_object_graph,
 };
+use ato_record_writer::verify_frontier_object;
 use clap::ValueEnum;
 use reqwest::blocking::{Client, RequestBuilder};
 use reqwest::header::{HeaderName, HeaderValue, ORIGIN};
@@ -113,6 +114,8 @@ struct GraphResponse {
     visibility_policy: VisibilityPolicy,
     status: String,
     object_count: usize,
+    #[serde(default)]
+    declared_object_count: Option<usize>,
     logical_bytes: u64,
     bundle_id: Option<String>,
     rejection_code: Option<String>,
@@ -124,6 +127,8 @@ struct GraphResponse {
     objects_uploaded: Option<usize>,
     #[serde(default)]
     objects_stored_new: Option<usize>,
+    #[serde(default)]
+    objects_reused: Option<usize>,
     #[serde(default)]
     unique_stored_bytes: Option<u64>,
 }
@@ -142,11 +147,17 @@ pub(crate) struct ObjectUploadReceipt {
     pub root_computation_ref: String,
     pub bundle_index_digest: String,
     pub bundle_id: String,
+    /// Exact number of objects declared by the canonical graph index.
+    pub declared_object_count: usize,
     pub object_count: usize,
     pub logical_bytes: u64,
+    /// Actual PUT calls made by this client session.
+    pub client_put_count: usize,
+    /// Compatibility field; same meaning as `client_put_count` in client receipts.
     pub objects_uploaded: usize,
     pub uploaded_bytes: u64,
     pub objects_stored_new: usize,
+    pub objects_reused: usize,
     pub unique_stored_bytes: u64,
     pub object_digests: Vec<String>,
     pub validation_status: String,
@@ -189,6 +200,34 @@ pub(crate) fn vm_capture_receipt_refs(
         .context("VM materialization descriptor omitted record_frontier_ref")?;
     ContentRef::parse(&frontier).context("VM materialization RecordFrontier ref is invalid")?;
     Ok((Some(materialization.descriptor_ref.clone()), Some(frontier)))
+}
+
+/// Validator/Runner semantic closure check. The traversal is rebuilt from
+/// object bytes via extension reference extractors; declared references are
+/// compared only after derivation and can never expand or suppress traversal.
+pub(crate) fn validate_semantic_object_graph(
+    index: &ObjectGraphIndexV1,
+    objects: &dyn ObjectResolver,
+    references: &ReferenceRegistry,
+) -> Result<()> {
+    let declared = ObjectGraphClosure {
+        root_computation_ref: index.root_computation_ref.clone(),
+        objects: index.objects.clone(),
+        materializations: index.materializations.clone(),
+    };
+    let root = ComputationRef::parse(&index.root_computation_ref)?;
+    let derived = verify_declared_object_graph(&declared, objects, references)
+        .context("decoded semantic closure differs from declared object graph")?;
+    if derived.root_computation_ref != root.to_string() {
+        bail!("decoded object graph changed root ComputationRef");
+    }
+    let (_, frontier) = vm_capture_receipt_refs(index, objects)?;
+    if let Some(frontier) = frontier {
+        let frontier = ContentRef::parse(frontier)?;
+        verify_frontier_object(&frontier, objects)
+            .context("VM materialization RecordFrontier closure is invalid")?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -391,6 +430,9 @@ fn validate_prepare(
     if response.root_computation_ref != index.root_computation_ref
         || response.bundle_index_digest != index_digest
         || response.object_count != index.objects.len()
+        || response
+            .declared_object_count
+            .is_some_and(|count| count != index.objects.len())
         || response.logical_bytes != index.logical_bytes()?
     {
         bail!("prepare response does not match the submitted object graph");
@@ -532,13 +574,21 @@ fn upload_object_graph(
         root_computation_ref: finalized.root_computation_ref,
         bundle_index_digest: index_digest,
         bundle_id,
+        declared_object_count: index.objects.len(),
         object_count: index.objects.len(),
         logical_bytes: index.logical_bytes()?,
+        client_put_count: uploaded_objects.load(Ordering::Acquire),
         objects_uploaded: uploaded_objects.load(Ordering::Acquire),
         uploaded_bytes: uploaded_bytes.load(Ordering::Acquire),
         objects_stored_new: finalized
             .objects_stored_new
             .context("ready response omitted objects_stored_new accounting")?,
+        objects_reused: finalized.objects_reused.unwrap_or_else(|| {
+            index
+                .objects
+                .len()
+                .saturating_sub(finalized.objects_stored_new.unwrap_or(0))
+        }),
         unique_stored_bytes: finalized
             .unique_stored_bytes
             .context("ready response omitted unique_stored_bytes accounting")?,
@@ -557,9 +607,11 @@ pub(crate) fn upload_http_object_graph(
     api: &HttpObjectTransportApi,
     index: &ObjectGraphIndexV1,
     objects: &dyn ObjectResolver,
+    references: &ReferenceRegistry,
     idempotency_key: &str,
     config: UploadConfig,
 ) -> Result<ObjectUploadReceipt> {
+    validate_semantic_object_graph(index, objects, references)?;
     upload_object_graph(api, index, objects, idempotency_key, config)
 }
 
@@ -590,6 +642,7 @@ mod tests {
                     visibility_policy: VisibilityPolicy::Private,
                     status: "uploading".to_owned(),
                     object_count: index.objects.len(),
+                    declared_object_count: Some(index.objects.len()),
                     logical_bytes: index.logical_bytes().unwrap(),
                     bundle_id: None,
                     rejection_code: None,
@@ -608,6 +661,7 @@ mod tests {
                         .collect(),
                     objects_uploaded: None,
                     objects_stored_new: None,
+                    objects_reused: None,
                     unique_stored_bytes: None,
                 },
                 active: AtomicUsize::new(0),

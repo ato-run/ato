@@ -51,7 +51,8 @@ use ato_materializer_snapshot::{
     WorkspaceSnapshotReferences,
 };
 use ato_materializer_vm_snapshot::{
-    FirecrackerBackend, FirecrackerBackendConfig, SealedRecordFrontierVerifier, VmSnapshotError,
+    FirecrackerBackend, FirecrackerBackendConfig, FirecrackerRecordCaptureBarrier,
+    FirecrackerRecordCaptureLease, SealedRecordFrontierVerifier, VmSnapshotError,
     VmSnapshotMaterializer, VmSnapshotReferences,
 };
 use ato_objects::{
@@ -64,7 +65,9 @@ use ato_realization_planner::{
     TrustBoundary,
 };
 use ato_record_writer::RecordSchemaRegistry;
-use ato_record_writer::{RecordFrontier, load_frontier, records_for_frontier};
+use ato_record_writer::{
+    CaptureBarrier, PausedCapture, load_frontier, records_for_frontier, verify_frontier_object,
+};
 use clap::{Args, Parser, Subcommand};
 
 use crate::authoring::{
@@ -438,6 +441,7 @@ fn upload(args: UploadArgs) -> Result<()> {
         &api,
         &index,
         repository.objects(),
+        &references,
         &idempotency_key,
         UploadConfig {
             concurrency: usize::from(args.concurrency),
@@ -797,16 +801,51 @@ fn materializer_registry() -> Result<MaterializerRegistry> {
 
 struct RecordWriterFrontierVerifier;
 
+/// Application-layer bridge between the independently layered Record Writer
+/// and VM Materializer capture capability.
+pub struct RecordWriterCaptureBarrier {
+    inner: CaptureBarrier,
+}
+
+impl RecordWriterCaptureBarrier {
+    pub fn new(inner: CaptureBarrier) -> Self {
+        Self { inner }
+    }
+}
+
+struct RecordWriterCaptureLease {
+    frontier: ContentRef,
+    _paused: PausedCapture,
+}
+
+impl FirecrackerRecordCaptureLease for RecordWriterCaptureLease {
+    fn frontier_ref(&self) -> &ContentRef {
+        &self.frontier
+    }
+}
+
+impl FirecrackerRecordCaptureBarrier for RecordWriterCaptureBarrier {
+    fn pause_and_seal(
+        &self,
+    ) -> std::result::Result<Box<dyn FirecrackerRecordCaptureLease>, VmSnapshotError> {
+        let paused = self
+            .inner
+            .pause_and_seal()
+            .map_err(|error| VmSnapshotError::Backend(error.to_string()))?;
+        Ok(Box::new(RecordWriterCaptureLease {
+            frontier: paused.frontier.frontier_digest.clone(),
+            _paused: paused,
+        }))
+    }
+}
+
 impl SealedRecordFrontierVerifier for RecordWriterFrontierVerifier {
     fn verify(
         &self,
         reference: &ContentRef,
         objects: &dyn ato_objects::ObjectResolver,
     ) -> std::result::Result<(), VmSnapshotError> {
-        let metadata = objects.metadata(reference)?;
-        let bytes =
-            ato_objects::read_exact_object(objects, reference, metadata.size, 16 * 1024 * 1024)?;
-        RecordFrontier::decode_identity(reference, &bytes)
+        verify_frontier_object(reference, objects)
             .map(|_| ())
             .map_err(|error| VmSnapshotError::InvalidDescriptor(error.to_string()))
     }
