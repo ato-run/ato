@@ -213,7 +213,7 @@ impl ConnectedWorker {
                 &lease.id,
                 &execution_id,
                 &self.config.public_base_url,
-                self.config.hidden_surface_listen.port(),
+                ready_local_port(&self.config),
             )?;
             let mut last_heartbeat = Instant::now();
             loop {
@@ -239,6 +239,10 @@ impl ConnectedWorker {
             (Ok(()), Err(error)) => Err(error),
         }
     }
+}
+
+fn ready_local_port(config: &WorkerConfig) -> u16 {
+    config.surface_listen.port()
 }
 
 fn validate_config(config: &WorkerConfig) -> Result<()> {
@@ -1098,5 +1102,27 @@ mod tests {
         drop(proxy);
         upstream.join().unwrap();
         assert!(TcpStream::connect(published).is_err());
+    }
+
+    #[test]
+    fn ready_receipt_reports_the_published_proxy_port() {
+        let config = WorkerConfig {
+            api_base: "https://staging.api.ato.run".to_owned(),
+            runner_id: "runner_1".to_owned(),
+            runner_token: "token".to_owned(),
+            public_base_url: "https://runner.example".to_owned(),
+            work_root: PathBuf::from(".tmp/worker"),
+            surface_listen: "127.0.0.1:8420".parse().unwrap(),
+            hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
+            surface_target: "172.30.0.2:38865".parse().unwrap(),
+            tap_host_cidr: "172.30.0.1/24".to_owned(),
+            slot_id: "0".to_owned(),
+            once: true,
+        };
+        assert_eq!(ready_local_port(&config), 8420);
+        assert_ne!(
+            ready_local_port(&config),
+            config.hidden_surface_listen.port()
+        );
     }
 }
