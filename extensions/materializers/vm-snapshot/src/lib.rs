@@ -24,10 +24,13 @@ use thiserror::Error;
 
 mod firecracker;
 
+#[cfg(target_os = "linux")]
+pub use firecracker::FreshFirecrackerRealization;
 pub use firecracker::{
     ActiveFirecrackerCaptureSpec, ActiveFirecrackerRealization, ActiveVmCaptureSource,
     FirecrackerActiveVmCaptureSource, FirecrackerBackend, FirecrackerBackendConfig,
-    FirecrackerRecordCaptureBarrier, FirecrackerRecordCaptureLease, FirecrackerRestoreLayout,
+    FirecrackerIngressGate, FirecrackerRecordCaptureBarrier, FirecrackerRecordCaptureLease,
+    FirecrackerRestoreLayout, FirecrackerSurfaceRelayConfig, FreshFirecrackerConfig,
 };
 
 pub const VM_SNAPSHOT_MATERIALIZER_ID: &str = "ato.materialize.vm.snapshot@1";
