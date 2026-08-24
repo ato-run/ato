@@ -1237,11 +1237,10 @@ impl HttpRunnerApi {
         let mut status = if prepare.status == "ready" {
             prepare
         } else {
-            self.authorized(self.client.post(format!(
-                "{}{}",
-                self.base,
-                format!("{graph_base}/finalize")
-            )))
+            self.authorized(
+                self.client
+                    .post(format!("{}{graph_base}/finalize", self.base)),
+            )
             .send()?
             .error_for_status()?
             .json::<CaptureGraphResponse>()?
