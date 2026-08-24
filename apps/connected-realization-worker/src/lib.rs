@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail, ensure};
 use ato_adapter_api::{ActuatorProviderRegistry, AdapterRegistry, WorkspaceCapturePolicy};
@@ -47,6 +47,9 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 const PORTABLE_CAPSULE_LEASE_KIND: &str = "portable_capsule_v2";
+const ACTIVE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+const GUEST_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+const GUEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 struct WorkerRecordCaptureBarrier {
     inner: ato_record_writer::CaptureBarrier,
@@ -159,14 +162,15 @@ impl ConnectedWorker {
                 self.api.heartbeat(&self.config, 0)?;
                 continue;
             };
+            self.api.heartbeat(&self.config, 1)?;
             if let Err(error) = self.execute_lease(&lease) {
                 let message = format!("connected Realization failed: {error:#}");
                 let _ = self.api.report_failed(&lease.id, &message);
             }
+            self.api.heartbeat(&self.config, 0)?;
             if self.config.once {
                 return Ok(());
             }
-            self.api.heartbeat(&self.config, 0)?;
         }
     }
 
@@ -211,6 +215,7 @@ impl ConnectedWorker {
                 &self.config.public_base_url,
                 self.config.hidden_surface_listen.port(),
             )?;
+            let mut last_heartbeat = Instant::now();
             loop {
                 let control = self.api.control(&lease.id)?;
                 if control.stop_requested {
@@ -218,6 +223,10 @@ impl ConnectedWorker {
                     running.quiesce()?;
                     self.api.report_stopped(&lease.id, &execution_id)?;
                     return Ok(());
+                }
+                if last_heartbeat.elapsed() >= ACTIVE_HEARTBEAT_INTERVAL {
+                    self.api.heartbeat(&self.config, 1)?;
+                    last_heartbeat = Instant::now();
                 }
                 thread::sleep(Duration::from_secs(1));
             }
@@ -943,13 +952,27 @@ pub fn run_netns_surface_relay(args: &[String]) -> Result<()> {
             continue;
         };
         thread::spawn(move || {
-            let Ok(upstream) = TcpStream::connect(target) else {
+            let Ok(upstream) = connect_tcp_until(target, GUEST_CONNECT_TIMEOUT) else {
                 return;
             };
             proxy_unix_tcp_pair(&mut client, upstream);
         });
     }
     Ok(())
+}
+
+fn connect_tcp_until(target: SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
+    let started = Instant::now();
+    loop {
+        match TcpStream::connect(target) {
+            Ok(stream) => return Ok(stream),
+            Err(error) if started.elapsed() < timeout => {
+                thread::sleep(GUEST_CONNECT_RETRY_INTERVAL);
+                let _ = error;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 #[cfg(not(unix))]
