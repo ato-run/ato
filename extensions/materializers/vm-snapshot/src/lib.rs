@@ -155,7 +155,6 @@ pub struct VmSnapshotDescriptor {
 #[derive(Debug, Clone)]
 pub struct VmCaptureRequest {
     pub target: ComputationRef,
-    pub record_frontier_ref: ContentRef,
 }
 
 #[derive(Debug, Clone)]
@@ -277,22 +276,16 @@ impl Materializer for VmSnapshotMaterializer {
         context: &MaterializerContext<'_>,
     ) -> Result<ContentRef, MaterializerError> {
         resolve_computation(context.objects, target)?;
-        let frontier_ref = context.record_frontier_ref.ok_or_else(|| {
-            MaterializerError::Operation(
-                "VM capture requires a sealed RecordFrontier from a Capture Barrier".to_owned(),
-            )
-        })?;
-        self.frontiers
-            .verify(frontier_ref, context.objects)
-            .map_err(materializer_operation)?;
         let captured = self
             .backend
             .capture(&VmCaptureRequest {
                 target: target.clone(),
-                record_frontier_ref: frontier_ref.clone(),
             })
             .map_err(materializer_operation)?;
-        validate_capture_result(&captured, target, frontier_ref, self.backend.id())
+        validate_capture_result(&captured, target, self.backend.id())
+            .map_err(materializer_operation)?;
+        self.frontiers
+            .verify(&captured.record_frontier_ref, context.objects)
             .map_err(materializer_operation)?;
         let mut artifacts = Vec::with_capacity(captured.artifacts.len());
         for artifact in &captured.artifacts {
@@ -302,7 +295,7 @@ impl Materializer for VmSnapshotMaterializer {
         let descriptor = VmSnapshotDescriptor {
             version: VM_SNAPSHOT_DESCRIPTOR_VERSION,
             target_computation_ref: target.to_string(),
-            record_frontier_ref: Some(frontier_ref.to_string()),
+            record_frontier_ref: Some(captured.record_frontier_ref.to_string()),
             backend: self.backend.id().to_owned(),
             snapshot_format: captured.snapshot_format.clone(),
             architecture: captured.architecture.clone(),
@@ -459,17 +452,11 @@ impl Drop for VmRealization {
 fn validate_capture_result(
     captured: &CapturedVm,
     target: &ComputationRef,
-    frontier: &ContentRef,
     backend_id: &str,
 ) -> Result<(), VmSnapshotError> {
     if &captured.target != target {
         return Err(VmSnapshotError::InvalidDescriptor(
             "capture returned a different target ComputationRef".to_owned(),
-        ));
-    }
-    if &captured.record_frontier_ref != frontier {
-        return Err(VmSnapshotError::InvalidDescriptor(
-            "capture returned a different RecordFrontier".to_owned(),
         ));
     }
     if captured.host_backend_contract.backend_id != backend_id
@@ -941,6 +928,7 @@ mod tests {
 
     struct FakeBackend {
         root: PathBuf,
+        frontier: Arc<Mutex<ContentRef>>,
         events: Arc<Mutex<Vec<String>>>,
         active_resources: Arc<AtomicUsize>,
         failure: Arc<Mutex<SessionFailure>>,
@@ -961,7 +949,7 @@ mod tests {
             self.events.lock().unwrap().push("capture".to_owned());
             Ok(CapturedVm {
                 target: request.target.clone(),
-                record_frontier_ref: request.record_frontier_ref.clone(),
+                record_frontier_ref: self.frontier.lock().unwrap().clone(),
                 snapshot_format: "fc-full-file-v1".to_owned(),
                 architecture: "x86_64".to_owned(),
                 guest_os: "linux".to_owned(),
@@ -1126,6 +1114,7 @@ mod tests {
         objects: Arc<MemoryObjectStore>,
         target: ComputationRef,
         frontier: ContentRef,
+        capture_frontier: Arc<Mutex<ContentRef>>,
         adapters: AdapterRegistry,
         policy: WorkspaceCapturePolicy,
         capabilities: RunnerCapabilities,
@@ -1167,8 +1156,10 @@ mod tests {
             let target = computation(objects.as_ref());
             let frontier = frontier(Arc::clone(&objects), temporary.path());
             let events = Arc::new(Mutex::new(Vec::new()));
+            let capture_frontier = Arc::new(Mutex::new(frontier.clone()));
             let backend = Arc::new(FakeBackend {
                 root: temporary.path().to_path_buf(),
+                frontier: Arc::clone(&capture_frontier),
                 events,
                 active_resources: Arc::new(AtomicUsize::new(0)),
                 failure: Arc::new(Mutex::new(SessionFailure::None)),
@@ -1179,6 +1170,7 @@ mod tests {
                 objects,
                 target,
                 frontier,
+                capture_frontier,
                 adapters: AdapterRegistry::default(),
                 policy: WorkspaceCapturePolicy::secure_default(),
                 capabilities: capabilities(),
@@ -1197,7 +1189,7 @@ mod tests {
                 records: &[],
                 records_v2: &[],
                 replay_anchor: None,
-                record_frontier_ref: Some(&self.frontier),
+                record_frontier_ref: None,
                 workspace: self.temporary.path(),
                 workspace_policy: &self.policy,
                 realization: None,
@@ -1360,17 +1352,14 @@ mod tests {
         );
 
         let second_frontier = frontier(Arc::clone(&harness.objects), harness.temporary.path());
-        let context = MaterializerContext {
-            record_frontier_ref: Some(&second_frontier),
-            ..harness.context()
-        };
-        let third = harness
-            .materializer
-            .encode(&harness.target, &context)
-            .unwrap();
+        *harness.capture_frontier.lock().unwrap() = second_frontier.clone();
+        let third = harness.encode();
         assert_ne!(second, third);
         assert_eq!(
-            harness.materializer.verify(&third, &context).unwrap(),
+            harness
+                .materializer
+                .verify(&third, &harness.context())
+                .unwrap(),
             harness.target
         );
     }

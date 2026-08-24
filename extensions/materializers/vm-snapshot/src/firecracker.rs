@@ -139,11 +139,7 @@ impl ActiveVmCaptureSource for FirecrackerActiveVmCaptureSource {
             active.pause_vm()?;
             vm_paused = true;
             let record_lease = self.barrier.pause_and_seal()?;
-            if record_lease.frontier_ref() != &request.record_frontier_ref {
-                return Err(VmSnapshotError::Backend(
-                    "sealed RecordFrontier does not match requested frontier".to_owned(),
-                ));
-            }
+            let record_frontier_ref = record_lease.frontier_ref().clone();
 
             fs::create_dir_all(&self.capture_root)?;
             let capture_dir = tempfile::Builder::new()
@@ -166,15 +162,15 @@ impl ActiveVmCaptureSource for FirecrackerActiveVmCaptureSource {
             sync_capture_artifact(&rootfs_path)?;
             sync_capture_artifact(&metadata_path)?;
 
+            drop(record_lease);
             active.resume_vm()?;
             vm_paused = false;
-            drop(record_lease);
             active.unfreeze_ingress()?;
             ingress_frozen = false;
 
             Ok(CapturedVm {
                 target: request.target.clone(),
-                record_frontier_ref: request.record_frontier_ref.clone(),
+                record_frontier_ref,
                 snapshot_format: spec.snapshot_format,
                 architecture: spec.architecture,
                 guest_os: spec.guest_os,
@@ -1178,15 +1174,7 @@ mod tests {
             }),
             root.path().to_path_buf(),
         );
-        (
-            source,
-            VmCaptureRequest {
-                target,
-                record_frontier_ref: frontier,
-            },
-            events,
-            root,
-        )
+        (source, VmCaptureRequest { target }, events, root)
     }
 
     #[test]
@@ -1267,7 +1255,10 @@ mod tests {
         let (source, request, events, _root) = capture_harness(false);
         let captured = source.capture_active(&request).unwrap();
         assert_eq!(captured.target, request.target);
-        assert_eq!(captured.record_frontier_ref, request.record_frontier_ref);
+        assert_eq!(
+            captured.record_frontier_ref,
+            ContentRef::parse(FRONTIER).unwrap()
+        );
         assert!(
             captured
                 .artifacts
@@ -1283,10 +1274,19 @@ mod tests {
                 "barrier.seal",
                 "snapshot.create",
                 "rootfs.copy",
-                "vm.resume",
                 "barrier.release",
+                "vm.resume",
                 "ingress.unfreeze",
             ]
+        );
+        assert_eq!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| event.as_str() == "barrier.seal")
+                .count(),
+            1
         );
     }
 
