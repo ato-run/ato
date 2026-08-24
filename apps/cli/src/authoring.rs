@@ -1038,6 +1038,7 @@ fn observed_at() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ato_objects::MemoryObjectStore;
 
     fn legacy_state(adapter_config: serde_json::Value) -> serde_json::Value {
         serde_json::json!({
@@ -1077,5 +1078,50 @@ mod tests {
         let error = decode_legacy_authoring_state(legacy_state(serde_json::json!({"secret": 1})))
             .unwrap_err();
         assert!(error.to_string().contains("must be null"));
+    }
+
+    #[test]
+    fn direct_authoring_evolution_keeps_its_existing_identity_rule() {
+        let objects = MemoryObjectStore::default();
+        let snapshot = objects.put(b"workspace-v1").unwrap();
+        let root = seal_state(
+            &objects,
+            AuthoringConfig {
+                schema: 1,
+                process: Vec::new(),
+                adapter: Vec::new(),
+                port: Vec::new(),
+                connection: Vec::new(),
+                binding: Vec::new(),
+                workspace: WorkspaceConfig::default(),
+                encap: EncapConfig::default(),
+            },
+            snapshot,
+        )
+        .unwrap();
+        let payload = objects.put(b"ArrowLeft").unwrap();
+        let observation = AdapterObservation {
+            adapter_id: "ato.browser@1".to_owned(),
+            protocol_id: ProtocolId::parse("ato.browser.keyboard@1").unwrap(),
+            port_id: PortId::parse("keyboard").unwrap(),
+            direction: Direction::Inbound,
+            payload: b"ArrowLeft".to_vec(),
+            caused_by: Vec::new(),
+            effect: ato_adapter_api::ObservationEffect::Evolution,
+        };
+
+        let first = evolve_observation(&objects, &root, &observation, &payload).unwrap();
+        let same_first = evolve_observation(&objects, &root, &observation, &payload).unwrap();
+        let second = evolve_observation(&objects, &first, &observation, &payload).unwrap();
+
+        assert_eq!(first, same_first);
+        assert_ne!(root, first);
+        assert_ne!(first, second);
+        assert!(
+            load_state(&second, &objects)
+                .unwrap()
+                .semantic_frontier
+                .is_some()
+        );
     }
 }
