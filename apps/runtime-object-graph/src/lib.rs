@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use ato_adapter_workspace::WorkspaceSnapshot;
+use ato_browser_semantics::{BROWSER_COMPUTATION_SEMANTICS_ID, BrowserComputationReferences};
 use ato_compose::{COMPOSE_SEMANTICS_ID, ComposeReferences, decode_composite_residual};
 use ato_computation::{ComputationRef, ContentRef, ResolvedComputation, SemanticsId};
 use ato_materializer_replay::{ReplayReferences, ReplayV2References};
@@ -343,6 +344,7 @@ pub fn standard_reference_registry() -> Result<ReferenceRegistry> {
     let mut registry = ReferenceRegistry::default();
     registry.register(Arc::new(AuthoringReferences::new()))?;
     registry.register(Arc::new(ComposeReferences::default()))?;
+    registry.register(Arc::new(BrowserComputationReferences::default()))?;
     registry.register_materializer(Arc::new(ReplayReferences))?;
     registry.register_materializer(Arc::new(ReplayV2References))?;
     registry.register_materializer(Arc::new(SnapshotReferences))?;
@@ -509,6 +511,11 @@ fn collect_runtime_projection(
         for child in composite.nodes.values() {
             collect_runtime_projection(child, objects, bindings, workspaces)?;
         }
+        return Ok(());
+    }
+    if resolved.object().semantics == SemanticsId::parse(BROWSER_COMPUTATION_SEMANTICS_ID)? {
+        // Browser logical state has no workspace or Binding projection. Its
+        // physical profile is a Runner realization, never graph content.
         return Ok(());
     }
     bail!(
