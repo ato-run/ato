@@ -12,15 +12,15 @@ use ato_objects::FsObjectStore;
 use ato_runtime_object_graph::{ObjectGraphIndexV1, VisibilityPolicy, standard_reference_registry};
 use base64::Engine;
 use clap::Parser;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, Parser)]
 struct Args {
     #[arg(long)]
-    index: PathBuf,
+    index: Option<PathBuf>,
     #[arg(long)]
-    objects: PathBuf,
+    objects: Option<PathBuf>,
     #[arg(long, default_value = "https://staging.api.ato.run")]
     api_url: String,
     #[arg(long, default_value = "ato")]
@@ -34,6 +34,9 @@ struct Args {
     /// Delete an owned non-ready graph before starting this upload.
     #[arg(long)]
     cleanup_owned_graph: Option<String>,
+    /// Staging-only create-and-publish request for an already-ready Bundle.
+    #[arg(long)]
+    publish_post_request: Option<PathBuf>,
     #[arg(long)]
     receipt: PathBuf,
     #[arg(long)]
@@ -75,9 +78,59 @@ struct DeviceExchange {
     access_token: String,
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PostCreateRequest {
+    bundle_id: String,
+    title: String,
+    description: String,
+    #[serde(default)]
+    thumbnail_url: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    original_app: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct CreatedPostEnvelope {
+    capsule_post: CreatedPost,
+}
+
+#[derive(Deserialize, Serialize)]
+struct CreatedPost {
+    post_id: String,
+    share_id: String,
+    share_path: String,
+    bundle_id: String,
+    root_computation_ref: String,
+    visibility: String,
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
-    let bytes = fs::read(&args.index)?;
+    let token = if args.device_login {
+        device_login(&args.api_url)?
+    } else {
+        load_auth_handoff(&args.auth_handoff_binary, &args.api_url)?
+    };
+    if let Some(request) = &args.publish_post_request {
+        return publish_staging_post(
+            &args.api_url,
+            &token,
+            request,
+            &args.receipt,
+            args.idempotency_key.as_deref(),
+        );
+    }
+    let index_path = args
+        .index
+        .as_ref()
+        .context("--index is required for upload")?;
+    let objects_path = args
+        .objects
+        .as_ref()
+        .context("--objects is required for upload")?;
+    let bytes = fs::read(index_path)?;
     let mut index: ObjectGraphIndexV1 = serde_json::from_slice(&bytes)?;
     ensure!(
         serde_jcs::to_vec(&index)? == bytes,
@@ -86,12 +139,7 @@ fn main() -> Result<()> {
     if args.negative_validator_test {
         forge_declared_reference(&mut index)?;
     }
-    let objects = FsObjectStore::open(&args.objects)?;
-    let token = if args.device_login {
-        device_login(&args.api_url)?
-    } else {
-        load_auth_handoff(&args.auth_handoff_binary, &args.api_url)?
-    };
+    let objects = FsObjectStore::open(objects_path)?;
     let mut api = HttpObjectTransportApi::new(&args.api_url, token)?;
     if args.staging_api_proxy_upload {
         api = api.with_staging_proxy_upload()?;
@@ -252,6 +300,89 @@ fn device_login(api_url: &str) -> Result<String> {
         "device login did not return a device credential"
     );
     Ok(exchange.access_token)
+}
+
+fn publish_staging_post(
+    api_url: &str,
+    token: &str,
+    request_path: &Path,
+    receipt_path: &Path,
+    idempotency_key: Option<&str>,
+) -> Result<()> {
+    ensure!(
+        api_url.trim_end_matches('/') == "https://staging.api.ato.run",
+        "Post publication is restricted to the staging API"
+    );
+    let request: PostCreateRequest = serde_json::from_slice(
+        &fs::read(request_path)
+            .with_context(|| format!("read Post request {}", request_path.display()))?,
+    )
+    .context("Post request is not valid JSON")?;
+    ensure!(
+        request.bundle_id.starts_with("bnd_") && request.bundle_id.len() == 30,
+        "invalid ready Bundle id"
+    );
+    let idempotency_key = idempotency_key
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("staging-vm-post-v1-{}", request.bundle_id));
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .context("construct staging Post client")?;
+    let created_response = client
+        .post("https://staging.api.ato.run/v1/capsule-posts")
+        .bearer_auth(token)
+        .header("origin", "https://stg-app.ato.run")
+        .header("idempotency-key", idempotency_key)
+        .json(&request)
+        .send()
+        .context("create private staging Post")?;
+    ensure!(
+        created_response.status().is_success(),
+        "staging Post creation failed with HTTP {}",
+        created_response.status()
+    );
+    let mut created: CreatedPostEnvelope = created_response
+        .json()
+        .context("decode staging Post creation response")?;
+    ensure!(
+        created.capsule_post.bundle_id == request.bundle_id,
+        "created Post Bundle mismatch"
+    );
+    let published_response = client
+        .post(format!(
+            "https://staging.api.ato.run/v1/capsule-posts/{}/publish",
+            created.capsule_post.post_id
+        ))
+        .bearer_auth(token)
+        .header("origin", "https://stg-app.ato.run")
+        .json(&serde_json::json!({
+            "title": request.title,
+            "description": request.description,
+            "thumbnail_url": request.thumbnail_url,
+            "tags": request.tags
+        }))
+        .send()
+        .context("publish staging Post")?;
+    ensure!(
+        published_response.status().is_success(),
+        "staging Post publication failed with HTTP {}",
+        published_response.status()
+    );
+    created.capsule_post.visibility = "public".to_owned();
+    let receipt = serde_json::json!({
+        "version": 1,
+        "status": "published",
+        "post": created.capsule_post,
+        "production_mutated": false
+    });
+    write_receipt(receipt_path, &serde_jcs::to_vec(&receipt)?)?;
+    println!(
+        "{} {}",
+        receipt["post"]["post_id"].as_str().unwrap_or_default(),
+        receipt["post"]["share_path"].as_str().unwrap_or_default()
+    );
+    Ok(())
 }
 
 fn rejected_graph_id(message: &str) -> Result<&str> {
