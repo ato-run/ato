@@ -3,6 +3,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 mod authoring;
+mod desktop_control;
 mod supervisor;
 
 use std::collections::BTreeMap;
@@ -91,6 +92,17 @@ enum Commands {
         token: String,
         descriptor: Option<String>,
     },
+    #[command(name = "__desktop", hide = true)]
+    Desktop {
+        #[command(subcommand)]
+        command: DesktopCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum DesktopCommands {
+    /// Inspect the active Run of a Capsule project as a single JSON object.
+    Inspect { project: String },
 }
 
 #[derive(Debug, Args)]
@@ -147,7 +159,17 @@ pub fn run() -> Result<()> {
             &token,
             descriptor.map(ContentRef::parse).transpose()?.as_ref(),
         ),
+        Commands::Desktop { command } => match command {
+            DesktopCommands::Inspect { project } => desktop_inspect(&project),
+        },
     }
+}
+
+fn desktop_inspect(project: &str) -> Result<()> {
+    let path = project_path(project, false)?;
+    let view = desktop_control::inspect(&path)?;
+    println!("{}", serde_json::to_string(&view)?);
+    Ok(())
 }
 
 fn init(args: InitArgs) -> Result<()> {
@@ -715,6 +737,17 @@ mod tests {
         }
         for removed in ["lock", "decap", "snapshot"] {
             assert!(Cli::try_parse_from(["ato", removed]).is_err());
+        }
+    }
+
+    #[test]
+    fn hidden_machine_commands_do_not_appear_in_help() {
+        use clap::CommandFactory;
+        let help = Cli::command().render_long_help().to_string();
+        assert!(!help.contains("__worker"));
+        assert!(!help.contains("__desktop"));
+        for public in ["init", "resume", "stop", "encap", "run"] {
+            assert!(help.contains(public));
         }
     }
 

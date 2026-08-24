@@ -23,6 +23,7 @@ members = [
     "tools/legacy-vm-inspector",
     "tools/arch-check",
     "lib/ipc",
+    "lib/host-control",
     "services/netd",
 ]
 
@@ -38,6 +39,7 @@ exclude = [
     "apps/desktop/xtask",
     "apps/desktop/.tmp",
     "apps/desktop/vendor",
+    "apps/desktop-tauri",
     "services/ato-tsnetd",
     "extensions/providers/nacelle",
     "extensions/semantics/workspace",
