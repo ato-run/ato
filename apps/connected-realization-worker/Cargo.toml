@@ -19,6 +19,8 @@ path = "src/bin/ato-connected-realization-worker.rs"
 [dependencies]
 anyhow = "1"
 ato-adapter-api = { path = "../../extensions/adapters/api", version = "0.1.0" }
+ato-adapter-browser = { path = "../../extensions/adapters/browser", version = "0.1.0" }
+ato-browser-semantics = { path = "../../extensions/semantics/browser", version = "0.1.0" }
 ato-computation = { path = "../../lib/computation", version = "0.1.0" }
 ato-contracts = { path = "../../extensions/contracts", version = "0.1.0" }
 ato-kernel = { path = "../../lib/kernel", version = "0.1.0" }

@@ -14,9 +14,10 @@ use std::time::Duration;
 
 use ato_adapter_api::{
     AdapterAttachContext, AdapterCapabilities, AdapterContext, AdapterError, AdapterFactory,
-    AdapterInstance, AttachedAdapter, Stylus, SupportedOperation,
+    AdapterInstance, AttachedAdapter, LiveOperation, Stylus, SupportedOperation,
 };
 use ato_objects::{RecordCandidate, RecordEnvelope, read_exact_object};
+use ato_record_writer::RecordSchemaRegistry;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -114,6 +115,33 @@ pub fn operation_for_event(event: &BrowserEvent) -> &'static str {
         BrowserEvent::Click { .. } => BROWSER_CLICK_OPERATION,
         BrowserEvent::Scroll { .. } => BROWSER_SCROLL_OPERATION,
     }
+}
+
+/// Registers the extension-owned payload validators used by both the Record
+/// Writer and hosted Runner wiring. This keeps operation validation out of CLI.
+pub fn register_record_schemas(registry: &mut RecordSchemaRegistry) -> Result<(), AdapterError> {
+    for operation_id in [
+        BROWSER_KEYBOARD_OPERATION,
+        BROWSER_POINTER_OPERATION,
+        BROWSER_CLICK_OPERATION,
+        BROWSER_SCROLL_OPERATION,
+    ] {
+        registry
+            .register(
+                SupportedOperation::new(BROWSER_PROTOCOL_ID, operation_id, 1, BTreeSet::new())
+                    .expect("valid static Browser operation"),
+                move |bytes| {
+                    let event = decode_event(bytes).map_err(|error| error.to_string())?;
+                    (operation_for_event(&event) == operation_id)
+                        .then_some(())
+                        .ok_or_else(|| {
+                            format!("Browser payload kind does not match `{operation_id}`")
+                        })
+                },
+            )
+            .map_err(|error| AdapterError::InvalidConfig(error.to_string()))?;
+    }
+    Ok(())
 }
 
 impl AdapterFactory for BrowserAdapter {
@@ -217,6 +245,26 @@ impl BrowserSession {
         }
         Ok(())
     }
+
+    fn apply_event(&mut self, event: BrowserEvent) -> Result<(), AdapterError> {
+        self.transport_failure()?;
+        if self.quiesced {
+            return Err(AdapterError::Operation(
+                "Browser Adapter is already quiesced".to_owned(),
+            ));
+        }
+        let request_id = self.request_id();
+        let (sender, receiver) = mpsc::channel();
+        self.transport
+            .commands
+            .send(transport::TransportCommand::Apply {
+                request_id,
+                event,
+                result: sender,
+            })
+            .map_err(|error| AdapterError::Operation(error.to_string()))?;
+        transport::wait_for_result(receiver, ACK_TIMEOUT, "apply")
+    }
 }
 
 impl AttachedAdapter for BrowserSession {
@@ -243,24 +291,29 @@ impl AttachedAdapter for BrowserSession {
         record: &RecordEnvelope,
         context: &AdapterContext<'_>,
     ) -> Result<(), AdapterError> {
-        self.transport_failure()?;
-        if self.quiesced {
+        let event = read_event(record, context, &self.config)?;
+        self.apply_event(event)
+    }
+
+    fn apply_operation(&mut self, operation: &LiveOperation) -> Result<(), AdapterError> {
+        if operation.protocol_id.as_str() != BROWSER_PROTOCOL_ID
+            || operation.port_id.as_str() != self.config.port_id
+        {
             return Err(AdapterError::Operation(
-                "Browser Adapter is already quiesced".to_owned(),
+                "Browser live operation has wrong protocol or port".to_owned(),
             ));
         }
-        let event = read_event(record, context, &self.config)?;
-        let request_id = self.request_id();
-        let (sender, receiver) = mpsc::channel();
-        self.transport
-            .commands
-            .send(transport::TransportCommand::Apply {
-                request_id,
-                event,
-                result: sender,
-            })
-            .map_err(|error| AdapterError::Operation(error.to_string()))?;
-        transport::wait_for_result(receiver, ACK_TIMEOUT, "apply")
+        let event = protocol::decode_event_with_policy(
+            &operation.payload,
+            &self.config.allowed_non_text_codes,
+        )
+        .map_err(|error| AdapterError::Operation(error.to_string()))?;
+        if operation.operation_id.as_str() != operation_for_event(&event) {
+            return Err(AdapterError::Operation(
+                "Browser live operation kind does not match payload".to_owned(),
+            ));
+        }
+        self.apply_event(event)
     }
 
     fn verify(
