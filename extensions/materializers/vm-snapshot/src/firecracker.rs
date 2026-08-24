@@ -809,6 +809,16 @@ pub struct FirecrackerBackend {
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     config: FirecrackerBackendConfig,
     capture_source: Option<Arc<dyn ActiveVmCaptureSource>>,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    restored_capture: Option<RestoredCaptureRuntime>,
+    restored_capture_source: Mutex<Option<Arc<dyn ActiveVmCaptureSource>>>,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+struct RestoredCaptureRuntime {
+    barrier: Arc<dyn FirecrackerRecordCaptureBarrier>,
+    capture_root: PathBuf,
+    ingress: Arc<Mutex<Box<dyn FirecrackerIngressGate>>>,
 }
 
 impl FirecrackerBackend {
@@ -816,6 +826,8 @@ impl FirecrackerBackend {
         Self {
             config,
             capture_source: None,
+            restored_capture: None,
+            restored_capture_source: Mutex::new(None),
         }
     }
 
@@ -826,6 +838,29 @@ impl FirecrackerBackend {
         Self {
             config,
             capture_source: Some(capture_source),
+            restored_capture: None,
+            restored_capture_source: Mutex::new(None),
+        }
+    }
+
+    /// Capture-capable restore assembly for a hosted runtime. The active
+    /// source is registered only after snapshot/load succeeds, and remains
+    /// bound to that exact backend-owned session.
+    pub fn with_restored_capture(
+        config: FirecrackerBackendConfig,
+        barrier: Arc<dyn FirecrackerRecordCaptureBarrier>,
+        capture_root: PathBuf,
+        ingress: Box<dyn FirecrackerIngressGate>,
+    ) -> Self {
+        Self {
+            config,
+            capture_source: None,
+            restored_capture: Some(RestoredCaptureRuntime {
+                barrier,
+                capture_root,
+                ingress: Arc::new(Mutex::new(ingress)),
+            }),
+            restored_capture_source: Mutex::new(None),
         }
     }
 
@@ -897,14 +932,20 @@ impl VmSnapshotBackend for FirecrackerBackend {
     }
 
     fn capture(&self, request: &VmCaptureRequest) -> Result<CapturedVm, VmSnapshotError> {
-        self.capture_source
-            .as_ref()
+        if let Some(source) = &self.capture_source {
+            return source.capture_active(request);
+        }
+        let source = self
+            .restored_capture_source
+            .lock()
+            .map_err(|_| VmSnapshotError::Backend("restored capture lock poisoned".to_owned()))?
+            .clone()
             .ok_or_else(|| {
                 VmSnapshotError::Backend(
                     "no active Firecracker Realization is registered for capture".to_owned(),
                 )
-            })?
-            .capture_active(request)
+            })?;
+        source.capture_active(request)
     }
 
     fn restore(
@@ -958,8 +999,59 @@ impl FirecrackerBackend {
             &serde_json::to_vec(&body)?,
             self.config.api_timeout,
         )?;
+        let layout = load_restore_layout(request)?;
+        let target =
+            ato_computation::ComputationRef::parse(&request.descriptor.target_computation_ref)
+                .map_err(|error| VmSnapshotError::InvalidReference(error.to_string()))?;
+        let shared = Arc::new(Mutex::new(Some(resources)));
+        if let Some(capture) = &self.restored_capture {
+            let captured_at = time::OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Rfc3339)
+                .map_err(|error| VmSnapshotError::Backend(error.to_string()))?;
+            let active = RestoredActiveFirecrackerRealization {
+                resources: Arc::clone(&shared),
+                target,
+                realization_id: format!("firecracker-restored:{}", self.config.slot_id),
+                spec: ActiveFirecrackerCaptureSpec {
+                    captured_at,
+                    snapshot_format: request.descriptor.snapshot_format.clone(),
+                    architecture: request.descriptor.architecture.clone(),
+                    guest_os: request.descriptor.guest_os.clone(),
+                    host_backend_contract: request.descriptor.host_backend_contract.clone(),
+                    cpu_contract: request.descriptor.cpu_contract.clone(),
+                    firecracker_version: request.descriptor.firecracker_version.clone(),
+                    device_contract: request.descriptor.device_contract.clone(),
+                    network_contract: request.descriptor.network_contract.clone(),
+                    vsock_contract: request.descriptor.vsock_contract.clone(),
+                    memory_contract: request.descriptor.memory_contract.clone(),
+                    state_contract_refs: request
+                        .descriptor
+                        .state_contract_refs
+                        .iter()
+                        .map(|reference| {
+                            ato_computation::ContentRef::parse(reference).map_err(|error| {
+                                VmSnapshotError::InvalidReference(error.to_string())
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                    placement_hint: Some("hosted-restored".to_owned()),
+                    restore_layout: layout,
+                },
+                ingress: Arc::clone(&capture.ingress),
+                api_timeout: self.config.api_timeout,
+            };
+            let source: Arc<dyn ActiveVmCaptureSource> =
+                Arc::new(FirecrackerActiveVmCaptureSource::new(
+                    Box::new(active),
+                    Arc::clone(&capture.barrier),
+                    capture.capture_root.clone(),
+                ));
+            *self.restored_capture_source.lock().map_err(|_| {
+                VmSnapshotError::Backend("restored capture lock poisoned".to_owned())
+            })? = Some(source);
+        }
         Ok(Box::new(FirecrackerSession {
-            resources: Some(resources),
+            resources: shared,
             api_timeout: self.config.api_timeout,
         }))
     }
@@ -1319,8 +1411,127 @@ fn snapshot_load_body(
 
 #[cfg(target_os = "linux")]
 struct FirecrackerSession {
-    resources: Option<FirecrackerResources>,
+    resources: Arc<Mutex<Option<FirecrackerResources>>>,
     api_timeout: Duration,
+}
+
+#[cfg(target_os = "linux")]
+struct RestoredActiveFirecrackerRealization {
+    resources: Arc<Mutex<Option<FirecrackerResources>>>,
+    target: ato_computation::ComputationRef,
+    realization_id: String,
+    spec: ActiveFirecrackerCaptureSpec,
+    ingress: Arc<Mutex<Box<dyn FirecrackerIngressGate>>>,
+    api_timeout: Duration,
+}
+
+#[cfg(target_os = "linux")]
+impl RestoredActiveFirecrackerRealization {
+    fn with_resources<T>(
+        &self,
+        operation: impl FnOnce(&mut FirecrackerResources) -> Result<T, VmSnapshotError>,
+    ) -> Result<T, VmSnapshotError> {
+        let mut resources = self.resources.lock().map_err(|_| {
+            VmSnapshotError::Backend("Firecracker session lock poisoned".to_owned())
+        })?;
+        operation(resources.as_mut().ok_or_else(|| {
+            VmSnapshotError::Backend("Firecracker session already stopped".to_owned())
+        })?)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl ActiveFirecrackerRealization for RestoredActiveFirecrackerRealization {
+    fn target(&self) -> &ato_computation::ComputationRef {
+        &self.target
+    }
+
+    fn realization_id(&self) -> &str {
+        &self.realization_id
+    }
+
+    fn capture_spec(&self) -> ActiveFirecrackerCaptureSpec {
+        let mut spec = self.spec.clone();
+        if let Ok(captured_at) =
+            time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339)
+        {
+            spec.captured_at = captured_at;
+        }
+        spec
+    }
+
+    fn freeze_ingress(&mut self) -> Result<(), VmSnapshotError> {
+        self.ingress
+            .lock()
+            .map_err(|_| VmSnapshotError::Backend("ingress gate lock poisoned".to_owned()))?
+            .freeze()
+    }
+
+    fn quiesce_interactions(&mut self) -> Result<(), VmSnapshotError> {
+        self.ingress
+            .lock()
+            .map_err(|_| VmSnapshotError::Backend("ingress gate lock poisoned".to_owned()))?
+            .quiesce()
+    }
+
+    fn pause_vm(&mut self) -> Result<(), VmSnapshotError> {
+        self.with_resources(|resources| {
+            firecracker_api(
+                &resources.api_socket,
+                "PATCH",
+                "/vm",
+                br#"{"state":"Paused"}"#,
+                self.api_timeout,
+            )
+        })
+    }
+
+    fn create_full_snapshot(
+        &mut self,
+        memory_path: &Path,
+        vmstate_path: &Path,
+    ) -> Result<(), VmSnapshotError> {
+        self.with_resources(|resources| {
+            firecracker_api(
+                &resources.api_socket,
+                "PUT",
+                "/snapshot/create",
+                &serde_json::to_vec(&serde_json::json!({
+                    "snapshot_type": "Full",
+                    "snapshot_path": vmstate_path,
+                    "mem_file_path": memory_path,
+                }))?,
+                self.api_timeout,
+            )
+        })
+    }
+
+    fn copy_rootfs_backing(&mut self, destination: &Path) -> Result<(), VmSnapshotError> {
+        self.with_resources(|resources| {
+            fs::copy(&resources.rootfs, destination)?;
+            File::open(destination)?.sync_all()?;
+            Ok(())
+        })
+    }
+
+    fn resume_vm(&mut self) -> Result<(), VmSnapshotError> {
+        self.with_resources(|resources| {
+            firecracker_api(
+                &resources.api_socket,
+                "PATCH",
+                "/vm",
+                br#"{"state":"Resumed"}"#,
+                self.api_timeout,
+            )
+        })
+    }
+
+    fn unfreeze_ingress(&mut self) -> Result<(), VmSnapshotError> {
+        self.ingress
+            .lock()
+            .map_err(|_| VmSnapshotError::Backend("ingress gate lock poisoned".to_owned()))?
+            .unfreeze()
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1334,8 +1545,10 @@ impl VmBackendSession for FirecrackerSession {
     }
 
     fn wait(&mut self) -> Result<(), VmSnapshotError> {
-        let resources = self
-            .resources
+        let mut resources = self.resources.lock().map_err(|_| {
+            VmSnapshotError::Backend("Firecracker session lock poisoned".to_owned())
+        })?;
+        let resources = resources
             .as_mut()
             .ok_or_else(|| VmSnapshotError::Backend("session already stopped".to_owned()))?;
         let status = resources
@@ -1353,7 +1566,10 @@ impl VmBackendSession for FirecrackerSession {
     }
 
     fn quiesce(&mut self) -> Result<(), VmSnapshotError> {
-        if let Some(mut resources) = self.resources.take() {
+        let mut shared = self.resources.lock().map_err(|_| {
+            VmSnapshotError::Backend("Firecracker session lock poisoned".to_owned())
+        })?;
+        if let Some(mut resources) = shared.take() {
             let pause = firecracker_api(
                 &resources.api_socket,
                 "PATCH",

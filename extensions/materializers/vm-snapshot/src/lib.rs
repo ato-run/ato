@@ -520,7 +520,7 @@ fn chunk_artifact(
     })
 }
 
-fn load_descriptor(
+pub fn load_descriptor(
     reference: &ContentRef,
     objects: &dyn ObjectResolver,
 ) -> Result<VmSnapshotDescriptor, VmSnapshotError> {
