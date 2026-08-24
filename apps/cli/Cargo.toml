@@ -22,6 +22,10 @@ eula = false
 name = "ato"
 path = "src/main.rs"
 
+[[bin]]
+name = "ato-object-graph-upload"
+path = "src/bin/ato-object-graph-upload.rs"
+
 [dependencies]
 anyhow = "1"
 ato-adapter-api = { path = "../../extensions/adapters/api", version = "0.1.0" }
