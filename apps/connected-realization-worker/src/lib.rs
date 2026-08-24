@@ -79,7 +79,6 @@ const GUEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 #[derive(Debug, Clone)]
 struct HostedBrowserBinding {
     port: PortId,
-    expected_origin: String,
 }
 
 /// Finds the single explicitly composed Browser continuation. This never
@@ -112,27 +111,17 @@ fn hosted_browser_binding(
     let [port] = ports.as_slice() else {
         bail!("Browser Computation must be explicitly exported as one controller Port");
     };
-    Ok(Some(HostedBrowserBinding {
-        port: port.clone(),
-        expected_origin: leaves.pop().expect("one Browser leaf"),
-    }))
+    Ok(Some(HostedBrowserBinding { port: port.clone() }))
 }
 
 fn collect_browser_leaves(
     reference: &ComputationRef,
     objects: &dyn ObjectResolver,
-    leaves: &mut Vec<String>,
+    leaves: &mut Vec<()>,
 ) -> Result<()> {
     let resolved = resolve_computation(objects, reference)?;
     if resolved.object().semantics == SemanticsId::parse(BROWSER_COMPUTATION_SEMANTICS_ID)? {
-        let metadata = objects.metadata(&resolved.object().residual)?;
-        let bytes = ato_objects::read_exact_object(
-            objects,
-            &resolved.object().residual,
-            metadata.size,
-            64 * 1024,
-        )?;
-        leaves.push(ato_browser_semantics::decode_residual(&bytes)?.expected_origin);
+        leaves.push(());
         return Ok(());
     }
     if resolved.object().semantics == SemanticsId::parse(COMPOSE_SEMANTICS_ID)? {
@@ -458,6 +447,7 @@ impl ConnectedWorker {
                 Arc::clone(&evolution),
                 self.api.clone(),
                 self.config.browser_chrome.as_deref(),
+                &format!("http://{}/", self.config.hidden_surface_listen),
             )?;
 
             // The externally reachable listener does not exist until the VM is
@@ -695,6 +685,7 @@ fn start_hosted_browser_runtime(
     evolution: Arc<RunEvolutionAuthority>,
     api: HttpRunnerApi,
     chrome: Option<&Path>,
+    browser_target_url: &str,
 ) -> Result<Option<HostedBrowserRuntime>> {
     let root = ComputationRef::parse(&graph.report().root_computation_ref)?;
     let Some(binding) = hosted_browser_binding(&root, graph.objects())? else {
@@ -703,6 +694,15 @@ fn start_hosted_browser_runtime(
     let chrome = chrome.context(
         "Browser-aware Hosted Run requires ATO_BROWSER_CHROME to name an absolute Chrome executable",
     )?;
+    let browser_target_url = url::Url::parse(browser_target_url)
+        .context("Hosted Browser document endpoint is invalid")?;
+    ensure!(
+        matches!(browser_target_url.scheme(), "http" | "https")
+            && browser_target_url.username().is_empty()
+            && browser_target_url.password().is_none(),
+        "Hosted Browser document endpoint must be credential-free HTTP(S)"
+    );
+    let browser_origin = browser_target_url.origin().ascii_serialization();
     ensure!(
         chrome.is_absolute() && chrome.is_file(),
         "Browser-aware Hosted Run requires ATO_BROWSER_CHROME to name an absolute Chrome executable"
@@ -720,7 +720,7 @@ fn start_hosted_browser_runtime(
         adapter_id: ato_adapter_browser::BROWSER_ADAPTER_ID.to_owned(),
         config: serde_json::to_value(BrowserAdapterConfig {
             port_id: binding.port.to_string(),
-            expected_origin: binding.expected_origin.clone(),
+            expected_origin: browser_origin.clone(),
             allowed_non_text_codes: BTreeSet::new(),
             input_mode: BrowserInputMode::ApplyOnly,
         })?,
@@ -754,7 +754,7 @@ fn start_hosted_browser_runtime(
     let host = match BrowserHost::start(BrowserHostConfig {
         runtime_dir: host_root,
         bootstrap_path,
-        target_url: format!("{}/", binding.expected_origin),
+        target_url: browser_target_url.to_string(),
         chrome: chrome.to_owned(),
         headless: true,
     }) {
@@ -1524,7 +1524,7 @@ mod tests {
         }
     }
 
-    fn browser_authority(origin: String) -> Arc<RunEvolutionAuthority> {
+    fn browser_authority() -> Arc<RunEvolutionAuthority> {
         let objects = Arc::new(ato_objects::MemoryObjectStore::default());
         let mut kernel = Kernel::new(objects.clone());
         kernel
@@ -1538,7 +1538,6 @@ mod tests {
                 &ato_browser_semantics::encode_residual(
                     &ato_browser_semantics::BrowserResidualV1 {
                         version: 1,
-                        expected_origin: origin,
                         interaction_frontier: None,
                     },
                 )
@@ -1662,7 +1661,7 @@ mod tests {
         let records = TestRecords::default();
         let submitted = Arc::clone(&records.0);
         let ingress = BrowserOperationIngress::new(
-            browser_authority(origin),
+            browser_authority(),
             PortId::parse("browser").unwrap(),
             AttachedBrowserActuator(Arc::clone(&adapter)),
             TestPersistence,
