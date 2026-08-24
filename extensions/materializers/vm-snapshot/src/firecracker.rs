@@ -7,7 +7,7 @@ use std::fs;
 #[cfg(target_os = "linux")]
 use std::fs::{File, OpenOptions};
 #[cfg(target_os = "linux")]
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 #[cfg(target_os = "linux")]
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -932,11 +932,17 @@ impl FirecrackerBackend {
         fs::create_dir_all(&self.config.work_root)?;
         let mut resources = FirecrackerResources::allocate(&self.config, request)?;
         resources.child = Some(resources.spawn_firecracker()?);
-        wait_for_socket(
+        if let Err(error) = wait_for_socket(
             &resources.api_socket,
             resources.child.as_mut().expect("child was stored"),
             self.config.api_timeout,
-        )?;
+        ) {
+            let diagnostic = bounded_diagnostic_tail(&resources.console_path, 4096)
+                .unwrap_or_else(|_| "unavailable".to_owned());
+            return Err(VmSnapshotError::Backend(format!(
+                "{error}; Firecracker startup diagnostic: {diagnostic}"
+            )));
+        }
         let body = snapshot_load_body(
             &resources.vmstate,
             &resources.memory,
@@ -975,6 +981,7 @@ struct FirecrackerResources {
     session_dir: TempDir,
     api_socket: PathBuf,
     console: File,
+    console_path: PathBuf,
     memory: PathBuf,
     vmstate: PathBuf,
     rootfs: PathBuf,
@@ -1030,7 +1037,7 @@ impl FirecrackerResources {
             let console_path = session_dir.path().join(&layout.console_log_path);
             create_parent(&api_socket)?;
             create_parent(&console_path)?;
-            let console = File::create(console_path)?;
+            let console = File::create(&console_path)?;
             let memory = materialize_layout_artifact(
                 required_artifact(request, ArtifactRole::Memory)?,
                 session_dir.path().join(&layout.memory_path),
@@ -1043,21 +1050,31 @@ impl FirecrackerResources {
                 required_artifact(request, ArtifactRole::Rootfs)?,
                 session_dir.path().join(&layout.rootfs_backing_path),
             )?;
-            Ok::<_, VmSnapshotError>((session_dir, api_socket, console, memory, vmstate, rootfs))
+            Ok::<_, VmSnapshotError>((
+                session_dir,
+                api_socket,
+                console,
+                console_path,
+                memory,
+                vmstate,
+                rootfs,
+            ))
         })();
-        let (session_dir, api_socket, console, memory, vmstate, rootfs) = match allocated_session {
-            Ok(allocated) => allocated,
-            Err(error) => {
-                drop(slot_file);
-                let _ = fs::remove_file(&slot_path);
-                return Err(error);
-            }
-        };
+        let (session_dir, api_socket, console, console_path, memory, vmstate, rootfs) =
+            match allocated_session {
+                Ok(allocated) => allocated,
+                Err(error) => {
+                    drop(slot_file);
+                    let _ = fs::remove_file(&slot_path);
+                    return Err(error);
+                }
+            };
         let mut resources = Self {
             config: config.clone(),
             session_dir,
             api_socket,
             console,
+            console_path,
             memory,
             vmstate,
             rootfs,
@@ -1390,6 +1407,25 @@ fn wait_for_path(
     Err(VmSnapshotError::Backend(format!(
         "{label} readiness timed out"
     )))
+}
+
+#[cfg(target_os = "linux")]
+fn bounded_diagnostic_tail(path: &Path, max_bytes: u64) -> std::io::Result<String> {
+    let mut file = File::open(path)?;
+    let length = file.metadata()?.len();
+    file.seek(SeekFrom::Start(length.saturating_sub(max_bytes)))?;
+    let mut bytes = Vec::with_capacity(length.min(max_bytes) as usize);
+    file.take(max_bytes).read_to_end(&mut bytes)?;
+    Ok(String::from_utf8_lossy(&bytes)
+        .chars()
+        .map(|character| match character {
+            '\n' | '\r' | '\t' => character,
+            character if character.is_control() => ' ',
+            character => character,
+        })
+        .collect::<String>()
+        .trim()
+        .to_owned())
 }
 
 #[cfg(target_os = "linux")]
