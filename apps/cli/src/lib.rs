@@ -39,27 +39,40 @@ use ato_compose::ComposeReferences;
 use ato_computation::{ComputationRef, ContentRef};
 use ato_contracts::{HttpEndpointVerifier, WorkspaceContentVerifier};
 use ato_materializer_api::{
-    Compatibility, ContractContext, ContractVerifierRegistry, MaterializerContext,
-    MaterializerRegistry, RestoreCapability, accept_candidate,
+    ContractContext, ContractVerifierRegistry, MaterializerContext, MaterializerRegistry,
+    accept_candidate,
 };
 use ato_materializer_replay::{
     ReplayMaterializer, ReplayMaterializerV2, ReplayReferences, ReplayV2References,
 };
-use ato_materializer_snapshot::{SnapshotMaterializer, SnapshotReferences};
+use ato_materializer_snapshot::{
+    SnapshotMaterializer, SnapshotReferences, WorkspaceSnapshotMaterializer,
+    WorkspaceSnapshotReferences,
+};
+use ato_materializer_vm_snapshot::{
+    FirecrackerBackend, FirecrackerBackendConfig, SealedRecordFrontierVerifier, VmSnapshotError,
+    VmSnapshotMaterializer, VmSnapshotReferences,
+};
 use ato_objects::{
     BranchOrigin, BundleMaterialization, CapsuleSelector, LocalCapsuleRepository, RecordId,
     ReferenceRegistry, decode_bundle, encode_bundle, export_bundle_with_materializations,
     import_bundle,
 };
+use ato_realization_planner::{
+    MaterializationCandidate, Placement, PlannerPolicy, RealizationPlanner, TargetEnvironment,
+    TrustBoundary,
+};
 use ato_record_writer::RecordSchemaRegistry;
-use ato_record_writer::{load_frontier, records_for_frontier};
+use ato_record_writer::{RecordFrontier, load_frontier, records_for_frontier};
 use clap::{Args, Parser, Subcommand};
 
 use crate::authoring::{
     AuthoringReferences, evolve_workspace, initial_computation, load_config, load_runtime_state,
     workspace_policy,
 };
-use crate::supervisor::{CliRealizationDriver, start_durable, stop_active};
+use crate::supervisor::{
+    CliRealizationDriver, preflight_actuator_provider_registry, start_durable, stop_active,
+};
 
 #[derive(Parser)]
 #[command(
@@ -306,6 +319,7 @@ fn encap(args: EncapArgs) -> Result<()> {
         workspace_policy: &capture_policy,
         realization: None,
         contracts: &[],
+        runner_capabilities: None,
     };
     let mut entries = Vec::new();
     for id in selected {
@@ -469,6 +483,9 @@ fn run_capsule(args: RunArgs) -> Result<()> {
     }
     let adapters = adapter_registry()?;
     let materializers = materializer_registry()?;
+    let actuator_providers = preflight_actuator_provider_registry()?;
+    let contract_verifiers = contract_verifier_registry()?;
+    let runner_capabilities = FirecrackerBackend::new(FirecrackerBackendConfig::default()).probe();
     let capture_policy = workspace_policy(&state.config)?;
     let driver = CliRealizationDriver::new(&project, &bindings);
     let context = MaterializerContext {
@@ -482,41 +499,57 @@ fn run_capsule(args: RunArgs) -> Result<()> {
         workspace_policy: &capture_policy,
         realization: Some(&driver),
         contracts: &[],
+        runner_capabilities: Some(&runner_capabilities),
     };
-    let mut candidates = bundle.index.materializations.clone();
-    candidates.sort_by(|left, right| left.materializer_id.cmp(&right.materializer_id));
-    let mut diagnostics = Vec::new();
-    let mut restored = None;
-    for candidate in candidates {
-        let descriptor = ContentRef::parse(&candidate.descriptor_ref)?;
-        let materializer = match materializers.get(&candidate.materializer_id) {
-            Ok(materializer) => materializer,
-            Err(_) => {
-                diagnostics.push(format!(
-                    "{}: implementation missing",
-                    candidate.materializer_id
-                ));
-                continue;
-            }
-        };
-        if materializer.restore_capability() != RestoreCapability::Supported {
-            diagnostics.push(format!("{}: verify-only", candidate.materializer_id));
-            continue;
-        }
-        if materializer.compatibility(&descriptor, &context) != Compatibility::Compatible {
-            diagnostics.push(format!("{}: incompatible", candidate.materializer_id));
-            continue;
-        }
-        let contracts = materializer.contracts(&descriptor, &context)?;
-        restored = Some((materializer.restore(&descriptor, &context)?, contracts));
-        break;
+    let target_environment = TargetEnvironment {
+        id: "local".to_owned(),
+        placement: Placement::Local,
+        trust_boundary: TrustBoundary::Local,
+    };
+    let candidates = bundle
+        .index
+        .materializations
+        .iter()
+        .map(|candidate| {
+            Ok(MaterializationCandidate {
+                materializer_id: candidate.materializer_id.clone(),
+                descriptor_ref: ContentRef::parse(&candidate.descriptor_ref)?,
+                environment: target_environment.clone(),
+                context: MaterializerContext {
+                    objects: context.objects,
+                    adapters: context.adapters,
+                    records: context.records,
+                    records_v2: context.records_v2,
+                    replay_anchor: context.replay_anchor,
+                    record_frontier_ref: context.record_frontier_ref,
+                    workspace: context.workspace,
+                    workspace_policy: context.workspace_policy,
+                    realization: context.realization,
+                    contracts: context.contracts,
+                    runner_capabilities: context.runner_capabilities,
+                },
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let port_bindings = Vec::new();
+    let policy = PlannerPolicy::default();
+    let plan = RealizationPlanner {
+        target: &root,
+        materializers: &materializers,
+        actuator_providers: &actuator_providers,
+        contract_verifiers: &contract_verifiers,
+        port_bindings: &port_bindings,
+        policy: &policy,
     }
-    let (realization, contracts) = restored.ok_or_else(|| {
-        anyhow::anyhow!(
-            "no compatible restore-capable Materialization: {}",
-            diagnostics.join("; ")
-        )
-    })?;
+    .plan(candidates)
+    .map_err(|error| anyhow::anyhow!("no acceptable Realization path: {error}"))?;
+    let selected = plan
+        .candidates
+        .first()
+        .context("Realization Planner returned no candidate")?;
+    let materializer = materializers.get(&selected.materializer_id)?;
+    let contracts = materializer.contracts(&selected.descriptor_ref, &context)?;
+    let realization = materializer.restore(&selected.descriptor_ref, &context)?;
     if realization.target() != &root {
         bail!(
             "Materialization restored {}, expected bundle root {root}",
@@ -530,7 +563,7 @@ fn run_capsule(args: RunArgs) -> Result<()> {
     let accepted = accept_candidate(
         realization,
         &contracts,
-        &contract_verifier_registry()?,
+        &contract_verifiers,
         &contract_context,
     )?;
     accepted.run().map_err(Into::into)
@@ -643,7 +676,29 @@ fn materializer_registry() -> Result<MaterializerRegistry> {
     registry.register(Arc::new(ReplayMaterializer))?;
     registry.register(Arc::new(ReplayMaterializerV2))?;
     registry.register(Arc::new(SnapshotMaterializer))?;
+    registry.register(Arc::new(WorkspaceSnapshotMaterializer))?;
+    registry.register(Arc::new(VmSnapshotMaterializer::new(
+        Arc::new(FirecrackerBackend::new(FirecrackerBackendConfig::default())),
+        Arc::new(RecordWriterFrontierVerifier),
+    )))?;
     Ok(registry)
+}
+
+struct RecordWriterFrontierVerifier;
+
+impl SealedRecordFrontierVerifier for RecordWriterFrontierVerifier {
+    fn verify(
+        &self,
+        reference: &ContentRef,
+        objects: &dyn ato_objects::ObjectResolver,
+    ) -> std::result::Result<(), VmSnapshotError> {
+        let metadata = objects.metadata(reference)?;
+        let bytes =
+            ato_objects::read_exact_object(objects, reference, metadata.size, 16 * 1024 * 1024)?;
+        RecordFrontier::decode_identity(reference, &bytes)
+            .map(|_| ())
+            .map_err(|error| VmSnapshotError::InvalidDescriptor(error.to_string()))
+    }
 }
 
 fn contract_verifier_registry() -> Result<ContractVerifierRegistry> {
@@ -660,6 +715,8 @@ fn reference_registry() -> Result<ReferenceRegistry> {
     registry.register_materializer(Arc::new(ReplayReferences))?;
     registry.register_materializer(Arc::new(ReplayV2References))?;
     registry.register_materializer(Arc::new(SnapshotReferences))?;
+    registry.register_materializer(Arc::new(WorkspaceSnapshotReferences))?;
+    registry.register_materializer(Arc::new(VmSnapshotReferences))?;
     Ok(registry)
 }
 

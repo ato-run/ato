@@ -206,7 +206,10 @@ dependencies = [
  "ato-materializer-api",
  "ato-materializer-replay",
  "ato-materializer-snapshot",
+ "ato-materializer-vm-snapshot",
  "ato-objects",
+ "ato-player",
+ "ato-realization-planner",
  "ato-record-writer",
  "base64 0.22.1",
  "blake3",
@@ -331,6 +334,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ato-materializer-vm-snapshot"
+version = "0.1.0"
+dependencies = [
+ "ato-adapter-api",
+ "ato-computation",
+ "ato-materializer-api",
+ "ato-objects",
+ "ato-record-writer",
+ "semver",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ato-objects"
 version = "0.1.0"
 dependencies = [
@@ -355,6 +375,18 @@ dependencies = [
  "ato-adapter-api",
  "ato-computation",
  "ato-objects",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ato-realization-planner"
+version = "0.1.0"
+dependencies = [
+ "ato-adapter-api",
+ "ato-computation",
+ "ato-materializer-api",
+ "ato-objects",
+ "ato-player",
  "thiserror 2.0.18",
 ]
 
