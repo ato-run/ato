@@ -168,6 +168,7 @@ fn encode_replay(
         workspace: repository.project(),
         workspace_policy: &policy,
         realization: None,
+        contracts: &[],
     };
     Ok(materializers
         .get("ato.replay@1")?
@@ -238,6 +239,7 @@ pub(crate) fn worker(
             workspace: repository.project(),
             workspace_policy: &policy,
             realization: Some(&driver),
+            contracts: &[],
         };
         let realization = materializers
             .get("ato.replay@1")?
@@ -286,9 +288,11 @@ pub(crate) fn worker(
     enter(SupervisorState::Active);
     if let Some(realization) = &mut restored {
         realization.activate()?;
+        realization.publish()?;
     } else {
         for session in &mut sessions {
             session.activate()?;
+            session.publish()?;
         }
     }
 
@@ -527,6 +531,13 @@ impl Realization for CliRealization {
     fn activate(&mut self) -> Result<(), MaterializerError> {
         for session in &mut self.sessions {
             session.activate().map_err(materializer_operation)?;
+        }
+        Ok(())
+    }
+
+    fn publish(&mut self) -> Result<(), MaterializerError> {
+        for session in &mut self.sessions {
+            session.publish().map_err(materializer_operation)?;
         }
         Ok(())
     }
