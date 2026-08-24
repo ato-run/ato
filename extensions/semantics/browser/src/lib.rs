@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use ato_adapter_api::LiveOperation;
 use ato_adapter_browser::{BROWSER_PROTOCOL_ID, decode_event, operation_for_event};
@@ -292,7 +292,49 @@ pub struct BrowserOperationIngress<A, P, R> {
     records: R,
     operation_gate: Mutex<()>,
     pending_operation: Mutex<Option<PendingBrowserOperation>>,
+    accepted_operations: Mutex<AcceptedOperationCache>,
     next_operation_id: AtomicU64,
+}
+
+const ACCEPTED_OPERATION_CACHE_LIMIT: usize = 1024;
+
+/// Bounded live-run idempotency cache. It is deliberately operational state:
+/// operation IDs and client retries never enter the Browser residual.
+#[derive(Default)]
+struct AcceptedOperationCache {
+    by_id: BTreeMap<String, (Vec<u8>, AcceptedOperation)>,
+    insertion_order: VecDeque<String>,
+}
+
+impl AcceptedOperationCache {
+    fn get(
+        &self,
+        operation_id: &str,
+        payload: &[u8],
+    ) -> Result<Option<AcceptedOperation>, EvolutionError> {
+        let Some((known_payload, accepted)) = self.by_id.get(operation_id) else {
+            return Ok(None);
+        };
+        if known_payload != payload {
+            return Err(EvolutionError::Apply(
+                "Browser operation id was reused with a different payload".to_owned(),
+            ));
+        }
+        Ok(Some(accepted.clone()))
+    }
+
+    fn insert(&mut self, operation_id: String, payload: Vec<u8>, accepted: AcceptedOperation) {
+        if self.by_id.contains_key(&operation_id) {
+            return;
+        }
+        self.insertion_order.push_back(operation_id.clone());
+        self.by_id.insert(operation_id, (payload, accepted));
+        while self.insertion_order.len() > ACCEPTED_OPERATION_CACHE_LIMIT {
+            if let Some(expired) = self.insertion_order.pop_front() {
+                self.by_id.remove(&expired);
+            }
+        }
+    }
 }
 
 impl<A, P, R> BrowserOperationIngress<A, P, R>
@@ -316,6 +358,7 @@ where
             records,
             operation_gate: Mutex::new(()),
             pending_operation: Mutex::new(None),
+            accepted_operations: Mutex::new(AcceptedOperationCache::default()),
             next_operation_id: AtomicU64::new(0),
         }
     }
@@ -350,6 +393,14 @@ where
         }
         let payload = ato_adapter_browser::encode_event(&event)
             .map_err(|error| EvolutionError::Apply(error.to_string()))?;
+        if let Some(accepted) = self
+            .accepted_operations
+            .lock()
+            .expect("Browser accepted operation cache mutex poisoned")
+            .get(&operation_id, &payload)?
+        {
+            return Ok(accepted);
+        }
         let operation = LiveOperation {
             protocol_id: ProtocolId::parse(BROWSER_PROTOCOL_ID)
                 .expect("static Browser Protocol ID"),
@@ -360,7 +411,7 @@ where
         };
         let offer = TransitionOffer::external_input(
             self.browser_port.clone(),
-            ProtocolPayload::from(payload),
+            ProtocolPayload::from(payload.clone()),
         );
         *self
             .pending_operation
@@ -394,6 +445,12 @@ where
                 })
             },
         );
+        if let Ok(accepted) = &result {
+            self.accepted_operations
+                .lock()
+                .expect("Browser accepted operation cache mutex poisoned")
+                .insert(operation_id, payload, accepted.clone());
+        }
         if !matches!(result, Err(EvolutionError::Persist(_))) {
             *self
                 .pending_operation
@@ -434,15 +491,24 @@ where
                 record_error: None,
             });
         }
-        let record_error = self
-            .records
-            .submit(&AcceptedBrowserOperation {
-                operation_id: operation.operation_id,
-                event: operation.event,
-                transition: pending.transition,
-                run_seq: pending.run_seq,
-            })
-            .err();
+        let accepted_operation = AcceptedBrowserOperation {
+            operation_id: operation.operation_id.clone(),
+            event: operation.event.clone(),
+            transition: pending.transition.clone(),
+            run_seq: pending.run_seq,
+        };
+        let record_error = self.records.submit(&accepted_operation).err();
+        let accepted = AcceptedOperation {
+            transition: pending.transition.clone(),
+            run_seq: pending.run_seq,
+            record_error: record_error.clone(),
+        };
+        let payload = ato_adapter_browser::encode_event(&operation.event)
+            .map_err(|error| EvolutionError::Apply(error.to_string()))?;
+        self.accepted_operations
+            .lock()
+            .expect("Browser accepted operation cache mutex poisoned")
+            .insert(operation.operation_id.clone(), payload, accepted);
         *self
             .pending_operation
             .lock()
@@ -675,6 +741,40 @@ mod tests {
         assert_eq!(retry.record_error, None);
         let accepted = ingress.accept(key()).unwrap();
         assert_eq!(accepted.run_seq, 2);
+    }
+
+    #[test]
+    fn duplicate_operation_id_returns_the_first_acceptance_without_reapplying() {
+        let authority = authority();
+        let records = Records::default();
+        let submitted = Arc::clone(&records.0);
+        let ingress = BrowserOperationIngress::new(
+            authority.clone(),
+            PortId::parse("browser").unwrap(),
+            Actuator::default(),
+            Persistence::default(),
+            records,
+        );
+        let first = ingress
+            .accept_with_operation_id("op-reconnect-1".to_owned(), key())
+            .unwrap();
+        let retry = ingress
+            .accept_with_operation_id("op-reconnect-1".to_owned(), key())
+            .unwrap();
+        assert_eq!(retry, first);
+        assert_eq!(authority.current_head().run_seq, 1);
+        assert_eq!(submitted.lock().unwrap().len(), 1);
+        assert!(matches!(
+            ingress.accept_with_operation_id(
+                "op-reconnect-1".to_owned(),
+                BrowserEvent::Click {
+                    x_normalized: 0.5,
+                    y_normalized: 0.5,
+                    button: 0,
+                },
+            ),
+            Err(EvolutionError::Apply(_))
+        ));
     }
 
     #[test]
