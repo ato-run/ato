@@ -15,10 +15,7 @@ use ato_kernel::{
     ProtocolSemantics, RunEvolutionAuthority, SemanticError, SemanticHost, SemanticStep, Semantics,
     TransitionOffer,
 };
-use ato_objects::{
-    BundleError, ComputationReferences, ObjectLink, ObjectResolver, read_exact_object,
-    resolve_computation,
-};
+use ato_objects::{BundleError, ComputationReferences, ObjectLink, ObjectResolver};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -917,10 +914,10 @@ mod tests {
         assert_eq!(accepted.run_seq, 1);
         assert_ne!(accepted.transition.to, before.head);
         let next = authority.current_head();
-        let computation = resolve_computation(&*objects, &next.head).unwrap();
+        let computation = ato_objects::resolve_computation(&*objects, &next.head).unwrap();
         let residual_ref = &computation.object().residual;
         let residual = decode_residual(
-            &read_exact_object(
+            &ato_objects::read_exact_object(
                 &*objects,
                 residual_ref,
                 objects.metadata(residual_ref).unwrap().size,
