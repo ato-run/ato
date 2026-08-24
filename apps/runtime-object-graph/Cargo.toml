@@ -19,6 +19,7 @@ path = "src/bin/ato-runtime-validator.rs"
 [dependencies]
 anyhow = "1"
 ato-adapter-workspace = { path = "../../extensions/adapters/workspace", version = "0.1.0" }
+ato-browser-semantics = { path = "../../extensions/semantics/browser", version = "0.1.0" }
 ato-compose = { path = "../../lib/compose", version = "0.1.0" }
 ato-computation = { path = "../../lib/computation", version = "0.1.0" }
 ato-materializer-replay = { path = "../../extensions/materializers/replay", version = "0.1.0" }

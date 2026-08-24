@@ -9,52 +9,68 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::io;
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::io::{self, Read, Write};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail, ensure};
-use ato_adapter_api::{ActuatorProviderRegistry, AdapterRegistry, WorkspaceCapturePolicy};
-use ato_computation::{ComputationRef, ContentRef};
+use ato_adapter_api::{
+    ActuatorProviderRegistry, AdapterAttachContext, AdapterContext, AdapterInstance,
+    AdapterRegistry, AttachedAdapter, IgnoreObservations, LiveOperation, Stylus,
+    WorkspaceCapturePolicy,
+};
+use ato_adapter_browser::{
+    BROWSER_PROTOCOL_ID, BrowserAdapter, BrowserAdapterConfig, BrowserInputMode,
+    register_record_schemas as register_browser_record_schemas,
+};
+use ato_browser_host::{BrowserHost, BrowserHostConfig};
+use ato_browser_semantics::{
+    AcceptedBrowserOperation, BROWSER_COMPUTATION_SEMANTICS_ID, BrowserComputationSemantics,
+    BrowserHeadPersistence, BrowserOperationActuator, BrowserOperationIngress,
+    BrowserProtocolSemantics, BrowserRecordSubmission,
+};
+use ato_compose::{COMPOSE_SEMANTICS_ID, ComposeSemantics, decode_composite_residual};
+use ato_computation::{ComputationRef, ContentRef, PortId, ProtocolId, SemanticsId};
 use ato_contracts::{HttpEndpointVerifier, WorkspaceContentVerifier};
+use ato_kernel::{Kernel, RunEvolutionAuthority};
 use ato_materializer_api::{
-    AcceptedRealization, ContractContext, ContractVerifierRegistry, Materializer,
-    MaterializerContext, MaterializerError, MaterializerRegistry, Realization, RunnerCapabilities,
-    accept_candidate,
+    AcceptedRealization, ContractContext, ContractVerifierRegistry, MaterializerContext,
+    MaterializerError, MaterializerRegistry, Realization, accept_candidate,
 };
 use ato_materializer_vm_snapshot::{
     ActiveFirecrackerRealization, FirecrackerActiveVmCaptureSource, FirecrackerBackend,
-    FirecrackerBackendConfig, FirecrackerIngressGate, FirecrackerRecordCaptureBarrier,
-    FirecrackerRecordCaptureLease, FirecrackerSurfaceRelayConfig, VM_SNAPSHOT_MATERIALIZER_ID,
-    VmSnapshotError, VmSnapshotMaterializer, load_descriptor,
+    FirecrackerBackendConfig, FirecrackerRecordCaptureBarrier, FirecrackerRecordCaptureLease,
+    FirecrackerSurfaceRelayConfig, VM_SNAPSHOT_MATERIALIZER_ID, VmSnapshotError,
+    VmSnapshotMaterializer,
 };
-use ato_objects::{
-    GraphMaterialization, GraphRestoreCapability, ObjectResolver, ObjectStore, read_exact_object,
-};
+use ato_objects::{ObjectResolver, ObjectStore, RecordCandidate, resolve_computation};
 use ato_planner::{
     MaterializationCandidate, Placement, PlannerPolicy, RealizationPlanner, TargetEnvironment,
     TrustBoundary,
 };
-use ato_record_writer::{
-    AsyncRecordStylus, RecordPipeline, RecordSchemaRegistry, RecordWriterConfig,
-};
 use ato_runtime_object_graph::{
     GraphDownloadExpectation, ObjectGraphIndexV1, RuntimeGraphSource, ValidatedRuntimeGraph,
-    VisibilityPolicy, build_runtime_object_graph_index, download_and_validate_graph,
-    standard_reference_registry, vm_capture_refs,
+    download_and_validate_graph,
 };
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use clap::Parser;
+use hmac::{Hmac, Mac};
 use reqwest::blocking::{Client, RequestBuilder, Response};
-use reqwest::header::{HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use tungstenite::handshake::server::{
+    ErrorResponse, Request as WebSocketRequest, Response as WebSocketResponse,
+};
+use tungstenite::{Message, accept_hdr};
 
 const PORTABLE_CAPSULE_LEASE_KIND: &str = "portable_capsule_v2";
 const RUNNER_CAPABILITIES: &[&str] = &[
@@ -66,46 +82,594 @@ const RUNNER_CAPABILITIES: &[&str] = &[
 const ACTIVE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const GUEST_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const GUEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const RUN_CONTROL_PATH: &str = "/.well-known/ato/control";
+const RUN_CONTROL_MAX_FRAME_BYTES: usize = 32 * 1024;
+const RUN_CONTROL_REQUEST_HEADER_MAX_BYTES: usize = 16 * 1024;
+type HmacSha256 = Hmac<Sha256>;
 
-#[derive(Default)]
-struct IngressState {
-    frozen: AtomicBool,
-    active_connections: AtomicUsize,
+#[derive(Debug, Clone)]
+struct HostedBrowserBinding {
+    port: PortId,
+}
+
+/// Finds the single explicitly composed Browser continuation. This never
+/// injects a Port into an existing source/2048 Computation: no Browser leaf
+/// means no hosted Chrome lifecycle.
+fn hosted_browser_binding(
+    root: &ComputationRef,
+    objects: &dyn ObjectResolver,
+) -> Result<Option<HostedBrowserBinding>> {
+    let mut leaves = Vec::new();
+    collect_browser_leaves(root, objects, &mut leaves)?;
+    if leaves.is_empty() {
+        return Ok(None);
+    }
+    ensure!(
+        leaves.len() == 1,
+        "multiple Browser Computations are not supported by one Hosted Run"
+    );
+    let root = resolve_computation(objects, root)?;
+    let ports = root
+        .object()
+        .boundary
+        .iter()
+        .filter(|(_, definition)| {
+            definition.protocol.as_str() == BROWSER_PROTOCOL_ID
+                && definition.role.as_str() == "controller"
+        })
+        .map(|(port, _)| port.clone())
+        .collect::<Vec<_>>();
+    let [port] = ports.as_slice() else {
+        bail!("Browser Computation must be explicitly exported as one controller Port");
+    };
+    Ok(Some(HostedBrowserBinding { port: port.clone() }))
+}
+
+fn collect_browser_leaves(
+    reference: &ComputationRef,
+    objects: &dyn ObjectResolver,
+    leaves: &mut Vec<()>,
+) -> Result<()> {
+    let resolved = resolve_computation(objects, reference)?;
+    if resolved.object().semantics == SemanticsId::parse(BROWSER_COMPUTATION_SEMANTICS_ID)? {
+        leaves.push(());
+        return Ok(());
+    }
+    if resolved.object().semantics == SemanticsId::parse(COMPOSE_SEMANTICS_ID)? {
+        let metadata = objects.metadata(&resolved.object().residual)?;
+        let bytes = ato_objects::read_exact_object(
+            objects,
+            &resolved.object().residual,
+            metadata.size,
+            ato_compose::MAX_COMPOSITE_RESIDUAL_BYTES,
+        )?;
+        for child in decode_composite_residual(&bytes)?.nodes.values() {
+            collect_browser_leaves(child, objects, leaves)?;
+        }
+    }
+    Ok(())
+}
+
+struct AttachedBrowserActuator(Arc<Mutex<Box<dyn AttachedAdapter>>>);
+
+impl BrowserOperationActuator for AttachedBrowserActuator {
+    fn apply(&mut self, operation: &LiveOperation) -> std::result::Result<(), String> {
+        self.0
+            .lock()
+            .map_err(|_| "Browser Adapter session mutex poisoned".to_owned())?
+            .apply_operation(operation)
+            .map_err(|error| error.to_string())
+    }
 }
 
 #[derive(Clone)]
-struct WorkerIngressGate {
-    state: Arc<IngressState>,
+struct RunnerBrowserHeadPersistence {
+    api: HttpRunnerApi,
+    lease_id: String,
 }
 
-impl FirecrackerIngressGate for WorkerIngressGate {
-    fn freeze(&mut self) -> std::result::Result<(), VmSnapshotError> {
-        self.state.frozen.store(true, Ordering::Release);
+impl BrowserHeadPersistence for RunnerBrowserHeadPersistence {
+    fn persist(&self, operation: &AcceptedBrowserOperation) -> std::result::Result<(), String> {
+        let pending = ato_kernel::PendingHeadPersistence {
+            transition: operation.transition.clone(),
+            run_seq: operation.run_seq,
+        };
+        self.api
+            .persist_computation_head(&self.lease_id, &operation.operation_id, &pending)
+            .map_err(|error| error.to_string())
+    }
+}
+
+#[derive(Clone)]
+struct RunnerBrowserRecordSubmission {
+    stylus: Arc<ato_record_writer::AsyncRecordStylus>,
+    port: PortId,
+    stream: String,
+    next_local_seq: Arc<AtomicU64>,
+}
+
+impl BrowserRecordSubmission for RunnerBrowserRecordSubmission {
+    fn submit(&self, operation: &AcceptedBrowserOperation) -> std::result::Result<(), String> {
+        // `operation` contains the exact event/transition/run_seq/operation_id
+        // accepted by the authority. Record metadata stays outside semantic
+        // identity; the portable Record itself remains only the Browser action.
+        self.stylus
+            .record(RecordCandidate {
+                protocol_id: ProtocolId::parse(BROWSER_PROTOCOL_ID)
+                    .expect("static Browser Protocol ID"),
+                operation_id: ato_computation::OperationId::parse(
+                    ato_adapter_browser::operation_for_event(&operation.event),
+                )
+                .expect("static Browser operation ID"),
+                port_id: self.port.clone(),
+                payload: ato_adapter_browser::encode_event(&operation.event)
+                    .map_err(|error| error.to_string())?,
+                payload_version: 1,
+                required_features: BTreeSet::new(),
+                recorded_by: Some("ato.browser@1".to_owned()),
+                stream: self.stream.clone(),
+                local_seq: self.next_local_seq.fetch_add(1, Ordering::Relaxed) + 1,
+                caused_by: Vec::new(),
+                observed_at: OffsetDateTime::now_utc().unix_timestamp().to_string(),
+            })
+            .map_err(|error| error.to_string())
+    }
+}
+
+type HostedBrowserIngress = BrowserOperationIngress<
+    AttachedBrowserActuator,
+    RunnerBrowserHeadPersistence,
+    RunnerBrowserRecordSubmission,
+>;
+
+/// Object-safe control boundary used by the generic WebSocket server. The
+/// concrete BrowserOperationIngress remains the sole authority owner; this
+/// trait prevents the listener from depending on its Adapter/Persistence types.
+trait BrowserControlIngress: Send + Sync {
+    fn accept_control_operation(
+        &self,
+        operation_id: String,
+        event: ato_adapter_browser::BrowserEvent,
+    ) -> std::result::Result<ato_kernel::AcceptedOperation, ato_kernel::EvolutionError>;
+}
+
+impl<A, P, R> BrowserControlIngress for BrowserOperationIngress<A, P, R>
+where
+    A: BrowserOperationActuator + Send,
+    P: BrowserHeadPersistence + Send + Sync,
+    R: BrowserRecordSubmission + Send + Sync,
+{
+    fn accept_control_operation(
+        &self,
+        operation_id: String,
+        event: ato_adapter_browser::BrowserEvent,
+    ) -> std::result::Result<ato_kernel::AcceptedOperation, ato_kernel::EvolutionError> {
+        self.accept_with_operation_id(operation_id, event)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct BrowserControlCapability {
+    protocol: String,
+    port: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunControlClaims {
+    v: u8,
+    session_id: String,
+    run_id: String,
+    lease_id: String,
+    runner_id: String,
+    protocol: String,
+    port: String,
+    expires_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunControlRequest {
+    operation_id: String,
+    client_seq: u64,
+    protocol: String,
+    operation: String,
+    port: String,
+    /// Canonical `ato.browser@1` JSON. Keeping the operation payload as its
+    /// protocol encoding avoids a second, control-product schema.
+    payload: String,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum RunControlResponse {
+    Applied {
+        operation_id: String,
+        client_seq: u64,
+        run_seq: u64,
+        head_after: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        record_error: Option<String>,
+    },
+    Rejected {
+        operation_id: String,
+        client_seq: u64,
+        reason: String,
+    },
+}
+
+/// Loopback-only generic Run-control listener. The public surface mux routes
+/// only `RUN_CONTROL_PATH` here; it has no Activity/Product vocabulary and it
+/// never persists raw input events.
+struct RunControlServer {
+    address: SocketAddr,
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl RunControlServer {
+    fn start<I>(
+        ingress: Arc<I>,
+        run_id: String,
+        lease_id: String,
+        runner_id: String,
+        capability: BrowserControlCapability,
+        verification_key: String,
+    ) -> Result<Self>
+    where
+        I: BrowserControlIngress + 'static,
+    {
+        ensure!(
+            verification_key.len() >= 32,
+            "Run control verification key is too short"
+        );
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        listener.set_nonblocking(true)?;
+        let address = listener.local_addr()?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let ingress: Arc<dyn BrowserControlIngress> = ingress;
+        let thread_stop = Arc::clone(&stop);
+        let worker = thread::spawn(move || {
+            while !thread_stop.load(Ordering::Acquire) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let ingress = Arc::clone(&ingress);
+                        let run_id = run_id.clone();
+                        let lease_id = lease_id.clone();
+                        let runner_id = runner_id.clone();
+                        let capability = capability.clone();
+                        let verification_key = verification_key.clone();
+                        thread::spawn(move || {
+                            let _ = serve_run_control_connection(
+                                stream,
+                                ingress,
+                                &run_id,
+                                &lease_id,
+                                &runner_id,
+                                &capability,
+                                &verification_key,
+                            );
+                        });
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Ok(Self {
+            address,
+            stop,
+            worker: Some(worker),
+        })
+    }
+
+    fn address(&self) -> SocketAddr {
+        self.address
+    }
+}
+
+impl Drop for RunControlServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+// tungstenite fixes the HTTP rejection response type in its handshake callback.
+#[allow(clippy::result_large_err)]
+fn serve_run_control_connection(
+    stream: TcpStream,
+    ingress: Arc<dyn BrowserControlIngress>,
+    run_id: &str,
+    lease_id: &str,
+    runner_id: &str,
+    capability: &BrowserControlCapability,
+    verification_key: &str,
+) -> Result<()> {
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(Duration::from_secs(15)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(15)))?;
+    let expected_run = run_id.to_owned();
+    let expected_lease = lease_id.to_owned();
+    let expected_runner = runner_id.to_owned();
+    let expected_capability = capability.clone();
+    let verification_key = verification_key.to_owned();
+    let mut socket = accept_hdr(
+        stream,
+        move |request: &WebSocketRequest, mut response: WebSocketResponse| {
+            let requested_protocol = request
+                .headers()
+                .get("sec-websocket-protocol")
+                .and_then(|value| value.to_str().ok());
+            let credential = request
+                .headers()
+                .get("sec-websocket-protocol")
+                .and_then(|value| value.to_str().ok())
+                .and_then(run_control_credential_from_protocols);
+            let accepted = credential
+                .and_then(|credential| {
+                    verify_run_control_credential(
+                        &verification_key,
+                        credential,
+                        &expected_run,
+                        &expected_lease,
+                        &expected_runner,
+                        &expected_capability,
+                    )
+                    .ok()
+                })
+                .is_some();
+            if request.uri().path() != RUN_CONTROL_PATH || !accepted {
+                return Err(run_control_forbidden());
+            }
+            if let Some(protocol) = requested_protocol.and_then(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .find(|value| value.starts_with("ato-control."))
+            }) {
+                response.headers_mut().insert(
+                    "sec-websocket-protocol",
+                    protocol
+                        .parse()
+                        .expect("validated control subprotocol is a header value"),
+                );
+            }
+            Ok(response)
+        },
+    )
+    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    loop {
+        let message = match socket.read() {
+            Ok(message) => message,
+            Err(
+                tungstenite::Error::ConnectionClosed
+                | tungstenite::Error::AlreadyClosed
+                | tungstenite::Error::Protocol(
+                    tungstenite::error::ProtocolError::ResetWithoutClosingHandshake,
+                ),
+            ) => break,
+            Err(error) => return Err(anyhow::anyhow!(error.to_string())),
+        };
+        match message {
+            Message::Text(text) => {
+                if text.len() > RUN_CONTROL_MAX_FRAME_BYTES {
+                    socket.send(Message::Close(None))?;
+                    break;
+                }
+                let request = serde_json::from_str::<RunControlRequest>(&text);
+                let response = match request {
+                    Ok(request) => {
+                        handle_run_control_request(ingress.as_ref(), capability, &request)
+                    }
+                    Err(_) => RunControlResponse::Rejected {
+                        operation_id: String::new(),
+                        client_seq: 0,
+                        reason: "invalid_operation".to_owned(),
+                    },
+                };
+                socket.send(Message::Text(serde_json::to_string(&response)?.into()))?;
+            }
+            Message::Ping(payload) => socket.send(Message::Pong(payload))?,
+            Message::Close(_) => break,
+            Message::Binary(_) => socket.send(Message::Close(None))?,
+            Message::Pong(_) | Message::Frame(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn handle_run_control_request(
+    ingress: &dyn BrowserControlIngress,
+    capability: &BrowserControlCapability,
+    request: &RunControlRequest,
+) -> RunControlResponse {
+    if request.protocol != capability.protocol || request.port != capability.port {
+        return RunControlResponse::Rejected {
+            operation_id: request.operation_id.clone(),
+            client_seq: request.client_seq,
+            reason: "protocol_or_port_forbidden".to_owned(),
+        };
+    }
+    if request.payload.len() > RUN_CONTROL_MAX_FRAME_BYTES {
+        return RunControlResponse::Rejected {
+            operation_id: request.operation_id.clone(),
+            client_seq: request.client_seq,
+            reason: "payload_too_large".to_owned(),
+        };
+    }
+    let event = match ato_adapter_browser::decode_event(request.payload.as_bytes()) {
+        Ok(event) => event,
+        Err(_) => {
+            return RunControlResponse::Rejected {
+                operation_id: request.operation_id.clone(),
+                client_seq: request.client_seq,
+                reason: "invalid_payload".to_owned(),
+            };
+        }
+    };
+    if request.operation != ato_adapter_browser::operation_for_event(&event) {
+        return RunControlResponse::Rejected {
+            operation_id: request.operation_id.clone(),
+            client_seq: request.client_seq,
+            reason: "operation_mismatch".to_owned(),
+        };
+    }
+    match ingress.accept_control_operation(request.operation_id.clone(), event) {
+        Ok(accepted) => RunControlResponse::Applied {
+            operation_id: request.operation_id.clone(),
+            client_seq: request.client_seq,
+            run_seq: accepted.run_seq,
+            head_after: accepted.transition.to.to_string(),
+            record_error: accepted.record_error,
+        },
+        Err(_) => RunControlResponse::Rejected {
+            operation_id: request.operation_id.clone(),
+            client_seq: request.client_seq,
+            reason: "operation_rejected".to_owned(),
+        },
+    }
+}
+
+fn run_control_credential_from_protocols(protocols: &str) -> Option<&str> {
+    protocols
+        .split(',')
+        .map(str::trim)
+        .find_map(|value| value.strip_prefix("ato-control."))
+}
+
+fn verify_run_control_credential(
+    verification_key: &str,
+    credential: &str,
+    run_id: &str,
+    lease_id: &str,
+    runner_id: &str,
+    capability: &BrowserControlCapability,
+) -> Result<()> {
+    let (encoded, signature) = credential
+        .split_once('.')
+        .context("Run control credential format is invalid")?;
+    ensure!(
+        !signature.contains('.'),
+        "Run control credential format is invalid"
+    );
+    let signature =
+        hex::decode(signature).context("Run control credential signature is invalid")?;
+    let mut mac = HmacSha256::new_from_slice(verification_key.as_bytes())
+        .map_err(|_| anyhow::anyhow!("Run control verification key is invalid"))?;
+    mac.update(encoded.as_bytes());
+    mac.verify_slice(&signature)
+        .map_err(|_| anyhow::anyhow!("Run control credential signature is invalid"))?;
+    let payload = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .context("Run control credential payload is invalid")?;
+    let claims: RunControlClaims =
+        serde_json::from_slice(&payload).context("Run control credential claims are invalid")?;
+    ensure!(claims.v == 1, "Run control credential version is invalid");
+    ensure!(
+        claims.expires_at > OffsetDateTime::now_utc().unix_timestamp(),
+        "Run control credential expired"
+    );
+    ensure!(
+        claims.session_id.starts_with("rcs_"),
+        "Run control session id is invalid"
+    );
+    ensure!(
+        claims.run_id == run_id && claims.lease_id == lease_id && claims.runner_id == runner_id,
+        "Run control credential scope mismatch"
+    );
+    ensure!(
+        claims.protocol == capability.protocol && claims.port == capability.port,
+        "Run control credential capability mismatch"
+    );
+    Ok(())
+}
+
+fn run_control_forbidden() -> ErrorResponse {
+    tungstenite::http::Response::builder()
+        .status(tungstenite::http::StatusCode::FORBIDDEN)
+        .body(Some("Run control authorization failed".to_owned()))
+        .expect("static Run control rejection is valid")
+}
+
+struct HostedBrowserRuntime {
+    ingress: Arc<HostedBrowserIngress>,
+    control: Option<RunControlServer>,
+    control_capability: BrowserControlCapability,
+    adapter: Option<Arc<Mutex<Box<dyn AttachedAdapter>>>>,
+    host: Option<BrowserHost>,
+    pipeline: Option<ato_record_writer::RecordPipeline>,
+    objects: Arc<dyn ObjectStore>,
+    workspace: PathBuf,
+}
+
+impl HostedBrowserRuntime {
+    fn control_capability(&self) -> BrowserControlCapability {
+        self.control_capability.clone()
+    }
+
+    fn control_address(&self) -> SocketAddr {
+        self.control
+            .as_ref()
+            .expect("Browser runtime always owns its control listener")
+            .address()
+    }
+
+    /// Future capture coordination freezes this logical gate before it asks
+    /// the Browser Host to quiesce. No physical Browser state is captured in
+    /// P0-B.
+    fn freeze(&self) -> Result<ato_kernel::RunHeadSnapshot> {
+        self.ingress
+            .freeze()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
+    }
+
+    fn stop(mut self) -> Result<()> {
+        self.freeze()?;
+        self.cleanup()?;
         Ok(())
     }
 
-    fn quiesce(&mut self) -> std::result::Result<(), VmSnapshotError> {
-        let deadline = Instant::now() + Duration::from_secs(15);
-        while self.state.active_connections.load(Ordering::Acquire) > 0 {
-            if Instant::now() >= deadline {
-                return Err(VmSnapshotError::Backend(
-                    "interaction ingress did not quiesce before capture".to_owned(),
-                ));
-            }
-            thread::sleep(Duration::from_millis(10));
+    fn cleanup(&mut self) -> Result<()> {
+        self.control.take();
+        if let Some(adapter) = self.adapter.take() {
+            let mut adapter = adapter
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Browser Adapter session mutex poisoned"))?;
+            adapter.quiesce(&AdapterContext {
+                workspace: &self.workspace,
+                objects: self.objects.as_ref(),
+            })?;
+            adapter.detach(&AdapterContext {
+                workspace: &self.workspace,
+                objects: self.objects.as_ref(),
+            })?;
+        }
+        if let Some(host) = self.host.take() {
+            host.stop()?;
+        }
+        if let Some(pipeline) = self.pipeline.take() {
+            pipeline.shutdown()?;
         }
         Ok(())
     }
+}
 
-    fn unfreeze(&mut self) -> std::result::Result<(), VmSnapshotError> {
-        self.state.frozen.store(false, Ordering::Release);
-        Ok(())
+impl Drop for HostedBrowserRuntime {
+    fn drop(&mut self) {
+        // Error paths may bypass the normal stop request. Do not leave a
+        // private profile, bridge transport, or writer behind merely because
+        // the control-plane request which followed readiness failed.
+        let _ = self.cleanup();
     }
 }
 
 struct WorkerRecordCaptureBarrier {
     inner: ato_record_writer::CaptureBarrier,
-    calls: Arc<AtomicUsize>,
 }
 
 struct WorkerRecordCaptureLease {
@@ -123,7 +687,6 @@ impl FirecrackerRecordCaptureBarrier for WorkerRecordCaptureBarrier {
     fn pause_and_seal(
         &self,
     ) -> std::result::Result<Box<dyn FirecrackerRecordCaptureLease>, VmSnapshotError> {
-        self.calls.fetch_add(1, Ordering::AcqRel);
         let paused = self
             .inner
             .pause_and_seal()
@@ -144,10 +707,7 @@ pub fn capture_capable_firecracker_backend(
     barrier: ato_record_writer::CaptureBarrier,
     capture_root: PathBuf,
 ) -> FirecrackerBackend {
-    let barrier = Arc::new(WorkerRecordCaptureBarrier {
-        inner: barrier,
-        calls: Arc::new(AtomicUsize::new(0)),
-    });
+    let barrier = Arc::new(WorkerRecordCaptureBarrier { inner: barrier });
     let source = Arc::new(FirecrackerActiveVmCaptureSource::new(
         active,
         barrier,
@@ -194,10 +754,14 @@ pub struct WorkerConfig {
     pub tap_host_cidr: String,
     #[arg(long, env = "ATO_RUNNER_SLOT_ID", default_value = "0")]
     pub slot_id: String,
-    /// Stable execution slots owned by this single Runner process. Each slot
-    /// receives a distinct ingress port and Firecracker physical layout.
-    #[arg(long, env = "ATO_RUNNER_MAX_SLOTS", default_value_t = 2)]
-    pub max_slots: u16,
+    /// Required only by roots that explicitly compose a Browser Computation.
+    #[arg(long, env = "ATO_BROWSER_CHROME")]
+    pub browser_chrome: Option<PathBuf>,
+    /// Runner-scoped HMAC verification key for short-lived API-issued
+    /// Run-control capabilities. The control-plane root is never installed on
+    /// a Runner. Required only for Browser-aware Hosted Runs.
+    #[arg(long, env = "ATO_RUN_CONTROL_VERIFICATION_KEY", hide_env_values = true)]
+    pub run_control_verification_key: Option<String>,
     #[arg(long)]
     pub once: bool,
 }
@@ -217,40 +781,25 @@ impl ConnectedWorker {
     }
 
     pub fn run(&self) -> Result<()> {
-        let active_slots = Arc::new(AtomicUsize::new(0));
-        self.api.heartbeat(
-            &self.config,
-            active_slots.load(Ordering::Acquire) as u32,
-            self.config.max_slots,
-        )?;
-        let worker_count = if self.config.once {
-            1
-        } else {
-            usize::from(self.config.max_slots)
-        };
-        let mut slots = Vec::with_capacity(worker_count);
-        for slot_index in 0..worker_count {
-            let config = slot_config(&self.config, slot_index as u16)?;
-            let api = self.api.clone();
-            let active_slots = Arc::clone(&active_slots);
-            slots.push(thread::spawn(move || run_slot(config, api, active_slots)));
-        }
-        if self.config.once {
-            return slots
-                .pop()
-                .expect("one slot was created")
-                .join()
-                .map_err(|_| anyhow::anyhow!("Runner slot thread panicked"))?;
-        }
+        self.api.heartbeat(&self.config, 0)?;
         loop {
-            thread::sleep(ACTIVE_HEARTBEAT_INTERVAL);
-            self.api.heartbeat(
-                &self.config,
-                active_slots.load(Ordering::Acquire) as u32,
-                self.config.max_slots,
-            )?;
-            if slots.iter().any(JoinHandle::is_finished) {
-                bail!("a stable Runner slot stopped unexpectedly");
+            let claim = self.api.claim_next()?;
+            let Some(lease) = claim.lease else {
+                if self.config.once {
+                    return Ok(());
+                }
+                thread::sleep(Duration::from_secs(claim.next_poll_seconds.clamp(1, 30)));
+                self.api.heartbeat(&self.config, 0)?;
+                continue;
+            };
+            self.api.heartbeat(&self.config, 1)?;
+            if let Err(error) = self.execute_lease(&lease) {
+                let message = format!("connected Realization failed: {error:#}");
+                let _ = self.api.report_failed(&lease.id, &message);
+            }
+            self.api.heartbeat(&self.config, 0)?;
+            if self.config.once {
+                return Ok(());
             }
         }
     }
@@ -272,6 +821,15 @@ impl ConnectedWorker {
                 logical_bytes: index.logical_bytes()?,
             };
             let graph = download_and_validate_graph(&source, &expectation, &lease_root)?;
+            // The Worker owns the live logical Run head from the same immutable
+            // root that its assigned lease authorizes. No operation is wired to
+            // this authority yet: Browser composition and its registered
+            // Semantics arrive in P0-B. Keeping it alive here establishes the
+            // hosted lifecycle without inventing an authoring/hash fallback.
+            let evolution = Arc::new(initialize_hosted_run_evolution_authority(
+                &graph,
+                &lease.command.expected_root_computation_ref,
+            )?);
             let firecracker_work_root = self.config.work_root.join("fc");
             let physical = RestorePhysicalConfig {
                 firecracker_work_root: &firecracker_work_root,
@@ -280,62 +838,59 @@ impl ConnectedWorker {
                 guest_surface_target: self.config.surface_target,
                 tap_host_cidr: &self.config.tap_host_cidr,
             };
-            let mut running = restore_vm_path(graph, &lease_root, &lease.id, &physical)?;
+            let running = restore_vm_path(&graph, &lease_root, &lease.id, &physical)?;
             self.api.report_status(&lease.id, "running")?;
+
+            // An explicit Browser Computation receives one private Chrome
+            // realization. Ordinary VM-only roots take the unchanged path.
+            let mut browser = start_hosted_browser_runtime(
+                &graph,
+                lease,
+                &lease_root,
+                &lease_root.join("workspace"),
+                Arc::clone(&evolution),
+                self.api.clone(),
+                self.config.browser_chrome.as_deref(),
+                self.config.run_control_verification_key.as_deref(),
+                &self.config.runner_id,
+                &format!("http://{}/", self.config.hidden_surface_listen),
+            )?;
 
             // The externally reachable listener does not exist until the VM is
             // active, every Contract passed, and the Realization published.
-            let proxy = TcpProxy::start_with_ingress(
+            let proxy = TcpProxy::start_with_control(
                 self.config.surface_listen,
                 ProxyTarget::Tcp(self.config.hidden_surface_listen),
-                Some(Arc::clone(&running.ingress)),
+                browser.as_ref().map(|runtime| runtime.control_address()),
             )?;
             let execution_id = format!("vm:{}:{}", lease.run_id, lease.id);
+            ensure!(
+                evolution.current_head().head.as_str()
+                    == lease.command.expected_root_computation_ref,
+                "hosted evolution authority root changed before the first operation"
+            );
             self.api.report_ready(
                 &lease.id,
                 &execution_id,
                 &self.config.public_base_url,
                 ready_local_port(&self.config),
+                browser.as_ref().map(|runtime| runtime.control_capability()),
             )?;
-            let mut observed_captures = BTreeSet::new();
+            let mut last_heartbeat = Instant::now();
             loop {
                 let control = self.api.control(&lease.id)?;
                 if control.stop_requested {
+                    if let Some(browser) = browser.take() {
+                        browser.stop()?;
+                    }
                     drop(proxy);
                     running.quiesce()?;
                     self.api.report_stopped(&lease.id, &execution_id)?;
                     return Ok(());
                 }
-                if let Some(capture) = control.capture
-                    && observed_captures.insert(capture.request_id.clone())
-                {
-                    let started = Instant::now();
-                    let outcome = (|| {
-                        let point = running.capture_current_point()?;
-                        self.api.report_capture_uploading(
-                            &lease.id,
-                            &capture.request_id,
-                            started.elapsed(),
-                            point.capture_barrier_count,
-                        )?;
-                        self.api.upload_capture_graph(
-                            &lease.id,
-                            &capture,
-                            &point,
-                            running.graph.objects(),
-                        )
-                    })();
-                    if let Err(error) = outcome {
-                        let _ = self.api.report_capture_failed(
-                            &lease.id,
-                            &capture.request_id,
-                            "current_point_capture_failed",
-                        );
-                        eprintln!(
-                            "current-point capture {} failed: {:#}",
-                            capture.request_id, error
-                        );
-                    }
+                if last_heartbeat.elapsed() >= ACTIVE_HEARTBEAT_INTERVAL {
+                    self.api.heartbeat(&self.config, 1)?;
+                    last_heartbeat = Instant::now();
                 }
                 thread::sleep(Duration::from_secs(1));
             }
@@ -348,75 +903,6 @@ impl ConnectedWorker {
             (Ok(()), Err(error)) => Err(error),
         }
     }
-}
-
-fn run_slot(
-    config: WorkerConfig,
-    api: HttpRunnerApi,
-    active_slots: Arc<AtomicUsize>,
-) -> Result<()> {
-    let worker = ConnectedWorker { config, api };
-    loop {
-        let claim = worker.api.claim_next()?;
-        let Some(lease) = claim.lease else {
-            if worker.config.once {
-                return Ok(());
-            }
-            thread::sleep(Duration::from_secs(claim.next_poll_seconds.clamp(1, 30)));
-            continue;
-        };
-        let _slot_lease = ActiveSlotLease::acquire(Arc::clone(&active_slots));
-        if let Err(error) = worker.execute_lease(&lease) {
-            let message = format!("connected Realization failed: {error:#}");
-            let _ = worker.api.report_failed(&lease.id, &message);
-        }
-        if worker.config.once {
-            return Ok(());
-        }
-    }
-}
-
-struct ActiveSlotLease {
-    active_slots: Arc<AtomicUsize>,
-}
-
-impl ActiveSlotLease {
-    fn acquire(active_slots: Arc<AtomicUsize>) -> Self {
-        active_slots.fetch_add(1, Ordering::AcqRel);
-        Self { active_slots }
-    }
-}
-
-impl Drop for ActiveSlotLease {
-    fn drop(&mut self) {
-        self.active_slots.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
-fn slot_config(base: &WorkerConfig, slot_index: u16) -> Result<WorkerConfig> {
-    ensure!(
-        slot_index < base.max_slots,
-        "Runner slot index is out of range"
-    );
-    let mut config = base.clone();
-    config.surface_listen.set_port(
-        base.surface_listen
-            .port()
-            .checked_add(slot_index)
-            .context("Runner Surface port range overflow")?,
-    );
-    config.hidden_surface_listen.set_port(
-        base.hidden_surface_listen
-            .port()
-            .checked_add(slot_index)
-            .context("Runner hidden Surface port range overflow")?,
-    );
-    config.slot_id = if base.slot_id == "0" {
-        slot_index.to_string()
-    } else {
-        format!("{}-{slot_index}", base.slot_id)
-    };
-    Ok(config)
 }
 
 #[derive(Deserialize)]
@@ -479,24 +965,6 @@ fn validate_config(config: &WorkerConfig) -> Result<()> {
     ensure!(
         config.hidden_surface_listen != config.surface_listen,
         "hidden and published Surface listeners must be distinct"
-    );
-    ensure!(
-        (1..=16).contains(&config.max_slots),
-        "Runner max slots must be between 1 and 16"
-    );
-    let final_offset = config.max_slots - 1;
-    ensure!(
-        config
-            .surface_listen
-            .port()
-            .checked_add(final_offset)
-            .is_some()
-            && config
-                .hidden_surface_listen
-                .port()
-                .checked_add(final_offset)
-                .is_some(),
-        "Runner slot port range overflows"
     );
     ensure!(
         !config.tap_host_cidr.trim().is_empty() && config.tap_host_cidr.contains('/'),
@@ -583,156 +1051,203 @@ struct RestorePhysicalConfig<'a> {
     tap_host_cidr: &'a str,
 }
 
-struct RunningHostedRealization {
-    accepted: Option<AcceptedRealization>,
-    graph: ValidatedRuntimeGraph,
-    target: ComputationRef,
-    materializer: Arc<VmSnapshotMaterializer>,
-    source_descriptor: ContentRef,
-    capabilities: RunnerCapabilities,
-    workspace: PathBuf,
-    ingress: Arc<IngressState>,
-    barrier_calls: Arc<AtomicUsize>,
-    _record_stylus: Arc<AsyncRecordStylus>,
+fn initialize_hosted_run_evolution_authority(
+    graph: &ValidatedRuntimeGraph,
+    expected_root: &str,
+) -> Result<RunEvolutionAuthority> {
+    let expected = ComputationRef::parse(expected_root)?;
+    let validated = ComputationRef::parse(&graph.report().root_computation_ref)?;
+    ensure!(
+        expected == validated,
+        "validated graph root does not match the assigned lease root"
+    );
+    Ok(RunEvolutionAuthority::new(
+        hosted_evolution_kernel(Arc::new(graph.objects().clone()))?,
+        expected,
+    ))
 }
 
-impl RunningHostedRealization {
-    fn capture_current_point(&mut self) -> Result<CapturedPoint> {
-        let adapters = AdapterRegistry::default();
-        let workspace_policy = WorkspaceCapturePolicy::secure_default();
-        let base_context = MaterializerContext {
-            objects: self.graph.objects(),
-            adapters: &adapters,
-            records: &[],
-            records_v2: &[],
-            replay_anchor: None,
-            record_frontier_ref: None,
-            workspace: &self.workspace,
-            workspace_policy: &workspace_policy,
-            realization: None,
-            contracts: &[],
-            runner_capabilities: Some(&self.capabilities),
-        };
-        let contracts = self
-            .materializer
-            .contracts(&self.source_descriptor, &base_context)?;
-        let capture_context = MaterializerContext {
-            contracts: &contracts,
-            ..base_context
-        };
-        let calls_before = self.barrier_calls.load(Ordering::Acquire);
-        let descriptor = self.materializer.encode(&self.target, &capture_context)?;
-        let calls_after = self.barrier_calls.load(Ordering::Acquire);
-        ensure!(
-            calls_after == calls_before + 1,
-            "current-point capture did not cross exactly one Capture Barrier"
-        );
+/// Shared hosted registration point. Browser interaction is available only to
+/// an explicit Browser Computation/Port; registering it never mutates legacy
+/// source Computations or grants a Browser capability by itself.
+fn hosted_evolution_kernel(objects: Arc<dyn ato_objects::ObjectStore>) -> Result<Kernel> {
+    let mut kernel = Kernel::new(objects);
+    kernel.register(Arc::new(ComposeSemantics::default()))?;
+    kernel.register(Arc::new(BrowserComputationSemantics::default()))?;
+    kernel.register_protocol(Arc::new(BrowserProtocolSemantics::default()))?;
+    Ok(kernel)
+}
 
-        let mut materializations = self.graph.index().materializations.clone();
-        materializations.retain(|item| item.id != VM_SNAPSHOT_MATERIALIZER_ID);
-        materializations.push(GraphMaterialization {
-            id: VM_SNAPSHOT_MATERIALIZER_ID.to_owned(),
-            descriptor_ref: descriptor.to_string(),
-            restore_capability: GraphRestoreCapability::Supported,
-        });
-        let references = standard_reference_registry()?;
-        let index = build_runtime_object_graph_index(
-            &self.target,
-            &materializations,
-            self.graph.objects(),
-            &references,
-            VisibilityPolicy::Private,
-        )?;
-        let (verified_descriptor, frontier) = vm_capture_refs(&index, self.graph.objects())?
-            .context("captured graph omitted VM descriptor or RecordFrontier")?;
-        ensure!(
-            verified_descriptor == descriptor,
-            "captured VM descriptor changed"
-        );
-        scan_vm_capture(&verified_descriptor, self.graph.objects())?;
-        Ok(CapturedPoint {
-            index,
-            descriptor,
-            frontier,
-            capture_barrier_count: calls_after - calls_before,
-        })
+fn hosted_record_schema_registry() -> Result<ato_record_writer::RecordSchemaRegistry> {
+    let mut schemas = ato_record_writer::RecordSchemaRegistry::default();
+    register_browser_record_schemas(&mut schemas)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    Ok(schemas)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_hosted_browser_runtime(
+    graph: &ValidatedRuntimeGraph,
+    lease: &ClaimedLease,
+    lease_root: &Path,
+    workspace: &Path,
+    evolution: Arc<RunEvolutionAuthority>,
+    api: HttpRunnerApi,
+    chrome: Option<&Path>,
+    run_control_verification_key: Option<&str>,
+    runner_id: &str,
+    browser_target_url: &str,
+) -> Result<Option<HostedBrowserRuntime>> {
+    let root = ComputationRef::parse(&graph.report().root_computation_ref)?;
+    let Some(binding) = hosted_browser_binding(&root, graph.objects())? else {
+        return Ok(None);
+    };
+    let chrome = chrome.context(
+        "Browser-aware Hosted Run requires ATO_BROWSER_CHROME to name an absolute Chrome executable",
+    )?;
+    let run_control_verification_key = run_control_verification_key
+        .context("Browser-aware Hosted Run requires ATO_RUN_CONTROL_VERIFICATION_KEY")?;
+    let browser_target_url = url::Url::parse(browser_target_url)
+        .context("Hosted Browser document endpoint is invalid")?;
+    ensure!(
+        matches!(browser_target_url.scheme(), "http" | "https")
+            && browser_target_url.username().is_empty()
+            && browser_target_url.password().is_none(),
+        "Hosted Browser document endpoint must be credential-free HTTP(S)"
+    );
+    let browser_origin = browser_target_url.origin().ascii_serialization();
+    ensure!(
+        chrome.is_absolute() && chrome.is_file(),
+        "Browser-aware Hosted Run requires ATO_BROWSER_CHROME to name an absolute Chrome executable"
+    );
+    let records_root = lease_root.join("records");
+    let pipeline = ato_record_writer::RecordPipeline::start(
+        ato_record_writer::RecordWriterConfig::at(&records_root, &lease.run_id),
+        Arc::new(graph.objects().clone()),
+        hosted_record_schema_registry()?,
+    )?;
+    let mut registry = AdapterRegistry::default();
+    registry.register(Arc::new(BrowserAdapter))?;
+    let instance = AdapterInstance {
+        instance_id: "hosted.browser".to_owned(),
+        adapter_id: ato_adapter_browser::BROWSER_ADAPTER_ID.to_owned(),
+        config: serde_json::to_value(BrowserAdapterConfig {
+            port_id: binding.port.to_string(),
+            expected_origin: browser_origin.clone(),
+            allowed_non_text_codes: BTreeSet::new(),
+            input_mode: BrowserInputMode::ApplyOnly,
+        })?,
+    };
+    let mut attached = registry.attach_all(
+        &[instance],
+        &AdapterAttachContext {
+            runtime: AdapterContext {
+                workspace,
+                objects: graph.objects(),
+            },
+            stylus: pipeline.stylus.clone(),
+            observations: Arc::new(IgnoreObservations),
+        },
+    )?;
+    let adapter = Arc::new(Mutex::new(
+        attached.pop().context("Browser Adapter did not attach")?,
+    ));
+    ensure!(
+        attached.is_empty(),
+        "unexpected additional Browser Adapter session"
+    );
+    let host_root = lease_root.join("browser");
+    fs::create_dir_all(&host_root)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&host_root, fs::Permissions::from_mode(0o700))?;
     }
-
-    fn quiesce(mut self) -> Result<()> {
-        self.accepted
-            .take()
-            .context("hosted Realization already stopped")?
-            .quiesce()
-            .map_err(Into::into)
-    }
-}
-
-struct CapturedPoint {
-    index: ObjectGraphIndexV1,
-    descriptor: ContentRef,
-    frontier: ContentRef,
-    capture_barrier_count: usize,
-}
-
-fn scan_vm_capture(descriptor_ref: &ContentRef, objects: &dyn ObjectResolver) -> Result<()> {
-    const SCAN_PATTERNS: &[&[u8]] = &[
-        b"-----begin private key",
-        b"authorization: bearer",
-        b"cloudflare_api_token",
-        b"cf_api_token",
-        b"ato_runner_token",
-        b"aws_access_key_id",
-        b"aws_secret_access_key",
-        b"x-api-key:",
-        b"set-cookie:",
-        b"session_token",
-        b"sessionid=",
-        b"user_notes",
-        b"notes.db",
-    ];
-    let descriptor = load_descriptor(descriptor_ref, objects)?;
-    let overlap = SCAN_PATTERNS
-        .iter()
-        .map(|pattern| pattern.len())
-        .max()
-        .unwrap_or(1)
-        .saturating_sub(1);
-    for artifact in descriptor.artifacts {
-        let mut tail = Vec::new();
-        for chunk in artifact.chunks {
-            let reference = ContentRef::parse(&chunk.content_ref)?;
-            let bytes = read_exact_object(objects, &reference, chunk.size, 64 * 1024 * 1024)?;
-            let mut window = Vec::with_capacity(tail.len() + bytes.len());
-            window.extend_from_slice(&tail);
-            window.extend(bytes.iter().map(u8::to_ascii_lowercase));
-            if SCAN_PATTERNS.iter().any(|pattern| {
-                window
-                    .windows(pattern.len())
-                    .any(|candidate| candidate == *pattern)
-            }) {
-                bail!(
-                    "new VM artifact failed bounded private-data scan ({:?})",
-                    artifact.role
-                );
+    let bootstrap_path = ato_adapter_browser::runtime_discovery_path(workspace, "hosted.browser");
+    let host = match BrowserHost::start(BrowserHostConfig {
+        runtime_dir: host_root,
+        bootstrap_path,
+        target_url: browser_target_url.to_string(),
+        chrome: chrome.to_owned(),
+        headless: true,
+    }) {
+        Ok(host) => host,
+        Err(error) => {
+            if let Ok(mut adapter) = adapter.lock() {
+                let context = AdapterContext {
+                    workspace,
+                    objects: graph.objects(),
+                };
+                let _ = adapter.detach(&context);
             }
-            let keep = overlap.min(window.len());
-            tail.clear();
-            tail.extend_from_slice(&window[window.len() - keep..]);
+            drop(adapter);
+            let _ = pipeline.shutdown();
+            return Err(error);
         }
-    }
-    Ok(())
+    };
+    let ingress = Arc::new(BrowserOperationIngress::new(
+        evolution,
+        binding.port.clone(),
+        AttachedBrowserActuator(Arc::clone(&adapter)),
+        RunnerBrowserHeadPersistence {
+            api,
+            lease_id: lease.id.clone(),
+        },
+        RunnerBrowserRecordSubmission {
+            stylus: pipeline.stylus.clone(),
+            port: binding.port.clone(),
+            stream: format!("browser-{}", lease.id),
+            next_local_seq: Arc::new(AtomicU64::new(0)),
+        },
+    ));
+    let control_capability = BrowserControlCapability {
+        protocol: BROWSER_PROTOCOL_ID.to_owned(),
+        port: binding.port.to_string(),
+    };
+    let control = match RunControlServer::start(
+        Arc::clone(&ingress),
+        lease.run_id.clone(),
+        lease.id.clone(),
+        runner_id.to_owned(),
+        control_capability.clone(),
+        run_control_verification_key.to_owned(),
+    ) {
+        Ok(control) => control,
+        Err(error) => {
+            if let Ok(mut adapter) = adapter.lock() {
+                let context = AdapterContext {
+                    workspace,
+                    objects: graph.objects(),
+                };
+                let _ = adapter.detach(&context);
+            }
+            drop(adapter);
+            let _ = host.stop();
+            let _ = pipeline.shutdown();
+            return Err(error);
+        }
+    };
+    Ok(Some(HostedBrowserRuntime {
+        ingress,
+        control: Some(control),
+        control_capability,
+        adapter: Some(adapter),
+        host: Some(host),
+        pipeline: Some(pipeline),
+        objects: Arc::new(graph.objects().clone()),
+        workspace: workspace.to_owned(),
+    }))
 }
 
 fn restore_vm_path(
-    graph: ValidatedRuntimeGraph,
+    graph: &ValidatedRuntimeGraph,
     lease_root: &Path,
     lease_id: &str,
     physical: &RestorePhysicalConfig<'_>,
-) -> Result<RunningHostedRealization> {
+) -> Result<AcceptedRealization> {
     let root = ComputationRef::parse(&graph.report().root_computation_ref)?;
     let workspace = lease_root.join("workspace");
     fs::create_dir_all(&workspace)?;
-    let adapters = AdapterRegistry::default();
     let workspace_policy = WorkspaceCapturePolicy::secure_default();
     let backend_config = FirecrackerBackendConfig {
         // Firecracker's API/vsock Unix socket paths are bounded by SUN_LEN.
@@ -748,30 +1263,7 @@ fn restore_vm_path(
         tap_host_cidr: Some(physical.tap_host_cidr.to_owned()),
         ..FirecrackerBackendConfig::default()
     };
-    let graph_objects = Arc::new(graph.objects().clone());
-    let RecordPipeline {
-        stylus,
-        barrier,
-        published: _,
-    } = RecordPipeline::start(
-        RecordWriterConfig::at(lease_root.join("records"), safe_component(lease_id)),
-        Arc::clone(&graph_objects) as Arc<dyn ObjectStore>,
-        RecordSchemaRegistry::default(),
-    )?;
-    let barrier_calls = Arc::new(AtomicUsize::new(0));
-    let capture_barrier = Arc::new(WorkerRecordCaptureBarrier {
-        inner: barrier,
-        calls: Arc::clone(&barrier_calls),
-    });
-    let ingress = Arc::new(IngressState::default());
-    let backend = Arc::new(FirecrackerBackend::with_restored_capture(
-        backend_config,
-        capture_barrier,
-        lease_root.join("captures"),
-        Box::new(WorkerIngressGate {
-            state: Arc::clone(&ingress),
-        }),
-    ));
+    let backend = Arc::new(FirecrackerBackend::new(backend_config));
     let capabilities = backend.probe();
     ensure!(
         capabilities.backends.contains("firecracker"),
@@ -779,18 +1271,17 @@ fn restore_vm_path(
     );
 
     let mut materializers = MaterializerRegistry::default();
-    let vm_materializer = Arc::new(VmSnapshotMaterializer::new(
+    materializers.register(Arc::new(VmSnapshotMaterializer::new(
         backend,
         Arc::new(FrontierVerifier),
-    ));
-    materializers.register(vm_materializer.clone())?;
+    )))?;
     let actuator_providers = ActuatorProviderRegistry::default();
     let mut contract_verifiers = ContractVerifierRegistry::default();
     contract_verifiers.register(Arc::new(HttpEndpointVerifier))?;
     contract_verifiers.register(Arc::new(WorkspaceContentVerifier))?;
     let context = MaterializerContext {
         objects: graph.objects(),
-        adapters: &adapters,
+        adapters: &AdapterRegistry::default(),
         records: &[],
         records_v2: &[],
         replay_anchor: None,
@@ -867,25 +1358,13 @@ fn restore_vm_path(
         objects: graph.objects(),
         workspace: &workspace,
     };
-    let source_descriptor = selected.descriptor_ref.clone();
-    let accepted = accept_candidate(
+    accept_candidate(
         realization,
         &contracts,
         &contract_verifiers,
         &contract_context,
-    )?;
-    Ok(RunningHostedRealization {
-        accepted: Some(accepted),
-        graph,
-        target: root,
-        materializer: vm_materializer,
-        source_descriptor,
-        capabilities,
-        workspace,
-        ingress,
-        barrier_calls,
-        _record_stylus: stylus,
-    })
+    )
+    .map_err(Into::into)
 }
 
 struct SurfaceGatewayRealization {
@@ -968,13 +1447,6 @@ struct PortableLeaseCommand {
 #[derive(Debug, Deserialize)]
 struct ControlResponse {
     stop_requested: bool,
-    capture: Option<CaptureInstruction>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct CaptureInstruction {
-    request_id: String,
-    prepare_url: String,
 }
 
 #[derive(Serialize)]
@@ -982,27 +1454,27 @@ struct StatusReport<'a> {
     status: &'a str,
 }
 
-#[derive(Debug, Deserialize)]
-struct CaptureGraphResponse {
-    graph_id: String,
-    root_computation_ref: String,
-    bundle_index_digest: String,
-    status: String,
-    object_count: usize,
-    logical_bytes: u64,
-    bundle_id: Option<String>,
-    rejection_code: Option<String>,
-    #[serde(default)]
-    uploads: Vec<CaptureUploadInstruction>,
+#[derive(Serialize)]
+struct ComputationHeadReport<'a> {
+    operation_id: &'a str,
+    run_seq: u64,
+    head_before: &'a str,
+    head_after: &'a str,
 }
 
-#[derive(Debug, Deserialize)]
-struct CaptureUploadInstruction {
-    content_ref: String,
-    size_bytes: u64,
-    upload_url: String,
-    upload_direct: bool,
-    upload_headers: std::collections::BTreeMap<String, String>,
+#[derive(Serialize)]
+struct BrowserControlReport<'a> {
+    protocol: &'a str,
+    port: &'a str,
+}
+
+#[derive(Serialize)]
+struct ReadyReport<'a> {
+    execution_id: &'a str,
+    ready_url: &'a str,
+    local_port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    control: Option<BrowserControlReport<'a>>,
 }
 
 #[derive(Clone)]
@@ -1027,7 +1499,7 @@ impl HttpRunnerApi {
         request.bearer_auth(&self.token)
     }
 
-    fn heartbeat(&self, config: &WorkerConfig, active_slots: u32, max_slots: u16) -> Result<()> {
+    fn heartbeat(&self, config: &WorkerConfig, active_slots: u32) -> Result<()> {
         self.authorized(self.client.post(format!(
             "{}/v1/runners/{}/heartbeat",
             self.base, self.runner_id
@@ -1043,7 +1515,7 @@ impl HttpRunnerApi {
             "public_base_url": config.public_base_url,
             "os": std::env::consts::OS,
             "arch": std::env::consts::ARCH,
-            "max_slots": max_slots,
+            "max_slots": 1,
             "active_slots": active_slots,
             "agent_version": env!("CARGO_PKG_VERSION"),
         }))
@@ -1094,16 +1566,42 @@ impl HttpRunnerApi {
         execution_id: &str,
         ready_url: &str,
         local_port: u16,
+        control: Option<BrowserControlCapability>,
     ) -> Result<()> {
         self.authorized(
             self.client
                 .post(format!("{}/v1/runner-leases/{lease_id}/ready", self.base)),
         )
-        .json(&serde_json::json!({
-            "execution_id": execution_id,
-            "ready_url": ready_url,
-            "local_port": local_port,
-        }))
+        .json(&ReadyReport {
+            execution_id,
+            ready_url,
+            local_port,
+            control: control.as_ref().map(|capability| BrowserControlReport {
+                protocol: &capability.protocol,
+                port: &capability.port,
+            }),
+        })
+        .send()?
+        .error_for_status()?;
+        Ok(())
+    }
+
+    pub fn persist_computation_head(
+        &self,
+        lease_id: &str,
+        operation_id: &str,
+        pending: &ato_kernel::PendingHeadPersistence,
+    ) -> Result<()> {
+        self.authorized(self.client.post(format!(
+            "{}/v1/runner-leases/{lease_id}/computation-head",
+            self.base
+        )))
+        .json(&ComputationHeadReport {
+            operation_id,
+            run_seq: pending.run_seq,
+            head_before: pending.transition.from.as_str(),
+            head_after: pending.transition.to.as_str(),
+        })
         .send()?
         .error_for_status()?;
         Ok(())
@@ -1118,158 +1616,6 @@ impl HttpRunnerApi {
             .send()?
             .error_for_status()?
             .json()?)
-    }
-
-    fn report_capture_uploading(
-        &self,
-        lease_id: &str,
-        capture_id: &str,
-        capture_elapsed: Duration,
-        barrier_count: usize,
-    ) -> Result<()> {
-        ensure!(
-            barrier_count == 1,
-            "capture crossed an invalid barrier count"
-        );
-        self.authorized(self.client.post(format!(
-            "{}/v1/runner-leases/{lease_id}/captures/{capture_id}/status",
-            self.base
-        )))
-        .json(&serde_json::json!({
-            "status": "uploading",
-            "capture_ms": capture_elapsed.as_millis().min(u128::from(u32::MAX)) as u32,
-            "capture_barrier_count": 1,
-        }))
-        .send()?
-        .error_for_status()?;
-        Ok(())
-    }
-
-    fn report_capture_failed(
-        &self,
-        lease_id: &str,
-        capture_id: &str,
-        error_code: &str,
-    ) -> Result<()> {
-        self.authorized(self.client.post(format!(
-            "{}/v1/runner-leases/{lease_id}/captures/{capture_id}/status",
-            self.base
-        )))
-        .json(&serde_json::json!({
-            "status": "failed",
-            "error_code": error_code,
-        }))
-        .send()?
-        .error_for_status()?;
-        Ok(())
-    }
-
-    fn upload_capture_graph(
-        &self,
-        lease_id: &str,
-        instruction: &CaptureInstruction,
-        point: &CapturedPoint,
-        objects: &dyn ObjectResolver,
-    ) -> Result<()> {
-        let expected_prepare = format!(
-            "/v1/runner-leases/{lease_id}/captures/{}/object-graph/prepare",
-            instruction.request_id
-        );
-        ensure!(
-            instruction.prepare_url == expected_prepare,
-            "capture prepare route is not bound to the claimed lease"
-        );
-        let graph_base = instruction
-            .prepare_url
-            .strip_suffix("/prepare")
-            .context("capture prepare route is malformed")?;
-        let index_digest = point.index.digest()?;
-        let prepare = self
-            .authorized(
-                self.client
-                    .post(format!("{}{}", self.base, instruction.prepare_url)),
-            )
-            .json(&serde_json::json!({
-                "idempotency_key": instruction.request_id,
-                "index_digest": index_digest,
-                "index": point.index,
-            }))
-            .send()?
-            .error_for_status()?
-            .json::<CaptureGraphResponse>()?;
-        ensure_capture_graph_response(&prepare, point, &index_digest)?;
-
-        if prepare.status == "uploading" {
-            let expected = point
-                .index
-                .objects
-                .iter()
-                .map(|object| (object.content_ref.as_str(), object.size_bytes))
-                .collect::<std::collections::BTreeMap<_, _>>();
-            let actual = prepare
-                .uploads
-                .iter()
-                .map(|upload| (upload.content_ref.as_str(), upload.size_bytes))
-                .collect::<std::collections::BTreeMap<_, _>>();
-            ensure!(expected == actual, "capture upload closure mismatch");
-            for upload in &prepare.uploads {
-                let reference = ContentRef::parse(&upload.content_ref)?;
-                let bytes =
-                    read_exact_object(objects, &reference, upload.size_bytes, 64 * 1024 * 1024)?;
-                let upload_url = if upload.upload_url.starts_with('/') {
-                    format!("{}{}", self.base, upload.upload_url)
-                } else {
-                    upload.upload_url.clone()
-                };
-                let mut request = self.client.put(upload_url).body(bytes);
-                for (name, value) in &upload.upload_headers {
-                    let name = HeaderName::from_bytes(name.to_ascii_lowercase().as_bytes())?;
-                    let value = HeaderValue::from_str(value)?;
-                    request = request.header(name, value);
-                }
-                if !upload.upload_direct || upload.upload_url.starts_with('/') {
-                    request = self.authorized(request);
-                }
-                request.send()?.error_for_status()?;
-            }
-        }
-
-        let mut status = if prepare.status == "ready" {
-            prepare
-        } else {
-            self.authorized(
-                self.client
-                    .post(format!("{}{graph_base}/finalize", self.base)),
-            )
-            .send()?
-            .error_for_status()?
-            .json::<CaptureGraphResponse>()?
-        };
-        for _ in 0..300 {
-            ensure_capture_graph_response(&status, point, &index_digest)?;
-            match status.status.as_str() {
-                "ready" => {
-                    ensure!(status.bundle_id.is_some(), "ready capture omitted Bundle");
-                    eprintln!(
-                        "current-point capture ready: request={} graph={} descriptor={} frontier={}",
-                        instruction.request_id, status.graph_id, point.descriptor, point.frontier
-                    );
-                    return Ok(());
-                }
-                "rejected" | "failed" => bail!(
-                    "capture graph validation rejected ({:?})",
-                    status.rejection_code
-                ),
-                "validating" => thread::sleep(Duration::from_secs(2)),
-                other => bail!("capture graph entered unexpected state `{other}`"),
-            }
-            status = self
-                .authorized(self.client.get(format!("{}{}", self.base, graph_base)))
-                .send()?
-                .error_for_status()?
-                .json::<CaptureGraphResponse>()?;
-        }
-        bail!("capture graph validation timed out")
     }
 
     fn report_stopped(&self, lease_id: &str, execution_id: &str) -> Result<()> {
@@ -1293,31 +1639,6 @@ impl HttpRunnerApi {
             &lease.command.expected_root_computation_ref,
         )
     }
-}
-
-fn ensure_capture_graph_response(
-    response: &CaptureGraphResponse,
-    point: &CapturedPoint,
-    index_digest: &str,
-) -> Result<()> {
-    ensure!(
-        response.root_computation_ref == point.index.root_computation_ref,
-        "capture graph root mismatch"
-    );
-    ensure!(
-        response.bundle_index_digest == index_digest,
-        "capture graph index mismatch"
-    );
-    ensure!(
-        response.object_count == point.index.objects.len(),
-        "capture graph object count mismatch"
-    );
-    ensure!(
-        response.logical_bytes == point.index.logical_bytes()?,
-        "capture graph byte count mismatch"
-    );
-    ensure!(!response.graph_id.is_empty(), "capture graph id is empty");
-    Ok(())
 }
 
 fn truncate(value: &str, max: usize) -> String {
@@ -1460,13 +1781,16 @@ enum ProxyTarget {
 
 impl TcpProxy {
     fn start(listen: SocketAddr, target: ProxyTarget) -> Result<Self> {
-        Self::start_with_ingress(listen, target, None)
+        Self::start_with_control(listen, target, None)
     }
 
-    fn start_with_ingress(
+    /// The Browser control listener is intentionally not a second public
+    /// socket. A bounded request prelude routes its one exact WebSocket path;
+    /// every other request keeps the existing VM Surface proxy unchanged.
+    fn start_with_control(
         listen: SocketAddr,
         target: ProxyTarget,
-        ingress: Option<Arc<IngressState>>,
+        control_target: Option<SocketAddr>,
     ) -> Result<Self> {
         let listener = TcpListener::bind(listen)?;
         listener.set_nonblocking(true)?;
@@ -1476,24 +1800,13 @@ impl TcpProxy {
             while !thread_stop.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((client, _)) => {
-                        let connection = match ingress.as_ref() {
-                            Some(state) if state.frozen.load(Ordering::Acquire) => continue,
-                            Some(state) => {
-                                state.active_connections.fetch_add(1, Ordering::AcqRel);
-                                if state.frozen.load(Ordering::Acquire) {
-                                    state.active_connections.fetch_sub(1, Ordering::AcqRel);
-                                    continue;
-                                }
-                                Some(ConnectionLease {
-                                    state: Arc::clone(state),
-                                })
-                            }
-                            None => None,
-                        };
                         let target = target.clone();
                         thread::spawn(move || {
-                            let _connection = connection;
-                            proxy_connection(client, &target);
+                            if let Some(control_target) = control_target {
+                                proxy_surface_or_control(client, &target, control_target);
+                            } else {
+                                proxy_connection(client, &target);
+                            }
                         });
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -1510,16 +1823,6 @@ impl TcpProxy {
     }
 }
 
-struct ConnectionLease {
-    state: Arc<IngressState>,
-}
-
-impl Drop for ConnectionLease {
-    fn drop(&mut self) {
-        self.state.active_connections.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
 impl Drop for TcpProxy {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
@@ -1530,20 +1833,80 @@ impl Drop for TcpProxy {
 }
 
 fn proxy_connection(mut client: TcpStream, target: &ProxyTarget) {
+    proxy_connection_with_prelude(&mut client, target, &[]);
+}
+
+fn proxy_surface_or_control(
+    mut client: TcpStream,
+    surface_target: &ProxyTarget,
+    control_target: SocketAddr,
+) {
+    let Ok(prelude) = read_http_request_prelude(&mut client) else {
+        return;
+    };
+    let target = if control_request_path(&prelude) == Some(RUN_CONTROL_PATH) {
+        ProxyTarget::Tcp(control_target)
+    } else {
+        surface_target.clone()
+    };
+    proxy_connection_with_prelude(&mut client, &target, &prelude);
+}
+
+fn read_http_request_prelude(client: &mut TcpStream) -> io::Result<Vec<u8>> {
+    client.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let mut bytes = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 1024];
+    while bytes.len() < RUN_CONTROL_REQUEST_HEADER_MAX_BYTES {
+        let read = client.read(&mut chunk)?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "HTTP request ended before headers",
+            ));
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+        if bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+            client.set_read_timeout(None)?;
+            return Ok(bytes);
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "HTTP request headers exceed bound",
+    ))
+}
+
+fn control_request_path(prelude: &[u8]) -> Option<&str> {
+    let headers = std::str::from_utf8(prelude).ok()?;
+    let request = headers.lines().next()?;
+    let mut fields = request.split_whitespace();
+    let method = fields.next()?;
+    let target = fields.next()?;
+    if method != "GET" || !target.starts_with('/') {
+        return None;
+    }
+    Some(target.split('?').next().unwrap_or(target))
+}
+
+fn proxy_connection_with_prelude(client: &mut TcpStream, target: &ProxyTarget, prelude: &[u8]) {
     match target {
         ProxyTarget::Tcp(target) => {
-            let Ok(upstream) = TcpStream::connect(target) else {
+            let Ok(mut upstream) = TcpStream::connect(target) else {
                 return;
             };
-            proxy_tcp_pair(&mut client, upstream);
+            if upstream.write_all(prelude).is_ok() {
+                proxy_tcp_pair(client, upstream);
+            }
         }
         ProxyTarget::Unix(path) => {
             #[cfg(unix)]
             {
-                let Ok(upstream) = UnixStream::connect(path) else {
+                let Ok(mut upstream) = UnixStream::connect(path) else {
                     return;
                 };
-                proxy_tcp_unix_pair(&mut client, upstream);
+                if upstream.write_all(prelude).is_ok() {
+                    proxy_tcp_unix_pair(client, upstream);
+                }
             }
             #[cfg(not(unix))]
             let _ = path;
@@ -1668,6 +2031,351 @@ mod tests {
     use std::io::{Read, Write};
 
     use super::*;
+    use tungstenite::client::IntoClientRequest;
+
+    #[derive(Default)]
+    struct TestStylus;
+
+    impl Stylus for TestStylus {
+        fn record(&self, _candidate: RecordCandidate) -> Result<(), ato_adapter_api::AdapterError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct TestPersistence;
+
+    impl BrowserHeadPersistence for TestPersistence {
+        fn persist(
+            &self,
+            _operation: &AcceptedBrowserOperation,
+        ) -> std::result::Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct TestRecords(Arc<Mutex<Vec<AcceptedBrowserOperation>>>);
+
+    impl BrowserRecordSubmission for TestRecords {
+        fn submit(&self, operation: &AcceptedBrowserOperation) -> std::result::Result<(), String> {
+            self.0.lock().unwrap().push(operation.clone());
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct TestBrowserActuator;
+
+    impl BrowserOperationActuator for TestBrowserActuator {
+        fn apply(&mut self, _operation: &LiveOperation) -> std::result::Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn control_credential(
+        verification_key: &str,
+        run_id: &str,
+        lease_id: &str,
+        runner_id: &str,
+        capability: &BrowserControlCapability,
+    ) -> String {
+        let claims = serde_json::json!({
+            "v": 1,
+            "session_id": "rcs_test",
+            "run_id": run_id,
+            "lease_id": lease_id,
+            "runner_id": runner_id,
+            "protocol": capability.protocol,
+            "port": capability.port,
+            "expires_at": OffsetDateTime::now_utc().unix_timestamp() + 60,
+        });
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
+        let mut mac = HmacSha256::new_from_slice(verification_key.as_bytes()).unwrap();
+        mac.update(encoded.as_bytes());
+        format!("{encoded}.{}", hex::encode(mac.finalize().into_bytes()))
+    }
+
+    #[test]
+    fn control_websocket_is_idempotent_and_routes_only_through_ingress() {
+        let capability = BrowserControlCapability {
+            protocol: BROWSER_PROTOCOL_ID.to_owned(),
+            port: "browser".to_owned(),
+        };
+        let secret = "s".repeat(32);
+        let records = TestRecords::default();
+        let submitted = Arc::clone(&records.0);
+        let ingress = Arc::new(BrowserOperationIngress::new(
+            browser_authority(),
+            PortId::parse("browser").unwrap(),
+            TestBrowserActuator,
+            TestPersistence,
+            records,
+        ));
+        let control = RunControlServer::start(
+            Arc::clone(&ingress),
+            "run_1".to_owned(),
+            "lease_1".to_owned(),
+            "runner_1".to_owned(),
+            capability.clone(),
+            secret.clone(),
+        )
+        .unwrap();
+        let credential = control_credential(&secret, "run_1", "lease_1", "runner_1", &capability);
+        let mut request = format!("ws://{}/{}", control.address(), &RUN_CONTROL_PATH[1..])
+            .into_client_request()
+            .unwrap();
+        request.headers_mut().insert(
+            "sec-websocket-protocol",
+            format!("ato-control.{credential}").parse().unwrap(),
+        );
+        let (mut socket, _) = tungstenite::connect(request).unwrap();
+        let event = ato_adapter_browser::BrowserEvent::Keyboard {
+            kind: ato_adapter_browser::KeyboardKind::KeyDown,
+            code: "ArrowRight".to_owned(),
+            modifiers: ato_adapter_browser::Modifiers::default(),
+        };
+        let request = serde_json::json!({
+            "operation_id": "op_1",
+            "client_seq": 1,
+            "protocol": BROWSER_PROTOCOL_ID,
+            "operation": "keyboard",
+            "port": "browser",
+            "payload": String::from_utf8(ato_adapter_browser::encode_event(&event).unwrap()).unwrap(),
+        });
+        socket
+            .send(Message::Text(request.to_string().into()))
+            .unwrap();
+        let first: serde_json::Value =
+            serde_json::from_str(socket.read().unwrap().into_text().unwrap().as_str()).unwrap();
+        assert_eq!(first["status"], "applied");
+        assert_eq!(first["run_seq"], 1);
+        socket
+            .send(Message::Text(request.to_string().into()))
+            .unwrap();
+        let retry: serde_json::Value =
+            serde_json::from_str(socket.read().unwrap().into_text().unwrap().as_str()).unwrap();
+        assert_eq!(retry["status"], "applied");
+        assert_eq!(retry["run_seq"], 1);
+        assert_eq!(ingress.freeze().unwrap().run_seq, 1);
+        assert_eq!(submitted.lock().unwrap().len(), 1);
+        drop(socket);
+        drop(control);
+    }
+
+    #[test]
+    fn control_credential_is_rejected_by_a_different_runner() {
+        let capability = BrowserControlCapability {
+            protocol: BROWSER_PROTOCOL_ID.to_owned(),
+            port: "browser".to_owned(),
+        };
+        let verification_key = "v".repeat(32);
+        let credential = control_credential(
+            &verification_key,
+            "run_1",
+            "lease_1",
+            "runner_a",
+            &capability,
+        );
+        assert!(
+            verify_run_control_credential(
+                &verification_key,
+                &credential,
+                "run_1",
+                "lease_1",
+                "runner_b",
+                &capability,
+            )
+            .is_err()
+        );
+    }
+
+    fn browser_authority() -> Arc<RunEvolutionAuthority> {
+        let objects = Arc::new(ato_objects::MemoryObjectStore::default());
+        let mut kernel = Kernel::new(objects.clone());
+        kernel
+            .register(Arc::new(BrowserComputationSemantics::default()))
+            .unwrap();
+        kernel
+            .register_protocol(Arc::new(BrowserProtocolSemantics::default()))
+            .unwrap();
+        let residual = objects
+            .put(
+                &ato_browser_semantics::encode_residual(
+                    &ato_browser_semantics::BrowserResidualV1 {
+                        version: 1,
+                        interaction_frontier: None,
+                        checkpoint_state_ref: None,
+                    },
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let root = kernel
+            .seal(&ato_computation::ComputationObject {
+                semantics: SemanticsId::parse(BROWSER_COMPUTATION_SEMANTICS_ID).unwrap(),
+                boundary: ato_computation::Boundary::from([(
+                    PortId::parse("browser").unwrap(),
+                    ato_computation::PortDef {
+                        protocol: ProtocolId::parse(BROWSER_PROTOCOL_ID).unwrap(),
+                        role: ato_computation::RoleId::parse("controller").unwrap(),
+                    },
+                )]),
+                residual,
+            })
+            .unwrap();
+        Arc::new(RunEvolutionAuthority::new(kernel, root))
+    }
+
+    fn e2e_chrome() -> PathBuf {
+        std::env::var_os("ATO_BROWSER_E2E_CHROME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_file())
+            .or_else(|| {
+                [
+                    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                    "/usr/bin/google-chrome",
+                    "/usr/bin/chromium",
+                    "/usr/bin/chromium-browser",
+                ]
+                .into_iter()
+                .map(PathBuf::from)
+                .find(|path| path.is_file())
+            })
+            .expect("P0-B Browser E2E requires Chrome; set ATO_BROWSER_E2E_CHROME")
+    }
+
+    fn counter_server() -> (SocketAddr, Arc<AtomicBool>, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::clone(&stop);
+        let thread = thread::spawn(move || {
+            const PAGE: &str = "<!doctype html><button id='button' style='width:100vw;height:100vh'>counter</button><output id='counter'>0</output><script>let n=0;const inc=()=>document.querySelector('#counter').textContent=String(++n);document.addEventListener('keydown',e=>{if(e.code==='ArrowRight')inc()});document.addEventListener('click',inc)</script>";
+            while !stopped.load(Ordering::Acquire) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut request = [0_u8; 1024];
+                        let _ = stream.read(&mut request);
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            PAGE.len(),
+                            PAGE
+                        );
+                        let _ = stream.write_all(response.as_bytes());
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10))
+                    }
+                    Err(_) => return,
+                }
+            }
+        });
+        (address, stop, thread)
+    }
+
+    #[test]
+    fn browser_e2e_routes_keyboard_and_click_through_authority_then_ack_then_record() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (address, stop_server, server) = counter_server();
+        let origin = format!("http://{address}");
+        let objects = Arc::new(ato_objects::MemoryObjectStore::default());
+        let mut registry = AdapterRegistry::default();
+        registry.register(Arc::new(BrowserAdapter)).unwrap();
+        let mut sessions = registry
+            .attach_all(
+                &[AdapterInstance {
+                    instance_id: "hosted.browser".to_owned(),
+                    adapter_id: ato_adapter_browser::BROWSER_ADAPTER_ID.to_owned(),
+                    config: serde_json::to_value(BrowserAdapterConfig {
+                        port_id: "browser".to_owned(),
+                        expected_origin: origin.clone(),
+                        allowed_non_text_codes: BTreeSet::new(),
+                        input_mode: BrowserInputMode::ApplyOnly,
+                    })
+                    .unwrap(),
+                }],
+                &AdapterAttachContext {
+                    runtime: AdapterContext {
+                        workspace: workspace.path(),
+                        objects: objects.as_ref(),
+                    },
+                    stylus: Arc::new(TestStylus),
+                    observations: Arc::new(IgnoreObservations),
+                },
+            )
+            .unwrap();
+        let adapter = Arc::new(Mutex::new(sessions.pop().unwrap()));
+        let host_root = workspace.path().join("browser-host");
+        fs::create_dir(&host_root).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&host_root, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let mut host = BrowserHost::start(BrowserHostConfig {
+            runtime_dir: host_root,
+            bootstrap_path: ato_adapter_browser::runtime_discovery_path(
+                workspace.path(),
+                "hosted.browser",
+            ),
+            target_url: format!("{origin}/"),
+            chrome: e2e_chrome(),
+            headless: true,
+        })
+        .unwrap();
+        let records = TestRecords::default();
+        let submitted = Arc::clone(&records.0);
+        let ingress = BrowserOperationIngress::new(
+            browser_authority(),
+            PortId::parse("browser").unwrap(),
+            AttachedBrowserActuator(Arc::clone(&adapter)),
+            TestPersistence,
+            records,
+        );
+        let first = ingress
+            .accept(ato_adapter_browser::BrowserEvent::Keyboard {
+                kind: ato_adapter_browser::KeyboardKind::KeyDown,
+                code: "ArrowRight".to_owned(),
+                modifiers: ato_adapter_browser::Modifiers::default(),
+            })
+            .unwrap();
+        assert_eq!(first.run_seq, 1);
+        assert_eq!(
+            host.evaluate("document.querySelector('#counter').textContent")
+                .unwrap()
+                .pointer("/result/value")
+                .and_then(serde_json::Value::as_str),
+            Some("1")
+        );
+        let second = ingress
+            .accept(ato_adapter_browser::BrowserEvent::Click {
+                x_normalized: 0.5,
+                y_normalized: 0.5,
+                button: 0,
+            })
+            .unwrap();
+        assert_eq!(second.run_seq, 2);
+        assert_eq!(submitted.lock().unwrap().len(), 2);
+        assert_eq!(
+            host.evaluate("document.querySelector('#counter').textContent")
+                .unwrap()
+                .pointer("/result/value")
+                .and_then(serde_json::Value::as_str),
+            Some("2")
+        );
+        ingress.freeze().unwrap();
+        let context = AdapterContext {
+            workspace: workspace.path(),
+            objects: objects.as_ref(),
+        };
+        adapter.lock().unwrap().quiesce(&context).unwrap();
+        adapter.lock().unwrap().detach(&context).unwrap();
+        host.stop().unwrap();
+        stop_server.store(true, Ordering::Release);
+        server.join().unwrap();
+    }
 
     fn lease(expires_at: Option<String>) -> ClaimedLease {
         ClaimedLease {
@@ -1735,7 +2443,8 @@ mod tests {
             surface_target: "127.0.0.1:8080".parse().unwrap(),
             tap_host_cidr: "172.16.0.1/24".to_owned(),
             slot_id: "0".to_owned(),
-            max_slots: 2,
+            browser_chrome: None,
+            run_control_verification_key: None,
             once: true,
         };
         assert!(validate_config(&config).is_err());
@@ -1762,7 +2471,8 @@ mod tests {
             surface_target: "172.30.0.2:38865".parse().unwrap(),
             tap_host_cidr: "172.30.0.1/24".to_owned(),
             slot_id: "0".to_owned(),
-            max_slots: 2,
+            browser_chrome: None,
+            run_control_verification_key: None,
             once: true,
         };
         resolve_runner_credentials(&mut config).unwrap();
@@ -1811,7 +2521,8 @@ mod tests {
             surface_target: "172.30.0.2:38865".parse().unwrap(),
             tap_host_cidr: "172.30.0.1/24".to_owned(),
             slot_id: "0".to_owned(),
-            max_slots: 2,
+            browser_chrome: None,
+            run_control_verification_key: None,
             once: true,
         };
         assert_eq!(ready_local_port(&config), 8420);
@@ -1827,81 +2538,5 @@ mod tests {
         assert!(RUNNER_CAPABILITIES.contains(&"isolation=untrusted-v1"));
         assert!(RUNNER_CAPABILITIES.contains(&"materializer=ato.materialize.vm.snapshot@1"));
         assert!(RUNNER_CAPABILITIES.contains(&"backend=firecracker"));
-        // VM capture alone is not a complete current point for a Run whose
-        // Browser realization owns state (for example localStorage). This is
-        // enabled only after the Runner-owned Browser capture closure lands.
-        assert!(!RUNNER_CAPABILITIES.contains(&"capture=current-point-vm-v1"));
-    }
-
-    #[test]
-    fn control_decodes_current_point_capture_instruction() {
-        let control: ControlResponse = serde_json::from_value(serde_json::json!({
-            "stop_requested": false,
-            "capture": {
-                "request_id": "cap_1",
-                "prepare_url": "/v1/runner-leases/lease_1/captures/cap_1/object-graph/prepare"
-            }
-        }))
-        .unwrap();
-        let capture = control.capture.unwrap();
-        assert_eq!(capture.request_id, "cap_1");
-        assert!(capture.prepare_url.ends_with("/object-graph/prepare"));
-    }
-
-    #[test]
-    fn ingress_gate_rejects_new_connections_while_capture_is_frozen() {
-        let state = Arc::new(IngressState::default());
-        let target_listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let target = target_listener.local_addr().unwrap();
-        let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
-        let published = reservation.local_addr().unwrap();
-        drop(reservation);
-        let _proxy = TcpProxy::start_with_ingress(
-            published,
-            ProxyTarget::Tcp(target),
-            Some(Arc::clone(&state)),
-        )
-        .unwrap();
-        let mut gate = WorkerIngressGate {
-            state: Arc::clone(&state),
-        };
-        gate.freeze().unwrap();
-        let mut client = TcpStream::connect(published).unwrap();
-        client
-            .set_read_timeout(Some(Duration::from_millis(100)))
-            .unwrap();
-        client.write_all(b"x").unwrap();
-        let mut reply = [0_u8; 1];
-        assert!(client.read_exact(&mut reply).is_err());
-        assert!(target_listener.set_nonblocking(true).is_ok());
-        assert!(target_listener.accept().is_err());
-        gate.unfreeze().unwrap();
-    }
-
-    #[test]
-    fn stable_slots_receive_distinct_surface_and_firecracker_layouts() {
-        let base = WorkerConfig {
-            api_base: "https://staging.api.ato.run".to_owned(),
-            runner_id: "runner".to_owned(),
-            runner_token: "token".to_owned(),
-            runner_credentials_file: None,
-            public_base_url: "https://runner.example".to_owned(),
-            work_root: PathBuf::from(".tmp/worker-slots"),
-            surface_listen: "127.0.0.1:8420".parse().unwrap(),
-            hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
-            surface_target: "172.30.0.2:38865".parse().unwrap(),
-            tap_host_cidr: "172.30.0.1/24".to_owned(),
-            slot_id: "0".to_owned(),
-            max_slots: 2,
-            once: false,
-        };
-        let slot0 = slot_config(&base, 0).unwrap();
-        let slot1 = slot_config(&base, 1).unwrap();
-        assert_eq!(slot0.slot_id, "0");
-        assert_eq!(slot1.slot_id, "1");
-        assert_eq!(slot0.surface_listen.port(), 8420);
-        assert_eq!(slot1.surface_listen.port(), 8421);
-        assert_eq!(slot0.hidden_surface_listen.port(), 18420);
-        assert_eq!(slot1.hidden_surface_listen.port(), 18421);
     }
 }
