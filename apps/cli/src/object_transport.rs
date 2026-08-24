@@ -158,6 +158,8 @@ pub struct HttpObjectTransportApi {
     base_url: String,
     token: String,
     origin: HeaderValue,
+    prepared_graph_id: Mutex<Option<String>>,
+    staging_proxy_upload: bool,
 }
 
 impl HttpObjectTransportApi {
@@ -186,7 +188,20 @@ impl HttpObjectTransportApi {
             base_url,
             token,
             origin,
+            prepared_graph_id: Mutex::new(None),
+            staging_proxy_upload: false,
         })
+    }
+
+    /// Route object PUTs through the authenticated staging API fallback when
+    /// direct R2 presigned PUTs are unavailable from the staging runner.
+    pub fn with_staging_proxy_upload(mut self) -> Result<Self> {
+        ensure!(
+            self.base_url == "https://staging.api.ato.run",
+            "proxy upload override is restricted to the staging API"
+        );
+        self.staging_proxy_upload = true;
+        Ok(self)
     }
 
     fn authenticated(&self, request: RequestBuilder) -> RequestBuilder {
@@ -257,11 +272,29 @@ impl ObjectTransportApi for HttpObjectTransportApi {
     fn prepare(&self, request: &PrepareRequest<'_>) -> Result<GraphResponse, ApiError> {
         let response = self
             .send(self.authenticated(self.client.post(self.graph_url("/prepare")).json(request)))?;
-        Self::response(response)
+        let graph: GraphResponse = Self::response(response)?;
+        *self
+            .prepared_graph_id
+            .lock()
+            .map_err(|_| ApiError::terminal("object transport graph lock is poisoned"))? =
+            Some(graph.graph_id.clone());
+        Ok(graph)
     }
 
     fn upload(&self, instruction: &UploadInstruction, bytes: Vec<u8>) -> Result<(), ApiError> {
-        let mut request = self.client.put(&instruction.upload_url);
+        let proxy_upload = instruction.upload_direct && self.staging_proxy_upload;
+        let upload_url = if proxy_upload {
+            let graph_id = self
+                .prepared_graph_id
+                .lock()
+                .map_err(|_| ApiError::terminal("object transport graph lock is poisoned"))?
+                .clone()
+                .ok_or_else(|| ApiError::terminal("object transport graph was not prepared"))?;
+            self.graph_url(&format!("/{graph_id}/objects/{}", instruction.content_ref))
+        } else {
+            instruction.upload_url.clone()
+        };
+        let mut request = self.client.put(upload_url);
         for (name, value) in &instruction.upload_headers {
             let lower = name.to_ascii_lowercase();
             if lower != "content-type" && !lower.starts_with("x-amz-meta-") {
@@ -276,7 +309,7 @@ impl ObjectTransportApi for HttpObjectTransportApi {
             })?;
             request = request.header(name, value);
         }
-        if !instruction.upload_direct {
+        if !instruction.upload_direct || proxy_upload {
             request = self.authenticated(request);
         }
         let response = self.send(request.body(bytes))?;
@@ -740,6 +773,23 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("declared closure"));
         assert!(api.attempts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn proxy_upload_override_is_staging_only() {
+        let production = HttpObjectTransportApi::new(
+            "https://api.ato.run",
+            "ato_dev_test-only-placeholder".to_owned(),
+        )
+        .unwrap();
+        assert!(production.with_staging_proxy_upload().is_err());
+
+        let staging = HttpObjectTransportApi::new(
+            "https://staging.api.ato.run",
+            "ato_dev_test-only-placeholder".to_owned(),
+        )
+        .unwrap();
+        assert!(staging.with_staging_proxy_upload().is_ok());
     }
 
     #[test]
