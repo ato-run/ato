@@ -103,10 +103,14 @@ pub fn capture_capable_firecracker_backend(
 pub struct WorkerConfig {
     #[arg(long, env = "ATO_API_URL")]
     pub api_base: String,
-    #[arg(long, env = "ATO_RUNNER_ID")]
+    #[arg(long, env = "ATO_RUNNER_ID", default_value = "")]
     pub runner_id: String,
-    #[arg(long, env = "ATO_RUNNER_TOKEN")]
+    #[arg(long, env = "ATO_RUNNER_TOKEN", default_value = "")]
     pub runner_token: String,
+    /// Existing canonical runner credential JSON. Explicit CLI/env identity
+    /// values, when provided, must exactly match this file.
+    #[arg(long, env = "ATO_RUNNER_CREDENTIALS_FILE")]
+    pub runner_credentials_file: Option<PathBuf>,
     #[arg(long, env = "ATO_RUNNER_PUBLIC_BASE_URL")]
     pub public_base_url: String,
     #[arg(long, env = "ATO_RUNTIME_WORK_ROOT")]
@@ -143,7 +147,8 @@ pub struct ConnectedWorker {
 }
 
 impl ConnectedWorker {
-    pub fn new(config: WorkerConfig) -> Result<Self> {
+    pub fn new(mut config: WorkerConfig) -> Result<Self> {
+        resolve_runner_credentials(&mut config)?;
         validate_config(&config)?;
         fs::create_dir_all(&config.work_root)?;
         let api = HttpRunnerApi::new(&config.api_base, &config.runner_id, &config.runner_token)?;
@@ -239,6 +244,45 @@ impl ConnectedWorker {
             (Ok(()), Err(error)) => Err(error),
         }
     }
+}
+
+#[derive(Deserialize)]
+struct StoredRunnerCredentials {
+    api_base: String,
+    runner_id: String,
+    runner_token: String,
+}
+
+fn resolve_runner_credentials(config: &mut WorkerConfig) -> Result<()> {
+    let Some(path) = &config.runner_credentials_file else {
+        return Ok(());
+    };
+    let credentials: StoredRunnerCredentials = serde_json::from_slice(
+        &fs::read(path)
+            .with_context(|| format!("failed to read runner credentials {}", path.display()))?,
+    )
+    .context("runner credentials are not valid JSON")?;
+    ensure!(
+        credentials.api_base.trim_end_matches('/') == config.api_base.trim_end_matches('/'),
+        "runner credential API does not match configured API"
+    );
+    if config.runner_id.is_empty() {
+        config.runner_id = credentials.runner_id;
+    } else {
+        ensure!(
+            config.runner_id == credentials.runner_id,
+            "runner credential identity does not match configured runner"
+        );
+    }
+    if config.runner_token.is_empty() {
+        config.runner_token = credentials.runner_token;
+    } else {
+        ensure!(
+            config.runner_token == credentials.runner_token,
+            "runner credential token does not match configured token"
+        );
+    }
+    Ok(())
 }
 
 fn ready_local_port(config: &WorkerConfig) -> u16 {
@@ -1065,6 +1109,7 @@ mod tests {
             api_base: "https://staging.api.ato.run".to_owned(),
             runner_id: "runner".to_owned(),
             runner_token: "token".to_owned(),
+            runner_credentials_file: None,
             public_base_url: "https://runner.example".to_owned(),
             work_root: PathBuf::from(".tmp/worker-test"),
             surface_listen: "0.0.0.0:8420".parse().unwrap(),
@@ -1075,6 +1120,34 @@ mod tests {
             once: true,
         };
         assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn loads_existing_runner_credentials_without_copying_the_token_to_args() {
+        let directory = tempfile::tempdir().unwrap();
+        let credentials = directory.path().join("credentials.json");
+        fs::write(
+            &credentials,
+            br#"{"api_base":"https://staging.api.ato.run","runner_id":"runner-file","runner_token":"token-file"}"#,
+        )
+        .unwrap();
+        let mut config = WorkerConfig {
+            api_base: "https://staging.api.ato.run".to_owned(),
+            runner_id: String::new(),
+            runner_token: String::new(),
+            runner_credentials_file: Some(credentials),
+            public_base_url: "https://runner.example".to_owned(),
+            work_root: directory.path().join("work"),
+            surface_listen: "127.0.0.1:8420".parse().unwrap(),
+            hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
+            surface_target: "172.30.0.2:38865".parse().unwrap(),
+            tap_host_cidr: "172.30.0.1/24".to_owned(),
+            slot_id: "0".to_owned(),
+            once: true,
+        };
+        resolve_runner_credentials(&mut config).unwrap();
+        assert_eq!(config.runner_id, "runner-file");
+        assert_eq!(config.runner_token, "token-file");
     }
 
     #[test]
@@ -1110,6 +1183,7 @@ mod tests {
             api_base: "https://staging.api.ato.run".to_owned(),
             runner_id: "runner_1".to_owned(),
             runner_token: "token".to_owned(),
+            runner_credentials_file: None,
             public_base_url: "https://runner.example".to_owned(),
             work_root: PathBuf::from(".tmp/worker"),
             surface_listen: "127.0.0.1:8420".parse().unwrap(),
