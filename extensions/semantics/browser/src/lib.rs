@@ -7,14 +7,18 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use ato_adapter_api::LiveOperation;
 use ato_adapter_browser::{BROWSER_PROTOCOL_ID, decode_event, operation_for_event};
 use ato_computation::{
-    ComputationObject, OperationId, PortId, ProtocolId, ResolvedComputation, RoleId, SemanticsId,
+    ComputationObject, ContentRef, OperationId, PortId, ProtocolId, ResolvedComputation, RoleId,
+    SemanticsId,
 };
 use ato_kernel::{
     AcceptedOperation, Action, EvolutionError, KernelError, ProtocolError, ProtocolPayload,
     ProtocolSemantics, RunEvolutionAuthority, SemanticError, SemanticHost, SemanticStep, Semantics,
     TransitionOffer,
 };
-use ato_objects::{BundleError, ComputationReferences, ObjectLink, ObjectResolver};
+use ato_objects::{
+    BundleError, ComputationReferences, ObjectLink, ObjectResolver, read_exact_object,
+    resolve_computation,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -64,11 +68,19 @@ impl ComputationReferences for BrowserComputationReferences {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct BrowserResidualV1 {
+pub struct BrowserResidualV2 {
     pub version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interaction_frontier: Option<String>,
+    /// A physical Browser state object explicitly attached by a system
+    /// checkpoint. This is a ContentRef, not a hash-derived ComputationRef.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_state_ref: Option<String>,
 }
+
+/// Compatibility name for v1 residual construction. New Browser-aware
+/// Capsules must use `BrowserResidualV2 { version: 2, .. }`.
+pub type BrowserResidualV1 = BrowserResidualV2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum BrowserSemanticsError {
@@ -76,13 +88,13 @@ pub enum BrowserSemanticsError {
     Residual(String),
 }
 
-pub fn encode_residual(residual: &BrowserResidualV1) -> Result<Vec<u8>, BrowserSemanticsError> {
+pub fn encode_residual(residual: &BrowserResidualV2) -> Result<Vec<u8>, BrowserSemanticsError> {
     validate_residual(residual)?;
     serde_jcs::to_vec(residual).map_err(|error| BrowserSemanticsError::Residual(error.to_string()))
 }
 
-pub fn decode_residual(bytes: &[u8]) -> Result<BrowserResidualV1, BrowserSemanticsError> {
-    let residual: BrowserResidualV1 = serde_json::from_slice(bytes)
+pub fn decode_residual(bytes: &[u8]) -> Result<BrowserResidualV2, BrowserSemanticsError> {
+    let residual: BrowserResidualV2 = serde_json::from_slice(bytes)
         .map_err(|error| BrowserSemanticsError::Residual(error.to_string()))?;
     if serde_jcs::to_vec(&residual)
         .map_err(|error| BrowserSemanticsError::Residual(error.to_string()))?
@@ -130,9 +142,12 @@ impl Semantics for BrowserComputationSemantics {
         offer: &TransitionOffer,
         host: &dyn SemanticHost,
     ) -> Result<SemanticStep, SemanticError> {
+        if matches!(offer.action, Action::Tau) {
+            return checkpoint_step(current, offer, host);
+        }
         let Action::Input { port, payload } = &offer.action else {
             return Err(SemanticError::new(
-                "Browser Computation accepts external input only",
+                "Browser Computation accepts Browser input or a checkpoint",
             ));
         };
         let definition = current
@@ -163,7 +178,7 @@ impl Semantics for BrowserComputationSemantics {
             )
             .to_hex()
         );
-        let next = BrowserResidualV1 {
+        let next = BrowserResidualV2 {
             interaction_frontier: Some(frontier),
             ..residual
         };
@@ -231,20 +246,74 @@ impl ProtocolSemantics for BrowserProtocolSemantics {
     }
 }
 
+/// Internal checkpoint which makes the Browser Materialization ContentRef an
+/// explicit residual fact. It is neither an `ato.browser@1` operation nor a
+/// Record. The successor remains a normal Kernel-sealed Computation.
+pub fn checkpoint_offer(state_ref: ContentRef) -> TransitionOffer {
+    TransitionOffer::selected(
+        ato_kernel::ChoiceId::new(format!("ato.browser.checkpoint@1:{state_ref}")),
+        Action::Tau,
+    )
+}
+
+fn checkpoint_step(
+    current: &ResolvedComputation,
+    offer: &TransitionOffer,
+    host: &dyn SemanticHost,
+) -> Result<SemanticStep, SemanticError> {
+    let choice = offer
+        .choice
+        .as_ref()
+        .ok_or_else(|| SemanticError::new("Browser checkpoint requires an explicit choice"))?;
+    let state_ref = choice
+        .as_str()
+        .strip_prefix("ato.browser.checkpoint@1:")
+        .ok_or_else(|| SemanticError::new("Browser Tau transition is not a checkpoint"))?;
+    ContentRef::parse(state_ref).map_err(|error| SemanticError::new(error.to_string()))?;
+    let mut next =
+        residual_for(current, host).map_err(|error| SemanticError::new(error.to_string()))?;
+    if next.version != 2 {
+        return Err(SemanticError::new(
+            "Browser checkpoint requires residual version 2",
+        ));
+    }
+    next.checkpoint_state_ref = Some(state_ref.to_owned());
+    let residual = host
+        .put_object(&encode_residual(&next).map_err(|error| SemanticError::new(error.to_string()))?)
+        .map_err(|error| SemanticError::new(error.to_string()))?;
+    Ok(SemanticStep {
+        offer: offer.clone(),
+        successor: ComputationObject {
+            semantics: current.object().semantics.clone(),
+            boundary: current.object().boundary.clone(),
+            residual,
+        },
+    })
+}
+
 fn residual_for(
     current: &ResolvedComputation,
     host: &dyn SemanticHost,
-) -> Result<BrowserResidualV1, KernelError> {
+) -> Result<BrowserResidualV2, KernelError> {
     let bytes = host.get_object(&current.object().residual, 64 * 1024)?;
     decode_residual(&bytes)
         .map_err(|error| KernelError::Semantic(SemanticError::new(error.to_string())))
 }
 
-fn validate_residual(residual: &BrowserResidualV1) -> Result<(), BrowserSemanticsError> {
-    if residual.version != 1 {
+fn validate_residual(residual: &BrowserResidualV2) -> Result<(), BrowserSemanticsError> {
+    if !matches!(residual.version, 1 | 2) {
         return Err(BrowserSemanticsError::Residual(
             "unsupported Browser residual version".to_owned(),
         ));
+    }
+    if residual.version == 1 && residual.checkpoint_state_ref.is_some() {
+        return Err(BrowserSemanticsError::Residual(
+            "Browser residual v1 cannot contain a checkpoint".to_owned(),
+        ));
+    }
+    if let Some(reference) = &residual.checkpoint_state_ref {
+        ContentRef::parse(reference)
+            .map_err(|error| BrowserSemanticsError::Residual(error.to_string()))?;
     }
     Ok(())
 }
@@ -637,6 +706,7 @@ mod tests {
                 &encode_residual(&BrowserResidualV1 {
                     version: 1,
                     interaction_frontier: None,
+                    checkpoint_state_ref: None,
                 })
                 .unwrap(),
             )
@@ -655,6 +725,41 @@ mod tests {
             })
             .unwrap();
         Arc::new(RunEvolutionAuthority::new(kernel, root))
+    }
+
+    fn checkpoint_authority() -> (Arc<RunEvolutionAuthority>, Arc<MemoryObjectStore>) {
+        let objects = Arc::new(MemoryObjectStore::default());
+        let mut kernel = Kernel::new(objects.clone());
+        kernel
+            .register(Arc::new(BrowserComputationSemantics::default()))
+            .unwrap();
+        kernel
+            .register_protocol(Arc::new(BrowserProtocolSemantics::default()))
+            .unwrap();
+        let residual = objects
+            .put(
+                &encode_residual(&BrowserResidualV2 {
+                    version: 2,
+                    interaction_frontier: None,
+                    checkpoint_state_ref: None,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        let root = kernel
+            .seal(&ComputationObject {
+                semantics: SemanticsId::parse(BROWSER_COMPUTATION_SEMANTICS_ID).unwrap(),
+                boundary: Boundary::from([(
+                    PortId::parse("browser").unwrap(),
+                    PortDef {
+                        protocol: ProtocolId::parse(BROWSER_PROTOCOL_ID).unwrap(),
+                        role: RoleId::parse("controller").unwrap(),
+                    },
+                )]),
+                residual,
+            })
+            .unwrap();
+        (Arc::new(RunEvolutionAuthority::new(kernel, root)), objects)
     }
 
     fn key() -> BrowserEvent {
@@ -794,5 +899,36 @@ mod tests {
             Some("Record Writer is unavailable")
         );
         assert_eq!(authority.current_head().head, accepted.transition.to);
+    }
+
+    #[test]
+    fn checkpoint_explicitly_links_physical_state_without_a_browser_record() {
+        let (authority, objects) = checkpoint_authority();
+        let state_ref = objects.put(b"browser-state-object").unwrap();
+        let before = authority.current_head();
+        let accepted = authority
+            .accept(
+                &checkpoint_offer(state_ref.clone()),
+                || Ok(()),
+                |_| Ok(()),
+                |_, _| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(accepted.run_seq, 1);
+        assert_ne!(accepted.transition.to, before.head);
+        let next = authority.current_head();
+        let computation = resolve_computation(&*objects, &next.head).unwrap();
+        let residual_ref = &computation.object().residual;
+        let residual = decode_residual(
+            &read_exact_object(
+                &*objects,
+                residual_ref,
+                objects.metadata(residual_ref).unwrap().size,
+                64 * 1024,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(residual.checkpoint_state_ref, Some(state_ref.to_string()));
     }
 }
