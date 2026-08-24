@@ -3,12 +3,14 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 mod authoring;
+mod object_transport;
 mod supervisor;
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use ato_adapter_api::{
@@ -53,9 +55,9 @@ use ato_materializer_vm_snapshot::{
     VmSnapshotMaterializer, VmSnapshotReferences,
 };
 use ato_objects::{
-    BranchOrigin, BundleMaterialization, CapsuleSelector, LocalCapsuleRepository, RecordId,
-    ReferenceRegistry, decode_bundle, encode_bundle, export_bundle_with_materializations,
-    import_bundle,
+    BranchOrigin, BundleMaterialization, CapsuleSelector, GraphMaterialization,
+    GraphRestoreCapability, LocalCapsuleRepository, RecordId, ReferenceRegistry, decode_bundle,
+    encode_bundle, export_bundle_with_materializations, export_object_graph, import_bundle,
 };
 use ato_realization_planner::{
     MaterializationCandidate, Placement, PlannerPolicy, RealizationPlanner, TargetEnvironment,
@@ -68,6 +70,10 @@ use clap::{Args, Parser, Subcommand};
 use crate::authoring::{
     AuthoringReferences, evolve_workspace, initial_computation, load_config, load_runtime_state,
     workspace_policy,
+};
+use crate::object_transport::{
+    ExportedPort, HttpObjectTransportApi, ObjectGraphIndexV1, RequiredBinding, UploadConfig,
+    VisibilityPolicy, upload_http_object_graph,
 };
 use crate::supervisor::{
     CliRealizationDriver, preflight_actuator_provider_registry, start_durable, stop_active,
@@ -96,6 +102,8 @@ enum Commands {
     Encap(EncapArgs),
     /// Consume a portable .capsule ephemerally.
     Run(RunArgs),
+    /// Upload a content-addressed Capsule object graph.
+    Upload(UploadArgs),
     #[command(name = "__worker", hide = true)]
     Worker {
         project: PathBuf,
@@ -140,6 +148,31 @@ struct RunArgs {
     bindings: Vec<(String, String)>,
 }
 
+#[derive(Debug, Args)]
+struct UploadArgs {
+    selector: String,
+    #[arg(long = "materialize")]
+    materializers: Vec<String>,
+    #[arg(long, env = "ATO_API_URL")]
+    api_url: String,
+    #[arg(long, env = "ATO_API_TOKEN", hide_env_values = true)]
+    auth_token: String,
+    #[arg(long, value_enum, default_value = "private")]
+    visibility: VisibilityPolicy,
+    #[arg(long)]
+    idempotency_key: Option<String>,
+    #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u8).range(1..=32))]
+    concurrency: u8,
+    #[arg(long, default_value_t = 4)]
+    retry_attempts: usize,
+    #[arg(long, default_value_t = 120)]
+    validation_poll_attempts: usize,
+    #[arg(long, default_value_t = 1_000)]
+    validation_poll_ms: u64,
+    #[arg(long, default_value = "object-upload-receipt.json")]
+    receipt: PathBuf,
+}
+
 pub fn run() -> Result<()> {
     match Cli::parse().command {
         Commands::Init(args) => init(args),
@@ -147,6 +180,7 @@ pub fn run() -> Result<()> {
         Commands::Stop { capsule } => stop(&capsule),
         Commands::Encap(args) => encap(args),
         Commands::Run(args) => run_capsule(args),
+        Commands::Upload(args) => upload(args),
         Commands::Worker {
             project,
             branch,
@@ -261,10 +295,6 @@ fn encap(args: EncapArgs) -> Result<()> {
     let repository = LocalCapsuleRepository::open(project)?;
     let target = repository.resolve(&selector)?;
     let state = load_runtime_state(&target, repository.objects())?;
-    let records = repository.records_for_causal_branch(&selector.branch, selector.record)?;
-    let adapters = adapter_registry()?;
-    let materializers = materializer_registry()?;
-    let capture_policy = workspace_policy(&state.config)?;
     let selected = if args.materializers.is_empty() {
         if state.config.encap.materializers.is_empty() {
             vec!["ato.replay@1".to_owned()]
@@ -274,12 +304,32 @@ fn encap(args: EncapArgs) -> Result<()> {
     } else {
         args.materializers
     };
+    let entries = encode_materializations(&repository, &selector, &target, &state, selected)?;
+    let references = reference_registry()?;
+    let bundle =
+        export_bundle_with_materializations(&target, &entries, repository.objects(), &references)?;
+    atomic_write(&args.output, &encode_bundle(&bundle)?)?;
+    println!("{target}");
+    Ok(())
+}
+
+fn encode_materializations(
+    repository: &LocalCapsuleRepository,
+    selector: &CapsuleSelector,
+    target: &ComputationRef,
+    state: &authoring::AuthoringState,
+    selected: Vec<String>,
+) -> Result<Vec<BundleMaterialization>> {
+    let records = repository.records_for_causal_branch(&selector.branch, selector.record)?;
+    let adapters = adapter_registry()?;
+    let materializers = materializer_registry()?;
+    let capture_policy = workspace_policy(&state.config)?;
     let (records_v2, replay_anchor, record_frontier_ref) = if selected
         .iter()
         .any(|materializer| materializer == "ato.replay@2")
     {
         let (records, anchor, frontier) =
-            load_run_record_frontier(&repository, &selector.branch, &target)?;
+            load_run_record_frontier(repository, &selector.branch, target)?;
         (records, Some(anchor), Some(frontier))
     } else {
         (Vec::new(), None, None)
@@ -302,9 +352,9 @@ fn encap(args: EncapArgs) -> Result<()> {
     let mut entries = Vec::new();
     for id in selected {
         let materializer = materializers.get(&id)?;
-        let descriptor = materializer.encode(&target, &context)?;
+        let descriptor = materializer.encode(target, &context)?;
         let verified = materializer.verify(&descriptor, &context)?;
-        if verified != target {
+        if &verified != target {
             bail!("materializer `{id}` verified a different computation {verified}");
         }
         entries.push(BundleMaterialization {
@@ -312,11 +362,94 @@ fn encap(args: EncapArgs) -> Result<()> {
             descriptor_ref: descriptor.to_string(),
         });
     }
+    Ok(entries)
+}
+
+fn upload(args: UploadArgs) -> Result<()> {
+    let selector: CapsuleSelector = args.selector.parse()?;
+    let project = project_path(&selector.capsule, false)?;
+    let repository = LocalCapsuleRepository::open(project)?;
+    let target = repository.resolve(&selector)?;
+    let state = load_runtime_state(&target, repository.objects())?;
+    let selected = if args.materializers.is_empty() {
+        if state.config.encap.materializers.is_empty() {
+            vec!["ato.replay@2".to_owned()]
+        } else {
+            state.config.encap.materializers.clone()
+        }
+    } else {
+        args.materializers
+    };
+    let entries = encode_materializations(&repository, &selector, &target, &state, selected)?;
+    let graph_materializations = entries
+        .iter()
+        .map(|entry| GraphMaterialization {
+            id: entry.materializer_id.clone(),
+            descriptor_ref: entry.descriptor_ref.clone(),
+            restore_capability: if entry.materializer_id == "ato.snapshot@1" {
+                GraphRestoreCapability::VerifyOnly
+            } else {
+                GraphRestoreCapability::Supported
+            },
+        })
+        .collect::<Vec<_>>();
     let references = reference_registry()?;
-    let bundle =
-        export_bundle_with_materializations(&target, &entries, repository.objects(), &references)?;
-    atomic_write(&args.output, &encode_bundle(&bundle)?)?;
-    println!("{target}");
+    let closure = export_object_graph(
+        &target,
+        &graph_materializations,
+        repository.objects(),
+        &references,
+    )?;
+    let exported_ports = state
+        .config
+        .port
+        .iter()
+        .filter(|port| !port.internal)
+        .map(|port| ExportedPort {
+            port_id: port.id.clone(),
+            protocol: port.protocol.clone(),
+            role: port.role.clone(),
+        })
+        .collect();
+    let required_bindings = state
+        .config
+        .binding
+        .iter()
+        .map(|binding| RequiredBinding {
+            id: binding.id.clone(),
+            schema: binding.protocol.clone(),
+        })
+        .collect();
+    let index =
+        ObjectGraphIndexV1::new(closure, exported_ports, required_bindings, args.visibility);
+    let idempotency_key = args.idempotency_key.unwrap_or_else(|| {
+        format!(
+            "ato-object-upload-v1-{}",
+            index.digest().expect("JCS index")
+        )
+    });
+    if !(16..=160).contains(&idempotency_key.len()) {
+        bail!("idempotency key must contain between 16 and 160 bytes");
+    }
+    let api = HttpObjectTransportApi::new(&args.api_url, args.auth_token)?;
+    let (vm_materialization_descriptor_ref, record_frontier_ref) =
+        object_transport::vm_capture_receipt_refs(&index, repository.objects())?;
+    let mut receipt = upload_http_object_graph(
+        &api,
+        &index,
+        repository.objects(),
+        &idempotency_key,
+        UploadConfig {
+            concurrency: usize::from(args.concurrency),
+            retry_attempts: args.retry_attempts,
+            validation_poll_attempts: args.validation_poll_attempts,
+            validation_poll_interval: Duration::from_millis(args.validation_poll_ms),
+        },
+    )?;
+    receipt.vm_materialization_descriptor_ref = vm_materialization_descriptor_ref;
+    receipt.record_frontier_ref = record_frontier_ref;
+    atomic_write(&args.receipt, &serde_jcs::to_vec(&receipt)?)?;
+    println!("{} {}", receipt.bundle_id, receipt.root_computation_ref);
     Ok(())
 }
 
@@ -773,6 +906,18 @@ mod tests {
         for removed in ["lock", "decap", "snapshot"] {
             assert!(Cli::try_parse_from(["ato", removed]).is_err());
         }
+        assert!(
+            Cli::try_parse_from([
+                "ato",
+                "upload",
+                "value",
+                "--api-url",
+                "https://staging.api.ato.run",
+                "--auth-token",
+                "redacted",
+            ])
+            .is_ok()
+        );
     }
 
     #[test]
