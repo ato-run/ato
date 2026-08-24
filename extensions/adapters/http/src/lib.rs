@@ -105,8 +105,6 @@ impl AdapterFactory for HttpAdapter {
         if let Some(path) = &config.ready_path {
             wait_until_ready(config.upstream, path)?;
         }
-        let listener = TcpListener::bind(config.listen)?;
-        listener.set_nonblocking(true)?;
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let failure = Arc::new(Mutex::new(None));
         let observed_responses = Arc::new(Mutex::new(VecDeque::new()));
@@ -114,7 +112,6 @@ impl AdapterFactory for HttpAdapter {
             instance_id: instance.instance_id.clone(),
             stream_id: format!("http.{}", instance.instance_id),
             config,
-            listener: Some(listener),
             stylus: Arc::clone(&context.stylus),
             observations: Arc::clone(&context.observations),
             stop,
@@ -161,7 +158,6 @@ struct HttpSession {
     instance_id: String,
     stream_id: String,
     config: HttpAdapterConfig,
-    listener: Option<TcpListener>,
     stylus: Arc<dyn Stylus>,
     observations: Arc<dyn ObservationSink>,
     stop: Arc<std::sync::atomic::AtomicBool>,
@@ -187,10 +183,12 @@ impl AttachedAdapter for HttpSession {
         record.adapter_id == HTTP_ADAPTER_ID && record.port_id.as_str() == self.config.port_id
     }
 
-    fn activate(&mut self) -> Result<(), AdapterError> {
-        let Some(listener) = self.listener.take() else {
+    fn publish(&mut self) -> Result<(), AdapterError> {
+        if self.join.is_some() {
             return Ok(());
-        };
+        }
+        let listener = TcpListener::bind(self.config.listen)?;
+        listener.set_nonblocking(true)?;
         self.join = Some(spawn_proxy(
             listener,
             self.config.clone(),
@@ -548,6 +546,9 @@ fn invalid_http() -> std::io::Error {
 
 #[cfg(test)]
 mod tests {
+    use ato_adapter_api::{IgnoreObservations, IgnoreRecords};
+    use ato_objects::MemoryObjectStore;
+
     use super::*;
 
     #[derive(Default)]
@@ -627,6 +628,47 @@ mod tests {
             decode_event(&candidates[0].payload).unwrap(),
             HttpEvent::Request { .. }
         ));
+    }
+
+    #[test]
+    fn external_listener_stays_hidden_until_publish() {
+        let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listen = reservation.local_addr().unwrap();
+        drop(reservation);
+        let objects = MemoryObjectStore::default();
+        let runtime = AdapterContext {
+            workspace: std::path::Path::new("."),
+            objects: &objects,
+        };
+        let context = AdapterAttachContext {
+            runtime,
+            stylus: Arc::new(IgnoreRecords),
+            observations: Arc::new(IgnoreObservations),
+        };
+        let instance = AdapterInstance {
+            instance_id: "http.main".to_owned(),
+            adapter_id: HTTP_ADAPTER_ID.to_owned(),
+            config: serde_json::to_value(HttpAdapterConfig {
+                listen,
+                upstream: "127.0.0.1:1".parse().unwrap(),
+                port_id: "app.http".to_owned(),
+                ready_path: None,
+            })
+            .unwrap(),
+        };
+
+        let mut session = HttpAdapter.attach(&instance, &context).unwrap();
+        let probe = TcpListener::bind(listen).unwrap();
+        drop(probe);
+        session.activate().unwrap();
+        let probe = TcpListener::bind(listen).unwrap();
+        drop(probe);
+
+        session.publish().unwrap();
+
+        assert!(TcpListener::bind(listen).is_err());
+        session.quiesce(&context.runtime).unwrap();
+        assert!(TcpListener::bind(listen).is_ok());
     }
 
     #[test]
