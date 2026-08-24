@@ -2205,6 +2205,7 @@ mod tests {
                     &ato_browser_semantics::BrowserResidualV1 {
                         version: 1,
                         interaction_frontier: None,
+                        checkpoint_state_ref: None,
                     },
                 )
                 .unwrap(),
