@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "apps/cli",
+    "apps/connected-realization-worker",
     "apps/runtime-object-graph",
     "lib/computation",
     "lib/kernel",
