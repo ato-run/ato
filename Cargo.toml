@@ -17,6 +17,7 @@ members = [
     "extensions/materializers/api",
     "extensions/materializers/replay",
     "tools/snapshot-builder",
+    "tools/legacy-vm-inspector",
     "tools/arch-check",
     "lib/ipc",
     "lib/host-control",

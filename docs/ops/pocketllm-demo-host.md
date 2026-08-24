@@ -1,7 +1,7 @@
-# PocketLLM GPU demo — turnkey host setup (Store → Open → chat)
+# PocketLLM GPU demo — turnkey host setup (Store → Run → chat)
 
 Reproduce the GPU local-LLM demo on a **fresh Ubuntu 22.04/24.04 + NVIDIA host**.
-"PocketLLM" is **Qwen3-30B-A3B** (MoE) served by **SGLang** (CUDA), opened from
+"PocketLLM" is **Qwen3-30B-A3B** (MoE) served by **SGLang** (CUDA), run from
 the Store and chatted with through **open-webui**.
 
 > This is a **live-walkthrough demo**, not a persistent product. The cloudflared
@@ -23,7 +23,7 @@ The end state is **two URLs** plus the Store entrypoint:
 
 | Surface | What it is | Reached via |
 |---------|-----------|-------------|
-| **Store → Open** | `app.ato.run/open/ato/pocketllm` → `/v1/launches` routes the native-inference launch to your Connected Runner → redirect to `<slug>.app.ato.run` (the model's app_url) | the demo account, in a browser |
+| **Store → Run** | `app.ato.run/a/pocketllm?autostart=1&ref=ato%2Fpocketllm` → `/v1/launches` routes the native-inference launch to your Connected Runner → redirect to `<slug>.app.ato.run` (the model's app_url) | the demo account, in a browser |
 | **Chat UI** | open-webui (OpenAI-compatible chat), pointed at SGLang's `localhost:30000/v1` | its own cloudflared tunnel URL |
 
 The single-capsule **"the app_url IS the chat UI"** (open-webui served *by* the
@@ -36,7 +36,7 @@ above. The script sets the likely-needed open-webui env (`WEBUI_URL`,
 
 ```
  browser (demo account)
-   │  app.ato.run/open/ato/pocketllm
+   │  app.ato.run/a/pocketllm?autostart=1&ref=ato%2Fpocketllm
    ▼
  ato-api  /v1/launches ── native-inference ──▶ Connected Runner (this host)   [#150]
    │                                              │ ato run --sandbox (SGLang)
@@ -77,7 +77,7 @@ Key facts that drive the design:
   the host has many keys offered, pin one with `--ssh-key` (the script adds
   `IdentitiesOnly=yes`).
 - The **demo account** browser session (to approve the runner device-flow and to
-  drive `/open`).
+  drive the App Page's autostart URL).
 - The capsule **`ato/pocketllm`** is **already published** (repo
   `Koh0920/qwen3-sglang`) — nothing to publish here.
 
@@ -148,7 +148,7 @@ script is **idempotent** — safe to re-run; it overwrites the systemd units,
 | 5 | `ato runner serve` (systemd `ato-runner-serve`, root) | ✅ |
 | 6 | open-webui venv + serve (systemd `ato-webui`) | ✅ |
 | 7 | cloudflared **open-webui** tunnel (systemd `ato-cf-webui`) | ✅ |
-| 8 | print the two tunnel URLs + the `/open` URL | ✅ |
+| 8 | print the two tunnel URLs + the demo entrypoint URL | ✅ |
 
 The script **stops clearly** at the two human steps and tells you exactly what to
 run, then to re-run itself to continue.
@@ -232,13 +232,15 @@ The script prints these at the end:
 ```
 Runner proxy tunnel : https://<rand>.trycloudflare.com   (runner --public-base-url)
 Chat UI             : https://<rand>.trycloudflare.com   (open-webui — film this)
-Demo entrypoint     : https://app.ato.run/open/ato/pocketllm
+Demo entrypoint     : https://app.ato.run/a/pocketllm?autostart=1&ref=ato%2Fpocketllm
 ```
 
-1. Open **`https://app.ato.run/open/ato/pocketllm`** in the **demo account**
-   browser → `/v1/launches` detects native-inference, routes the launch to your
-   Connected Runner (`qwen3-a6000`), boots `ato run --sandbox`, and redirects to
-   `<slug>.app.ato.run` (the model's app_url) once ready.
+1. Open **`https://app.ato.run/a/pocketllm?autostart=1&ref=ato%2Fpocketllm`** in
+   the **demo account** browser → the App Page's autostart effect detects
+   native-inference, routes the launch (via `/v1/launches`) to your Connected
+   Runner (`qwen3-a6000`), boots `ato run --sandbox`, and redirects to
+   `<slug>.app.ato.run` (the model's app_url) once ready. (`/open` is retired
+   with no redirect — ato-pwa#241 — this autostart URL is its replacement.)
 2. Show the chat at the **open-webui tunnel URL** — type a prompt, get Qwen3's
    answer (e.g. `25×4 → 100` with a `<think>` trace).
 
@@ -309,4 +311,5 @@ detokenizer and frees VRAM). See [`sglang-cuda-host.md`](sglang-cuda-host.md) §
 The steps were validated end-to-end on a real RTX A6000 (2026-06-25). The demo
 VM has since been deleted, so this runbook + script encode the validated path for
 re-creation; the script itself has **not** been re-run against a live host since
-the VM teardown (re-validate `provision → doctor → /open → chat` on a fresh host).
+the VM teardown (re-validate `provision → doctor → App Page autostart → chat` on
+a fresh host).

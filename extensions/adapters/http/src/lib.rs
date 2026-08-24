@@ -382,6 +382,11 @@ fn proxy_exchange(
     port_id: &ato_computation::PortId,
     observe: &mut impl FnMut(ato_adapter_api::AdapterObservation),
 ) -> std::io::Result<()> {
+    // The supervising listener is nonblocking so it can observe shutdown.
+    // Accepted sockets inherit that mode on some platforms (including macOS),
+    // where `write_all` can otherwise stop at the socket-buffer boundary with
+    // `WouldBlock` and leave the browser with a truncated response body.
+    client.set_nonblocking(false)?;
     let request_bytes = read_http_message(client)?;
     let request = parse_request(&request_bytes)?;
     observe(ato_adapter_api::AdapterObservation {
@@ -520,6 +525,60 @@ fn invalid_http() -> std::io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxy_forwards_large_response_from_nonblocking_listener_without_truncation() {
+        let response_body = vec![b'x'; 2 * 1024 * 1024];
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let upstream = upstream_listener.local_addr().unwrap();
+        let upstream_body = response_body.clone();
+        let upstream_thread = thread::spawn(move || {
+            let (mut stream, _) = upstream_listener.accept().unwrap();
+            read_http_message(&mut stream).unwrap();
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                upstream_body.len()
+            );
+            stream.write_all(head.as_bytes()).unwrap();
+            stream.write_all(&upstream_body).unwrap();
+        });
+
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy = proxy_listener.local_addr().unwrap();
+        proxy_listener.set_nonblocking(true).unwrap();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let failure = Arc::new(Mutex::new(None));
+        let proxy_thread = spawn_proxy(
+            proxy_listener,
+            HttpAdapterConfig {
+                listen: proxy,
+                upstream,
+                port_id: "app.http".to_owned(),
+                ready_path: None,
+            },
+            Arc::new(ato_adapter_api::IgnoreObservations),
+            Arc::clone(&stop),
+            Arc::clone(&failure),
+            Arc::new(Mutex::new(VecDeque::new())),
+        );
+
+        let mut client = connect_with_retry(proxy).unwrap();
+        client
+            .write_all(b"GET /asset.js HTTP/1.1\r\nHost: test\r\nContent-Length: 0\r\n\r\n")
+            .unwrap();
+        let response = parse_response(&read_http_message(&mut client).unwrap()).unwrap();
+        let HttpEvent::Response { status, body, .. } = response else {
+            panic!("proxy returned a request event")
+        };
+        assert_eq!(status, 200);
+        assert_eq!(body, response_body);
+
+        upstream_thread.join().unwrap();
+        stop.store(true, std::sync::atomic::Ordering::Release);
+        TcpStream::connect(proxy).unwrap();
+        proxy_thread.join().unwrap();
+        assert!(failure.lock().unwrap().is_none());
+    }
 
     #[test]
     fn request_and_response_are_distinct_protocol_events() {
