@@ -2,6 +2,9 @@
   "use strict";
 
   const bootstrap = globalThis.__ATO_BROWSER_BOOTSTRAP__;
+  if (!Reflect.deleteProperty(globalThis, "__ATO_BROWSER_BOOTSTRAP__")) {
+    globalThis.__ATO_BROWSER_BOOTSTRAP__ = undefined;
+  }
   if (
     globalThis.top !== globalThis ||
     !isObject(bootstrap) ||
