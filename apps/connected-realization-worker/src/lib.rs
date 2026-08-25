@@ -634,7 +634,7 @@ fn run_control_forbidden() -> ErrorResponse {
 }
 
 struct HostedBrowserRuntime {
-    ingress: Arc<HostedBrowserIngress>,
+    ingress: Option<Arc<HostedBrowserIngress>>,
     control: Option<RunControlServer>,
     control_capability: BrowserControlCapability,
     adapter: Option<Arc<Mutex<Box<dyn AttachedAdapter>>>>,
@@ -657,7 +657,11 @@ impl HostedBrowserRuntime {
     }
 
     fn activity_ingress(&self) -> Arc<dyn BrowserControlIngress> {
-        Arc::clone(&self.ingress) as Arc<dyn BrowserControlIngress>
+        Arc::clone(
+            self.ingress
+                .as_ref()
+                .expect("Browser runtime always owns its ingress while active"),
+        ) as Arc<dyn BrowserControlIngress>
     }
 
     fn open_auxiliary_target(&mut self, target_url: &str) -> Result<()> {
@@ -679,6 +683,8 @@ impl HostedBrowserRuntime {
     /// P0-B.
     fn freeze(&self) -> Result<ato_kernel::RunHeadSnapshot> {
         self.ingress
+            .as_ref()
+            .context("Browser ingress is already stopped")?
             .freeze()
             .map_err(|error| anyhow::anyhow!(error.to_string()))
     }
@@ -691,6 +697,10 @@ impl HostedBrowserRuntime {
 
     fn cleanup(&mut self) -> Result<()> {
         self.control.take();
+        // BrowserOperationIngress owns a Record stylus sender. It must be
+        // released before RecordPipeline::shutdown waits for all senders;
+        // otherwise clean stop deadlocks after Chrome has already exited.
+        self.ingress.take();
         if let Some(adapter) = self.adapter.take() {
             let mut adapter = adapter
                 .lock()
@@ -2173,7 +2183,7 @@ fn start_hosted_browser_runtime(
         }
     };
     Ok(Some(HostedBrowserRuntime {
-        ingress,
+        ingress: Some(ingress),
         control: Some(control),
         control_capability,
         adapter: Some(adapter),
