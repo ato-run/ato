@@ -238,6 +238,7 @@ mod linux {
             stylus,
             barrier,
             published,
+            ..
         } = RecordPipeline::start(
             RecordWriterConfig::at(args.work_root.join("records"), "staging-2048-capture"),
             Arc::clone(&objects) as Arc<dyn ObjectStore>,
