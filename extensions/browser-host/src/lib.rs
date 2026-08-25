@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use ato_adapter_browser::BrowserRuntimeBootstrap;
+use base64::Engine as _;
 use serde_json::{Value, json};
 use tungstenite::client::IntoClientRequest;
 use tungstenite::stream::MaybeTlsStream;
@@ -27,6 +28,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const PROFILE_NAME: &str = "browser-profile";
 const DEVTOOLS_ACTIVE_PORT: &str = "DevToolsActivePort";
 const BRIDGE_SOURCE: &str = include_str!("../../adapters/browser/bridge/browser-bridge.js");
+const MAX_PRESENTATION_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 const MAX_LOCAL_STORAGE_ITEMS: usize = 4096;
 const MAX_LOCAL_STORAGE_KEY_BYTES: usize = 16 * 1024;
@@ -59,6 +61,7 @@ pub struct BrowserHost {
     profile: PathBuf,
     cdp: Cdp,
     session_id: String,
+    browser_context_id: String,
     origin: String,
     stopped: bool,
 }
@@ -90,13 +93,14 @@ impl BrowserHost {
         };
         let result = attach_bridge(&profile, &config.target_url, &bootstrap, &mut child);
         match result {
-            Ok((cdp, session_id)) => {
+            Ok((cdp, session_id, browser_context_id)) => {
                 wait_for_bridge_ready(&config.bootstrap_path)?;
                 Ok(Self {
                     child,
                     profile,
                     cdp,
                     session_id,
+                    browser_context_id,
                     origin: Url::parse(&config.target_url)?
                         .origin()
                         .ascii_serialization(),
@@ -128,6 +132,43 @@ impl BrowserHost {
             json!({"expression": expression, "returnByValue": true}),
             Some(&self.session_id),
         )
+    }
+
+    /// Opens one credential-free loopback controller in the same private
+    /// Browser context. Product runtimes may use this for media/control
+    /// orchestration without giving the application target those credentials.
+    pub fn open_auxiliary_target(&mut self, target_url: &str) -> Result<()> {
+        validate_auxiliary_target(target_url)?;
+        self.cdp.call(
+            "Target.createTarget",
+            json!({"url": target_url, "browserContextId": self.browser_context_id}),
+            None,
+        )?;
+        Ok(())
+    }
+
+    /// Captures the attached application target only. The returned JPEG is a
+    /// bounded physical presentation frame, never Record or Computation data.
+    pub fn capture_jpeg(&mut self) -> Result<Vec<u8>> {
+        let screenshot = self.cdp.call(
+            "Page.captureScreenshot",
+            json!({
+                "format": "jpeg",
+                "quality": 65,
+                "fromSurface": true,
+                "captureBeyondViewport": false
+            }),
+            Some(&self.session_id),
+        )?;
+        let encoded = required_string(&screenshot, "data")?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .context("decode Browser presentation frame")?;
+        ensure!(
+            !bytes.is_empty() && bytes.len() <= MAX_PRESENTATION_FRAME_BYTES,
+            "Browser presentation frame exceeds bound"
+        );
+        Ok(bytes)
     }
 
     /// Captures only the active target's origin-scoped localStorage through
@@ -354,6 +395,20 @@ fn validate_target(target: &str, expected_origin: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_auxiliary_target(value: &str) -> Result<()> {
+    let url = Url::parse(value).context("parse Browser auxiliary target URL")?;
+    ensure!(
+        url.scheme() == "http"
+            && matches!(url.host_str(), Some("127.0.0.1") | Some("localhost"))
+            && url.port().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.fragment().is_none(),
+        "Browser auxiliary target must be credential-free loopback HTTP"
+    );
+    Ok(())
+}
+
 fn launch_chrome(chrome: &Path, profile: &Path, headless: bool) -> Result<Child> {
     let stderr_path = profile.join("chrome-stderr.log");
     let stderr = OpenOptions::new()
@@ -420,7 +475,7 @@ fn attach_bridge(
     target_url: &str,
     bootstrap: &BrowserRuntimeBootstrap,
     child: &mut Child,
-) -> Result<(Cdp, String)> {
+) -> Result<(Cdp, String, String)> {
     let websocket = connect_cdp(&wait_for_debugger_url(profile, child)?)?;
     let mut cdp = Cdp {
         websocket,
@@ -455,7 +510,7 @@ fn attach_bridge(
         bail!("Browser navigation failed: {error}");
     }
     wait_for_document_ready(&mut cdp, &session_id)?;
-    Ok((cdp, session_id))
+    Ok((cdp, session_id, context_id))
 }
 
 impl Cdp {
@@ -592,5 +647,18 @@ mod tests {
             .expect("bridge must open its private control socket");
 
         assert!(erase < socket, "bootstrap survived until socket creation");
+    }
+
+    #[test]
+    fn auxiliary_target_is_loopback_and_credential_free() {
+        assert!(validate_auxiliary_target("http://127.0.0.1:49152/bootstrap/opaque").is_ok());
+        for value in [
+            "https://127.0.0.1:49152/bootstrap/opaque",
+            "http://example.test:49152/bootstrap/opaque",
+            "http://secret@127.0.0.1:49152/bootstrap/opaque",
+            "http://127.0.0.1:49152/bootstrap/opaque#secret",
+        ] {
+            assert!(validate_auxiliary_target(value).is_err());
+        }
     }
 }
