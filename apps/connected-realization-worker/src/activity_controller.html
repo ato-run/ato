@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Ato hosted activity controller</title>
+  <style nonce="__ATO_NONCE__">
+    html,body{width:100%;height:100%;margin:0;background:#030503;overflow:hidden}
+    canvas{position:fixed;width:1px;height:1px;opacity:0;pointer-events:none}
+  </style>
+</head>
+<body>
+  <canvas id="activity-media"></canvas>
+  <script nonce="__ATO_NONCE__">
+  (() => {
+    "use strict";
+    const config = __ATO_CONFIG__;
+    const roomProtocol = "ato.activity.room@1";
+    const roomWebSocketProtocol = "ato.activity.room.v1";
+    const mediaCanvas = document.getElementById("activity-media");
+    const mediaContext = mediaCanvas.getContext("2d", { alpha: false });
+    let room = null;
+    let roomOutboundSequence = 0;
+    let roomInboundSequence = 0;
+    let roomIdentity = null;
+    let mediaReady = false;
+    let mediaStream = null;
+    let readyReported = false;
+    let ending = false;
+    let inputChain = Promise.resolve();
+    const subscribers = new Set();
+    const peers = new Map();
+
+    connectRoom();
+    pumpFrame();
+
+    function connectRoom() {
+      room = new WebSocket(config.roomUrl, [
+        roomWebSocketProtocol,
+        `activity-executor.${config.executorCredential}`,
+      ]);
+      room.addEventListener("message", (event) => {
+        let envelope;
+        try { envelope = JSON.parse(String(event.data)); } catch { return fail(); }
+        if (!isObject(envelope) || envelope.protocol !== roomProtocol ||
+            !Number.isSafeInteger(envelope.seq) || envelope.seq <= roomInboundSequence ||
+            typeof envelope.type !== "string") return fail();
+        roomInboundSequence = envelope.seq;
+        receiveRoom(envelope.type, isObject(envelope.payload) ? envelope.payload : {});
+      });
+      room.addEventListener("close", () => { if (!ending) fail(); });
+      room.addEventListener("error", () => { if (!ending) fail(); });
+    }
+
+    function receiveRoom(type, payload) {
+      if (type === "room.connected") {
+        if (typeof payload.connection_id !== "string" ||
+            !Number.isSafeInteger(payload.media_generation)) return fail();
+        roomIdentity = {
+          connectionId: payload.connection_id,
+          mediaGeneration: payload.media_generation,
+        };
+        for (const participant of Array.isArray(payload.participant_connections)
+          ? payload.participant_connections : []) {
+          if (isObject(participant) && typeof participant.participant_id === "string" &&
+              Array.isArray(participant.subscribable_run_ids) &&
+              participant.subscribable_run_ids.includes(config.runId)) {
+            subscribers.add(participant.participant_id);
+          }
+        }
+        announceReady();
+        return;
+      }
+      if (type === "participant.connected" && typeof payload.participant_id === "string") {
+        subscribers.add(payload.participant_id);
+        void startPeer(payload.participant_id).catch(fail);
+        return;
+      }
+      if (type === "participant.disconnected" && typeof payload.participant_id === "string") {
+        stopParticipant(payload.participant_id, true);
+        return;
+      }
+      if (type === "run.input") {
+        inputChain = inputChain.then(() => applyInput(payload)).catch(fail);
+        return;
+      }
+      if (type === "run.media.answer" || type === "run.media.ice") {
+        if (matchesPublishedPeer(payload)) {
+          void applyMediaSignal(type, payload).catch(() => stopPeer(payload.peer_id, true));
+        }
+        return;
+      }
+      if (type === "run.media.closed") {
+        stopPeer(payload.peer_id, false);
+        return;
+      }
+      if (type === "activity.started") {
+        const delay = Math.max(0, Date.parse(payload.starts_at) - Date.parse(payload.server_now));
+        if (!Number.isFinite(delay)) return fail();
+        setTimeout(() => sendRoom("run.state", { run_id: config.runId, state: "live" }), delay);
+        return;
+      }
+      if (type === "activity.ended") void end();
+    }
+
+    async function applyInput(input) {
+      if (!isObject(input) || input.run_id !== config.runId ||
+          typeof input.operation_id !== "string") throw new Error("invalid input");
+      const response = await hostFetch("/input", input);
+      if (!response.ok) throw new Error("apply failed");
+      const receipt = await response.json();
+      sendRoom("run.operation.receipt", {
+        run_id: config.runId,
+        run_sequence: receipt.run_sequence,
+        operation_id: receipt.operation_id,
+        actor_participant_id: receipt.actor_participant_id,
+        client_sequence: receipt.client_sequence,
+        result: receipt.result,
+        adapter_id: "ato.browser@1",
+        applied_at: receipt.applied_at,
+      });
+    }
+
+    async function startPeer(participantId) {
+      if (!roomIdentity || !mediaReady || peers.has(participantId)) return;
+      const signal = {
+        run_id: config.runId,
+        peer_id: `peer_${cryptoToken()}`,
+        media_generation: roomIdentity.mediaGeneration,
+        publisher_connection_id: roomIdentity.connectionId,
+        subscriber_participant_id: participantId,
+      };
+      const connection = new RTCPeerConnection({ iceServers: config.iceServers });
+      peers.set(participantId, { signal, connection });
+      if (!mediaStream) mediaStream = mediaCanvas.captureStream(30);
+      for (const track of mediaStream.getTracks()) connection.addTrack(track, mediaStream);
+      connection.addEventListener("icecandidate", (event) => {
+        if (event.candidate) {
+          sendRoom("run.media.ice", { ...signal, candidate: event.candidate.toJSON() });
+        }
+      });
+      connection.addEventListener("connectionstatechange", () => {
+        if (["failed", "closed"].includes(connection.connectionState)) {
+          stopPeer(signal.peer_id, true);
+        }
+      });
+      const offer = await connection.createOffer();
+      await connection.setLocalDescription(offer);
+      sendRoom("run.media.offer", {
+        ...signal,
+        sdp: { type: offer.type, sdp: offer.sdp },
+      });
+    }
+
+    function announceReady() {
+      if (!mediaReady || !roomIdentity) return;
+      for (const participantId of subscribers) void startPeer(participantId).catch(fail);
+      sendRoom("run.state", { run_id: config.runId, state: "paused" });
+      if (!readyReported) {
+        readyReported = true;
+        void hostFetch("/ready", {});
+      }
+    }
+
+    function stopParticipant(participantId, publish) {
+      subscribers.delete(participantId);
+      const peer = peers.get(participantId);
+      if (peer) stopPeer(peer.signal.peer_id, publish);
+    }
+
+    function stopPeer(peerId, publish) {
+      const entry = [...peers.entries()].find(([, peer]) => peer.signal.peer_id === peerId);
+      if (!entry) return;
+      const [participantId, peer] = entry;
+      peers.delete(participantId);
+      peer.connection.close();
+      if (publish) sendRoom("run.media.stop", peer.signal);
+    }
+
+    function matchesPublishedPeer(payload) {
+      return isObject(payload) && [...peers.values()].some(({ signal }) =>
+        signal.peer_id === payload.peer_id &&
+        signal.publisher_connection_id === payload.publisher_connection_id &&
+        signal.subscriber_participant_id === payload.subscriber_participant_id);
+    }
+
+    async function applyMediaSignal(type, payload) {
+      const peer = [...peers.values()].find(({ signal }) => signal.peer_id === payload.peer_id);
+      if (!peer) return;
+      if (type === "run.media.answer") await peer.connection.setRemoteDescription(payload.sdp);
+      else if (payload.candidate) await peer.connection.addIceCandidate(payload.candidate);
+    }
+
+    async function pumpFrame() {
+      if (ending) return;
+      try {
+        const response = await fetch("/frame", {
+          headers: { "x-ato-activity-host": config.hostSecret },
+          cache: "no-store",
+        });
+        if (response.ok && response.status !== 204) {
+          const bitmap = await createImageBitmap(await response.blob());
+          if (mediaCanvas.width !== bitmap.width || mediaCanvas.height !== bitmap.height) {
+            mediaCanvas.width = bitmap.width;
+            mediaCanvas.height = bitmap.height;
+          }
+          mediaContext.drawImage(bitmap, 0, 0);
+          bitmap.close();
+          if (!mediaReady) {
+            mediaReady = true;
+            announceReady();
+          }
+        }
+      } catch { return fail(); }
+      setTimeout(pumpFrame, 50);
+    }
+
+    function sendRoom(type, payload) {
+      if (room?.readyState !== WebSocket.OPEN) return;
+      room.send(JSON.stringify({
+        protocol: roomProtocol,
+        seq: ++roomOutboundSequence,
+        type,
+        payload,
+      }));
+    }
+
+    async function end() {
+      if (ending) return;
+      ending = true;
+      for (const { signal, connection } of [...peers.values()]) {
+        sendRoom("run.media.stop", signal);
+        connection.close();
+      }
+      peers.clear();
+      for (const track of mediaStream?.getTracks() ?? []) track.stop();
+      room?.close(1000, "Activity ended");
+      await hostFetch("/end", {});
+    }
+
+    function fail() {
+      if (ending) return;
+      ending = true;
+      void hostFetch("/failure", {});
+    }
+
+    function hostFetch(path, body) {
+      return fetch(path, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-ato-activity-host": config.hostSecret,
+        },
+        body: JSON.stringify(body),
+        cache: "no-store",
+      });
+    }
+
+    function cryptoToken() {
+      const bytes = crypto.getRandomValues(new Uint8Array(18));
+      return btoa(String.fromCharCode(...bytes))
+        .replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+    }
+
+    function isObject(value) {
+      return value !== null && typeof value === "object" && !Array.isArray(value);
+    }
+  })();
+  </script>
+</body>
+</html>

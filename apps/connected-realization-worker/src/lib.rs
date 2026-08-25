@@ -7,6 +7,8 @@
 
 #![forbid(unsafe_code)]
 
+mod activity_controller;
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -17,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -72,7 +75,12 @@ use tungstenite::handshake::server::{
 };
 use tungstenite::{Message, accept_hdr};
 
+use activity_controller::{
+    ActivityControllerEvent, ActivityControllerPageConfig, ActivityControllerServer,
+};
+
 const PORTABLE_CAPSULE_LEASE_KIND: &str = "portable_capsule_v2";
+const ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND: &str = "activity_browser_executor_v0";
 const RUNNER_CAPABILITIES: &[&str] = &[
     "execution_abi=process",
     "isolation=untrusted-v1",
@@ -619,6 +627,24 @@ impl HostedBrowserRuntime {
             .address()
     }
 
+    fn activity_ingress(&self) -> Arc<dyn BrowserControlIngress> {
+        Arc::clone(&self.ingress) as Arc<dyn BrowserControlIngress>
+    }
+
+    fn open_auxiliary_target(&mut self, target_url: &str) -> Result<()> {
+        self.host
+            .as_mut()
+            .context("Browser Host is unavailable")?
+            .open_auxiliary_target(target_url)
+    }
+
+    fn capture_presentation_frame(&mut self) -> Result<Vec<u8>> {
+        self.host
+            .as_mut()
+            .context("Browser Host is unavailable")?
+            .capture_jpeg()
+    }
+
     /// Future capture coordination freezes this logical gate before it asks
     /// the Browser Host to quiesce. No physical Browser state is captured in
     /// P0-B.
@@ -810,97 +836,235 @@ impl ConnectedWorker {
 
         let lease_root = self.config.work_root.join("leases").join(&lease.id);
         fs::create_dir_all(&lease_root)?;
-        let result = (|| {
-            let source = self.api.graph_source(lease)?;
-            let index: ObjectGraphIndexV1 = serde_json::from_slice(source.index_bytes())
-                .context("runtime graph index is not valid JSON")?;
-            let expectation = GraphDownloadExpectation {
-                index_digest: source.index_digest().to_owned(),
-                root_computation_ref: lease.command.expected_root_computation_ref.clone(),
-                object_count: index.objects.len(),
-                logical_bytes: index.logical_bytes()?,
-            };
-            let graph = download_and_validate_graph(&source, &expectation, &lease_root)?;
-            // The Worker owns the live logical Run head from the same immutable
-            // root that its assigned lease authorizes. No operation is wired to
-            // this authority yet: Browser composition and its registered
-            // Semantics arrive in P0-B. Keeping it alive here establishes the
-            // hosted lifecycle without inventing an authoring/hash fallback.
-            let evolution = Arc::new(initialize_hosted_run_evolution_authority(
-                &graph,
-                &lease.command.expected_root_computation_ref,
-            )?);
-            let firecracker_work_root = self.config.work_root.join("fc");
-            let physical = RestorePhysicalConfig {
-                firecracker_work_root: &firecracker_work_root,
-                slot_id: &self.config.slot_id,
-                hidden_surface_listen: self.config.hidden_surface_listen,
-                guest_surface_target: self.config.surface_target,
-                tap_host_cidr: &self.config.tap_host_cidr,
-            };
-            let running = restore_vm_path(&graph, &lease_root, &lease.id, &physical)?;
-            self.api.report_status(&lease.id, "running")?;
-
-            // An explicit Browser Computation receives one private Chrome
-            // realization. Ordinary VM-only roots take the unchanged path.
-            let mut browser = start_hosted_browser_runtime(
-                &graph,
-                lease,
-                &lease_root,
-                &lease_root.join("workspace"),
-                Arc::clone(&evolution),
-                self.api.clone(),
-                self.config.browser_chrome.as_deref(),
-                self.config.run_control_verification_key.as_deref(),
-                &self.config.runner_id,
-                &format!("http://{}/", self.config.hidden_surface_listen),
-            )?;
-
-            // The externally reachable listener does not exist until the VM is
-            // active, every Contract passed, and the Realization published.
-            let proxy = TcpProxy::start_with_control(
-                self.config.surface_listen,
-                ProxyTarget::Tcp(self.config.hidden_surface_listen),
-                browser.as_ref().map(|runtime| runtime.control_address()),
-            )?;
-            let execution_id = format!("vm:{}:{}", lease.run_id, lease.id);
-            ensure!(
-                evolution.current_head().head.as_str()
-                    == lease.command.expected_root_computation_ref,
-                "hosted evolution authority root changed before the first operation"
-            );
-            self.api.report_ready(
-                &lease.id,
-                &execution_id,
-                &self.config.public_base_url,
-                ready_local_port(&self.config),
-                browser.as_ref().map(|runtime| runtime.control_capability()),
-            )?;
-            let mut last_heartbeat = Instant::now();
-            loop {
-                let control = self.api.control(&lease.id)?;
-                if control.stop_requested {
-                    if let Some(browser) = browser.take() {
-                        browser.stop()?;
-                    }
-                    drop(proxy);
-                    running.quiesce()?;
-                    self.api.report_stopped(&lease.id, &execution_id)?;
-                    return Ok(());
-                }
-                if last_heartbeat.elapsed() >= ACTIVE_HEARTBEAT_INTERVAL {
-                    self.api.heartbeat(&self.config, 1)?;
-                    last_heartbeat = Instant::now();
-                }
-                thread::sleep(Duration::from_secs(1));
+        let result = match &lease.command {
+            LeaseCommand::Portable(command) => {
+                self.execute_portable_lease(lease, command, &lease_root)
             }
-        })();
+            LeaseCommand::Activity(command) => {
+                self.execute_activity_lease(lease, command, &lease_root)
+            }
+        };
         let cleanup = fs::remove_dir_all(&lease_root)
             .with_context(|| format!("failed to clean lease directory {}", lease_root.display()));
         match (result, cleanup) {
             (Ok(()), Ok(())) => Ok(()),
             (Err(error), _) => Err(error),
             (Ok(()), Err(error)) => Err(error),
+        }
+    }
+
+    fn execute_portable_lease(
+        &self,
+        lease: &ClaimedLease,
+        command: &PortableLeaseCommand,
+        lease_root: &Path,
+    ) -> Result<()> {
+        let source = self.api.graph_source(
+            &lease.id,
+            &command.bundle_id,
+            &command.expected_root_computation_ref,
+        )?;
+        let index: ObjectGraphIndexV1 = serde_json::from_slice(source.index_bytes())
+            .context("runtime graph index is not valid JSON")?;
+        let expectation = GraphDownloadExpectation {
+            index_digest: source.index_digest().to_owned(),
+            root_computation_ref: command.expected_root_computation_ref.clone(),
+            object_count: index.objects.len(),
+            logical_bytes: index.logical_bytes()?,
+        };
+        let graph = download_and_validate_graph(&source, &expectation, lease_root)?;
+        validate_exported_web_port(
+            &graph,
+            &command.expected_root_computation_ref,
+            &command.exported_port_id,
+        )?;
+        let evolution = Arc::new(initialize_hosted_run_evolution_authority(
+            &graph,
+            &command.expected_root_computation_ref,
+        )?);
+        let firecracker_work_root = self.config.work_root.join("fc");
+        let physical = RestorePhysicalConfig {
+            firecracker_work_root: &firecracker_work_root,
+            slot_id: &self.config.slot_id,
+            hidden_surface_listen: self.config.hidden_surface_listen,
+            guest_surface_target: self.config.surface_target,
+            tap_host_cidr: &self.config.tap_host_cidr,
+        };
+        let running = restore_vm_path(&graph, lease_root, &lease.id, &physical)?;
+        self.api.report_status(&lease.id, "running")?;
+
+        // An explicit Browser Computation receives one private Chrome
+        // realization. Ordinary VM-only roots take the unchanged path.
+        let mut browser = start_hosted_browser_runtime(
+            &graph,
+            lease,
+            lease_root,
+            &lease_root.join("workspace"),
+            Arc::clone(&evolution),
+            self.api.clone(),
+            self.config.browser_chrome.as_deref(),
+            self.config.run_control_verification_key.as_deref(),
+            &self.config.runner_id,
+            &format!("http://{}/", self.config.hidden_surface_listen),
+        )?;
+
+        // The externally reachable listener does not exist until the VM is
+        // active, every Contract passed, and the Realization published.
+        let proxy = TcpProxy::start_with_control(
+            self.config.surface_listen,
+            ProxyTarget::Tcp(self.config.hidden_surface_listen),
+            browser.as_ref().map(|runtime| runtime.control_address()),
+        )?;
+        let execution_id = format!("vm:{}:{}", lease.run_id, lease.id);
+        ensure!(
+            evolution.current_head().head.as_str() == command.expected_root_computation_ref,
+            "hosted evolution authority root changed before the first operation"
+        );
+        self.api.report_ready(
+            &lease.id,
+            &execution_id,
+            &self.config.public_base_url,
+            ready_local_port(&self.config),
+            browser.as_ref().map(|runtime| runtime.control_capability()),
+        )?;
+        let mut last_heartbeat = Instant::now();
+        loop {
+            let control = self.api.control(&lease.id)?;
+            if control.stop_requested {
+                if let Some(browser) = browser.take() {
+                    browser.stop()?;
+                }
+                drop(proxy);
+                running.quiesce()?;
+                self.api.report_stopped(&lease.id, &execution_id)?;
+                return Ok(());
+            }
+            if last_heartbeat.elapsed() >= ACTIVE_HEARTBEAT_INTERVAL {
+                self.api.heartbeat(&self.config, 1)?;
+                last_heartbeat = Instant::now();
+            }
+            thread::sleep(Duration::from_secs(1));
+        }
+    }
+
+    fn execute_activity_lease(
+        &self,
+        lease: &ClaimedLease,
+        command: &ActivityLeaseCommand,
+        lease_root: &Path,
+    ) -> Result<()> {
+        let session = self
+            .api
+            .activity_executor_session(&command.activity_id, &command.activity_run_id)?;
+        validate_activity_executor_session(&session, lease, command)?;
+        let source = self.api.graph_source(
+            &lease.id,
+            &session.source.bundle_id,
+            &session.source.computation_ref,
+        )?;
+        let index: ObjectGraphIndexV1 = serde_json::from_slice(source.index_bytes())
+            .context("Activity runtime graph index is not valid JSON")?;
+        let expectation = GraphDownloadExpectation {
+            index_digest: source.index_digest().to_owned(),
+            root_computation_ref: session.source.computation_ref.clone(),
+            object_count: index.objects.len(),
+            logical_bytes: index.logical_bytes()?,
+        };
+        let graph = download_and_validate_graph(&source, &expectation, lease_root)?;
+        validate_exported_web_port(
+            &graph,
+            &session.source.computation_ref,
+            &session.source.exported_port_id,
+        )?;
+        let evolution = Arc::new(initialize_hosted_run_evolution_authority(
+            &graph,
+            &session.source.computation_ref,
+        )?);
+        let firecracker_work_root = self.config.work_root.join("fc");
+        let physical = RestorePhysicalConfig {
+            firecracker_work_root: &firecracker_work_root,
+            slot_id: &self.config.slot_id,
+            hidden_surface_listen: self.config.hidden_surface_listen,
+            guest_surface_target: self.config.surface_target,
+            tap_host_cidr: &self.config.tap_host_cidr,
+        };
+        let running = restore_vm_path(&graph, lease_root, &lease.id, &physical)?;
+        self.api.report_status(&lease.id, "running")?;
+        let mut browser = start_hosted_browser_runtime(
+            &graph,
+            lease,
+            lease_root,
+            &lease_root.join("workspace"),
+            evolution,
+            self.api.clone(),
+            self.config.browser_chrome.as_deref(),
+            self.config.run_control_verification_key.as_deref(),
+            &self.config.runner_id,
+            &format!("http://{}/", self.config.hidden_surface_listen),
+        )?
+        .context("Activity source does not contain an explicit Browser Computation")?;
+        let controller = ActivityControllerServer::start(
+            ActivityControllerPageConfig {
+                run_id: session.run_id.clone(),
+                room_url: session.room_url,
+                executor_credential: session.executor_credential,
+                ice_servers: serde_json::to_value(session.rtc.ice_servers)?,
+            },
+            browser.activity_ingress(),
+        )?;
+        browser.open_auxiliary_target(controller.target_url())?;
+        let execution_id = format!("activity:{}:{}", lease.run_id, lease.id);
+        let mut ready = false;
+        let mut last_control = Instant::now() - Duration::from_secs(1);
+        let mut last_heartbeat = Instant::now();
+        let result = loop {
+            controller.publish_frame(browser.capture_presentation_frame()?)?;
+            match controller.recv_timeout(Duration::from_millis(100)) {
+                Ok(ActivityControllerEvent::Ready) if !ready => {
+                    self.api.report_activity_ready(&lease.id, &execution_id)?;
+                    ready = true;
+                }
+                Ok(ActivityControllerEvent::Ready) => {}
+                Ok(ActivityControllerEvent::Ended) => break Ok(()),
+                Ok(ActivityControllerEvent::Failed) => {
+                    break Err(anyhow::anyhow!("Activity controller failed"));
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    break Err(anyhow::anyhow!("Activity controller stopped unexpectedly"));
+                }
+            }
+            if last_control.elapsed() >= Duration::from_secs(1) {
+                if self.api.control(&lease.id)?.stop_requested {
+                    break Ok(());
+                }
+                last_control = Instant::now();
+            }
+            if last_heartbeat.elapsed() >= ACTIVE_HEARTBEAT_INTERVAL {
+                self.api.heartbeat(&self.config, 1)?;
+                last_heartbeat = Instant::now();
+            }
+        };
+        let mut shutdown_errors = Vec::new();
+        if let Err(error) = result {
+            shutdown_errors.push(format!("Activity execution failed: {error:#}"));
+        }
+        if let Err(error) = controller.stop() {
+            shutdown_errors.push(format!("Activity controller shutdown failed: {error:#}"));
+        }
+        if let Err(error) = browser.stop() {
+            shutdown_errors.push(format!("Activity Browser shutdown failed: {error:#}"));
+        }
+        if let Err(error) = running.quiesce() {
+            shutdown_errors.push(format!("Activity realization quiesce failed: {error:#}"));
+        }
+        if let Err(error) = self.api.report_stopped(&lease.id, &execution_id) {
+            shutdown_errors.push(format!("Activity stopped report failed: {error:#}"));
+        }
+        if shutdown_errors.is_empty() {
+            Ok(())
+        } else {
+            anyhow::bail!(shutdown_errors.join("; "))
         }
     }
 }
@@ -976,48 +1140,128 @@ fn validate_config(config: &WorkerConfig) -> Result<()> {
 fn validate_lease(lease: &ClaimedLease, now: SystemTime) -> Result<()> {
     ensure!(valid_control_id(&lease.id), "invalid lease id");
     ensure!(valid_control_id(&lease.run_id), "invalid run id");
-    ensure!(
-        lease.command.kind == PORTABLE_CAPSULE_LEASE_KIND,
-        "unsupported lease kind `{}`",
-        lease.command.kind
-    );
-    ensure!(
-        lease.command.bundle_id.starts_with("bnd_"),
-        "invalid bundle id"
-    );
-    ensure!(
-        lease.command.transport_digest.starts_with("sha256:"),
-        "invalid transport digest"
-    );
-    ensure!(
-        lease.command.run_id == lease.run_id,
-        "lease command run mismatch"
-    );
-    ensure!(
-        lease.command.session_id == format!("run:{}", lease.run_id),
-        "lease command session mismatch"
-    );
-    ensure!(
-        !lease.command.exported_port_id.is_empty(),
-        "lease exported Port is empty"
-    );
-    ensure!(
-        lease.command.surface_contract_version == "1",
-        "unsupported Surface contract version"
-    );
-    ensure!(
-        lease.command.session_surface.is_object()
-            && !lease.command.accepted_session_surfaces.is_empty(),
-        "lease Surface negotiation is incomplete"
-    );
-    ComputationRef::parse(&lease.command.expected_root_computation_ref)
-        .context("lease root ComputationRef is invalid")?;
+    match &lease.command {
+        LeaseCommand::Portable(command) => {
+            ensure!(command.bundle_id.starts_with("bnd_"), "invalid bundle id");
+            ensure!(
+                command.transport_digest.starts_with("sha256:"),
+                "invalid transport digest"
+            );
+            ensure!(command.run_id == lease.run_id, "lease command run mismatch");
+            ensure!(
+                command.session_id == format!("run:{}", lease.run_id),
+                "lease command session mismatch"
+            );
+            ensure!(
+                !command.exported_port_id.is_empty(),
+                "lease exported Port is empty"
+            );
+            ensure!(
+                command.surface_contract_version == "1",
+                "unsupported Surface contract version"
+            );
+            ensure!(
+                command.session_surface.is_object()
+                    && !command.accepted_session_surfaces.is_empty(),
+                "lease Surface negotiation is incomplete"
+            );
+            ComputationRef::parse(&command.expected_root_computation_ref)
+                .context("lease root ComputationRef is invalid")?;
+        }
+        LeaseCommand::Activity(command) => {
+            ensure!(
+                valid_control_id(&command.activity_id)
+                    && valid_control_id(&command.activity_run_id),
+                "Activity lease scope is invalid"
+            );
+            ensure!(
+                command.activity_run_id == lease.run_id,
+                "Activity lease Run identity mismatch"
+            );
+        }
+    }
     if let Some(expires_at) = &lease.expires_at {
         let expiry =
             OffsetDateTime::parse(expires_at, &Rfc3339).context("lease expiry is not RFC3339")?;
         let now = OffsetDateTime::from(now);
         ensure!(expiry > now, "lease expired before execution");
     }
+    Ok(())
+}
+
+fn validate_activity_executor_session(
+    session: &ActivityExecutorSession,
+    lease: &ClaimedLease,
+    command: &ActivityLeaseCommand,
+) -> Result<()> {
+    ensure!(
+        session.activity_id == command.activity_id
+            && session.run_id == command.activity_run_id
+            && session.run_id == lease.run_id,
+        "Activity executor session escaped its lease scope"
+    );
+    ensure!(
+        session.source.kind == "capsuleContinuation"
+            && session.source.bundle_id.starts_with("bnd_")
+            && valid_sha256_digest(&session.source.transport_digest)
+            && !session.source.exported_port_id.trim().is_empty(),
+        "Activity executor source is invalid"
+    );
+    ComputationRef::parse(&session.source.computation_ref)
+        .context("Activity source ComputationRef is invalid")?;
+    let room = url::Url::parse(&session.room_url).context("Activity Room URL is invalid")?;
+    ensure!(
+        matches!(room.scheme(), "ws" | "wss")
+            && room.username().is_empty()
+            && room.password().is_none()
+            && !session.executor_credential.trim().is_empty(),
+        "Activity realtime boundary is invalid"
+    );
+    let expiry = OffsetDateTime::parse(&session.expires_at, &Rfc3339)
+        .context("Activity executor expiry is not RFC3339")?;
+    ensure!(
+        expiry > OffsetDateTime::now_utc(),
+        "Activity executor session expired before execution"
+    );
+    ensure!(
+        session.rtc.ice_servers.iter().all(|server| {
+            !server.urls.is_empty()
+                && server
+                    .urls
+                    .iter()
+                    .all(|url| url.starts_with("stun:") || url.starts_with("stuns:"))
+        }),
+        "Activity executor session contains a non-STUN ICE server"
+    );
+    Ok(())
+}
+
+fn valid_sha256_digest(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    })
+}
+
+fn validate_exported_web_port(
+    graph: &ValidatedRuntimeGraph,
+    expected_root: &str,
+    exported_port_id: &str,
+) -> Result<()> {
+    let root_ref = ComputationRef::parse(expected_root)?;
+    let root = resolve_computation(graph.objects(), &root_ref)?;
+    let port = PortId::parse(exported_port_id).context("exported Port id is invalid")?;
+    let definition = root
+        .object()
+        .boundary
+        .get(&port)
+        .context("exported Port is absent from the root Computation")?;
+    ensure!(
+        definition.protocol.as_str() == "ato.http@1" && definition.role.as_str() == "server",
+        "exported Port is not the realized Web server boundary"
+    );
     Ok(())
 }
 
@@ -1425,14 +1669,22 @@ fn default_poll_seconds() -> u64 {
 struct ClaimedLease {
     id: String,
     run_id: String,
-    command: PortableLeaseCommand,
+    command: LeaseCommand,
     expires_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind")]
+enum LeaseCommand {
+    #[serde(rename = "portable_capsule_v2")]
+    Portable(PortableLeaseCommand),
+    #[serde(rename = "activity_browser_executor_v0")]
+    Activity(ActivityLeaseCommand),
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PortableLeaseCommand {
-    kind: String,
     bundle_id: String,
     transport_digest: String,
     expected_root_computation_ref: String,
@@ -1442,6 +1694,53 @@ struct PortableLeaseCommand {
     surface_contract_version: String,
     session_surface: serde_json::Value,
     accepted_session_surfaces: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ActivityLeaseCommand {
+    activity_id: String,
+    activity_run_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ActivityExecutorSession {
+    activity_id: String,
+    run_id: String,
+    source: ActivityCapsuleSource,
+    #[serde(rename = "experienceUrl")]
+    _experience_url: String,
+    #[serde(rename = "experienceOrigin")]
+    _experience_origin: String,
+    #[serde(rename = "experienceManifestDigest")]
+    _experience_manifest_digest: String,
+    room_url: String,
+    executor_credential: String,
+    expires_at: String,
+    rtc: ActivityRtcConfiguration,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ActivityCapsuleSource {
+    kind: String,
+    bundle_id: String,
+    transport_digest: String,
+    computation_ref: String,
+    exported_port_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ActivityRtcConfiguration {
+    ice_servers: Vec<ActivityIceServer>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ActivityIceServer {
+    urls: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1506,7 +1805,7 @@ impl HttpRunnerApi {
         )))
         .json(&serde_json::json!({
             "capabilities": RUNNER_CAPABILITIES,
-            "supported_lease_kinds": [PORTABLE_CAPSULE_LEASE_KIND],
+            "supported_lease_kinds": supported_lease_kinds(config),
             "supported_session_surfaces": [{
                 "kind": "web",
                 "profiles": ["ato.web-surface.v1"],
@@ -1541,6 +1840,20 @@ impl HttpRunnerApi {
                 .post(format!("{}/v1/runner-leases/{lease_id}/status", self.base)),
         )
         .json(&StatusReport { status })
+        .send()?
+        .error_for_status()?;
+        Ok(())
+    }
+
+    fn report_activity_ready(&self, lease_id: &str, execution_id: &str) -> Result<()> {
+        self.authorized(
+            self.client
+                .post(format!("{}/v1/runner-leases/{lease_id}/status", self.base)),
+        )
+        .json(&serde_json::json!({
+            "status": "ready",
+            "execution_id": execution_id,
+        }))
         .send()?
         .error_for_status()?;
         Ok(())
@@ -1629,16 +1942,49 @@ impl HttpRunnerApi {
         Ok(())
     }
 
-    fn graph_source(&self, lease: &ClaimedLease) -> Result<LeaseGraphSource> {
+    fn activity_executor_session(
+        &self,
+        activity_id: &str,
+        activity_run_id: &str,
+    ) -> Result<ActivityExecutorSession> {
+        Ok(self
+            .authorized(self.client.post(format!(
+                "{}/v1/activities/{activity_id}/runs/{activity_run_id}/executor-session",
+                self.base
+            )))
+            .send()?
+            .error_for_status()?
+            .json()?)
+    }
+
+    fn graph_source(
+        &self,
+        lease_id: &str,
+        expected_bundle: &str,
+        expected_root: &str,
+    ) -> Result<LeaseGraphSource> {
         LeaseGraphSource::load(
             self.client.clone(),
             self.base.clone(),
             self.token.clone(),
-            &lease.id,
-            &lease.command.bundle_id,
-            &lease.command.expected_root_computation_ref,
+            lease_id,
+            expected_bundle,
+            expected_root,
         )
     }
+}
+
+fn supported_lease_kinds(config: &WorkerConfig) -> Vec<&'static str> {
+    let mut kinds = vec![PORTABLE_CAPSULE_LEASE_KIND];
+    if config.browser_chrome.as_deref().is_some_and(Path::is_file)
+        && config
+            .run_control_verification_key
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+    {
+        kinds.push(ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND);
+    }
+    kinds
 }
 
 fn truncate(value: &str, max: usize) -> String {
@@ -2381,18 +2727,17 @@ mod tests {
         ClaimedLease {
             id: "lease_1".to_owned(),
             run_id: "run_1".to_owned(),
-            command: PortableLeaseCommand {
-                kind: PORTABLE_CAPSULE_LEASE_KIND.to_owned(),
+            command: LeaseCommand::Portable(PortableLeaseCommand {
                 bundle_id: "bnd_1".to_owned(),
-                transport_digest: "sha256:ignored-by-graph-runtime".to_owned(),
+                transport_digest: format!("sha256:{}", "11".repeat(32)),
                 expected_root_computation_ref: format!("blake3:{}", "11".repeat(32)),
                 run_id: "run_1".to_owned(),
                 session_id: "run:run_1".to_owned(),
                 exported_port_id: "web".to_owned(),
                 surface_contract_version: "1".to_owned(),
                 session_surface: serde_json::json!({"kind":"web"}),
-                accepted_session_surfaces: Vec::new(),
-            },
+                accepted_session_surfaces: vec![serde_json::json!({"kind":"web"})],
+            }),
             expires_at,
         }
     }
@@ -2538,5 +2883,39 @@ mod tests {
         assert!(RUNNER_CAPABILITIES.contains(&"isolation=untrusted-v1"));
         assert!(RUNNER_CAPABILITIES.contains(&"materializer=ato.materialize.vm.snapshot@1"));
         assert!(RUNNER_CAPABILITIES.contains(&"backend=firecracker"));
+    }
+
+    #[test]
+    fn activity_executor_is_advertised_only_when_browser_runtime_is_available() {
+        let chrome = tempfile::NamedTempFile::new().unwrap();
+        let mut config = WorkerConfig {
+            api_base: "https://staging.api.ato.run".to_owned(),
+            runner_id: "runner_1".to_owned(),
+            runner_token: "token".to_owned(),
+            runner_credentials_file: None,
+            public_base_url: "https://runner.example".to_owned(),
+            work_root: PathBuf::from(".tmp/worker"),
+            surface_listen: "127.0.0.1:8420".parse().unwrap(),
+            hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
+            surface_target: "172.30.0.2:38865".parse().unwrap(),
+            tap_host_cidr: "172.30.0.1/24".to_owned(),
+            slot_id: "0".to_owned(),
+            browser_chrome: None,
+            run_control_verification_key: None,
+            once: true,
+        };
+        assert_eq!(
+            supported_lease_kinds(&config),
+            [PORTABLE_CAPSULE_LEASE_KIND]
+        );
+        config.browser_chrome = Some(chrome.path().to_owned());
+        config.run_control_verification_key = Some("v".repeat(32));
+        assert_eq!(
+            supported_lease_kinds(&config),
+            [
+                PORTABLE_CAPSULE_LEASE_KIND,
+                ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND,
+            ]
+        );
     }
 }
