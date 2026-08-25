@@ -581,4 +581,16 @@ mod tests {
         assert!(validate_target("https://example.test/path", "https://example.test").is_ok());
         assert!(validate_target("https://other.test", "https://example.test").is_err());
     }
+
+    #[test]
+    fn bridge_erases_the_injected_bootstrap_before_opening_a_socket() {
+        let erase = BRIDGE_SOURCE
+            .find("Reflect.deleteProperty")
+            .expect("bridge must erase its injected bootstrap");
+        let socket = BRIDGE_SOURCE
+            .find("new WebSocket")
+            .expect("bridge must open its private control socket");
+
+        assert!(erase < socket, "bootstrap survived until socket creation");
+    }
 }
