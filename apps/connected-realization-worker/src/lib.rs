@@ -18,7 +18,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
@@ -399,13 +399,18 @@ fn serve_run_control_connection(
     verification_key: &str,
 ) -> Result<()> {
     stream.set_nonblocking(false)?;
-    stream.set_read_timeout(Some(Duration::from_secs(15)))?;
+    // A connected client must lose authority promptly when its short-lived
+    // capability expires. A bounded read timeout lets an idle connection be
+    // closed without waiting for the next client frame.
+    stream.set_read_timeout(Some(Duration::from_secs(1)))?;
     stream.set_write_timeout(Some(Duration::from_secs(15)))?;
     let expected_run = run_id.to_owned();
     let expected_lease = lease_id.to_owned();
     let expected_runner = runner_id.to_owned();
     let expected_capability = capability.clone();
     let verification_key = verification_key.to_owned();
+    let credential_expires_at = Arc::new(AtomicI64::new(0));
+    let handshake_expires_at = Arc::clone(&credential_expires_at);
     let mut socket = accept_hdr(
         stream,
         move |request: &WebSocketRequest, mut response: WebSocketResponse| {
@@ -418,22 +423,21 @@ fn serve_run_control_connection(
                 .get("sec-websocket-protocol")
                 .and_then(|value| value.to_str().ok())
                 .and_then(run_control_credential_from_protocols);
-            let accepted = credential
-                .and_then(|credential| {
-                    verify_run_control_credential(
-                        &verification_key,
-                        credential,
-                        &expected_run,
-                        &expected_lease,
-                        &expected_runner,
-                        &expected_capability,
-                    )
-                    .ok()
-                })
-                .is_some();
-            if request.uri().path() != RUN_CONTROL_PATH || !accepted {
+            let expiry = credential.and_then(|credential| {
+                verify_run_control_credential(
+                    &verification_key,
+                    credential,
+                    &expected_run,
+                    &expected_lease,
+                    &expected_runner,
+                    &expected_capability,
+                )
+                .ok()
+            });
+            if request.uri().path() != RUN_CONTROL_PATH || expiry.is_none() {
                 return Err(run_control_forbidden());
             }
+            handshake_expires_at.store(expiry.expect("expiry was checked"), Ordering::Release);
             if let Some(protocol) = requested_protocol.and_then(|value| {
                 value
                     .split(',')
@@ -452,6 +456,12 @@ fn serve_run_control_connection(
     )
     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     loop {
+        if credential_expires_at.load(Ordering::Acquire)
+            <= OffsetDateTime::now_utc().unix_timestamp()
+        {
+            let _ = socket.send(Message::Close(None));
+            break;
+        }
         let message = match socket.read() {
             Ok(message) => message,
             Err(
@@ -461,6 +471,14 @@ fn serve_run_control_connection(
                     tungstenite::error::ProtocolError::ResetWithoutClosingHandshake,
                 ),
             ) => break,
+            Err(tungstenite::Error::Io(error))
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue;
+            }
             Err(error) => return Err(anyhow::anyhow!(error.to_string())),
         };
         match message {
@@ -557,7 +575,7 @@ fn verify_run_control_credential(
     lease_id: &str,
     runner_id: &str,
     capability: &BrowserControlCapability,
-) -> Result<()> {
+) -> Result<i64> {
     let (encoded, signature) = credential
         .split_once('.')
         .context("Run control credential format is invalid")?;
@@ -594,7 +612,7 @@ fn verify_run_control_credential(
         claims.protocol == capability.protocol && claims.port == capability.port,
         "Run control credential capability mismatch"
     );
-    Ok(())
+    Ok(claims.expires_at)
 }
 
 fn run_control_forbidden() -> ErrorResponse {
