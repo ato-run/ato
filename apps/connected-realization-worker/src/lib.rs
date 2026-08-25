@@ -2437,6 +2437,20 @@ mod tests {
         }
     }
 
+    fn assert_tcp_unreachable(address: SocketAddr) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            if TcpStream::connect_timeout(&address, Duration::from_millis(20)).is_err() {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "TCP endpoint remained reachable after its listener closed"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     fn control_credential(
         verification_key: &str,
         run_id: &str,
@@ -2850,7 +2864,7 @@ mod tests {
         let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
         let published = reservation.local_addr().unwrap();
         drop(reservation);
-        assert!(TcpStream::connect(published).is_err());
+        assert_tcp_unreachable(published);
 
         let upstream = thread::spawn(move || {
             let (mut stream, _) = target_listener.accept().unwrap();
@@ -2867,7 +2881,7 @@ mod tests {
         drop(stream);
         drop(proxy);
         upstream.join().unwrap();
-        assert!(TcpStream::connect(published).is_err());
+        assert_tcp_unreachable(published);
     }
 
     #[test]
