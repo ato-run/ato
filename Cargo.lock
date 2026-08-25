@@ -209,6 +209,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "ato-adapter-browser",
+ "base64 0.22.1",
  "serde",
  "serde_json",
  "tempfile",
@@ -325,6 +326,7 @@ dependencies = [
  "clap",
  "hex",
  "hmac",
+ "rand 0.8.6",
  "reqwest",
  "serde",
  "serde_json",
