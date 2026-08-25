@@ -44,7 +44,7 @@ use ato_browser_semantics::{
 use ato_compose::{COMPOSE_SEMANTICS_ID, ComposeSemantics, decode_composite_residual};
 use ato_computation::{ComputationRef, ContentRef, PortId, ProtocolId, SemanticsId};
 use ato_contracts::{HttpEndpointVerifier, WorkspaceContentVerifier};
-use ato_kernel::{Kernel, RunEvolutionAuthority};
+use ato_kernel::{EvolutionError, Kernel, RunEvolutionAuthority};
 use ato_materializer_api::{
     AcceptedRealization, ContractContext, ContractVerifierRegistry, MaterializerContext,
     MaterializerError, MaterializerRegistry, OperationReplayRuntime, Realization,
@@ -564,11 +564,25 @@ fn handle_run_control_request(
             head_after: accepted.transition.to.to_string(),
             record_error: accepted.record_error,
         },
-        Err(_) => RunControlResponse::Rejected {
-            operation_id: request.operation_id.clone(),
-            client_seq: request.client_seq,
-            reason: "operation_rejected".to_owned(),
-        },
+        Err(error) => {
+            let reason = evolution_error_code(&error);
+            eprintln!("run control operation rejected: {reason}");
+            RunControlResponse::Rejected {
+                operation_id: request.operation_id.clone(),
+                client_seq: request.client_seq,
+                reason: reason.to_owned(),
+            }
+        }
+    }
+}
+
+fn evolution_error_code(error: &EvolutionError) -> &'static str {
+    match error {
+        EvolutionError::Kernel(_) => "kernel_rejected",
+        EvolutionError::Frozen => "run_frozen",
+        EvolutionError::PersistencePending(_) => "head_persistence_pending",
+        EvolutionError::Apply(_) => "adapter_apply_rejected",
+        EvolutionError::Persist(_) => "head_persistence_failed",
     }
 }
 
