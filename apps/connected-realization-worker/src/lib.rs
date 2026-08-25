@@ -17,10 +17,9 @@ use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -100,6 +99,7 @@ const ACTIVE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const GUEST_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const GUEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const RUN_CONTROL_PATH: &str = "/.well-known/ato/control";
+const BROWSER_PRESENTATION_PATH: &str = "/.well-known/ato/browser/frame.jpg";
 const RUN_CONTROL_MAX_FRAME_BYTES: usize = 32 * 1024;
 const RUN_CONTROL_REQUEST_HEADER_MAX_BYTES: usize = 16 * 1024;
 const AUTHORING_SEMANTICS_ID: &str = "ato.authoring@1";
@@ -963,10 +963,19 @@ impl ConnectedWorker {
 
         // The externally reachable listener does not exist until the VM is
         // active, every Contract passed, and the Realization published.
+        let presentation_frame = browser
+            .as_mut()
+            .map(|runtime| {
+                runtime
+                    .capture_presentation_frame()
+                    .map(|frame| Arc::new(RwLock::new(frame)))
+            })
+            .transpose()?;
         let proxy = TcpProxy::start_with_control(
             self.config.surface_listen,
             ProxyTarget::Tcp(self.config.hidden_surface_listen),
             browser.as_ref().map(|runtime| runtime.control_address()),
+            presentation_frame.clone(),
         )?;
         let execution_id = format!("vm:{}:{}", lease.run_id, lease.id);
         ensure!(
@@ -980,23 +989,38 @@ impl ConnectedWorker {
             ready_local_port(&self.config),
             browser.as_ref().map(|runtime| runtime.control_capability()),
         )?;
+        let mut last_control = Instant::now() - Duration::from_secs(1);
+        let mut last_frame = Instant::now();
         let mut last_heartbeat = Instant::now();
         loop {
-            let control = self.api.control(&lease.id)?;
-            if control.stop_requested {
-                if let Some(browser) = browser.take() {
-                    browser.stop()?;
+            if last_frame.elapsed() >= Duration::from_millis(250) {
+                if let (Some(browser), Some(frame)) =
+                    (browser.as_mut(), presentation_frame.as_ref())
+                {
+                    *frame.write().map_err(|_| {
+                        anyhow::anyhow!("Browser presentation frame lock poisoned")
+                    })? = browser.capture_presentation_frame()?;
                 }
-                drop(proxy);
-                running.quiesce()?;
-                self.api.report_stopped(&lease.id, &execution_id)?;
-                return Ok(());
+                last_frame = Instant::now();
+            }
+            if last_control.elapsed() >= Duration::from_secs(1) {
+                let control = self.api.control(&lease.id)?;
+                if control.stop_requested {
+                    if let Some(browser) = browser.take() {
+                        browser.stop()?;
+                    }
+                    drop(proxy);
+                    running.quiesce()?;
+                    self.api.report_stopped(&lease.id, &execution_id)?;
+                    return Ok(());
+                }
+                last_control = Instant::now();
             }
             if last_heartbeat.elapsed() >= ACTIVE_HEARTBEAT_INTERVAL {
                 self.api.heartbeat(&self.config, 1)?;
                 last_heartbeat = Instant::now();
             }
-            thread::sleep(Duration::from_secs(1));
+            thread::sleep(Duration::from_millis(50));
         }
     }
 
@@ -2870,7 +2894,7 @@ enum ProxyTarget {
 
 impl TcpProxy {
     fn start(listen: SocketAddr, target: ProxyTarget) -> Result<Self> {
-        Self::start_with_control(listen, target, None)
+        Self::start_with_control(listen, target, None, None)
     }
 
     /// The Browser control listener is intentionally not a second public
@@ -2880,6 +2904,7 @@ impl TcpProxy {
         listen: SocketAddr,
         target: ProxyTarget,
         control_target: Option<SocketAddr>,
+        presentation_frame: Option<Arc<RwLock<Vec<u8>>>>,
     ) -> Result<Self> {
         let listener = TcpListener::bind(listen)?;
         listener.set_nonblocking(true)?;
@@ -2890,9 +2915,15 @@ impl TcpProxy {
                 match listener.accept() {
                     Ok((client, _)) => {
                         let target = target.clone();
+                        let presentation_frame = presentation_frame.clone();
                         thread::spawn(move || {
                             if let Some(control_target) = control_target {
-                                proxy_surface_or_control(client, &target, control_target);
+                                proxy_surface_or_browser(
+                                    client,
+                                    &target,
+                                    control_target,
+                                    presentation_frame,
+                                );
                             } else {
                                 proxy_connection(client, &target);
                             }
@@ -2925,20 +2956,45 @@ fn proxy_connection(mut client: TcpStream, target: &ProxyTarget) {
     proxy_connection_with_prelude(&mut client, target, &[]);
 }
 
-fn proxy_surface_or_control(
+fn proxy_surface_or_browser(
     mut client: TcpStream,
     surface_target: &ProxyTarget,
     control_target: SocketAddr,
+    presentation_frame: Option<Arc<RwLock<Vec<u8>>>>,
 ) {
     let Ok(prelude) = read_http_request_prelude(&mut client) else {
         return;
     };
-    let target = if control_request_path(&prelude) == Some(RUN_CONTROL_PATH) {
+    let path = control_request_path(&prelude);
+    if path == Some(BROWSER_PRESENTATION_PATH) {
+        serve_browser_presentation(&mut client, presentation_frame.as_ref());
+        return;
+    }
+    let target = if path == Some(RUN_CONTROL_PATH) {
         ProxyTarget::Tcp(control_target)
     } else {
         surface_target.clone()
     };
     proxy_connection_with_prelude(&mut client, &target, &prelude);
+}
+
+fn serve_browser_presentation(
+    client: &mut TcpStream,
+    presentation_frame: Option<&Arc<RwLock<Vec<u8>>>>,
+) {
+    let Some(frame) = presentation_frame.and_then(|frame| frame.read().ok()) else {
+        let _ = client.write_all(
+            b"HTTP/1.1 503 Service Unavailable\r\nCache-Control: no-store\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        return;
+    };
+    let headers = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nCache-Control: no-store, max-age=0\r\nContent-Length: {}\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\n\r\n",
+        frame.len()
+    );
+    if client.write_all(headers.as_bytes()).is_ok() {
+        let _ = client.write_all(&frame);
+    }
 }
 
 fn read_http_request_prelude(client: &mut TcpStream) -> io::Result<Vec<u8>> {
@@ -3174,6 +3230,31 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn browser_presentation_response_is_no_store_jpeg() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let frame = Arc::new(RwLock::new(vec![0xff, 0xd8, 0xff, 0xd9]));
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            serve_browser_presentation(&mut stream, Some(&frame));
+        });
+        let mut client = TcpStream::connect(address).unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+        server.join().unwrap();
+        let headers_end = response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .unwrap()
+            + 4;
+        let headers = std::str::from_utf8(&response[..headers_end]).unwrap();
+        assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(headers.contains("Content-Type: image/jpeg\r\n"));
+        assert!(headers.contains("Cache-Control: no-store, max-age=0\r\n"));
+        assert_eq!(&response[headers_end..], &[0xff, 0xd8, 0xff, 0xd9]);
     }
 
     fn control_credential(
