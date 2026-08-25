@@ -16,6 +16,7 @@ use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
@@ -33,6 +34,7 @@ use ato_adapter_browser::{
     BROWSER_PROTOCOL_ID, BrowserAdapter, BrowserAdapterConfig, BrowserInputMode,
     register_record_schemas as register_browser_record_schemas,
 };
+use ato_adapter_workspace::restore_workspace;
 use ato_browser_host::{BrowserHost, BrowserHostConfig};
 use ato_browser_semantics::{
     AcceptedBrowserOperation, BROWSER_COMPUTATION_SEMANTICS_ID, BrowserComputationSemantics,
@@ -45,7 +47,11 @@ use ato_contracts::{HttpEndpointVerifier, WorkspaceContentVerifier};
 use ato_kernel::{Kernel, RunEvolutionAuthority};
 use ato_materializer_api::{
     AcceptedRealization, ContractContext, ContractVerifierRegistry, MaterializerContext,
-    MaterializerError, MaterializerRegistry, Realization, accept_candidate,
+    MaterializerError, MaterializerRegistry, OperationReplayRuntime, Realization,
+    RealizationDriver, ReplayRuntime, accept_candidate,
+};
+use ato_materializer_replay::{
+    REPLAY_MATERIALIZER_ID, REPLAY_MATERIALIZER_V2_ID, ReplayMaterializer, ReplayMaterializerV2,
 };
 use ato_materializer_vm_snapshot::{
     ActiveFirecrackerRealization, FirecrackerActiveVmCaptureSource, FirecrackerBackend,
@@ -53,7 +59,10 @@ use ato_materializer_vm_snapshot::{
     FirecrackerSurfaceRelayConfig, VM_SNAPSHOT_MATERIALIZER_ID, VmSnapshotError,
     VmSnapshotMaterializer,
 };
-use ato_objects::{ObjectResolver, ObjectStore, RecordCandidate, resolve_computation};
+use ato_objects::{
+    ObjectResolver, ObjectStore, RecordCandidate, RecordEnvelope, RecordEnvelopeV2,
+    read_exact_object, resolve_computation,
+};
 use ato_planner::{
     MaterializationCandidate, Placement, PlannerPolicy, RealizationPlanner, TargetEnvironment,
     TrustBoundary,
@@ -93,6 +102,8 @@ const GUEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const RUN_CONTROL_PATH: &str = "/.well-known/ato/control";
 const RUN_CONTROL_MAX_FRAME_BYTES: usize = 32 * 1024;
 const RUN_CONTROL_REQUEST_HEADER_MAX_BYTES: usize = 16 * 1024;
+const AUTHORING_SEMANTICS_ID: &str = "ato.authoring@1";
+const SOURCE_READY_TIMEOUT: Duration = Duration::from_secs(30);
 type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Debug, Clone)]
@@ -908,7 +919,7 @@ impl ConnectedWorker {
             guest_surface_target: self.config.surface_target,
             tap_host_cidr: &self.config.tap_host_cidr,
         };
-        let running = restore_vm_path(&graph, lease_root, &lease.id, &physical)?;
+        let running = restore_portable_path(&graph, lease_root, &lease.id, &physical)?;
         self.api.report_status(&lease.id, "running")?;
 
         // An explicit Browser Computation receives one private Chrome
@@ -1006,7 +1017,7 @@ impl ConnectedWorker {
             guest_surface_target: self.config.surface_target,
             tap_host_cidr: &self.config.tap_host_cidr,
         };
-        let running = restore_vm_path(&graph, lease_root, &lease.id, &physical)?;
+        let running = restore_portable_path(&graph, lease_root, &lease.id, &physical)?;
         self.api.report_status(&lease.id, "running")?;
         let mut browser = start_hosted_browser_runtime(
             &graph,
@@ -1313,6 +1324,678 @@ struct RestorePhysicalConfig<'a> {
     tap_host_cidr: &'a str,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceAuthoringState {
+    version: u32,
+    config: SourceAuthoringConfig,
+    workspace_snapshot: String,
+    #[serde(default)]
+    semantic_frontier: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceAuthoringConfig {
+    schema: u32,
+    process: Vec<SourceProcessConfig>,
+    adapter: Vec<SourceAdapterConfig>,
+    port: Vec<SourcePortConfig>,
+    connection: Vec<serde_json::Value>,
+    binding: Vec<serde_json::Value>,
+    workspace: serde_json::Value,
+    encap: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceProcessConfig {
+    id: String,
+    command: Vec<String>,
+    cwd: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceAdapterConfig {
+    #[serde(rename = "use")]
+    use_adapter: String,
+    target: Option<String>,
+    port: Option<String>,
+    listen: Option<String>,
+    upstream: Option<String>,
+    input: Option<String>,
+    ready_path: Option<String>,
+    config: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourcePortConfig {
+    id: String,
+    node: String,
+    protocol: String,
+    role: String,
+    address: Option<String>,
+    environment: Option<String>,
+    internal: bool,
+}
+
+#[derive(Debug, Clone)]
+struct SourceLaunchSpec {
+    command: Vec<String>,
+    cwd: PathBuf,
+    listen_environment: String,
+    application_address: SocketAddr,
+    workspace: PathBuf,
+    relay_script: PathBuf,
+    surface_socket: PathBuf,
+    hidden_surface_listen: SocketAddr,
+}
+
+const SOURCE_RELAY_SCRIPT: &str = r#"import os
+import selectors
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+
+surface = sys.argv[1]
+host, port_text = sys.argv[2].rsplit(':', 1)
+command = sys.argv[4:]
+if not command:
+    raise SystemExit('source command is empty')
+child = subprocess.Popen(command)
+stopping = False
+
+def stop(_signal=None, _frame=None):
+    global stopping
+    stopping = True
+    if child.poll() is None:
+        child.terminate()
+
+signal.signal(signal.SIGTERM, stop)
+signal.signal(signal.SIGINT, stop)
+deadline = time.monotonic() + 30
+while time.monotonic() < deadline and child.poll() is None:
+    try:
+        probe = socket.create_connection((host, int(port_text)), timeout=0.2)
+        probe.close()
+        break
+    except OSError:
+        time.sleep(0.05)
+else:
+    stop()
+    child.wait(timeout=5)
+    raise SystemExit('source application did not become ready')
+
+try:
+    os.unlink(surface)
+except FileNotFoundError:
+    pass
+listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+listener.bind(surface)
+os.chmod(surface, 0o600)
+listener.listen(16)
+listener.settimeout(0.2)
+
+def proxy(client):
+    upstream = socket.create_connection((host, int(port_text)), timeout=5)
+    client.setblocking(False)
+    upstream.setblocking(False)
+    selector = selectors.DefaultSelector()
+    selector.register(client, selectors.EVENT_READ, upstream)
+    selector.register(upstream, selectors.EVENT_READ, client)
+    try:
+        while True:
+            events = selector.select(timeout=5)
+            if not events and stopping:
+                return
+            for key, _ in events:
+                data = key.fileobj.recv(65536)
+                if not data:
+                    return
+                key.data.sendall(data)
+    finally:
+        selector.close()
+        client.close()
+        upstream.close()
+
+try:
+    while not stopping and child.poll() is None:
+        try:
+            client, _ = listener.accept()
+        except TimeoutError:
+            continue
+        threading.Thread(target=proxy, args=(client,), daemon=True).start()
+finally:
+    listener.close()
+    try:
+        os.unlink(surface)
+    except FileNotFoundError:
+        pass
+    stop()
+    try:
+        child.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        child.wait()
+raise SystemExit(child.returncode or 0)
+"#;
+
+fn source_launch_spec(
+    graph: &ValidatedRuntimeGraph,
+    lease_root: &Path,
+    hidden_surface_listen: SocketAddr,
+) -> Result<SourceLaunchSpec> {
+    let root = ComputationRef::parse(&graph.report().root_computation_ref)?;
+    let mut leaves = Vec::new();
+    collect_authoring_leaves(&root, graph.objects(), &mut leaves)?;
+    let [authoring] = leaves.as_slice() else {
+        bail!("source Replay requires exactly one authored process computation");
+    };
+    let resolved = resolve_computation(graph.objects(), authoring)?;
+    let metadata = graph.objects().metadata(&resolved.object().residual)?;
+    let bytes = read_exact_object(
+        graph.objects(),
+        &resolved.object().residual,
+        metadata.size,
+        16 * 1024 * 1024,
+    )?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+    ensure!(
+        serde_jcs::to_vec(&value)? == bytes,
+        "source authoring state is non-canonical"
+    );
+    let state: SourceAuthoringState = serde_json::from_value(value)?;
+    ensure!(
+        state.version == 1,
+        "source authoring state version is unsupported"
+    );
+    ensure!(
+        state.config.schema == 1,
+        "source authoring schema is unsupported"
+    );
+    ensure!(
+        state.semantic_frontier.is_none(),
+        "source Replay with an evolved semantic frontier requires a captured VM"
+    );
+    ensure!(
+        state.config.connection.is_empty() && state.config.binding.is_empty(),
+        "source Replay v0 does not admit connections or runtime Bindings"
+    );
+    ensure!(
+        state.config.adapter.iter().all(|adapter| {
+            let _ = (
+                &adapter.target,
+                &adapter.port,
+                &adapter.listen,
+                &adapter.upstream,
+                &adapter.input,
+                &adapter.ready_path,
+                &adapter.config,
+            );
+            adapter.use_adapter == "ato.process@1"
+        }),
+        "source Replay v0 admits only the process Adapter inside the sandbox"
+    );
+    let [process] = state.config.process.as_slice() else {
+        bail!("source Replay v0 requires exactly one process");
+    };
+    ensure!(
+        !process.command.is_empty(),
+        "source process command is empty"
+    );
+    ensure!(
+        !process.cwd.is_absolute()
+            && process.cwd.components().all(|component| matches!(
+                component,
+                std::path::Component::CurDir | std::path::Component::Normal(_)
+            )),
+        "source process cwd escapes the restored workspace"
+    );
+    let web_ports = state
+        .config
+        .port
+        .iter()
+        .filter(|port| !port.internal && port.protocol == "ato.http@1" && port.role == "server")
+        .collect::<Vec<_>>();
+    let [web_port] = web_ports.as_slice() else {
+        bail!("source Replay v0 requires exactly one exported ato.http@1 server Port");
+    };
+    ensure!(
+        web_port.node == process.id && !web_port.id.is_empty(),
+        "source HTTP Port is not owned by the selected process"
+    );
+    let application_address: SocketAddr = web_port
+        .address
+        .as_deref()
+        .context("source HTTP Port requires an address")?
+        .parse()?;
+    ensure!(
+        application_address.ip().is_loopback(),
+        "source HTTP Port must bind loopback"
+    );
+    let listen_environment = web_port
+        .environment
+        .clone()
+        .context("source HTTP Port requires an environment projection")?;
+    ensure!(
+        !listen_environment.is_empty(),
+        "source HTTP environment name is empty"
+    );
+    let _ = (&state.config.workspace, &state.config.encap);
+    let workspace = lease_root.join("workspace");
+    let snapshot = ContentRef::parse(state.workspace_snapshot)?;
+    restore_workspace(&snapshot, &workspace, graph.objects())?;
+    let relay_script = lease_root.join("source-relay.py");
+    fs::write(&relay_script, SOURCE_RELAY_SCRIPT)?;
+    let surface_socket = workspace.join("surface.sock");
+    Ok(SourceLaunchSpec {
+        command: process.command.clone(),
+        cwd: process.cwd.clone(),
+        listen_environment,
+        application_address,
+        workspace,
+        relay_script,
+        surface_socket,
+        hidden_surface_listen,
+    })
+}
+
+fn collect_authoring_leaves(
+    reference: &ComputationRef,
+    objects: &dyn ObjectResolver,
+    leaves: &mut Vec<ComputationRef>,
+) -> Result<()> {
+    let resolved = resolve_computation(objects, reference)?;
+    if resolved.object().semantics == SemanticsId::parse(AUTHORING_SEMANTICS_ID)? {
+        leaves.push(reference.clone());
+        return Ok(());
+    }
+    if resolved.object().semantics == SemanticsId::parse(BROWSER_COMPUTATION_SEMANTICS_ID)? {
+        return Ok(());
+    }
+    ensure!(
+        resolved.object().semantics == SemanticsId::parse(COMPOSE_SEMANTICS_ID)?,
+        "source Replay graph contains an unsupported computation leaf"
+    );
+    let metadata = objects.metadata(&resolved.object().residual)?;
+    let bytes = read_exact_object(
+        objects,
+        &resolved.object().residual,
+        metadata.size,
+        ato_compose::MAX_COMPOSITE_RESIDUAL_BYTES,
+    )?;
+    for child in decode_composite_residual(&bytes)?.nodes.values() {
+        collect_authoring_leaves(child, objects, leaves)?;
+    }
+    Ok(())
+}
+
+struct SourceReplayDriver {
+    expected_root: ComputationRef,
+    spec: SourceLaunchSpec,
+}
+
+impl RealizationDriver for SourceReplayDriver {
+    fn begin(&self, anchor: &ComputationRef) -> Result<Box<dyn ReplayRuntime>, MaterializerError> {
+        if anchor != &self.expected_root {
+            return Err(MaterializerError::Operation(
+                "source Replay anchor does not match the graph root".to_owned(),
+            ));
+        }
+        Ok(Box::new(SourceReplayRuntime {
+            expected_root: self.expected_root.clone(),
+            spec: self.spec.clone(),
+        }))
+    }
+
+    fn preflight_operations(&self, records: &[RecordEnvelopeV2]) -> Result<(), MaterializerError> {
+        if records.is_empty() {
+            Ok(())
+        } else {
+            Err(MaterializerError::OperationReplayUnsupported)
+        }
+    }
+
+    fn begin_operations(
+        &self,
+        anchor: &ComputationRef,
+    ) -> Result<Box<dyn OperationReplayRuntime>, MaterializerError> {
+        if anchor != &self.expected_root {
+            return Err(MaterializerError::Operation(
+                "source Replay anchor does not match the graph root".to_owned(),
+            ));
+        }
+        Ok(Box::new(SourceOperationReplayRuntime {
+            expected_root: self.expected_root.clone(),
+            spec: self.spec.clone(),
+        }))
+    }
+}
+
+struct SourceReplayRuntime {
+    expected_root: ComputationRef,
+    spec: SourceLaunchSpec,
+}
+
+impl ReplayRuntime for SourceReplayRuntime {
+    fn apply(&mut self, _record: &RecordEnvelope) -> Result<(), MaterializerError> {
+        Err(MaterializerError::OperationReplayUnsupported)
+    }
+
+    fn finish(
+        self: Box<Self>,
+        target: &ComputationRef,
+    ) -> Result<Box<dyn Realization>, MaterializerError> {
+        source_realization(self.expected_root, target, self.spec)
+    }
+}
+
+struct SourceOperationReplayRuntime {
+    expected_root: ComputationRef,
+    spec: SourceLaunchSpec,
+}
+
+impl OperationReplayRuntime for SourceOperationReplayRuntime {
+    fn apply(&mut self, _record: &RecordEnvelopeV2) -> Result<(), MaterializerError> {
+        Err(MaterializerError::OperationReplayUnsupported)
+    }
+
+    fn finish(
+        self: Box<Self>,
+        target: &ComputationRef,
+    ) -> Result<Box<dyn Realization>, MaterializerError> {
+        source_realization(self.expected_root, target, self.spec)
+    }
+}
+
+fn source_realization(
+    expected_root: ComputationRef,
+    target: &ComputationRef,
+    spec: SourceLaunchSpec,
+) -> Result<Box<dyn Realization>, MaterializerError> {
+    if target != &expected_root {
+        return Err(MaterializerError::Operation(
+            "source Replay target does not match the graph root".to_owned(),
+        ));
+    }
+    Ok(Box::new(SourceProcessRealization {
+        target: expected_root,
+        spec,
+        child: None,
+        hidden_proxy: None,
+    }))
+}
+
+struct SourceProcessRealization {
+    target: ComputationRef,
+    spec: SourceLaunchSpec,
+    child: Option<Child>,
+    hidden_proxy: Option<TcpProxy>,
+}
+
+impl SourceProcessRealization {
+    fn spawn(&self) -> Result<Child> {
+        let bwrap = Path::new("/usr/bin/bwrap");
+        ensure!(bwrap.is_file(), "source Replay requires /usr/bin/bwrap");
+        let workspace = self.spec.workspace.canonicalize()?;
+        let relay = self.spec.relay_script.canonicalize()?;
+        let cwd = Path::new("/workspace").join(&self.spec.cwd);
+        let mut command = Command::new(bwrap);
+        command.args([
+            "--die-with-parent",
+            "--new-session",
+            "--unshare-all",
+            "--clearenv",
+            "--cap-drop",
+            "ALL",
+            "--tmpfs",
+            "/",
+        ]);
+        for path in ["/usr", "/lib", "/lib64", "/bin", "/sbin"] {
+            if Path::new(path).exists() {
+                command.args(["--ro-bind", path, path]);
+            }
+        }
+        for path in ["/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d"] {
+            if Path::new(path).exists() {
+                command.args(["--ro-bind", path, path]);
+            }
+        }
+        command
+            .args(["--dir", "/opt", "--dir", "/opt/ato"])
+            .arg("--ro-bind")
+            .arg(relay)
+            .arg("/opt/ato/source-relay.py")
+            .args(["--dir", "/workspace"])
+            .arg("--bind")
+            .arg(workspace)
+            .arg("/workspace")
+            .args([
+                "--proc",
+                "/proc",
+                "--dev",
+                "/dev",
+                "--tmpfs",
+                "/tmp",
+                "--dir",
+                "/home",
+                "--dir",
+                "/home/ato",
+                "--chdir",
+            ])
+            .arg(cwd)
+            .args([
+                "--setenv",
+                "HOME",
+                "/home/ato",
+                "--setenv",
+                "TMPDIR",
+                "/tmp",
+            ])
+            .args(["--setenv", "PATH", "/usr/bin:/bin"])
+            .arg("--setenv")
+            .arg(&self.spec.listen_environment)
+            .arg(self.spec.application_address.to_string())
+            .args([
+                "/usr/bin/python3",
+                "/opt/ato/source-relay.py",
+                "/workspace/surface.sock",
+            ])
+            .arg(self.spec.application_address.to_string())
+            .arg("--")
+            .args(&self.spec.command)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit());
+        command.spawn().context("start source Replay sandbox")
+    }
+}
+
+impl Realization for SourceProcessRealization {
+    fn target(&self) -> &ComputationRef {
+        &self.target
+    }
+
+    fn activate(&mut self) -> Result<(), MaterializerError> {
+        if self.child.is_some() {
+            return Ok(());
+        }
+        let mut child = self
+            .spawn()
+            .map_err(|error| MaterializerError::Operation(error.to_string()))?;
+        let deadline = Instant::now() + SOURCE_READY_TIMEOUT;
+        while Instant::now() < deadline {
+            if self.spec.surface_socket.exists() {
+                let proxy = TcpProxy::start(
+                    self.spec.hidden_surface_listen,
+                    ProxyTarget::Unix(self.spec.surface_socket.clone()),
+                )
+                .map_err(|error| MaterializerError::Operation(error.to_string()))?;
+                self.child = Some(child);
+                self.hidden_proxy = Some(proxy);
+                return Ok(());
+            }
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|error| MaterializerError::Operation(error.to_string()))?
+            {
+                return Err(MaterializerError::Operation(format!(
+                    "source Replay sandbox exited before readiness: {status}"
+                )));
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        Err(MaterializerError::Operation(
+            "source Replay sandbox did not publish its Surface".to_owned(),
+        ))
+    }
+
+    fn publish(&mut self) -> Result<(), MaterializerError> {
+        Ok(())
+    }
+
+    fn wait(&mut self) -> Result<(), MaterializerError> {
+        let status = self
+            .child
+            .as_mut()
+            .ok_or_else(|| MaterializerError::Operation("source Replay is inactive".to_owned()))?
+            .wait()
+            .map_err(|error| MaterializerError::Operation(error.to_string()))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(MaterializerError::Operation(format!(
+                "source Replay sandbox exited: {status}"
+            )))
+        }
+    }
+
+    fn quiesce(&mut self) -> Result<(), MaterializerError> {
+        self.hidden_proxy.take();
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            child
+                .wait()
+                .map_err(|error| MaterializerError::Operation(error.to_string()))?;
+        }
+        match fs::remove_file(&self.spec.surface_socket) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(MaterializerError::Operation(error.to_string())),
+        }
+        Ok(())
+    }
+}
+
+fn restore_source_replay_path(
+    graph: &ValidatedRuntimeGraph,
+    lease_root: &Path,
+    lease_id: &str,
+    physical: &RestorePhysicalConfig<'_>,
+) -> Result<AcceptedRealization> {
+    let root = ComputationRef::parse(&graph.report().root_computation_ref)?;
+    let spec = source_launch_spec(graph, lease_root, physical.hidden_surface_listen)?;
+    let driver = SourceReplayDriver {
+        expected_root: root.clone(),
+        spec,
+    };
+    let workspace = lease_root.join("workspace");
+    let workspace_policy = WorkspaceCapturePolicy::secure_default();
+    let adapters = AdapterRegistry::default();
+    let mut materializers = MaterializerRegistry::default();
+    materializers.register(Arc::new(ReplayMaterializer))?;
+    materializers.register(Arc::new(ReplayMaterializerV2))?;
+    let actuator_providers = ActuatorProviderRegistry::default();
+    let context = MaterializerContext {
+        objects: graph.objects(),
+        adapters: &adapters,
+        records: &[],
+        records_v2: &[],
+        replay_anchor: None,
+        record_frontier_ref: None,
+        workspace: &workspace,
+        workspace_policy: &workspace_policy,
+        realization: Some(&driver),
+        contracts: &[],
+        runner_capabilities: None,
+    };
+    let environment = TargetEnvironment {
+        id: format!("hosted-source:{lease_id}"),
+        placement: Placement::Hosted,
+        trust_boundary: TrustBoundary::TenantIsolated,
+    };
+    let candidates = graph
+        .index()
+        .materializations
+        .iter()
+        .filter(|candidate| {
+            candidate.id == REPLAY_MATERIALIZER_ID || candidate.id == REPLAY_MATERIALIZER_V2_ID
+        })
+        .map(|candidate| {
+            Ok(MaterializationCandidate {
+                materializer_id: candidate.id.clone(),
+                descriptor_ref: ContentRef::parse(&candidate.descriptor_ref)?,
+                environment: environment.clone(),
+                context: MaterializerContext {
+                    objects: context.objects,
+                    adapters: context.adapters,
+                    records: context.records,
+                    records_v2: context.records_v2,
+                    replay_anchor: context.replay_anchor,
+                    record_frontier_ref: context.record_frontier_ref,
+                    workspace: context.workspace,
+                    workspace_policy: context.workspace_policy,
+                    realization: context.realization,
+                    contracts: context.contracts,
+                    runner_capabilities: context.runner_capabilities,
+                },
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    ensure!(
+        !candidates.is_empty(),
+        "graph has neither a VM nor source Replay Materialization candidate"
+    );
+    let contract_verifiers = ContractVerifierRegistry::default();
+    let plan = RealizationPlanner {
+        target: &root,
+        materializers: &materializers,
+        actuator_providers: &actuator_providers,
+        contract_verifiers: &contract_verifiers,
+        port_bindings: &[],
+        policy: &PlannerPolicy::default(),
+    }
+    .plan(candidates)?;
+    let selected = plan
+        .candidates
+        .first()
+        .context("Planner returned no source Replay path")?;
+    let materializer = materializers.get(&selected.materializer_id)?;
+    let contracts = materializer.contracts(&selected.descriptor_ref, &context)?;
+    let realization = materializer.restore(&selected.descriptor_ref, &context)?;
+    ensure!(
+        realization.target() == &root,
+        "source Replay target mismatch"
+    );
+    accept_candidate(
+        realization,
+        &contracts,
+        &contract_verifiers,
+        &ContractContext {
+            objects: graph.objects(),
+            workspace: &workspace,
+        },
+    )
+    .map_err(Into::into)
+}
+
 fn initialize_hosted_run_evolution_authority(
     graph: &ValidatedRuntimeGraph,
     expected_root: &str,
@@ -1499,6 +2182,24 @@ fn start_hosted_browser_runtime(
         objects: Arc::new(graph.objects().clone()),
         workspace: workspace.to_owned(),
     }))
+}
+
+fn restore_portable_path(
+    graph: &ValidatedRuntimeGraph,
+    lease_root: &Path,
+    lease_id: &str,
+    physical: &RestorePhysicalConfig<'_>,
+) -> Result<AcceptedRealization> {
+    if graph
+        .index()
+        .materializations
+        .iter()
+        .any(|candidate| candidate.id == VM_SNAPSHOT_MATERIALIZER_ID)
+    {
+        restore_vm_path(graph, lease_root, lease_id, physical)
+    } else {
+        restore_source_replay_path(graph, lease_root, lease_id, physical)
+    }
 }
 
 fn restore_vm_path(

@@ -35,6 +35,7 @@ ato-adapter-http = { path = "../../extensions/adapters/http", version = "0.1.0" 
 ato-adapter-process = { path = "../../extensions/adapters/process", version = "0.1.0" }
 ato-adapter-pty = { path = "../../extensions/adapters/pty", version = "0.1.0" }
 ato-adapter-workspace = { path = "../../extensions/adapters/workspace", version = "0.1.0" }
+ato-browser-semantics = { path = "../../extensions/semantics/browser", version = "0.1.0" }
 ato-computation = { path = "../../lib/computation", version = "0.1.0" }
 ato-ipc = { path = "../../lib/ipc", version = "0.1.0" }
 ato-kernel = { path = "../../lib/kernel", version = "0.1.0" }
