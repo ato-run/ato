@@ -23,6 +23,10 @@ use tungstenite::{Message, WebSocket, client};
 use url::Url;
 
 const DISCOVERY_WAIT: Duration = Duration::from_secs(30);
+// GitHub-hosted macOS runners can take more than 30 seconds to cold-start
+// Chrome and complete isolated-world injection. This timeout only bounds the
+// fail-closed handshake; it does not delay the normal readiness path.
+const BRIDGE_HANDSHAKE_WAIT: Duration = Duration::from_secs(60);
 const CDP_WAIT: Duration = Duration::from_secs(15);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const PROFILE_NAME: &str = "browser-profile";
@@ -373,7 +377,7 @@ fn validate_bootstrap(bootstrap: &BrowserRuntimeBootstrap) -> Result<()> {
 
 fn wait_for_bridge_ready(bootstrap_path: &Path) -> Result<()> {
     let ready_path = bootstrap_path.with_extension("ready");
-    let deadline = Instant::now() + DISCOVERY_WAIT;
+    let deadline = Instant::now() + BRIDGE_HANDSHAKE_WAIT;
     loop {
         if fs::read(&ready_path).ok().as_deref() == Some(b"ready") {
             return Ok(());
