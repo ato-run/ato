@@ -147,8 +147,8 @@ Room credentials are not persisted in `runner_leases.command_json`.
 The Browser Host injects two distinct scripts:
 
 1. A credential-free consumer compatibility script in the page main world.
-   It probes `document.modelContext`, the deprecated compatibility alias, and
-   the deterministic fixture producer, in that order.
+   It selects exactly one producer: `document.modelContext`, the deprecated
+   compatibility alias, or the deterministic fixture producer, in that order.
 2. The existing credential-bearing `ato.browser@1` bridge in an isolated
    world. It cannot directly depend on main-world expando visibility and uses
    a narrow DOM-event request/ack bridge.
@@ -157,6 +157,12 @@ Only the main-world script knows draft WebMCP producer method names. It holds
 one `AbortController` per in-flight page operation. Page-provided operation
 output is discarded at that boundary; a Controller must observe the resulting
 surface state. No Ato credential is installed in the main-world consumer.
+Changing the selected producer context or API atomically removes the previous
+owner's operations and increments the registry generation even when the new
+definitions have identical signatures. A disappearing native producer falls
+back to the fixture producer. Native `listTools`/`getTools` discovery has a
+short main-world deadline; timeout or failure retires the last native registry
+instead of keeping stale handlers current or inheriting the CDP timeout.
 
 The Browser Adapter treats names, descriptions, schemas, origins, observations,
 and outputs as untrusted. It:

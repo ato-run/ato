@@ -716,7 +716,7 @@ mod tests {
 
     #[test]
     fn webmcp_compatibility_bridge_keeps_draft_names_in_main_world_boundary() {
-        assert!(WEBMCP_BRIDGE_SOURCE.contains("document.modelContext"));
+        assert!(WEBMCP_BRIDGE_SOURCE.contains("producerProperty(document, \"modelContext\")"));
         assert!(WEBMCP_BRIDGE_SOURCE.contains("deprecated_alias"));
         assert!(WEBMCP_BRIDGE_SOURCE.contains("deterministic_fixture_polyfill"));
         assert!(WEBMCP_BRIDGE_SOURCE.contains("__ATO_WEBMCP_FIXTURE_TOOLS__"));
@@ -878,6 +878,84 @@ mod tests {
             assert_eq!(
                 native_invoked.pointer("/result/value/producer_name"),
                 Some(&Value::String("Increment_Counter".to_owned()))
+            );
+
+            let timed_out_snapshot = cdp.call(
+                "Runtime.evaluate",
+                json!({
+                    "expression":r#"(async () => {
+                      document.modelContext.listTools = () => new Promise(() => {});
+                      const started = performance.now();
+                      const snapshot = await globalThis.__ATO_WEBMCP_CONSUMER__.snapshot();
+                      return { elapsed_ms: performance.now() - started, snapshot };
+                    })()"#,
+                    "returnByValue":true,
+                    "awaitPromise":true
+                }),
+                Some(&session),
+            )?;
+            assert!(
+                timed_out_snapshot
+                    .pointer("/result/value/elapsed_ms")
+                    .and_then(Value::as_f64)
+                    .is_some_and(|elapsed| elapsed < 2_000.0),
+                "a never-settling native producer must not inherit the 15 second CDP timeout"
+            );
+            assert_eq!(
+                timed_out_snapshot
+                    .pointer("/result/value/snapshot/tools")
+                    .and_then(Value::as_array)
+                    .map(Vec::len),
+                Some(0),
+                "a timed-out authoritative producer snapshot must retire stale tools"
+            );
+            assert_ne!(
+                timed_out_snapshot.pointer("/result/value/snapshot/registry_generation"),
+                first.pointer("/result/value/registry_generation")
+            );
+
+            let validate_after_timeout = format!(
+                r#"(async () => {{
+                  const response = new Promise((resolve) => {{
+                    const receive = (event) => {{
+                      const value = JSON.parse(String(event.detail));
+                      if (value.id !== "timed-out-native-validation") return;
+                      document.removeEventListener("__ato_webmcp_response_v1", receive, false);
+                      resolve(value);
+                    }};
+                    document.addEventListener("__ato_webmcp_response_v1", receive, false);
+                  }});
+                  const started = performance.now();
+                  document.dispatchEvent(new CustomEvent("__ato_webmcp_request_v1", {{
+                    detail: JSON.stringify({{
+                      id: "timed-out-native-validation",
+                      type: "validate_document",
+                      realization_generation: {native_realization_generation}
+                    }})
+                  }}));
+                  const value = await response;
+                  return {{ elapsed_ms: performance.now() - started, response: value }};
+                }})()"#
+            );
+            let stale_after_timeout = cdp.call(
+                "Runtime.evaluate",
+                json!({
+                    "expression":validate_after_timeout,
+                    "returnByValue":true,
+                    "awaitPromise":true
+                }),
+                Some(&session),
+            )?;
+            assert!(
+                stale_after_timeout
+                    .pointer("/result/value/elapsed_ms")
+                    .and_then(Value::as_f64)
+                    .is_some_and(|elapsed| elapsed < 2_000.0),
+                "operation validation must remain bounded while native discovery is hung"
+            );
+            assert_eq!(
+                stale_after_timeout.pointer("/result/value/response/error"),
+                Some(&Value::String("stale_operation".to_owned()))
             );
 
             // A second target proves the deterministic main-world producer
@@ -1120,6 +1198,215 @@ mod tests {
                     .is_some_and(|tools| tools.iter().all(|tool| {
                         tool.get("name").and_then(Value::as_str) != Some("set_label")
                     }))
+            );
+
+            // Producer ownership is part of realization identity. A canonical
+            // document producer wins over a simultaneously available alias,
+            // atomically replaces fixture tools even when one definition has
+            // the same operational signature, and invalidates the fixture's
+            // already-published realization generation.
+            let replaced_generation = replaced
+                .pointer("/result/value/registry_generation")
+                .and_then(Value::as_u64)
+                .context("replacement fixture generation missing")?;
+            let replaced_document_token = replaced
+                .pointer("/result/value/document_token")
+                .and_then(Value::as_str)
+                .context("replacement fixture document token missing")?;
+            let replaced_realization_generation =
+                serde_json::to_string(&format!("{replaced_document_token}.{replaced_generation}"))?;
+            let switched_to_document = cdp.call(
+                "Runtime.evaluate",
+                json!({
+                    "expression":r#"(async () => {
+                      globalThis.__producerInvocation = null;
+                      Object.defineProperty(document, "modelContext", {
+                        configurable: true,
+                        value: {
+                          registerTool() {},
+                          listTools() {
+                            return [{
+                              name: "get_counter",
+                              description: "replacement native handler",
+                              inputSchema: {
+                                type: "object",
+                                properties: {},
+                                additionalProperties: false
+                              },
+                              readOnly: true
+                            }];
+                          },
+                          invokeTool(name) {
+                            globalThis.__producerInvocation = `document:${name}`;
+                          }
+                        }
+                      });
+                      Object.defineProperty(globalThis.navigator, "modelContext", {
+                        configurable: true,
+                        value: {
+                          registerTool() {},
+                          listTools() {
+                            return [{
+                              name: "alias_only",
+                              inputSchema: { type: "object", properties: {} }
+                            }];
+                          },
+                          invokeTool(name) {
+                            globalThis.__producerInvocation = `alias:${name}`;
+                          }
+                        }
+                      });
+                      return globalThis.__ATO_WEBMCP_CONSUMER__.snapshot();
+                    })()"#,
+                    "returnByValue":true,
+                    "awaitPromise":true
+                }),
+                Some(&fixture_session),
+            )?;
+            assert_eq!(
+                switched_to_document.pointer("/result/value/producer_api"),
+                Some(&Value::String("document_model_context".to_owned()))
+            );
+            assert_ne!(
+                switched_to_document.pointer("/result/value/registry_generation"),
+                replaced.pointer("/result/value/registry_generation")
+            );
+            assert_eq!(
+                switched_to_document
+                    .pointer("/result/value/tools")
+                    .and_then(Value::as_array)
+                    .map(Vec::len),
+                Some(1),
+                "fixture-only and alias-only tools must not survive the owner transition"
+            );
+            assert_eq!(
+                switched_to_document.pointer("/result/value/tools/0/name"),
+                Some(&Value::String("get_counter".to_owned()))
+            );
+
+            let invoke_replaced_fixture = format!(
+                r#"(async () => {{
+                  const response = new Promise((resolve) => {{
+                    const receive = (event) => {{
+                      const value = JSON.parse(String(event.detail));
+                      if (value.id !== "replaced-fixture-request") return;
+                      document.removeEventListener("__ato_webmcp_response_v1", receive, false);
+                      resolve(value);
+                    }};
+                    document.addEventListener("__ato_webmcp_response_v1", receive, false);
+                  }});
+                  document.dispatchEvent(new CustomEvent("__ato_webmcp_request_v1", {{
+                    detail: JSON.stringify({{
+                      id: "replaced-fixture-request",
+                      type: "invoke",
+                      operation_id: "replaced-fixture-operation",
+                      operation_name: "get_counter",
+                      arguments: {{}},
+                      realization_generation: {replaced_realization_generation},
+                      surface_generation: {replaced_generation}
+                    }})
+                  }}));
+                  return {{ response: await response, invoked: globalThis.__producerInvocation }};
+                }})()"#
+            );
+            let stale_fixture_invoke = cdp.call(
+                "Runtime.evaluate",
+                json!({
+                    "expression":invoke_replaced_fixture,
+                    "returnByValue":true,
+                    "awaitPromise":true
+                }),
+                Some(&fixture_session),
+            )?;
+            assert_eq!(
+                stale_fixture_invoke.pointer("/result/value/response/error"),
+                Some(&Value::String("stale_operation".to_owned()))
+            );
+            assert_eq!(
+                stale_fixture_invoke.pointer("/result/value/invoked"),
+                Some(&Value::Null),
+                "an old fixture descriptor must not resolve to the replacement native handler"
+            );
+
+            let document_generation = switched_to_document
+                .pointer("/result/value/registry_generation")
+                .and_then(Value::as_u64)
+                .context("document producer generation missing")?;
+            let document_realization_generation =
+                serde_json::to_string(&format!("{replaced_document_token}.{document_generation}"))?;
+            let invoke_document = format!(
+                r#"(async () => {{
+                  const response = new Promise((resolve) => {{
+                    const receive = (event) => {{
+                      const value = JSON.parse(String(event.detail));
+                      if (value.id !== "document-owner-request") return;
+                      document.removeEventListener("__ato_webmcp_response_v1", receive, false);
+                      resolve(value);
+                    }};
+                    document.addEventListener("__ato_webmcp_response_v1", receive, false);
+                  }});
+                  document.dispatchEvent(new CustomEvent("__ato_webmcp_request_v1", {{
+                    detail: JSON.stringify({{
+                      id: "document-owner-request",
+                      type: "invoke",
+                      operation_id: "document-owner-operation",
+                      operation_name: "get_counter",
+                      arguments: {{}},
+                      realization_generation: {document_realization_generation},
+                      surface_generation: {document_generation}
+                    }})
+                  }}));
+                  return {{ response: await response, invoked: globalThis.__producerInvocation }};
+                }})()"#
+            );
+            let document_invoked = cdp.call(
+                "Runtime.evaluate",
+                json!({
+                    "expression":invoke_document,
+                    "returnByValue":true,
+                    "awaitPromise":true
+                }),
+                Some(&fixture_session),
+            )?;
+            assert_eq!(
+                document_invoked.pointer("/result/value/response/ok"),
+                Some(&Value::Bool(true))
+            );
+            assert_eq!(
+                document_invoked.pointer("/result/value/invoked"),
+                Some(&Value::String("document:get_counter".to_owned())),
+                "the deprecated alias must never replace the canonical document producer"
+            );
+
+            let fixture_fallback = cdp.call(
+                "Runtime.evaluate",
+                json!({
+                    "expression":r#"(async () => {
+                      Reflect.deleteProperty(document, "modelContext");
+                      Reflect.deleteProperty(globalThis.navigator, "modelContext");
+                      return globalThis.__ATO_WEBMCP_CONSUMER__.snapshot();
+                    })()"#,
+                    "returnByValue":true,
+                    "awaitPromise":true
+                }),
+                Some(&fixture_session),
+            )?;
+            assert_eq!(
+                fixture_fallback.pointer("/result/value/producer_api"),
+                Some(&Value::String("deterministic_fixture_polyfill".to_owned()))
+            );
+            assert_ne!(
+                fixture_fallback.pointer("/result/value/registry_generation"),
+                switched_to_document.pointer("/result/value/registry_generation")
+            );
+            assert!(
+                fixture_fallback
+                    .pointer("/result/value/tools")
+                    .and_then(Value::as_array)
+                    .is_some_and(|tools| tools.iter().any(|tool| {
+                        tool.get("name").and_then(Value::as_str) == Some("slow_increment")
+                    })),
+                "fixture tools must become active again after native API disappearance"
             );
             Ok(())
         })();

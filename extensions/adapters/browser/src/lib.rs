@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ato_adapter_api::{
     AdapterAttachContext, AdapterCapabilities, AdapterContext, AdapterError, AdapterFactory,
@@ -326,39 +326,24 @@ impl BrowserLiveOperationDispatcher {
         let ordered = correlation_id.is_some();
         let correlation_id = correlation_id.unwrap_or(&request_id).to_owned();
         let (sender, receiver) = mpsc::channel();
+        let deadline = Instant::now() + ack_timeout;
         self.commands
             .send(transport::TransportCommand::Apply {
                 request_id,
                 correlation_id,
                 realization_generation: realization_generation.map(str::to_owned),
                 ordered,
+                deadline,
                 event,
                 result: sender,
             })
             .map_err(|error| AdapterError::Operation(error.to_string()))?;
-        match transport::wait_for_apply_result(receiver, ack_timeout) {
-            Ok(result) => Ok(result),
-            Err(transport::ApplyWaitError::Failed(error)) => Err(error),
-            Err(transport::ApplyWaitError::Timeout) if ordered => {
-                // Once an ordered physical result becomes ambiguous, this
-                // adapter incarnation must never issue a later settlement
-                // ticket. Fence the transport as a whole instead of dropping
-                // only this waiter and creating a sequence gap.
-                let (fenced, fence_ack) = mpsc::channel();
-                let _ = self.commands.send(transport::TransportCommand::Fence {
-                    reason: "Browser physical outcome is indeterminate after ACK timeout"
-                        .to_owned(),
-                    result: fenced,
-                });
-                let _ = fence_ack.recv_timeout(Duration::from_secs(1));
-                Err(AdapterError::Operation(
-                    "physical_outcome_indeterminate".to_owned(),
-                ))
-            }
-            Err(transport::ApplyWaitError::Timeout) => Err(AdapterError::Operation(
-                "Browser apply acknowledgement timed out".to_owned(),
-            )),
-        }
+        // The transport thread owns both the deadline and ACK demultiplexer.
+        // Waiting without an independent timeout prevents a boundary race in
+        // which this thread abandons ticket N while the transport publishes
+        // ticket N+1. Transport termination drops this channel, so the wait is
+        // still bounded by its fail-closed lifecycle.
+        transport::wait_for_apply_result(receiver)
     }
 
     fn validate_operation(&self, operation: &LiveOperation) -> Result<BrowserEvent, AdapterError> {
@@ -733,6 +718,7 @@ mod tests {
             correlation_id,
             realization_generation,
             ordered,
+            deadline,
             event: transported,
             result,
         } = receiver
@@ -748,6 +734,7 @@ mod tests {
             Some("document_generation_7")
         );
         assert!(ordered);
+        assert!(deadline > Instant::now());
         assert_eq!(transported, event);
         result.send(Ok(Some(1))).expect("transport ACK");
         assert_eq!(
@@ -757,7 +744,7 @@ mod tests {
     }
 
     #[test]
-    fn ordered_apply_timeout_fences_the_whole_transport_without_a_ticket_gap() {
+    fn ordered_apply_waits_for_the_transport_owned_deadline_outcome() {
         let (commands, receiver) = mpsc::channel();
         let dispatcher = Arc::new(BrowserLiveOperationDispatcher {
             commands,
@@ -780,27 +767,33 @@ mod tests {
                 Duration::from_millis(20),
             )
         });
-        let transport::TransportCommand::Apply { result, .. } = receiver
+        let transport::TransportCommand::Apply {
+            deadline, result, ..
+        } = receiver
             .recv_timeout(Duration::from_secs(1))
             .expect("transport apply")
         else {
             panic!("unexpected transport command");
         };
-        // Keep the pending ACK sender alive while the Browser handler is hung.
-        let _pending_result = result;
-        let transport::TransportCommand::Fence { reason, result } = receiver
-            .recv_timeout(Duration::from_secs(1))
-            .expect("transport fence")
-        else {
-            panic!("ordered timeout must fence the transport");
-        };
-        assert!(reason.contains("indeterminate"));
-        result.send(()).expect("fence ACK");
+        std::thread::sleep(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .saturating_add(Duration::from_millis(5)),
+        );
+        result
+            .send(Err(AdapterError::Operation(
+                "physical_outcome_indeterminate".to_owned(),
+            )))
+            .expect("transport deadline result");
         let error = apply
             .join()
             .expect("apply thread")
             .expect_err("hung Browser operation must fail closed");
         assert!(error.to_string().contains("physical_outcome_indeterminate"));
+        assert!(
+            receiver.recv_timeout(Duration::from_millis(20)).is_err(),
+            "the dispatcher must not race the transport with a second Fence command"
+        );
     }
 
     #[test]
