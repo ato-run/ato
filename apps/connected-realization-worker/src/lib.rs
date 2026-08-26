@@ -971,7 +971,15 @@ impl ConnectedWorker {
             self.api.heartbeat(&self.config, 1)?;
             if let Err(error) = self.execute_lease(&lease) {
                 let message = format!("connected Realization failed: {error:#}");
-                let _ = self.api.report_failed(&lease.id, &message);
+                if let Err(report_error) = self.api.report_failed(&lease.id, &message) {
+                    // Never print credentials or the remote response body. The
+                    // lease id and bounded HTTP error are enough to distinguish
+                    // a physical failure from a terminal-evidence delivery gap.
+                    eprintln!(
+                        "connected Realization terminal report failed lease_id={} error={report_error:#}",
+                        lease.id
+                    );
+                }
             }
             self.api.heartbeat(&self.config, 0)?;
             if self.config.once {
