@@ -29,11 +29,7 @@
 
   const consumer = Object.freeze({
     snapshot: async () => {
-      installKnownProducers();
-      await refreshNativeConsumer();
-      if (["unavailable", "deterministic_fixture_polyfill"].includes(producerApi)) {
-        refreshFixture();
-      }
+      await refreshCurrentRegistry();
       return {
         document_token: documentToken,
         producer_api: producerApi,
@@ -47,6 +43,13 @@
     abortActive: () => {
       if (inFlight.size !== 1) return false;
       const controller = inFlight.values().next().value;
+      controller.abort();
+      return true;
+    },
+    abort: (operationId) => {
+      if (typeof operationId !== "string") return false;
+      const controller = inFlight.get(operationId);
+      if (!controller) return false;
       controller.abort();
       return true;
     },
@@ -326,20 +329,28 @@
     if (!isObject(request) || typeof request.id !== "string" || typeof request.type !== "string") {
       return;
     }
+    if (request.type === "validate_document") {
+      await refreshCurrentRegistry();
+      const currentGeneration = `${documentToken}.${registryGeneration}`;
+      return respond(
+        request.id,
+        request.realization_generation === currentGeneration,
+        request.realization_generation === currentGeneration ? null : "stale_operation",
+      );
+    }
     if (request.type === "abort") {
       const controller = inFlight.get(request.operation_id);
       if (controller) controller.abort();
       return respond(request.id, true, controller ? null : "operation_not_found");
     }
     if (request.type !== "invoke" || typeof request.operation_name !== "string" ||
+        typeof request.realization_generation !== "string" ||
         !Number.isSafeInteger(request.surface_generation) || request.surface_generation <= 0) {
       return respond(request.id, false, "invalid_operation");
     }
-    installKnownProducers();
-    if (["unavailable", "deterministic_fixture_polyfill"].includes(producerApi)) {
-      refreshFixture();
-    }
-    if (request.surface_generation !== registryGeneration) {
+    await refreshCurrentRegistry();
+    if (request.realization_generation !== `${documentToken}.${registryGeneration}` ||
+        request.surface_generation !== registryGeneration) {
       return respond(request.id, false, "stale_operation");
     }
     const registration = registry.get(request.operation_name);
@@ -364,6 +375,14 @@
     document.dispatchEvent(new CustomEvent(responseEvent, {
       detail: stringify({ id, ok, error }),
     }));
+  }
+
+  async function refreshCurrentRegistry() {
+    installKnownProducers();
+    await refreshNativeConsumer();
+    if (["unavailable", "deterministic_fixture_polyfill"].includes(producerApi)) {
+      refreshFixture();
+    }
   }
 
   function fixtureObservation() {
