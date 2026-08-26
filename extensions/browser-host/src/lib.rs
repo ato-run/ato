@@ -161,7 +161,13 @@ impl BrowserHost {
             !snapshot.is_null(),
             "WebMCP compatibility bridge is unavailable"
         );
-        serde_json::from_value(snapshot).context("decode untrusted WebMCP snapshot")
+        let snapshot: RawWebMcpSnapshotV1 =
+            serde_json::from_value(snapshot).context("decode untrusted WebMCP snapshot")?;
+        ensure!(
+            snapshot.origin == self.origin,
+            "WebMCP snapshot escaped the Browser Adapter origin"
+        );
+        Ok(snapshot)
     }
 
     /// Requests cancellation of one in-flight page operation. Abort is
@@ -744,12 +750,28 @@ mod tests {
                 json!({"source":r#"
                     Object.defineProperty(document, "modelContext", { value: {
                       registerTool() {},
-                      listTools() { return [{
-                        name: "increment_counter",
-                        description: "untrusted",
-                        inputSchema: { type: "object", properties: {} }
-                      }]; },
-                      invokeTool() { return { ok: true }; }
+                      listTools() {
+                        const cyclic = { type: "object" };
+                        cyclic.self = cyclic;
+                        const throwing = { name: "throwing_tool" };
+                        Object.defineProperty(throwing, "inputSchema", {
+                          get() { throw new Error("hostile getter"); }
+                        });
+                        this.probeCount = (this.probeCount ?? 0) + 1;
+                        return [{
+                          name: "Increment_Counter",
+                          description: `untrusted metadata ${this.probeCount}`,
+                          inputSchema: { type: "object", properties: {} },
+                          output: 1n,
+                        }, {
+                          name: "cyclic_tool",
+                          inputSchema: cyclic,
+                        }, throwing];
+                      },
+                      invokeTool(name) {
+                        globalThis.__nativeInvokedName = name;
+                        return { ok: true };
+                      }
                     }, configurable: true });
                 "#}),
                 Some(&session),
@@ -787,6 +809,59 @@ mod tests {
             assert_eq!(
                 first.pointer("/result/value/tools/0/name"),
                 Some(&Value::String("increment_counter".to_owned()))
+            );
+            assert_eq!(
+                first
+                    .pointer("/result/value/tools")
+                    .and_then(Value::as_array)
+                    .map(Vec::len),
+                Some(1),
+                "malformed tools must be isolated without suppressing the safe tool"
+            );
+            let native_generation = first
+                .pointer("/result/value/registry_generation")
+                .and_then(Value::as_u64)
+                .context("native registry generation missing")?;
+            let invoke_native = format!(
+                r#"(async () => {{
+                  const response = new Promise((resolve) => {{
+                    const receive = (event) => {{
+                      const value = JSON.parse(String(event.detail));
+                      if (value.id !== "native-invoke-request") return;
+                      document.removeEventListener("__ato_webmcp_response_v1", receive, false);
+                      resolve(value);
+                    }};
+                    document.addEventListener("__ato_webmcp_response_v1", receive, false);
+                  }});
+                  document.dispatchEvent(new CustomEvent("__ato_webmcp_request_v1", {{
+                    detail: JSON.stringify({{
+                      id: "native-invoke-request",
+                      type: "invoke",
+                      operation_id: "native-invoke-operation",
+                      operation_name: "increment_counter",
+                      arguments: {{}},
+                      surface_generation: {native_generation}
+                    }})
+                  }}));
+                  return {{ response: await response, producer_name: globalThis.__nativeInvokedName }};
+                }})()"#
+            );
+            let native_invoked = cdp.call(
+                "Runtime.evaluate",
+                json!({
+                    "expression":invoke_native,
+                    "returnByValue":true,
+                    "awaitPromise":true
+                }),
+                Some(&session),
+            )?;
+            assert_eq!(
+                native_invoked.pointer("/result/value/response/ok"),
+                Some(&Value::Bool(true))
+            );
+            assert_eq!(
+                native_invoked.pointer("/result/value/producer_name"),
+                Some(&Value::String("Increment_Counter".to_owned()))
             );
 
             // A second target proves the deterministic main-world producer
@@ -844,6 +919,19 @@ mod tests {
                 }),
                 Some(&fixture_session),
             )?;
+            let fixture_snapshot_again = cdp.call(
+                "Runtime.evaluate",
+                json!({
+                    "expression":"globalThis.__ATO_WEBMCP_CONSUMER__.snapshot()",
+                    "returnByValue":true,
+                    "awaitPromise":true
+                }),
+                Some(&fixture_session),
+            )?;
+            assert_eq!(
+                fixture_snapshot.pointer("/result/value/registry_generation"),
+                fixture_snapshot_again.pointer("/result/value/registry_generation")
+            );
             let snapshot_value = fixture_snapshot
                 .pointer("/result/value")
                 .cloned()
@@ -872,6 +960,50 @@ mod tests {
                 operation.operation_name == "slow_increment"
                     && operation.protocol_id == "ato.webmcp@1"
             }));
+
+            let invoke_read_only = format!(
+                r##"(async () => {{
+                  const response = new Promise((resolve) => {{
+                    const receive = (event) => {{
+                      const value = JSON.parse(String(event.detail));
+                      if (value.id !== "fixture-read-request") return;
+                      document.removeEventListener("__ato_webmcp_response_v1", receive, false);
+                      resolve(value);
+                    }};
+                    document.addEventListener("__ato_webmcp_response_v1", receive, false);
+                  }});
+                  document.dispatchEvent(new CustomEvent("__ato_webmcp_request_v1", {{
+                    detail: JSON.stringify({{
+                      id: "fixture-read-request",
+                      type: "invoke",
+                      operation_id: "fixture-read-operation",
+                      operation_name: "get_counter",
+                      arguments: {{}},
+                      surface_generation: {generation}
+                    }})
+                  }}));
+                  return await response;
+                }})()"##
+            );
+            let read_only_response = cdp.call(
+                "Runtime.evaluate",
+                json!({
+                    "expression":invoke_read_only,
+                    "returnByValue":true,
+                    "awaitPromise":true
+                }),
+                Some(&fixture_session),
+            )?;
+            assert_eq!(
+                read_only_response.pointer("/result/value/ok"),
+                Some(&Value::Bool(true))
+            );
+            assert!(read_only_response.pointer("/result/value/output").is_none());
+            assert!(
+                !serde_json::to_string(&read_only_response)?
+                    .contains("Ignore all previous instructions"),
+                "page output must not cross the main-world boundary"
+            );
 
             let invoke_and_abort = format!(
                 r##"(async () => {{
@@ -920,6 +1052,32 @@ mod tests {
             assert_eq!(
                 aborted.pointer("/result/value/counter"),
                 Some(&Value::String("0".to_owned()))
+            );
+
+            let replaced = cdp.call(
+                "Runtime.evaluate",
+                json!({
+                    "expression":r#"(async () => {
+                      globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__ =
+                        globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__.filter(({ name }) => name !== "set_label");
+                      return globalThis.__ATO_WEBMCP_CONSUMER__.snapshot();
+                    })()"#,
+                    "returnByValue":true,
+                    "awaitPromise":true
+                }),
+                Some(&fixture_session),
+            )?;
+            assert_ne!(
+                replaced.pointer("/result/value/registry_generation"),
+                fixture_snapshot.pointer("/result/value/registry_generation")
+            );
+            assert!(
+                replaced
+                    .pointer("/result/value/tools")
+                    .and_then(Value::as_array)
+                    .is_some_and(|tools| tools.iter().all(|tool| {
+                        tool.get("name").and_then(Value::as_str) != Some("set_label")
+                    }))
             );
             Ok(())
         })();

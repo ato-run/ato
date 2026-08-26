@@ -96,7 +96,7 @@ impl ActivityControllerServer {
             surface: Mutex::new(None),
             abort_requests: Mutex::new(BTreeSet::new()),
             operation_gate: Mutex::new(()),
-            active_operation_id: Mutex::new(None),
+            active_operation: Mutex::new(None),
             ingress,
         });
         let thread_context = Arc::clone(&context);
@@ -318,6 +318,39 @@ impl ReceiptCache {
             }
         }
     }
+
+    fn settled_controller_operation(
+        &self,
+        input: &HostedAbortInput,
+        target_run_id: &str,
+    ) -> Result<bool> {
+        let Some((payload, _)) = self.by_id.get(&input.operation_id) else {
+            return Ok(false);
+        };
+        let invocation: HostedOperationInput = serde_json::from_slice(payload)
+            .context("settled operation did not contain Controller provenance")?;
+        ensure!(
+            abort_matches_invocation(&invocation, input, target_run_id),
+            "invalid_operation"
+        );
+        Ok(true)
+    }
+}
+
+fn abort_matches_invocation(
+    invocation: &HostedOperationInput,
+    input: &HostedAbortInput,
+    target_run_id: &str,
+) -> bool {
+    invocation.operation_id == input.operation_id
+        && invocation.descriptor_id == input.descriptor_id
+        && invocation.actor_id == input.actor_id
+        && invocation.actor_run_id == input.actor_run_id
+        && invocation.controller_session_id == input.controller_session_id
+        && invocation.controller_epoch == input.controller_epoch
+        && invocation.target_run_id().ok() == Some(target_run_id)
+        && invocation.surface_id == input.surface_id
+        && invocation.surface_epoch == input.surface_epoch
 }
 
 struct ActivityControllerContext {
@@ -332,7 +365,7 @@ struct ActivityControllerContext {
     surface: Mutex<Option<PublishedSurface>>,
     abort_requests: Mutex<BTreeSet<String>>,
     operation_gate: Mutex<()>,
-    active_operation_id: Mutex<Option<String>>,
+    active_operation: Mutex<Option<HostedOperationInput>>,
     ingress: Arc<dyn BrowserControlIngress>,
 }
 
@@ -516,10 +549,7 @@ fn apply_input(
         .ingress
         .accept_control_operation(input.operation_id.clone(), event)
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    ensure!(
-        accepted.record_error.is_none(),
-        "Activity Browser Record submission failed after apply"
-    );
+    let record_evidence_persisted = accepted.record_error.is_none();
     let receipt = ActivityOperationReceipt {
         run_sequence: accepted.run_seq,
         operation_id: input.operation_id.clone(),
@@ -533,7 +563,7 @@ fn apply_input(
         surface_epoch: None,
         client_sequence: input.client_seq,
         result: "applied".to_owned(),
-        output: Value::Null,
+        output: serde_json::json!({"record_evidence_persisted":record_evidence_persisted}),
         applied_at: OffsetDateTime::now_utc().format(&Rfc3339)?,
     };
     context
@@ -607,10 +637,10 @@ fn apply_operation(
     let is_webmcp = matches!(&event, BrowserEvent::Operation { .. });
     if is_webmcp {
         *context
-            .active_operation_id
+            .active_operation
             .lock()
             .map_err(|_| anyhow::anyhow!("Activity active operation mutex poisoned"))? =
-            Some(input.operation_id.clone());
+            Some(input.clone());
     }
     let accepted = context
         .ingress
@@ -618,7 +648,7 @@ fn apply_operation(
         .map_err(|error| anyhow::anyhow!(error.to_string()));
     if is_webmcp {
         *context
-            .active_operation_id
+            .active_operation
             .lock()
             .map_err(|_| anyhow::anyhow!("Activity active operation mutex poisoned"))? = None;
     }
@@ -629,13 +659,12 @@ fn apply_operation(
         .remove(&input.operation_id);
     let accepted = match accepted {
         Ok(accepted) => accepted,
-        Err(error) if abort_requested => bail!("operation_aborted: {error}"),
+        Err(error) if abort_requested && error.to_string().contains("aborted") => {
+            bail!("operation_aborted: {error}")
+        }
         Err(error) => return Err(error),
     };
-    ensure!(
-        accepted.record_error.is_none(),
-        "Activity Browser Record submission failed after operation apply"
-    );
+    let record_evidence_persisted = accepted.record_error.is_none();
     let receipt = ActivityOperationReceipt {
         run_sequence: accepted.run_seq,
         operation_id: input.operation_id.clone(),
@@ -655,7 +684,10 @@ fn apply_operation(
         },
         // Page-provided output never becomes an Ato instruction. Callers can
         // re-observe the surface to inspect resulting state.
-        output: serde_json::json!({"adapter_ack":true}),
+        output: serde_json::json!({
+            "adapter_ack":true,
+            "record_evidence_persisted":record_evidence_persisted
+        }),
         applied_at: OffsetDateTime::now_utc().format(&Rfc3339)?,
     };
     context
@@ -708,7 +740,8 @@ fn request_abort(
         (Some(target), None) | (None, Some(target)) => target,
         (Some(target), Some(run)) if target == run => target,
         _ => bail!("invalid_operation"),
-    };
+    }
+    .to_owned();
     ensure!(
         target_run_id == context.run_id
             && !input.operation_id.is_empty()
@@ -719,22 +752,57 @@ fn request_abort(
             && !input.controller_session_id.is_empty(),
         "invalid_operation"
     );
-    let published = context
-        .surface
+    if context
+        .receipts
         .lock()
-        .map_err(|_| anyhow::anyhow!("Activity surface mutex poisoned"))?
-        .clone()
-        .context("stale_operation")?;
-    ensure!(
-        published.projection.observation.surface_id == input.surface_id
-            && published.projection.observation.surface_epoch == input.surface_epoch
-            && published
-                .projection
-                .operations
-                .iter()
-                .any(|descriptor| descriptor.id == input.descriptor_id),
-        "stale_operation"
-    );
+        .map_err(|_| anyhow::anyhow!("Activity receipt mutex poisoned"))?
+        .settled_controller_operation(&input, &target_run_id)?
+    {
+        return Ok(ActivityAbortReceipt {
+            operation_id: input.operation_id,
+            actor_id: input.actor_id,
+            actor_run_id: input.actor_run_id,
+            controller_session_id: input.controller_session_id,
+            controller_epoch: input.controller_epoch,
+            target_run_id,
+            surface_id: input.surface_id,
+            surface_epoch: input.surface_epoch,
+            status: "failed",
+            best_effort_result: "already_settled".to_owned(),
+            requested_at: OffsetDateTime::now_utc().format(&Rfc3339)?,
+        });
+    }
+    let active = context
+        .active_operation
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Activity active operation mutex poisoned"))?
+        .clone();
+    let is_active = active
+        .as_ref()
+        .is_some_and(|operation| operation.operation_id == input.operation_id);
+    if let Some(operation) = active.as_ref().filter(|_| is_active) {
+        ensure!(
+            abort_matches_invocation(operation, &input, &target_run_id),
+            "invalid_operation"
+        );
+    } else {
+        let published = context
+            .surface
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Activity surface mutex poisoned"))?
+            .clone()
+            .context("stale_operation")?;
+        ensure!(
+            published.projection.observation.surface_id == input.surface_id
+                && published.projection.observation.surface_epoch == input.surface_epoch
+                && published
+                    .projection
+                    .operations
+                    .iter()
+                    .any(|descriptor| descriptor.id == input.descriptor_id),
+            "stale_operation"
+        );
+    }
     {
         let mut requests = context
             .abort_requests
@@ -746,12 +814,6 @@ fn request_abort(
         );
         requests.insert(input.operation_id.clone());
     }
-    let is_active = context
-        .active_operation_id
-        .lock()
-        .map_err(|_| anyhow::anyhow!("Activity active operation mutex poisoned"))?
-        .as_deref()
-        == Some(input.operation_id.as_str());
     let signaled = if is_active {
         let (result, receiver) = mpsc::channel();
         context
@@ -770,7 +832,7 @@ fn request_abort(
         actor_run_id: input.actor_run_id,
         controller_session_id: input.controller_session_id,
         controller_epoch: input.controller_epoch,
-        target_run_id: target_run_id.to_owned(),
+        target_run_id,
         surface_id: input.surface_id,
         surface_epoch: input.surface_epoch,
         status: "abort_requested",
@@ -1049,7 +1111,7 @@ mod tests {
                 })),
                 abort_requests: Mutex::new(BTreeSet::new()),
                 operation_gate: Mutex::new(()),
-                active_operation_id: Mutex::new(None),
+                active_operation: Mutex::new(None),
                 ingress,
             },
             receiver,
@@ -1084,6 +1146,7 @@ mod tests {
         assert!(CONTROLLER_HTML.contains("surface.operations.replace"));
         assert!(CONTROLLER_HTML.contains("run.operation.invoke"));
         assert!(CONTROLLER_HTML.contains("run.operation.abort.receipt"));
+        assert!(CONTROLLER_HTML.contains("already_settled"));
         assert!(!CONTROLLER_HTML.contains("app_view_token"));
     }
 
@@ -1222,6 +1285,25 @@ mod tests {
                 surface_generation: 9,
             }
         );
+        drop(accepted);
+        let late_abort = request_abort(
+            &context,
+            HostedAbortInput {
+                operation_id: "invocation-1".to_owned(),
+                descriptor_id: "descriptor-current".to_owned(),
+                actor_id: "actor-child".to_owned(),
+                actor_run_id: "run-actor-child".to_owned(),
+                controller_session_id: "controller-session".to_owned(),
+                controller_epoch: 6,
+                target_run_id: Some("run-browser".to_owned()),
+                run_id: None,
+                surface_id: "surface-browser".to_owned(),
+                surface_epoch: 4,
+            },
+        )
+        .expect("late abort should produce idempotent audit evidence");
+        assert_eq!(late_abort.status, "failed");
+        assert_eq!(late_abort.best_effort_result, "already_settled");
     }
 
     #[test]
@@ -1258,6 +1340,15 @@ mod tests {
         operation_started
             .recv_timeout(Duration::from_secs(1))
             .expect("operation should reach the Runner ingress");
+        context
+            .surface
+            .lock()
+            .expect("surface mutex")
+            .as_mut()
+            .expect("published surface")
+            .projection
+            .observation
+            .surface_epoch = 5;
 
         let abort_context = Arc::clone(&context);
         let abort = thread::spawn(move || {
