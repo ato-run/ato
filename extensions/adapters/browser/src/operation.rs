@@ -4,7 +4,7 @@
 //! Computation semantic nor an Activity primitive. Page-owned WebMCP metadata
 //! is untrusted input; only the normalized descriptor leaves this module.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -13,10 +13,11 @@ use url::Url;
 use crate::BROWSER_PROTOCOL_ID;
 
 const MAX_DESCRIPTOR_BYTES: usize = 64 * 1024;
-const MAX_RAW_SNAPSHOT_BYTES: usize = 1024 * 1024;
+const MAX_RAW_SNAPSHOT_BYTES: usize = 256 * 1024;
 const MAX_SCHEMA_BYTES: usize = 16 * 1024;
 const MAX_OPERATION_NAME_BYTES: usize = 64;
 const MAX_SCHEMA_DEPTH: usize = 8;
+const MAX_ACCEPTED_OPERATIONS: usize = 1024;
 const WEBMCP_PROTOCOL_ID: &str = "ato.webmcp@1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -306,13 +307,20 @@ struct PendingOperation {
     abort_requested: bool,
 }
 
+#[derive(Debug, Clone)]
+struct AcceptedActorOperation {
+    invocation: BrowserOperationInvocationV1,
+    receipt: BrowserOperationReceiptV1,
+}
+
 /// Actor-scoped mutation gate. Target-Run ordering deliberately remains with
 /// the Runner; this ledger never assigns `run_sequence`.
 #[derive(Debug, Default)]
 pub struct ActorOperationLedger {
     active_by_id: BTreeMap<String, PendingOperation>,
     mutating_by_actor: BTreeMap<String, String>,
-    accepted: BTreeMap<String, BrowserOperationReceiptV1>,
+    accepted: BTreeMap<String, AcceptedActorOperation>,
+    accepted_order: VecDeque<String>,
 }
 
 impl ActorOperationLedger {
@@ -324,8 +332,13 @@ impl ActorOperationLedger {
         current_controller_epoch: u64,
         current_surface_epoch: u64,
     ) -> Result<Option<&BrowserOperationReceiptV1>, BrowserOperationError> {
-        if let Some(receipt) = self.accepted.get(&invocation.operation_id) {
-            return Ok(Some(receipt));
+        if let Some(accepted) = self.accepted.get(&invocation.operation_id) {
+            if accepted.invocation != invocation {
+                return Err(BrowserOperationError::Invalid(
+                    "operation id was reused with different input".to_owned(),
+                ));
+            }
+            return Ok(Some(&accepted.receipt));
         }
         validate_invocation(&invocation, descriptor)?;
         if invocation.controller_session_id != current_controller_session_id
@@ -378,6 +391,13 @@ impl ActorOperationLedger {
         operation_id: &str,
         runner: RunnerOperationResultV1,
     ) -> Result<&BrowserOperationReceiptV1, BrowserOperationError> {
+        if runner.run_sequence == 0
+            || !matches!(runner.status.as_str(), "applied" | "failed" | "aborted")
+        {
+            return Err(BrowserOperationError::Invalid(
+                "Runner operation result is invalid".to_owned(),
+            ));
+        }
         let pending = self
             .active_by_id
             .remove(operation_id)
@@ -388,12 +408,12 @@ impl ActorOperationLedger {
         let invocation = pending.invocation;
         let receipt = BrowserOperationReceiptV1 {
             operation_id: invocation.operation_id.clone(),
-            actor_id: invocation.actor_id,
-            actor_run_id: invocation.actor_run_id,
-            controller_session_id: invocation.controller_session_id,
+            actor_id: invocation.actor_id.clone(),
+            actor_run_id: invocation.actor_run_id.clone(),
+            controller_session_id: invocation.controller_session_id.clone(),
             controller_epoch: invocation.controller_epoch,
-            target_run_id: invocation.target_run_id,
-            surface_id: invocation.surface_id,
+            target_run_id: invocation.target_run_id.clone(),
+            surface_id: invocation.surface_id.clone(),
             surface_epoch: invocation.surface_epoch,
             status: if pending.abort_requested && runner.status == "applied" {
                 "applied_after_abort_requested".to_owned()
@@ -404,10 +424,23 @@ impl ActorOperationLedger {
             record_ref: runner.record_ref,
             result: bounded_untrusted_value(runner.result),
         };
+        let operation_id = invocation.operation_id.clone();
+        self.accepted_order.push_back(operation_id.clone());
+        self.accepted.insert(
+            operation_id.clone(),
+            AcceptedActorOperation {
+                invocation,
+                receipt,
+            },
+        );
+        while self.accepted_order.len() > MAX_ACCEPTED_OPERATIONS {
+            if let Some(expired) = self.accepted_order.pop_front() {
+                self.accepted.remove(&expired);
+            }
+        }
         self.accepted
-            .insert(invocation.operation_id.clone(), receipt);
-        self.accepted
-            .get(&invocation.operation_id)
+            .get(&operation_id)
+            .map(|accepted| &accepted.receipt)
             .ok_or(BrowserOperationError::UnknownOperation)
     }
 }
@@ -457,13 +490,67 @@ fn validate_snapshot(snapshot: &RawWebMcpSnapshotV1) -> Result<(), BrowserOperat
 fn registry_fingerprint(
     snapshot: &RawWebMcpSnapshotV1,
 ) -> Result<blake3::Hash, BrowserOperationError> {
+    let tools = normalized_webmcp_tools(snapshot)?
+        .into_iter()
+        .map(|tool| {
+            json!({
+                "index": tool.index,
+                "operation_name": tool.operation_name,
+                "origin": tool.origin,
+                "input_schema": tool.input_schema,
+                "read_only": tool.read_only,
+            })
+        })
+        .collect::<Vec<_>>();
     let value = json!({
         "producer_api": snapshot.producer_api,
-        "tools": snapshot.tools,
+        "origin": safe_origin(&snapshot.origin)?,
+        "tools": tools,
     });
     let bytes = serde_jcs::to_vec(&value)
         .map_err(|error| BrowserOperationError::Invalid(error.to_string()))?;
     Ok(blake3::hash(&bytes))
+}
+
+#[derive(Debug)]
+struct NormalizedWebMcpTool {
+    index: usize,
+    operation_name: String,
+    origin: String,
+    input_schema: Value,
+    read_only: bool,
+}
+
+fn normalized_webmcp_tools(
+    snapshot: &RawWebMcpSnapshotV1,
+) -> Result<Vec<NormalizedWebMcpTool>, BrowserOperationError> {
+    let origin = safe_origin(&snapshot.origin)?;
+    let mut seen = BTreeSet::new();
+    let mut tools = Vec::new();
+    for (index, raw) in snapshot.tools.iter().enumerate() {
+        let Some(operation_name) = raw.name.as_str().and_then(normalize_operation_name) else {
+            continue;
+        };
+        if !seen.insert(operation_name.clone()) {
+            continue;
+        }
+        let tool_origin = raw
+            .origin
+            .as_str()
+            .and_then(|value| safe_origin(value).ok())
+            .filter(|value| value == &origin)
+            .unwrap_or_else(|| origin.clone());
+        tools.push(NormalizedWebMcpTool {
+            index,
+            operation_name,
+            origin: tool_origin,
+            input_schema: sanitize_schema(&raw.input_schema, 0).unwrap_or_else(
+                || json!({"type":"object","properties":{},"additionalProperties":false}),
+            ),
+            read_only: raw.read_only.as_bool().unwrap_or(false),
+        });
+    }
+    Ok(tools)
 }
 
 fn surface_operations(
@@ -550,45 +637,29 @@ fn surface_operations(
             discovered_at,
         ),
     ];
-    let mut seen = BTreeSet::new();
-    for (index, raw) in snapshot.tools.iter().enumerate() {
-        let Some(operation_name) = raw.name.as_str().and_then(normalize_operation_name) else {
-            continue;
-        };
-        if !seen.insert(operation_name.clone()) {
-            continue;
-        }
-        let tool_origin = raw
-            .origin
-            .as_str()
-            .and_then(|value| safe_origin(value).ok())
-            .filter(|value| value == &origin)
-            .unwrap_or_else(|| origin.clone());
-        let read_only = raw.read_only.as_bool().unwrap_or(false);
-        let schema = sanitize_schema(&raw.input_schema, 0).unwrap_or_else(
-            || json!({"type":"object","properties":{},"additionalProperties":false}),
-        );
+    for tool in normalized_webmcp_tools(snapshot)? {
         let hash_input = serde_jcs::to_vec(&json!({
             "surface_id": surface_id,
             "surface_epoch": surface_epoch,
             "registry_generation": snapshot.registry_generation,
-            "index": index,
-            "operation_name": operation_name,
-            "origin": tool_origin,
+            "index": tool.index,
+            "operation_name": tool.operation_name,
+            "origin": tool.origin,
         }))
         .map_err(|error| BrowserOperationError::Invalid(error.to_string()))?;
         let id = format!("op_webmcp_{}", &blake3::hash(&hash_input).to_hex()[..24]);
         operations.push(SurfaceOperationDescriptorV1 {
             id,
             protocol_id: WEBMCP_PROTOCOL_ID.to_owned(),
-            operation_name: operation_name.clone(),
+            operation_name: tool.operation_name.clone(),
             safe_description: format!(
-                "Operation offered by {tool_origin} through WebMCP. Action name: {operation_name}. Arguments follow the declared JSON schema. The page-provided description is untrusted metadata."
+                "Operation offered by {} through WebMCP. Action name: {}. Arguments follow the declared JSON schema. The page-provided description is untrusted metadata.",
+                tool.origin, tool.operation_name
             ),
-            input_schema: schema,
+            input_schema: tool.input_schema,
             source: OperationSource::Webmcp,
-            origin: tool_origin,
-            read_only,
+            origin: tool.origin,
+            read_only: tool.read_only,
             discovered_at: discovered_at.to_owned(),
         });
     }
@@ -664,6 +735,11 @@ fn validate_invocation(
     descriptor: &OperationDescriptorV1,
 ) -> Result<(), BrowserOperationError> {
     if invocation.operation_id.is_empty()
+        || invocation.operation_id.len() > 128
+        || !invocation
+            .operation_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
         || invocation.actor_id != descriptor.actor_id
         || invocation.actor_run_id != descriptor.actor_run_id
         || invocation.target_run_id != descriptor.target_run_id
@@ -671,7 +747,12 @@ fn validate_invocation(
         || invocation.surface_epoch != descriptor.surface_epoch
         || invocation.protocol_id != descriptor.protocol_id
         || invocation.operation_name != descriptor.operation_name
+        || invocation.controller_session_id.is_empty()
+        || invocation.controller_session_id.len() > 128
+        || invocation.controller_epoch == 0
         || invocation.client_sequence == 0
+        || serde_json::to_vec(&invocation.arguments)
+            .map_or(true, |arguments| arguments.len() > MAX_SCHEMA_BYTES * 4)
     {
         return Err(BrowserOperationError::Invalid(
             "invocation escaped descriptor scope".to_owned(),
@@ -957,6 +1038,41 @@ mod tests {
         assert_ne!(first.operations[0].id, replaced.operations[0].id);
     }
 
+    #[test]
+    fn discarded_webmcp_metadata_does_not_invalidate_operation_identity() {
+        let mut tracker = BrowserSurfaceTracker::new("surface-1", "run-1");
+        let first = tracker
+            .update(snapshot("document-1", 1), "one")
+            .expect("first snapshot")
+            .clone();
+        let mut metadata_only = snapshot("document-1", 1);
+        metadata_only.tools[0].description = Value::String("different untrusted prose".to_owned());
+        metadata_only.tools[0].output = json!({"instruction":"different untrusted output"});
+        let unchanged = tracker
+            .update(metadata_only, "two")
+            .expect("metadata-only snapshot")
+            .clone();
+        assert_eq!(
+            first.observation.surface_epoch,
+            unchanged.observation.surface_epoch
+        );
+        assert_eq!(first.operations, unchanged.operations);
+
+        let mut schema_changed = snapshot("document-1", 1);
+        schema_changed.tools[0].input_schema = json!({
+            "type":"object",
+            "properties":{"amount":{"type":"integer"}},
+            "additionalProperties":false
+        });
+        let invalidated = tracker
+            .update(schema_changed, "three")
+            .expect("operational schema replacement");
+        assert_eq!(
+            invalidated.observation.surface_epoch,
+            first.observation.surface_epoch + 1
+        );
+    }
+
     fn descriptor(actor: &str, read_only: bool) -> OperationDescriptorV1 {
         OperationDescriptorV1 {
             id: "descriptor".to_owned(),
@@ -1079,5 +1195,49 @@ mod tests {
             .expect("Runner result should settle");
         assert_eq!(receipt.run_sequence, Some(41));
         assert_eq!(receipt.status, "applied_after_abort_requested");
+    }
+
+    #[test]
+    fn accepted_operation_retry_requires_identical_invocation() {
+        let mut ledger = ActorOperationLedger::default();
+        let invocation = invocation("actor-a", "op-retry", 1);
+        ledger
+            .begin(
+                invocation.clone(),
+                &descriptor("actor-a", false),
+                "session",
+                4,
+                3,
+            )
+            .expect("operation should begin");
+        ledger
+            .settle(
+                "op-retry",
+                RunnerOperationResultV1 {
+                    run_sequence: 9,
+                    status: "applied".to_owned(),
+                    record_ref: None,
+                    result: json!({"ok":true}),
+                },
+            )
+            .expect("operation should settle");
+        assert!(
+            ledger
+                .begin(
+                    invocation.clone(),
+                    &descriptor("actor-a", false),
+                    "session",
+                    4,
+                    3,
+                )
+                .expect("identical retry should resolve")
+                .is_some()
+        );
+        let mut conflicting = invocation;
+        conflicting.arguments = json!({"different":true});
+        assert!(matches!(
+            ledger.begin(conflicting, &descriptor("actor-a", false), "session", 4, 3,),
+            Err(BrowserOperationError::Invalid(_))
+        ));
     }
 }
