@@ -31,6 +31,7 @@ use ato_adapter_api::{
 };
 use ato_adapter_browser::{
     BROWSER_PROTOCOL_ID, BrowserAdapter, BrowserAdapterConfig, BrowserInputMode,
+    BrowserSurfaceTracker, RawWebMcpSnapshotV1,
     register_record_schemas as register_browser_record_schemas,
 };
 use ato_adapter_workspace::restore_workspace;
@@ -692,6 +693,13 @@ impl HostedBrowserRuntime {
             .capture_jpeg()
     }
 
+    fn webmcp_snapshot(&mut self) -> Result<RawWebMcpSnapshotV1> {
+        self.host
+            .as_mut()
+            .context("Browser Host is unavailable")?
+            .webmcp_snapshot()
+    }
+
     /// Future capture coordination freezes this logical gate before it asks
     /// the Browser Host to quiesce. No physical Browser state is captured in
     /// P0-B.
@@ -1095,12 +1103,26 @@ impl ConnectedWorker {
             browser.activity_ingress(),
         )?;
         browser.open_auxiliary_target(controller.target_url())?;
+        let mut surface = BrowserSurfaceTracker::new(
+            format!("surface_{}", session.run_id),
+            session.run_id.clone(),
+        );
         let execution_id = format!("activity:{}:{}", lease.run_id, lease.id);
         let mut ready = false;
         let mut last_control = Instant::now() - Duration::from_secs(1);
         let mut last_heartbeat = Instant::now();
+        let mut last_surface = Instant::now() - Duration::from_secs(1);
         let result = loop {
             controller.publish_frame(browser.capture_presentation_frame()?)?;
+            if last_surface.elapsed() >= Duration::from_millis(250) {
+                if let Ok(snapshot) = browser.webmcp_snapshot() {
+                    let registry_generation = snapshot.registry_generation;
+                    let observed_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
+                    let projection = surface.update(snapshot, observed_at)?.clone();
+                    controller.publish_surface(projection, registry_generation)?;
+                }
+                last_surface = Instant::now();
+            }
             match controller.recv_timeout(Duration::from_millis(100)) {
                 Ok(ActivityControllerEvent::Ready) if !ready => {
                     self.api.report_activity_ready(&lease.id, &execution_id)?;

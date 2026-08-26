@@ -30,9 +30,11 @@
     let inputChain = Promise.resolve();
     const subscribers = new Set();
     const peers = new Map();
+    let surfaceRevision = 0;
 
     connectRoom();
     pumpFrame();
+    pumpSurface();
 
     function connectRoom() {
       room = new WebSocket(config.roomUrl, [
@@ -84,6 +86,14 @@
         inputChain = inputChain.then(() => applyInput(payload)).catch(fail);
         return;
       }
+      if (type === "run.operation.invoke") {
+        void applyOperation(payload).catch((error) => publishOperationFailure(payload, error));
+        return;
+      }
+      if (type === "run.operation.abort") {
+        void abortOperation(payload).catch((error) => publishAbortFailure(payload, error));
+        return;
+      }
       if (type === "run.media.answer" || type === "run.media.ice") {
         if (matchesPublishedPeer(payload)) {
           void applyMediaSignal(type, payload).catch(() => stopPeer(payload.peer_id, true));
@@ -118,6 +128,74 @@
         result: receipt.result,
         adapter_id: "ato.browser@1",
         applied_at: receipt.applied_at,
+      });
+    }
+
+    async function applyOperation(input) {
+      if (!isObject(input) || typeof input.operation_id !== "string" ||
+          typeof input.descriptor_id !== "string") throw new Error("invalid_operation");
+      const response = await hostFetch("/operation/invoke", input);
+      if (!response.ok) throw new Error(await responseError(response));
+      const receipt = await response.json();
+      sendRoom("run.operation.receipt", {
+        run_id: receipt.target_run_id,
+        target_run_id: receipt.target_run_id,
+        run_sequence: receipt.run_sequence,
+        operation_id: receipt.operation_id,
+        actor_participant_id: receipt.actor_participant_id,
+        actor_id: receipt.actor_id,
+        actor_run_id: receipt.actor_run_id,
+        controller_session_id: receipt.controller_session_id,
+        controller_epoch: receipt.controller_epoch,
+        surface_id: receipt.surface_id,
+        surface_epoch: receipt.surface_epoch,
+        client_sequence: receipt.client_sequence,
+        result: receipt.result,
+        output: receipt.output,
+        adapter_id: "ato.browser@1",
+        applied_at: receipt.applied_at,
+      });
+    }
+
+    async function abortOperation(input) {
+      if (!isObject(input) || typeof input.operation_id !== "string") {
+        throw new Error("invalid_operation");
+      }
+      const response = await hostFetch("/operation/abort", input);
+      if (!response.ok) throw new Error(await responseError(response));
+      sendRoom("run.operation.abort.receipt", await response.json());
+    }
+
+    function publishOperationFailure(input, error) {
+      sendRoom("run.operation.receipt", {
+        run_id: input?.target_run_id ?? input?.run_id ?? config.runId,
+        target_run_id: input?.target_run_id ?? input?.run_id ?? config.runId,
+        operation_id: input?.operation_id,
+        actor_id: input?.actor_id,
+        actor_run_id: input?.actor_run_id,
+        controller_session_id: input?.controller_session_id,
+        controller_epoch: input?.controller_epoch,
+        surface_id: input?.surface_id,
+        surface_epoch: input?.surface_epoch,
+        client_sequence: input?.client_sequence,
+        result: "failed",
+        error: error instanceof Error ? error.message : "operation_failed",
+        adapter_id: "ato.browser@1",
+      });
+    }
+
+    function publishAbortFailure(input, error) {
+      sendRoom("run.operation.abort.receipt", {
+        operation_id: input?.operation_id,
+        actor_id: input?.actor_id,
+        actor_run_id: input?.actor_run_id,
+        controller_session_id: input?.controller_session_id,
+        controller_epoch: input?.controller_epoch,
+        target_run_id: input?.target_run_id ?? input?.run_id ?? config.runId,
+        surface_id: input?.surface_id,
+        surface_epoch: input?.surface_epoch,
+        status: "failed",
+        best_effort_result: error instanceof Error ? error.message : "operation_failed",
       });
     }
 
@@ -215,6 +293,31 @@
       setTimeout(pumpFrame, 50);
     }
 
+    async function pumpSurface() {
+      if (ending) return;
+      try {
+        const response = await fetch("/surface", {
+          headers: { "x-ato-activity-host": config.hostSecret },
+          cache: "no-store",
+        });
+        if (response.ok && response.status !== 204) {
+          const surface = await response.json();
+          if (Number.isSafeInteger(surface.revision) && surface.revision > surfaceRevision &&
+              isObject(surface.observation) && Array.isArray(surface.operations)) {
+            surfaceRevision = surface.revision;
+            sendRoom("surface.observe", surface.observation);
+            sendRoom("surface.operations.replace", {
+              surface_id: surface.observation.surface_id,
+              target_run_id: surface.observation.target_run_id,
+              surface_epoch: surface.observation.surface_epoch,
+              operations: surface.operations,
+            });
+          }
+        }
+      } catch { /* A transient poll failure does not end the hosted Run. */ }
+      setTimeout(pumpSurface, 250);
+    }
+
     function sendRoom(type, payload) {
       if (room?.readyState !== WebSocket.OPEN) return;
       room.send(JSON.stringify({
@@ -254,6 +357,13 @@
         body: JSON.stringify(body),
         cache: "no-store",
       });
+    }
+
+    async function responseError(response) {
+      try {
+        const value = await response.json();
+        return typeof value.error === "string" ? value.error : "operation_failed";
+      } catch { return "operation_failed"; }
     }
 
     function cryptoToken() {
