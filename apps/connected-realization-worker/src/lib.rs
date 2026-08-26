@@ -3677,7 +3677,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
 },{
   name:'sync_block',
   inputSchema:{type:'object',properties:{duration_ms:{type:'integer'}},additionalProperties:false},
-  execute:({duration_ms=6000}={})=>{
+  execute:({duration_ms=11000}={})=>{
     const until=Date.now()+duration_ms;
     while(Date.now()<until){}
     inc();
@@ -3833,7 +3833,9 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
                 "aop-agent-slow".to_owned(),
                 ato_adapter_browser::BrowserEvent::Operation {
                     operation_name: "slow_increment".to_owned(),
-                    arguments: serde_json::json!({"delay_ms":800}),
+                    // Model the five-second handler plus scheduling margin;
+                    // the former deadline made this operation indeterminate.
+                    arguments: serde_json::json!({"delay_ms":5200}),
                     surface_generation: generation,
                 },
                 Some(slow_realization_generation),
@@ -4026,16 +4028,17 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
                 "aop-sync-hung-page".to_owned(),
                 ato_adapter_browser::BrowserEvent::Operation {
                     operation_name: "sync_block".to_owned(),
-                    arguments: serde_json::json!({"duration_ms":6000}),
+                    arguments: serde_json::json!({"duration_ms":11000}),
                     surface_generation: replacement.registry_generation,
                 },
                 Some(replacement_generation),
             )
             .expect_err("synchronous hostile page handler must be fenced");
         assert!(hung.to_string().contains("physical_outcome_indeterminate"));
+        let hung_elapsed = hung_started.elapsed();
         assert!(
-            hung_started.elapsed() < Duration::from_secs(7),
-            "native ACK deadline must bound a page that blocks JavaScript timers"
+            hung_elapsed >= Duration::from_secs(9) && hung_elapsed < Duration::from_secs(12),
+            "native ACK deadline, not an unrelated early failure, must fence a blocked page"
         );
         // Allow the hostile task to unwind. Its late physical effect remains
         // deliberately uncommitted while this adapter incarnation stays
