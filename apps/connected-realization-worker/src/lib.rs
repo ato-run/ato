@@ -26,8 +26,8 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::{Context, Result, bail, ensure};
 use ato_adapter_api::{
     ActuatorProviderRegistry, AdapterAttachContext, AdapterContext, AdapterInstance,
-    AdapterRegistry, AttachedAdapter, IgnoreObservations, LiveOperation, Stylus,
-    WorkspaceCapturePolicy,
+    AdapterRegistry, AttachedAdapter, IgnoreObservations, LiveOperation, LiveOperationDispatcher,
+    Stylus, WorkspaceCapturePolicy,
 };
 use ato_adapter_browser::{
     BROWSER_PROTOCOL_ID, BrowserAdapter, BrowserAdapterConfig, BrowserInputMode,
@@ -39,7 +39,7 @@ use ato_browser_host::{BrowserHost, BrowserHostConfig};
 use ato_browser_semantics::{
     AcceptedBrowserOperation, BROWSER_COMPUTATION_SEMANTICS_ID, BrowserComputationSemantics,
     BrowserHeadPersistence, BrowserOperationActuator, BrowserOperationIngress,
-    BrowserProtocolSemantics, BrowserRecordSubmission,
+    BrowserOperationRetryStage, BrowserProtocolSemantics, BrowserRecordSubmission,
 };
 use ato_compose::{COMPOSE_SEMANTICS_ID, ComposeSemantics, decode_composite_residual};
 use ato_computation::{ComputationRef, ContentRef, PortId, ProtocolId, SemanticsId};
@@ -170,14 +170,18 @@ fn collect_browser_leaves(
     Ok(())
 }
 
-struct AttachedBrowserActuator(Arc<Mutex<Box<dyn AttachedAdapter>>>);
+struct AttachedBrowserActuator(Arc<dyn LiveOperationDispatcher>);
 
 impl BrowserOperationActuator for AttachedBrowserActuator {
-    fn apply(&mut self, operation: &LiveOperation) -> std::result::Result<(), String> {
+    fn apply(
+        &self,
+        correlation_id: &str,
+        realization_generation: Option<&str>,
+        operation: &LiveOperation,
+    ) -> std::result::Result<u64, String> {
         self.0
-            .lock()
-            .map_err(|_| "Browser Adapter session mutex poisoned".to_owned())?
-            .apply_operation(operation)
+            .apply_operation(correlation_id, realization_generation, operation)
+            .map(|settlement| settlement.order)
             .map_err(|error| error.to_string())
     }
 }
@@ -251,6 +255,28 @@ trait BrowserControlIngress: Send + Sync {
         operation_id: String,
         event: ato_adapter_browser::BrowserEvent,
     ) -> std::result::Result<ato_kernel::AcceptedOperation, ato_kernel::EvolutionError>;
+
+    fn accept_control_operation_in_context(
+        &self,
+        operation_id: String,
+        event: ato_adapter_browser::BrowserEvent,
+        _realization_generation: Option<String>,
+    ) -> std::result::Result<ato_kernel::AcceptedOperation, ato_kernel::EvolutionError> {
+        self.accept_control_operation(operation_id, event)
+    }
+
+    fn retry_control_persistence(
+        &self,
+    ) -> std::result::Result<
+        Option<(String, ato_kernel::AcceptedOperation)>,
+        ato_kernel::EvolutionError,
+    > {
+        Ok(None)
+    }
+
+    fn control_operation_retry_stage(&self, _operation_id: &str) -> BrowserOperationRetryStage {
+        BrowserOperationRetryStage::BeforeApply
+    }
 }
 
 impl<A, P, R> BrowserControlIngress for BrowserOperationIngress<A, P, R>
@@ -265,6 +291,29 @@ where
         event: ato_adapter_browser::BrowserEvent,
     ) -> std::result::Result<ato_kernel::AcceptedOperation, ato_kernel::EvolutionError> {
         self.accept_with_operation_id(operation_id, event)
+    }
+
+    fn accept_control_operation_in_context(
+        &self,
+        operation_id: String,
+        event: ato_adapter_browser::BrowserEvent,
+        realization_generation: Option<String>,
+    ) -> std::result::Result<ato_kernel::AcceptedOperation, ato_kernel::EvolutionError> {
+        self.accept_with_operation_context(operation_id, event, realization_generation)
+    }
+
+    fn retry_control_persistence(
+        &self,
+    ) -> std::result::Result<
+        Option<(String, ato_kernel::AcceptedOperation)>,
+        ato_kernel::EvolutionError,
+    > {
+        self.retry_pending_persistence()
+            .map(|retry| retry.operation_id.zip(retry.accepted))
+    }
+
+    fn control_operation_retry_stage(&self, operation_id: &str) -> BrowserOperationRetryStage {
+        self.operation_retry_stage(operation_id)
     }
 }
 
@@ -700,11 +749,11 @@ impl HostedBrowserRuntime {
             .webmcp_snapshot()
     }
 
-    fn abort_active_webmcp_operation(&mut self) -> Result<bool> {
+    fn abort_webmcp_operation(&mut self, operation_id: &str) -> Result<bool> {
         self.host
             .as_mut()
             .context("Browser Host is unavailable")?
-            .abort_active_webmcp_operation()
+            .abort_webmcp_operation(operation_id)
     }
 
     /// Future capture coordination freezes this logical gate before it asks
@@ -917,8 +966,7 @@ impl ConnectedWorker {
                 self.execute_activity_lease(lease, command, &lease_root)
             }
         };
-        let cleanup = fs::remove_dir_all(&lease_root)
-            .with_context(|| format!("failed to clean lease directory {}", lease_root.display()));
+        let cleanup = cleanup_lease_directory(&lease_root);
         match (result, cleanup) {
             (Ok(()), Ok(())) => Ok(()),
             (Err(error), _) => Err(error),
@@ -1108,6 +1156,7 @@ impl ConnectedWorker {
                 ice_servers: serde_json::to_value(session.rtc.ice_servers)?,
             },
             browser.activity_ingress(),
+            &lease_root.join("activity-operation-receipts"),
         )?;
         browser.open_auxiliary_target(controller.target_url())?;
         let execution_id = format!("activity:{}:{}", lease.run_id, lease.id);
@@ -1128,9 +1177,14 @@ impl ConnectedWorker {
                 if last_surface.elapsed() >= Duration::from_millis(250) {
                     if let Ok(snapshot) = browser.webmcp_snapshot() {
                         let registry_generation = snapshot.registry_generation;
+                        let document_token = snapshot.document_token.clone();
                         let observed_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
                         let projection = surface.update(snapshot, observed_at)?.clone();
-                        controller.publish_surface(projection, registry_generation)?;
+                        controller.publish_surface(
+                            projection,
+                            registry_generation,
+                            document_token,
+                        )?;
                     }
                     last_surface = Instant::now();
                 }
@@ -1144,8 +1198,13 @@ impl ConnectedWorker {
                     Ok(ActivityControllerEvent::Failed) => {
                         break Err(anyhow::anyhow!("Activity controller failed"));
                     }
-                    Ok(ActivityControllerEvent::AbortRequested { result }) => {
-                        let signaled = browser.abort_active_webmcp_operation().unwrap_or(false);
+                    Ok(ActivityControllerEvent::AbortRequested {
+                        operation_id,
+                        result,
+                    }) => {
+                        let signaled = browser
+                            .abort_webmcp_operation(&operation_id)
+                            .unwrap_or(false);
                         let _ = result.send(signaled);
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -1230,6 +1289,11 @@ fn resolve_runner_credentials(config: &mut WorkerConfig) -> Result<()> {
 
 fn ready_local_port(config: &WorkerConfig) -> u16 {
     config.surface_listen.port()
+}
+
+fn cleanup_lease_directory(lease_root: &Path) -> Result<()> {
+    fs::remove_dir_all(lease_root)
+        .with_context(|| format!("failed to clean lease directory {}", lease_root.display()))
 }
 
 fn activity_surface_id(run_id: &str, lease_id: &str) -> String {
@@ -2202,6 +2266,11 @@ fn start_hosted_browser_runtime(
         attached.is_empty(),
         "unexpected additional Browser Adapter session"
     );
+    let live_dispatcher = adapter
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Browser Adapter session mutex poisoned"))?
+        .live_operation_dispatcher()
+        .context("Browser Adapter does not expose concurrent live dispatch")?;
     let host_root = lease_root.join("browser");
     fs::create_dir_all(&host_root)?;
     #[cfg(unix)]
@@ -2234,7 +2303,7 @@ fn start_hosted_browser_runtime(
     let ingress = Arc::new(BrowserOperationIngress::new(
         evolution,
         binding.port.clone(),
-        AttachedBrowserActuator(Arc::clone(&adapter)),
+        AttachedBrowserActuator(live_dispatcher),
         RunnerBrowserHeadPersistence {
             api,
             lease_id: lease.id.clone(),
@@ -3231,6 +3300,18 @@ mod tests {
     use super::*;
     use tungstenite::client::IntoClientRequest;
 
+    #[test]
+    fn normal_lease_cleanup_removes_activity_operation_journal() {
+        let temporary = tempfile::tempdir().expect("lease tempdir");
+        let lease_root = temporary.path().join("leases/lease-cleanup");
+        let journal = lease_root.join("activity-operation-receipts");
+        fs::create_dir_all(&journal).expect("journal directory");
+        fs::write(journal.join("evidence.json"), b"settled").expect("journal evidence");
+
+        cleanup_lease_directory(&lease_root).expect("lease cleanup");
+        assert!(!lease_root.exists());
+    }
+
     #[derive(Default)]
     struct TestStylus;
 
@@ -3263,11 +3344,16 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct TestBrowserActuator;
+    struct TestBrowserActuator(AtomicU64);
 
     impl BrowserOperationActuator for TestBrowserActuator {
-        fn apply(&mut self, _operation: &LiveOperation) -> std::result::Result<(), String> {
-            Ok(())
+        fn apply(
+            &self,
+            _correlation_id: &str,
+            _realization_generation: Option<&str>,
+            _operation: &LiveOperation,
+        ) -> std::result::Result<u64, String> {
+            Ok(self.0.fetch_add(1, Ordering::SeqCst) + 1)
         }
     }
 
@@ -3345,7 +3431,7 @@ mod tests {
         let ingress = Arc::new(BrowserOperationIngress::new(
             browser_authority(),
             PortId::parse("browser").unwrap(),
-            TestBrowserActuator,
+            TestBrowserActuator::default(),
             TestPersistence,
             records,
         ));
@@ -3489,7 +3575,37 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = Arc::clone(&stop);
         let thread = thread::spawn(move || {
-            const PAGE: &str = "<!doctype html><button id='button' style='width:100vw;height:100vh'>counter</button><output id='counter'>0</output><script>let n=0;const inc=()=>document.querySelector('#counter').textContent=String(++n);document.addEventListener('keydown',e=>{if(e.code==='ArrowRight')inc()});document.addEventListener('click',inc)</script>";
+            const PAGE: &str = r#"<!doctype html>
+<button id='button' style='width:100vw;height:100vh'>counter</button>
+<output id='counter'>0</output><script>
+let n=0;
+const counter=document.querySelector('#counter');
+const inc=()=>counter.textContent=String(++n);
+document.addEventListener('keydown',e=>{if(e.code==='ArrowRight')inc()});
+document.addEventListener('click',inc);
+globalThis.__ATO_WEBMCP_FIXTURE_OBSERVATION__=()=>({counter:n});
+globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
+  name:'slow_increment',
+  inputSchema:{type:'object',properties:{delay_ms:{type:'integer'}},additionalProperties:false},
+  execute:async({delay_ms=800}={}, {signal}={})=>{
+    await new Promise((resolve,reject)=>{
+      const timer=setTimeout(resolve,delay_ms);
+      signal?.addEventListener('abort',()=>{
+        clearTimeout(timer);reject(new DOMException('aborted','AbortError'));
+      },{once:true});
+    });
+    inc();
+  }
+},{
+  name:'sync_block',
+  inputSchema:{type:'object',properties:{duration_ms:{type:'integer'}},additionalProperties:false},
+  execute:({duration_ms=6000}={})=>{
+    const until=Date.now()+duration_ms;
+    while(Date.now()<until){}
+    inc();
+  }
+}];
+</script>"#;
             while !stopped.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
@@ -3564,13 +3680,18 @@ mod tests {
         .unwrap();
         let records = TestRecords::default();
         let submitted = Arc::clone(&records.0);
-        let ingress = BrowserOperationIngress::new(
+        let dispatcher = adapter
+            .lock()
+            .unwrap()
+            .live_operation_dispatcher()
+            .expect("Browser test adapter dispatcher");
+        let ingress = Arc::new(BrowserOperationIngress::new(
             browser_authority(),
             PortId::parse("browser").unwrap(),
-            AttachedBrowserActuator(Arc::clone(&adapter)),
+            AttachedBrowserActuator(dispatcher),
             TestPersistence,
             records,
-        );
+        ));
         let first = ingress
             .accept(ato_adapter_browser::BrowserEvent::Keyboard {
                 kind: ato_adapter_browser::KeyboardKind::KeyDown,
@@ -3602,13 +3723,240 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("2")
         );
+        let webmcp = host.webmcp_snapshot().expect("WebMCP fixture snapshot");
+        assert!(
+            webmcp
+                .tools
+                .iter()
+                .any(|tool| tool.name.as_str() == Some("slow_increment"))
+        );
+        let generation = webmcp.registry_generation;
+        let document_token = webmcp.document_token.clone();
+        let realization_generation = format!("{document_token}.{generation}");
+        let slow_ingress = Arc::clone(&ingress);
+        let slow_realization_generation = realization_generation.clone();
+        let slow = thread::spawn(move || {
+            slow_ingress.accept_with_operation_context(
+                "aop-agent-slow".to_owned(),
+                ato_adapter_browser::BrowserEvent::Operation {
+                    operation_name: "slow_increment".to_owned(),
+                    arguments: serde_json::json!({"delay_ms":800}),
+                    surface_generation: generation,
+                },
+                Some(slow_realization_generation),
+            )
+        });
+        thread::sleep(Duration::from_millis(75));
+        let human_started = Instant::now();
+        let human = ingress
+            .accept_with_operation_context(
+                "aop-human-click".to_owned(),
+                ato_adapter_browser::BrowserEvent::Click {
+                    x_normalized: 0.5,
+                    y_normalized: 0.5,
+                    button: 0,
+                },
+                Some(realization_generation.clone()),
+            )
+            .expect("Human operation must not wait for slow Agent WebMCP");
+        assert_eq!(human.run_seq, 3);
+        assert!(human_started.elapsed() < Duration::from_millis(500));
+        let slow = slow
+            .join()
+            .expect("slow operation thread")
+            .expect("slow operation receipt");
+        assert_eq!(slow.run_seq, 4);
+        assert_eq!(
+            host.evaluate("document.querySelector('#counter').textContent")
+                .unwrap()
+                .pointer("/result/value")
+                .and_then(serde_json::Value::as_str),
+            Some("4")
+        );
+
+        let abort_ingress = Arc::clone(&ingress);
+        let abort_realization_generation = realization_generation.clone();
+        let aborted = thread::spawn(move || {
+            abort_ingress.accept_with_operation_context(
+                "aop-targeted-abort".to_owned(),
+                ato_adapter_browser::BrowserEvent::Operation {
+                    operation_name: "slow_increment".to_owned(),
+                    arguments: serde_json::json!({"delay_ms":3000}),
+                    surface_generation: generation,
+                },
+                Some(abort_realization_generation),
+            )
+        });
+        let complete_ingress = Arc::clone(&ingress);
+        let complete_realization_generation = realization_generation.clone();
+        let completed = thread::spawn(move || {
+            complete_ingress.accept_with_operation_context(
+                "aop-not-aborted".to_owned(),
+                ato_adapter_browser::BrowserEvent::Operation {
+                    operation_name: "slow_increment".to_owned(),
+                    arguments: serde_json::json!({"delay_ms":200}),
+                    surface_generation: generation,
+                },
+                Some(complete_realization_generation),
+            )
+        });
+        thread::sleep(Duration::from_millis(75));
+        assert!(
+            host.abort_webmcp_operation("aop-targeted-abort")
+                .expect("targeted Browser abort")
+        );
+        assert!(matches!(
+            aborted.join().expect("aborted operation thread"),
+            Err(EvolutionError::Apply(_))
+        ));
+        let completed = completed
+            .join()
+            .expect("completed operation thread")
+            .expect("other WebMCP operation must complete");
+        assert_eq!(completed.run_seq, 5);
+        assert_eq!(submitted.lock().unwrap().len(), 5);
+        assert_eq!(
+            host.evaluate("document.querySelector('#counter').textContent")
+                .unwrap()
+                .pointer("/result/value")
+                .and_then(serde_json::Value::as_str),
+            Some("5")
+        );
+
+        host.evaluate(
+            r#"globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
+              name:'slow_increment',
+              inputSchema:{type:'object',properties:{delay_ms:{type:'integer'},label:{type:'string'}},additionalProperties:false},
+              execute:async()=>{document.querySelector('#counter').textContent='999'}
+            }]; true"#,
+        )
+        .unwrap();
+        let replaced_registry = host
+            .webmcp_snapshot()
+            .expect("replacement registry snapshot");
+        assert_eq!(replaced_registry.document_token, document_token);
+        assert!(replaced_registry.registry_generation > generation);
+        let stale_registry_webmcp = ingress
+            .accept_with_operation_context(
+                "aop-old-registry-webmcp".to_owned(),
+                ato_adapter_browser::BrowserEvent::Operation {
+                    operation_name: "slow_increment".to_owned(),
+                    arguments: serde_json::json!({"delay_ms":1}),
+                    surface_generation: generation,
+                },
+                Some(realization_generation.clone()),
+            )
+            .expect_err("old WebMCP descriptor must not resolve after registry replacement");
+        assert!(
+            stale_registry_webmcp
+                .to_string()
+                .contains("stale_operation")
+        );
+        let stale_registry_click = ingress
+            .accept_with_operation_context(
+                "aop-old-registry-click".to_owned(),
+                ato_adapter_browser::BrowserEvent::Click {
+                    x_normalized: 0.5,
+                    y_normalized: 0.5,
+                    button: 0,
+                },
+                Some(realization_generation.clone()),
+            )
+            .expect_err("old fixed descriptor must not cross registry replacement");
+        assert!(stale_registry_click.to_string().contains("stale_operation"));
+        assert_eq!(
+            host.evaluate("document.querySelector('#counter').textContent")
+                .unwrap()
+                .pointer("/result/value")
+                .and_then(serde_json::Value::as_str),
+            Some("5")
+        );
+
+        // A replacement document deliberately exposes the same operation
+        // name and starts its registry generation at the same value. Before
+        // the worker's next surface poll, the old descriptor/context must not
+        // resolve against that new document -- for WebMCP or fixed Browser
+        // input.
+        host.evaluate("location.reload(); true").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let replacement = loop {
+            if let Ok(snapshot) = host.webmcp_snapshot()
+                && snapshot.document_token != document_token
+            {
+                break snapshot;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "replacement document did not load"
+            );
+            thread::sleep(Duration::from_millis(25));
+        };
+        assert_eq!(replacement.registry_generation, generation);
+        let stale_webmcp = ingress
+            .accept_with_operation_context(
+                "aop-old-document-webmcp".to_owned(),
+                ato_adapter_browser::BrowserEvent::Operation {
+                    operation_name: "slow_increment".to_owned(),
+                    arguments: serde_json::json!({"delay_ms":1}),
+                    surface_generation: generation,
+                },
+                Some(realization_generation.clone()),
+            )
+            .expect_err("old WebMCP descriptor must not resolve in replacement document");
+        assert!(stale_webmcp.to_string().contains("stale_operation"));
+        let stale_click = ingress
+            .accept_with_operation_context(
+                "aop-old-document-click".to_owned(),
+                ato_adapter_browser::BrowserEvent::Click {
+                    x_normalized: 0.5,
+                    y_normalized: 0.5,
+                    button: 0,
+                },
+                Some(realization_generation),
+            )
+            .expect_err("old fixed Browser descriptor must not target replacement document");
+        assert!(stale_click.to_string().contains("stale_operation"));
+        assert_eq!(
+            host.evaluate("document.querySelector('#counter').textContent")
+                .unwrap()
+                .pointer("/result/value")
+                .and_then(serde_json::Value::as_str),
+            Some("0")
+        );
+        let replacement_generation = format!(
+            "{}.{}",
+            replacement.document_token, replacement.registry_generation
+        );
+        let hung_started = Instant::now();
+        let hung = ingress
+            .accept_with_operation_context(
+                "aop-sync-hung-page".to_owned(),
+                ato_adapter_browser::BrowserEvent::Operation {
+                    operation_name: "sync_block".to_owned(),
+                    arguments: serde_json::json!({"duration_ms":6000}),
+                    surface_generation: replacement.registry_generation,
+                },
+                Some(replacement_generation),
+            )
+            .expect_err("synchronous hostile page handler must be fenced");
+        assert!(hung.to_string().contains("physical_outcome_indeterminate"));
+        assert!(
+            hung_started.elapsed() < Duration::from_secs(7),
+            "native ACK deadline must bound a page that blocks JavaScript timers"
+        );
+        // Allow the hostile task to unwind. Its late physical effect remains
+        // deliberately uncommitted while this adapter incarnation stays
+        // terminally fenced.
+        thread::sleep(Duration::from_millis(1200));
         ingress.freeze().unwrap();
         let context = AdapterContext {
             workspace: workspace.path(),
             objects: objects.as_ref(),
         };
-        adapter.lock().unwrap().quiesce(&context).unwrap();
-        adapter.lock().unwrap().detach(&context).unwrap();
+        let quiesce_started = Instant::now();
+        assert!(adapter.lock().unwrap().quiesce(&context).is_err());
+        assert!(quiesce_started.elapsed() < Duration::from_millis(500));
+        assert!(adapter.lock().unwrap().detach(&context).is_err());
         host.stop().unwrap();
         stop_server.store(true, Ordering::Release);
         server.join().unwrap();

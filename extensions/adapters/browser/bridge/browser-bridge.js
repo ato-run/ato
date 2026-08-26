@@ -59,9 +59,12 @@
       acceptingInput = true;
       return;
     }
-    if (value.type === "apply" && typeof value.request_id === "string") {
+    if (value.type === "apply" &&
+        typeof value.request_id === "string" &&
+        typeof value.operation_id === "string") {
       try {
-        await dispatch(value.event, value.request_id);
+        await validateRealizationGeneration(value.realization_generation, value.operation_id);
+        await dispatch(value.event, value.operation_id, value.realization_generation);
         send({ type: "ack", request_id: value.request_id });
       } catch (error) {
         send({
@@ -141,7 +144,7 @@
     return acceptingInput && event.isTrusted === true && socket.readyState === WebSocket.OPEN;
   }
 
-  async function dispatch(event, requestId) {
+  async function dispatch(event, requestId, realizationGeneration) {
     if (!isObject(event) || typeof event.type !== "string") throw new Error("invalid Browser event");
     if (event.type === "keyboard") {
       const target = document.activeElement || document.body;
@@ -187,13 +190,13 @@
       return;
     }
     if (event.type === "operation") {
-      await invokePageOperation(event, requestId);
+      await invokePageOperation(event, requestId, realizationGeneration);
       return;
     }
     throw new Error("unsupported Browser event");
   }
 
-  function invokePageOperation(event, requestId) {
+  function invokePageOperation(event, requestId, realizationGeneration) {
     if (typeof event.operation_name !== "string" ||
         !Number.isSafeInteger(event.surface_generation) || event.surface_generation <= 0) {
       throw new Error("invalid Browser operation");
@@ -223,6 +226,39 @@
           operation_name: event.operation_name,
           arguments: event.arguments ?? {},
           surface_generation: event.surface_generation,
+          realization_generation: realizationGeneration,
+        }),
+      }));
+    });
+  }
+
+  function validateRealizationGeneration(expected, requestId) {
+    if (expected === undefined) return Promise.resolve();
+    if (typeof expected !== "string" || expected.length === 0 || expected.length > 256) {
+      return Promise.reject(new Error("invalid Browser realization generation"));
+    }
+    const bridgeId = `${requestId}:document:${cryptoToken()}`;
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => finish(new Error("document validation timed out")), 5000);
+      const receive = (responseEvent) => {
+        let response;
+        try { response = JSON.parse(String(responseEvent.detail)); } catch { return; }
+        if (!isObject(response) || response.id !== bridgeId) return;
+        finish(response.ok === true ? null : new Error(
+          typeof response.error === "string" ? response.error : "stale_operation",
+        ));
+      };
+      const finish = (error) => {
+        clearTimeout(timeout);
+        document.removeEventListener("__ato_webmcp_response_v1", receive, false);
+        if (error) reject(error); else resolve();
+      };
+      document.addEventListener("__ato_webmcp_response_v1", receive, false);
+      document.dispatchEvent(new CustomEvent("__ato_webmcp_request_v1", {
+        detail: JSON.stringify({
+          id: bridgeId,
+          type: "validate_document",
+          realization_generation: expected,
         }),
       }));
     });

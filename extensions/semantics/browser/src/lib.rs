@@ -18,7 +18,8 @@ use ato_kernel::{
 use ato_objects::{BundleError, ComputationReferences, ObjectLink, ObjectResolver};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::time::Duration;
 use thiserror::Error;
 
 pub const BROWSER_COMPUTATION_SEMANTICS_ID: &str = "ato.browser.computation@1";
@@ -317,8 +318,13 @@ fn validate_residual(residual: &BrowserResidualV2) -> Result<(), BrowserSemantic
 
 /// Physical Browser boundary used by hosted operation ingress. Implementations
 /// send the canonical live operation to Chrome and return only after its ACK.
-pub trait BrowserOperationActuator: Send {
-    fn apply(&mut self, operation: &LiveOperation) -> Result<(), String>;
+pub trait BrowserOperationActuator: Send + Sync {
+    fn apply(
+        &self,
+        correlation_id: &str,
+        realization_generation: Option<&str>,
+        operation: &LiveOperation,
+    ) -> Result<u64, String>;
 }
 
 /// Runner control-plane projection port. Its failure is intentionally kept
@@ -345,6 +351,8 @@ pub struct AcceptedBrowserOperation {
 struct PendingBrowserOperation {
     operation_id: String,
     event: ato_adapter_browser::BrowserEvent,
+    realization_generation: Option<String>,
+    settlement_order: u64,
 }
 
 /// One canonical hosted Browser operation path. It is not a Player: it takes a
@@ -353,10 +361,16 @@ struct PendingBrowserOperation {
 pub struct BrowserOperationIngress<A, P, R> {
     authority: Arc<RunEvolutionAuthority>,
     browser_port: PortId,
-    actuator: Mutex<A>,
+    actuator: A,
     persistence: P,
     records: R,
-    operation_gate: Mutex<()>,
+    lifecycle_gate: RwLock<()>,
+    commit_gate: Mutex<()>,
+    next_settlement_order: Mutex<u64>,
+    settlement_changed: Condvar,
+    in_flight_operations: Mutex<BTreeMap<String, Vec<u8>>>,
+    physically_applied_operations: Mutex<BTreeMap<String, PendingBrowserOperation>>,
+    physical_commit_failure: Mutex<Option<String>>,
     pending_operation: Mutex<Option<PendingBrowserOperation>>,
     accepted_operations: Mutex<AcceptedOperationCache>,
     next_operation_id: AtomicU64,
@@ -419,10 +433,16 @@ where
         Self {
             authority,
             browser_port,
-            actuator: Mutex::new(actuator),
+            actuator,
             persistence,
             records,
-            operation_gate: Mutex::new(()),
+            lifecycle_gate: RwLock::new(()),
+            commit_gate: Mutex::new(()),
+            next_settlement_order: Mutex::new(1),
+            settlement_changed: Condvar::new(),
+            in_flight_operations: Mutex::new(BTreeMap::new()),
+            physically_applied_operations: Mutex::new(BTreeMap::new()),
+            physical_commit_failure: Mutex::new(None),
             pending_operation: Mutex::new(None),
             accepted_operations: Mutex::new(AcceptedOperationCache::default()),
             next_operation_id: AtomicU64::new(0),
@@ -445,25 +465,45 @@ where
         operation_id: String,
         event: ato_adapter_browser::BrowserEvent,
     ) -> Result<AcceptedOperation, EvolutionError> {
+        self.accept_with_operation_context(operation_id, event, None)
+    }
+
+    /// Accepts an operation bound to one opaque physical Browser document
+    /// incarnation. The generation is deliberately excluded from the
+    /// semantic event/Record and is used only by the Adapter as a stale-input
+    /// fence across navigation.
+    pub fn accept_with_operation_context(
+        &self,
+        operation_id: String,
+        event: ato_adapter_browser::BrowserEvent,
+        realization_generation: Option<String>,
+    ) -> Result<AcceptedOperation, EvolutionError> {
         if !valid_operation_id(&operation_id) {
             return Err(EvolutionError::Apply(
                 "invalid Browser operation id".to_owned(),
             ));
         }
-        let _gate = self
-            .operation_gate
+        let _lifecycle = self
+            .lifecycle_gate
+            .read()
+            .expect("Browser lifecycle gate poisoned");
+        if self
+            .physical_commit_failure
             .lock()
-            .expect("Browser operation gate poisoned");
-        if let Some(pending) = self.authority.pending_persistence() {
-            return Err(EvolutionError::PersistencePending(pending.run_seq));
+            .expect("Browser physical commit failure mutex poisoned")
+            .as_deref()
+            .is_some_and(|failed| failed != operation_id)
+        {
+            return Err(EvolutionError::Apply("operation_in_flight".to_owned()));
         }
         let payload = ato_adapter_browser::encode_event(&event)
             .map_err(|error| EvolutionError::Apply(error.to_string()))?;
+        let cache_payload = operation_cache_key(&payload, realization_generation.as_deref());
         if let Some(accepted) = self
             .accepted_operations
             .lock()
             .expect("Browser accepted operation cache mutex poisoned")
-            .get(&operation_id, &payload)?
+            .get(&operation_id, &cache_payload)?
         {
             return Ok(accepted);
         }
@@ -479,21 +519,125 @@ where
             self.browser_port.clone(),
             ProtocolPayload::from(payload.clone()),
         );
+        {
+            let mut in_flight = self
+                .in_flight_operations
+                .lock()
+                .expect("Browser in-flight operation mutex poisoned");
+            if let Some(known) = in_flight.get(&operation_id) {
+                return if known == &cache_payload {
+                    Err(EvolutionError::Apply("operation_in_flight".to_owned()))
+                } else {
+                    Err(EvolutionError::Apply(
+                        "Browser operation id was reused with a different payload".to_owned(),
+                    ))
+                };
+            }
+            in_flight.insert(operation_id.clone(), cache_payload.clone());
+        }
+        let physically_applied = self
+            .physically_applied_operations
+            .lock()
+            .expect("Browser applied operation mutex poisoned")
+            .get(&operation_id)
+            .cloned();
+        let physical_result = match physically_applied {
+            Some(known)
+                if known.event == event
+                    && known.realization_generation == realization_generation =>
+            {
+                Ok(known.settlement_order)
+            }
+            Some(_) => Err(EvolutionError::Apply(
+                "Browser operation id was reused with a different payload".to_owned(),
+            )),
+            None => {
+                // Browser input semantics accept every already-validated
+                // ato.browser@1 event at every Browser frontier. Validate at
+                // the current head before allowing the physical handler to run
+                // without the commit sequencer.
+                self.authority.validate_offer(&offer).and_then(|()| {
+                    self.actuator
+                        .apply(&operation_id, realization_generation.as_deref(), &operation)
+                        .map_err(EvolutionError::Apply)
+                })
+            }
+        };
+        let settlement_order = match physical_result {
+            Ok(order) => order,
+            Err(error) => {
+                self.in_flight_operations
+                    .lock()
+                    .expect("Browser in-flight operation mutex poisoned")
+                    .remove(&operation_id);
+                return Err(error);
+            }
+        };
+        self.physically_applied_operations
+            .lock()
+            .expect("Browser applied operation mutex poisoned")
+            .entry(operation_id.clone())
+            .or_insert_with(|| PendingBrowserOperation {
+                operation_id: operation_id.clone(),
+                event: event.clone(),
+                realization_generation: realization_generation.clone(),
+                settlement_order,
+            });
+
+        if !self.wait_for_settlement_turn(settlement_order) {
+            self.finish_operation(&operation_id, false);
+            return Err(EvolutionError::Apply("operation_in_flight".to_owned()));
+        }
+
+        // Physical handlers may overlap, but head derivation/commit remains a
+        // short sequencer. Runner sequence follows the authoritative
+        // post-settlement commit race, and each transition is derived from the
+        // latest committed head.
+        let _commit = self
+            .commit_gate
+            .lock()
+            .expect("Browser commit gate poisoned");
+        if self
+            .physical_commit_failure
+            .lock()
+            .expect("Browser physical commit failure mutex poisoned")
+            .as_deref()
+            .is_some_and(|failed| failed != operation_id)
+        {
+            // This operation has physically settled, but cannot cross a prior
+            // uncommitted physical effect. Keep its physical tombstone, drop
+            // only the live owner, and let the controller retry after the
+            // earlier operation repairs/fences the Run.
+            self.finish_operation(&operation_id, false);
+            return Err(EvolutionError::Apply("operation_in_flight".to_owned()));
+        }
+        if self.authority.pending_persistence().is_some()
+            && let Err(error) = self.retry_pending_persistence_inner()
+        {
+            self.finish_operation(&operation_id, false);
+            return Err(error);
+        }
+        if let Some(accepted) = self
+            .accepted_operations
+            .lock()
+            .expect("Browser accepted operation cache mutex poisoned")
+            .get(&operation_id, &cache_payload)?
+        {
+            self.finish_operation(&operation_id, true);
+            return Ok(accepted);
+        }
         *self
             .pending_operation
             .lock()
             .expect("Browser pending operation mutex poisoned") = Some(PendingBrowserOperation {
             operation_id: operation_id.clone(),
             event: event.clone(),
+            realization_generation: realization_generation.clone(),
+            settlement_order,
         });
         let result = self.authority.accept(
             &offer,
-            || {
-                self.actuator
-                    .lock()
-                    .map_err(|_| "Browser actuator mutex poisoned".to_owned())?
-                    .apply(&operation)
-            },
+            || Ok(()),
             |pending| {
                 self.persistence.persist(&AcceptedBrowserOperation {
                     operation_id: operation_id.clone(),
@@ -515,7 +659,7 @@ where
             self.accepted_operations
                 .lock()
                 .expect("Browser accepted operation cache mutex poisoned")
-                .insert(operation_id, payload, accepted.clone());
+                .insert(operation_id.clone(), cache_payload, accepted.clone());
         }
         if !matches!(result, Err(EvolutionError::Persist(_))) {
             *self
@@ -523,14 +667,60 @@ where
                 .lock()
                 .expect("Browser pending operation mutex poisoned") = None;
         }
-        result
+        if result.is_err() && !matches!(result, Err(EvolutionError::Persist(_))) {
+            *self
+                .physical_commit_failure
+                .lock()
+                .expect("Browser physical commit failure mutex poisoned") =
+                Some(operation_id.clone());
+        }
+        match result {
+            Ok(accepted) => {
+                self.advance_settlement_order(settlement_order)?;
+                self.finish_operation(&operation_id, true);
+                Ok(accepted)
+            }
+            Err(EvolutionError::Persist(error)) => {
+                self.finish_operation(&operation_id, false);
+                Err(EvolutionError::Persist(error))
+            }
+            Err(_) => {
+                // The physical effect already settled. Preserve its event and
+                // ticket for same-ID commit repair and keep later tickets
+                // fenced; a terminal failed receipt would make repair
+                // impossible and contradict the physical Browser.
+                self.finish_operation(&operation_id, false);
+                Err(EvolutionError::Apply("operation_in_flight".to_owned()))
+            }
+        }
     }
 
     pub fn retry_pending_persistence(&self) -> Result<BrowserPersistenceRetry, EvolutionError> {
-        let _gate = self
-            .operation_gate
+        let _lifecycle = self
+            .lifecycle_gate
+            .read()
+            .expect("Browser lifecycle gate poisoned");
+        let _commit = self
+            .commit_gate
             .lock()
-            .expect("Browser operation gate poisoned");
+            .expect("Browser commit gate poisoned");
+        self.retry_pending_persistence_inner()
+    }
+
+    pub fn operation_retry_stage(&self, operation_id: &str) -> BrowserOperationRetryStage {
+        if self
+            .physically_applied_operations
+            .lock()
+            .expect("Browser applied operation mutex poisoned")
+            .contains_key(operation_id)
+        {
+            BrowserOperationRetryStage::PhysicallyAppliedPendingCommit
+        } else {
+            BrowserOperationRetryStage::BeforeApply
+        }
+    }
+
+    fn retry_pending_persistence_inner(&self) -> Result<BrowserPersistenceRetry, EvolutionError> {
         let operation = self
             .pending_operation
             .lock()
@@ -555,6 +745,8 @@ where
             return Ok(BrowserPersistenceRetry {
                 persisted: false,
                 record_error: None,
+                accepted: None,
+                operation_id: None,
             });
         }
         let accepted_operation = AcceptedBrowserOperation {
@@ -571,25 +763,101 @@ where
         };
         let payload = ato_adapter_browser::encode_event(&operation.event)
             .map_err(|error| EvolutionError::Apply(error.to_string()))?;
+        let cache_payload =
+            operation_cache_key(&payload, operation.realization_generation.as_deref());
         self.accepted_operations
             .lock()
             .expect("Browser accepted operation cache mutex poisoned")
-            .insert(operation.operation_id.clone(), payload, accepted);
+            .insert(
+                operation.operation_id.clone(),
+                cache_payload,
+                accepted.clone(),
+            );
         *self
             .pending_operation
             .lock()
             .expect("Browser pending operation mutex poisoned") = None;
+        self.advance_settlement_order(operation.settlement_order)?;
+        self.finish_operation(&operation.operation_id, true);
         Ok(BrowserPersistenceRetry {
             persisted: true,
             record_error,
+            accepted: Some(accepted),
+            operation_id: Some(operation.operation_id),
         })
     }
 
+    fn finish_operation(&self, operation_id: &str, committed: bool) {
+        self.in_flight_operations
+            .lock()
+            .expect("Browser in-flight operation mutex poisoned")
+            .remove(operation_id);
+        if committed {
+            self.physically_applied_operations
+                .lock()
+                .expect("Browser applied operation mutex poisoned")
+                .remove(operation_id);
+            let mut failure = self
+                .physical_commit_failure
+                .lock()
+                .expect("Browser physical commit failure mutex poisoned");
+            if failure.as_deref() == Some(operation_id) {
+                *failure = None;
+            }
+        }
+    }
+
+    fn wait_for_settlement_turn(&self, settlement_order: u64) -> bool {
+        let next = self
+            .next_settlement_order
+            .lock()
+            .expect("Browser settlement sequencer mutex poisoned");
+        let (next, timeout) = self
+            .settlement_changed
+            .wait_timeout_while(next, Duration::from_millis(100), |next| {
+                *next < settlement_order
+            })
+            .expect("Browser settlement sequencer mutex poisoned");
+        !timeout.timed_out() || *next >= settlement_order
+    }
+
+    fn advance_settlement_order(&self, settlement_order: u64) -> Result<(), EvolutionError> {
+        let mut next = self
+            .next_settlement_order
+            .lock()
+            .expect("Browser settlement sequencer mutex poisoned");
+        if *next > settlement_order {
+            return Ok(());
+        }
+        if *next != settlement_order {
+            return Err(EvolutionError::Apply(
+                "Browser settlement ordering evidence is discontinuous".to_owned(),
+            ));
+        }
+        *next = next.checked_add(1).ok_or_else(|| {
+            EvolutionError::Apply("Browser settlement order exhausted".to_owned())
+        })?;
+        self.settlement_changed.notify_all();
+        Ok(())
+    }
+
     pub fn freeze(&self) -> Result<ato_kernel::RunHeadSnapshot, EvolutionError> {
+        let _lifecycle = self
+            .lifecycle_gate
+            .write()
+            .expect("Browser lifecycle gate poisoned");
+        let _commit = self
+            .commit_gate
+            .lock()
+            .expect("Browser commit gate poisoned");
         self.authority.freeze()
     }
 
     pub fn unfreeze(&self) {
+        let _lifecycle = self
+            .lifecycle_gate
+            .write()
+            .expect("Browser lifecycle gate poisoned");
         self.authority.unfreeze();
     }
 }
@@ -600,6 +868,14 @@ where
 pub struct BrowserPersistenceRetry {
     pub persisted: bool,
     pub record_error: Option<String>,
+    pub accepted: Option<AcceptedOperation>,
+    pub operation_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserOperationRetryStage {
+    BeforeApply,
+    PhysicallyAppliedPendingCommit,
 }
 
 fn valid_operation_id(value: &str) -> bool {
@@ -610,30 +886,55 @@ fn valid_operation_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':'))
 }
 
+fn operation_cache_key(payload: &[u8], realization_generation: Option<&str>) -> Vec<u8> {
+    let mut key = Vec::with_capacity(
+        payload.len() + realization_generation.map_or(1, |value| value.len() + 1),
+    );
+    key.extend_from_slice(payload);
+    // Canonical JSON never contains a literal NUL byte, so this boundary is
+    // unambiguous without placing the realization generation in the semantic
+    // protocol payload.
+    key.push(0);
+    if let Some(generation) = realization_generation {
+        key.extend_from_slice(generation.as_bytes());
+    }
+    key
+}
+
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc::{self, Receiver, Sender};
     use std::sync::{Arc, Mutex};
 
     use ato_adapter_browser::{BrowserEvent, KeyboardKind, Modifiers};
     use ato_computation::{Boundary, PortDef};
     use ato_kernel::Kernel;
-    use ato_objects::{MemoryObjectStore, ObjectStore};
+    use ato_objects::{
+        MemoryObjectStore, ObjectError, ObjectMetadata, ObjectResolver, ObjectStore,
+    };
 
     use super::*;
 
     #[derive(Default)]
     struct Actuator {
-        calls: Vec<LiveOperation>,
-        reject: bool,
+        calls: Mutex<Vec<LiveOperation>>,
+        reject: AtomicBool,
+        next_settlement: AtomicU64,
     }
     impl BrowserOperationActuator for Actuator {
-        fn apply(&mut self, operation: &LiveOperation) -> Result<(), String> {
-            if self.reject {
+        fn apply(
+            &self,
+            _correlation_id: &str,
+            _realization_generation: Option<&str>,
+            operation: &LiveOperation,
+        ) -> Result<u64, String> {
+            if self.reject.load(Ordering::Acquire) {
                 return Err("Browser ACK timeout".to_owned());
             }
-            self.calls.push(operation.clone());
-            Ok(())
+            self.calls.lock().unwrap().push(operation.clone());
+            Ok(self.next_settlement.fetch_add(1, Ordering::SeqCst) + 1)
         }
     }
 
@@ -667,6 +968,109 @@ mod tests {
     struct FailOncePersistence {
         fail: AtomicBool,
         received: Mutex<Vec<AcceptedBrowserOperation>>,
+    }
+
+    struct ParallelActuator {
+        slow_started: Sender<()>,
+        slow_release: Mutex<Receiver<()>>,
+        correlations: Mutex<Vec<String>>,
+        next_settlement: AtomicU64,
+    }
+
+    struct ReverseWakeActuator {
+        first_ticket_assigned: Sender<()>,
+        second_ticket_assigned: Sender<()>,
+        release_first_waiter: Mutex<Receiver<()>>,
+        next_settlement: AtomicU64,
+    }
+
+    struct FailNextInsertStore {
+        inner: MemoryObjectStore,
+        fail_next: AtomicBool,
+    }
+
+    impl ObjectResolver for FailNextInsertStore {
+        fn metadata(&self, reference: &ContentRef) -> Result<ObjectMetadata, ObjectError> {
+            self.inner.metadata(reference)
+        }
+
+        fn open(&self, reference: &ContentRef) -> Result<Box<dyn Read + Send + '_>, ObjectError> {
+            self.inner.open(reference)
+        }
+    }
+
+    impl ObjectStore for FailNextInsertStore {
+        fn insert(&self, reference: &ContentRef, bytes: &[u8]) -> Result<(), ObjectError> {
+            if self.fail_next.swap(false, Ordering::SeqCst) {
+                return Err(ObjectError::Storage("injected CAS failure".to_owned()));
+            }
+            self.inner.insert(reference, bytes)
+        }
+    }
+
+    struct FailCommitOnceActuator {
+        store: Arc<FailNextInsertStore>,
+        calls: AtomicU64,
+    }
+
+    impl BrowserOperationActuator for FailCommitOnceActuator {
+        fn apply(
+            &self,
+            _correlation_id: &str,
+            _realization_generation: Option<&str>,
+            _operation: &LiveOperation,
+        ) -> Result<u64, String> {
+            let order = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if order == 1 {
+                self.store.fail_next.store(true, Ordering::SeqCst);
+            }
+            Ok(order)
+        }
+    }
+
+    impl BrowserOperationActuator for ReverseWakeActuator {
+        fn apply(
+            &self,
+            _correlation_id: &str,
+            _realization_generation: Option<&str>,
+            _operation: &LiveOperation,
+        ) -> Result<u64, String> {
+            let order = self.next_settlement.fetch_add(1, Ordering::SeqCst) + 1;
+            if order == 1 {
+                let _ = self.first_ticket_assigned.send(());
+                self.release_first_waiter
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .map_err(|error| error.to_string())?;
+            } else {
+                let _ = self.second_ticket_assigned.send(());
+            }
+            Ok(order)
+        }
+    }
+
+    impl BrowserOperationActuator for ParallelActuator {
+        fn apply(
+            &self,
+            correlation_id: &str,
+            _realization_generation: Option<&str>,
+            _operation: &LiveOperation,
+        ) -> Result<u64, String> {
+            self.correlations
+                .lock()
+                .unwrap()
+                .push(correlation_id.to_owned());
+            if correlation_id == "actor-a-slow" {
+                let _ = self.slow_started.send(());
+                self.slow_release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok(self.next_settlement.fetch_add(1, Ordering::SeqCst) + 1)
+        }
     }
 
     impl FailOncePersistence {
@@ -759,6 +1163,44 @@ mod tests {
         (Arc::new(RunEvolutionAuthority::new(kernel, root)), objects)
     }
 
+    fn authority_with_failing_store() -> (Arc<RunEvolutionAuthority>, Arc<FailNextInsertStore>) {
+        let objects = Arc::new(FailNextInsertStore {
+            inner: MemoryObjectStore::default(),
+            fail_next: AtomicBool::new(false),
+        });
+        let mut kernel = Kernel::new(objects.clone());
+        kernel
+            .register(Arc::new(BrowserComputationSemantics::default()))
+            .unwrap();
+        kernel
+            .register_protocol(Arc::new(BrowserProtocolSemantics::default()))
+            .unwrap();
+        let residual = objects
+            .put(
+                &encode_residual(&BrowserResidualV1 {
+                    version: 1,
+                    interaction_frontier: None,
+                    checkpoint_state_ref: None,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        let root = kernel
+            .seal(&ComputationObject {
+                semantics: SemanticsId::parse(BROWSER_COMPUTATION_SEMANTICS_ID).unwrap(),
+                boundary: Boundary::from([(
+                    PortId::parse("browser").unwrap(),
+                    PortDef {
+                        protocol: ProtocolId::parse(BROWSER_PROTOCOL_ID).unwrap(),
+                        role: RoleId::parse("controller").unwrap(),
+                    },
+                )]),
+                residual,
+            })
+            .unwrap();
+        (Arc::new(RunEvolutionAuthority::new(kernel, root)), objects)
+    }
+
     fn key() -> BrowserEvent {
         BrowserEvent::Keyboard {
             kind: KeyboardKind::KeyDown,
@@ -804,8 +1246,9 @@ mod tests {
             authority.clone(),
             PortId::parse("browser").unwrap(),
             Actuator {
-                calls: Vec::new(),
-                reject: true,
+                calls: Mutex::new(Vec::new()),
+                reject: AtomicBool::new(true),
+                next_settlement: AtomicU64::new(0),
             },
             Persistence::default(),
             Records::default(),
@@ -841,8 +1284,164 @@ mod tests {
         let retry = ingress.retry_pending_persistence().unwrap();
         assert!(retry.persisted);
         assert_eq!(retry.record_error, None);
+        assert_eq!(retry.operation_id.as_deref(), Some("op-browser-1"));
+        assert_eq!(retry.accepted.as_ref().map(|value| value.run_seq), Some(1));
+        assert_eq!(ingress.actuator.calls.lock().unwrap().len(), 1);
         let accepted = ingress.accept(key()).unwrap();
         assert_eq!(accepted.run_seq, 2);
+    }
+
+    #[test]
+    fn different_actor_browser_handlers_overlap_and_commit_in_settlement_order() {
+        let authority = authority();
+        let (slow_started, started) = mpsc::channel();
+        let (release, slow_release) = mpsc::channel();
+        let ingress = Arc::new(BrowserOperationIngress::new(
+            authority.clone(),
+            PortId::parse("browser").unwrap(),
+            ParallelActuator {
+                slow_started,
+                slow_release: Mutex::new(slow_release),
+                correlations: Mutex::new(Vec::new()),
+                next_settlement: AtomicU64::new(0),
+            },
+            Persistence::default(),
+            Records::default(),
+        ));
+        let slow_ingress = Arc::clone(&ingress);
+        let slow = std::thread::spawn(move || {
+            slow_ingress.accept_with_operation_id("actor-a-slow".to_owned(), key())
+        });
+        started
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("slow physical handler should start");
+
+        let fast = ingress
+            .accept_with_operation_id(
+                "actor-b-human".to_owned(),
+                BrowserEvent::Click {
+                    x_normalized: 0.5,
+                    y_normalized: 0.5,
+                    button: 0,
+                },
+            )
+            .expect("different Actor must not wait for slow WebMCP settlement");
+        assert_eq!(fast.run_seq, 1);
+        release.send(()).expect("release slow handler");
+        let slow = slow.join().expect("slow thread").expect("slow acceptance");
+        assert_eq!(slow.run_seq, 2);
+        assert_eq!(authority.current_head().run_seq, 2);
+        assert_eq!(
+            ingress.actuator.correlations.lock().unwrap().as_slice(),
+            ["actor-a-slow", "actor-b-human"]
+        );
+    }
+
+    #[test]
+    fn ack_ticket_order_survives_reverse_waiter_scheduling() {
+        let authority = authority();
+        let (first_ticket_assigned, first_assigned) = mpsc::channel();
+        let (second_ticket_assigned, second_assigned) = mpsc::channel();
+        let (release_first, release_first_waiter) = mpsc::channel();
+        let ingress = Arc::new(BrowserOperationIngress::new(
+            authority,
+            PortId::parse("browser").unwrap(),
+            ReverseWakeActuator {
+                first_ticket_assigned,
+                second_ticket_assigned,
+                release_first_waiter: Mutex::new(release_first_waiter),
+                next_settlement: AtomicU64::new(0),
+            },
+            Persistence::default(),
+            Records::default(),
+        ));
+        let first_ingress = Arc::clone(&ingress);
+        let first = std::thread::spawn(move || {
+            first_ingress.accept_with_operation_id("ticket-first".to_owned(), key())
+        });
+        first_assigned
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("first ACK demux ticket");
+        let second_ingress = Arc::clone(&ingress);
+        let second = std::thread::spawn(move || {
+            second_ingress.accept_with_operation_id(
+                "ticket-second".to_owned(),
+                BrowserEvent::Click {
+                    x_normalized: 0.5,
+                    y_normalized: 0.5,
+                    button: 0,
+                },
+            )
+        });
+        second_assigned
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("second ACK demux ticket");
+        release_first.send(()).expect("wake first ticket waiter");
+
+        let first = first.join().expect("first thread").expect("first receipt");
+        let second = second
+            .join()
+            .expect("second thread")
+            .expect("second receipt");
+        assert_eq!(first.run_seq, 1);
+        assert_eq!(second.run_seq, 2);
+    }
+
+    #[test]
+    fn post_physical_commit_failure_repairs_same_id_without_reapply_or_failed_terminal() {
+        let (authority, store) = authority_with_failing_store();
+        let records = Records::default();
+        let submitted = Arc::clone(&records.0);
+        let ingress = BrowserOperationIngress::new(
+            authority.clone(),
+            PortId::parse("browser").unwrap(),
+            FailCommitOnceActuator {
+                store,
+                calls: AtomicU64::new(0),
+            },
+            Persistence::default(),
+            records,
+        );
+        assert!(matches!(
+            ingress.accept_with_operation_id("physical-repair".to_owned(), key()),
+            Err(EvolutionError::Apply(ref message)) if message == "operation_in_flight"
+        ));
+        assert_eq!(
+            ingress.operation_retry_stage("physical-repair"),
+            BrowserOperationRetryStage::PhysicallyAppliedPendingCommit
+        );
+        assert!(matches!(
+            ingress.accept_with_operation_id(
+                "later-operation".to_owned(),
+                BrowserEvent::Click {
+                    x_normalized: 0.5,
+                    y_normalized: 0.5,
+                    button: 0,
+                },
+            ),
+            Err(EvolutionError::Apply(ref message)) if message == "operation_in_flight"
+        ));
+        assert_eq!(ingress.actuator.calls.load(Ordering::SeqCst), 1);
+
+        let repaired = ingress
+            .accept_with_operation_id("physical-repair".to_owned(), key())
+            .expect("same operation should repair the logical commit");
+        assert_eq!(repaired.run_seq, 1);
+        assert_eq!(ingress.actuator.calls.load(Ordering::SeqCst), 1);
+        let later = ingress
+            .accept_with_operation_id(
+                "later-operation".to_owned(),
+                BrowserEvent::Click {
+                    x_normalized: 0.5,
+                    y_normalized: 0.5,
+                    button: 0,
+                },
+            )
+            .expect("later operation after repair");
+        assert_eq!(later.run_seq, 2);
+        assert_eq!(ingress.actuator.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(submitted.lock().unwrap().len(), 2);
+        assert_eq!(authority.current_head().run_seq, 2);
     }
 
     #[test]
