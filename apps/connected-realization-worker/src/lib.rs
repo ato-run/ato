@@ -7,6 +7,8 @@
 
 #![forbid(unsafe_code)]
 
+mod activity_controller;
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -14,9 +16,10 @@ use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -30,6 +33,7 @@ use ato_adapter_browser::{
     BROWSER_PROTOCOL_ID, BrowserAdapter, BrowserAdapterConfig, BrowserInputMode,
     register_record_schemas as register_browser_record_schemas,
 };
+use ato_adapter_workspace::restore_workspace;
 use ato_browser_host::{BrowserHost, BrowserHostConfig};
 use ato_browser_semantics::{
     AcceptedBrowserOperation, BROWSER_COMPUTATION_SEMANTICS_ID, BrowserComputationSemantics,
@@ -39,10 +43,14 @@ use ato_browser_semantics::{
 use ato_compose::{COMPOSE_SEMANTICS_ID, ComposeSemantics, decode_composite_residual};
 use ato_computation::{ComputationRef, ContentRef, PortId, ProtocolId, SemanticsId};
 use ato_contracts::{HttpEndpointVerifier, WorkspaceContentVerifier};
-use ato_kernel::{Kernel, RunEvolutionAuthority};
+use ato_kernel::{EvolutionError, Kernel, RunEvolutionAuthority};
 use ato_materializer_api::{
     AcceptedRealization, ContractContext, ContractVerifierRegistry, MaterializerContext,
-    MaterializerError, MaterializerRegistry, Realization, accept_candidate,
+    MaterializerError, MaterializerRegistry, OperationReplayRuntime, Realization,
+    RealizationDriver, ReplayRuntime, accept_candidate,
+};
+use ato_materializer_replay::{
+    REPLAY_MATERIALIZER_ID, REPLAY_MATERIALIZER_V2_ID, ReplayMaterializer, ReplayMaterializerV2,
 };
 use ato_materializer_vm_snapshot::{
     ActiveFirecrackerRealization, FirecrackerActiveVmCaptureSource, FirecrackerBackend,
@@ -50,7 +58,10 @@ use ato_materializer_vm_snapshot::{
     FirecrackerSurfaceRelayConfig, VM_SNAPSHOT_MATERIALIZER_ID, VmSnapshotError,
     VmSnapshotMaterializer,
 };
-use ato_objects::{ObjectResolver, ObjectStore, RecordCandidate, resolve_computation};
+use ato_objects::{
+    ObjectResolver, ObjectStore, RecordCandidate, RecordEnvelope, RecordEnvelopeV2,
+    read_exact_object, resolve_computation,
+};
 use ato_planner::{
     MaterializationCandidate, Placement, PlannerPolicy, RealizationPlanner, TargetEnvironment,
     TrustBoundary,
@@ -72,7 +83,12 @@ use tungstenite::handshake::server::{
 };
 use tungstenite::{Message, accept_hdr};
 
+use activity_controller::{
+    ActivityControllerEvent, ActivityControllerPageConfig, ActivityControllerServer,
+};
+
 const PORTABLE_CAPSULE_LEASE_KIND: &str = "portable_capsule_v2";
+const ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND: &str = "activity_browser_executor_v0";
 const RUNNER_CAPABILITIES: &[&str] = &[
     "execution_abi=process",
     "isolation=untrusted-v1",
@@ -83,8 +99,11 @@ const ACTIVE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const GUEST_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const GUEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const RUN_CONTROL_PATH: &str = "/.well-known/ato/control";
+const BROWSER_PRESENTATION_PATH: &str = "/.well-known/ato/browser/frame.jpg";
 const RUN_CONTROL_MAX_FRAME_BYTES: usize = 32 * 1024;
 const RUN_CONTROL_REQUEST_HEADER_MAX_BYTES: usize = 16 * 1024;
+const AUTHORING_SEMANTICS_ID: &str = "ato.authoring@1";
+const SOURCE_READY_TIMEOUT: Duration = Duration::from_secs(30);
 type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Debug, Clone)]
@@ -391,13 +410,18 @@ fn serve_run_control_connection(
     verification_key: &str,
 ) -> Result<()> {
     stream.set_nonblocking(false)?;
-    stream.set_read_timeout(Some(Duration::from_secs(15)))?;
+    // A connected client must lose authority promptly when its short-lived
+    // capability expires. A bounded read timeout lets an idle connection be
+    // closed without waiting for the next client frame.
+    stream.set_read_timeout(Some(Duration::from_secs(1)))?;
     stream.set_write_timeout(Some(Duration::from_secs(15)))?;
     let expected_run = run_id.to_owned();
     let expected_lease = lease_id.to_owned();
     let expected_runner = runner_id.to_owned();
     let expected_capability = capability.clone();
     let verification_key = verification_key.to_owned();
+    let credential_expires_at = Arc::new(AtomicI64::new(0));
+    let handshake_expires_at = Arc::clone(&credential_expires_at);
     let mut socket = accept_hdr(
         stream,
         move |request: &WebSocketRequest, mut response: WebSocketResponse| {
@@ -410,22 +434,21 @@ fn serve_run_control_connection(
                 .get("sec-websocket-protocol")
                 .and_then(|value| value.to_str().ok())
                 .and_then(run_control_credential_from_protocols);
-            let accepted = credential
-                .and_then(|credential| {
-                    verify_run_control_credential(
-                        &verification_key,
-                        credential,
-                        &expected_run,
-                        &expected_lease,
-                        &expected_runner,
-                        &expected_capability,
-                    )
-                    .ok()
-                })
-                .is_some();
-            if request.uri().path() != RUN_CONTROL_PATH || !accepted {
+            let expiry = credential.and_then(|credential| {
+                verify_run_control_credential(
+                    &verification_key,
+                    credential,
+                    &expected_run,
+                    &expected_lease,
+                    &expected_runner,
+                    &expected_capability,
+                )
+                .ok()
+            });
+            if request.uri().path() != RUN_CONTROL_PATH || expiry.is_none() {
                 return Err(run_control_forbidden());
             }
+            handshake_expires_at.store(expiry.expect("expiry was checked"), Ordering::Release);
             if let Some(protocol) = requested_protocol.and_then(|value| {
                 value
                     .split(',')
@@ -444,6 +467,12 @@ fn serve_run_control_connection(
     )
     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     loop {
+        if credential_expires_at.load(Ordering::Acquire)
+            <= OffsetDateTime::now_utc().unix_timestamp()
+        {
+            let _ = socket.send(Message::Close(None));
+            break;
+        }
         let message = match socket.read() {
             Ok(message) => message,
             Err(
@@ -453,6 +482,14 @@ fn serve_run_control_connection(
                     tungstenite::error::ProtocolError::ResetWithoutClosingHandshake,
                 ),
             ) => break,
+            Err(tungstenite::Error::Io(error))
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue;
+            }
             Err(error) => return Err(anyhow::anyhow!(error.to_string())),
         };
         match message {
@@ -527,11 +564,25 @@ fn handle_run_control_request(
             head_after: accepted.transition.to.to_string(),
             record_error: accepted.record_error,
         },
-        Err(_) => RunControlResponse::Rejected {
-            operation_id: request.operation_id.clone(),
-            client_seq: request.client_seq,
-            reason: "operation_rejected".to_owned(),
-        },
+        Err(error) => {
+            let reason = evolution_error_code(&error);
+            eprintln!("run control operation rejected: {reason}");
+            RunControlResponse::Rejected {
+                operation_id: request.operation_id.clone(),
+                client_seq: request.client_seq,
+                reason: reason.to_owned(),
+            }
+        }
+    }
+}
+
+fn evolution_error_code(error: &EvolutionError) -> &'static str {
+    match error {
+        EvolutionError::Kernel(_) => "kernel_rejected",
+        EvolutionError::Frozen => "run_frozen",
+        EvolutionError::PersistencePending(_) => "head_persistence_pending",
+        EvolutionError::Apply(_) => "adapter_apply_rejected",
+        EvolutionError::Persist(_) => "head_persistence_failed",
     }
 }
 
@@ -549,7 +600,7 @@ fn verify_run_control_credential(
     lease_id: &str,
     runner_id: &str,
     capability: &BrowserControlCapability,
-) -> Result<()> {
+) -> Result<i64> {
     let (encoded, signature) = credential
         .split_once('.')
         .context("Run control credential format is invalid")?;
@@ -586,7 +637,7 @@ fn verify_run_control_credential(
         claims.protocol == capability.protocol && claims.port == capability.port,
         "Run control credential capability mismatch"
     );
-    Ok(())
+    Ok(claims.expires_at)
 }
 
 fn run_control_forbidden() -> ErrorResponse {
@@ -597,7 +648,7 @@ fn run_control_forbidden() -> ErrorResponse {
 }
 
 struct HostedBrowserRuntime {
-    ingress: Arc<HostedBrowserIngress>,
+    ingress: Option<Arc<HostedBrowserIngress>>,
     control: Option<RunControlServer>,
     control_capability: BrowserControlCapability,
     adapter: Option<Arc<Mutex<Box<dyn AttachedAdapter>>>>,
@@ -619,11 +670,35 @@ impl HostedBrowserRuntime {
             .address()
     }
 
+    fn activity_ingress(&self) -> Arc<dyn BrowserControlIngress> {
+        Arc::clone(
+            self.ingress
+                .as_ref()
+                .expect("Browser runtime always owns its ingress while active"),
+        ) as Arc<dyn BrowserControlIngress>
+    }
+
+    fn open_auxiliary_target(&mut self, target_url: &str) -> Result<()> {
+        self.host
+            .as_mut()
+            .context("Browser Host is unavailable")?
+            .open_auxiliary_target(target_url)
+    }
+
+    fn capture_presentation_frame(&mut self) -> Result<Vec<u8>> {
+        self.host
+            .as_mut()
+            .context("Browser Host is unavailable")?
+            .capture_jpeg()
+    }
+
     /// Future capture coordination freezes this logical gate before it asks
     /// the Browser Host to quiesce. No physical Browser state is captured in
     /// P0-B.
     fn freeze(&self) -> Result<ato_kernel::RunHeadSnapshot> {
         self.ingress
+            .as_ref()
+            .context("Browser ingress is already stopped")?
             .freeze()
             .map_err(|error| anyhow::anyhow!(error.to_string()))
     }
@@ -636,6 +711,10 @@ impl HostedBrowserRuntime {
 
     fn cleanup(&mut self) -> Result<()> {
         self.control.take();
+        // BrowserOperationIngress owns a Record stylus sender. It must be
+        // released before RecordPipeline::shutdown waits for all senders;
+        // otherwise clean stop deadlocks after Chrome has already exited.
+        self.ingress.take();
         if let Some(adapter) = self.adapter.take() {
             let mut adapter = adapter
                 .lock()
@@ -810,74 +889,121 @@ impl ConnectedWorker {
 
         let lease_root = self.config.work_root.join("leases").join(&lease.id);
         fs::create_dir_all(&lease_root)?;
-        let result = (|| {
-            let source = self.api.graph_source(lease)?;
-            let index: ObjectGraphIndexV1 = serde_json::from_slice(source.index_bytes())
-                .context("runtime graph index is not valid JSON")?;
-            let expectation = GraphDownloadExpectation {
-                index_digest: source.index_digest().to_owned(),
-                root_computation_ref: lease.command.expected_root_computation_ref.clone(),
-                object_count: index.objects.len(),
-                logical_bytes: index.logical_bytes()?,
-            };
-            let graph = download_and_validate_graph(&source, &expectation, &lease_root)?;
-            // The Worker owns the live logical Run head from the same immutable
-            // root that its assigned lease authorizes. No operation is wired to
-            // this authority yet: Browser composition and its registered
-            // Semantics arrive in P0-B. Keeping it alive here establishes the
-            // hosted lifecycle without inventing an authoring/hash fallback.
-            let evolution = Arc::new(initialize_hosted_run_evolution_authority(
-                &graph,
-                &lease.command.expected_root_computation_ref,
-            )?);
-            let firecracker_work_root = self.config.work_root.join("fc");
-            let physical = RestorePhysicalConfig {
-                firecracker_work_root: &firecracker_work_root,
-                slot_id: &self.config.slot_id,
-                hidden_surface_listen: self.config.hidden_surface_listen,
-                guest_surface_target: self.config.surface_target,
-                tap_host_cidr: &self.config.tap_host_cidr,
-            };
-            let running = restore_vm_path(&graph, &lease_root, &lease.id, &physical)?;
-            self.api.report_status(&lease.id, "running")?;
+        let result = match &lease.command {
+            LeaseCommand::Portable(command) => {
+                self.execute_portable_lease(lease, command, &lease_root)
+            }
+            LeaseCommand::Activity(command) => {
+                self.execute_activity_lease(lease, command, &lease_root)
+            }
+        };
+        let cleanup = fs::remove_dir_all(&lease_root)
+            .with_context(|| format!("failed to clean lease directory {}", lease_root.display()));
+        match (result, cleanup) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), _) => Err(error),
+            (Ok(()), Err(error)) => Err(error),
+        }
+    }
 
-            // An explicit Browser Computation receives one private Chrome
-            // realization. Ordinary VM-only roots take the unchanged path.
-            let mut browser = start_hosted_browser_runtime(
-                &graph,
-                lease,
-                &lease_root,
-                &lease_root.join("workspace"),
-                Arc::clone(&evolution),
-                self.api.clone(),
-                self.config.browser_chrome.as_deref(),
-                self.config.run_control_verification_key.as_deref(),
-                &self.config.runner_id,
-                &format!("http://{}/", self.config.hidden_surface_listen),
-            )?;
+    fn execute_portable_lease(
+        &self,
+        lease: &ClaimedLease,
+        command: &PortableLeaseCommand,
+        lease_root: &Path,
+    ) -> Result<()> {
+        let source = self.api.graph_source(
+            &lease.id,
+            &command.bundle_id,
+            &command.expected_root_computation_ref,
+        )?;
+        let index: ObjectGraphIndexV1 = serde_json::from_slice(source.index_bytes())
+            .context("runtime graph index is not valid JSON")?;
+        let expectation = GraphDownloadExpectation {
+            index_digest: source.index_digest().to_owned(),
+            root_computation_ref: command.expected_root_computation_ref.clone(),
+            object_count: index.objects.len(),
+            logical_bytes: index.logical_bytes()?,
+        };
+        let graph = download_and_validate_graph(&source, &expectation, lease_root)?;
+        validate_exported_web_port(
+            &graph,
+            &command.expected_root_computation_ref,
+            &command.exported_port_id,
+        )?;
+        let evolution = Arc::new(initialize_hosted_run_evolution_authority(
+            &graph,
+            &command.expected_root_computation_ref,
+        )?);
+        let firecracker_work_root = self.config.work_root.join("fc");
+        let physical = RestorePhysicalConfig {
+            firecracker_work_root: &firecracker_work_root,
+            slot_id: &self.config.slot_id,
+            hidden_surface_listen: self.config.hidden_surface_listen,
+            guest_surface_target: self.config.surface_target,
+            tap_host_cidr: &self.config.tap_host_cidr,
+        };
+        let running = restore_portable_path(&graph, lease_root, &lease.id, &physical)?;
+        self.api.report_status(&lease.id, "running")?;
 
-            // The externally reachable listener does not exist until the VM is
-            // active, every Contract passed, and the Realization published.
-            let proxy = TcpProxy::start_with_control(
-                self.config.surface_listen,
-                ProxyTarget::Tcp(self.config.hidden_surface_listen),
-                browser.as_ref().map(|runtime| runtime.control_address()),
-            )?;
-            let execution_id = format!("vm:{}:{}", lease.run_id, lease.id);
-            ensure!(
-                evolution.current_head().head.as_str()
-                    == lease.command.expected_root_computation_ref,
-                "hosted evolution authority root changed before the first operation"
-            );
-            self.api.report_ready(
-                &lease.id,
-                &execution_id,
-                &self.config.public_base_url,
-                ready_local_port(&self.config),
-                browser.as_ref().map(|runtime| runtime.control_capability()),
-            )?;
-            let mut last_heartbeat = Instant::now();
-            loop {
+        // An explicit Browser Computation receives one private Chrome
+        // realization. Ordinary VM-only roots take the unchanged path.
+        let mut browser = start_hosted_browser_runtime(
+            &graph,
+            lease,
+            lease_root,
+            &lease_root.join("workspace"),
+            Arc::clone(&evolution),
+            self.api.clone(),
+            self.config.browser_chrome.as_deref(),
+            self.config.run_control_verification_key.as_deref(),
+            &self.config.runner_id,
+            &format!("http://{}/", self.config.hidden_surface_listen),
+        )?;
+
+        // The externally reachable listener does not exist until the VM is
+        // active, every Contract passed, and the Realization published.
+        let presentation_frame = browser
+            .as_mut()
+            .map(|runtime| {
+                runtime
+                    .capture_presentation_frame()
+                    .map(|frame| Arc::new(RwLock::new(frame)))
+            })
+            .transpose()?;
+        let proxy = TcpProxy::start_with_control(
+            self.config.surface_listen,
+            ProxyTarget::Tcp(self.config.hidden_surface_listen),
+            browser.as_ref().map(|runtime| runtime.control_address()),
+            presentation_frame.clone(),
+        )?;
+        let execution_id = format!("vm:{}:{}", lease.run_id, lease.id);
+        ensure!(
+            evolution.current_head().head.as_str() == command.expected_root_computation_ref,
+            "hosted evolution authority root changed before the first operation"
+        );
+        self.api.report_ready(
+            &lease.id,
+            &execution_id,
+            &self.config.public_base_url,
+            ready_local_port(&self.config),
+            browser.as_ref().map(|runtime| runtime.control_capability()),
+        )?;
+        let mut last_control = Instant::now() - Duration::from_secs(1);
+        let mut last_frame = Instant::now();
+        let mut last_heartbeat = Instant::now();
+        loop {
+            if last_frame.elapsed() >= Duration::from_millis(250) {
+                if let (Some(browser), Some(frame)) =
+                    (browser.as_mut(), presentation_frame.as_ref())
+                {
+                    *frame.write().map_err(|_| {
+                        anyhow::anyhow!("Browser presentation frame lock poisoned")
+                    })? = browser.capture_presentation_frame()?;
+                }
+                last_frame = Instant::now();
+            }
+            if last_control.elapsed() >= Duration::from_secs(1) {
                 let control = self.api.control(&lease.id)?;
                 if control.stop_requested {
                     if let Some(browser) = browser.take() {
@@ -888,19 +1014,134 @@ impl ConnectedWorker {
                     self.api.report_stopped(&lease.id, &execution_id)?;
                     return Ok(());
                 }
-                if last_heartbeat.elapsed() >= ACTIVE_HEARTBEAT_INTERVAL {
-                    self.api.heartbeat(&self.config, 1)?;
-                    last_heartbeat = Instant::now();
-                }
-                thread::sleep(Duration::from_secs(1));
+                last_control = Instant::now();
             }
-        })();
-        let cleanup = fs::remove_dir_all(&lease_root)
-            .with_context(|| format!("failed to clean lease directory {}", lease_root.display()));
-        match (result, cleanup) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(error), _) => Err(error),
-            (Ok(()), Err(error)) => Err(error),
+            if last_heartbeat.elapsed() >= ACTIVE_HEARTBEAT_INTERVAL {
+                self.api.heartbeat(&self.config, 1)?;
+                last_heartbeat = Instant::now();
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    fn execute_activity_lease(
+        &self,
+        lease: &ClaimedLease,
+        command: &ActivityLeaseCommand,
+        lease_root: &Path,
+    ) -> Result<()> {
+        let session = self
+            .api
+            .activity_executor_session(&command.activity_id, &command.activity_run_id)?;
+        validate_activity_executor_session(&session, lease, command)?;
+        let source = self.api.graph_source(
+            &lease.id,
+            &session.source.bundle_id,
+            &session.source.computation_ref,
+        )?;
+        let index: ObjectGraphIndexV1 = serde_json::from_slice(source.index_bytes())
+            .context("Activity runtime graph index is not valid JSON")?;
+        let expectation = GraphDownloadExpectation {
+            index_digest: source.index_digest().to_owned(),
+            root_computation_ref: session.source.computation_ref.clone(),
+            object_count: index.objects.len(),
+            logical_bytes: index.logical_bytes()?,
+        };
+        let graph = download_and_validate_graph(&source, &expectation, lease_root)?;
+        validate_exported_web_port(
+            &graph,
+            &session.source.computation_ref,
+            &session.source.exported_port_id,
+        )?;
+        let evolution = Arc::new(initialize_hosted_run_evolution_authority(
+            &graph,
+            &session.source.computation_ref,
+        )?);
+        let firecracker_work_root = self.config.work_root.join("fc");
+        let physical = RestorePhysicalConfig {
+            firecracker_work_root: &firecracker_work_root,
+            slot_id: &self.config.slot_id,
+            hidden_surface_listen: self.config.hidden_surface_listen,
+            guest_surface_target: self.config.surface_target,
+            tap_host_cidr: &self.config.tap_host_cidr,
+        };
+        let running = restore_portable_path(&graph, lease_root, &lease.id, &physical)?;
+        self.api.report_status(&lease.id, "running")?;
+        let mut browser = start_hosted_browser_runtime(
+            &graph,
+            lease,
+            lease_root,
+            &lease_root.join("workspace"),
+            evolution,
+            self.api.clone(),
+            self.config.browser_chrome.as_deref(),
+            self.config.run_control_verification_key.as_deref(),
+            &self.config.runner_id,
+            &format!("http://{}/", self.config.hidden_surface_listen),
+        )?
+        .context("Activity source does not contain an explicit Browser Computation")?;
+        let controller = ActivityControllerServer::start(
+            ActivityControllerPageConfig {
+                run_id: session.run_id.clone(),
+                room_url: session.room_url,
+                executor_credential: session.executor_credential,
+                ice_servers: serde_json::to_value(session.rtc.ice_servers)?,
+            },
+            browser.activity_ingress(),
+        )?;
+        browser.open_auxiliary_target(controller.target_url())?;
+        let execution_id = format!("activity:{}:{}", lease.run_id, lease.id);
+        let mut ready = false;
+        let mut last_control = Instant::now() - Duration::from_secs(1);
+        let mut last_heartbeat = Instant::now();
+        let result = loop {
+            controller.publish_frame(browser.capture_presentation_frame()?)?;
+            match controller.recv_timeout(Duration::from_millis(100)) {
+                Ok(ActivityControllerEvent::Ready) if !ready => {
+                    self.api.report_activity_ready(&lease.id, &execution_id)?;
+                    ready = true;
+                }
+                Ok(ActivityControllerEvent::Ready) => {}
+                Ok(ActivityControllerEvent::Ended) => break Ok(()),
+                Ok(ActivityControllerEvent::Failed) => {
+                    break Err(anyhow::anyhow!("Activity controller failed"));
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    break Err(anyhow::anyhow!("Activity controller stopped unexpectedly"));
+                }
+            }
+            if last_control.elapsed() >= Duration::from_secs(1) {
+                if self.api.control(&lease.id)?.stop_requested {
+                    break Ok(());
+                }
+                last_control = Instant::now();
+            }
+            if last_heartbeat.elapsed() >= ACTIVE_HEARTBEAT_INTERVAL {
+                self.api.heartbeat(&self.config, 1)?;
+                last_heartbeat = Instant::now();
+            }
+        };
+        let mut shutdown_errors = Vec::new();
+        if let Err(error) = result {
+            shutdown_errors.push(format!("Activity execution failed: {error:#}"));
+        }
+        if let Err(error) = controller.stop() {
+            shutdown_errors.push(format!("Activity controller shutdown failed: {error:#}"));
+        }
+        if let Err(error) = browser.stop() {
+            shutdown_errors.push(format!("Activity Browser shutdown failed: {error:#}"));
+        }
+        if let Err(error) = running.quiesce() {
+            shutdown_errors.push(format!("Activity realization quiesce failed: {error:#}"));
+        }
+        if let Err(error) = self.api.report_stopped(&lease.id, &execution_id) {
+            shutdown_errors.push(format!("Activity stopped report failed: {error:#}"));
+        }
+        if shutdown_errors.is_empty() {
+            Ok(())
+        } else {
+            anyhow::bail!(shutdown_errors.join("; "))
         }
     }
 }
@@ -976,48 +1217,128 @@ fn validate_config(config: &WorkerConfig) -> Result<()> {
 fn validate_lease(lease: &ClaimedLease, now: SystemTime) -> Result<()> {
     ensure!(valid_control_id(&lease.id), "invalid lease id");
     ensure!(valid_control_id(&lease.run_id), "invalid run id");
-    ensure!(
-        lease.command.kind == PORTABLE_CAPSULE_LEASE_KIND,
-        "unsupported lease kind `{}`",
-        lease.command.kind
-    );
-    ensure!(
-        lease.command.bundle_id.starts_with("bnd_"),
-        "invalid bundle id"
-    );
-    ensure!(
-        lease.command.transport_digest.starts_with("sha256:"),
-        "invalid transport digest"
-    );
-    ensure!(
-        lease.command.run_id == lease.run_id,
-        "lease command run mismatch"
-    );
-    ensure!(
-        lease.command.session_id == format!("run:{}", lease.run_id),
-        "lease command session mismatch"
-    );
-    ensure!(
-        !lease.command.exported_port_id.is_empty(),
-        "lease exported Port is empty"
-    );
-    ensure!(
-        lease.command.surface_contract_version == "1",
-        "unsupported Surface contract version"
-    );
-    ensure!(
-        lease.command.session_surface.is_object()
-            && !lease.command.accepted_session_surfaces.is_empty(),
-        "lease Surface negotiation is incomplete"
-    );
-    ComputationRef::parse(&lease.command.expected_root_computation_ref)
-        .context("lease root ComputationRef is invalid")?;
+    match &lease.command {
+        LeaseCommand::Portable(command) => {
+            ensure!(command.bundle_id.starts_with("bnd_"), "invalid bundle id");
+            ensure!(
+                command.transport_digest.starts_with("sha256:"),
+                "invalid transport digest"
+            );
+            ensure!(command.run_id == lease.run_id, "lease command run mismatch");
+            ensure!(
+                command.session_id == format!("run:{}", lease.run_id),
+                "lease command session mismatch"
+            );
+            ensure!(
+                !command.exported_port_id.is_empty(),
+                "lease exported Port is empty"
+            );
+            ensure!(
+                command.surface_contract_version == "1",
+                "unsupported Surface contract version"
+            );
+            ensure!(
+                command.session_surface.is_object()
+                    && !command.accepted_session_surfaces.is_empty(),
+                "lease Surface negotiation is incomplete"
+            );
+            ComputationRef::parse(&command.expected_root_computation_ref)
+                .context("lease root ComputationRef is invalid")?;
+        }
+        LeaseCommand::Activity(command) => {
+            ensure!(
+                valid_control_id(&command.activity_id)
+                    && valid_control_id(&command.activity_run_id),
+                "Activity lease scope is invalid"
+            );
+            ensure!(
+                command.activity_run_id == lease.run_id,
+                "Activity lease Run identity mismatch"
+            );
+        }
+    }
     if let Some(expires_at) = &lease.expires_at {
         let expiry =
             OffsetDateTime::parse(expires_at, &Rfc3339).context("lease expiry is not RFC3339")?;
         let now = OffsetDateTime::from(now);
         ensure!(expiry > now, "lease expired before execution");
     }
+    Ok(())
+}
+
+fn validate_activity_executor_session(
+    session: &ActivityExecutorSession,
+    lease: &ClaimedLease,
+    command: &ActivityLeaseCommand,
+) -> Result<()> {
+    ensure!(
+        session.activity_id == command.activity_id
+            && session.run_id == command.activity_run_id
+            && session.run_id == lease.run_id,
+        "Activity executor session escaped its lease scope"
+    );
+    ensure!(
+        session.source.kind == "capsuleContinuation"
+            && session.source.bundle_id.starts_with("bnd_")
+            && valid_sha256_digest(&session.source.transport_digest)
+            && !session.source.exported_port_id.trim().is_empty(),
+        "Activity executor source is invalid"
+    );
+    ComputationRef::parse(&session.source.computation_ref)
+        .context("Activity source ComputationRef is invalid")?;
+    let room = url::Url::parse(&session.room_url).context("Activity Room URL is invalid")?;
+    ensure!(
+        matches!(room.scheme(), "ws" | "wss")
+            && room.username().is_empty()
+            && room.password().is_none()
+            && !session.executor_credential.trim().is_empty(),
+        "Activity realtime boundary is invalid"
+    );
+    let expiry = OffsetDateTime::parse(&session.expires_at, &Rfc3339)
+        .context("Activity executor expiry is not RFC3339")?;
+    ensure!(
+        expiry > OffsetDateTime::now_utc(),
+        "Activity executor session expired before execution"
+    );
+    ensure!(
+        session.rtc.ice_servers.iter().all(|server| {
+            !server.urls.is_empty()
+                && server
+                    .urls
+                    .iter()
+                    .all(|url| url.starts_with("stun:") || url.starts_with("stuns:"))
+        }),
+        "Activity executor session contains a non-STUN ICE server"
+    );
+    Ok(())
+}
+
+fn valid_sha256_digest(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    })
+}
+
+fn validate_exported_web_port(
+    graph: &ValidatedRuntimeGraph,
+    expected_root: &str,
+    exported_port_id: &str,
+) -> Result<()> {
+    let root_ref = ComputationRef::parse(expected_root)?;
+    let root = resolve_computation(graph.objects(), &root_ref)?;
+    let port = PortId::parse(exported_port_id).context("exported Port id is invalid")?;
+    let definition = root
+        .object()
+        .boundary
+        .get(&port)
+        .context("exported Port is absent from the root Computation")?;
+    ensure!(
+        definition.protocol.as_str() == "ato.http@1" && definition.role.as_str() == "server",
+        "exported Port is not the realized Web server boundary"
+    );
     Ok(())
 }
 
@@ -1049,6 +1370,678 @@ struct RestorePhysicalConfig<'a> {
     hidden_surface_listen: SocketAddr,
     guest_surface_target: SocketAddr,
     tap_host_cidr: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceAuthoringState {
+    version: u32,
+    config: SourceAuthoringConfig,
+    workspace_snapshot: String,
+    #[serde(default)]
+    semantic_frontier: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceAuthoringConfig {
+    schema: u32,
+    process: Vec<SourceProcessConfig>,
+    adapter: Vec<SourceAdapterConfig>,
+    port: Vec<SourcePortConfig>,
+    connection: Vec<serde_json::Value>,
+    binding: Vec<serde_json::Value>,
+    workspace: serde_json::Value,
+    encap: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceProcessConfig {
+    id: String,
+    command: Vec<String>,
+    cwd: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceAdapterConfig {
+    #[serde(rename = "use")]
+    use_adapter: String,
+    target: Option<String>,
+    port: Option<String>,
+    listen: Option<String>,
+    upstream: Option<String>,
+    input: Option<String>,
+    ready_path: Option<String>,
+    config: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourcePortConfig {
+    id: String,
+    node: String,
+    protocol: String,
+    role: String,
+    address: Option<String>,
+    environment: Option<String>,
+    internal: bool,
+}
+
+#[derive(Debug, Clone)]
+struct SourceLaunchSpec {
+    command: Vec<String>,
+    cwd: PathBuf,
+    listen_environment: String,
+    application_address: SocketAddr,
+    workspace: PathBuf,
+    relay_script: PathBuf,
+    surface_socket: PathBuf,
+    hidden_surface_listen: SocketAddr,
+}
+
+const SOURCE_RELAY_SCRIPT: &str = r#"import os
+import selectors
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+
+surface = sys.argv[1]
+host, port_text = sys.argv[2].rsplit(':', 1)
+command = sys.argv[4:]
+if not command:
+    raise SystemExit('source command is empty')
+child = subprocess.Popen(command)
+stopping = False
+
+def stop(_signal=None, _frame=None):
+    global stopping
+    stopping = True
+    if child.poll() is None:
+        child.terminate()
+
+signal.signal(signal.SIGTERM, stop)
+signal.signal(signal.SIGINT, stop)
+deadline = time.monotonic() + 30
+while time.monotonic() < deadline and child.poll() is None:
+    try:
+        probe = socket.create_connection((host, int(port_text)), timeout=0.2)
+        probe.close()
+        break
+    except OSError:
+        time.sleep(0.05)
+else:
+    stop()
+    child.wait(timeout=5)
+    raise SystemExit('source application did not become ready')
+
+try:
+    os.unlink(surface)
+except FileNotFoundError:
+    pass
+listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+listener.bind(surface)
+os.chmod(surface, 0o600)
+listener.listen(16)
+listener.settimeout(0.2)
+
+def proxy(client):
+    upstream = socket.create_connection((host, int(port_text)), timeout=5)
+    client.setblocking(False)
+    upstream.setblocking(False)
+    selector = selectors.DefaultSelector()
+    selector.register(client, selectors.EVENT_READ, upstream)
+    selector.register(upstream, selectors.EVENT_READ, client)
+    try:
+        while True:
+            events = selector.select(timeout=5)
+            if not events and stopping:
+                return
+            for key, _ in events:
+                data = key.fileobj.recv(65536)
+                if not data:
+                    return
+                key.data.sendall(data)
+    finally:
+        selector.close()
+        client.close()
+        upstream.close()
+
+try:
+    while not stopping and child.poll() is None:
+        try:
+            client, _ = listener.accept()
+        except TimeoutError:
+            continue
+        threading.Thread(target=proxy, args=(client,), daemon=True).start()
+finally:
+    listener.close()
+    try:
+        os.unlink(surface)
+    except FileNotFoundError:
+        pass
+    stop()
+    try:
+        child.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        child.wait()
+raise SystemExit(child.returncode or 0)
+"#;
+
+fn source_launch_spec(
+    graph: &ValidatedRuntimeGraph,
+    lease_root: &Path,
+    hidden_surface_listen: SocketAddr,
+) -> Result<SourceLaunchSpec> {
+    let root = ComputationRef::parse(&graph.report().root_computation_ref)?;
+    let mut leaves = Vec::new();
+    collect_authoring_leaves(&root, graph.objects(), &mut leaves)?;
+    let [authoring] = leaves.as_slice() else {
+        bail!("source Replay requires exactly one authored process computation");
+    };
+    let resolved = resolve_computation(graph.objects(), authoring)?;
+    let metadata = graph.objects().metadata(&resolved.object().residual)?;
+    let bytes = read_exact_object(
+        graph.objects(),
+        &resolved.object().residual,
+        metadata.size,
+        16 * 1024 * 1024,
+    )?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+    ensure!(
+        serde_jcs::to_vec(&value)? == bytes,
+        "source authoring state is non-canonical"
+    );
+    let state: SourceAuthoringState = serde_json::from_value(value)?;
+    ensure!(
+        state.version == 1,
+        "source authoring state version is unsupported"
+    );
+    ensure!(
+        state.config.schema == 1,
+        "source authoring schema is unsupported"
+    );
+    ensure!(
+        state.semantic_frontier.is_none(),
+        "source Replay with an evolved semantic frontier requires a captured VM"
+    );
+    ensure!(
+        state.config.connection.is_empty() && state.config.binding.is_empty(),
+        "source Replay v0 does not admit connections or runtime Bindings"
+    );
+    ensure!(
+        state.config.adapter.iter().all(|adapter| {
+            let _ = (
+                &adapter.target,
+                &adapter.port,
+                &adapter.listen,
+                &adapter.upstream,
+                &adapter.input,
+                &adapter.ready_path,
+                &adapter.config,
+            );
+            adapter.use_adapter == "ato.process@1"
+        }),
+        "source Replay v0 admits only the process Adapter inside the sandbox"
+    );
+    let [process] = state.config.process.as_slice() else {
+        bail!("source Replay v0 requires exactly one process");
+    };
+    ensure!(
+        !process.command.is_empty(),
+        "source process command is empty"
+    );
+    ensure!(
+        !process.cwd.is_absolute()
+            && process.cwd.components().all(|component| matches!(
+                component,
+                std::path::Component::CurDir | std::path::Component::Normal(_)
+            )),
+        "source process cwd escapes the restored workspace"
+    );
+    let web_ports = state
+        .config
+        .port
+        .iter()
+        .filter(|port| !port.internal && port.protocol == "ato.http@1" && port.role == "server")
+        .collect::<Vec<_>>();
+    let [web_port] = web_ports.as_slice() else {
+        bail!("source Replay v0 requires exactly one exported ato.http@1 server Port");
+    };
+    ensure!(
+        web_port.node == process.id && !web_port.id.is_empty(),
+        "source HTTP Port is not owned by the selected process"
+    );
+    let application_address: SocketAddr = web_port
+        .address
+        .as_deref()
+        .context("source HTTP Port requires an address")?
+        .parse()?;
+    ensure!(
+        application_address.ip().is_loopback(),
+        "source HTTP Port must bind loopback"
+    );
+    let listen_environment = web_port
+        .environment
+        .clone()
+        .context("source HTTP Port requires an environment projection")?;
+    ensure!(
+        !listen_environment.is_empty(),
+        "source HTTP environment name is empty"
+    );
+    let _ = (&state.config.workspace, &state.config.encap);
+    let workspace = lease_root.join("workspace");
+    let snapshot = ContentRef::parse(state.workspace_snapshot)?;
+    restore_workspace(&snapshot, &workspace, graph.objects())?;
+    let relay_script = lease_root.join("source-relay.py");
+    fs::write(&relay_script, SOURCE_RELAY_SCRIPT)?;
+    let surface_socket = workspace.join("surface.sock");
+    Ok(SourceLaunchSpec {
+        command: process.command.clone(),
+        cwd: process.cwd.clone(),
+        listen_environment,
+        application_address,
+        workspace,
+        relay_script,
+        surface_socket,
+        hidden_surface_listen,
+    })
+}
+
+fn collect_authoring_leaves(
+    reference: &ComputationRef,
+    objects: &dyn ObjectResolver,
+    leaves: &mut Vec<ComputationRef>,
+) -> Result<()> {
+    let resolved = resolve_computation(objects, reference)?;
+    if resolved.object().semantics == SemanticsId::parse(AUTHORING_SEMANTICS_ID)? {
+        leaves.push(reference.clone());
+        return Ok(());
+    }
+    if resolved.object().semantics == SemanticsId::parse(BROWSER_COMPUTATION_SEMANTICS_ID)? {
+        return Ok(());
+    }
+    ensure!(
+        resolved.object().semantics == SemanticsId::parse(COMPOSE_SEMANTICS_ID)?,
+        "source Replay graph contains an unsupported computation leaf"
+    );
+    let metadata = objects.metadata(&resolved.object().residual)?;
+    let bytes = read_exact_object(
+        objects,
+        &resolved.object().residual,
+        metadata.size,
+        ato_compose::MAX_COMPOSITE_RESIDUAL_BYTES,
+    )?;
+    for child in decode_composite_residual(&bytes)?.nodes.values() {
+        collect_authoring_leaves(child, objects, leaves)?;
+    }
+    Ok(())
+}
+
+struct SourceReplayDriver {
+    expected_root: ComputationRef,
+    spec: SourceLaunchSpec,
+}
+
+impl RealizationDriver for SourceReplayDriver {
+    fn begin(&self, anchor: &ComputationRef) -> Result<Box<dyn ReplayRuntime>, MaterializerError> {
+        if anchor != &self.expected_root {
+            return Err(MaterializerError::Operation(
+                "source Replay anchor does not match the graph root".to_owned(),
+            ));
+        }
+        Ok(Box::new(SourceReplayRuntime {
+            expected_root: self.expected_root.clone(),
+            spec: self.spec.clone(),
+        }))
+    }
+
+    fn preflight_operations(&self, records: &[RecordEnvelopeV2]) -> Result<(), MaterializerError> {
+        if records.is_empty() {
+            Ok(())
+        } else {
+            Err(MaterializerError::OperationReplayUnsupported)
+        }
+    }
+
+    fn begin_operations(
+        &self,
+        anchor: &ComputationRef,
+    ) -> Result<Box<dyn OperationReplayRuntime>, MaterializerError> {
+        if anchor != &self.expected_root {
+            return Err(MaterializerError::Operation(
+                "source Replay anchor does not match the graph root".to_owned(),
+            ));
+        }
+        Ok(Box::new(SourceOperationReplayRuntime {
+            expected_root: self.expected_root.clone(),
+            spec: self.spec.clone(),
+        }))
+    }
+}
+
+struct SourceReplayRuntime {
+    expected_root: ComputationRef,
+    spec: SourceLaunchSpec,
+}
+
+impl ReplayRuntime for SourceReplayRuntime {
+    fn apply(&mut self, _record: &RecordEnvelope) -> Result<(), MaterializerError> {
+        Err(MaterializerError::OperationReplayUnsupported)
+    }
+
+    fn finish(
+        self: Box<Self>,
+        target: &ComputationRef,
+    ) -> Result<Box<dyn Realization>, MaterializerError> {
+        source_realization(self.expected_root, target, self.spec)
+    }
+}
+
+struct SourceOperationReplayRuntime {
+    expected_root: ComputationRef,
+    spec: SourceLaunchSpec,
+}
+
+impl OperationReplayRuntime for SourceOperationReplayRuntime {
+    fn apply(&mut self, _record: &RecordEnvelopeV2) -> Result<(), MaterializerError> {
+        Err(MaterializerError::OperationReplayUnsupported)
+    }
+
+    fn finish(
+        self: Box<Self>,
+        target: &ComputationRef,
+    ) -> Result<Box<dyn Realization>, MaterializerError> {
+        source_realization(self.expected_root, target, self.spec)
+    }
+}
+
+fn source_realization(
+    expected_root: ComputationRef,
+    target: &ComputationRef,
+    spec: SourceLaunchSpec,
+) -> Result<Box<dyn Realization>, MaterializerError> {
+    if target != &expected_root {
+        return Err(MaterializerError::Operation(
+            "source Replay target does not match the graph root".to_owned(),
+        ));
+    }
+    Ok(Box::new(SourceProcessRealization {
+        target: expected_root,
+        spec,
+        child: None,
+        hidden_proxy: None,
+    }))
+}
+
+struct SourceProcessRealization {
+    target: ComputationRef,
+    spec: SourceLaunchSpec,
+    child: Option<Child>,
+    hidden_proxy: Option<TcpProxy>,
+}
+
+impl SourceProcessRealization {
+    fn spawn(&self) -> Result<Child> {
+        let bwrap = Path::new("/usr/bin/bwrap");
+        ensure!(bwrap.is_file(), "source Replay requires /usr/bin/bwrap");
+        let workspace = self.spec.workspace.canonicalize()?;
+        let relay = self.spec.relay_script.canonicalize()?;
+        let cwd = Path::new("/workspace").join(&self.spec.cwd);
+        let mut command = Command::new(bwrap);
+        command.args([
+            "--die-with-parent",
+            "--new-session",
+            "--unshare-all",
+            "--clearenv",
+            "--cap-drop",
+            "ALL",
+            "--tmpfs",
+            "/",
+        ]);
+        for path in ["/usr", "/lib", "/lib64", "/bin", "/sbin"] {
+            if Path::new(path).exists() {
+                command.args(["--ro-bind", path, path]);
+            }
+        }
+        for path in ["/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d"] {
+            if Path::new(path).exists() {
+                command.args(["--ro-bind", path, path]);
+            }
+        }
+        command
+            .args(["--dir", "/opt", "--dir", "/opt/ato"])
+            .arg("--ro-bind")
+            .arg(relay)
+            .arg("/opt/ato/source-relay.py")
+            .args(["--dir", "/workspace"])
+            .arg("--bind")
+            .arg(workspace)
+            .arg("/workspace")
+            .args([
+                "--proc",
+                "/proc",
+                "--dev",
+                "/dev",
+                "--tmpfs",
+                "/tmp",
+                "--dir",
+                "/home",
+                "--dir",
+                "/home/ato",
+                "--chdir",
+            ])
+            .arg(cwd)
+            .args([
+                "--setenv",
+                "HOME",
+                "/home/ato",
+                "--setenv",
+                "TMPDIR",
+                "/tmp",
+            ])
+            .args(["--setenv", "PATH", "/usr/bin:/bin"])
+            .arg("--setenv")
+            .arg(&self.spec.listen_environment)
+            .arg(self.spec.application_address.to_string())
+            .args([
+                "/usr/bin/python3",
+                "/opt/ato/source-relay.py",
+                "/workspace/surface.sock",
+            ])
+            .arg(self.spec.application_address.to_string())
+            .arg("--")
+            .args(&self.spec.command)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit());
+        command.spawn().context("start source Replay sandbox")
+    }
+}
+
+impl Realization for SourceProcessRealization {
+    fn target(&self) -> &ComputationRef {
+        &self.target
+    }
+
+    fn activate(&mut self) -> Result<(), MaterializerError> {
+        if self.child.is_some() {
+            return Ok(());
+        }
+        let mut child = self
+            .spawn()
+            .map_err(|error| MaterializerError::Operation(error.to_string()))?;
+        let deadline = Instant::now() + SOURCE_READY_TIMEOUT;
+        while Instant::now() < deadline {
+            if self.spec.surface_socket.exists() {
+                let proxy = TcpProxy::start(
+                    self.spec.hidden_surface_listen,
+                    ProxyTarget::Unix(self.spec.surface_socket.clone()),
+                )
+                .map_err(|error| MaterializerError::Operation(error.to_string()))?;
+                self.child = Some(child);
+                self.hidden_proxy = Some(proxy);
+                return Ok(());
+            }
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|error| MaterializerError::Operation(error.to_string()))?
+            {
+                return Err(MaterializerError::Operation(format!(
+                    "source Replay sandbox exited before readiness: {status}"
+                )));
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        Err(MaterializerError::Operation(
+            "source Replay sandbox did not publish its Surface".to_owned(),
+        ))
+    }
+
+    fn publish(&mut self) -> Result<(), MaterializerError> {
+        Ok(())
+    }
+
+    fn wait(&mut self) -> Result<(), MaterializerError> {
+        let status = self
+            .child
+            .as_mut()
+            .ok_or_else(|| MaterializerError::Operation("source Replay is inactive".to_owned()))?
+            .wait()
+            .map_err(|error| MaterializerError::Operation(error.to_string()))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(MaterializerError::Operation(format!(
+                "source Replay sandbox exited: {status}"
+            )))
+        }
+    }
+
+    fn quiesce(&mut self) -> Result<(), MaterializerError> {
+        self.hidden_proxy.take();
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            child
+                .wait()
+                .map_err(|error| MaterializerError::Operation(error.to_string()))?;
+        }
+        match fs::remove_file(&self.spec.surface_socket) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(MaterializerError::Operation(error.to_string())),
+        }
+        Ok(())
+    }
+}
+
+fn restore_source_replay_path(
+    graph: &ValidatedRuntimeGraph,
+    lease_root: &Path,
+    lease_id: &str,
+    physical: &RestorePhysicalConfig<'_>,
+) -> Result<AcceptedRealization> {
+    let root = ComputationRef::parse(&graph.report().root_computation_ref)?;
+    let spec = source_launch_spec(graph, lease_root, physical.hidden_surface_listen)?;
+    let driver = SourceReplayDriver {
+        expected_root: root.clone(),
+        spec,
+    };
+    let workspace = lease_root.join("workspace");
+    let workspace_policy = WorkspaceCapturePolicy::secure_default();
+    let adapters = AdapterRegistry::default();
+    let mut materializers = MaterializerRegistry::default();
+    materializers.register(Arc::new(ReplayMaterializer))?;
+    materializers.register(Arc::new(ReplayMaterializerV2))?;
+    let actuator_providers = ActuatorProviderRegistry::default();
+    let context = MaterializerContext {
+        objects: graph.objects(),
+        adapters: &adapters,
+        records: &[],
+        records_v2: &[],
+        replay_anchor: None,
+        record_frontier_ref: None,
+        workspace: &workspace,
+        workspace_policy: &workspace_policy,
+        realization: Some(&driver),
+        contracts: &[],
+        runner_capabilities: None,
+    };
+    let environment = TargetEnvironment {
+        id: format!("hosted-source:{lease_id}"),
+        placement: Placement::Hosted,
+        trust_boundary: TrustBoundary::TenantIsolated,
+    };
+    let candidates = graph
+        .index()
+        .materializations
+        .iter()
+        .filter(|candidate| {
+            candidate.id == REPLAY_MATERIALIZER_ID || candidate.id == REPLAY_MATERIALIZER_V2_ID
+        })
+        .map(|candidate| {
+            Ok(MaterializationCandidate {
+                materializer_id: candidate.id.clone(),
+                descriptor_ref: ContentRef::parse(&candidate.descriptor_ref)?,
+                environment: environment.clone(),
+                context: MaterializerContext {
+                    objects: context.objects,
+                    adapters: context.adapters,
+                    records: context.records,
+                    records_v2: context.records_v2,
+                    replay_anchor: context.replay_anchor,
+                    record_frontier_ref: context.record_frontier_ref,
+                    workspace: context.workspace,
+                    workspace_policy: context.workspace_policy,
+                    realization: context.realization,
+                    contracts: context.contracts,
+                    runner_capabilities: context.runner_capabilities,
+                },
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    ensure!(
+        !candidates.is_empty(),
+        "graph has neither a VM nor source Replay Materialization candidate"
+    );
+    let contract_verifiers = ContractVerifierRegistry::default();
+    let plan = RealizationPlanner {
+        target: &root,
+        materializers: &materializers,
+        actuator_providers: &actuator_providers,
+        contract_verifiers: &contract_verifiers,
+        port_bindings: &[],
+        policy: &PlannerPolicy::default(),
+    }
+    .plan(candidates)?;
+    let selected = plan
+        .candidates
+        .first()
+        .context("Planner returned no source Replay path")?;
+    let materializer = materializers.get(&selected.materializer_id)?;
+    let contracts = materializer.contracts(&selected.descriptor_ref, &context)?;
+    let realization = materializer.restore(&selected.descriptor_ref, &context)?;
+    ensure!(
+        realization.target() == &root,
+        "source Replay target mismatch"
+    );
+    accept_candidate(
+        realization,
+        &contracts,
+        &contract_verifiers,
+        &ContractContext {
+            objects: graph.objects(),
+            workspace: &workspace,
+        },
+    )
+    .map_err(Into::into)
 }
 
 fn initialize_hosted_run_evolution_authority(
@@ -1228,7 +2221,7 @@ fn start_hosted_browser_runtime(
         }
     };
     Ok(Some(HostedBrowserRuntime {
-        ingress,
+        ingress: Some(ingress),
         control: Some(control),
         control_capability,
         adapter: Some(adapter),
@@ -1237,6 +2230,24 @@ fn start_hosted_browser_runtime(
         objects: Arc::new(graph.objects().clone()),
         workspace: workspace.to_owned(),
     }))
+}
+
+fn restore_portable_path(
+    graph: &ValidatedRuntimeGraph,
+    lease_root: &Path,
+    lease_id: &str,
+    physical: &RestorePhysicalConfig<'_>,
+) -> Result<AcceptedRealization> {
+    if graph
+        .index()
+        .materializations
+        .iter()
+        .any(|candidate| candidate.id == VM_SNAPSHOT_MATERIALIZER_ID)
+    {
+        restore_vm_path(graph, lease_root, lease_id, physical)
+    } else {
+        restore_source_replay_path(graph, lease_root, lease_id, physical)
+    }
 }
 
 fn restore_vm_path(
@@ -1425,14 +2436,22 @@ fn default_poll_seconds() -> u64 {
 struct ClaimedLease {
     id: String,
     run_id: String,
-    command: PortableLeaseCommand,
+    command: LeaseCommand,
     expires_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind")]
+enum LeaseCommand {
+    #[serde(rename = "portable_capsule_v2")]
+    Portable(PortableLeaseCommand),
+    #[serde(rename = "activity_browser_executor_v0")]
+    Activity(ActivityLeaseCommand),
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PortableLeaseCommand {
-    kind: String,
     bundle_id: String,
     transport_digest: String,
     expected_root_computation_ref: String,
@@ -1442,6 +2461,53 @@ struct PortableLeaseCommand {
     surface_contract_version: String,
     session_surface: serde_json::Value,
     accepted_session_surfaces: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ActivityLeaseCommand {
+    activity_id: String,
+    activity_run_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ActivityExecutorSession {
+    activity_id: String,
+    run_id: String,
+    source: ActivityCapsuleSource,
+    #[serde(rename = "experienceUrl")]
+    _experience_url: String,
+    #[serde(rename = "experienceOrigin")]
+    _experience_origin: String,
+    #[serde(rename = "experienceManifestDigest")]
+    _experience_manifest_digest: String,
+    room_url: String,
+    executor_credential: String,
+    expires_at: String,
+    rtc: ActivityRtcConfiguration,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ActivityCapsuleSource {
+    kind: String,
+    bundle_id: String,
+    transport_digest: String,
+    computation_ref: String,
+    exported_port_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ActivityRtcConfiguration {
+    ice_servers: Vec<ActivityIceServer>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ActivityIceServer {
+    urls: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1506,7 +2572,7 @@ impl HttpRunnerApi {
         )))
         .json(&serde_json::json!({
             "capabilities": RUNNER_CAPABILITIES,
-            "supported_lease_kinds": [PORTABLE_CAPSULE_LEASE_KIND],
+            "supported_lease_kinds": supported_lease_kinds(config),
             "supported_session_surfaces": [{
                 "kind": "web",
                 "profiles": ["ato.web-surface.v1"],
@@ -1541,6 +2607,20 @@ impl HttpRunnerApi {
                 .post(format!("{}/v1/runner-leases/{lease_id}/status", self.base)),
         )
         .json(&StatusReport { status })
+        .send()?
+        .error_for_status()?;
+        Ok(())
+    }
+
+    fn report_activity_ready(&self, lease_id: &str, execution_id: &str) -> Result<()> {
+        self.authorized(
+            self.client
+                .post(format!("{}/v1/runner-leases/{lease_id}/status", self.base)),
+        )
+        .json(&serde_json::json!({
+            "status": "ready",
+            "execution_id": execution_id,
+        }))
         .send()?
         .error_for_status()?;
         Ok(())
@@ -1629,16 +2709,49 @@ impl HttpRunnerApi {
         Ok(())
     }
 
-    fn graph_source(&self, lease: &ClaimedLease) -> Result<LeaseGraphSource> {
+    fn activity_executor_session(
+        &self,
+        activity_id: &str,
+        activity_run_id: &str,
+    ) -> Result<ActivityExecutorSession> {
+        Ok(self
+            .authorized(self.client.post(format!(
+                "{}/v1/activities/{activity_id}/runs/{activity_run_id}/executor-session",
+                self.base
+            )))
+            .send()?
+            .error_for_status()?
+            .json()?)
+    }
+
+    fn graph_source(
+        &self,
+        lease_id: &str,
+        expected_bundle: &str,
+        expected_root: &str,
+    ) -> Result<LeaseGraphSource> {
         LeaseGraphSource::load(
             self.client.clone(),
             self.base.clone(),
             self.token.clone(),
-            &lease.id,
-            &lease.command.bundle_id,
-            &lease.command.expected_root_computation_ref,
+            lease_id,
+            expected_bundle,
+            expected_root,
         )
     }
+}
+
+fn supported_lease_kinds(config: &WorkerConfig) -> Vec<&'static str> {
+    let mut kinds = vec![PORTABLE_CAPSULE_LEASE_KIND];
+    if config.browser_chrome.as_deref().is_some_and(Path::is_file)
+        && config
+            .run_control_verification_key
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+    {
+        kinds.push(ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND);
+    }
+    kinds
 }
 
 fn truncate(value: &str, max: usize) -> String {
@@ -1781,7 +2894,7 @@ enum ProxyTarget {
 
 impl TcpProxy {
     fn start(listen: SocketAddr, target: ProxyTarget) -> Result<Self> {
-        Self::start_with_control(listen, target, None)
+        Self::start_with_control(listen, target, None, None)
     }
 
     /// The Browser control listener is intentionally not a second public
@@ -1791,6 +2904,7 @@ impl TcpProxy {
         listen: SocketAddr,
         target: ProxyTarget,
         control_target: Option<SocketAddr>,
+        presentation_frame: Option<Arc<RwLock<Vec<u8>>>>,
     ) -> Result<Self> {
         let listener = TcpListener::bind(listen)?;
         listener.set_nonblocking(true)?;
@@ -1801,9 +2915,15 @@ impl TcpProxy {
                 match listener.accept() {
                     Ok((client, _)) => {
                         let target = target.clone();
+                        let presentation_frame = presentation_frame.clone();
                         thread::spawn(move || {
                             if let Some(control_target) = control_target {
-                                proxy_surface_or_control(client, &target, control_target);
+                                proxy_surface_or_browser(
+                                    client,
+                                    &target,
+                                    control_target,
+                                    presentation_frame,
+                                );
                             } else {
                                 proxy_connection(client, &target);
                             }
@@ -1836,20 +2956,45 @@ fn proxy_connection(mut client: TcpStream, target: &ProxyTarget) {
     proxy_connection_with_prelude(&mut client, target, &[]);
 }
 
-fn proxy_surface_or_control(
+fn proxy_surface_or_browser(
     mut client: TcpStream,
     surface_target: &ProxyTarget,
     control_target: SocketAddr,
+    presentation_frame: Option<Arc<RwLock<Vec<u8>>>>,
 ) {
     let Ok(prelude) = read_http_request_prelude(&mut client) else {
         return;
     };
-    let target = if control_request_path(&prelude) == Some(RUN_CONTROL_PATH) {
+    let path = control_request_path(&prelude);
+    if path == Some(BROWSER_PRESENTATION_PATH) {
+        serve_browser_presentation(&mut client, presentation_frame.as_ref());
+        return;
+    }
+    let target = if path == Some(RUN_CONTROL_PATH) {
         ProxyTarget::Tcp(control_target)
     } else {
         surface_target.clone()
     };
     proxy_connection_with_prelude(&mut client, &target, &prelude);
+}
+
+fn serve_browser_presentation(
+    client: &mut TcpStream,
+    presentation_frame: Option<&Arc<RwLock<Vec<u8>>>>,
+) {
+    let Some(frame) = presentation_frame.and_then(|frame| frame.read().ok()) else {
+        let _ = client.write_all(
+            b"HTTP/1.1 503 Service Unavailable\r\nCache-Control: no-store\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        return;
+    };
+    let headers = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nCache-Control: no-store, max-age=0\r\nContent-Length: {}\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\n\r\n",
+        frame.len()
+    );
+    if client.write_all(headers.as_bytes()).is_ok() {
+        let _ = client.write_all(&frame);
+    }
 }
 
 fn read_http_request_prelude(client: &mut TcpStream) -> io::Result<Vec<u8>> {
@@ -2071,6 +3216,45 @@ mod tests {
         fn apply(&mut self, _operation: &LiveOperation) -> std::result::Result<(), String> {
             Ok(())
         }
+    }
+
+    fn assert_tcp_unreachable(address: SocketAddr) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            if TcpStream::connect_timeout(&address, Duration::from_millis(20)).is_err() {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "TCP endpoint remained reachable after its listener closed"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn browser_presentation_response_is_no_store_jpeg() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let frame = Arc::new(RwLock::new(vec![0xff, 0xd8, 0xff, 0xd9]));
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            serve_browser_presentation(&mut stream, Some(&frame));
+        });
+        let mut client = TcpStream::connect(address).unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+        server.join().unwrap();
+        let headers_end = response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .unwrap()
+            + 4;
+        let headers = std::str::from_utf8(&response[..headers_end]).unwrap();
+        assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(headers.contains("Content-Type: image/jpeg\r\n"));
+        assert!(headers.contains("Cache-Control: no-store, max-age=0\r\n"));
+        assert_eq!(&response[headers_end..], &[0xff, 0xd8, 0xff, 0xd9]);
     }
 
     fn control_credential(
@@ -2381,18 +3565,17 @@ mod tests {
         ClaimedLease {
             id: "lease_1".to_owned(),
             run_id: "run_1".to_owned(),
-            command: PortableLeaseCommand {
-                kind: PORTABLE_CAPSULE_LEASE_KIND.to_owned(),
+            command: LeaseCommand::Portable(PortableLeaseCommand {
                 bundle_id: "bnd_1".to_owned(),
-                transport_digest: "sha256:ignored-by-graph-runtime".to_owned(),
+                transport_digest: format!("sha256:{}", "11".repeat(32)),
                 expected_root_computation_ref: format!("blake3:{}", "11".repeat(32)),
                 run_id: "run_1".to_owned(),
                 session_id: "run:run_1".to_owned(),
                 exported_port_id: "web".to_owned(),
                 surface_contract_version: "1".to_owned(),
                 session_surface: serde_json::json!({"kind":"web"}),
-                accepted_session_surfaces: Vec::new(),
-            },
+                accepted_session_surfaces: vec![serde_json::json!({"kind":"web"})],
+            }),
             expires_at,
         }
     }
@@ -2487,7 +3670,7 @@ mod tests {
         let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
         let published = reservation.local_addr().unwrap();
         drop(reservation);
-        assert!(TcpStream::connect(published).is_err());
+        assert_tcp_unreachable(published);
 
         let upstream = thread::spawn(move || {
             let (mut stream, _) = target_listener.accept().unwrap();
@@ -2504,7 +3687,7 @@ mod tests {
         drop(stream);
         drop(proxy);
         upstream.join().unwrap();
-        assert!(TcpStream::connect(published).is_err());
+        assert_tcp_unreachable(published);
     }
 
     #[test]
@@ -2538,5 +3721,39 @@ mod tests {
         assert!(RUNNER_CAPABILITIES.contains(&"isolation=untrusted-v1"));
         assert!(RUNNER_CAPABILITIES.contains(&"materializer=ato.materialize.vm.snapshot@1"));
         assert!(RUNNER_CAPABILITIES.contains(&"backend=firecracker"));
+    }
+
+    #[test]
+    fn activity_executor_is_advertised_only_when_browser_runtime_is_available() {
+        let chrome = tempfile::NamedTempFile::new().unwrap();
+        let mut config = WorkerConfig {
+            api_base: "https://staging.api.ato.run".to_owned(),
+            runner_id: "runner_1".to_owned(),
+            runner_token: "token".to_owned(),
+            runner_credentials_file: None,
+            public_base_url: "https://runner.example".to_owned(),
+            work_root: PathBuf::from(".tmp/worker"),
+            surface_listen: "127.0.0.1:8420".parse().unwrap(),
+            hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
+            surface_target: "172.30.0.2:38865".parse().unwrap(),
+            tap_host_cidr: "172.30.0.1/24".to_owned(),
+            slot_id: "0".to_owned(),
+            browser_chrome: None,
+            run_control_verification_key: None,
+            once: true,
+        };
+        assert_eq!(
+            supported_lease_kinds(&config),
+            [PORTABLE_CAPSULE_LEASE_KIND]
+        );
+        config.browser_chrome = Some(chrome.path().to_owned());
+        config.run_control_verification_key = Some("v".repeat(32));
+        assert_eq!(
+            supported_lease_kinds(&config),
+            [
+                PORTABLE_CAPSULE_LEASE_KIND,
+                ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND,
+            ]
+        );
     }
 }

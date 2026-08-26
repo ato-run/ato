@@ -1934,9 +1934,11 @@ mod tests {
         let events = Arc::new(Mutex::new(Vec::new()));
         let target = ComputationRef::parse(TARGET).unwrap();
         let frontier = ContentRef::parse(FRONTIER).unwrap();
+        let temp_root = std::env::current_dir().unwrap().join(".tmp");
+        fs::create_dir_all(&temp_root).unwrap();
         let root = tempfile::Builder::new()
             .prefix("active-vm-capture-")
-            .tempdir_in(std::env::current_dir().unwrap().join(".tmp"))
+            .tempdir_in(temp_root)
             .unwrap();
         let source = FirecrackerActiveVmCaptureSource::new(
             Box::new(TestActiveVm {

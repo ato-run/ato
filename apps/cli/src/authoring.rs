@@ -11,6 +11,9 @@ use ato_adapter_pty::{PTY_ADAPTER_ID, PtyAdapterConfig};
 use ato_adapter_workspace::{
     WorkspaceMutation, WorkspaceSnapshot, capture_workspace_with_policy, encode_mutation,
 };
+use ato_browser_semantics::{
+    BROWSER_COMPUTATION_SEMANTICS_ID, BrowserResidualV2, encode_residual as encode_browser_residual,
+};
 use ato_compose::{
     COMPOSE_SEMANTICS_ID, CompositeResidual, Connection, Endpoint, NodeId,
     decode_composite_residual, encode_composite_residual,
@@ -26,6 +29,9 @@ use ato_objects::{
 use serde::{Deserialize, Serialize};
 
 pub(crate) const AUTHORING_SEMANTICS_ID: &str = "ato.authoring@1";
+const BROWSER_PROTOCOL_ID: &str = "ato.browser@1";
+const BROWSER_NODE_ID: &str = "ato.browser";
+const SOURCE_NODE_ID: &str = "ato.source";
 const AUTHORING_STATE_VERSION: u32 = 1;
 const MAX_AUTHORING_STATE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_WORKSPACE_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
@@ -251,6 +257,122 @@ pub(crate) fn initial_computation(
 }
 
 fn seal_authored_root(
+    objects: &dyn ObjectStore,
+    config: AuthoringConfig,
+    snapshot: ContentRef,
+) -> Result<ComputationRef> {
+    let browser_adapters = config
+        .adapter
+        .iter()
+        .filter(|adapter| adapter.use_adapter == BROWSER_PROTOCOL_ID)
+        .collect::<Vec<_>>();
+    if browser_adapters.is_empty() {
+        return seal_authored_source(objects, config, snapshot);
+    }
+    let [browser_adapter] = browser_adapters.as_slice() else {
+        bail!("one authored Capsule may declare exactly one ato.browser@1 Adapter");
+    };
+    let browser_port_id = browser_adapter
+        .port
+        .as_deref()
+        .context("ato.browser@1 adapter requires port")?;
+    let browser_port = config
+        .port
+        .iter()
+        .find(|port| port.id == browser_port_id)
+        .with_context(|| format!("ato.browser@1 adapter names unknown port `{browser_port_id}`"))?;
+    if browser_port.protocol != BROWSER_PROTOCOL_ID || browser_port.role != "server" {
+        bail!("authored ato.browser@1 application port must use the server role");
+    }
+    if config
+        .connection
+        .iter()
+        .any(|connection| connection.from == browser_port_id || connection.to == browser_port_id)
+    {
+        bail!("authored ato.browser@1 application port cannot also be explicitly connected");
+    }
+
+    // The application declaration is authoring sugar for a generic Browser
+    // Computation composed beside the source. Chrome and its exact origin stay
+    // physical Runner concerns; the sealed Browser residual carries only the
+    // logical interaction frontier.
+    let mut source_config = config.clone();
+    source_config
+        .adapter
+        .retain(|adapter| adapter.use_adapter != BROWSER_PROTOCOL_ID);
+    source_config.port.retain(|port| port.id != browser_port_id);
+    let source_root = seal_authored_source(objects, source_config.clone(), snapshot)?;
+    let browser_port_id = PortId::parse(browser_port_id)?;
+    let browser_root = seal_browser_computation(objects, browser_port_id.clone())?;
+    let source_node = NodeId::parse(SOURCE_NODE_ID)?;
+    let browser_node = NodeId::parse(BROWSER_NODE_ID)?;
+    let mut exports = source_config
+        .port
+        .iter()
+        .filter(|port| !port.internal)
+        .map(|port| {
+            Ok((
+                PortId::parse(&port.id)?,
+                Endpoint {
+                    node: source_node.clone(),
+                    port: PortId::parse(&port.id)?,
+                },
+            ))
+        })
+        .collect::<Result<std::collections::BTreeMap<_, _>>>()?;
+    exports.insert(
+        browser_port_id.clone(),
+        Endpoint {
+            node: browser_node.clone(),
+            port: browser_port_id.clone(),
+        },
+    );
+    let mut root_boundary = boundary(&source_config)?;
+    root_boundary.insert(
+        browser_port_id.clone(),
+        PortDef {
+            protocol: ProtocolId::parse(BROWSER_PROTOCOL_ID)?,
+            role: RoleId::parse("controller")?,
+        },
+    );
+    seal_composite(
+        objects,
+        std::collections::BTreeMap::from([
+            (source_node, source_root),
+            (browser_node, browser_root),
+        ]),
+        Vec::new(),
+        exports,
+        root_boundary,
+    )
+}
+
+fn seal_browser_computation(objects: &dyn ObjectStore, port: PortId) -> Result<ComputationRef> {
+    let residual = objects.put(&encode_browser_residual(&BrowserResidualV2 {
+        version: 2,
+        interaction_frontier: None,
+        checkpoint_state_ref: None,
+    })?)?;
+    let computation = ComputationObject {
+        semantics: SemanticsId::parse(BROWSER_COMPUTATION_SEMANTICS_ID)?,
+        boundary: Boundary::from([(
+            port,
+            PortDef {
+                protocol: ProtocolId::parse(BROWSER_PROTOCOL_ID)?,
+                role: RoleId::parse("controller")?,
+            },
+        )]),
+        residual,
+    };
+    let reference = computation_ref(&computation)?;
+    objects.insert(
+        reference.content_ref(),
+        &encode_computation_object(&computation)?,
+    )?;
+    Ok(reference)
+}
+
+fn seal_authored_source(
     objects: &dyn ObjectStore,
     config: AuthoringConfig,
     snapshot: ContentRef,
@@ -597,10 +719,21 @@ pub(crate) fn load_runtime_state(
         bail!("computation {reference} has no authoring runtime projection");
     }
     let composite = load_composite(reference, objects)?;
-    let mut states = composite
-        .nodes
-        .values()
-        .map(|child| load_runtime_state(child, objects));
+    let mut states =
+        composite
+            .nodes
+            .values()
+            .filter_map(|child| match resolve_computation(objects, child) {
+                Ok(resolved)
+                    if resolved.object().semantics
+                        == SemanticsId::parse(BROWSER_COMPUTATION_SEMANTICS_ID)
+                            .expect("static Browser Semantics ID") =>
+                {
+                    None
+                }
+                Ok(_) => Some(load_runtime_state(child, objects)),
+                Err(error) => Some(Err(error.into())),
+            });
     let mut merged = states.next().context("composite has no child nodes")??;
     for state in states {
         let state = state?;
@@ -792,8 +925,10 @@ fn evolve_composite_snapshot(
             let mut state = load_state(child, objects)?;
             state.workspace_snapshot = snapshot.to_string();
             seal_authoring_state(objects, state)?
-        } else {
+        } else if semantics == SemanticsId::parse(COMPOSE_SEMANTICS_ID)? {
             evolve_composite_snapshot(objects, child, snapshot)?
+        } else {
+            child.clone()
         };
     }
     seal_composite(
@@ -970,6 +1105,7 @@ fn boundary(config: &AuthoringConfig) -> Result<Boundary> {
 #[cfg(test)]
 mod generic_adapter_tests {
     use super::*;
+    use ato_objects::MemoryObjectStore;
 
     #[test]
     fn generic_adapter_config_lowers_port_without_an_adapter_id_branch() {
@@ -1007,6 +1143,81 @@ expected_origin = "http://127.0.0.1:3000"
             instances[0].config["expected_origin"],
             "http://127.0.0.1:3000"
         );
+    }
+
+    #[test]
+    fn browser_declaration_seals_an_explicit_browser_computation() {
+        let project = tempfile::tempdir().expect("temporary project should open");
+        std::fs::write(
+            project.path().join("capsule.toml"),
+            r#"schema = 1
+
+[[process]]
+id = "app"
+command = ["app"]
+
+[[port]]
+id = "app.browser"
+node = "app"
+protocol = "ato.browser@1"
+role = "server"
+
+[[adapter]]
+use = "ato.browser@1"
+port = "app.browser"
+
+[adapter.config]
+expected_origin = "http://127.0.0.1:3000"
+
+[[port]]
+id = "app.http"
+node = "app"
+protocol = "ato.http@1"
+role = "server"
+"#,
+        )
+        .expect("authoring config should write");
+        let config = load_config(project.path()).expect("authoring config should load");
+        let objects = MemoryObjectStore::default();
+        let snapshot = objects.put(b"workspace").unwrap();
+        let root = seal_authored_root(&objects, config, snapshot).unwrap();
+        let resolved = resolve_computation(&objects, &root).unwrap();
+        assert_eq!(
+            resolved.object().semantics,
+            SemanticsId::parse(COMPOSE_SEMANTICS_ID).unwrap()
+        );
+        assert_eq!(
+            resolved.object().boundary[&PortId::parse("app.browser").unwrap()]
+                .role
+                .as_str(),
+            "controller"
+        );
+        let composite = load_composite(&root, &objects).unwrap();
+        assert_eq!(composite.nodes.len(), 2);
+        let browser = composite.nodes[&NodeId::parse(BROWSER_NODE_ID).unwrap()].clone();
+        assert_eq!(
+            resolve_computation(&objects, &browser)
+                .unwrap()
+                .object()
+                .semantics,
+            SemanticsId::parse(BROWSER_COMPUTATION_SEMANTICS_ID).unwrap()
+        );
+        let runtime = load_runtime_state(&root, &objects).unwrap();
+        assert!(
+            runtime
+                .config
+                .adapter
+                .iter()
+                .all(|adapter| adapter.use_adapter != BROWSER_PROTOCOL_ID)
+        );
+        assert!(
+            runtime
+                .config
+                .port
+                .iter()
+                .all(|port| port.id != "app.browser")
+        );
+        assert!(runtime.config.port.iter().any(|port| port.id == "app.http"));
     }
 }
 

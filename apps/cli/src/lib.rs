@@ -61,6 +61,7 @@ use ato_objects::{
     BranchOrigin, BundleMaterialization, CapsuleSelector, GraphMaterialization,
     GraphRestoreCapability, LocalCapsuleRepository, RecordId, ReferenceRegistry, decode_bundle,
     encode_bundle, export_bundle_with_materializations, export_object_graph, import_bundle,
+    resolve_computation,
 };
 use ato_realization_planner::{
     MaterializationCandidate, Placement, PlannerPolicy, RealizationPlanner, TargetEnvironment,
@@ -427,15 +428,14 @@ fn upload(args: UploadArgs) -> Result<()> {
         repository.objects(),
         &references,
     )?;
-    let exported_ports = state
-        .config
-        .port
+    let exported_ports = resolve_computation(repository.objects(), &target)?
+        .object()
+        .boundary
         .iter()
-        .filter(|port| !port.internal)
-        .map(|port| ExportedPort {
-            port_id: port.id.clone(),
-            protocol: port.protocol.clone(),
-            role: port.role.clone(),
+        .map(|(port, definition)| ExportedPort {
+            port_id: port.to_string(),
+            protocol: definition.protocol.to_string(),
+            role: definition.role.to_string(),
         })
         .collect();
     let required_bindings = state
