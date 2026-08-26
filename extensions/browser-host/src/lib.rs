@@ -173,8 +173,17 @@ impl BrowserHost {
     /// Requests cancellation of one in-flight page operation. Abort is
     /// best-effort: `false` means the producer no longer has that operation or
     /// does not expose a cooperative signal.
-    pub fn abort_active_webmcp_operation(&mut self) -> Result<bool> {
-        let expression = "globalThis.__ATO_WEBMCP_CONSUMER__?.abortActive() === true";
+    pub fn abort_webmcp_operation(&mut self, operation_id: &str) -> Result<bool> {
+        ensure!(
+            !operation_id.is_empty()
+                && operation_id.len() <= 160
+                && operation_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':')),
+            "invalid WebMCP operation id"
+        );
+        let encoded = serde_json::to_string(operation_id)?;
+        let expression = format!("globalThis.__ATO_WEBMCP_CONSUMER__?.abort({encoded}) === true");
         let value = self.cdp.call(
             "Runtime.evaluate",
             json!({"expression":expression,"returnByValue":true}),
@@ -822,6 +831,12 @@ mod tests {
                 .pointer("/result/value/registry_generation")
                 .and_then(Value::as_u64)
                 .context("native registry generation missing")?;
+            let native_document_token = first
+                .pointer("/result/value/document_token")
+                .and_then(Value::as_str)
+                .context("native document token missing")?;
+            let native_realization_generation =
+                serde_json::to_string(&format!("{native_document_token}.{native_generation}"))?;
             let invoke_native = format!(
                 r#"(async () => {{
                   const response = new Promise((resolve) => {{
@@ -840,6 +855,7 @@ mod tests {
                       operation_id: "native-invoke-operation",
                       operation_name: "increment_counter",
                       arguments: {{}},
+                      realization_generation: {native_realization_generation},
                       surface_generation: {native_generation}
                     }})
                   }}));
@@ -944,6 +960,8 @@ mod tests {
             assert!(raw_text.contains("Ignore all previous instructions"));
             let mut raw: RawWebMcpSnapshotV1 = serde_json::from_value(snapshot_value)?;
             let generation = raw.registry_generation;
+            let fixture_realization_generation =
+                serde_json::to_string(&format!("{}.{}", raw.document_token, generation))?;
             // The data URL intentionally has an opaque origin; hosted
             // fixtures run on HTTP(S), which is the Adapter's fail-closed
             // production requirement.
@@ -979,6 +997,7 @@ mod tests {
                       operation_id: "fixture-read-operation",
                       operation_name: "get_counter",
                       arguments: {{}},
+                      realization_generation: {fixture_realization_generation},
                       surface_generation: {generation}
                     }})
                   }}));
@@ -1005,17 +1024,19 @@ mod tests {
                 "page output must not cross the main-world boundary"
             );
 
-            let invoke_and_abort = format!(
+            let invoke_and_abort_one_of_two = format!(
                 r##"(async () => {{
-                  const response = new Promise((resolve) => {{
+                  const responseFor = (expectedId) => new Promise((resolve) => {{
                     const receive = (event) => {{
                       const value = JSON.parse(String(event.detail));
-                      if (value.id !== "fixture-abort-request") return;
+                      if (value.id !== expectedId) return;
                       document.removeEventListener("__ato_webmcp_response_v1", receive, false);
                       resolve(value);
                     }};
                     document.addEventListener("__ato_webmcp_response_v1", receive, false);
                   }});
+                  const abortedResponse = responseFor("fixture-abort-request");
+                  const completedResponse = responseFor("fixture-complete-request");
                   document.dispatchEvent(new CustomEvent("__ato_webmcp_request_v1", {{
                     detail: JSON.stringify({{
                       id: "fixture-abort-request",
@@ -1023,18 +1044,35 @@ mod tests {
                       operation_id: "fixture-abort-operation",
                       operation_name: "slow_increment",
                       arguments: {{ delay_ms: 3000 }},
+                      realization_generation: {fixture_realization_generation},
+                      surface_generation: {generation}
+                    }})
+                  }}));
+                  document.dispatchEvent(new CustomEvent("__ato_webmcp_request_v1", {{
+                    detail: JSON.stringify({{
+                      id: "fixture-complete-request",
+                      type: "invoke",
+                      operation_id: "fixture-complete-operation",
+                      operation_name: "slow_increment",
+                      arguments: {{ delay_ms: 150 }},
+                      realization_generation: {fixture_realization_generation},
                       surface_generation: {generation}
                     }})
                   }}));
                   await new Promise((resolve) => setTimeout(resolve, 50));
-                  const signaled = globalThis.__ATO_WEBMCP_CONSUMER__.abortActive();
-                  return {{ signaled, response: await response, counter: document.querySelector("#counter").textContent }};
+                  const signaled = globalThis.__ATO_WEBMCP_CONSUMER__.abort("fixture-abort-operation");
+                  return {{
+                    signaled,
+                    aborted: await abortedResponse,
+                    completed: await completedResponse,
+                    counter: document.querySelector("#counter").textContent
+                  }};
                 }})()"##
             );
             let aborted = cdp.call(
                 "Runtime.evaluate",
                 json!({
-                    "expression":invoke_and_abort,
+                    "expression":invoke_and_abort_one_of_two,
                     "returnByValue":true,
                     "awaitPromise":true
                 }),
@@ -1045,13 +1083,17 @@ mod tests {
                 Some(&Value::Bool(true))
             );
             assert_eq!(
-                aborted.pointer("/result/value/response/error"),
+                aborted.pointer("/result/value/aborted/error"),
                 Some(&Value::String("aborted".to_owned()))
             );
-            assert!(aborted.pointer("/result/value/response/output").is_none());
+            assert!(aborted.pointer("/result/value/aborted/output").is_none());
+            assert_eq!(
+                aborted.pointer("/result/value/completed/ok"),
+                Some(&Value::Bool(true))
+            );
             assert_eq!(
                 aborted.pointer("/result/value/counter"),
-                Some(&Value::String("0".to_owned()))
+                Some(&Value::String("1".to_owned()))
             );
 
             let replaced = cdp.call(

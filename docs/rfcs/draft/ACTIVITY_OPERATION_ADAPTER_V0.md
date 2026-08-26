@@ -176,9 +176,47 @@ regenerates `safe_description` instead of trusting the Runner value.
 
 The Activity control plane enforces one mutating operation in flight per Actor.
 Read-only operations and mutations by another Actor are not fenced by that
-Actor-level gate. The connected worker serializes physical application target
-operations only long enough for the existing Browser ingress to let the Runner
-choose canonical order.
+Actor-level gate. Browser physical handlers from different Actors may overlap.
+The Adapter's single ACK demultiplexer assigns a monotonic settlement ticket,
+then the Browser ingress commits in ticket order from the current Run head.
+This Browser-only path relies on `ato.browser@1` external input being
+head-independent and derivable at every valid Browser frontier; generic Kernel
+semantics retain apply-before-commit.
+
+The physical dispatch carries an opaque realization generation made from the
+main-world document token and WebMCP registry generation. It is not part of the
+semantic Browser event or Record. The main-world compatibility boundary checks
+it immediately before every fixed Browser or WebMCP operation, so navigation
+and registry replacement invalidate all prior descriptors even before the
+worker's next projection poll. A missing ACK or disconnect after ordered
+dispatch makes the physical outcome indeterminate and terminally fences that
+Adapter incarnation; it never abandons one ticket and issues a later ticket.
+
+## Lease-lifetime retry evidence
+
+Before physical Controller dispatch, the worker atomically persists and
+file/directory-syncs a `started` intent under the lease root. The filename is a
+digest rather than a caller-provided operation id. The entry contains only the
+canonical request digest and bounded provenance: it excludes credentials,
+arguments, page output, and raw WebMCP metadata. After settlement it is
+atomically replaced with the sanitized terminal receipt. The journal root and
+files are owner-only, and normal lease cleanup removes the journal.
+
+An identical Room redispatch joins the live owner or exactly replays the
+terminal receipt, including its original result and Runner sequence. A
+different digest fails closed. A `started` intent found after worker restart is
+reported as `operation_indeterminate` and is never physically replayed. This
+provides no-double-apply behavior through Room restart and the Runner lease
+lifetime. It is deliberately not an exactly-once claim: without a producer
+transaction or producer idempotency there is no way to distinguish a process
+crash immediately before a page effect from one immediately after that effect.
+
+Head persistence failure after physical ACK is non-terminal. The same
+operation repairs the pending head/Record without reapplying the page effect;
+later settlement tickets remain fenced behind it. The controller page keeps a
+bounded in-memory receipt outbox, reconnects to the Room, and retries ambiguous
+loopback responses with the same operation id so a lost HTTP response cannot
+overwrite an already-journaled acceptance with a synthetic failure.
 
 Emergency stop records `abort_requested` first. If the matching WebMCP
 operation is active, the worker attempts to signal its main-world
@@ -197,9 +235,9 @@ normally lets its current mutation settle before rebinding the same Actor Run.
 
 v0 supports the connected hosted Browser realization and the deterministic
 WebMCP fixture. It does not promise universal WebMCP draft compatibility, DOM
-or accessibility operation discovery, terminal operation projection, or
-cross-target hard cancellation. Those additions must preserve the same
-Protocol/Adapter boundary and Runner-issued ordering.
+or accessibility operation discovery, or cross-target hard cancellation.
+Those additions must preserve the same Protocol/Adapter boundary and
+Runner-issued ordering.
 
 The separate pure-stdio `ato-activity-mcp` is a Controller client for the
 Activity API. It exposes a fixed tool vocabulary and reads a scoped connection
