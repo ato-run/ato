@@ -26,6 +26,10 @@ path = "src/main.rs"
 name = "ato-object-graph-upload"
 path = "src/bin/ato-object-graph-upload.rs"
 
+[[bin]]
+name = "ato-activity-mcp"
+path = "src/bin/ato-activity-mcp.rs"
+
 [dependencies]
 anyhow = "1"
 ato-adapter-api = { path = "../../extensions/adapters/api", version = "0.1.0" }
