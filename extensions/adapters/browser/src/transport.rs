@@ -37,16 +37,13 @@ pub(crate) enum TransportCommand {
         correlation_id: String,
         realization_generation: Option<String>,
         ordered: bool,
+        deadline: Instant,
         event: BrowserEvent,
         result: mpsc::Sender<Result<Option<u64>, AdapterError>>,
     },
     Quiesce {
         request_id: String,
         result: mpsc::Sender<Result<(), AdapterError>>,
-    },
-    Fence {
-        reason: String,
-        result: mpsc::Sender<()>,
     },
     Shutdown,
 }
@@ -98,6 +95,7 @@ enum BridgeMessage {
 struct PendingRequest {
     kind: PendingKind,
     ordered: bool,
+    deadline: Option<Instant>,
     result: PendingResult,
 }
 
@@ -194,6 +192,15 @@ fn run_transport(
     let mut next_live_settlement_order = 0_u64;
     let stopped = AtomicBool::new(false);
 
+    macro_rules! transport_try {
+        ($result:expr) => {
+            match $result {
+                Ok(value) => value,
+                Err(error) => return terminate_after_error(&mut pending, error),
+            }
+        };
+    }
+
     while !stopped.load(Ordering::Acquire) {
         if socket.is_none() {
             match listener.accept() {
@@ -202,13 +209,14 @@ fn run_transport(
                     Err(_) => continue,
                 },
                 Err(error) if error.kind() == ErrorKind::WouldBlock => {}
-                Err(error) => return Err(error.into()),
+                Err(error) => return terminate_after_error(&mut pending, error.into()),
             }
         }
 
         while let Ok(command) = commands.try_recv() {
             queued_commands.push_back(command);
         }
+        transport_try!(expire_pending_deadlines(&mut pending, Instant::now()));
 
         while let Some(command) = queued_commands.front() {
             if matches!(command, TransportCommand::Shutdown) {
@@ -216,13 +224,21 @@ fn run_transport(
                 stopped.store(true, Ordering::Release);
                 break;
             }
-            let terminal_command = matches!(
-                command,
-                TransportCommand::Fence { .. } | TransportCommand::Shutdown
-            );
-            if !terminal_command
-                && (socket.as_ref().is_none_or(|_| !authenticated)
-                    || matches!(command, TransportCommand::Quiesce { .. }) && !pending.is_empty())
+            if matches!(command, TransportCommand::Apply { deadline, .. } if Instant::now() >= *deadline)
+            {
+                let TransportCommand::Apply { result, .. } = queued_commands
+                    .pop_front()
+                    .expect("expired front command was present")
+                else {
+                    unreachable!("expiry is checked only for Apply commands");
+                };
+                let _ = result.send(Err(AdapterError::Operation(
+                    "Browser apply acknowledgement timed out before dispatch".to_owned(),
+                )));
+                continue;
+            }
+            if socket.as_ref().is_none_or(|_| !authenticated)
+                || matches!(command, TransportCommand::Quiesce { .. }) && !pending.is_empty()
             {
                 break;
             }
@@ -235,14 +251,24 @@ fn run_transport(
                     correlation_id,
                     realization_generation,
                     ordered,
+                    deadline,
                     event,
                     result,
                 } => {
+                    pending.insert(
+                        request_id.clone(),
+                        PendingRequest {
+                            kind: PendingKind::Apply,
+                            ordered,
+                            deadline: Some(deadline),
+                            result: PendingResult::Apply(result),
+                        },
+                    );
                     let bridge = socket
                         .as_mut()
                         .filter(|_| authenticated)
                         .expect("authenticated bridge was checked");
-                    send_message(
+                    transport_try!(send_message(
                         bridge,
                         &AdapterMessage::Apply {
                             request_id: &request_id,
@@ -250,60 +276,49 @@ fn run_transport(
                             realization_generation: realization_generation.as_deref(),
                             event: &event,
                         },
-                    )?;
-                    pending.insert(
-                        request_id.clone(),
-                        PendingRequest {
-                            kind: PendingKind::Apply,
-                            ordered,
-                            result: PendingResult::Apply(result),
-                        },
-                    );
+                    ));
                 }
                 TransportCommand::Quiesce { request_id, result } => {
                     if let Some(bridge) = socket.as_mut().filter(|_| authenticated) {
-                        send_message(
-                            bridge,
-                            &AdapterMessage::Quiesce {
-                                request_id: &request_id,
-                            },
-                        )?;
                         pending.insert(
                             request_id.clone(),
                             PendingRequest {
                                 kind: PendingKind::Quiesce,
                                 ordered: false,
+                                deadline: None,
                                 result: PendingResult::Quiesce(result),
                             },
                         );
+                        transport_try!(send_message(
+                            bridge,
+                            &AdapterMessage::Quiesce {
+                                request_id: &request_id,
+                            },
+                        ));
                     } else {
-                        flush_events(
+                        transport_try!(flush_events(
                             &mut coalescer,
                             &config,
                             Arc::clone(&stylus),
                             Arc::clone(&observations),
-                        )?;
+                        ));
                         let _ = result.send(Ok(()));
                     }
-                }
-                TransportCommand::Fence { reason, result } => {
-                    fail_pending(&mut pending, &reason);
-                    if let Some(mut bridge) = socket.take() {
-                        let _ = bridge.close(None);
-                    }
-                    let _ = result.send(());
-                    return Err(AdapterError::Operation(reason));
                 }
                 TransportCommand::Shutdown => stopped.store(true, Ordering::Release),
             }
         }
 
+        transport_try!(expire_pending_deadlines(&mut pending, Instant::now()));
         if let Some(bridge) = socket.as_mut() {
             match bridge.read() {
                 Ok(Message::Text(text)) => {
-                    let message: BridgeMessage = serde_json::from_str(&text).map_err(|error| {
-                        AdapterError::Operation(format!("invalid Browser Bridge message: {error}"))
-                    })?;
+                    let message: BridgeMessage =
+                        transport_try!(serde_json::from_str(&text).map_err(|error| {
+                            AdapterError::Operation(format!(
+                                "invalid Browser Bridge message: {error}"
+                            ))
+                        }));
                     match message {
                         BridgeMessage::Hello {
                             protocol,
@@ -311,22 +326,22 @@ fn run_transport(
                             browser_session,
                             top_level_origin,
                         } if !authenticated => {
-                            validate_hello(
+                            transport_try!(validate_hello(
                                 &config,
                                 &protocol,
                                 &channel_credential,
                                 &browser_session,
                                 &top_level_origin,
-                            )?;
+                            ));
                             authenticated = true;
-                            send_message(
+                            transport_try!(send_message(
                                 bridge,
                                 &AdapterMessage::HelloAck {
                                     protocol: BROWSER_PROTOCOL_ID,
                                     browser_session: &config.browser_session,
                                 },
-                            )?;
-                            write_owner_only(&readiness_path, b"ready")?;
+                            ));
+                            transport_try!(write_owner_only(&readiness_path, b"ready"));
                         }
                         BridgeMessage::Event { event }
                             if authenticated
@@ -335,46 +350,46 @@ fn run_transport(
                         {
                             if validate_event(&event, &config.allowed_non_text_codes).is_ok() {
                                 for ready in coalescer.ingest(event) {
-                                    emit_event(
+                                    transport_try!(emit_event(
                                         &config,
                                         Arc::clone(&stylus),
                                         Arc::clone(&observations),
                                         &ready,
-                                    )?;
+                                    ));
                                 }
                             }
                         }
                         BridgeMessage::Ack { request_id } if authenticated => {
-                            complete_pending(
+                            transport_try!(complete_pending(
                                 &mut pending,
                                 &request_id,
                                 PendingKind::Apply,
                                 Ok(()),
                                 &mut next_live_settlement_order,
-                            )?;
+                            ));
                         }
                         BridgeMessage::Quiesced { request_id } if authenticated => {
                             accepting_input = false;
-                            flush_events(
+                            transport_try!(flush_events(
                                 &mut coalescer,
                                 &config,
                                 Arc::clone(&stylus),
                                 Arc::clone(&observations),
-                            )?;
-                            complete_pending(
+                            ));
+                            transport_try!(complete_pending(
                                 &mut pending,
                                 &request_id,
                                 PendingKind::Quiesce,
                                 Ok(()),
                                 &mut next_live_settlement_order,
-                            )?;
+                            ));
                         }
                         BridgeMessage::Error { request_id, reason } if authenticated => {
                             if let Some(request_id) = request_id {
                                 let pending_kind = pending
                                     .get(&request_id)
                                     .map_or(PendingKind::Apply, |value| value.kind);
-                                complete_pending(
+                                transport_try!(complete_pending(
                                     &mut pending,
                                     &request_id,
                                     pending_kind,
@@ -382,17 +397,24 @@ fn run_transport(
                                         "Browser Bridge rejected request: {reason}"
                                     ))),
                                     &mut next_live_settlement_order,
-                                )?;
+                                ));
                             } else {
-                                return Err(AdapterError::Operation(format!(
-                                    "Browser Bridge failed: {reason}"
-                                )));
+                                return terminate_after_error(
+                                    &mut pending,
+                                    AdapterError::Operation(format!(
+                                        "Browser Bridge failed: {reason}"
+                                    )),
+                                );
                             }
                         }
                         _ => {
-                            return Err(AdapterError::Operation(
-                                "Browser Bridge message violates handshake or lifecycle".to_owned(),
-                            ));
+                            return terminate_after_error(
+                                &mut pending,
+                                AdapterError::Operation(
+                                    "Browser Bridge message violates handshake or lifecycle"
+                                        .to_owned(),
+                                ),
+                            );
                         }
                     }
                 }
@@ -405,9 +427,11 @@ fn run_transport(
                     socket = None;
                     authenticated = false;
                 }
-                Ok(Message::Ping(payload)) => bridge
-                    .send(Message::Pong(payload))
-                    .map_err(|error| AdapterError::Operation(error.to_string()))?,
+                Ok(Message::Ping(payload)) => transport_try!(
+                    bridge
+                        .send(Message::Pong(payload))
+                        .map_err(|error| AdapterError::Operation(error.to_string()))
+                ),
                 Ok(_) => {}
                 Err(tungstenite::Error::Io(error)) if error.kind() == ErrorKind::WouldBlock => {}
                 Err(tungstenite::Error::ConnectionClosed) => {
@@ -448,9 +472,6 @@ fn run_transport(
                 let _ = result.send(Err(AdapterError::Operation(
                     "Browser Adapter detached".to_owned(),
                 )));
-            }
-            TransportCommand::Fence { result, .. } => {
-                let _ = result.send(());
             }
             TransportCommand::Shutdown => {}
         }
@@ -562,7 +583,7 @@ fn complete_pending(
     result: Result<(), AdapterError>,
     next_live_settlement_order: &mut u64,
 ) -> Result<(), AdapterError> {
-    let Some(request) = pending.remove(request_id) else {
+    let Some(request) = pending.get(request_id) else {
         return Err(AdapterError::Operation(
             "Browser Bridge acknowledged no pending request".to_owned(),
         ));
@@ -572,19 +593,31 @@ fn complete_pending(
             "Browser Bridge acknowledgement mismatch".to_owned(),
         ));
     }
+    if request
+        .deadline
+        .is_some_and(|deadline| Instant::now() >= deadline)
+    {
+        return Err(AdapterError::Operation(if request.ordered {
+            "physical_outcome_indeterminate".to_owned()
+        } else {
+            "Browser apply acknowledgement timed out".to_owned()
+        }));
+    }
+    let request = pending
+        .remove(request_id)
+        .expect("validated pending request remains present");
     match request.result {
+        PendingResult::Apply(sender) if request.ordered && result.is_ok() => {
+            let next = next_live_settlement_order.checked_add(1).ok_or_else(|| {
+                AdapterError::Operation("Browser settlement order exhausted".to_owned())
+            })?;
+            sender.send(Ok(Some(next))).map_err(|_| {
+                AdapterError::Operation("physical_outcome_indeterminate".to_owned())
+            })?;
+            *next_live_settlement_order = next;
+        }
         PendingResult::Apply(sender) => {
-            let result = result.and_then(|()| {
-                if !request.ordered {
-                    return Ok(None);
-                }
-                *next_live_settlement_order =
-                    next_live_settlement_order.checked_add(1).ok_or_else(|| {
-                        AdapterError::Operation("Browser settlement order exhausted".to_owned())
-                    })?;
-                Ok(Some(*next_live_settlement_order))
-            });
-            let _ = sender.send(result);
+            let _ = sender.send(result.map(|()| None));
         }
         PendingResult::Quiesce(sender) => {
             let _ = sender.send(result);
@@ -604,6 +637,55 @@ fn fail_pending(pending: &mut BTreeMap<String, PendingRequest>, reason: &str) {
             }
         }
     }
+}
+
+fn terminate_after_error(
+    pending: &mut BTreeMap<String, PendingRequest>,
+    error: AdapterError,
+) -> Result<(), AdapterError> {
+    if has_ordered_apply(pending) {
+        let reason = "physical_outcome_indeterminate";
+        fail_pending(pending, reason);
+        Err(AdapterError::Operation(reason.to_owned()))
+    } else {
+        fail_pending(pending, &error.to_string());
+        Err(error)
+    }
+}
+
+fn expire_pending_deadlines(
+    pending: &mut BTreeMap<String, PendingRequest>,
+    now: Instant,
+) -> Result<(), AdapterError> {
+    if pending.values().any(|request| {
+        request.ordered
+            && matches!(request.kind, PendingKind::Apply)
+            && request.deadline.is_some_and(|deadline| now >= deadline)
+    }) {
+        return Err(AdapterError::Operation(
+            "physical_outcome_indeterminate".to_owned(),
+        ));
+    }
+    let expired = pending
+        .iter()
+        .filter(|(_, request)| {
+            !request.ordered
+                && matches!(request.kind, PendingKind::Apply)
+                && request.deadline.is_some_and(|deadline| now >= deadline)
+        })
+        .map(|(request_id, _)| request_id.clone())
+        .collect::<Vec<_>>();
+    for request_id in expired {
+        let request = pending
+            .remove(&request_id)
+            .expect("expired pending request remains present");
+        if let PendingResult::Apply(sender) = request.result {
+            let _ = sender.send(Err(AdapterError::Operation(
+                "Browser apply acknowledgement timed out".to_owned(),
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn has_ordered_apply(pending: &BTreeMap<String, PendingRequest>) -> bool {
@@ -688,25 +770,12 @@ pub(crate) fn wait_for_result(
         })?
 }
 
-pub(crate) enum ApplyWaitError {
-    Timeout,
-    Failed(AdapterError),
-}
-
 pub(crate) fn wait_for_apply_result(
     receiver: mpsc::Receiver<Result<Option<u64>, AdapterError>>,
-    timeout: Duration,
-) -> Result<Option<u64>, ApplyWaitError> {
-    let deadline = Instant::now() + timeout;
-    receiver
-        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-        .map_err(|error| match error {
-            mpsc::RecvTimeoutError::Timeout => ApplyWaitError::Timeout,
-            mpsc::RecvTimeoutError::Disconnected => ApplyWaitError::Failed(
-                AdapterError::Operation("Browser apply acknowledgement disconnected".to_owned()),
-            ),
-        })?
-        .map_err(ApplyWaitError::Failed)
+) -> Result<Option<u64>, AdapterError> {
+    receiver.recv().map_err(|_| {
+        AdapterError::Operation("Browser apply acknowledgement disconnected".to_owned())
+    })?
 }
 
 #[cfg(test)]
@@ -764,6 +833,7 @@ mod tests {
                 PendingRequest {
                     kind: PendingKind::Apply,
                     ordered: true,
+                    deadline: Some(Instant::now() + Duration::from_secs(1)),
                     result: PendingResult::Apply(first_tx),
                 },
             ),
@@ -772,6 +842,7 @@ mod tests {
                 PendingRequest {
                     kind: PendingKind::Apply,
                     ordered: true,
+                    deadline: Some(Instant::now() + Duration::from_secs(1)),
                     result: PendingResult::Apply(second_tx),
                 },
             ),
@@ -800,12 +871,51 @@ mod tests {
     }
 
     #[test]
-    fn ordered_apply_timeout_is_explicit_before_any_ticket_is_assigned() {
-        let (_sender, receiver) = mpsc::channel();
-        assert!(matches!(
-            wait_for_apply_result(receiver, Duration::ZERO),
-            Err(ApplyWaitError::Timeout)
-        ));
+    fn expired_ordered_ack_fences_every_waiter_before_any_ticket_is_published() {
+        let (first_tx, first_rx) = mpsc::channel();
+        let (second_tx, second_rx) = mpsc::channel();
+        let now = Instant::now();
+        let mut pending = BTreeMap::from([
+            (
+                "request-expired".to_owned(),
+                PendingRequest {
+                    kind: PendingKind::Apply,
+                    ordered: true,
+                    deadline: Some(now),
+                    result: PendingResult::Apply(first_tx),
+                },
+            ),
+            (
+                "request-later".to_owned(),
+                PendingRequest {
+                    kind: PendingKind::Apply,
+                    ordered: true,
+                    deadline: Some(now + Duration::from_secs(1)),
+                    result: PendingResult::Apply(second_tx),
+                },
+            ),
+        ]);
+        let mut next = 0;
+
+        let timeout = complete_pending(
+            &mut pending,
+            "request-expired",
+            PendingKind::Apply,
+            Ok(()),
+            &mut next,
+        )
+        .expect_err("the transport deadline wins over a boundary ACK");
+        terminate_after_error(&mut pending, timeout)
+            .expect_err("one expired ordered operation fences the incarnation");
+
+        for receiver in [first_rx, second_rx] {
+            let error = receiver
+                .recv()
+                .expect("every ordered waiter receives the transport fence")
+                .expect_err("neither the expired nor later ACK can publish a ticket");
+            assert!(error.to_string().contains("physical_outcome_indeterminate"));
+        }
+        assert_eq!(next, 0);
     }
 
     #[test]
@@ -816,6 +926,7 @@ mod tests {
             PendingRequest {
                 kind: PendingKind::Apply,
                 ordered: true,
+                deadline: Some(Instant::now() + Duration::from_secs(1)),
                 result: PendingResult::Apply(sender),
             },
         )]);
@@ -826,6 +937,73 @@ mod tests {
             .expect("ordered waiter must receive terminal transport evidence")
             .expect_err("lost ACK is indeterminate, never a rejection");
         assert!(error.to_string().contains("physical_outcome_indeterminate"));
+    }
+
+    #[test]
+    fn ordered_apply_send_failure_is_indeterminate_after_pre_send_registration() {
+        let (sender, receiver) = mpsc::channel();
+        let mut pending = BTreeMap::from([(
+            "request-ordered".to_owned(),
+            PendingRequest {
+                kind: PendingKind::Apply,
+                ordered: true,
+                deadline: Some(Instant::now() + Duration::from_secs(1)),
+                result: PendingResult::Apply(sender),
+            },
+        )]);
+
+        let terminal = terminate_after_error(
+            &mut pending,
+            AdapterError::Operation("socket write failed".to_owned()),
+        )
+        .expect_err("a write failure after an Apply may have reached the page");
+        assert!(
+            terminal
+                .to_string()
+                .contains("physical_outcome_indeterminate")
+        );
+        assert!(pending.is_empty());
+        let waiter = receiver
+            .recv()
+            .expect("ordered waiter receives explicit terminal transport evidence")
+            .expect_err("write failure is not a proven physical rejection");
+        assert!(
+            waiter
+                .to_string()
+                .contains("physical_outcome_indeterminate")
+        );
+    }
+
+    #[test]
+    fn acknowledgement_kind_mismatch_preserves_ordered_pending_for_transport_fence() {
+        let (sender, receiver) = mpsc::channel();
+        let mut pending = BTreeMap::from([(
+            "request-ordered".to_owned(),
+            PendingRequest {
+                kind: PendingKind::Apply,
+                ordered: true,
+                deadline: Some(Instant::now() + Duration::from_secs(1)),
+                result: PendingResult::Apply(sender),
+            },
+        )]);
+        let mut next = 0;
+
+        let protocol_error = complete_pending(
+            &mut pending,
+            "request-ordered",
+            PendingKind::Quiesce,
+            Ok(()),
+            &mut next,
+        )
+        .expect_err("mismatched acknowledgement is a lifecycle violation");
+        terminate_after_error(&mut pending, protocol_error)
+            .expect_err("ordered lifecycle violation terminates the transport");
+        let error = receiver
+            .recv()
+            .expect("pending ordered waiter must be fenced")
+            .expect_err("no ticket may be assigned after a protocol violation");
+        assert!(error.to_string().contains("physical_outcome_indeterminate"));
+        assert_eq!(next, 0);
     }
 
     #[test]
