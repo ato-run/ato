@@ -49,7 +49,11 @@ const MAX_BROWSER_EVENT_BYTES: u64 = 64 * 1024;
 // Browser operations are interactive control, not background jobs. A page
 // that blocks its main thread can also prevent JavaScript timers from firing,
 // so the native transport owns this independent hard deadline.
-const ACK_TIMEOUT: Duration = Duration::from_secs(5);
+// The BYOA v0 acceptance surface deliberately includes a five-second WebMCP
+// handler. Keep a bounded margin above that physical duration so an ACK at
+// the boundary cannot be misclassified as indeterminate. A hung untrusted
+// page is still fenced well inside the controller's 30s request horizon.
+const ACK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Selects whether trusted DOM events are merely observed by a local CLI, or
 /// whether this Adapter accepts only Runner-authorized physical operations.
