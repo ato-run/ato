@@ -2233,6 +2233,9 @@ mod tests {
         assert!(CONTROLLER_HTML.contains("receiptOutbox"));
         assert!(CONTROLLER_HTML.contains("scheduleRoomReconnect"));
         assert!(CONTROLLER_HTML.contains("replayReceiptOutbox"));
+        assert!(CONTROLLER_HTML.contains("sendRoom(\"runner.ping\", {})"));
+        assert!(CONTROLLER_HTML.contains("startRoomHeartbeat(room)"));
+        assert!(CONTROLLER_HTML.contains("stopRoomHeartbeat()"));
         assert!(!CONTROLLER_HTML.contains("app_view_token"));
     }
 
