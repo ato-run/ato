@@ -164,6 +164,19 @@ impl BrowserHost {
         serde_json::from_value(snapshot).context("decode untrusted WebMCP snapshot")
     }
 
+    /// Requests cancellation of one in-flight page operation. Abort is
+    /// best-effort: `false` means the producer no longer has that operation or
+    /// does not expose a cooperative signal.
+    pub fn abort_active_webmcp_operation(&mut self) -> Result<bool> {
+        let expression = "globalThis.__ATO_WEBMCP_CONSUMER__?.abortActive() === true";
+        let value = self.cdp.call(
+            "Runtime.evaluate",
+            json!({"expression":expression,"returnByValue":true}),
+            Some(&self.session_id),
+        )?;
+        Ok(value.pointer("/result/value").and_then(Value::as_bool) == Some(true))
+    }
+
     /// Opens one credential-free loopback controller in the same private
     /// Browser context. Product runtimes may use this for media/control
     /// orchestration without giving the application target those credentials.
@@ -774,6 +787,139 @@ mod tests {
             assert_eq!(
                 first.pointer("/result/value/tools/0/name"),
                 Some(&Value::String("increment_counter".to_owned()))
+            );
+
+            // A second target proves the deterministic main-world producer
+            // path without the synthetic native API above. Its instruction-
+            // shaped metadata is removed before an Activity projection, and
+            // its cooperative AbortController is reachable through CDP.
+            let fixture_target = cdp.call(
+                "Target.createTarget",
+                json!({"url":"about:blank","browserContextId":context_id}),
+                None,
+            )?;
+            let fixture_attached = cdp.call(
+                "Target.attachToTarget",
+                json!({
+                    "targetId":required_string(&fixture_target, "targetId")?,
+                    "flatten":true
+                }),
+                None,
+            )?;
+            let fixture_session = required_string(&fixture_attached, "sessionId")?.to_owned();
+            cdp.call("Page.enable", json!({}), Some(&fixture_session))?;
+            cdp.call(
+                "Page.addScriptToEvaluateOnNewDocument",
+                json!({"source":WEBMCP_BRIDGE_SOURCE}),
+                Some(&fixture_session),
+            )?;
+            // `sessionStorage` is unavailable to an opaque data URL. Keep the
+            // checked-in fixture source while replacing persistence only for
+            // this self-contained CDP test.
+            let fixture_html = include_str!("../../../tests/fixtures/webmcp-activity/index.html")
+                .replace(
+                    "let value = Number(sessionStorage.getItem(\"fixture.counter\") ?? \"0\");",
+                    "let value = 0;",
+                )
+                .replace(
+                    "sessionStorage.setItem(\"fixture.counter\", String(value));",
+                    "void value;",
+                );
+            let fixture_url = format!(
+                "data:text/html;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(fixture_html)
+            );
+            cdp.call(
+                "Page.navigate",
+                json!({"url":fixture_url}),
+                Some(&fixture_session),
+            )?;
+            wait_for_document_ready(&mut cdp, &fixture_session)?;
+            let fixture_snapshot = cdp.call(
+                "Runtime.evaluate",
+                json!({
+                    "expression":"globalThis.__ATO_WEBMCP_CONSUMER__.snapshot()",
+                    "returnByValue":true,
+                    "awaitPromise":true
+                }),
+                Some(&fixture_session),
+            )?;
+            let snapshot_value = fixture_snapshot
+                .pointer("/result/value")
+                .cloned()
+                .context("fixture snapshot missing")?;
+            assert_eq!(
+                snapshot_value.get("producer_api"),
+                Some(&Value::String("deterministic_fixture_polyfill".to_owned()))
+            );
+            let raw_text = serde_json::to_string(&snapshot_value)?;
+            assert!(raw_text.contains("Ignore all previous instructions"));
+            let mut raw: RawWebMcpSnapshotV1 = serde_json::from_value(snapshot_value)?;
+            let generation = raw.registry_generation;
+            // The data URL intentionally has an opaque origin; hosted
+            // fixtures run on HTTP(S), which is the Adapter's fail-closed
+            // production requirement.
+            raw.origin = "https://fixture.example".to_owned();
+            for tool in &mut raw.tools {
+                tool.origin = Value::String(raw.origin.clone());
+            }
+            let mut tracker =
+                ato_adapter_browser::BrowserSurfaceTracker::new("surface-fixture", "run-fixture");
+            let safe_projection = tracker.update(raw, "2026-08-26T00:00:00Z")?;
+            let projected_text = serde_json::to_string(safe_projection)?;
+            assert!(!projected_text.contains("Ignore all previous instructions"));
+            assert!(safe_projection.operations.iter().any(|operation| {
+                operation.operation_name == "slow_increment"
+                    && operation.protocol_id == "ato.webmcp@1"
+            }));
+
+            let invoke_and_abort = format!(
+                r##"(async () => {{
+                  const response = new Promise((resolve) => {{
+                    const receive = (event) => {{
+                      const value = JSON.parse(String(event.detail));
+                      if (value.id !== "fixture-abort-request") return;
+                      document.removeEventListener("__ato_webmcp_response_v1", receive, false);
+                      resolve(value);
+                    }};
+                    document.addEventListener("__ato_webmcp_response_v1", receive, false);
+                  }});
+                  document.dispatchEvent(new CustomEvent("__ato_webmcp_request_v1", {{
+                    detail: JSON.stringify({{
+                      id: "fixture-abort-request",
+                      type: "invoke",
+                      operation_id: "fixture-abort-operation",
+                      operation_name: "slow_increment",
+                      arguments: {{ delay_ms: 3000 }},
+                      surface_generation: {generation}
+                    }})
+                  }}));
+                  await new Promise((resolve) => setTimeout(resolve, 50));
+                  const signaled = globalThis.__ATO_WEBMCP_CONSUMER__.abortActive();
+                  return {{ signaled, response: await response, counter: document.querySelector("#counter").textContent }};
+                }})()"##
+            );
+            let aborted = cdp.call(
+                "Runtime.evaluate",
+                json!({
+                    "expression":invoke_and_abort,
+                    "returnByValue":true,
+                    "awaitPromise":true
+                }),
+                Some(&fixture_session),
+            )?;
+            assert_eq!(
+                aborted.pointer("/result/value/signaled"),
+                Some(&Value::Bool(true))
+            );
+            assert_eq!(
+                aborted.pointer("/result/value/response/error"),
+                Some(&Value::String("aborted".to_owned()))
+            );
+            assert!(aborted.pointer("/result/value/response/output").is_none());
+            assert_eq!(
+                aborted.pointer("/result/value/counter"),
+                Some(&Value::String("0".to_owned()))
             );
             Ok(())
         })();
