@@ -9,9 +9,15 @@
   const installed = new WeakSet();
   const inFlight = new Map();
   const arrayIsArray = Array.isArray.bind(Array);
+  const parse = JSON.parse.bind(JSON);
   const stringify = JSON.stringify.bind(JSON);
+  const resolvePromise = Promise.resolve.bind(Promise);
+  const thenPromise = Function.prototype.call.bind(Promise.prototype.then);
   const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor.bind(Object);
   const getOwnPropertyDescriptors = Object.getOwnPropertyDescriptors.bind(Object);
+  const SafePromise = Promise;
+  const scheduleTimeout = globalThis.setTimeout.bind(globalThis);
+  const cancelTimeout = globalThis.clearTimeout.bind(globalThis);
   const documentToken = cryptoToken();
   const maxTools = 256;
   const maxSchemaBytes = 16 * 1024;
@@ -21,10 +27,13 @@
   // can expand to four UTF-8 bytes in the Rust/CDP boundary.
   const maxRegistryCodeUnits = 40 * 1024;
   const maxObservationCodeUnits = 8 * 1024;
+  const nativeRegistryTimeoutMs = 500;
   let producerApi = "unavailable";
+  let activeProducerOwner = "unavailable";
+  let activeProducerContext = null;
   let registryGeneration = 1;
 
-  installKnownProducers();
+  installSelectedNativeProducer();
   document.addEventListener(requestEvent, receiveRequest, false);
 
   const consumer = Object.freeze({
@@ -61,32 +70,64 @@
     writable: false,
   });
 
-  function installKnownProducers() {
-    installProducer(document.modelContext, "document_model_context");
-    installProducer(globalThis.navigator?.modelContext, "deprecated_alias");
+  function selectedNativeProducer() {
+    const documentContext = producerProperty(document, "modelContext");
+    if (supportsProducer(documentContext)) {
+      return { context: documentContext, api: "document_model_context" };
+    }
+    const aliasContext = producerProperty(globalThis.navigator, "modelContext");
+    if (supportsProducer(aliasContext)) {
+      return { context: aliasContext, api: "deprecated_alias" };
+    }
+    return null;
   }
 
-  function installProducer(context, api) {
+  function supportsProducer(context) {
+    if (!isObject(context)) return false;
+    try {
+      return [context.registerTool, context.listTools, context.getTools]
+        .some((candidate) => typeof candidate === "function");
+    } catch {
+      return false;
+    }
+  }
+
+  function producerProperty(target, name) {
+    if (!isObject(target)) return null;
+    try { return target[name]; } catch { return null; }
+  }
+
+  function installSelectedNativeProducer() {
+    const producer = selectedNativeProducer();
+    if (!producer) return null;
+    activateProducer("native", producer.context, producer.api);
+    installProducer(producer.context);
+    return producer;
+  }
+
+  function installProducer(context) {
     if (!isObject(context) || installed.has(context)) return;
     installed.add(context);
-    if (typeof context.registerTool !== "function") return;
-    producerApi = api;
-    const registerTool = context.registerTool.bind(context);
-    const unregisterTool = typeof context.unregisterTool === "function"
-      ? context.unregisterTool.bind(context)
-      : null;
     try {
+      if (typeof context.registerTool !== "function") return;
+      const registerTool = context.registerTool.bind(context);
+      const unregisterTool = typeof context.unregisterTool === "function"
+        ? context.unregisterTool.bind(context)
+        : null;
       context.registerTool = (...args) => {
         const registration = registrationFrom(args, context);
         const result = registerTool(...args);
-        if (registration) replaceRegistration(registration);
+        if (registration && context === activeProducerContext) {
+          replaceRegistration(registration);
+        }
         return result;
       };
       if (unregisterTool) {
         context.unregisterTool = (name) => {
           const result = unregisterTool(name);
           const normalizedName = normalizeOperationName(name);
-          if (normalizedName && registry.delete(normalizedName)) registryGeneration += 1;
+          if (context === activeProducerContext && normalizedName &&
+              registry.delete(normalizedName)) registryGeneration += 1;
           return result;
         };
       }
@@ -96,21 +137,22 @@
     }
   }
 
-  async function refreshNativeConsumer() {
-    const context = document.modelContext ?? globalThis.navigator?.modelContext;
-    if (!isObject(context)) return;
-    const list = typeof context.listTools === "function"
-      ? context.listTools.bind(context)
-      : typeof context.getTools === "function"
-        ? context.getTools.bind(context)
-        : null;
-    if (!list) return;
+  async function refreshNativeConsumer(producer, producerChanged) {
+    const { context } = producer;
     try {
-      const tools = await list();
-      if (!arrayIsArray(tools)) return;
-      producerApi = context === document.modelContext
-        ? "document_model_context"
-        : "deprecated_alias";
+      const list = typeof context.listTools === "function"
+        ? context.listTools.bind(context)
+        : typeof context.getTools === "function"
+          ? context.getTools.bind(context)
+          : null;
+      if (!list) return;
+      const tools = await withDeadline(list, nativeRegistryTimeoutMs);
+      if (activeProducerOwner !== "native" || activeProducerContext !== context ||
+          producerApi !== producer.api) return;
+      if (!arrayIsArray(tools)) {
+        replaceActiveRegistrations([], producerChanged);
+        return;
+      }
       const registrations = [];
       for (let index = 0; index < Math.min(tools.length, maxTools); index += 1) {
         try {
@@ -123,21 +165,26 @@
             : typeof context.executeTool === "function"
               ? (argumentsValue, signal) => context.executeTool(producerName, argumentsValue, { signal })
               : null;
-          registrations.push({ definition, invoke, owner: "native_probe" });
+          registrations.push({ definition, invoke, owner: "native" });
         } catch {
           // One hostile definition must not suppress unrelated operations.
         }
       }
-      replaceOwnedRegistrations("native_probe", boundedRegistrations(registrations));
+      replaceActiveRegistrations(boundedRegistrations(registrations), producerChanged);
     } catch {
-      // An unstable native consumer failure means no newly discovered tools.
+      // A failed authoritative snapshot invalidates stale native operations.
+      if (activeProducerOwner === "native" && activeProducerContext === context &&
+          producerApi === producer.api) {
+        replaceActiveRegistrations([], producerChanged);
+      }
     }
   }
 
-  function refreshFixture() {
-    const tools = globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__;
-    if (!arrayIsArray(tools)) return;
-    producerApi = "deterministic_fixture_polyfill";
+  function refreshFixture(tools, producerChanged) {
+    if (!arrayIsArray(tools)) {
+      replaceActiveRegistrations([], producerChanged);
+      return;
+    }
     const registrations = [];
     for (let index = 0; index < Math.min(tools.length, maxTools); index += 1) {
       try {
@@ -156,7 +203,7 @@
         // Drop only the malformed fixture definition.
       }
     }
-    replaceOwnedRegistrations("fixture", boundedRegistrations(registrations));
+    replaceActiveRegistrations(boundedRegistrations(registrations), producerChanged);
   }
 
   function registrationFrom(args, context) {
@@ -176,13 +223,13 @@
       invoke: typeof handler === "function"
         ? (argumentsValue, signal) => handler.call(context, argumentsValue, { signal })
         : null,
-      owner: "native_probe",
+      owner: "native",
     };
   }
 
   function replaceRegistration(registration, handlerChangeInvalidates = true) {
     const previous = registry.get(registration.definition.name);
-    if (previous && registration.owner === "native_probe" && registration.invoke === null) {
+    if (previous && registration.owner === "native" && registration.invoke === null) {
       registration = { ...registration, invoke: previous.invoke, owner: previous.owner };
     }
     const nextSignature = operationalSignature(registration.definition);
@@ -196,29 +243,73 @@
     }
   }
 
-  function replaceOwnedRegistrations(owner, registrations) {
+  function replaceActiveRegistrations(registrations, producerChanged = false) {
     const next = new Map(registrations.map((registration) => [registration.definition.name, registration]));
-    let operationallyChanged = false;
-    for (const [name, registration] of [...registry]) {
-      if (registration.owner === owner && !next.has(name)) {
-        registry.delete(name);
-        operationallyChanged = true;
-      }
-    }
+    const resolved = new Map();
+    let operationallyChanged = registry.size !== next.size;
     for (let registration of next.values()) {
       const previous = registry.get(registration.definition.name);
-      if (previous && registration.invoke === null) {
+      if (previous && previous.owner === registration.owner && registration.invoke === null) {
         registration = { ...registration, invoke: previous.invoke };
       }
       if (!previous || operationalSignature(previous.definition) !==
           operationalSignature(registration.definition)) {
         operationallyChanged = true;
       }
+      resolved.set(registration.definition.name, registration);
+    }
+    registry.clear();
+    for (const registration of resolved.values()) {
       // Handler closures produced by listTools/getTools are deliberately not
       // identity. The newest closure is retained without epoch churn.
       registry.set(registration.definition.name, registration);
     }
-    if (operationallyChanged) registryGeneration += 1;
+    if (operationallyChanged && !producerChanged) registryGeneration += 1;
+  }
+
+  function activateProducer(owner, context, api) {
+    if (activeProducerOwner === owner && activeProducerContext === context &&
+        producerApi === api) return false;
+    activeProducerOwner = owner;
+    activeProducerContext = context;
+    producerApi = api;
+    registry.clear();
+    // Producer ownership is operational identity. Even an identical schema
+    // must not let an old descriptor resolve to a replacement handler.
+    registryGeneration += 1;
+    return true;
+  }
+
+  function withDeadline(invoke, timeoutMs) {
+    return new SafePromise((resolve, reject) => {
+      let complete = false;
+      const timeoutId = scheduleTimeout(() => {
+        if (complete) return;
+        complete = true;
+        reject(new Error("producer_refresh_timeout"));
+      }, timeoutMs);
+      try {
+        thenPromise(resolvePromise(invoke()),
+          (value) => {
+            if (complete) return;
+            complete = true;
+            cancelTimeout(timeoutId);
+            resolve(value);
+          },
+          (error) => {
+            if (complete) return;
+            complete = true;
+            cancelTimeout(timeoutId);
+            reject(error);
+          },
+        );
+      } catch (error) {
+        if (complete) return;
+        complete = true;
+        cancelTimeout(timeoutId);
+        reject(error);
+      }
+    });
   }
 
   function boundedRegistrations(registrations) {
@@ -322,7 +413,7 @@
   async function receiveRequest(event) {
     let request;
     try {
-      request = JSON.parse(String(event.detail));
+      request = parse(String(event.detail));
     } catch {
       return;
     }
@@ -378,15 +469,28 @@
   }
 
   async function refreshCurrentRegistry() {
-    installKnownProducers();
-    await refreshNativeConsumer();
-    if (["unavailable", "deterministic_fixture_polyfill"].includes(producerApi)) {
-      refreshFixture();
+    const native = selectedNativeProducer();
+    if (native) {
+      const changed = activateProducer("native", native.context, native.api);
+      installProducer(native.context);
+      await refreshNativeConsumer(native, changed);
+      return;
     }
+    const fixtureTools = producerProperty(globalThis, "__ATO_WEBMCP_FIXTURE_TOOLS__");
+    if (arrayIsArray(fixtureTools)) {
+      const changed = activateProducer(
+        "fixture",
+        globalThis,
+        "deterministic_fixture_polyfill",
+      );
+      refreshFixture(fixtureTools, changed);
+      return;
+    }
+    activateProducer("unavailable", null, "unavailable");
   }
 
   function fixtureObservation() {
-    const producer = globalThis.__ATO_WEBMCP_FIXTURE_OBSERVATION__;
+    const producer = producerProperty(globalThis, "__ATO_WEBMCP_FIXTURE_OBSERVATION__");
     if (typeof producer !== "function") return null;
     try { return boundedJsonClone(producer(), maxObservationCodeUnits); } catch { return null; }
   }
