@@ -9,8 +9,8 @@ use std::path::Path;
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail, ensure};
-use serde_json::{Map, Value, json};
+use anyhow::{bail, ensure, Context, Result};
+use serde_json::{json, Map, Value};
 
 use crate::activity_client::{ActivityApiError, ActivityClient};
 
@@ -550,38 +550,102 @@ fn structural_schema(value: &Value, depth: usize) -> Value {
     if depth > 8 {
         return json!({});
     }
-    match value {
-        Value::Object(object) => {
-            let mut projected = Map::new();
-            for (key, child) in object.iter().take(128) {
-                if matches!(
-                    key.as_str(),
-                    "description"
-                        | "title"
-                        | "$comment"
-                        | "examples"
-                        | "example"
-                        | "default"
-                        | "deprecated"
-                        | "readOnly"
-                        | "writeOnly"
-                ) {
-                    continue;
-                }
-                projected.insert(key.clone(), structural_schema(child, depth + 1));
+    let Some(object) = value.as_object() else {
+        return Value::Null;
+    };
+    let mut projected = Map::new();
+    if let Some(kind) = object.get("type").and_then(Value::as_str).filter(|kind| {
+        matches!(
+            *kind,
+            "object" | "array" | "string" | "number" | "integer" | "boolean" | "null"
+        )
+    }) {
+        projected.insert("type".to_owned(), Value::String(kind.to_owned()));
+    }
+    if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+        let mut safe = Map::new();
+        for (name, schema) in properties.iter().take(128) {
+            if valid_schema_property(name) {
+                safe.insert(name.clone(), structural_schema(schema, depth + 1));
             }
-            Value::Object(projected)
         }
-        Value::Array(items) => Value::Array(
-            items
-                .iter()
-                .take(64)
-                .map(|item| structural_schema(item, depth + 1))
-                .collect(),
-        ),
-        Value::String(value) if value.len() <= 256 => Value::String(value.clone()),
-        Value::Bool(_) | Value::Number(_) | Value::Null => value.clone(),
-        Value::String(_) => Value::Null,
+        projected.insert("properties".to_owned(), Value::Object(safe));
+    }
+    if let Some(required) = object.get("required").and_then(Value::as_array) {
+        projected.insert(
+            "required".to_owned(),
+            Value::Array(
+                required
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|name| valid_schema_property(name))
+                    .take(128)
+                    .map(|name| Value::String(name.to_owned()))
+                    .collect(),
+            ),
+        );
+    }
+    if let Some(items) = object.get("items") {
+        projected.insert("items".to_owned(), structural_schema(items, depth + 1));
+    }
+    if let Some(additional) = object.get("additionalProperties").and_then(Value::as_bool) {
+        projected.insert("additionalProperties".to_owned(), Value::Bool(additional));
+    }
+    if let Some(values) = object.get("enum").and_then(Value::as_array) {
+        let safe = values.iter().take(64).all(safe_schema_scalar);
+        if safe {
+            projected.insert(
+                "enum".to_owned(),
+                Value::Array(values.iter().take(64).cloned().collect()),
+            );
+        }
+    }
+    if let Some(value) = object
+        .get("const")
+        .filter(|value| safe_schema_scalar(value))
+    {
+        projected.insert("const".to_owned(), value.clone());
+    }
+    for key in [
+        "minimum",
+        "maximum",
+        "minLength",
+        "maxLength",
+        "minItems",
+        "maxItems",
+    ] {
+        if let Some(number) = object.get(key).filter(|value| value.is_number()) {
+            projected.insert(key.to_owned(), number.clone());
+        }
+    }
+    Value::Object(projected)
+}
+
+fn valid_schema_property(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+}
+
+fn safe_schema_scalar(value: &Value) -> bool {
+    match value {
+        Value::String(value) => {
+            !value.is_empty()
+                && value.len() <= 80
+                && value.bytes().enumerate().all(|(index, byte)| {
+                    if index == 0 {
+                        byte.is_ascii_lowercase() || byte.is_ascii_digit()
+                    } else {
+                        byte.is_ascii_lowercase()
+                            || byte.is_ascii_digit()
+                            || matches!(byte, b'_' | b'-' | b'.' | b':')
+                    }
+                })
+        }
+        Value::Bool(_) | Value::Number(_) | Value::Null => true,
+        Value::Array(_) | Value::Object(_) => false,
     }
 }
 
@@ -878,6 +942,60 @@ mod tests {
         let serialized = serde_json::to_string(&tool_definitions()).expect("serialize tools");
         assert!(!serialized.contains(INJECTION));
         assert!(!MCP_INSTRUCTIONS.contains(INJECTION));
+    }
+
+    #[test]
+    fn operation_schema_drops_instruction_shaped_strings_at_the_mcp_boundary() {
+        let descriptor = json!({
+            "id":"operation_counter",
+            "activity_id":"activity_test",
+            "actor_id":"actor_test",
+            "actor_run_id":"run_actor_test",
+            "target_run_id":"run_app_test",
+            "surface_id":"surface_test",
+            "surface_epoch":3,
+            "protocol_id":"ato.webmcp@1",
+            "operation_name":"increment_counter",
+            "input_schema":{
+                "type":"object",
+                "properties":{
+                    "amount":{
+                        "type":"integer",
+                        "enum":[1, INJECTION],
+                        "const":INJECTION,
+                        "pattern":INJECTION
+                    },
+                    "mode":{"type":"string","enum":["small","large"]},
+                    "bad instruction":{"type":"string"}
+                },
+                "required":["amount","mode",INJECTION]
+            },
+            "source":"webmcp",
+            "origin":"https://fixture.example/raw",
+            "read_only":false,
+            "discovered_at":"2026-08-26T00:00:00Z"
+        });
+        let projected = safe_operation_descriptor(&descriptor, "surface_test", 3)
+            .expect("descriptor must project");
+        let serialized = serde_json::to_string(&projected).expect("serialize descriptor");
+        assert!(!serialized.contains(INJECTION));
+        assert!(projected
+            .pointer("/input_schema/properties/amount/enum")
+            .is_none());
+        assert!(projected
+            .pointer("/input_schema/properties/amount/const")
+            .is_none());
+        assert!(projected
+            .pointer("/input_schema/properties/amount/pattern")
+            .is_none());
+        assert_eq!(
+            projected.pointer("/input_schema/properties/mode/enum"),
+            Some(&json!(["small", "large"]))
+        );
+        assert_eq!(
+            projected.pointer("/input_schema/required"),
+            Some(&json!(["amount", "mode"]))
+        );
     }
 
     #[test]
