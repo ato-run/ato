@@ -202,6 +202,14 @@ impl BrowserHost {
             json!({"url": target_url, "browserContextId": self.browser_context_id}),
             None,
         )?;
+        // Chrome makes a newly-created target foreground. The Activity
+        // controller must keep running in the auxiliary target, while
+        // screenshots and WebMCP discovery remain scoped to the application
+        // session. Restore that application session to the foreground before
+        // the next presentation capture; background Page.captureScreenshot can
+        // otherwise wait until the CDP deadline on hosted headless Chrome.
+        self.cdp
+            .call("Page.bringToFront", json!({}), Some(&self.session_id))?;
         Ok(())
     }
 
