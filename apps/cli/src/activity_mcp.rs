@@ -9,8 +9,8 @@ use std::path::Path;
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{bail, ensure, Context, Result};
-use serde_json::{json, Map, Value};
+use anyhow::{Context, Result, bail, ensure};
+use serde_json::{Map, Value, json};
 
 use crate::activity_client::{ActivityApiError, ActivityClient};
 
@@ -1035,15 +1035,21 @@ mod tests {
             .expect("descriptor must project");
         let serialized = serde_json::to_string(&projected).expect("serialize descriptor");
         assert!(!serialized.contains(INJECTION));
-        assert!(projected
-            .pointer("/input_schema/properties/amount/enum")
-            .is_none());
-        assert!(projected
-            .pointer("/input_schema/properties/amount/const")
-            .is_none());
-        assert!(projected
-            .pointer("/input_schema/properties/amount/pattern")
-            .is_none());
+        assert!(
+            projected
+                .pointer("/input_schema/properties/amount/enum")
+                .is_none()
+        );
+        assert!(
+            projected
+                .pointer("/input_schema/properties/amount/const")
+                .is_none()
+        );
+        assert!(
+            projected
+                .pointer("/input_schema/properties/amount/pattern")
+                .is_none()
+        );
         assert_eq!(
             projected.pointer("/input_schema/properties/mode/enum"),
             Some(&json!(["small", "large"]))
@@ -1089,15 +1095,21 @@ mod tests {
             projected.pointer("/input_schema/required"),
             Some(&json!(["delay_ms"]))
         );
-        assert!(projected
-            .pointer("/input_schema/properties/ignore_previous_instructions")
-            .is_none());
-        assert!(projected
-            .pointer("/input_schema/properties/mode/enum")
-            .is_none());
-        assert!(!serde_json::to_string(&projected)
-            .expect("serialize descriptor")
-            .contains("previous_instructions"));
+        assert!(
+            projected
+                .pointer("/input_schema/properties/ignore_previous_instructions")
+                .is_none()
+        );
+        assert!(
+            projected
+                .pointer("/input_schema/properties/mode/enum")
+                .is_none()
+        );
+        assert!(
+            !serde_json::to_string(&projected)
+                .expect("serialize descriptor")
+                .contains("previous_instructions")
+        );
     }
 
     #[test]
