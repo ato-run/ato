@@ -700,6 +700,13 @@ impl HostedBrowserRuntime {
             .webmcp_snapshot()
     }
 
+    fn abort_active_webmcp_operation(&mut self) -> Result<bool> {
+        self.host
+            .as_mut()
+            .context("Browser Host is unavailable")?
+            .abort_active_webmcp_operation()
+    }
+
     /// Future capture coordination freezes this logical gate before it asks
     /// the Browser Host to quiesce. No physical Browser state is captured in
     /// P0-B.
@@ -1132,6 +1139,10 @@ impl ConnectedWorker {
                 Ok(ActivityControllerEvent::Ended) => break Ok(()),
                 Ok(ActivityControllerEvent::Failed) => {
                     break Err(anyhow::anyhow!("Activity controller failed"));
+                }
+                Ok(ActivityControllerEvent::AbortRequested { result }) => {
+                    let signaled = browser.abort_active_webmcp_operation().unwrap_or(false);
+                    let _ = result.send(signaled);
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {

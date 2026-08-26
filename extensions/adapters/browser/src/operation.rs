@@ -13,6 +13,7 @@ use url::Url;
 use crate::BROWSER_PROTOCOL_ID;
 
 const MAX_DESCRIPTOR_BYTES: usize = 64 * 1024;
+const MAX_RAW_SNAPSHOT_BYTES: usize = 1024 * 1024;
 const MAX_SCHEMA_BYTES: usize = 16 * 1024;
 const MAX_OPERATION_NAME_BYTES: usize = 64;
 const MAX_SCHEMA_DEPTH: usize = 8;
@@ -438,10 +439,13 @@ pub fn decode_operation_descriptor(
 }
 
 fn validate_snapshot(snapshot: &RawWebMcpSnapshotV1) -> Result<(), BrowserOperationError> {
+    let snapshot_bytes = serde_json::to_vec(snapshot)
+        .map_err(|error| BrowserOperationError::Invalid(error.to_string()))?;
     if snapshot.document_token.is_empty()
         || snapshot.document_token.len() > 256
         || snapshot.registry_generation == 0
         || snapshot.tools.len() > 256
+        || snapshot_bytes.len() > MAX_RAW_SNAPSHOT_BYTES
     {
         return Err(BrowserOperationError::Invalid(
             "WebMCP snapshot violates bounds".to_owned(),
@@ -497,11 +501,18 @@ fn surface_operations(
                 "type":"object",
                 "properties":{
                     "kind":{"type":"string"},
+                    "pointer_id":{"type":"integer","minimum":0},
+                    "pointer_type":{"type":"string","enum":["mouse","pen"]},
                     "x_normalized":{"type":"number"},
-                    "y_normalized":{"type":"number"}
+                    "y_normalized":{"type":"number"},
+                    "button":{"type":"integer"},
+                    "buttons":{"type":"integer","minimum":0}
                 },
-                "required":["kind","x_normalized","y_normalized"],
-                "additionalProperties":true
+                "required":[
+                    "kind","pointer_id","pointer_type","x_normalized",
+                    "y_normalized","button","buttons"
+                ],
+                "additionalProperties":false
             }),
             &origin,
             discovered_at,
@@ -594,8 +605,14 @@ fn browser_compat_descriptor(
     origin: &str,
     discovered_at: &str,
 ) -> SurfaceOperationDescriptorV1 {
+    let mut descriptor_hash = blake3::Hasher::new();
+    descriptor_hash.update(surface_id.as_bytes());
+    descriptor_hash.update(&[0]);
+    descriptor_hash.update(&surface_epoch.to_be_bytes());
+    descriptor_hash.update(&[0]);
+    descriptor_hash.update(operation_name.as_bytes());
     SurfaceOperationDescriptorV1 {
-        id: format!("op_browser_{surface_id}_{surface_epoch}_{operation_name}"),
+        id: format!("op_browser_{}", &descriptor_hash.finalize().to_hex()[..24]),
         protocol_id: BROWSER_PROTOCOL_ID.to_owned(),
         operation_name: operation_name.to_owned(),
         safe_description: safe_description.to_owned(),
@@ -678,25 +695,15 @@ fn safe_origin(value: &str) -> Result<String, BrowserOperationError> {
 }
 
 fn normalize_operation_name(value: &str) -> Option<String> {
-    let mut normalized = String::with_capacity(value.len().min(MAX_OPERATION_NAME_BYTES));
-    let mut previous_separator = false;
-    for character in value.chars() {
-        if normalized.len() >= MAX_OPERATION_NAME_BYTES {
-            break;
-        }
-        let next = if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
-            previous_separator = false;
-            character.to_ascii_lowercase()
-        } else if !previous_separator {
-            previous_separator = true;
-            '_'
-        } else {
-            continue;
-        };
-        normalized.push(next);
+    if value.is_empty()
+        || value.len() > MAX_OPERATION_NAME_BYTES
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return None;
     }
-    let normalized = normalized.trim_matches(['_', '-']).to_owned();
-    (!normalized.is_empty()).then_some(normalized)
+    Some(value.to_ascii_lowercase())
 }
 
 fn sanitize_schema(value: &Value, depth: usize) -> Option<Value> {
@@ -751,7 +758,9 @@ fn sanitize_schema(value: &Value, depth: usize) -> Option<Value> {
                 value.is_boolean()
                     || value.is_number()
                     || value.is_null()
-                    || value.as_str().is_some_and(|value| value.len() <= 128)
+                    || value.as_str().is_some_and(|value| {
+                        normalize_operation_name(value).as_deref() == Some(value)
+                    })
             })
             .take(64)
             .cloned()
@@ -807,23 +816,37 @@ mod tests {
             producer_api: WebMcpProducerApi::DocumentModelContext,
             registry_generation: generation,
             origin: "https://fixture.example/path?secret=no".to_owned(),
-            tools: vec![RawWebMcpToolV1 {
-                name: Value::String("Increment Counter".to_owned()),
-                description: Value::String(MALICIOUS.to_owned()),
-                input_schema: json!({
-                    "type":"object",
-                    "description":MALICIOUS,
-                    "properties":{
-                        "amount":{"type":"integer","description":MALICIOUS},
-                        "bad instruction":{"type":"string"}
-                    },
-                    "required":["amount","bad instruction"],
-                    "additionalProperties":false
-                }),
-                output: Value::String(MALICIOUS.to_owned()),
-                origin: Value::String("https://fixture.example/tool?raw=secret".to_owned()),
-                read_only: Value::Bool(false),
-            }],
+            tools: vec![
+                RawWebMcpToolV1 {
+                    name: Value::String("Increment_Counter".to_owned()),
+                    description: Value::String(MALICIOUS.to_owned()),
+                    input_schema: json!({
+                        "type":"object",
+                        "description":MALICIOUS,
+                        "properties":{
+                            "amount":{
+                                "type":"integer",
+                                "description":MALICIOUS,
+                                "enum":[1, MALICIOUS]
+                            },
+                            "bad instruction":{"type":"string"}
+                        },
+                        "required":["amount","bad instruction"],
+                        "additionalProperties":false
+                    }),
+                    output: Value::String(MALICIOUS.to_owned()),
+                    origin: Value::String("https://fixture.example/tool?raw=secret".to_owned()),
+                    read_only: Value::Bool(false),
+                },
+                RawWebMcpToolV1 {
+                    name: Value::String(MALICIOUS.to_owned()),
+                    description: Value::String(MALICIOUS.to_owned()),
+                    input_schema: json!({}),
+                    output: Value::String(MALICIOUS.to_owned()),
+                    origin: Value::String("https://fixture.example".to_owned()),
+                    read_only: Value::Bool(false),
+                },
+            ],
             untrusted_observation: json!({"counter":0}),
         }
     }
@@ -873,6 +896,15 @@ mod tests {
             .find(|operation| operation.source == OperationSource::Webmcp)
             .expect("WebMCP operation should exist");
         assert_eq!(webmcp.operation_name, "increment_counter");
+        assert_eq!(
+            projection
+                .operations
+                .iter()
+                .filter(|operation| operation.source == OperationSource::Webmcp)
+                .count(),
+            1,
+            "instruction-shaped tool names must not enter agent-visible descriptors"
+        );
         assert_eq!(webmcp.origin, "https://fixture.example");
         assert!(webmcp.input_schema.pointer("/description").is_none());
         assert!(
@@ -887,6 +919,15 @@ mod tests {
                 .pointer("/properties/bad instruction")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn oversized_raw_webmcp_snapshot_is_rejected_before_projection() {
+        let mut raw = snapshot("document-1", 1);
+        raw.tools[0].description = Value::String("x".repeat(MAX_RAW_SNAPSHOT_BYTES));
+        let mut tracker = BrowserSurfaceTracker::new("surface-1", "run-1");
+        assert!(tracker.update(raw, "now").is_err());
+        assert!(tracker.current().is_none());
     }
 
     #[test]
