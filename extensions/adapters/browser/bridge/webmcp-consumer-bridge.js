@@ -30,6 +30,12 @@
         untrusted_observation: fixtureObservation(),
       };
     },
+    abortActive: () => {
+      if (inFlight.size !== 1) return false;
+      const controller = inFlight.values().next().value;
+      controller.abort();
+      return true;
+    },
   });
   Object.defineProperty(globalThis, "__ATO_WEBMCP_CONSUMER__", {
     value: consumer,
@@ -184,36 +190,38 @@
     if (request.type === "abort") {
       const controller = inFlight.get(request.operation_id);
       if (controller) controller.abort();
-      return respond(request.id, true, null, controller ? null : "operation_not_found");
+      return respond(request.id, true, controller ? null : "operation_not_found");
     }
     if (request.type !== "invoke" || typeof request.operation_name !== "string" ||
         !Number.isSafeInteger(request.surface_generation) || request.surface_generation <= 0) {
-      return respond(request.id, false, null, "invalid_operation");
+      return respond(request.id, false, "invalid_operation");
     }
     installKnownProducers();
     refreshFixture();
     if (request.surface_generation !== registryGeneration) {
-      return respond(request.id, false, null, "stale_operation");
+      return respond(request.id, false, "stale_operation");
     }
     const registration = registry.get(request.operation_name);
     if (!registration || typeof registration.invoke !== "function") {
-      return respond(request.id, false, null, "unknown_operation");
+      return respond(request.id, false, "unknown_operation");
     }
     const controller = new AbortController();
     inFlight.set(request.operation_id, controller);
     try {
-      const output = await registration.invoke(request.arguments ?? {}, controller.signal);
-      respond(request.id, true, output ?? null, null);
+      // Page output is evidence to recover through a fresh observation, never
+      // an instruction-bearing response crossing into Ato's isolated world.
+      await registration.invoke(request.arguments ?? {}, controller.signal);
+      respond(request.id, true, null);
     } catch (error) {
-      respond(request.id, false, null, controller.signal.aborted ? "aborted" : "operation_failed");
+      respond(request.id, false, controller.signal.aborted ? "aborted" : "operation_failed");
     } finally {
       inFlight.delete(request.operation_id);
     }
   }
 
-  function respond(id, ok, output, error) {
+  function respond(id, ok, error) {
     document.dispatchEvent(new CustomEvent(responseEvent, {
-      detail: JSON.stringify({ id, ok, output, error }),
+      detail: JSON.stringify({ id, ok, error }),
     }));
   }
 

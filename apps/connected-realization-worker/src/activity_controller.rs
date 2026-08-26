@@ -31,6 +31,7 @@ const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_BODY_BYTES: usize = 64 * 1024;
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const MAX_RECEIPTS: usize = 1024;
+const MAX_ABORT_REQUESTS: usize = 1024;
 const BROWSER_PROTOCOL: &str = "ato.browser@1";
 const WEBMCP_PROTOCOL: &str = "ato.webmcp@1";
 const CONTROLLER_HTML: &str = include_str!("activity_controller.html");
@@ -40,6 +41,7 @@ pub(crate) enum ActivityControllerEvent {
     Ready,
     Ended,
     Failed,
+    AbortRequested { result: Sender<bool> },
 }
 
 #[derive(Debug, Serialize)]
@@ -93,6 +95,8 @@ impl ActivityControllerServer {
             receipts: Mutex::new(ReceiptCache::default()),
             surface: Mutex::new(None),
             abort_requests: Mutex::new(BTreeSet::new()),
+            operation_gate: Mutex::new(()),
+            active_operation_id: Mutex::new(None),
             ingress,
         });
         let thread_context = Arc::clone(&context);
@@ -222,6 +226,7 @@ impl HostedOperationInput {
 #[serde(deny_unknown_fields)]
 struct HostedAbortInput {
     operation_id: String,
+    descriptor_id: String,
     actor_id: String,
     actor_run_id: String,
     controller_session_id: String,
@@ -272,7 +277,7 @@ struct ActivityAbortReceipt {
     surface_id: String,
     surface_epoch: u64,
     status: &'static str,
-    best_effort_result: &'static str,
+    best_effort_result: String,
     requested_at: String,
 }
 
@@ -326,6 +331,8 @@ struct ActivityControllerContext {
     receipts: Mutex<ReceiptCache>,
     surface: Mutex<Option<PublishedSurface>>,
     abort_requests: Mutex<BTreeSet<String>>,
+    operation_gate: Mutex<()>,
+    active_operation_id: Mutex<Option<String>>,
     ingress: Arc<dyn BrowserControlIngress>,
 }
 
@@ -342,14 +349,24 @@ fn serve(
     context: Arc<ActivityControllerContext>,
     stopping: Arc<AtomicBool>,
 ) -> Result<()> {
+    let mut requests: Vec<JoinHandle<()>> = Vec::new();
     while !stopping.load(Ordering::Acquire) {
+        let mut index = 0;
+        while index < requests.len() {
+            if requests[index].is_finished() {
+                let request = requests.swap_remove(index);
+                let _ = request.join();
+            } else {
+                index += 1;
+            }
+        }
         match listener.accept() {
             Ok((mut stream, peer)) => {
                 if !peer.ip().is_loopback() {
                     continue;
                 }
                 let context = Arc::clone(&context);
-                thread::spawn(move || {
+                requests.push(thread::spawn(move || {
                     if handle_request(&mut stream, &context).is_err() {
                         let _ = respond_json(
                             &mut stream,
@@ -357,13 +374,16 @@ fn serve(
                             &serde_json::json!({"error":"invalid_request"}),
                         );
                     }
-                });
+                }));
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(10));
             }
             Err(error) => return Err(error).context("accept Activity controller request"),
         }
+    }
+    for request in requests {
+        let _ = request.join();
     }
     Ok(())
 }
@@ -572,19 +592,50 @@ fn apply_operation(
         return Ok(receipt);
     }
     let event = operation_event(descriptor, &input.arguments, published.registry_generation)?;
+    let _gate = context
+        .operation_gate
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Activity operation gate poisoned"))?;
+    if context
+        .abort_requests
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Activity abort mutex poisoned"))?
+        .remove(&input.operation_id)
+    {
+        bail!("operation_aborted");
+    }
+    let is_webmcp = matches!(&event, BrowserEvent::Operation { .. });
+    if is_webmcp {
+        *context
+            .active_operation_id
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Activity active operation mutex poisoned"))? =
+            Some(input.operation_id.clone());
+    }
     let accepted = context
         .ingress
         .accept_control_operation(input.operation_id.clone(), event)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    ensure!(
-        accepted.record_error.is_none(),
-        "Activity Browser Record submission failed after operation apply"
-    );
+        .map_err(|error| anyhow::anyhow!(error.to_string()));
+    if is_webmcp {
+        *context
+            .active_operation_id
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Activity active operation mutex poisoned"))? = None;
+    }
     let abort_requested = context
         .abort_requests
         .lock()
         .map_err(|_| anyhow::anyhow!("Activity abort mutex poisoned"))?
         .remove(&input.operation_id);
+    let accepted = match accepted {
+        Ok(accepted) => accepted,
+        Err(error) if abort_requested => bail!("operation_aborted: {error}"),
+        Err(error) => return Err(error),
+    };
+    ensure!(
+        accepted.record_error.is_none(),
+        "Activity Browser Record submission failed after operation apply"
+    );
     let receipt = ActivityOperationReceipt {
         run_sequence: accepted.run_seq,
         operation_id: input.operation_id.clone(),
@@ -660,6 +711,8 @@ fn request_abort(
     };
     ensure!(
         target_run_id == context.run_id
+            && !input.operation_id.is_empty()
+            && !input.descriptor_id.is_empty()
             && input.controller_epoch > 0
             && !input.actor_id.is_empty()
             && !input.actor_run_id.is_empty()
@@ -674,14 +727,43 @@ fn request_abort(
         .context("stale_operation")?;
     ensure!(
         published.projection.observation.surface_id == input.surface_id
-            && published.projection.observation.surface_epoch == input.surface_epoch,
+            && published.projection.observation.surface_epoch == input.surface_epoch
+            && published
+                .projection
+                .operations
+                .iter()
+                .any(|descriptor| descriptor.id == input.descriptor_id),
         "stale_operation"
     );
-    context
-        .abort_requests
+    {
+        let mut requests = context
+            .abort_requests
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Activity abort mutex poisoned"))?;
+        ensure!(
+            requests.contains(&input.operation_id) || requests.len() < MAX_ABORT_REQUESTS,
+            "invalid_operation"
+        );
+        requests.insert(input.operation_id.clone());
+    }
+    let is_active = context
+        .active_operation_id
         .lock()
-        .map_err(|_| anyhow::anyhow!("Activity abort mutex poisoned"))?
-        .insert(input.operation_id.clone());
+        .map_err(|_| anyhow::anyhow!("Activity active operation mutex poisoned"))?
+        .as_deref()
+        == Some(input.operation_id.as_str());
+    let signaled = if is_active {
+        let (result, receiver) = mpsc::channel();
+        context
+            .events
+            .send(ActivityControllerEvent::AbortRequested { result })
+            .context("Activity controller abort channel closed")?;
+        receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or(false)
+    } else {
+        false
+    };
     Ok(ActivityAbortReceipt {
         operation_id: input.operation_id,
         actor_id: input.actor_id,
@@ -692,7 +774,13 @@ fn request_abort(
         surface_id: input.surface_id,
         surface_epoch: input.surface_epoch,
         status: "abort_requested",
-        best_effort_result: "settle_only",
+        best_effort_result: if signaled {
+            "abort_signal_delivered".to_owned()
+        } else if is_active {
+            "settle_only_abort_unavailable".to_owned()
+        } else {
+            "not_in_flight_or_queued".to_owned()
+        },
         requested_at: OffsetDateTime::now_utc().format(&Rfc3339)?,
     })
 }
@@ -703,6 +791,7 @@ fn stable_operation_error(error: &anyhow::Error) -> &'static str {
         "stale_operation",
         "unsupported_operation",
         "invalid_operation",
+        "operation_aborted",
         "fenced_controller",
     ] {
         if message.contains(code) {
@@ -860,6 +949,133 @@ fn controller_html(
 mod tests {
     use super::*;
 
+    #[derive(Default)]
+    struct TestIngress {
+        accepted: Mutex<Vec<(String, BrowserEvent)>>,
+    }
+
+    impl BrowserControlIngress for TestIngress {
+        fn accept_control_operation(
+            &self,
+            operation_id: String,
+            event: BrowserEvent,
+        ) -> std::result::Result<ato_kernel::AcceptedOperation, ato_kernel::EvolutionError>
+        {
+            self.accepted
+                .lock()
+                .expect("test ingress mutex")
+                .push((operation_id, event));
+            let reference =
+                ato_computation::ComputationRef::parse(format!("blake3:{}", "ab".repeat(32)))
+                    .expect("test reference");
+            Ok(ato_kernel::AcceptedOperation {
+                transition: ato_kernel::Transition {
+                    from: reference.clone(),
+                    offer: ato_kernel::TransitionOffer::selected(
+                        ato_kernel::ChoiceId::new("test"),
+                        ato_kernel::Action::Tau,
+                    ),
+                    to: reference,
+                },
+                run_seq: 73,
+                record_error: None,
+            })
+        }
+    }
+
+    struct BlockingTestIngress {
+        started: Sender<()>,
+        release: Mutex<Receiver<()>>,
+    }
+
+    impl BrowserControlIngress for BlockingTestIngress {
+        fn accept_control_operation(
+            &self,
+            _operation_id: String,
+            _event: BrowserEvent,
+        ) -> std::result::Result<ato_kernel::AcceptedOperation, ato_kernel::EvolutionError>
+        {
+            let _ = self.started.send(());
+            self.release
+                .lock()
+                .expect("release mutex")
+                .recv_timeout(Duration::from_secs(2))
+                .expect("test should release operation");
+            Err(ato_kernel::EvolutionError::Apply("aborted".to_owned()))
+        }
+    }
+
+    fn test_context(
+        ingress: Arc<dyn BrowserControlIngress>,
+    ) -> (ActivityControllerContext, Receiver<ActivityControllerEvent>) {
+        let (events, receiver) = mpsc::channel();
+        let descriptor = SurfaceOperationDescriptorV1 {
+            id: "descriptor-current".to_owned(),
+            protocol_id: WEBMCP_PROTOCOL.to_owned(),
+            operation_name: "increment_counter".to_owned(),
+            safe_description: "safe".to_owned(),
+            input_schema: serde_json::json!({"type":"object"}),
+            source: OperationSource::Webmcp,
+            origin: "https://fixture.example".to_owned(),
+            read_only: false,
+            discovered_at: "now".to_owned(),
+        };
+        (
+            ActivityControllerContext {
+                html: String::new(),
+                csp: String::new(),
+                secret: "secret".to_owned(),
+                bootstrap_path: "/bootstrap/test".to_owned(),
+                run_id: "run-browser".to_owned(),
+                events,
+                frame: Mutex::new(None),
+                receipts: Mutex::new(ReceiptCache::default()),
+                surface: Mutex::new(Some(PublishedSurface {
+                    projection: BrowserSurfaceProjectionV1 {
+                        revision: 1,
+                        observation: ato_adapter_browser::SurfaceObservationV1 {
+                            surface_id: "surface-browser".to_owned(),
+                            target_run_id: "run-browser".to_owned(),
+                            surface_epoch: 4,
+                            origin: "https://fixture.example".to_owned(),
+                            producer_api:
+                                ato_adapter_browser::WebMcpProducerApi::DocumentModelContext,
+                            untrusted_content: serde_json::json!({"counter":0}),
+                            observed_at: "now".to_owned(),
+                        },
+                        operations: vec![descriptor],
+                    },
+                    registry_generation: 9,
+                })),
+                abort_requests: Mutex::new(BTreeSet::new()),
+                operation_gate: Mutex::new(()),
+                active_operation_id: Mutex::new(None),
+                ingress,
+            },
+            receiver,
+        )
+    }
+
+    fn test_operation_input(operation_id: &str) -> HostedOperationInput {
+        HostedOperationInput {
+            operation_id: operation_id.to_owned(),
+            descriptor_id: "descriptor-current".to_owned(),
+            actor_id: "actor-child".to_owned(),
+            actor_run_id: "run-actor-child".to_owned(),
+            controller_session_id: "controller-session".to_owned(),
+            controller_epoch: 6,
+            target_run_id: Some("run-browser".to_owned()),
+            run_id: None,
+            surface_id: "surface-browser".to_owned(),
+            surface_epoch: 4,
+            protocol_id: WEBMCP_PROTOCOL.to_owned(),
+            operation_name: "increment_counter".to_owned(),
+            arguments: serde_json::json!({}),
+            client_sequence: 2,
+            actor_participant_id: None,
+        }
+    }
+
     #[test]
     fn controller_uses_canvas_media_and_application_receipts() {
         assert!(CONTROLLER_HTML.contains("mediaCanvas.captureStream(30)"));
@@ -978,5 +1194,116 @@ mod tests {
         assert_eq!(value["controller_session_id"], "controller-session-1");
         assert_eq!(value["controller_epoch"], 4);
         assert_eq!(value["surface_epoch"], 3);
+    }
+
+    #[test]
+    fn generic_controller_operation_uses_runner_sequence_and_full_provenance() {
+        let ingress = Arc::new(TestIngress::default());
+        let (context, _events) = test_context(ingress.clone());
+        let receipt = apply_operation(&context, test_operation_input("invocation-1"))
+            .expect("operation should reach ingress");
+        assert_eq!(receipt.run_sequence, 73);
+        assert_eq!(receipt.actor_id.as_deref(), Some("actor-child"));
+        assert_eq!(receipt.actor_run_id.as_deref(), Some("run-actor-child"));
+        assert_eq!(
+            receipt.controller_session_id.as_deref(),
+            Some("controller-session")
+        );
+        assert_eq!(receipt.controller_epoch, Some(6));
+        assert_eq!(receipt.surface_epoch, Some(4));
+        let accepted = ingress.accepted.lock().expect("test ingress mutex");
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].0, "invocation-1");
+        assert_eq!(
+            accepted[0].1,
+            BrowserEvent::Operation {
+                operation_name: "increment_counter".to_owned(),
+                arguments: serde_json::json!({}),
+                surface_generation: 9,
+            }
+        );
+    }
+
+    #[test]
+    fn stale_descriptor_is_rejected_without_same_name_reresolution() {
+        let ingress = Arc::new(TestIngress::default());
+        let (context, _events) = test_context(ingress.clone());
+        let mut input = test_operation_input("invocation-stale");
+        input.descriptor_id = "descriptor-from-prior-epoch".to_owned();
+        let error = apply_operation(&context, input).expect_err("stale descriptor must fail");
+        assert_eq!(stable_operation_error(&error), "stale_operation");
+        assert!(
+            ingress
+                .accepted
+                .lock()
+                .expect("test ingress mutex")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn active_webmcp_abort_is_signaled_and_settles_as_aborted() {
+        let (started, operation_started) = mpsc::channel();
+        let (release, operation_release) = mpsc::channel();
+        let ingress: Arc<dyn BrowserControlIngress> = Arc::new(BlockingTestIngress {
+            started,
+            release: Mutex::new(operation_release),
+        });
+        let (context, events) = test_context(ingress);
+        let context = Arc::new(context);
+        let apply_context = Arc::clone(&context);
+        let operation = thread::spawn(move || {
+            apply_operation(&apply_context, test_operation_input("invocation-abort"))
+        });
+        operation_started
+            .recv_timeout(Duration::from_secs(1))
+            .expect("operation should reach the Runner ingress");
+
+        let abort_context = Arc::clone(&context);
+        let abort = thread::spawn(move || {
+            request_abort(
+                &abort_context,
+                HostedAbortInput {
+                    operation_id: "invocation-abort".to_owned(),
+                    descriptor_id: "descriptor-current".to_owned(),
+                    actor_id: "actor-child".to_owned(),
+                    actor_run_id: "run-actor-child".to_owned(),
+                    controller_session_id: "controller-session".to_owned(),
+                    controller_epoch: 6,
+                    target_run_id: Some("run-browser".to_owned()),
+                    run_id: None,
+                    surface_id: "surface-browser".to_owned(),
+                    surface_epoch: 4,
+                },
+            )
+        });
+        let ActivityControllerEvent::AbortRequested { result } = events
+            .recv_timeout(Duration::from_secs(1))
+            .expect("active operation should request the Browser abort")
+        else {
+            panic!("unexpected controller event");
+        };
+        result.send(true).expect("abort result channel");
+        let abort_receipt = abort
+            .join()
+            .expect("abort request thread")
+            .expect("abort receipt");
+        assert_eq!(abort_receipt.status, "abort_requested");
+        assert_eq!(abort_receipt.best_effort_result, "abort_signal_delivered");
+
+        release.send(()).expect("release operation");
+        let error = operation
+            .join()
+            .expect("operation thread")
+            .expect_err("aborted ingress must not issue a Runner receipt");
+        assert_eq!(stable_operation_error(&error), "operation_aborted");
+        assert!(
+            context
+                .abort_requests
+                .lock()
+                .expect("abort request mutex")
+                .is_empty(),
+            "settled abort evidence must not leak into later invocations"
+        );
     }
 }
