@@ -97,6 +97,8 @@ const RUNNER_CAPABILITIES: &[&str] = &[
     "backend=firecracker",
 ];
 const ACTIVE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+const ACTIVITY_FRAME_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
+const ACTIVITY_FRAME_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const GUEST_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const GUEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const RUN_CONTROL_PATH: &str = "/.well-known/ato/control";
@@ -802,6 +804,32 @@ impl HostedBrowserRuntime {
     }
 }
 
+fn refresh_activity_presentation_frame<C, P>(
+    next_frame_at: &mut Instant,
+    capture: C,
+    publish: P,
+) -> Result<()>
+where
+    C: FnOnce() -> Result<Vec<u8>>,
+    P: FnOnce(Vec<u8>) -> Result<()>,
+{
+    if Instant::now() < *next_frame_at {
+        return Ok(());
+    }
+    // Presentation is a compatibility projection, not the Run's physical
+    // liveness boundary. Keep the last good frame across a transient CDP
+    // capture failure and back off before trying the untrusted page again.
+    let retry_after = match capture() {
+        Ok(frame) => {
+            publish(frame)?;
+            ACTIVITY_FRAME_REFRESH_INTERVAL
+        }
+        Err(_) => ACTIVITY_FRAME_RETRY_INTERVAL,
+    };
+    *next_frame_at = Instant::now() + retry_after;
+    Ok(())
+}
+
 impl Drop for HostedBrowserRuntime {
     fn drop(&mut self) {
         // Error paths may bypass the normal stop request. Do not leave a
@@ -1169,11 +1197,16 @@ impl ConnectedWorker {
         );
         let mut ready = false;
         let mut last_control = Instant::now() - Duration::from_secs(1);
+        let mut next_frame_at = Instant::now();
         let mut last_heartbeat = Instant::now();
         let mut last_surface = Instant::now() - Duration::from_secs(1);
         let result = (|| -> Result<()> {
             loop {
-                controller.publish_frame(browser.capture_presentation_frame()?)?;
+                refresh_activity_presentation_frame(
+                    &mut next_frame_at,
+                    || browser.capture_presentation_frame(),
+                    |frame| controller.publish_frame(frame),
+                )?;
                 if last_surface.elapsed() >= Duration::from_millis(250) {
                     if let Ok(snapshot) = browser.webmcp_snapshot() {
                         let registry_generation = snapshot.registry_generation;
@@ -1237,7 +1270,12 @@ impl ConnectedWorker {
         if let Err(error) = running.quiesce() {
             shutdown_errors.push(format!("Activity realization quiesce failed: {error:#}"));
         }
-        if let Err(error) = self.api.report_stopped(&lease.id, &execution_id) {
+        // A failed physical/controller loop must remain a failed lease. Sending
+        // `stopped` first makes the later failure report terminal-conflict and
+        // erases the only durable diagnostic evidence.
+        if shutdown_errors.is_empty()
+            && let Err(error) = self.api.report_stopped(&lease.id, &execution_id)
+        {
             shutdown_errors.push(format!("Activity stopped report failed: {error:#}"));
         }
         if shutdown_errors.is_empty() {
@@ -3301,6 +3339,46 @@ mod tests {
     use tungstenite::client::IntoClientRequest;
 
     #[test]
+    fn activity_frame_capture_failure_keeps_the_run_alive_and_backs_off() {
+        let attempts = AtomicU64::new(0);
+        let publications = AtomicU64::new(0);
+        let mut next_frame_at = Instant::now() - Duration::from_secs(1);
+        let before = Instant::now();
+
+        refresh_activity_presentation_frame(
+            &mut next_frame_at,
+            || -> Result<Vec<u8>> {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                anyhow::bail!("transient presentation capture failure")
+            },
+            |_| {
+                publications.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .expect("presentation failure is not Activity failure");
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(publications.load(Ordering::SeqCst), 0);
+        assert!(next_frame_at >= before + ACTIVITY_FRAME_RETRY_INTERVAL);
+
+        refresh_activity_presentation_frame(
+            &mut next_frame_at,
+            || {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Ok(Vec::new())
+            },
+            |_| {
+                publications.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .expect("backoff check");
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(publications.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
     fn normal_lease_cleanup_removes_activity_operation_journal() {
         let temporary = tempfile::tempdir().expect("lease tempdir");
         let lease_root = temporary.path().join("leases/lease-cleanup");
@@ -3678,6 +3756,21 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             headless: true,
         })
         .unwrap();
+        host.open_auxiliary_target(&format!("{origin}/"))
+            .expect("credential-free Activity controller target");
+        assert!(
+            !host
+                .capture_jpeg()
+                .expect("application frame after auxiliary target")
+                .is_empty()
+        );
+        thread::sleep(Duration::from_millis(250));
+        assert!(
+            !host
+                .capture_jpeg()
+                .expect("continued application frame after auxiliary target")
+                .is_empty()
+        );
         let records = TestRecords::default();
         let submitted = Arc::clone(&records.0);
         let dispatcher = adapter
