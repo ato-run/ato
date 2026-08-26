@@ -833,6 +833,11 @@ pub struct WorkerConfig {
     pub tap_host_cidr: String,
     #[arg(long, env = "ATO_RUNNER_SLOT_ID", default_value = "0")]
     pub slot_id: String,
+    /// Host-wide capacity advertised to the control plane. Multiple worker
+    /// processes may share one Runner credential when each owns a distinct
+    /// physical slot (ports, TAP network, and slot id).
+    #[arg(long, env = "ATO_RUNNER_MAX_SLOTS", default_value_t = 1)]
+    pub max_slots: u32,
     /// Required only by roots that explicitly compose a Browser Computation.
     #[arg(long, env = "ATO_BROWSER_CHROME")]
     pub browser_chrome: Option<PathBuf>,
@@ -1206,6 +1211,10 @@ fn validate_config(config: &WorkerConfig) -> Result<()> {
     ensure!(
         config.hidden_surface_listen != config.surface_listen,
         "hidden and published Surface listeners must be distinct"
+    );
+    ensure!(
+        (1..=64).contains(&config.max_slots),
+        "Runner max slots must be in [1, 64]"
     );
     ensure!(
         !config.tap_host_cidr.trim().is_empty() && config.tap_host_cidr.contains('/'),
@@ -2581,7 +2590,7 @@ impl HttpRunnerApi {
             "public_base_url": config.public_base_url,
             "os": std::env::consts::OS,
             "arch": std::env::consts::ARCH,
-            "max_slots": 1,
+            "max_slots": config.max_slots,
             "active_slots": active_slots,
             "agent_version": env!("CARGO_PKG_VERSION"),
         }))
@@ -3626,10 +3635,37 @@ mod tests {
             surface_target: "127.0.0.1:8080".parse().unwrap(),
             tap_host_cidr: "172.16.0.1/24".to_owned(),
             slot_id: "0".to_owned(),
+            max_slots: 1,
             browser_chrome: None,
             run_control_verification_key: None,
             once: true,
         };
+        assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn advertised_host_capacity_is_bounded() {
+        let mut config = WorkerConfig {
+            api_base: "https://staging.api.ato.run".to_owned(),
+            runner_id: "runner".to_owned(),
+            runner_token: "token".to_owned(),
+            runner_credentials_file: None,
+            public_base_url: "https://runner.example".to_owned(),
+            work_root: PathBuf::from(".tmp/worker-test"),
+            surface_listen: "127.0.0.1:8420".parse().unwrap(),
+            hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
+            surface_target: "172.30.0.2:38865".parse().unwrap(),
+            tap_host_cidr: "172.30.0.1/24".to_owned(),
+            slot_id: "0".to_owned(),
+            max_slots: 0,
+            browser_chrome: None,
+            run_control_verification_key: None,
+            once: true,
+        };
+        assert!(validate_config(&config).is_err());
+        config.max_slots = 64;
+        assert!(validate_config(&config).is_ok());
+        config.max_slots = 65;
         assert!(validate_config(&config).is_err());
     }
 
@@ -3654,6 +3690,7 @@ mod tests {
             surface_target: "172.30.0.2:38865".parse().unwrap(),
             tap_host_cidr: "172.30.0.1/24".to_owned(),
             slot_id: "0".to_owned(),
+            max_slots: 1,
             browser_chrome: None,
             run_control_verification_key: None,
             once: true,
@@ -3704,6 +3741,7 @@ mod tests {
             surface_target: "172.30.0.2:38865".parse().unwrap(),
             tap_host_cidr: "172.30.0.1/24".to_owned(),
             slot_id: "0".to_owned(),
+            max_slots: 1,
             browser_chrome: None,
             run_control_verification_key: None,
             once: true,
@@ -3738,6 +3776,7 @@ mod tests {
             surface_target: "172.30.0.2:38865".parse().unwrap(),
             tap_host_cidr: "172.30.0.1/24".to_owned(),
             slot_id: "0".to_owned(),
+            max_slots: 1,
             browser_chrome: None,
             run_control_verification_key: None,
             once: true,
