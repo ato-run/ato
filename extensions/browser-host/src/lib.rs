@@ -40,6 +40,17 @@ const MAX_LOCAL_STORAGE_ITEMS: usize = 4096;
 const MAX_LOCAL_STORAGE_KEY_BYTES: usize = 16 * 1024;
 const MAX_LOCAL_STORAGE_VALUE_BYTES: usize = 1024 * 1024;
 const MAX_LOCAL_STORAGE_TOTAL_BYTES: usize = 8 * 1024 * 1024;
+// The credential-free Activity controller runs in an auxiliary target while
+// the application target remains foreground for screenshots and WebMCP. Chrome
+// otherwise applies its intensive background-timer policy after an idle
+// interval, delaying the controller's Room ping and reconnect timers until the
+// live Activity tears itself down. These flags affect only this private hosted
+// realization; they do not participate in Computation identity.
+const BACKGROUND_CONTROLLER_LIVENESS_ARGS: [&str; 3] = [
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+];
 
 /// Origin-scoped physical Browser state. It is never a Computation residual.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -493,6 +504,7 @@ fn launch_chrome(chrome: &Path, profile: &Path, headless: bool) -> Result<Child>
         .arg("--remote-debugging-address=127.0.0.1")
         .arg("--remote-debugging-port=0")
         .arg("--remote-allow-origins=*")
+        .args(BACKGROUND_CONTROLLER_LIVENESS_ARGS)
         .arg("--window-size=800,600")
         .arg(format!("--user-data-dir={}", profile.display()))
         .arg("about:blank")
@@ -704,6 +716,19 @@ fn required_string<'a>(value: &'a Value, name: &str) -> Result<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_chrome_keeps_the_background_controller_live() {
+        assert_eq!(
+            BACKGROUND_CONTROLLER_LIVENESS_ARGS,
+            [
+                "--disable-background-timer-throttling",
+                "--disable-backgrounding-occluded-windows",
+                "--disable-renderer-backgrounding",
+            ]
+        );
+    }
+
     #[test]
     fn exact_origin_is_required() {
         assert!(validate_target("https://example.test/path", "https://example.test").is_ok());
