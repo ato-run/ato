@@ -21,6 +21,7 @@ anyhow = "1"
 base64 = "0.22"
 ato-adapter-api = { path = "../../extensions/adapters/api", version = "0.1.0" }
 ato-adapter-browser = { path = "../../extensions/adapters/browser", version = "0.1.0" }
+ato-adapter-workspace = { path = "../../extensions/adapters/workspace", version = "0.1.0" }
 ato-browser-host = { path = "../../extensions/browser-host", version = "0.1.0" }
 ato-browser-semantics = { path = "../../extensions/semantics/browser", version = "0.1.0" }
 ato-computation = { path = "../../lib/computation", version = "0.1.0" }
@@ -29,6 +30,7 @@ ato-contracts = { path = "../../extensions/contracts", version = "0.1.0" }
 ato-kernel = { path = "../../lib/kernel", version = "0.1.0" }
 ato-materializer-api = { path = "../../extensions/materializers/api", version = "0.1.0" }
 ato-materializer-vm-snapshot = { path = "../../extensions/materializers/vm-snapshot", version = "0.1.0" }
+ato-materializer-replay = { path = "../../extensions/materializers/replay", version = "0.1.0" }
 ato-objects = { path = "../../lib/objects", version = "0.1.0" }
 ato-planner = { package = "ato-realization-planner", path = "../../extensions/planner", version = "0.1.0" }
 ato-record-writer = { path = "../../extensions/record-writer", version = "0.1.0" }
@@ -37,7 +39,9 @@ clap = { version = "4.5", features = ["derive", "env"] }
 hmac = "0.12"
 hex = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+rand = "0.8"
 serde = { version = "1", features = ["derive"] }
+serde_jcs = "0.1"
 serde_json = "1"
 sha2 = "0.10"
 tempfile = "3"
