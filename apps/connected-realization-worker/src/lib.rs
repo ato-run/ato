@@ -101,6 +101,11 @@ const ACTIVITY_FRAME_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 const ACTIVITY_FRAME_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const GUEST_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const GUEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const TERMINAL_REPORT_RETRY_DELAYS: [Duration; 3] = [
+    Duration::ZERO,
+    Duration::from_millis(250),
+    Duration::from_secs(1),
+];
 const RUN_CONTROL_PATH: &str = "/.well-known/ato/control";
 const BROWSER_PRESENTATION_PATH: &str = "/.well-known/ato/browser/frame.jpg";
 const RUN_CONTROL_MAX_FRAME_BYTES: usize = 32 * 1024;
@@ -2795,17 +2800,31 @@ impl HttpRunnerApi {
     }
 
     fn report_failed(&self, lease_id: &str, message: &str) -> Result<()> {
-        self.authorized(
-            self.client
-                .post(format!("{}/v1/runner-leases/{lease_id}/status", self.base)),
-        )
-        .json(&serde_json::json!({
-            "status": "failed",
-            "error": { "code": "realization_failed", "message": truncate(message, 2000) }
-        }))
-        .send()?
-        .error_for_status()?;
-        Ok(())
+        let message = truncate(message, 2000);
+        let mut last_error = None;
+        for delay in TERMINAL_REPORT_RETRY_DELAYS {
+            if !delay.is_zero() {
+                thread::sleep(delay);
+            }
+            match self
+                .authorized(
+                    self.client
+                        .post(format!("{}/v1/runner-leases/{lease_id}/status", self.base)),
+                )
+                .json(&serde_json::json!({
+                    "status": "failed",
+                    "error": { "code": "realization_failed", "message": message }
+                }))
+                .send()
+                .and_then(reqwest::blocking::Response::error_for_status)
+            {
+                Ok(_) => return Ok(()),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error
+            .context("terminal failure report retry set is empty")?
+            .into())
     }
 
     fn report_ready(
@@ -2867,14 +2886,27 @@ impl HttpRunnerApi {
     }
 
     fn report_stopped(&self, lease_id: &str, execution_id: &str) -> Result<()> {
-        self.authorized(
-            self.client
-                .post(format!("{}/v1/runner-leases/{lease_id}/stopped", self.base)),
-        )
-        .json(&serde_json::json!({ "execution_id": execution_id }))
-        .send()?
-        .error_for_status()?;
-        Ok(())
+        let mut last_error = None;
+        for delay in TERMINAL_REPORT_RETRY_DELAYS {
+            if !delay.is_zero() {
+                thread::sleep(delay);
+            }
+            match self
+                .authorized(
+                    self.client
+                        .post(format!("{}/v1/runner-leases/{lease_id}/stopped", self.base)),
+                )
+                .json(&serde_json::json!({ "execution_id": execution_id }))
+                .send()
+                .and_then(reqwest::blocking::Response::error_for_status)
+            {
+                Ok(_) => return Ok(()),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error
+            .context("terminal stopped report retry set is empty")?
+            .into())
     }
 
     fn activity_executor_session(
