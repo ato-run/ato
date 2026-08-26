@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 mod coalescer;
+mod operation;
 mod protocol;
 mod transport;
 
@@ -22,6 +23,13 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+pub use operation::{
+    ActorOperationLedger, BrowserOperationError, BrowserOperationInvocationV1,
+    BrowserOperationReceiptV1, BrowserSurfaceProjectionV1, BrowserSurfaceTracker,
+    OperationDescriptorV1, OperationSource, RawWebMcpSnapshotV1, RawWebMcpToolV1,
+    RunnerOperationResultV1, SurfaceObservationV1, SurfaceOperationDescriptorV1, WebMcpProducerApi,
+    decode_operation_descriptor, encode_operation_descriptor,
+};
 pub use protocol::{
     BrowserEvent, BrowserProtocolError, KeyboardKind, Modifiers, PointerKind, PointerType,
     decode_event, encode_event,
