@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use url::Url;
 
-use crate::{BROWSER_KEYBOARD_OPERATION, BROWSER_POINTER_OPERATION, BROWSER_PROTOCOL_ID};
+use crate::BROWSER_PROTOCOL_ID;
 
 const MAX_DESCRIPTOR_BYTES: usize = 64 * 1024;
 const MAX_SCHEMA_BYTES: usize = 16 * 1024;
@@ -129,6 +129,7 @@ pub struct BrowserSurfaceTracker {
     document_token: Option<String>,
     registry_generation: Option<u64>,
     registry_fingerprint: Option<blake3::Hash>,
+    epoch_discovered_at: Option<String>,
     last_projection: Option<BrowserSurfaceProjectionV1>,
 }
 
@@ -142,6 +143,7 @@ impl BrowserSurfaceTracker {
             document_token: None,
             registry_generation: None,
             registry_fingerprint: None,
+            epoch_discovered_at: None,
             last_projection: None,
         }
     }
@@ -152,6 +154,7 @@ impl BrowserSurfaceTracker {
         observed_at: impl Into<String>,
     ) -> Result<&BrowserSurfaceProjectionV1, BrowserOperationError> {
         validate_snapshot(&snapshot)?;
+        let observed_at = observed_at.into();
         let fingerprint = registry_fingerprint(&snapshot)?;
         let invalidated = self.document_token.as_deref() != Some(&snapshot.document_token)
             || self.registry_generation != Some(snapshot.registry_generation)
@@ -163,13 +166,17 @@ impl BrowserSurfaceTracker {
             self.document_token = Some(snapshot.document_token.clone());
             self.registry_generation = Some(snapshot.registry_generation);
             self.registry_fingerprint = Some(fingerprint);
+            self.epoch_discovered_at = Some(observed_at.clone());
         }
-        let observed_at = observed_at.into();
         let operations = surface_operations(
             &self.surface_id,
             self.surface_epoch,
             &snapshot,
-            &observed_at,
+            self.epoch_discovered_at.as_deref().ok_or_else(|| {
+                BrowserOperationError::Invalid(
+                    "surface discovery time was not initialized".to_owned(),
+                )
+            })?,
         )?;
         let observation = SurfaceObservationV1 {
             surface_id: self.surface_id.clone(),
@@ -181,7 +188,13 @@ impl BrowserSurfaceTracker {
             observed_at,
         };
         let changed = self.last_projection.as_ref().is_none_or(|current| {
-            current.observation != observation || current.operations != operations
+            current.observation.surface_id != observation.surface_id
+                || current.observation.target_run_id != observation.target_run_id
+                || current.observation.surface_epoch != observation.surface_epoch
+                || current.observation.origin != observation.origin
+                || current.observation.producer_api != observation.producer_api
+                || current.observation.untrusted_content != observation.untrusted_content
+                || current.operations != operations
         });
         if changed {
             self.revision = self.revision.checked_add(1).ok_or_else(|| {
@@ -460,7 +473,7 @@ fn surface_operations(
         browser_compat_descriptor(
             surface_id,
             surface_epoch,
-            BROWSER_KEYBOARD_OPERATION,
+            "browser_keyboard",
             "Send a non-text keyboard event through the Ato Browser Adapter.",
             json!({
                 "type":"object",
@@ -478,7 +491,7 @@ fn surface_operations(
         browser_compat_descriptor(
             surface_id,
             surface_epoch,
-            BROWSER_POINTER_OPERATION,
+            "browser_pointer",
             "Send a normalized pointer event through the Ato Browser Adapter.",
             json!({
                 "type":"object",
@@ -489,6 +502,38 @@ fn surface_operations(
                 },
                 "required":["kind","x_normalized","y_normalized"],
                 "additionalProperties":true
+            }),
+            &origin,
+            discovered_at,
+        ),
+        browser_compat_descriptor(
+            surface_id,
+            surface_epoch,
+            "browser_click",
+            "Send a normalized click through the Ato Browser Adapter.",
+            json!({
+                "type":"object",
+                "properties":{
+                    "x_normalized":{"type":"number"},
+                    "y_normalized":{"type":"number"},
+                    "button":{"type":"integer"}
+                },
+                "required":["x_normalized","y_normalized","button"],
+                "additionalProperties":false
+            }),
+            &origin,
+            discovered_at,
+        ),
+        browser_compat_descriptor(
+            surface_id,
+            surface_epoch,
+            "browser_scroll_to",
+            "Scroll to an absolute position through the Ato Browser Adapter.",
+            json!({
+                "type":"object",
+                "properties":{"x":{"type":"number"},"y":{"type":"number"}},
+                "required":["x","y"],
+                "additionalProperties":false
             }),
             &origin,
             discovered_at,
@@ -865,6 +910,7 @@ mod tests {
             .clone();
         assert_eq!(first.observation.surface_epoch, 1);
         assert_eq!(observation_only.observation.surface_epoch, 1);
+        assert_eq!(first.revision, observation_only.revision);
         assert_eq!(replaced.observation.surface_epoch, 2);
         assert_eq!(navigated.observation.surface_epoch, 3);
         assert_ne!(first.operations[0].id, replaced.operations[0].id);
@@ -954,11 +1000,11 @@ mod tests {
         let mut ledger = ActorOperationLedger::default();
         let mut stale = invocation("actor-a", "stale", 1);
         stale.surface_epoch = 2;
+        let mut stale_descriptor = descriptor("actor-a", false);
+        stale_descriptor.surface_epoch = 2;
         assert_eq!(
-            ledger.begin(stale, &descriptor("actor-a", false), "session", 4, 3),
-            Err(BrowserOperationError::Invalid(
-                "invocation escaped descriptor scope".to_owned()
-            ))
+            ledger.begin(stale, &stale_descriptor, "session", 4, 3),
+            Err(BrowserOperationError::StaleOperation)
         );
         let mut fenced = invocation("actor-a", "fenced", 1);
         fenced.controller_epoch = 3;

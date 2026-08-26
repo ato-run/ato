@@ -42,6 +42,7 @@ pub const BROWSER_KEYBOARD_OPERATION: &str = "keyboard";
 pub const BROWSER_POINTER_OPERATION: &str = "pointer";
 pub const BROWSER_CLICK_OPERATION: &str = "click";
 pub const BROWSER_SCROLL_OPERATION: &str = "scroll";
+pub const BROWSER_GENERIC_OPERATION: &str = "operation";
 
 const MAX_BROWSER_EVENT_BYTES: u64 = 64 * 1024;
 const ACK_TIMEOUT: Duration = Duration::from_secs(30);
@@ -143,6 +144,7 @@ pub fn operation_for_event(event: &BrowserEvent) -> &'static str {
         BrowserEvent::Pointer { .. } => BROWSER_POINTER_OPERATION,
         BrowserEvent::Click { .. } => BROWSER_CLICK_OPERATION,
         BrowserEvent::Scroll { .. } => BROWSER_SCROLL_OPERATION,
+        BrowserEvent::Operation { .. } => BROWSER_GENERIC_OPERATION,
     }
 }
 
@@ -154,6 +156,7 @@ pub fn register_record_schemas(registry: &mut RecordSchemaRegistry) -> Result<()
         BROWSER_POINTER_OPERATION,
         BROWSER_CLICK_OPERATION,
         BROWSER_SCROLL_OPERATION,
+        BROWSER_GENERIC_OPERATION,
     ] {
         registry
             .register(
@@ -188,6 +191,7 @@ impl AdapterFactory for BrowserAdapter {
             BROWSER_POINTER_OPERATION,
             BROWSER_CLICK_OPERATION,
             BROWSER_SCROLL_OPERATION,
+            BROWSER_GENERIC_OPERATION,
         ]
         .into_iter()
         .map(|operation| {
@@ -559,7 +563,7 @@ mod tests {
         assert!(capabilities.verify);
         assert!(capabilities.quiesce);
         let operations = AdapterFactory::supported_operations(&BrowserAdapter);
-        assert_eq!(operations.len(), 4);
+        assert_eq!(operations.len(), 5);
         assert_eq!(
             operations
                 .iter()
@@ -570,6 +574,7 @@ mod tests {
                 BROWSER_KEYBOARD_OPERATION,
                 BROWSER_POINTER_OPERATION,
                 BROWSER_SCROLL_OPERATION,
+                BROWSER_GENERIC_OPERATION,
             ])
         );
     }

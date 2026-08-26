@@ -14,7 +14,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
-use ato_adapter_browser::BrowserRuntimeBootstrap;
+use ato_adapter_browser::{BrowserRuntimeBootstrap, RawWebMcpSnapshotV1};
 use base64::Engine as _;
 use serde_json::{Value, json};
 use tungstenite::client::IntoClientRequest;
@@ -32,6 +32,8 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const PROFILE_NAME: &str = "browser-profile";
 const DEVTOOLS_ACTIVE_PORT: &str = "DevToolsActivePort";
 const BRIDGE_SOURCE: &str = include_str!("../../adapters/browser/bridge/browser-bridge.js");
+const WEBMCP_BRIDGE_SOURCE: &str =
+    include_str!("../../adapters/browser/bridge/webmcp-consumer-bridge.js");
 const MAX_PRESENTATION_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 const MAX_LOCAL_STORAGE_ITEMS: usize = 4096;
@@ -136,6 +138,30 @@ impl BrowserHost {
             json!({"expression": expression, "returnByValue": true}),
             Some(&self.session_id),
         )
+    }
+
+    /// Probes the main-world WebMCP compatibility bridge. The returned page
+    /// metadata is untrusted and must be normalized by `ato-adapter-browser`
+    /// before it reaches a Room, MCP tool description, or agent instruction.
+    pub fn webmcp_snapshot(&mut self) -> Result<RawWebMcpSnapshotV1> {
+        let value = self.cdp.call(
+            "Runtime.evaluate",
+            json!({
+                "expression":"globalThis.__ATO_WEBMCP_CONSUMER__?.snapshot() ?? null",
+                "returnByValue":true,
+                "awaitPromise":true
+            }),
+            Some(&self.session_id),
+        )?;
+        let snapshot = value
+            .pointer("/result/value")
+            .cloned()
+            .context("WebMCP compatibility bridge returned no snapshot")?;
+        ensure!(
+            !snapshot.is_null(),
+            "WebMCP compatibility bridge is unavailable"
+        );
+        serde_json::from_value(snapshot).context("decode untrusted WebMCP snapshot")
     }
 
     /// Opens one credential-free loopback controller in the same private
@@ -500,6 +526,13 @@ fn attach_bridge(
     )?;
     let session_id = required_string(&attached, "sessionId")?.to_owned();
     cdp.call("Page.enable", json!({}), Some(&session_id))?;
+    // Main-world producer bridge contains no Ato credential. It is installed
+    // before producer scripts so it can isolate unstable registerTool shapes.
+    cdp.call(
+        "Page.addScriptToEvaluateOnNewDocument",
+        json!({"source":WEBMCP_BRIDGE_SOURCE}),
+        Some(&session_id),
+    )?;
     let source = format!(
         "globalThis.__ATO_BROWSER_BOOTSTRAP__ = {};\n{BRIDGE_SOURCE}",
         serde_json::to_string(bootstrap)?
@@ -651,6 +684,118 @@ mod tests {
             .expect("bridge must open its private control socket");
 
         assert!(erase < socket, "bootstrap survived until socket creation");
+    }
+
+    #[test]
+    fn webmcp_compatibility_bridge_keeps_draft_names_in_main_world_boundary() {
+        assert!(WEBMCP_BRIDGE_SOURCE.contains("document.modelContext"));
+        assert!(WEBMCP_BRIDGE_SOURCE.contains("deprecated_alias"));
+        assert!(WEBMCP_BRIDGE_SOURCE.contains("deterministic_fixture_polyfill"));
+        assert!(WEBMCP_BRIDGE_SOURCE.contains("__ATO_WEBMCP_FIXTURE_TOOLS__"));
+        assert!(!BRIDGE_SOURCE.contains("document.modelContext"));
+    }
+
+    #[test]
+    fn cdp_main_world_native_consumer_probe_keeps_registry_generation_stable() -> Result<()> {
+        let Some(chrome) = test_chrome() else {
+            return Ok(());
+        };
+        fs::create_dir_all(".tmp")?;
+        let profile = tempfile::Builder::new()
+            .prefix("browser-host-webmcp-")
+            .tempdir_in(".tmp")?;
+        restrict_dir(profile.path())?;
+        let mut child = launch_chrome(&chrome, profile.path(), true)?;
+        let result = (|| -> Result<()> {
+            let websocket = connect_cdp(&wait_for_debugger_url(profile.path(), &mut child)?)?;
+            let mut cdp = Cdp {
+                websocket,
+                next_id: 1,
+            };
+            let context = cdp.call("Target.createBrowserContext", json!({}), None)?;
+            let context_id = required_string(&context, "browserContextId")?.to_owned();
+            let target = cdp.call(
+                "Target.createTarget",
+                json!({"url":"about:blank","browserContextId":context_id}),
+                None,
+            )?;
+            let attached = cdp.call(
+                "Target.attachToTarget",
+                json!({"targetId":required_string(&target, "targetId")?,"flatten":true}),
+                None,
+            )?;
+            let session = required_string(&attached, "sessionId")?.to_owned();
+            cdp.call("Page.enable", json!({}), Some(&session))?;
+            cdp.call(
+                "Page.addScriptToEvaluateOnNewDocument",
+                json!({"source":r#"
+                    Object.defineProperty(document, "modelContext", { value: {
+                      registerTool() {},
+                      listTools() { return [{
+                        name: "increment_counter",
+                        description: "untrusted",
+                        inputSchema: { type: "object", properties: {} }
+                      }]; },
+                      invokeTool() { return { ok: true }; }
+                    }, configurable: true });
+                "#}),
+                Some(&session),
+            )?;
+            cdp.call(
+                "Page.addScriptToEvaluateOnNewDocument",
+                json!({"source":WEBMCP_BRIDGE_SOURCE}),
+                Some(&session),
+            )?;
+            cdp.call(
+                "Page.navigate",
+                json!({"url":"data:text/html,<title>webmcp</title>"}),
+                Some(&session),
+            )?;
+            wait_for_document_ready(&mut cdp, &session)?;
+            let expression = "globalThis.__ATO_WEBMCP_CONSUMER__.snapshot()";
+            let first = cdp.call(
+                "Runtime.evaluate",
+                json!({"expression":expression,"returnByValue":true,"awaitPromise":true}),
+                Some(&session),
+            )?;
+            let second = cdp.call(
+                "Runtime.evaluate",
+                json!({"expression":expression,"returnByValue":true,"awaitPromise":true}),
+                Some(&session),
+            )?;
+            assert_eq!(
+                first.pointer("/result/value/producer_api"),
+                Some(&Value::String("document_model_context".to_owned()))
+            );
+            assert_eq!(
+                first.pointer("/result/value/registry_generation"),
+                second.pointer("/result/value/registry_generation")
+            );
+            assert_eq!(
+                first.pointer("/result/value/tools/0/name"),
+                Some(&Value::String("increment_counter".to_owned()))
+            );
+            Ok(())
+        })();
+        let _ = stop_child(&mut child);
+        result
+    }
+
+    fn test_chrome() -> Option<PathBuf> {
+        std::env::var_os("ATO_BROWSER_CHROME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_file())
+            .or_else(|| {
+                [
+                    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+                    "/usr/bin/google-chrome",
+                    "/usr/bin/chromium",
+                ]
+                .into_iter()
+                .map(PathBuf::from)
+                .find(|path| path.is_file())
+            })
     }
 
     #[test]
