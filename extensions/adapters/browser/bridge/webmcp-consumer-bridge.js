@@ -8,10 +8,21 @@
   const registry = new Map();
   const installed = new WeakSet();
   const inFlight = new Map();
+  const arrayIsArray = Array.isArray.bind(Array);
+  const stringify = JSON.stringify.bind(JSON);
+  const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor.bind(Object);
+  const getOwnPropertyDescriptors = Object.getOwnPropertyDescriptors.bind(Object);
   const documentToken = cryptoToken();
+  const maxTools = 256;
+  const maxSchemaBytes = 16 * 1024;
+  const maxSchemaDepth = 8;
+  const maxSchemaNodes = 512;
+  // Code-unit bounds are intentionally conservative: one UTF-16 code unit
+  // can expand to four UTF-8 bytes in the Rust/CDP boundary.
+  const maxRegistryCodeUnits = 40 * 1024;
+  const maxObservationCodeUnits = 8 * 1024;
   let producerApi = "unavailable";
   let registryGeneration = 1;
-  let fixtureSignature = null;
 
   installKnownProducers();
   document.addEventListener(requestEvent, receiveRequest, false);
@@ -19,8 +30,10 @@
   const consumer = Object.freeze({
     snapshot: async () => {
       installKnownProducers();
-      refreshFixture();
       await refreshNativeConsumer();
+      if (["unavailable", "deterministic_fixture_polyfill"].includes(producerApi)) {
+        refreshFixture();
+      }
       return {
         document_token: documentToken,
         producer_api: producerApi,
@@ -30,6 +43,7 @@
         untrusted_observation: fixtureObservation(),
       };
     },
+    identity: () => ({ document_token: documentToken, origin: globalThis.location.origin }),
     abortActive: () => {
       if (inFlight.size !== 1) return false;
       const controller = inFlight.values().next().value;
@@ -68,7 +82,8 @@
       if (unregisterTool) {
         context.unregisterTool = (name) => {
           const result = unregisterTool(name);
-          if (typeof name === "string" && registry.delete(name)) registryGeneration += 1;
+          const normalizedName = normalizeOperationName(name);
+          if (normalizedName && registry.delete(normalizedName)) registryGeneration += 1;
           return result;
         };
       }
@@ -89,19 +104,28 @@
     if (!list) return;
     try {
       const tools = await list();
-      if (!Array.isArray(tools)) return;
-      for (const raw of tools) {
-        const definition = normalizeDefinition(raw);
-        if (!definition) continue;
-        const invoke = typeof context.invokeTool === "function"
-          ? (argumentsValue, signal) => context.invokeTool(definition.name, argumentsValue, { signal })
-          : typeof context.executeTool === "function"
-            ? (argumentsValue, signal) => context.executeTool(definition.name, argumentsValue, { signal })
-            : null;
-        // A native list probe recreates the closure on every poll. Only a
-        // definition change invalidates operation ids in this path.
-        replaceRegistration({ definition, invoke }, false);
+      if (!arrayIsArray(tools)) return;
+      producerApi = context === document.modelContext
+        ? "document_model_context"
+        : "deprecated_alias";
+      const registrations = [];
+      for (let index = 0; index < Math.min(tools.length, maxTools); index += 1) {
+        try {
+          const raw = tools[index];
+          const producerName = raw?.name;
+          const definition = normalizeDefinition(raw);
+          if (!definition || typeof producerName !== "string") continue;
+          const invoke = typeof context.invokeTool === "function"
+            ? (argumentsValue, signal) => context.invokeTool(producerName, argumentsValue, { signal })
+            : typeof context.executeTool === "function"
+              ? (argumentsValue, signal) => context.executeTool(producerName, argumentsValue, { signal })
+              : null;
+          registrations.push({ definition, invoke, owner: "native_probe" });
+        } catch {
+          // One hostile definition must not suppress unrelated operations.
+        }
       }
+      replaceOwnedRegistrations("native_probe", boundedRegistrations(registrations));
     } catch {
       // An unstable native consumer failure means no newly discovered tools.
     }
@@ -109,24 +133,27 @@
 
   function refreshFixture() {
     const tools = globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__;
-    if (!Array.isArray(tools)) return;
-    const definitions = tools.map(normalizeDefinition).filter(Boolean);
-    const signature = JSON.stringify(definitions);
-    if (signature === fixtureSignature) return;
-    fixtureSignature = signature;
+    if (!arrayIsArray(tools)) return;
     producerApi = "deterministic_fixture_polyfill";
-    for (const tool of tools) {
-      const definition = normalizeDefinition(tool);
-      if (!definition) continue;
-      const handler = tool.execute ?? tool.handler ?? tool.invoke;
-      replaceRegistration({
-        definition,
-        invoke: typeof handler === "function"
-          ? (argumentsValue, signal) => handler(argumentsValue, { signal })
-          : null,
-      });
+    const registrations = [];
+    for (let index = 0; index < Math.min(tools.length, maxTools); index += 1) {
+      try {
+        const tool = tools[index];
+        const definition = normalizeDefinition(tool);
+        if (!definition) continue;
+        const handler = tool.execute ?? tool.handler ?? tool.invoke;
+        registrations.push({
+          definition,
+          invoke: typeof handler === "function"
+            ? (argumentsValue, signal) => handler(argumentsValue, { signal })
+            : null,
+          owner: "fixture",
+        });
+      } catch {
+        // Drop only the malformed fixture definition.
+      }
     }
-    registryGeneration += 1;
+    replaceOwnedRegistrations("fixture", boundedRegistrations(registrations));
   }
 
   function registrationFrom(args, context) {
@@ -146,13 +173,18 @@
       invoke: typeof handler === "function"
         ? (argumentsValue, signal) => handler.call(context, argumentsValue, { signal })
         : null,
+      owner: "native_probe",
     };
   }
 
   function replaceRegistration(registration, handlerChangeInvalidates = true) {
     const previous = registry.get(registration.definition.name);
-    const nextSignature = JSON.stringify(registration.definition);
-    const definitionChanged = !previous || JSON.stringify(previous.definition) !== nextSignature;
+    if (previous && registration.owner === "native_probe" && registration.invoke === null) {
+      registration = { ...registration, invoke: previous.invoke, owner: previous.owner };
+    }
+    const nextSignature = operationalSignature(registration.definition);
+    const definitionChanged = !previous ||
+      operationalSignature(previous.definition) !== nextSignature;
     if (definitionChanged || (handlerChangeInvalidates && previous.invoke !== registration.invoke)) {
       registry.set(registration.definition.name, registration);
       registryGeneration += 1;
@@ -161,20 +193,127 @@
     }
   }
 
+  function replaceOwnedRegistrations(owner, registrations) {
+    const next = new Map(registrations.map((registration) => [registration.definition.name, registration]));
+    let operationallyChanged = false;
+    for (const [name, registration] of [...registry]) {
+      if (registration.owner === owner && !next.has(name)) {
+        registry.delete(name);
+        operationallyChanged = true;
+      }
+    }
+    for (let registration of next.values()) {
+      const previous = registry.get(registration.definition.name);
+      if (previous && registration.invoke === null) {
+        registration = { ...registration, invoke: previous.invoke };
+      }
+      if (!previous || operationalSignature(previous.definition) !==
+          operationalSignature(registration.definition)) {
+        operationallyChanged = true;
+      }
+      // Handler closures produced by listTools/getTools are deliberately not
+      // identity. The newest closure is retained without epoch churn.
+      registry.set(registration.definition.name, registration);
+    }
+    if (operationallyChanged) registryGeneration += 1;
+  }
+
+  function boundedRegistrations(registrations) {
+    const bounded = [];
+    let units = 0;
+    for (const registration of registrations) {
+      const encoded = stringify(registration.definition);
+      if (units + encoded.length > maxRegistryCodeUnits) continue;
+      units += encoded.length;
+      bounded.push(registration);
+    }
+    return bounded;
+  }
+
   function normalizeDefinition(raw) {
-    if (!isObject(raw) || typeof raw.name !== "string" || raw.name.length === 0) return null;
-    return {
-      name: raw.name,
-      description: typeof raw.description === "string" ? raw.description : null,
-      input_schema: isObject(raw.inputSchema)
+    try {
+      if (!isObject(raw)) return null;
+      const name = normalizeOperationName(raw.name);
+      if (!name) return null;
+      const schemaInput = isObject(raw.inputSchema)
         ? raw.inputSchema
         : isObject(raw.input_schema)
           ? raw.input_schema
-          : {},
-      output: raw.output ?? null,
-      origin: typeof raw.origin === "string" ? raw.origin : globalThis.location.origin,
-      read_only: raw.readOnly === true || raw.read_only === true,
-    };
+          : {};
+      const inputSchema = boundedJsonClone(schemaInput, maxSchemaBytes);
+      if (inputSchema === null || !isObject(inputSchema)) return null;
+      return {
+        name,
+        description: boundedString(raw.description, 1024),
+        input_schema: inputSchema,
+        // Page output is neither operation identity nor trusted evidence.
+        output: null,
+        origin: boundedString(raw.origin, 2048) ?? globalThis.location.origin,
+        read_only: raw.readOnly === true || raw.read_only === true,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  function operationalSignature(definition) {
+    return stringify({
+      name: definition.name,
+      input_schema: definition.input_schema,
+      origin: definition.origin,
+      read_only: definition.read_only,
+    });
+  }
+
+  function boundedString(value, maximum) {
+    return typeof value === "string" && value.length <= maximum ? value : null;
+  }
+
+  function boundedJsonClone(value, maximumBytes) {
+    const seen = new WeakSet();
+    const state = { nodes: 0 };
+    const clone = visit(value, 0);
+    if (clone === undefined) return null;
+    const encoded = stringify(clone);
+    return encoded.length <= maximumBytes ? clone : null;
+
+    function visit(current, depth) {
+      if (current === null || typeof current === "boolean") return current;
+      if (typeof current === "number") return Number.isFinite(current) ? current : undefined;
+      if (typeof current === "string") return current.length <= 4096 ? current : undefined;
+      if (typeof current !== "object" || depth > maxSchemaDepth || seen.has(current) ||
+          ++state.nodes > maxSchemaNodes) return undefined;
+      seen.add(current);
+      if (arrayIsArray(current)) {
+        if (current.length > 128) return undefined;
+        const output = [];
+        for (let index = 0; index < current.length; index += 1) {
+          const descriptor = getOwnPropertyDescriptor(current, String(index));
+          if (!descriptor || !("value" in descriptor)) return undefined;
+          const item = visit(descriptor.value, depth + 1);
+          if (item === undefined) return undefined;
+          output.push(item);
+        }
+        return output;
+      }
+      const descriptors = getOwnPropertyDescriptors(current);
+      const keys = Object.keys(descriptors).filter((key) => descriptors[key].enumerable);
+      if (keys.length > 128) return undefined;
+      const output = Object.create(null);
+      for (const key of keys) {
+        if (key.length > 128 || !("value" in descriptors[key])) return undefined;
+        const item = visit(descriptors[key].value, depth + 1);
+        if (item === undefined) return undefined;
+        output[key] = item;
+      }
+      return output;
+    }
+  }
+
+  function normalizeOperationName(value) {
+    if (typeof value !== "string" || value.length === 0 || value.length > 64 ||
+        !/^[A-Za-z0-9_-]+$/.test(value)) return null;
+    return value.toLowerCase();
   }
 
   async function receiveRequest(event) {
@@ -197,7 +336,9 @@
       return respond(request.id, false, "invalid_operation");
     }
     installKnownProducers();
-    refreshFixture();
+    if (["unavailable", "deterministic_fixture_polyfill"].includes(producerApi)) {
+      refreshFixture();
+    }
     if (request.surface_generation !== registryGeneration) {
       return respond(request.id, false, "stale_operation");
     }
@@ -221,14 +362,14 @@
 
   function respond(id, ok, error) {
     document.dispatchEvent(new CustomEvent(responseEvent, {
-      detail: JSON.stringify({ id, ok, error }),
+      detail: stringify({ id, ok, error }),
     }));
   }
 
   function fixtureObservation() {
     const producer = globalThis.__ATO_WEBMCP_FIXTURE_OBSERVATION__;
     if (typeof producer !== "function") return null;
-    try { return producer(); } catch { return null; }
+    try { return boundedJsonClone(producer(), maxObservationCodeUnits); } catch { return null; }
   }
 
   function cryptoToken() {
@@ -238,6 +379,6 @@
   }
 
   function isObject(value) {
-    return value !== null && typeof value === "object" && !Array.isArray(value);
+    return value !== null && typeof value === "object" && !arrayIsArray(value);
   }
 })();

@@ -30,7 +30,9 @@
     let inputChain = Promise.resolve();
     const subscribers = new Set();
     const peers = new Map();
+    const settledOperations = new Map();
     let surfaceRevision = 0;
+    let operationsSurfaceEpoch = 0;
 
     connectRoom();
     pumpFrame();
@@ -137,6 +139,7 @@
       const response = await hostFetch("/operation/invoke", input);
       if (!response.ok) throw new Error(await responseError(response));
       const receipt = await response.json();
+      rememberSettlement(input);
       sendRoom("run.operation.receipt", {
         run_id: receipt.target_run_id,
         target_run_id: receipt.target_run_id,
@@ -161,12 +164,31 @@
       if (!isObject(input) || typeof input.operation_id !== "string") {
         throw new Error("invalid_operation");
       }
+      const settled = settledOperations.get(input.operation_id);
+      if (settled && sameOperationScope(settled, input)) {
+        sendRoom("run.operation.abort.receipt", {
+          operation_id: input.operation_id,
+          actor_id: input.actor_id,
+          actor_run_id: input.actor_run_id,
+          controller_session_id: input.controller_session_id,
+          controller_epoch: input.controller_epoch,
+          target_run_id: input.target_run_id ?? input.run_id ?? config.runId,
+          surface_id: input.surface_id,
+          surface_epoch: input.surface_epoch,
+          status: "failed",
+          best_effort_result: "already_settled",
+          requested_at: new Date().toISOString(),
+        });
+        return;
+      }
       const response = await hostFetch("/operation/abort", input);
       if (!response.ok) throw new Error(await responseError(response));
       sendRoom("run.operation.abort.receipt", await response.json());
     }
 
     function publishOperationFailure(input, error) {
+      const reason = error instanceof Error ? error.message : "operation_failed";
+      rememberSettlement(input);
       sendRoom("run.operation.receipt", {
         run_id: input?.target_run_id ?? input?.run_id ?? config.runId,
         target_run_id: input?.target_run_id ?? input?.run_id ?? config.runId,
@@ -178,10 +200,28 @@
         surface_id: input?.surface_id,
         surface_epoch: input?.surface_epoch,
         client_sequence: input?.client_sequence,
-        result: "failed",
-        error: error instanceof Error ? error.message : "operation_failed",
+        result: reason === "operation_aborted" ? "aborted" : "failed",
+        error: reason,
         adapter_id: "ato.browser@1",
       });
+    }
+
+    function rememberSettlement(input) {
+      if (!isObject(input) || typeof input.operation_id !== "string") return;
+      settledOperations.delete(input.operation_id);
+      settledOperations.set(input.operation_id, input);
+      while (settledOperations.size > 1024) {
+        settledOperations.delete(settledOperations.keys().next().value);
+      }
+    }
+
+    function sameOperationScope(left, right) {
+      return left.descriptor_id === right.descriptor_id &&
+        left.actor_id === right.actor_id && left.actor_run_id === right.actor_run_id &&
+        left.controller_session_id === right.controller_session_id &&
+        left.controller_epoch === right.controller_epoch &&
+        (left.target_run_id ?? left.run_id) === (right.target_run_id ?? right.run_id) &&
+        left.surface_id === right.surface_id && left.surface_epoch === right.surface_epoch;
     }
 
     function publishAbortFailure(input, error) {
@@ -306,12 +346,15 @@
               isObject(surface.observation) && Array.isArray(surface.operations)) {
             surfaceRevision = surface.revision;
             sendRoom("surface.observe", surface.observation);
-            sendRoom("surface.operations.replace", {
-              surface_id: surface.observation.surface_id,
-              target_run_id: surface.observation.target_run_id,
-              surface_epoch: surface.observation.surface_epoch,
-              operations: surface.operations,
-            });
+            if (surface.observation.surface_epoch !== operationsSurfaceEpoch) {
+              operationsSurfaceEpoch = surface.observation.surface_epoch;
+              sendRoom("surface.operations.replace", {
+                surface_id: surface.observation.surface_id,
+                target_run_id: surface.observation.target_run_id,
+                surface_epoch: surface.observation.surface_epoch,
+                operations: surface.operations,
+              });
+            }
           }
         }
       } catch { /* A transient poll failure does not end the hosted Run. */ }

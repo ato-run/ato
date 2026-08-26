@@ -1110,56 +1110,61 @@ impl ConnectedWorker {
             browser.activity_ingress(),
         )?;
         browser.open_auxiliary_target(controller.target_url())?;
+        let execution_id = format!("activity:{}:{}", lease.run_id, lease.id);
+        // A restarted Browser context must not reuse an older Room surface
+        // identity with an epoch reset to one. The lease identifies this
+        // physical realization without becoming Run/Computation identity.
         let mut surface = BrowserSurfaceTracker::new(
-            format!("surface_{}", session.run_id),
+            activity_surface_id(&session.run_id, &lease.id),
             session.run_id.clone(),
         );
-        let execution_id = format!("activity:{}:{}", lease.run_id, lease.id);
         let mut ready = false;
         let mut last_control = Instant::now() - Duration::from_secs(1);
         let mut last_heartbeat = Instant::now();
         let mut last_surface = Instant::now() - Duration::from_secs(1);
-        let result = loop {
-            controller.publish_frame(browser.capture_presentation_frame()?)?;
-            if last_surface.elapsed() >= Duration::from_millis(250) {
-                if let Ok(snapshot) = browser.webmcp_snapshot() {
-                    let registry_generation = snapshot.registry_generation;
-                    let observed_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
-                    let projection = surface.update(snapshot, observed_at)?.clone();
-                    controller.publish_surface(projection, registry_generation)?;
+        let result = (|| -> Result<()> {
+            loop {
+                controller.publish_frame(browser.capture_presentation_frame()?)?;
+                if last_surface.elapsed() >= Duration::from_millis(250) {
+                    if let Ok(snapshot) = browser.webmcp_snapshot() {
+                        let registry_generation = snapshot.registry_generation;
+                        let observed_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
+                        let projection = surface.update(snapshot, observed_at)?.clone();
+                        controller.publish_surface(projection, registry_generation)?;
+                    }
+                    last_surface = Instant::now();
                 }
-                last_surface = Instant::now();
+                match controller.recv_timeout(Duration::from_millis(100)) {
+                    Ok(ActivityControllerEvent::Ready) if !ready => {
+                        self.api.report_activity_ready(&lease.id, &execution_id)?;
+                        ready = true;
+                    }
+                    Ok(ActivityControllerEvent::Ready) => {}
+                    Ok(ActivityControllerEvent::Ended) => break Ok(()),
+                    Ok(ActivityControllerEvent::Failed) => {
+                        break Err(anyhow::anyhow!("Activity controller failed"));
+                    }
+                    Ok(ActivityControllerEvent::AbortRequested { result }) => {
+                        let signaled = browser.abort_active_webmcp_operation().unwrap_or(false);
+                        let _ = result.send(signaled);
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        break Err(anyhow::anyhow!("Activity controller stopped unexpectedly"));
+                    }
+                }
+                if last_control.elapsed() >= Duration::from_secs(1) {
+                    if self.api.control(&lease.id)?.stop_requested {
+                        break Ok(());
+                    }
+                    last_control = Instant::now();
+                }
+                if last_heartbeat.elapsed() >= ACTIVE_HEARTBEAT_INTERVAL {
+                    self.api.heartbeat(&self.config, 1)?;
+                    last_heartbeat = Instant::now();
+                }
             }
-            match controller.recv_timeout(Duration::from_millis(100)) {
-                Ok(ActivityControllerEvent::Ready) if !ready => {
-                    self.api.report_activity_ready(&lease.id, &execution_id)?;
-                    ready = true;
-                }
-                Ok(ActivityControllerEvent::Ready) => {}
-                Ok(ActivityControllerEvent::Ended) => break Ok(()),
-                Ok(ActivityControllerEvent::Failed) => {
-                    break Err(anyhow::anyhow!("Activity controller failed"));
-                }
-                Ok(ActivityControllerEvent::AbortRequested { result }) => {
-                    let signaled = browser.abort_active_webmcp_operation().unwrap_or(false);
-                    let _ = result.send(signaled);
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    break Err(anyhow::anyhow!("Activity controller stopped unexpectedly"));
-                }
-            }
-            if last_control.elapsed() >= Duration::from_secs(1) {
-                if self.api.control(&lease.id)?.stop_requested {
-                    break Ok(());
-                }
-                last_control = Instant::now();
-            }
-            if last_heartbeat.elapsed() >= ACTIVE_HEARTBEAT_INTERVAL {
-                self.api.heartbeat(&self.config, 1)?;
-                last_heartbeat = Instant::now();
-            }
-        };
+        })();
         let mut shutdown_errors = Vec::new();
         if let Err(error) = result {
             shutdown_errors.push(format!("Activity execution failed: {error:#}"));
@@ -1225,6 +1230,12 @@ fn resolve_runner_credentials(config: &mut WorkerConfig) -> Result<()> {
 
 fn ready_local_port(config: &WorkerConfig) -> u16 {
     config.surface_listen.port()
+}
+
+fn activity_surface_id(run_id: &str, lease_id: &str) -> String {
+    let scope = format!("ato.activity.surface.v0\0{run_id}\0{lease_id}");
+    let digest = <Sha256 as sha2::Digest>::digest(scope.as_bytes());
+    format!("surface_{}", URL_SAFE_NO_PAD.encode(digest))
 }
 
 fn validate_config(config: &WorkerConfig) -> Result<()> {
@@ -3626,6 +3637,15 @@ mod tests {
     fn expired_lease_is_rejected_before_graph_access() {
         let expired = "2020-01-01T00:00:00Z".to_owned();
         assert!(validate_lease(&lease(Some(expired)), SystemTime::now()).is_err());
+    }
+
+    #[test]
+    fn activity_surface_identity_is_stable_per_lease_and_changes_on_restart() {
+        let first = activity_surface_id("run_shared", "lease_one");
+        assert_eq!(first, activity_surface_id("run_shared", "lease_one"));
+        assert_ne!(first, activity_surface_id("run_shared", "lease_two"));
+        assert!(first.starts_with("surface_"));
+        assert!(first.len() <= 128);
     }
 
     #[test]
