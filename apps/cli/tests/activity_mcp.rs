@@ -227,7 +227,7 @@ fn mock_response(request: &SeenRequest, binding_key: &str, session_token: &str) 
             assert_eq!(request.authorization, format!("Bearer {binding_key}"));
             assert_eq!(
                 request.body.get("controller_kind"),
-                Some(&json!("codex_mcp"))
+                Some(&json!("external_mcp"))
             );
             json!({
                 "controller_session_token":session_token,
@@ -237,7 +237,7 @@ fn mock_response(request: &SeenRequest, binding_key: &str, session_token: &str) 
                     "actor_id":"actor_child",
                     "actor_run_id":"run_actor_child",
                     "epoch":2,
-                    "controller_kind":"codex_mcp",
+                    "controller_kind":"external_mcp",
                     "expires_at":"2026-08-27T00:00:00Z"
                 }
             })
