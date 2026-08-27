@@ -26,6 +26,12 @@
     let roomReconnectAttempt = 0;
     let roomReconnectTimer = null;
     let roomHeartbeatTimer = null;
+    // Exponential backoff resets only after a connection has proven stable
+    // (held longer than this window), never on the bare room.connected event:
+    // a socket opened and immediately replaced would otherwise restart the
+    // storm at the minimum delay every time.
+    const ROOM_STABLE_CONNECTION_MS = 10_000;
+    let roomConnectedAt = 0;
     let mediaReady = false;
     let mediaStream = null;
     let readyReported = false;
@@ -62,25 +68,54 @@
         roomInboundSequence = envelope.seq;
         receiveRoom(envelope.type, isObject(envelope.payload) ? envelope.payload : {});
       });
-      socket.addEventListener("close", () => scheduleRoomReconnect(socket));
-      socket.addEventListener("error", () => {
-        if (!ending) socket.close();
+      socket.addEventListener("close", (event) => {
+        logRoomClose("close", event.code, event.reason, socket);
         scheduleRoomReconnect(socket);
       });
+      socket.addEventListener("error", () => {
+        if (!ending) socket.close();
+        logRoomClose("error", null, null, socket);
+        scheduleRoomReconnect(socket);
+      });
+    }
+
+    function logRoomClose(kind, code, reason, socket) {
+      const details = {
+        kind,
+        code: code ?? null,
+        reason: reason ? String(reason).slice(0, 120) : null,
+        uptime_ms: roomConnectedAt > 0 ? Date.now() - roomConnectedAt : 0,
+        reconnect_attempt: roomReconnectAttempt,
+        connection_id: roomIdentity ? roomIdentity.connectionId : null,
+        run_id: config.runId,
+      };
+      try { console.warn("[ato.room] closed", JSON.stringify(details)); } catch {}
     }
 
     function scheduleRoomReconnect(socket) {
       if (ending || socket !== room || roomReconnectTimer !== null) return;
       stopRoomHeartbeat();
       roomIdentity = null;
+      // A connection that lasted beyond the stability window proved the
+      // service reachable; only then does backoff restart from the minimum.
+      if (roomConnectedAt > 0 && Date.now() - roomConnectedAt >= ROOM_STABLE_CONNECTION_MS) {
+        roomReconnectAttempt = 0;
+      }
+      roomConnectedAt = 0;
       for (const participantId of [...peers.keys()]) stopParticipant(participantId, false);
       roomReconnectAttempt += 1;
       if (roomReconnectAttempt > 8) return fail();
-      const delay = Math.min(5000, 100 * (2 ** (roomReconnectAttempt - 1)));
+      const delay = roomReconnectDelay(roomReconnectAttempt);
       roomReconnectTimer = setTimeout(() => {
         roomReconnectTimer = null;
         connectRoom();
       }, delay);
+    }
+
+    function roomReconnectDelay(attempt) {
+      const base = Math.min(5000, 100 * (2 ** (attempt - 1)));
+      // ±20% jitter so a fleet of controllers never reconnects in lockstep.
+      return Math.max(1, Math.round(base * (0.8 + Math.random() * 0.4)));
     }
 
     function receiveRoom(type, payload) {
@@ -91,7 +126,11 @@
           connectionId: payload.connection_id,
           mediaGeneration: payload.media_generation,
         };
-        roomReconnectAttempt = 0;
+        // NOTE: roomReconnectAttempt is intentionally NOT reset here. Resetting
+        // on connect lets a connect/close storm restart at the minimum delay
+        // forever; backoff decays only after ROOM_STABLE_CONNECTION_MS of an
+        // uninterrupted connection (see scheduleRoomReconnect).
+        roomConnectedAt = Date.now();
         startRoomHeartbeat(room);
         surfaceRevision = 0;
         operationsSurfaceEpoch = 0;

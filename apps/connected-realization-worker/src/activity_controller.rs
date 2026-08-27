@@ -2240,6 +2240,101 @@ mod tests {
     }
 
     #[test]
+    fn controller_backoff_does_not_reset_on_room_connected() {
+        // The storm guard: room.connected must NOT reset the attempt counter,
+        // otherwise an immediate replacement restarts the storm at the floor.
+        let connected = CONTROLLER_HTML
+            .split("if (type === \"room.connected\")")
+            .nth(1)
+            .and_then(|value| value.split("announceReady();").next())
+            .expect("room.connected handler source");
+        assert!(
+            !connected.contains("roomReconnectAttempt = 0"),
+            "backoff must not reset inside the room.connected handler"
+        );
+        assert!(
+            CONTROLLER_HTML.contains("ROOM_STABLE_CONNECTION_MS"),
+            "a stability window must gate the backoff reset"
+        );
+        let schedule = CONTROLLER_HTML
+            .split("function scheduleRoomReconnect")
+            .nth(1)
+            .and_then(|value| value.split("function roomReconnectDelay").next())
+            .expect("scheduleRoomReconnect source");
+        let reset_position = schedule
+            .find("roomReconnectAttempt = 0")
+            .expect("stability-gated reset");
+        let stable_guard = schedule
+            .find("ROOM_STABLE_CONNECTION_MS")
+            .expect("stability check inside schedule");
+        assert!(
+            stable_guard < reset_position,
+            "the reset must be gated by the stability window check"
+        );
+    }
+
+    #[test]
+    fn controller_reconnect_delays_grow_exponentially_with_jitter() {
+        let source = CONTROLLER_HTML
+            .split("function roomReconnectDelay")
+            .nth(1)
+            .and_then(|value| value.split("}").next())
+            .expect("roomReconnectDelay source");
+        // Exponential base with the 5s ceiling…
+        assert!(source.contains("Math.min(5000, 100 * (2 ** (attempt - 1)))"));
+        // …plus a ±20% jitter band.
+        assert!(source.contains("0.8 + Math.random() * 0.4"));
+
+        // Simulate the exact JS delay curve per attempt to lock the contract:
+        // monotonic growth, ceiling at 5s, jitter never leaves [80%, 120%].
+        fn js_delay(attempt: u32, jitter: f64) -> u64 {
+            let base = std::cmp::min(5000u64, 100u64.saturating_mul(1 << (attempt - 1)));
+            ((base as f64 * (0.8 + jitter * 0.4)).round()) as u64
+        }
+        for attempt in 1..=7_u32 {
+            let low = js_delay(attempt, 0.0);
+            let high = js_delay(attempt, 1.0);
+            let expected_base = 100u64.saturating_mul(1 << (attempt - 1)).min(5000);
+            assert_eq!(low, expected_base * 8 / 10);
+            assert_eq!(high, expected_base * 12 / 10);
+            if attempt < 6 {
+                // Growth across attempts even at worst-case current vs best-case next.
+                assert!(
+                    js_delay(attempt + 1, 0.0) > js_delay(attempt, 1.0),
+                    "delay must grow from attempt {attempt} despite jitter bounds"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn controller_close_diagnostics_capture_storm_evidence() {
+        let log_source = CONTROLLER_HTML
+            .split("function logRoomClose")
+            .nth(1)
+            .and_then(|value| value.split("function scheduleRoomReconnect").next())
+            .expect("logRoomClose source");
+        for required in [
+            "code",
+            "reason",
+            "uptime_ms",
+            "reconnect_attempt",
+            "connection_id",
+            "run_id",
+        ] {
+            assert!(
+                log_source.contains(required),
+                "close diagnostics must include {required}"
+            );
+        }
+        // Both close and error paths route through diagnostics.
+        assert!(
+            CONTROLLER_HTML.contains("logRoomClose(\"close\", event.code, event.reason, socket)")
+        );
+        assert!(CONTROLLER_HTML.contains("logRoomClose(\"error\", null, null, socket)"));
+    }
+
+    #[test]
     fn controller_retries_lost_or_non_json_loopback_receipts_without_synthetic_failure() {
         let apply_operation = CONTROLLER_HTML
             .split("async function applyOperation")
