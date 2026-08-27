@@ -237,6 +237,22 @@ impl RunEvolutionAuthority {
             .clone()
     }
 
+    /// Validates that an offer is currently derivable without applying or
+    /// committing it. Specialized Protocol runtimes may use this before a
+    /// physical operation which is known to remain derivable at every
+    /// successor frontier; generic callers should continue using `accept`.
+    pub fn validate_offer(&self, offer: &TransitionOffer) -> Result<(), EvolutionError> {
+        let state = self.state.lock().expect("run evolution mutex poisoned");
+        if state.frozen {
+            return Err(EvolutionError::Frozen);
+        }
+        if let Some(pending) = &state.pending_persistence {
+            return Err(EvolutionError::PersistencePending(pending.run_seq));
+        }
+        self.kernel.derive_transition(&state.run.head, offer)?;
+        Ok(())
+    }
+
     /// Accepts one external operation in two phases. The `apply` closure is
     /// invoked only after a successor is derived, and the Run head advances
     /// only after it succeeds. `persist_head` is deliberately after commit:

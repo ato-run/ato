@@ -7,6 +7,9 @@ mod desktop_control;
 mod object_transport;
 mod supervisor;
 
+pub mod activity_client;
+pub mod activity_mcp;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};

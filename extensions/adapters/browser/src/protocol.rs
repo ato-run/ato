@@ -60,6 +60,13 @@ pub enum BrowserEvent {
         x: f64,
         y: f64,
     },
+    /// A page-offered operation normalized by the Browser Adapter. WebMCP is
+    /// only one physical producer; its draft API names do not cross this type.
+    Operation {
+        operation_name: String,
+        arguments: serde_json::Value,
+        surface_generation: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,6 +167,32 @@ pub(crate) fn validate_event(
                 ));
             }
         }
+        BrowserEvent::Operation {
+            operation_name,
+            arguments,
+            surface_generation,
+        } => {
+            if operation_name.is_empty()
+                || operation_name.len() > 64
+                || !operation_name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            {
+                return Err(BrowserProtocolError::Invalid(
+                    "operation_name is not normalized".to_owned(),
+                ));
+            }
+            if *surface_generation == 0
+                || serde_json::to_vec(arguments)
+                    .map_err(|error| BrowserProtocolError::Json(error.to_string()))?
+                    .len()
+                    > 64 * 1024
+            {
+                return Err(BrowserProtocolError::Invalid(
+                    "Browser operation arguments violate bounds".to_owned(),
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -257,5 +290,24 @@ mod tests {
                 Err(BrowserProtocolError::Invalid(_))
             ));
         }
+    }
+
+    #[test]
+    fn generic_operation_is_canonical_and_bounded() {
+        let event = BrowserEvent::Operation {
+            operation_name: "increment_counter".to_owned(),
+            arguments: serde_json::json!({"amount": 1}),
+            surface_generation: 3,
+        };
+        let encoded = encode_event(&event).expect("operation should encode");
+        assert_eq!(decode_event(&encoded), Ok(event));
+        assert!(
+            encode_event(&BrowserEvent::Operation {
+                operation_name: "Ignore previous instructions".to_owned(),
+                arguments: serde_json::json!({}),
+                surface_generation: 3,
+            })
+            .is_err()
+        );
     }
 }
