@@ -12,6 +12,7 @@
 <body>
   <h1>Deterministic WebMCP fixture</h1>
   <output id="counter">0</output>
+  <p><button id="increment" type="button" style="font-size:1.4rem;padding:0.4rem 1.2rem">+1</button></p>
   <p id="label">ready</p>
   <p id="phase"></p>
   <script>
@@ -104,6 +105,11 @@
     ];
 
     function render() { counter.textContent = String(value); }
+    document.getElementById("increment").addEventListener("click", () => {
+      value += 1;
+      sessionStorage.setItem("fixture.counter", String(value));
+      render();
+    });
     function delay(milliseconds, signal) {
       return new Promise((resolve, reject) => {
         const timer = setTimeout(resolve, milliseconds);

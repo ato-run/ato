@@ -1102,6 +1102,8 @@ fn handle_request(stream: &mut TcpStream, context: &ActivityControllerContext) -
             respond_json(stream, 200, &serde_json::json!({"ok":true}))
         }
         ("POST", "/failure") => {
+            let body_text = String::from_utf8_lossy(&request.body).to_string();
+            eprintln!("activity controller failure report: body={body_text}");
             let _ = context.events.send(ActivityControllerEvent::Failed);
             respond_json(stream, 200, &serde_json::json!({"ok":true}))
         }

@@ -1242,6 +1242,10 @@ impl ConnectedWorker {
                     Ok(ActivityControllerEvent::Ready) => {}
                     Ok(ActivityControllerEvent::Ended) => break Ok(()),
                     Ok(ActivityControllerEvent::Failed) => {
+                        eprintln!(
+                            "activity controller reported failure: run_id={} lease={}",
+                            lease.run_id, lease.id
+                        );
                         break Err(anyhow::anyhow!("Activity controller failed"));
                     }
                     Ok(ActivityControllerEvent::AbortRequested {
