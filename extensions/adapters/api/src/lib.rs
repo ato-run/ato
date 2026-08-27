@@ -576,6 +576,13 @@ pub trait AttachedAdapter: Send {
         })
     }
 
+    /// Optional concurrency-safe live-operation handle. Adapters which expose
+    /// this boundary guarantee that distinct validated operations may be
+    /// dispatched without holding the mutable lifecycle session lock.
+    fn live_operation_dispatcher(&self) -> Option<Arc<dyn LiveOperationDispatcher>> {
+        None
+    }
+
     fn apply(
         &mut self,
         _record: &RecordEnvelope,
@@ -619,6 +626,29 @@ pub trait AttachedAdapter: Send {
     fn publish(&mut self) -> Result<(), AdapterError> {
         Ok(())
     }
+}
+
+/// Cloneable physical dispatch boundary for live protocol operations.
+/// Lifecycle mutation (quiesce/detach) remains owned by `AttachedAdapter`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LiveOperationSettlement {
+    /// Monotonic order assigned by the adapter's single ACK demultiplexer.
+    /// This is runtime ordering evidence, never semantic payload identity.
+    pub order: u64,
+}
+
+pub trait LiveOperationDispatcher: Send + Sync {
+    /// Applies a live operation while keeping its controller invocation ID
+    /// outside the semantic payload. The correlation ID and optional opaque
+    /// realization generation are operational only: adapters may use them to
+    /// route cancellation and reject stale physical contexts, but must not
+    /// persist either as Computation identity.
+    fn apply_operation(
+        &self,
+        correlation_id: &str,
+        realization_generation: Option<&str>,
+        operation: &LiveOperation,
+    ) -> Result<LiveOperationSettlement, AdapterError>;
 }
 
 /// Creates configured live instances. Built-ins and third parties enter the

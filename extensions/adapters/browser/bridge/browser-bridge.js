@@ -42,7 +42,7 @@
     });
   });
 
-  socket.addEventListener("message", (message) => {
+  socket.addEventListener("message", async (message) => {
     let value;
     try {
       value = JSON.parse(String(message.data));
@@ -59,9 +59,12 @@
       acceptingInput = true;
       return;
     }
-    if (value.type === "apply" && typeof value.request_id === "string") {
+    if (value.type === "apply" &&
+        typeof value.request_id === "string" &&
+        typeof value.operation_id === "string") {
       try {
-        dispatch(value.event);
+        await validateRealizationGeneration(value.realization_generation, value.operation_id);
+        await dispatch(value.event, value.operation_id, value.realization_generation);
         send({ type: "ack", request_id: value.request_id });
       } catch (error) {
         send({
@@ -141,7 +144,7 @@
     return acceptingInput && event.isTrusted === true && socket.readyState === WebSocket.OPEN;
   }
 
-  function dispatch(event) {
+  async function dispatch(event, requestId, realizationGeneration) {
     if (!isObject(event) || typeof event.type !== "string") throw new Error("invalid Browser event");
     if (event.type === "keyboard") {
       const target = document.activeElement || document.body;
@@ -186,7 +189,79 @@
       globalThis.scrollTo(event.x, event.y);
       return;
     }
+    if (event.type === "operation") {
+      await invokePageOperation(event, requestId, realizationGeneration);
+      return;
+    }
     throw new Error("unsupported Browser event");
+  }
+
+  function invokePageOperation(event, requestId, realizationGeneration) {
+    if (typeof event.operation_name !== "string" ||
+        !Number.isSafeInteger(event.surface_generation) || event.surface_generation <= 0) {
+      throw new Error("invalid Browser operation");
+    }
+    const bridgeId = `${requestId}:${cryptoToken()}`;
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => finish(new Error("page operation timed out")), 25000);
+      const receive = (responseEvent) => {
+        let response;
+        try { response = JSON.parse(String(responseEvent.detail)); } catch { return; }
+        if (!isObject(response) || response.id !== bridgeId) return;
+        finish(response.ok === true ? null : new Error(
+          typeof response.error === "string" ? response.error : "page operation failed",
+        ));
+      };
+      const finish = (error) => {
+        clearTimeout(timeout);
+        document.removeEventListener("__ato_webmcp_response_v1", receive, false);
+        if (error) reject(error); else resolve();
+      };
+      document.addEventListener("__ato_webmcp_response_v1", receive, false);
+      document.dispatchEvent(new CustomEvent("__ato_webmcp_request_v1", {
+        detail: JSON.stringify({
+          id: bridgeId,
+          type: "invoke",
+          operation_id: requestId,
+          operation_name: event.operation_name,
+          arguments: event.arguments ?? {},
+          surface_generation: event.surface_generation,
+          realization_generation: realizationGeneration,
+        }),
+      }));
+    });
+  }
+
+  function validateRealizationGeneration(expected, requestId) {
+    if (expected === undefined) return Promise.resolve();
+    if (typeof expected !== "string" || expected.length === 0 || expected.length > 256) {
+      return Promise.reject(new Error("invalid Browser realization generation"));
+    }
+    const bridgeId = `${requestId}:document:${cryptoToken()}`;
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => finish(new Error("document validation timed out")), 5000);
+      const receive = (responseEvent) => {
+        let response;
+        try { response = JSON.parse(String(responseEvent.detail)); } catch { return; }
+        if (!isObject(response) || response.id !== bridgeId) return;
+        finish(response.ok === true ? null : new Error(
+          typeof response.error === "string" ? response.error : "stale_operation",
+        ));
+      };
+      const finish = (error) => {
+        clearTimeout(timeout);
+        document.removeEventListener("__ato_webmcp_response_v1", receive, false);
+        if (error) reject(error); else resolve();
+      };
+      document.addEventListener("__ato_webmcp_response_v1", receive, false);
+      document.dispatchEvent(new CustomEvent("__ato_webmcp_request_v1", {
+        detail: JSON.stringify({
+          id: bridgeId,
+          type: "validate_document",
+          realization_generation: expected,
+        }),
+      }));
+    });
   }
 
   function send(value) {
@@ -210,6 +285,12 @@
   function denormalize(value, extent) {
     if (!Number.isFinite(value) || value < 0 || value > 1) throw new Error("invalid normalized coordinate");
     return value * extent;
+  }
+
+  function cryptoToken() {
+    const bytes = crypto.getRandomValues(new Uint8Array(18));
+    return btoa(String.fromCharCode(...bytes))
+      .replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
   }
 
   function isObject(value) {

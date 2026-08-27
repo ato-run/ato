@@ -14,7 +14,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
-use ato_adapter_browser::BrowserRuntimeBootstrap;
+use ato_adapter_browser::{BrowserRuntimeBootstrap, RawWebMcpSnapshotV1};
 use base64::Engine as _;
 use serde_json::{Value, json};
 use tungstenite::client::IntoClientRequest;
@@ -32,12 +32,25 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const PROFILE_NAME: &str = "browser-profile";
 const DEVTOOLS_ACTIVE_PORT: &str = "DevToolsActivePort";
 const BRIDGE_SOURCE: &str = include_str!("../../adapters/browser/bridge/browser-bridge.js");
+const WEBMCP_BRIDGE_SOURCE: &str =
+    include_str!("../../adapters/browser/bridge/webmcp-consumer-bridge.js");
 const MAX_PRESENTATION_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 const MAX_LOCAL_STORAGE_ITEMS: usize = 4096;
 const MAX_LOCAL_STORAGE_KEY_BYTES: usize = 16 * 1024;
 const MAX_LOCAL_STORAGE_VALUE_BYTES: usize = 1024 * 1024;
 const MAX_LOCAL_STORAGE_TOTAL_BYTES: usize = 8 * 1024 * 1024;
+// The credential-free Activity controller runs in an auxiliary target while
+// the application target remains foreground for screenshots and WebMCP. Chrome
+// otherwise applies its intensive background-timer policy after an idle
+// interval, delaying the controller's Room ping and reconnect timers until the
+// live Activity tears itself down. These flags affect only this private hosted
+// realization; they do not participate in Computation identity.
+const BACKGROUND_CONTROLLER_LIVENESS_ARGS: [&str; 3] = [
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+];
 
 /// Origin-scoped physical Browser state. It is never a Computation residual.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -138,6 +151,58 @@ impl BrowserHost {
         )
     }
 
+    /// Probes the main-world WebMCP compatibility bridge. The returned page
+    /// metadata is untrusted and must be normalized by `ato-adapter-browser`
+    /// before it reaches a Room, MCP tool description, or agent instruction.
+    pub fn webmcp_snapshot(&mut self) -> Result<RawWebMcpSnapshotV1> {
+        let value = self.cdp.call(
+            "Runtime.evaluate",
+            json!({
+                "expression":"globalThis.__ATO_WEBMCP_CONSUMER__?.snapshot() ?? null",
+                "returnByValue":true,
+                "awaitPromise":true
+            }),
+            Some(&self.session_id),
+        )?;
+        let snapshot = value
+            .pointer("/result/value")
+            .cloned()
+            .context("WebMCP compatibility bridge returned no snapshot")?;
+        ensure!(
+            !snapshot.is_null(),
+            "WebMCP compatibility bridge is unavailable"
+        );
+        let snapshot: RawWebMcpSnapshotV1 =
+            serde_json::from_value(snapshot).context("decode untrusted WebMCP snapshot")?;
+        ensure!(
+            snapshot.origin == self.origin,
+            "WebMCP snapshot escaped the Browser Adapter origin"
+        );
+        Ok(snapshot)
+    }
+
+    /// Requests cancellation of one in-flight page operation. Abort is
+    /// best-effort: `false` means the producer no longer has that operation or
+    /// does not expose a cooperative signal.
+    pub fn abort_webmcp_operation(&mut self, operation_id: &str) -> Result<bool> {
+        ensure!(
+            !operation_id.is_empty()
+                && operation_id.len() <= 160
+                && operation_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':')),
+            "invalid WebMCP operation id"
+        );
+        let encoded = serde_json::to_string(operation_id)?;
+        let expression = format!("globalThis.__ATO_WEBMCP_CONSUMER__?.abort({encoded}) === true");
+        let value = self.cdp.call(
+            "Runtime.evaluate",
+            json!({"expression":expression,"returnByValue":true}),
+            Some(&self.session_id),
+        )?;
+        Ok(value.pointer("/result/value").and_then(Value::as_bool) == Some(true))
+    }
+
     /// Opens one credential-free loopback controller in the same private
     /// Browser context. Product runtimes may use this for media/control
     /// orchestration without giving the application target those credentials.
@@ -148,6 +213,14 @@ impl BrowserHost {
             json!({"url": target_url, "browserContextId": self.browser_context_id}),
             None,
         )?;
+        // Chrome makes a newly-created target foreground. The Activity
+        // controller must keep running in the auxiliary target, while
+        // screenshots and WebMCP discovery remain scoped to the application
+        // session. Restore that application session to the foreground before
+        // the next presentation capture; background Page.captureScreenshot can
+        // otherwise wait until the CDP deadline on hosted headless Chrome.
+        self.cdp
+            .call("Page.bringToFront", json!({}), Some(&self.session_id))?;
         Ok(())
     }
 
@@ -431,6 +504,7 @@ fn launch_chrome(chrome: &Path, profile: &Path, headless: bool) -> Result<Child>
         .arg("--remote-debugging-address=127.0.0.1")
         .arg("--remote-debugging-port=0")
         .arg("--remote-allow-origins=*")
+        .args(BACKGROUND_CONTROLLER_LIVENESS_ARGS)
         .arg("--window-size=800,600")
         .arg(format!("--user-data-dir={}", profile.display()))
         .arg("about:blank")
@@ -500,6 +574,13 @@ fn attach_bridge(
     )?;
     let session_id = required_string(&attached, "sessionId")?.to_owned();
     cdp.call("Page.enable", json!({}), Some(&session_id))?;
+    // Main-world producer bridge contains no Ato credential. It is installed
+    // before producer scripts so it can isolate unstable registerTool shapes.
+    cdp.call(
+        "Page.addScriptToEvaluateOnNewDocument",
+        json!({"source":WEBMCP_BRIDGE_SOURCE}),
+        Some(&session_id),
+    )?;
     let source = format!(
         "globalThis.__ATO_BROWSER_BOOTSTRAP__ = {};\n{BRIDGE_SOURCE}",
         serde_json::to_string(bootstrap)?
@@ -635,6 +716,19 @@ fn required_string<'a>(value: &'a Value, name: &str) -> Result<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_chrome_keeps_the_background_controller_live() {
+        assert_eq!(
+            BACKGROUND_CONTROLLER_LIVENESS_ARGS,
+            [
+                "--disable-background-timer-throttling",
+                "--disable-backgrounding-occluded-windows",
+                "--disable-renderer-backgrounding",
+            ]
+        );
+    }
+
     #[test]
     fn exact_origin_is_required() {
         assert!(validate_target("https://example.test/path", "https://example.test").is_ok());
@@ -651,6 +745,723 @@ mod tests {
             .expect("bridge must open its private control socket");
 
         assert!(erase < socket, "bootstrap survived until socket creation");
+    }
+
+    #[test]
+    fn webmcp_compatibility_bridge_keeps_draft_names_in_main_world_boundary() {
+        assert!(WEBMCP_BRIDGE_SOURCE.contains("producerProperty(document, \"modelContext\")"));
+        assert!(WEBMCP_BRIDGE_SOURCE.contains("deprecated_alias"));
+        assert!(WEBMCP_BRIDGE_SOURCE.contains("deterministic_fixture_polyfill"));
+        assert!(WEBMCP_BRIDGE_SOURCE.contains("__ATO_WEBMCP_FIXTURE_TOOLS__"));
+        assert!(!BRIDGE_SOURCE.contains("document.modelContext"));
+    }
+
+    #[test]
+    fn cdp_main_world_native_consumer_probe_keeps_registry_generation_stable() -> Result<()> {
+        let Some(chrome) = test_chrome() else {
+            return Ok(());
+        };
+        fs::create_dir_all(".tmp")?;
+        let profile = tempfile::Builder::new()
+            .prefix("browser-host-webmcp-")
+            .tempdir_in(".tmp")?;
+        restrict_dir(profile.path())?;
+        let mut child = launch_chrome(&chrome, profile.path(), true)?;
+        let result = (|| -> Result<()> {
+            let websocket = connect_cdp(&wait_for_debugger_url(profile.path(), &mut child)?)?;
+            let mut cdp = Cdp {
+                websocket,
+                next_id: 1,
+            };
+            let context = cdp.call("Target.createBrowserContext", json!({}), None)?;
+            let context_id = required_string(&context, "browserContextId")?.to_owned();
+            let target = cdp.call(
+                "Target.createTarget",
+                json!({"url":"about:blank","browserContextId":context_id}),
+                None,
+            )?;
+            let attached = cdp.call(
+                "Target.attachToTarget",
+                json!({"targetId":required_string(&target, "targetId")?,"flatten":true}),
+                None,
+            )?;
+            let session = required_string(&attached, "sessionId")?.to_owned();
+            cdp.call("Page.enable", json!({}), Some(&session))?;
+            cdp.call(
+                "Page.addScriptToEvaluateOnNewDocument",
+                json!({"source":r#"
+                    Object.defineProperty(document, "modelContext", { value: {
+                      registerTool() {},
+                      listTools() {
+                        const cyclic = { type: "object" };
+                        cyclic.self = cyclic;
+                        const throwing = { name: "throwing_tool" };
+                        Object.defineProperty(throwing, "inputSchema", {
+                          get() { throw new Error("hostile getter"); }
+                        });
+                        this.probeCount = (this.probeCount ?? 0) + 1;
+                        return [{
+                          name: "Increment_Counter",
+                          description: `untrusted metadata ${this.probeCount}`,
+                          inputSchema: { type: "object", properties: {} },
+                          output: 1n,
+                        }, {
+                          name: "cyclic_tool",
+                          inputSchema: cyclic,
+                        }, throwing];
+                      },
+                      invokeTool(name) {
+                        globalThis.__nativeInvokedName = name;
+                        return { ok: true };
+                      }
+                    }, configurable: true });
+                "#}),
+                Some(&session),
+            )?;
+            cdp.call(
+                "Page.addScriptToEvaluateOnNewDocument",
+                json!({"source":WEBMCP_BRIDGE_SOURCE}),
+                Some(&session),
+            )?;
+            cdp.call(
+                "Page.navigate",
+                json!({"url":"data:text/html,<title>webmcp</title>"}),
+                Some(&session),
+            )?;
+            wait_for_document_ready(&mut cdp, &session)?;
+            let expression = "globalThis.__ATO_WEBMCP_CONSUMER__.snapshot()";
+            let first = cdp.call(
+                "Runtime.evaluate",
+                json!({"expression":expression,"returnByValue":true,"awaitPromise":true}),
+                Some(&session),
+            )?;
+            let second = cdp.call(
+                "Runtime.evaluate",
+                json!({"expression":expression,"returnByValue":true,"awaitPromise":true}),
+                Some(&session),
+            )?;
+            assert_eq!(
+                first.pointer("/result/value/producer_api"),
+                Some(&Value::String("document_model_context".to_owned()))
+            );
+            assert_eq!(
+                first.pointer("/result/value/registry_generation"),
+                second.pointer("/result/value/registry_generation")
+            );
+            assert_eq!(
+                first.pointer("/result/value/tools/0/name"),
+                Some(&Value::String("increment_counter".to_owned()))
+            );
+            assert_eq!(
+                first
+                    .pointer("/result/value/tools")
+                    .and_then(Value::as_array)
+                    .map(Vec::len),
+                Some(1),
+                "malformed tools must be isolated without suppressing the safe tool"
+            );
+            let native_generation = first
+                .pointer("/result/value/registry_generation")
+                .and_then(Value::as_u64)
+                .context("native registry generation missing")?;
+            let native_document_token = first
+                .pointer("/result/value/document_token")
+                .and_then(Value::as_str)
+                .context("native document token missing")?;
+            let native_realization_generation =
+                serde_json::to_string(&format!("{native_document_token}.{native_generation}"))?;
+            let invoke_native = format!(
+                r#"(async () => {{
+                  const response = new Promise((resolve) => {{
+                    const receive = (event) => {{
+                      const value = JSON.parse(String(event.detail));
+                      if (value.id !== "native-invoke-request") return;
+                      document.removeEventListener("__ato_webmcp_response_v1", receive, false);
+                      resolve(value);
+                    }};
+                    document.addEventListener("__ato_webmcp_response_v1", receive, false);
+                  }});
+                  document.dispatchEvent(new CustomEvent("__ato_webmcp_request_v1", {{
+                    detail: JSON.stringify({{
+                      id: "native-invoke-request",
+                      type: "invoke",
+                      operation_id: "native-invoke-operation",
+                      operation_name: "increment_counter",
+                      arguments: {{}},
+                      realization_generation: {native_realization_generation},
+                      surface_generation: {native_generation}
+                    }})
+                  }}));
+                  return {{ response: await response, producer_name: globalThis.__nativeInvokedName }};
+                }})()"#
+            );
+            let native_invoked = cdp.call(
+                "Runtime.evaluate",
+                json!({
+                    "expression":invoke_native,
+                    "returnByValue":true,
+                    "awaitPromise":true
+                }),
+                Some(&session),
+            )?;
+            assert_eq!(
+                native_invoked.pointer("/result/value/response/ok"),
+                Some(&Value::Bool(true))
+            );
+            assert_eq!(
+                native_invoked.pointer("/result/value/producer_name"),
+                Some(&Value::String("Increment_Counter".to_owned()))
+            );
+
+            let timed_out_snapshot = cdp.call(
+                "Runtime.evaluate",
+                json!({
+                    "expression":r#"(async () => {
+                      document.modelContext.listTools = () => new Promise(() => {});
+                      const started = performance.now();
+                      const snapshot = await globalThis.__ATO_WEBMCP_CONSUMER__.snapshot();
+                      return { elapsed_ms: performance.now() - started, snapshot };
+                    })()"#,
+                    "returnByValue":true,
+                    "awaitPromise":true
+                }),
+                Some(&session),
+            )?;
+            assert!(
+                timed_out_snapshot
+                    .pointer("/result/value/elapsed_ms")
+                    .and_then(Value::as_f64)
+                    .is_some_and(|elapsed| elapsed < 2_000.0),
+                "a never-settling native producer must not inherit the 15 second CDP timeout"
+            );
+            assert_eq!(
+                timed_out_snapshot
+                    .pointer("/result/value/snapshot/tools")
+                    .and_then(Value::as_array)
+                    .map(Vec::len),
+                Some(0),
+                "a timed-out authoritative producer snapshot must retire stale tools"
+            );
+            assert_ne!(
+                timed_out_snapshot.pointer("/result/value/snapshot/registry_generation"),
+                first.pointer("/result/value/registry_generation")
+            );
+
+            let validate_after_timeout = format!(
+                r#"(async () => {{
+                  const response = new Promise((resolve) => {{
+                    const receive = (event) => {{
+                      const value = JSON.parse(String(event.detail));
+                      if (value.id !== "timed-out-native-validation") return;
+                      document.removeEventListener("__ato_webmcp_response_v1", receive, false);
+                      resolve(value);
+                    }};
+                    document.addEventListener("__ato_webmcp_response_v1", receive, false);
+                  }});
+                  const started = performance.now();
+                  document.dispatchEvent(new CustomEvent("__ato_webmcp_request_v1", {{
+                    detail: JSON.stringify({{
+                      id: "timed-out-native-validation",
+                      type: "validate_document",
+                      realization_generation: {native_realization_generation}
+                    }})
+                  }}));
+                  const value = await response;
+                  return {{ elapsed_ms: performance.now() - started, response: value }};
+                }})()"#
+            );
+            let stale_after_timeout = cdp.call(
+                "Runtime.evaluate",
+                json!({
+                    "expression":validate_after_timeout,
+                    "returnByValue":true,
+                    "awaitPromise":true
+                }),
+                Some(&session),
+            )?;
+            assert!(
+                stale_after_timeout
+                    .pointer("/result/value/elapsed_ms")
+                    .and_then(Value::as_f64)
+                    .is_some_and(|elapsed| elapsed < 2_000.0),
+                "operation validation must remain bounded while native discovery is hung"
+            );
+            assert_eq!(
+                stale_after_timeout.pointer("/result/value/response/error"),
+                Some(&Value::String("stale_operation".to_owned()))
+            );
+
+            // A second target proves the deterministic main-world producer
+            // path without the synthetic native API above. Its instruction-
+            // shaped metadata is removed before an Activity projection, and
+            // its cooperative AbortController is reachable through CDP.
+            let fixture_target = cdp.call(
+                "Target.createTarget",
+                json!({"url":"about:blank","browserContextId":context_id}),
+                None,
+            )?;
+            let fixture_attached = cdp.call(
+                "Target.attachToTarget",
+                json!({
+                    "targetId":required_string(&fixture_target, "targetId")?,
+                    "flatten":true
+                }),
+                None,
+            )?;
+            let fixture_session = required_string(&fixture_attached, "sessionId")?.to_owned();
+            cdp.call("Page.enable", json!({}), Some(&fixture_session))?;
+            cdp.call(
+                "Page.addScriptToEvaluateOnNewDocument",
+                json!({"source":WEBMCP_BRIDGE_SOURCE}),
+                Some(&fixture_session),
+            )?;
+            // `sessionStorage` is unavailable to an opaque data URL. Keep the
+            // checked-in fixture source while replacing persistence only for
+            // this self-contained CDP test.
+            let fixture_html = include_str!("../../../tests/fixtures/webmcp-activity/index.html")
+                .replace(
+                    "let value = Number(sessionStorage.getItem(\"fixture.counter\") ?? \"0\");",
+                    "let value = 0;",
+                )
+                .replace(
+                    "sessionStorage.setItem(\"fixture.counter\", String(value));",
+                    "void value;",
+                );
+            let fixture_url = format!(
+                "data:text/html;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(fixture_html)
+            );
+            cdp.call(
+                "Page.navigate",
+                json!({"url":fixture_url}),
+                Some(&fixture_session),
+            )?;
+            wait_for_document_ready(&mut cdp, &fixture_session)?;
+            let fixture_snapshot = cdp.call(
+                "Runtime.evaluate",
+                json!({
+                    "expression":"globalThis.__ATO_WEBMCP_CONSUMER__.snapshot()",
+                    "returnByValue":true,
+                    "awaitPromise":true
+                }),
+                Some(&fixture_session),
+            )?;
+            let fixture_snapshot_again = cdp.call(
+                "Runtime.evaluate",
+                json!({
+                    "expression":"globalThis.__ATO_WEBMCP_CONSUMER__.snapshot()",
+                    "returnByValue":true,
+                    "awaitPromise":true
+                }),
+                Some(&fixture_session),
+            )?;
+            assert_eq!(
+                fixture_snapshot.pointer("/result/value/registry_generation"),
+                fixture_snapshot_again.pointer("/result/value/registry_generation")
+            );
+            let snapshot_value = fixture_snapshot
+                .pointer("/result/value")
+                .cloned()
+                .context("fixture snapshot missing")?;
+            assert_eq!(
+                snapshot_value.get("producer_api"),
+                Some(&Value::String("deterministic_fixture_polyfill".to_owned()))
+            );
+            let raw_text = serde_json::to_string(&snapshot_value)?;
+            assert!(raw_text.contains("Ignore all previous instructions"));
+            let mut raw: RawWebMcpSnapshotV1 = serde_json::from_value(snapshot_value)?;
+            let generation = raw.registry_generation;
+            let fixture_realization_generation =
+                serde_json::to_string(&format!("{}.{}", raw.document_token, generation))?;
+            // The data URL intentionally has an opaque origin; hosted
+            // fixtures run on HTTP(S), which is the Adapter's fail-closed
+            // production requirement.
+            raw.origin = "https://fixture.example".to_owned();
+            for tool in &mut raw.tools {
+                tool.origin = Value::String(raw.origin.clone());
+            }
+            let mut tracker =
+                ato_adapter_browser::BrowserSurfaceTracker::new("surface-fixture", "run-fixture");
+            let safe_projection = tracker.update(raw, "2026-08-26T00:00:00Z")?;
+            let projected_text = serde_json::to_string(safe_projection)?;
+            assert!(!projected_text.contains("Ignore all previous instructions"));
+            assert!(safe_projection.operations.iter().any(|operation| {
+                operation.operation_name == "slow_increment"
+                    && operation.protocol_id == "ato.webmcp@1"
+            }));
+
+            let invoke_read_only = format!(
+                r##"(async () => {{
+                  const response = new Promise((resolve) => {{
+                    const receive = (event) => {{
+                      const value = JSON.parse(String(event.detail));
+                      if (value.id !== "fixture-read-request") return;
+                      document.removeEventListener("__ato_webmcp_response_v1", receive, false);
+                      resolve(value);
+                    }};
+                    document.addEventListener("__ato_webmcp_response_v1", receive, false);
+                  }});
+                  document.dispatchEvent(new CustomEvent("__ato_webmcp_request_v1", {{
+                    detail: JSON.stringify({{
+                      id: "fixture-read-request",
+                      type: "invoke",
+                      operation_id: "fixture-read-operation",
+                      operation_name: "get_counter",
+                      arguments: {{}},
+                      realization_generation: {fixture_realization_generation},
+                      surface_generation: {generation}
+                    }})
+                  }}));
+                  return await response;
+                }})()"##
+            );
+            let read_only_response = cdp.call(
+                "Runtime.evaluate",
+                json!({
+                    "expression":invoke_read_only,
+                    "returnByValue":true,
+                    "awaitPromise":true
+                }),
+                Some(&fixture_session),
+            )?;
+            assert_eq!(
+                read_only_response.pointer("/result/value/ok"),
+                Some(&Value::Bool(true))
+            );
+            assert!(read_only_response.pointer("/result/value/output").is_none());
+            assert!(
+                !serde_json::to_string(&read_only_response)?
+                    .contains("Ignore all previous instructions"),
+                "page output must not cross the main-world boundary"
+            );
+
+            let invoke_and_abort_one_of_two = format!(
+                r##"(async () => {{
+                  const responseFor = (expectedId) => new Promise((resolve) => {{
+                    const receive = (event) => {{
+                      const value = JSON.parse(String(event.detail));
+                      if (value.id !== expectedId) return;
+                      document.removeEventListener("__ato_webmcp_response_v1", receive, false);
+                      resolve(value);
+                    }};
+                    document.addEventListener("__ato_webmcp_response_v1", receive, false);
+                  }});
+                  const abortedResponse = responseFor("fixture-abort-request");
+                  const completedResponse = responseFor("fixture-complete-request");
+                  document.dispatchEvent(new CustomEvent("__ato_webmcp_request_v1", {{
+                    detail: JSON.stringify({{
+                      id: "fixture-abort-request",
+                      type: "invoke",
+                      operation_id: "fixture-abort-operation",
+                      operation_name: "slow_increment",
+                      arguments: {{ delay_ms: 3000 }},
+                      realization_generation: {fixture_realization_generation},
+                      surface_generation: {generation}
+                    }})
+                  }}));
+                  document.dispatchEvent(new CustomEvent("__ato_webmcp_request_v1", {{
+                    detail: JSON.stringify({{
+                      id: "fixture-complete-request",
+                      type: "invoke",
+                      operation_id: "fixture-complete-operation",
+                      operation_name: "slow_increment",
+                      arguments: {{ delay_ms: 150 }},
+                      realization_generation: {fixture_realization_generation},
+                      surface_generation: {generation}
+                    }})
+                  }}));
+                  await new Promise((resolve) => setTimeout(resolve, 50));
+                  const signaled = globalThis.__ATO_WEBMCP_CONSUMER__.abort("fixture-abort-operation");
+                  return {{
+                    signaled,
+                    aborted: await abortedResponse,
+                    completed: await completedResponse,
+                    counter: document.querySelector("#counter").textContent
+                  }};
+                }})()"##
+            );
+            let aborted = cdp.call(
+                "Runtime.evaluate",
+                json!({
+                    "expression":invoke_and_abort_one_of_two,
+                    "returnByValue":true,
+                    "awaitPromise":true
+                }),
+                Some(&fixture_session),
+            )?;
+            assert_eq!(
+                aborted.pointer("/result/value/signaled"),
+                Some(&Value::Bool(true))
+            );
+            assert_eq!(
+                aborted.pointer("/result/value/aborted/error"),
+                Some(&Value::String("aborted".to_owned()))
+            );
+            assert!(aborted.pointer("/result/value/aborted/output").is_none());
+            assert_eq!(
+                aborted.pointer("/result/value/completed/ok"),
+                Some(&Value::Bool(true))
+            );
+            assert_eq!(
+                aborted.pointer("/result/value/counter"),
+                Some(&Value::String("1".to_owned()))
+            );
+
+            let replaced = cdp.call(
+                "Runtime.evaluate",
+                json!({
+                    "expression":r#"(async () => {
+                      globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__ =
+                        globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__.filter(({ name }) => name !== "set_label");
+                      return globalThis.__ATO_WEBMCP_CONSUMER__.snapshot();
+                    })()"#,
+                    "returnByValue":true,
+                    "awaitPromise":true
+                }),
+                Some(&fixture_session),
+            )?;
+            assert_ne!(
+                replaced.pointer("/result/value/registry_generation"),
+                fixture_snapshot.pointer("/result/value/registry_generation")
+            );
+            assert!(
+                replaced
+                    .pointer("/result/value/tools")
+                    .and_then(Value::as_array)
+                    .is_some_and(|tools| tools.iter().all(|tool| {
+                        tool.get("name").and_then(Value::as_str) != Some("set_label")
+                    }))
+            );
+
+            // Producer ownership is part of realization identity. A canonical
+            // document producer wins over a simultaneously available alias,
+            // atomically replaces fixture tools even when one definition has
+            // the same operational signature, and invalidates the fixture's
+            // already-published realization generation.
+            let replaced_generation = replaced
+                .pointer("/result/value/registry_generation")
+                .and_then(Value::as_u64)
+                .context("replacement fixture generation missing")?;
+            let replaced_document_token = replaced
+                .pointer("/result/value/document_token")
+                .and_then(Value::as_str)
+                .context("replacement fixture document token missing")?;
+            let replaced_realization_generation =
+                serde_json::to_string(&format!("{replaced_document_token}.{replaced_generation}"))?;
+            let switched_to_document = cdp.call(
+                "Runtime.evaluate",
+                json!({
+                    "expression":r#"(async () => {
+                      globalThis.__producerInvocation = null;
+                      Object.defineProperty(document, "modelContext", {
+                        configurable: true,
+                        value: {
+                          registerTool() {},
+                          listTools() {
+                            return [{
+                              name: "get_counter",
+                              description: "replacement native handler",
+                              inputSchema: {
+                                type: "object",
+                                properties: {},
+                                additionalProperties: false
+                              },
+                              readOnly: true
+                            }];
+                          },
+                          invokeTool(name) {
+                            globalThis.__producerInvocation = `document:${name}`;
+                          }
+                        }
+                      });
+                      Object.defineProperty(globalThis.navigator, "modelContext", {
+                        configurable: true,
+                        value: {
+                          registerTool() {},
+                          listTools() {
+                            return [{
+                              name: "alias_only",
+                              inputSchema: { type: "object", properties: {} }
+                            }];
+                          },
+                          invokeTool(name) {
+                            globalThis.__producerInvocation = `alias:${name}`;
+                          }
+                        }
+                      });
+                      return globalThis.__ATO_WEBMCP_CONSUMER__.snapshot();
+                    })()"#,
+                    "returnByValue":true,
+                    "awaitPromise":true
+                }),
+                Some(&fixture_session),
+            )?;
+            assert_eq!(
+                switched_to_document.pointer("/result/value/producer_api"),
+                Some(&Value::String("document_model_context".to_owned()))
+            );
+            assert_ne!(
+                switched_to_document.pointer("/result/value/registry_generation"),
+                replaced.pointer("/result/value/registry_generation")
+            );
+            assert_eq!(
+                switched_to_document
+                    .pointer("/result/value/tools")
+                    .and_then(Value::as_array)
+                    .map(Vec::len),
+                Some(1),
+                "fixture-only and alias-only tools must not survive the owner transition"
+            );
+            assert_eq!(
+                switched_to_document.pointer("/result/value/tools/0/name"),
+                Some(&Value::String("get_counter".to_owned()))
+            );
+
+            let invoke_replaced_fixture = format!(
+                r#"(async () => {{
+                  const response = new Promise((resolve) => {{
+                    const receive = (event) => {{
+                      const value = JSON.parse(String(event.detail));
+                      if (value.id !== "replaced-fixture-request") return;
+                      document.removeEventListener("__ato_webmcp_response_v1", receive, false);
+                      resolve(value);
+                    }};
+                    document.addEventListener("__ato_webmcp_response_v1", receive, false);
+                  }});
+                  document.dispatchEvent(new CustomEvent("__ato_webmcp_request_v1", {{
+                    detail: JSON.stringify({{
+                      id: "replaced-fixture-request",
+                      type: "invoke",
+                      operation_id: "replaced-fixture-operation",
+                      operation_name: "get_counter",
+                      arguments: {{}},
+                      realization_generation: {replaced_realization_generation},
+                      surface_generation: {replaced_generation}
+                    }})
+                  }}));
+                  return {{ response: await response, invoked: globalThis.__producerInvocation }};
+                }})()"#
+            );
+            let stale_fixture_invoke = cdp.call(
+                "Runtime.evaluate",
+                json!({
+                    "expression":invoke_replaced_fixture,
+                    "returnByValue":true,
+                    "awaitPromise":true
+                }),
+                Some(&fixture_session),
+            )?;
+            assert_eq!(
+                stale_fixture_invoke.pointer("/result/value/response/error"),
+                Some(&Value::String("stale_operation".to_owned()))
+            );
+            assert_eq!(
+                stale_fixture_invoke.pointer("/result/value/invoked"),
+                Some(&Value::Null),
+                "an old fixture descriptor must not resolve to the replacement native handler"
+            );
+
+            let document_generation = switched_to_document
+                .pointer("/result/value/registry_generation")
+                .and_then(Value::as_u64)
+                .context("document producer generation missing")?;
+            let document_realization_generation =
+                serde_json::to_string(&format!("{replaced_document_token}.{document_generation}"))?;
+            let invoke_document = format!(
+                r#"(async () => {{
+                  const response = new Promise((resolve) => {{
+                    const receive = (event) => {{
+                      const value = JSON.parse(String(event.detail));
+                      if (value.id !== "document-owner-request") return;
+                      document.removeEventListener("__ato_webmcp_response_v1", receive, false);
+                      resolve(value);
+                    }};
+                    document.addEventListener("__ato_webmcp_response_v1", receive, false);
+                  }});
+                  document.dispatchEvent(new CustomEvent("__ato_webmcp_request_v1", {{
+                    detail: JSON.stringify({{
+                      id: "document-owner-request",
+                      type: "invoke",
+                      operation_id: "document-owner-operation",
+                      operation_name: "get_counter",
+                      arguments: {{}},
+                      realization_generation: {document_realization_generation},
+                      surface_generation: {document_generation}
+                    }})
+                  }}));
+                  return {{ response: await response, invoked: globalThis.__producerInvocation }};
+                }})()"#
+            );
+            let document_invoked = cdp.call(
+                "Runtime.evaluate",
+                json!({
+                    "expression":invoke_document,
+                    "returnByValue":true,
+                    "awaitPromise":true
+                }),
+                Some(&fixture_session),
+            )?;
+            assert_eq!(
+                document_invoked.pointer("/result/value/response/ok"),
+                Some(&Value::Bool(true))
+            );
+            assert_eq!(
+                document_invoked.pointer("/result/value/invoked"),
+                Some(&Value::String("document:get_counter".to_owned())),
+                "the deprecated alias must never replace the canonical document producer"
+            );
+
+            let fixture_fallback = cdp.call(
+                "Runtime.evaluate",
+                json!({
+                    "expression":r#"(async () => {
+                      Reflect.deleteProperty(document, "modelContext");
+                      Reflect.deleteProperty(globalThis.navigator, "modelContext");
+                      return globalThis.__ATO_WEBMCP_CONSUMER__.snapshot();
+                    })()"#,
+                    "returnByValue":true,
+                    "awaitPromise":true
+                }),
+                Some(&fixture_session),
+            )?;
+            assert_eq!(
+                fixture_fallback.pointer("/result/value/producer_api"),
+                Some(&Value::String("deterministic_fixture_polyfill".to_owned()))
+            );
+            assert_ne!(
+                fixture_fallback.pointer("/result/value/registry_generation"),
+                switched_to_document.pointer("/result/value/registry_generation")
+            );
+            assert!(
+                fixture_fallback
+                    .pointer("/result/value/tools")
+                    .and_then(Value::as_array)
+                    .is_some_and(|tools| tools.iter().any(|tool| {
+                        tool.get("name").and_then(Value::as_str) == Some("slow_increment")
+                    })),
+                "fixture tools must become active again after native API disappearance"
+            );
+            Ok(())
+        })();
+        let _ = stop_child(&mut child);
+        result
+    }
+
+    fn test_chrome() -> Option<PathBuf> {
+        std::env::var_os("ATO_BROWSER_CHROME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_file())
+            .or_else(|| {
+                [
+                    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+                    "/usr/bin/google-chrome",
+                    "/usr/bin/chromium",
+                ]
+                .into_iter()
+                .map(PathBuf::from)
+                .find(|path| path.is_file())
+            })
     }
 
     #[test]

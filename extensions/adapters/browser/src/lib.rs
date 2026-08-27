@@ -3,18 +3,20 @@
 #![forbid(unsafe_code)]
 
 mod coalescer;
+mod operation;
 mod protocol;
 mod transport;
 
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, mpsc};
-use std::time::Duration;
+use std::sync::{Arc, RwLock, mpsc};
+use std::time::{Duration, Instant};
 
 use ato_adapter_api::{
     AdapterAttachContext, AdapterCapabilities, AdapterContext, AdapterError, AdapterFactory,
-    AdapterInstance, AttachedAdapter, LiveOperation, Stylus, SupportedOperation,
+    AdapterInstance, AttachedAdapter, LiveOperation, LiveOperationDispatcher,
+    LiveOperationSettlement, Stylus, SupportedOperation,
 };
 use ato_objects::{RecordCandidate, RecordEnvelope, read_exact_object};
 use ato_record_writer::RecordSchemaRegistry;
@@ -22,6 +24,13 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+pub use operation::{
+    ActorOperationLedger, BrowserOperationError, BrowserOperationInvocationV1,
+    BrowserOperationReceiptV1, BrowserSurfaceProjectionV1, BrowserSurfaceTracker,
+    OperationDescriptorV1, OperationSource, RawWebMcpSnapshotV1, RawWebMcpToolV1,
+    RunnerOperationResultV1, SurfaceObservationV1, SurfaceOperationDescriptorV1, WebMcpProducerApi,
+    decode_operation_descriptor, encode_operation_descriptor,
+};
 pub use protocol::{
     BrowserEvent, BrowserProtocolError, KeyboardKind, Modifiers, PointerKind, PointerType,
     decode_event, encode_event,
@@ -34,9 +43,17 @@ pub const BROWSER_KEYBOARD_OPERATION: &str = "keyboard";
 pub const BROWSER_POINTER_OPERATION: &str = "pointer";
 pub const BROWSER_CLICK_OPERATION: &str = "click";
 pub const BROWSER_SCROLL_OPERATION: &str = "scroll";
+pub const BROWSER_GENERIC_OPERATION: &str = "operation";
 
 const MAX_BROWSER_EVENT_BYTES: u64 = 64 * 1024;
-const ACK_TIMEOUT: Duration = Duration::from_secs(30);
+// Browser operations are interactive control, not background jobs. A page
+// that blocks its main thread can also prevent JavaScript timers from firing,
+// so the native transport owns this independent hard deadline.
+// The BYOA v0 acceptance surface deliberately includes a five-second WebMCP
+// handler. Keep a bounded margin above that physical duration so an ACK at
+// the boundary cannot be misclassified as indeterminate. A hung untrusted
+// page is still fenced well inside the controller's 30s request horizon.
+const ACK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Selects whether trusted DOM events are merely observed by a local CLI, or
 /// whether this Adapter accepts only Runner-authorized physical operations.
@@ -135,6 +152,7 @@ pub fn operation_for_event(event: &BrowserEvent) -> &'static str {
         BrowserEvent::Pointer { .. } => BROWSER_POINTER_OPERATION,
         BrowserEvent::Click { .. } => BROWSER_CLICK_OPERATION,
         BrowserEvent::Scroll { .. } => BROWSER_SCROLL_OPERATION,
+        BrowserEvent::Operation { .. } => BROWSER_GENERIC_OPERATION,
     }
 }
 
@@ -146,6 +164,7 @@ pub fn register_record_schemas(registry: &mut RecordSchemaRegistry) -> Result<()
         BROWSER_POINTER_OPERATION,
         BROWSER_CLICK_OPERATION,
         BROWSER_SCROLL_OPERATION,
+        BROWSER_GENERIC_OPERATION,
     ] {
         registry
             .register(
@@ -180,6 +199,7 @@ impl AdapterFactory for BrowserAdapter {
             BROWSER_POINTER_OPERATION,
             BROWSER_CLICK_OPERATION,
             BROWSER_SCROLL_OPERATION,
+            BROWSER_GENERIC_OPERATION,
         ]
         .into_iter()
         .map(|operation| {
@@ -207,6 +227,8 @@ impl AdapterFactory for BrowserAdapter {
         let browser_session = random_credential();
         let port_id = ato_computation::PortId::parse(&config.port_id)
             .map_err(|error| AdapterError::InvalidConfig(error.to_string()))?;
+        let dispatcher_port_id = config.port_id.clone();
+        let dispatcher_allowed_codes = config.allowed_non_text_codes.clone();
         let stylus = Arc::new(BrowserStylus::new(
             Arc::clone(&context.stylus),
             port_id.clone(),
@@ -219,7 +241,7 @@ impl AdapterFactory for BrowserAdapter {
             &instance.instance_id,
             transport::TransportConfig {
                 expected_origin: config.expected_origin.clone(),
-                port_id,
+                port_id: port_id.clone(),
                 allowed_non_text_codes: config.allowed_non_text_codes.clone(),
                 input_mode: config.input_mode,
                 channel_credential,
@@ -231,9 +253,15 @@ impl AdapterFactory for BrowserAdapter {
         Ok(Box::new(BrowserSession {
             instance_id: instance.instance_id.clone(),
             config,
+            dispatcher: Arc::new(BrowserLiveOperationDispatcher {
+                commands: transport.commands.clone(),
+                failure: Arc::clone(&transport.failure),
+                port_id: dispatcher_port_id,
+                allowed_non_text_codes: dispatcher_allowed_codes,
+                next_request_id: AtomicU64::new(0),
+                lifecycle_stopped: RwLock::new(false),
+            }),
             transport,
-            next_request_id: 1,
-            quiesced: false,
         }))
     }
 }
@@ -242,20 +270,25 @@ struct BrowserSession {
     instance_id: String,
     config: BrowserAdapterConfig,
     transport: transport::TransportHandle,
-    next_request_id: u64,
-    quiesced: bool,
+    dispatcher: Arc<BrowserLiveOperationDispatcher>,
 }
 
-impl BrowserSession {
-    fn request_id(&mut self) -> String {
-        let request_id = self.next_request_id.to_string();
-        self.next_request_id = self.next_request_id.saturating_add(1);
-        request_id
+struct BrowserLiveOperationDispatcher {
+    commands: mpsc::Sender<transport::TransportCommand>,
+    failure: Arc<std::sync::Mutex<Option<String>>>,
+    port_id: String,
+    allowed_non_text_codes: BTreeSet<String>,
+    next_request_id: AtomicU64,
+    lifecycle_stopped: RwLock<bool>,
+}
+
+impl BrowserLiveOperationDispatcher {
+    fn request_id(&self) -> String {
+        (self.next_request_id.fetch_add(1, Ordering::Relaxed) + 1).to_string()
     }
 
     fn transport_failure(&self) -> Result<(), AdapterError> {
         if let Some(error) = self
-            .transport
             .failure
             .lock()
             .map_err(|_| {
@@ -268,24 +301,115 @@ impl BrowserSession {
         Ok(())
     }
 
-    fn apply_event(&mut self, event: BrowserEvent) -> Result<(), AdapterError> {
+    fn apply_event(
+        &self,
+        correlation_id: Option<&str>,
+        realization_generation: Option<&str>,
+        event: BrowserEvent,
+    ) -> Result<Option<u64>, AdapterError> {
+        self.apply_event_with_timeout(correlation_id, realization_generation, event, ACK_TIMEOUT)
+    }
+
+    fn apply_event_with_timeout(
+        &self,
+        correlation_id: Option<&str>,
+        realization_generation: Option<&str>,
+        event: BrowserEvent,
+        ack_timeout: Duration,
+    ) -> Result<Option<u64>, AdapterError> {
+        let stopped = self.lifecycle_stopped.read().map_err(|_| {
+            AdapterError::Operation("Browser Adapter lifecycle state poisoned".to_owned())
+        })?;
         self.transport_failure()?;
-        if self.quiesced {
+        if *stopped {
             return Err(AdapterError::Operation(
                 "Browser Adapter is already quiesced".to_owned(),
             ));
         }
         let request_id = self.request_id();
+        let ordered = correlation_id.is_some();
+        let correlation_id = correlation_id.unwrap_or(&request_id).to_owned();
         let (sender, receiver) = mpsc::channel();
-        self.transport
-            .commands
+        let deadline = Instant::now() + ack_timeout;
+        self.commands
             .send(transport::TransportCommand::Apply {
                 request_id,
+                correlation_id,
+                realization_generation: realization_generation.map(str::to_owned),
+                ordered,
+                deadline,
                 event,
                 result: sender,
             })
             .map_err(|error| AdapterError::Operation(error.to_string()))?;
-        transport::wait_for_result(receiver, ACK_TIMEOUT, "apply")
+        // The transport thread owns both the deadline and ACK demultiplexer.
+        // Waiting without an independent timeout prevents a boundary race in
+        // which this thread abandons ticket N while the transport publishes
+        // ticket N+1. Transport termination drops this channel, so the wait is
+        // still bounded by its fail-closed lifecycle.
+        transport::wait_for_apply_result(receiver)
+    }
+
+    fn validate_operation(&self, operation: &LiveOperation) -> Result<BrowserEvent, AdapterError> {
+        if operation.protocol_id.as_str() != BROWSER_PROTOCOL_ID
+            || operation.port_id.as_str() != self.port_id
+        {
+            return Err(AdapterError::Operation(
+                "Browser live operation has wrong protocol or port".to_owned(),
+            ));
+        }
+        let event =
+            protocol::decode_event_with_policy(&operation.payload, &self.allowed_non_text_codes)
+                .map_err(|error| AdapterError::Operation(error.to_string()))?;
+        if operation.operation_id.as_str() != operation_for_event(&event) {
+            return Err(AdapterError::Operation(
+                "Browser live operation kind does not match payload".to_owned(),
+            ));
+        }
+        Ok(event)
+    }
+}
+
+impl LiveOperationDispatcher for BrowserLiveOperationDispatcher {
+    fn apply_operation(
+        &self,
+        correlation_id: &str,
+        realization_generation: Option<&str>,
+        operation: &LiveOperation,
+    ) -> Result<LiveOperationSettlement, AdapterError> {
+        if correlation_id.is_empty()
+            || correlation_id.len() > 160
+            || !correlation_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':'))
+        {
+            return Err(AdapterError::Operation(
+                "invalid Browser operation correlation id".to_owned(),
+            ));
+        }
+        if realization_generation.is_some_and(|generation| {
+            generation.is_empty()
+                || generation.len() > 256
+                || !generation
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        }) {
+            return Err(AdapterError::Operation(
+                "invalid Browser realization generation".to_owned(),
+            ));
+        }
+        let order = self
+            .apply_event(
+                Some(correlation_id),
+                realization_generation,
+                self.validate_operation(operation)?,
+            )?
+            .ok_or_else(|| {
+                AdapterError::Operation(
+                    "Browser live apply returned no settlement order".to_owned(),
+                )
+            })?;
+        Ok(LiveOperationSettlement { order })
     }
 }
 
@@ -314,28 +438,17 @@ impl AttachedAdapter for BrowserSession {
         context: &AdapterContext<'_>,
     ) -> Result<(), AdapterError> {
         let event = read_event(record, context, &self.config)?;
-        self.apply_event(event)
+        self.dispatcher.apply_event(None, None, event).map(|_| ())
     }
 
     fn apply_operation(&mut self, operation: &LiveOperation) -> Result<(), AdapterError> {
-        if operation.protocol_id.as_str() != BROWSER_PROTOCOL_ID
-            || operation.port_id.as_str() != self.config.port_id
-        {
-            return Err(AdapterError::Operation(
-                "Browser live operation has wrong protocol or port".to_owned(),
-            ));
-        }
-        let event = protocol::decode_event_with_policy(
-            &operation.payload,
-            &self.config.allowed_non_text_codes,
-        )
-        .map_err(|error| AdapterError::Operation(error.to_string()))?;
-        if operation.operation_id.as_str() != operation_for_event(&event) {
-            return Err(AdapterError::Operation(
-                "Browser live operation kind does not match payload".to_owned(),
-            ));
-        }
-        self.apply_event(event)
+        self.dispatcher
+            .apply_event(None, None, self.dispatcher.validate_operation(operation)?)
+            .map(|_| ())
+    }
+
+    fn live_operation_dispatcher(&self) -> Option<Arc<dyn LiveOperationDispatcher>> {
+        Some(Arc::clone(&self.dispatcher) as Arc<dyn LiveOperationDispatcher>)
     }
 
     fn verify(
@@ -347,11 +460,15 @@ impl AttachedAdapter for BrowserSession {
     }
 
     fn quiesce(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
-        self.transport_failure()?;
-        if self.quiesced {
+        self.dispatcher.transport_failure()?;
+        let mut stopped = self.dispatcher.lifecycle_stopped.write().map_err(|_| {
+            AdapterError::Operation("Browser Adapter lifecycle state poisoned".to_owned())
+        })?;
+        if *stopped {
             return Ok(());
         }
-        let request_id = self.request_id();
+        *stopped = true;
+        let request_id = self.dispatcher.request_id();
         let (sender, receiver) = mpsc::channel();
         self.transport
             .commands
@@ -361,11 +478,13 @@ impl AttachedAdapter for BrowserSession {
             })
             .map_err(|error| AdapterError::Operation(error.to_string()))?;
         transport::wait_for_result(receiver, ACK_TIMEOUT, "quiesce")?;
-        self.quiesced = true;
         Ok(())
     }
 
     fn detach(&mut self, _context: &AdapterContext<'_>) -> Result<(), AdapterError> {
+        *self.dispatcher.lifecycle_stopped.write().map_err(|_| {
+            AdapterError::Operation("Browser Adapter lifecycle state poisoned".to_owned())
+        })? = true;
         let _ = self
             .transport
             .commands
@@ -385,7 +504,7 @@ impl AttachedAdapter for BrowserSession {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        self.transport_failure()
+        self.dispatcher.transport_failure()
     }
 }
 
@@ -499,10 +618,10 @@ pub fn runtime_discovery_path(workspace: &Path, instance_id: &str) -> std::path:
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, mpsc};
+    use std::sync::{Arc, Mutex, mpsc};
 
     use ato_adapter_api::{AdapterAttachContext, AdapterRegistry, ObservationSink, Stylus};
-    use ato_computation::{ComputationRef, ProtocolId};
+    use ato_computation::{ComputationRef, OperationId, PortId, ProtocolId};
     use ato_objects::{Direction, FsObjectStore, ObjectStore, RecordId};
     use ato_record_writer::{
         RecordPipeline, RecordSchemaRegistry, RecordWriterConfig, records_for_frontier,
@@ -551,7 +670,7 @@ mod tests {
         assert!(capabilities.verify);
         assert!(capabilities.quiesce);
         let operations = AdapterFactory::supported_operations(&BrowserAdapter);
-        assert_eq!(operations.len(), 4);
+        assert_eq!(operations.len(), 5);
         assert_eq!(
             operations
                 .iter()
@@ -562,7 +681,122 @@ mod tests {
                 BROWSER_KEYBOARD_OPERATION,
                 BROWSER_POINTER_OPERATION,
                 BROWSER_SCROLL_OPERATION,
+                BROWSER_GENERIC_OPERATION,
             ])
+        );
+    }
+
+    #[test]
+    fn live_dispatch_preserves_controller_correlation_outside_event_payload() {
+        let (commands, receiver) = mpsc::channel();
+        let dispatcher = Arc::new(BrowserLiveOperationDispatcher {
+            commands,
+            failure: Arc::new(Mutex::new(None)),
+            port_id: "app.browser".to_owned(),
+            allowed_non_text_codes: BTreeSet::new(),
+            next_request_id: AtomicU64::new(0),
+            lifecycle_stopped: RwLock::new(false),
+        });
+        let event = BrowserEvent::Keyboard {
+            kind: KeyboardKind::KeyDown,
+            code: "ArrowRight".to_owned(),
+            modifiers: Modifiers::default(),
+        };
+        let operation = LiveOperation {
+            protocol_id: ProtocolId::parse(BROWSER_PROTOCOL_ID).unwrap(),
+            operation_id: OperationId::parse(BROWSER_KEYBOARD_OPERATION).unwrap(),
+            port_id: PortId::parse("app.browser").unwrap(),
+            payload: encode_event(&event).unwrap(),
+        };
+        let caller = Arc::clone(&dispatcher);
+        let apply = std::thread::spawn(move || {
+            LiveOperationDispatcher::apply_operation(
+                caller.as_ref(),
+                "aop_controller_42",
+                Some("document_generation_7"),
+                &operation,
+            )
+        });
+        let transport::TransportCommand::Apply {
+            request_id,
+            correlation_id,
+            realization_generation,
+            ordered,
+            deadline,
+            event: transported,
+            result,
+        } = receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("transport apply")
+        else {
+            panic!("unexpected transport command");
+        };
+        assert_eq!(request_id, "1");
+        assert_eq!(correlation_id, "aop_controller_42");
+        assert_eq!(
+            realization_generation.as_deref(),
+            Some("document_generation_7")
+        );
+        assert!(ordered);
+        assert!(deadline > Instant::now());
+        assert_eq!(transported, event);
+        result.send(Ok(Some(1))).expect("transport ACK");
+        assert_eq!(
+            apply.join().expect("apply thread").expect("live apply"),
+            LiveOperationSettlement { order: 1 }
+        );
+    }
+
+    #[test]
+    fn ordered_apply_waits_for_the_transport_owned_deadline_outcome() {
+        let (commands, receiver) = mpsc::channel();
+        let dispatcher = Arc::new(BrowserLiveOperationDispatcher {
+            commands,
+            failure: Arc::new(Mutex::new(None)),
+            port_id: "app.browser".to_owned(),
+            allowed_non_text_codes: BTreeSet::new(),
+            next_request_id: AtomicU64::new(0),
+            lifecycle_stopped: RwLock::new(false),
+        });
+        let caller = Arc::clone(&dispatcher);
+        let apply = std::thread::spawn(move || {
+            caller.apply_event_with_timeout(
+                Some("aop_hung_page"),
+                Some("document_hung"),
+                BrowserEvent::Click {
+                    x_normalized: 0.5,
+                    y_normalized: 0.5,
+                    button: 0,
+                },
+                Duration::from_millis(20),
+            )
+        });
+        let transport::TransportCommand::Apply {
+            deadline, result, ..
+        } = receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("transport apply")
+        else {
+            panic!("unexpected transport command");
+        };
+        std::thread::sleep(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .saturating_add(Duration::from_millis(5)),
+        );
+        result
+            .send(Err(AdapterError::Operation(
+                "physical_outcome_indeterminate".to_owned(),
+            )))
+            .expect("transport deadline result");
+        let error = apply
+            .join()
+            .expect("apply thread")
+            .expect_err("hung Browser operation must fail closed");
+        assert!(error.to_string().contains("physical_outcome_indeterminate"));
+        assert!(
+            receiver.recv_timeout(Duration::from_millis(20)).is_err(),
+            "the dispatcher must not race the transport with a second Fence command"
         );
     }
 
@@ -829,6 +1063,10 @@ mod tests {
                     .expect("apply should be text"),
             )
             .expect("apply should decode");
+            assert_eq!(
+                apply["operation_id"], apply["request_id"],
+                "legacy Record apply uses a scoped transport correlation"
+            );
             apply_seen_tx.send(()).expect("test should observe apply");
             release_apply_rx.recv().expect("test should release apply");
             socket
