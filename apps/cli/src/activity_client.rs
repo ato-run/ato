@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 
 const MAX_CONNECTION_FILE_BYTES: u64 = 16 * 1024;
 const MAX_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
+const EXTERNAL_MCP_CONTROLLER_KIND: &str = "external_mcp";
 
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -145,7 +146,7 @@ impl ActivityClient {
         ensure!(
             created.session.activity_id == connection.activity_id
                 && created.session.actor_id == connection.actor_id
-                && created.session.controller_kind == "codex_mcp"
+                && created.session.controller_kind == EXTERNAL_MCP_CONTROLLER_KIND
                 && created.session.epoch > 0
                 && valid_scoped_id(&created.session.actor_run_id)
                 && created.controller_session_token.starts_with("atoc_"),
@@ -300,7 +301,7 @@ fn create_controller_session(
         Method::POST,
         "/v1/controller-sessions",
         &connection.controller_key,
-        Some(json!({"controller_kind": "codex_mcp"})),
+        Some(json!({"controller_kind": EXTERNAL_MCP_CONTROLLER_KIND})),
     )?;
     serde_json::from_value(value).context("decode Controller session response")
 }
