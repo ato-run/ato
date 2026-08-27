@@ -435,9 +435,12 @@
       });
       const offer = await connection.createOffer();
       await connection.setLocalDescription(offer);
+      // The Room's mediaSdpSchema requires `sdp` to be a bare string; sending
+      // the RTCSessionDescription object trips schema validation and the Room
+      // fences this socket with 1008 "Invalid media offer".
       sendRoom("run.media.offer", {
         ...signal,
-        sdp: { type: offer.type, sdp: offer.sdp },
+        sdp: offer.sdp ?? "",
       });
     }
 
@@ -476,7 +479,11 @@
     async function applyMediaSignal(type, payload) {
       const peer = [...peers.values()].find(({ signal }) => signal.peer_id === payload.peer_id);
       if (!peer) return;
-      if (type === "run.media.answer") await peer.connection.setRemoteDescription(payload.sdp);
+      if (type === "run.media.answer") {
+        await peer.connection.setRemoteDescription(
+          { type: "answer", sdp: payload.sdp },
+        );
+      }
       else if (payload.candidate) await peer.connection.addIceCandidate(payload.candidate);
     }
 
@@ -577,7 +584,12 @@
       if (ending) return;
       ending = true;
       stopRoomHeartbeat();
-      void hostFetch("/failure", {});
+      void hostFetch("/failure", {
+        reason: "controller_fail_called",
+        reconnect_attempt: roomReconnectAttempt,
+        connection_id: roomIdentity ? roomIdentity.connectionId : null,
+        uptime_ms: roomConnectedAt > 0 ? Date.now() - roomConnectedAt : 0,
+      });
     }
 
     function hostFetch(path, body) {
