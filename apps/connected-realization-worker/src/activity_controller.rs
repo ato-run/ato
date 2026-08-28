@@ -2224,6 +2224,33 @@ mod tests {
     }
 
     #[test]
+    fn controller_media_sdp_matches_room_string_wire_contract() {
+        let offer = CONTROLLER_HTML
+            .split("sendRoom(\"run.media.offer\"")
+            .nth(1)
+            .and_then(|value| value.split("});").next())
+            .expect("media offer source");
+        assert!(
+            offer.contains("sdp: offer.sdp ?? \"\""),
+            "Room media offers must carry SDP as a bare string"
+        );
+        assert!(
+            !offer.contains("sdp: {"),
+            "RTCSessionDescription objects violate the Room media schema"
+        );
+
+        let answer = CONTROLLER_HTML
+            .split("async function applyMediaSignal")
+            .nth(1)
+            .and_then(|value| value.split("async function pumpFrame").next())
+            .expect("media answer source");
+        assert!(
+            answer.contains("{ type: \"answer\", sdp: payload.sdp }"),
+            "the controller must reconstruct an answer description from Room string SDP"
+        );
+    }
+
+    #[test]
     fn controller_uses_canvas_media_and_application_receipts() {
         assert!(CONTROLLER_HTML.contains("mediaCanvas.captureStream(30)"));
         assert!(CONTROLLER_HTML.contains("run.operation.receipt"));
