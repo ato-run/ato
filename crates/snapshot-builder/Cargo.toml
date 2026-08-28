@@ -13,6 +13,10 @@ dist = false
 name = "snapshot-builder"
 path = "src/main.rs"
 
+[[bin]]
+name = "static-web-bundle"
+path = "src/bin/static-web-bundle.rs"
+
 [dependencies]
 snapshot = { path = "../snapshot" }
 capsule = { path = "../capsule" }
