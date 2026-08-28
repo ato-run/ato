@@ -1,0 +1,17 @@
+{
+  "schema": "ato.static-web-bundle-receipt/v1",
+  "materialization_id": "mat_fixture",
+  "manifest_digest": "sha256:6d77d3da709a578e6d58f50d4b8f8cf5c54e2178200821769afb03449c8e6ba2",
+  "manifest_r2_key": "static/v1/manifests/sha256/6d77d3da709a578e6d58f50d4b8f8cf5c54e2178200821769afb03449c8e6ba2.json",
+  "production_host_label": "p-nv35hwtqtjly43ky6uguxd4m6xcu4ilyeaecc5u27mbujheonora",
+  "staging_host_label": "s-nv35hwtqtjly43ky6uguxd4m6xcu4ilyeaecc5u27mbujheonora",
+  "entry_path": "index.html",
+  "file_count": 4,
+  "total_size": 69,
+  "blobs": [
+    {"digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "size": 42, "r2_key": "static/v1/blobs/sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "custom_metadata": {"schema": "ato.static-blob/v1", "sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},
+    {"digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "size": 7, "r2_key": "static/v1/blobs/sha256/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "custom_metadata": {"schema": "ato.static-blob/v1", "sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}},
+    {"digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "size": 9, "r2_key": "static/v1/blobs/sha256/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "custom_metadata": {"schema": "ato.static-blob/v1", "sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}},
+    {"digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "size": 11, "r2_key": "static/v1/blobs/sha256/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "custom_metadata": {"schema": "ato.static-blob/v1", "sha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}}
+  ]
+}
