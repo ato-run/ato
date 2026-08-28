@@ -736,6 +736,128 @@ mod tests {
     }
 
     #[test]
+    fn bridge_physical_keyboard_applies_native_select_default() -> Result<()> {
+        let Some(chrome) = test_chrome() else {
+            return Ok(());
+        };
+        fs::create_dir_all(".tmp")?;
+        let profile = tempfile::Builder::new()
+            .prefix("browser-host-select-")
+            .tempdir_in(".tmp")?;
+        restrict_dir(profile.path())?;
+        let mut child = launch_chrome(&chrome, profile.path(), true)?;
+        let result = (|| -> Result<()> {
+            let websocket = connect_cdp(&wait_for_debugger_url(profile.path(), &mut child)?)?;
+            let mut cdp = Cdp {
+                websocket,
+                next_id: 1,
+            };
+            let context = cdp.call("Target.createBrowserContext", json!({}), None)?;
+            let target = cdp.call(
+                "Target.createTarget",
+                json!({
+                    "url":"data:text/html,<select id=mode><option value=ai>AI</option><option value=pvp>PvP</option></select><output id=changes>0</output>",
+                    "browserContextId":required_string(&context, "browserContextId")?
+                }),
+                None,
+            )?;
+            let attached = cdp.call(
+                "Target.attachToTarget",
+                json!({"targetId":required_string(&target, "targetId")?,"flatten":true}),
+                None,
+            )?;
+            let session = required_string(&attached, "sessionId")?.to_owned();
+            cdp.call("Page.enable", json!({}), Some(&session))?;
+            wait_for_document_ready(&mut cdp, &session)?;
+            let bridge = serde_json::to_string(BRIDGE_SOURCE)?;
+            let expression = format!(
+                r#"(async () => {{
+                  class MockWebSocket {{
+                    static OPEN = 1;
+                    constructor() {{
+                      this.readyState = MockWebSocket.OPEN;
+                      this.listeners = new Map();
+                      globalThis.__atoTestSocket = this;
+                    }}
+                    addEventListener(type, listener) {{ this.listeners.set(type, listener); }}
+                    send() {{}}
+                    emit(type, event) {{ return this.listeners.get(type)?.(event); }}
+                  }}
+                  globalThis.WebSocket = MockWebSocket;
+                  globalThis.__ATO_BROWSER_BOOTSTRAP__ = {{
+                    protocol: "ato.browser@1",
+                    expected_origin: "null",
+                    control_url: "ws://127.0.0.1:1/control",
+                    channel_credential: "test-channel",
+                    browser_session: "test-session",
+                    allowed_non_text_codes: ["ArrowDown"],
+                    input_mode: "apply_only"
+                  }};
+                  eval({bridge});
+                  await globalThis.__atoTestSocket.emit("open", {{}});
+                  const mode = document.getElementById("mode");
+                  const changes = document.getElementById("changes");
+                  mode.addEventListener("change", () => {{
+                    changes.textContent = String(Number(changes.textContent) + 1);
+                  }});
+                  const rect = mode.getBoundingClientRect();
+                  const x = (rect.left + rect.width / 2) / innerWidth;
+                  const y = (rect.top + rect.height / 2) / innerHeight;
+                  const apply = (requestId, event) => globalThis.__atoTestSocket.emit("message", {{
+                    data: JSON.stringify({{
+                      type: "apply",
+                      request_id: requestId,
+                      operation_id: requestId,
+                      event
+                    }})
+                  }});
+                  await apply("pointer-down", {{
+                    type: "pointer",
+                    kind: "pointer_down",
+                    pointer_id: 1,
+                    pointer_type: "mouse",
+                    x_normalized: x,
+                    y_normalized: y,
+                    button: 0,
+                    buttons: 1
+                  }});
+                  await apply("arrow-down", {{
+                    type: "keyboard",
+                    kind: "key_down",
+                    code: "ArrowDown",
+                    modifiers: {{ alt: false, control: false, meta: false, shift: false }}
+                  }});
+                  return {{
+                    active_id: document.activeElement?.id ?? null,
+                    value: mode.value,
+                    changes: Number(changes.textContent)
+                  }};
+                }})()"#
+            );
+            let applied = cdp.call(
+                "Runtime.evaluate",
+                json!({"expression":expression,"returnByValue":true,"awaitPromise":true}),
+                Some(&session),
+            )?;
+            assert_eq!(
+                applied.pointer("/result/value/active_id"),
+                Some(&Value::String("mode".to_owned()))
+            );
+            assert_eq!(
+                applied.pointer("/result/value/value"),
+                Some(&Value::String("pvp".to_owned()))
+            );
+            assert_eq!(
+                applied.pointer("/result/value/changes"),
+                Some(&Value::Number(1.into()))
+            );
+            Ok(())
+        })();
+        let _ = stop_child(&mut child);
+        result
+    }
+
+    #[test]
     fn bridge_erases_the_injected_bootstrap_before_opening_a_socket() {
         let erase = BRIDGE_SOURCE
             .find("Reflect.deleteProperty")

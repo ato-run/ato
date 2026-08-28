@@ -148,17 +148,21 @@
     if (!isObject(event) || typeof event.type !== "string") throw new Error("invalid Browser event");
     if (event.type === "keyboard") {
       const target = document.activeElement || document.body;
-      target.dispatchEvent(new KeyboardEvent(
+      const accepted = target.dispatchEvent(new KeyboardEvent(
         event.kind === "key_down" ? "keydown" : "keyup",
         { code: event.code, ...modifierInit(event.modifiers), bubbles: true, cancelable: true },
       ));
+      if (accepted && event.kind === "key_down") applyNativeKeyboardDefault(target, event.code);
       return;
     }
     if (event.type === "pointer") {
       const x = denormalize(event.x_normalized, globalThis.innerWidth);
       const y = denormalize(event.y_normalized, globalThis.innerHeight);
       let target = pointerTargets.get(event.pointer_id) || document.elementFromPoint(x, y) || document.body;
-      if (event.kind === "pointer_down") pointerTargets.set(event.pointer_id, target);
+      if (event.kind === "pointer_down") {
+        pointerTargets.set(event.pointer_id, target);
+        if (typeof target.focus === "function") target.focus({ preventScroll: true });
+      }
       target.dispatchEvent(new PointerEvent(event.kind.replace("pointer_", "pointer"), {
         pointerId: event.pointer_id,
         pointerType: event.pointer_type,
@@ -194,6 +198,31 @@
       return;
     }
     throw new Error("unsupported Browser event");
+  }
+
+  function applyNativeKeyboardDefault(target, code) {
+    if (!(target instanceof HTMLSelectElement) || target.disabled || target.multiple) return;
+    const options = Array.from(target.options);
+    const selectable = (option) => !option.disabled &&
+      !(option.parentElement instanceof HTMLOptGroupElement && option.parentElement.disabled);
+    let next = target.selectedIndex;
+    if (code === "Home") {
+      next = options.findIndex(selectable);
+    } else if (code === "End") {
+      next = options.findLastIndex(selectable);
+    } else if (code === "ArrowDown" || code === "ArrowRight") {
+      next = options.findIndex((option, index) => index > target.selectedIndex && selectable(option));
+    } else if (code === "ArrowUp" || code === "ArrowLeft") {
+      for (let index = target.selectedIndex - 1; index >= 0; index -= 1) {
+        if (selectable(options[index])) { next = index; break; }
+      }
+    } else {
+      return;
+    }
+    if (next < 0 || next === target.selectedIndex) return;
+    target.selectedIndex = next;
+    target.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+    target.dispatchEvent(new Event("change", { bubbles: true }));
   }
 
   function invokePageOperation(event, requestId, realizationGeneration) {
