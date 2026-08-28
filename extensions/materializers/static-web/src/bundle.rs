@@ -383,16 +383,13 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn rejects_unsafe_closure_members() {
         let image = fixture_root();
-        #[cfg(unix)]
         std::os::unix::fs::symlink("index.html", image.path().join("dist/link.html")).unwrap();
-        #[cfg(unix)]
-        {
-            let extracted = extract_static_web_output(image.path(), &plan());
-            assert!(extracted.is_err());
-        }
+        let extracted = extract_static_web_output(image.path(), &plan());
+        assert!(extracted.is_err());
     }
 
     #[test]
