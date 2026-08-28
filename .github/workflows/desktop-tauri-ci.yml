@@ -7,7 +7,8 @@
 #   - the root workspace (path deps into lib/ipc and lib/host-control, and the
 #     root Cargo.toml `exclude` list) — gated by `rust-ci.yml` on the same
 #     branches/PRs, so it is intentionally not duplicated here;
-#   - the existing GPUI + Wry desktop shell (regression), gated below.
+#   - the legacy apps/desktop launcher shim, which shares lib/ipc and is also
+#     excluded from the workspace, so nothing else compiles it. Gated below.
 #
 # The real-macOS smoke evidence in PR #1287's Definition of Done is a manual
 # checklist, not a CI job; the `tauri` job below is the automated compile/test
@@ -30,8 +31,8 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  current-desktop-regression:
-    name: current desktop regression (macOS)
+  legacy-desktop-shim:
+    name: legacy apps/desktop shim compiles (macOS)
     runs-on: macos-14
     timeout-minutes: 60
     steps:
@@ -42,7 +43,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: current-desktop-${{ runner.os }}
-      - name: Test existing GPUI + Wry desktop
+      # apps/desktop is a three-file launcher shim over the ato CLI, not the
+      # GPUI + Wry shell this job was originally named for — that shell was
+      # dismantled. The job is kept because the crate is workspace-excluded and
+      # would otherwise never be compiled by CI at all.
+      - name: Test legacy desktop shim
         working-directory: apps/desktop
         run: cargo test
 
