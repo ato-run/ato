@@ -16,6 +16,7 @@ members = [
     "extensions/materializers/snapshot/guest-agent",
     "extensions/materializers/api",
     "extensions/materializers/replay",
+    "extensions/materializers/static-web",
     "tools/snapshot-builder",
     "tools/arch-check",
     "lib/ipc",
