@@ -114,6 +114,16 @@ enum Commands {
     Run(RunArgs),
     /// Upload a content-addressed Capsule object graph.
     Upload(UploadArgs),
+    /// Report this binary's build identity (version, commit, profile).
+    ///
+    /// `--version` stays exactly as it was — a human-readable release-line
+    /// string. This is the machine-readable form, and the only way to learn
+    /// which commit a given `ato` artifact was built from.
+    Version {
+        /// Emit a single JSON object instead of human-readable lines.
+        #[arg(long)]
+        json: bool,
+    },
     #[command(name = "__worker", hide = true)]
     Worker {
         project: PathBuf,
@@ -194,8 +204,57 @@ struct UploadArgs {
     receipt: PathBuf,
 }
 
+/// The build's own identity: what this binary is, not merely which release
+/// line it belongs to.
+///
+/// `--version` reports the crate version, which every build of a release line
+/// shares. Desktop assembly pins its Ato support crates and its bundled Runner
+/// to one Ato revision and must be able to VERIFY that from the artifact, so
+/// the commit is baked in at build time (see build.rs) and reported here.
+#[derive(serde::Serialize)]
+pub struct BuildIdentity {
+    /// Crate version — the same string `--version` prints.
+    pub version: &'static str,
+    /// Full git commit the binary was built from, or `"unknown"`.
+    pub git_commit: &'static str,
+    /// Whether the working tree was dirty. `"true"` / `"false"` / `"unknown"`;
+    /// tri-state on purpose, since "could not tell" is not "clean".
+    pub git_dirty: &'static str,
+    /// Cargo profile, so a release claim is checkable.
+    pub profile: &'static str,
+}
+
+impl BuildIdentity {
+    pub fn current() -> Self {
+        Self {
+            version: env!("CARGO_PKG_VERSION"),
+            git_commit: env!("ATO_BUILD_GIT_SHA"),
+            git_dirty: env!("ATO_BUILD_GIT_DIRTY"),
+            profile: if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            },
+        }
+    }
+}
+
+fn version(json: bool) -> Result<()> {
+    let identity = BuildIdentity::current();
+    if json {
+        println!("{}", serde_json::to_string(&identity)?);
+    } else {
+        println!("ato {}", identity.version);
+        println!("commit: {}", identity.git_commit);
+        println!("dirty: {}", identity.git_dirty);
+        println!("profile: {}", identity.profile);
+    }
+    Ok(())
+}
+
 pub fn run() -> Result<()> {
     match Cli::parse().command {
+        Commands::Version { json } => version(json),
         Commands::Init(args) => init(args),
         Commands::Resume(args) => resume(args),
         Commands::Stop { capsule } => stop(&capsule),
