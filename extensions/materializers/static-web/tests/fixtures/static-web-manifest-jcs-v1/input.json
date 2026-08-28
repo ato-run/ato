@@ -27,6 +27,6 @@
   },
   "security": {
     "connect_src": ["https://api.example.com:8443", "wss://socket.example.net"],
-    "frame_ancestors": ["https://ato.run", "https://app.ato.run", "https://staging.ato.run"]
+    "frame_ancestors": ["https://ato.run", "https://app.ato.run", "https://staging.store.ato.run", "https://stg-app.ato.run"]
   }
 }
