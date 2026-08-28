@@ -44,8 +44,12 @@ pub fn dispatch(request: &ComputationCommand) -> Result<ComputationCommandResult
     Ok(result(output))
 }
 
+/// Open the web console. `ato.run` is the only production shell — the
+/// `app.ato.run` host this used to open was retired in 2026-08, so the link had
+/// been dead. (`<session>.app.ato.run`, the app-proxy execution origin, is a
+/// different and still-live system; it is not what this opens.)
 pub fn launch_console() -> Result<()> {
-    let url = "https://app.ato.run";
+    let url = "https://ato.run";
     let status = if cfg!(target_os = "macos") {
         Command::new("open").arg(url).status()?
     } else if cfg!(windows) {
