@@ -73,6 +73,10 @@ class BrowserRunnerBridge {
         observe: authority.observe,
         interact: authority.interact
       });
+      markBrowserRunner("runner_ready_at", {
+        actor_id: authority.actor_id,
+        connection_id: transport.id
+      });
       return true;
     } catch (error) {
       transport.send({
@@ -98,6 +102,10 @@ class BrowserRunnerBridge {
       });
       return Promise.resolve();
     }
+    markBrowserRunner("operation_received_at", {
+      connection_id: connectionId,
+      operation_id: operation.operation_id
+    });
     this.applyChain = this.applyChain.then(
       () => this.apply(connection, operation),
       () => this.apply(connection, operation)
@@ -119,16 +127,19 @@ class BrowserRunnerBridge {
         void this.receive(transport.id, message);
       },
       () => this.detach(transport.id),
-      () => transport.send({
-        type: "BRIDGE_HELLO",
-        protocol: "ato.activity-experience@1",
-        interaction_protocol: "ato.browser@1",
-        runtime: "browser_document",
-        bridge_version: BROWSER_RUNNER_BRIDGE_VERSION,
-        capabilities: this.capabilities,
-        runner_nonce: runnerNonce,
-        ...this.identity()
-      })
+      () => {
+        markBrowserRunner("bridge_hello_at", this.identity());
+        transport.send({
+          type: "BRIDGE_HELLO",
+          protocol: "ato.activity-experience@1",
+          interaction_protocol: "ato.browser@1",
+          runtime: "browser_document",
+          bridge_version: BROWSER_RUNNER_BRIDGE_VERSION,
+          capabilities: this.capabilities,
+          runner_nonce: runnerNonce,
+          ...this.identity()
+        });
+      }
     );
   }
   detach(connectionId, reason = "peer_disconnected") {
@@ -188,6 +199,11 @@ class BrowserRunnerBridge {
       run_seq: runSeq,
       status: "applied"
     };
+    markBrowserRunner("operation_applied_at", {
+      actor_id: authority.actor_id,
+      operation_id: operation.operation_id,
+      run_seq: runSeq
+    });
     let projection;
     try {
       projection = this.stateProvider?.();
@@ -226,6 +242,12 @@ class BrowserRunnerBridge {
   }
   reject(transport, operationId, code) {
     transport.send({ type: "REJECT", operation_id: operationId, code });
+  }
+}
+function markBrowserRunner(name, detail) {
+  try {
+    performance.mark(name, { detail });
+  } catch {
   }
 }
 class MessagePortRunnerConnection {
