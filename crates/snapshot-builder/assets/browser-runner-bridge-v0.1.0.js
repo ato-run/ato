@@ -809,6 +809,29 @@ class BrowserDomOperationAdapter {
     }
   }
 }
+class BrowserDomTextObservationAdapter {
+  operations = new BrowserDomOperationAdapter();
+  revision = 0;
+  lastActor = null;
+  apply(event, authority) {
+    this.operations.apply(event);
+    this.revision += 1;
+    this.lastActor = authority.actor_id;
+  }
+  project() {
+    return {
+      revision: this.revision,
+      summary: {
+        projection: "dom_text",
+        text: visibleDocumentText(),
+        last_actor: this.lastActor
+      }
+    };
+  }
+}
+function visibleDocumentText() {
+  return (document.body?.innerText ?? document.body?.textContent ?? "").replace(/\s+/gu, " ").trim().slice(0, 8192);
+}
 async function verifyCapability(verifierUrl, capability, identity) {
   const response = await fetch(verifierUrl, {
     method: "POST",
@@ -940,20 +963,29 @@ const controllerPolicy = readOriginPolicy(
 );
 const verifierPolicy = readOriginPolicy("ato-browser-runner-verifier-origins");
 if (controllerPolicy.length > 0 && verifierPolicy.length > 0) {
+  const observation = readPolicy("ato-browser-runner-state-observation") === "dom_text" ? new BrowserDomTextObservationAdapter() : null;
   window.atoBrowserBridge = createAtoBrowserBridge({
     allowedControllerOrigins: controllerPolicy,
-    allowedCapabilityVerifierOrigins: verifierPolicy
+    allowedCapabilityVerifierOrigins: verifierPolicy,
+    ...observation ? {
+      applyOperation: (event, authority) => observation.apply(event, authority),
+      stateProvider: () => observation.project()
+    } : {}
   });
 }
 function readOriginPolicy(name) {
-  const content = document.querySelector(`meta[name="${name}"]`)?.content.trim();
+  const content = readPolicy(name);
   return content ? content.split(",").map((value) => value.trim()).filter(Boolean) : [];
+}
+function readPolicy(name) {
+  return document.querySelector(`meta[name="${name}"]`)?.content.trim() ?? "";
 }
 export {
   BROWSER_RUNNER_BRIDGE_VERSION,
   BROWSER_RUNNER_DATA_CHANNEL_LABEL,
   BROWSER_RUNNER_INPUT_PROFILE,
   BrowserDomOperationAdapter,
+  BrowserDomTextObservationAdapter,
   BrowserRunnerBridge,
   DataChannelRunnerConnection,
   MessagePortRunnerConnection,

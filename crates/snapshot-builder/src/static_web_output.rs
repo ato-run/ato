@@ -17,7 +17,7 @@ use tempfile::TempDir;
 
 const BROWSER_RUNNER_BRIDGE_PATH: &str = "__ato/browser-runner-bridge-v0.1.0.js";
 const BROWSER_RUNNER_BRIDGE_JS: &[u8] = include_bytes!("../assets/browser-runner-bridge-v0.1.0.js");
-const BROWSER_RUNNER_BRIDGE_TAG: &str = r#"<meta name="ato-browser-runner-controller-origins" content="https://ato.run,https://stg-app.ato.run"><meta name="ato-browser-runner-verifier-origins" content="https://api.ato.run,https://staging.api.ato.run"><script type="module" src="/__ato/browser-runner-bridge-v0.1.0.js"></script>"#;
+const BROWSER_RUNNER_BRIDGE_TAG: &str = r#"<meta name="ato-browser-runner-controller-origins" content="https://ato.run,https://stg-app.ato.run"><meta name="ato-browser-runner-verifier-origins" content="https://api.ato.run,https://staging.api.ato.run"><meta name="ato-browser-runner-state-observation" content="dom_text"><script type="module" src="/__ato/browser-runner-bridge-v0.1.0.js"></script>"#;
 
 /// An explicit materialization decision for immutable static output.
 #[derive(Debug, Clone, PartialEq, Eq)]
