@@ -20,7 +20,8 @@ pub const STATIC_WEB_MANIFEST_V1_SCHEMA: &str = "ato.static-web-manifest/v1";
 pub const STATIC_WEB_FRAME_ANCESTORS_V1: &[&str] = &[
     "https://ato.run",
     "https://app.ato.run",
-    "https://staging.ato.run",
+    "https://staging.store.ato.run",
+    "https://stg-app.ato.run",
 ];
 const MAX_SAFE_JSON_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_FILE_COUNT: usize = 10_000;
@@ -377,7 +378,7 @@ mod tests {
         assert_eq!(canonical, expected.trim_end_matches('\n').as_bytes());
         assert_eq!(
             format!("sha256:{:x}", sha2::Sha256::digest(&canonical)),
-            "sha256:6d77d3da709a578e6d58f50d4b8f8cf5c54e2178200821769afb03449c8e6ba2"
+            "sha256:c61c17155f2594c1c32fda225bb5c552d611f5c916b95e904f55afa6b7b69543"
         );
     }
 
