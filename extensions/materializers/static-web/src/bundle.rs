@@ -289,7 +289,10 @@ fn media_type_for(path: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::output::{StaticWebOutputPlan, extract_static_web_output};
+    use crate::output::{
+        StaticWebOutputPlan, extract_static_web_output,
+        extract_static_web_output_with_browser_runner,
+    };
 
     fn plan() -> StaticWebOutputPlan {
         StaticWebOutputPlan {
@@ -340,6 +343,40 @@ mod tests {
             !fs::read(one.bundle_root.join("manifest.json"))
                 .unwrap()
                 .ends_with(b"\n")
+        );
+    }
+
+    #[test]
+    fn browser_runner_bytes_participate_in_manifest_identity() {
+        let image = fixture_root();
+        let plain =
+            extract_static_web_output_with_browser_runner(image.path(), &plan(), false).unwrap();
+        let bridged =
+            extract_static_web_output_with_browser_runner(image.path(), &plan(), true).unwrap();
+        let plain_parent = tempfile::tempdir().unwrap();
+        let bridged_parent = tempfile::tempdir().unwrap();
+        let plain_bundle =
+            produce_static_web_bundle(&plan(), plain.output_root(), plain_parent.path(), &[])
+                .unwrap();
+        let bridged_bundle =
+            produce_static_web_bundle(&plan(), bridged.output_root(), bridged_parent.path(), &[])
+                .unwrap();
+
+        assert_ne!(
+            plain_bundle.receipt.manifest_digest,
+            bridged_bundle.receipt.manifest_digest
+        );
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&bridged_bundle.manifest_bytes).unwrap();
+        assert!(
+            manifest["files"]
+                .get("__ato/browser-runner-bridge-v0.1.2.js")
+                .is_some()
+        );
+        assert!(
+            fs::read_to_string(bridged.output_root().join("index.html"))
+                .unwrap()
+                .contains("browser-runner-bridge-v0.1.2.js")
         );
     }
 

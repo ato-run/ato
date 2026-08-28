@@ -20,7 +20,10 @@ pub use manifest::{
     canonical_jcs_bytes, canonicalize_connect_sources, is_allowed_media_type,
     validate_connect_source, validate_relative_path,
 };
-pub use output::{ExtractedStaticWebOutput, StaticWebOutputPlan, extract_static_web_output};
+pub use output::{
+    ExtractedStaticWebOutput, StaticWebOutputPlan, extract_static_web_output,
+    extract_static_web_output_with_browser_runner,
+};
 pub use receipt::{
     STATIC_WEB_BLOB_V1_SCHEMA, STATIC_WEB_BUNDLE_RECEIPT_V1_SCHEMA, StaticWebBlobMetadataV1,
     StaticWebBlobReceiptV1, StaticWebBundleReceiptV1, StaticWebReceiptError, blob_r2_key,
