@@ -366,13 +366,13 @@ mod tests {
             serde_json::from_slice(&bridged_bundle.manifest_bytes).unwrap();
         assert!(
             manifest["files"]
-                .get("__ato/browser-runner-bridge-v0.1.0.js")
+                .get("__ato/browser-runner-bridge-v0.1.1.js")
                 .is_some()
         );
         assert!(
             fs::read_to_string(bridged.output_root().join("index.html"))
                 .unwrap()
-                .contains("browser-runner-bridge-v0.1.0.js")
+                .contains("browser-runner-bridge-v0.1.1.js")
         );
     }
 
