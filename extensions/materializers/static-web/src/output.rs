@@ -13,6 +13,10 @@ use crate::{StaticWebSecurityV1, validate_connect_source, validate_relative_path
 use anyhow::{Context, Result, bail};
 use tempfile::TempDir;
 
+const BROWSER_RUNNER_BRIDGE_PATH: &str = "__ato/browser-runner-bridge-v0.1.2.js";
+const BROWSER_RUNNER_BRIDGE_JS: &[u8] = include_bytes!("../assets/browser-runner-bridge-v0.1.2.js");
+const BROWSER_RUNNER_BRIDGE_TAG: &str = r#"<meta name="ato-browser-runner-controller-origins" content="https://ato.run,https://stg-app.ato.run"><meta name="ato-browser-runner-verifier-origins" content="https://api.ato.run,https://staging.api.ato.run"><meta name="ato-browser-runner-state-observation" content="dom_text"><script type="module" src="/__ato/browser-runner-bridge-v0.1.2.js"></script>"#;
+
 /// An explicit materialization decision for immutable static output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StaticWebOutputPlan {
@@ -75,6 +79,16 @@ pub fn extract_static_web_output(
     image_root: &Path,
     plan: &StaticWebOutputPlan,
 ) -> Result<ExtractedStaticWebOutput> {
+    extract_static_web_output_with_browser_runner(image_root, plan, false)
+}
+
+/// Extracts a static output tree and, when explicitly selected, instruments
+/// only the materialized copy before its bytes are content-addressed.
+pub fn extract_static_web_output_with_browser_runner(
+    image_root: &Path,
+    plan: &StaticWebOutputPlan,
+    browser_runner_enabled: bool,
+) -> Result<ExtractedStaticWebOutput> {
     plan.validate()?;
     let source = image_root.join(&plan.image_output_root);
     let source_meta = fs::symlink_metadata(&source)
@@ -89,10 +103,45 @@ pub fn extract_static_web_output(
         .context("create static web extraction workspace")?;
     let output_root = workspace.path().join("output");
     copy_tree_no_links(&source, &output_root)?;
+    if browser_runner_enabled {
+        inject_browser_runner_bridge(&output_root, &plan.entry_path)?;
+    }
     Ok(ExtractedStaticWebOutput {
         _workspace: workspace,
         output_root,
     })
+}
+
+fn inject_browser_runner_bridge(output_root: &Path, entry_path: &str) -> Result<()> {
+    let bridge_path = output_root.join(BROWSER_RUNNER_BRIDGE_PATH);
+    if bridge_path.exists() {
+        bail!("static output already contains reserved path {BROWSER_RUNNER_BRIDGE_PATH}");
+    }
+
+    let entry = output_root.join(entry_path);
+    let html = fs::read_to_string(&entry)
+        .with_context(|| format!("read Browser Runner entry HTML {}", entry.display()))?;
+    let insertion = find_bridge_insertion(&html);
+    let mut instrumented = String::with_capacity(html.len() + BROWSER_RUNNER_BRIDGE_TAG.len());
+    instrumented.push_str(&html[..insertion]);
+    instrumented.push_str(BROWSER_RUNNER_BRIDGE_TAG);
+    instrumented.push_str(&html[insertion..]);
+
+    fs::create_dir_all(bridge_path.parent().expect("bridge path has parent"))
+        .context("create reserved Browser Runner bridge directory")?;
+    fs::write(&bridge_path, BROWSER_RUNNER_BRIDGE_JS)
+        .context("write versioned Browser Runner bridge artifact")?;
+    fs::write(&entry, instrumented)
+        .with_context(|| format!("write Browser Runner entry HTML {}", entry.display()))?;
+    Ok(())
+}
+
+fn find_bridge_insertion(html: &str) -> usize {
+    let lower = html.to_ascii_lowercase();
+    lower
+        .find("<script")
+        .or_else(|| lower.find("</head>"))
+        .unwrap_or(0)
 }
 
 fn validate_output_root(path: &Path) -> Result<()> {
@@ -203,6 +252,64 @@ mod tests {
         let workspace = extracted.output_root().parent().unwrap().to_path_buf();
         drop(extracted);
         assert!(!workspace.exists());
+    }
+
+    #[test]
+    fn browser_runner_flag_off_preserves_built_bytes() {
+        let image = tempfile::tempdir().unwrap();
+        let output = image.path().join("srv/app/dist");
+        fs::create_dir_all(&output).unwrap();
+        let original = b"<html><script src=\"application.js\"></script></html>";
+        fs::write(output.join("index.html"), original).unwrap();
+
+        let extracted =
+            extract_static_web_output_with_browser_runner(image.path(), &plan(), false).unwrap();
+        assert_eq!(
+            fs::read(extracted.output_root().join("index.html")).unwrap(),
+            original
+        );
+        assert!(
+            !extracted
+                .output_root()
+                .join(BROWSER_RUNNER_BRIDGE_PATH)
+                .exists()
+        );
+    }
+
+    #[test]
+    fn browser_runner_injection_changes_only_the_materialized_copy() {
+        let image = tempfile::tempdir().unwrap();
+        let output = image.path().join("srv/app/dist");
+        fs::create_dir_all(&output).unwrap();
+        let original = b"<!doctype html><html><head></head><body><script src=\"application.js\"></script></body></html>";
+        fs::write(output.join("index.html"), original).unwrap();
+
+        let extracted =
+            extract_static_web_output_with_browser_runner(image.path(), &plan(), true).unwrap();
+        let materialized = fs::read_to_string(extracted.output_root().join("index.html")).unwrap();
+        assert_eq!(fs::read(output.join("index.html")).unwrap(), original);
+        assert_eq!(materialized.matches(BROWSER_RUNNER_BRIDGE_TAG).count(), 1);
+        assert!(
+            materialized.find(BROWSER_RUNNER_BRIDGE_TAG).unwrap()
+                < materialized.find("application.js").unwrap()
+        );
+        assert_eq!(
+            fs::read(extracted.output_root().join(BROWSER_RUNNER_BRIDGE_PATH)).unwrap(),
+            BROWSER_RUNNER_BRIDGE_JS
+        );
+    }
+
+    #[test]
+    fn browser_runner_injection_fails_closed_on_reserved_path_collision() {
+        let image = tempfile::tempdir().unwrap();
+        let output = image.path().join("srv/app/dist");
+        fs::create_dir_all(output.join("__ato")).unwrap();
+        fs::write(output.join("index.html"), "<html></html>").unwrap();
+        fs::write(output.join(BROWSER_RUNNER_BRIDGE_PATH), "attacker bytes").unwrap();
+
+        assert!(
+            extract_static_web_output_with_browser_runner(image.path(), &plan(), true).is_err()
+        );
     }
 
     #[test]
