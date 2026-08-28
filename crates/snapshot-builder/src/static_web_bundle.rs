@@ -421,10 +421,10 @@ mod tests {
         assert_eq!(
             host_label(
                 'p',
-                "sha256:6d77d3da709a578e6d58f50d4b8f8cf5c54e2178200821769afb03449c8e6ba2"
+                "sha256:c61c17155f2594c1c32fda225bb5c552d611f5c916b95e904f55afa6b7b69543"
             )
             .unwrap(),
-            "p-nv35hwtqtjly43ky6uguxd4m6xcu4ilyeaecc5u27mbujheonora"
+            "p-yyobofk7ewkmdqzp3irfxnofkllbd5ojc24v5ecpkwx2nn5wsvbq"
         );
     }
 }

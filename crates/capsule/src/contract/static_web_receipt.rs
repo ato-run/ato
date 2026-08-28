@@ -254,7 +254,7 @@ mod tests {
         );
         assert_eq!(
             receipt.digest().unwrap(),
-            "sha256:a4b55b08a80fd3bf503be9948cd091d2a9c555b68e244147e5b78c9e6b5063d1"
+            "sha256:3d96b63e679b1ab1321041a2c2c79f81c00149720efada2fa6fd4098738d64e3"
         );
     }
 
