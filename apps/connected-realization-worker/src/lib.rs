@@ -90,12 +90,31 @@ use activity_controller::{
 
 const PORTABLE_CAPSULE_LEASE_KIND: &str = "portable_capsule_v2";
 const ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND: &str = "activity_browser_executor_v0";
-const RUNNER_CAPABILITIES: &[&str] = &[
-    "execution_abi=process",
-    "isolation=untrusted-v1",
+/// Capabilities every Runner has, regardless of host.
+///
+/// The process execution ABI and untrusted isolation come from the
+/// source/replay path, which needs no VM: `restore_portable_path` selects it
+/// whenever a Capsule carries no VM-snapshot materialization.
+const BASE_RUNNER_CAPABILITIES: &[&str] = &["execution_abi=process", "isolation=untrusted-v1"];
+
+/// Capabilities that exist only when this host can actually run Firecracker.
+///
+/// Advertising these unconditionally is a lie the control plane acts on: it
+/// would route a VM-snapshot Capsule to a Runner that cannot restore one, and
+/// the lease would fail at materialization rather than never being offered.
+const FIRECRACKER_RUNNER_CAPABILITIES: &[&str] = &[
     "materializer=ato.materialize.vm.snapshot@1",
     "backend=firecracker",
 ];
+
+/// What THIS Runner advertises, given its configuration.
+fn runner_capabilities(config: &WorkerConfig) -> Vec<&'static str> {
+    let mut capabilities = BASE_RUNNER_CAPABILITIES.to_vec();
+    if config.firecracker_configured() {
+        capabilities.extend_from_slice(FIRECRACKER_RUNNER_CAPABILITIES);
+    }
+    capabilities
+}
 const ACTIVE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const ACTIVITY_FRAME_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 const ACTIVITY_FRAME_RETRY_INTERVAL: Duration = Duration::from_secs(5);
@@ -926,8 +945,14 @@ pub struct WorkerConfig {
     /// is physical runtime configuration and never participates in identity.
     #[arg(long, env = "ATO_RUNTIME_SURFACE_TARGET")]
     pub surface_target: SocketAddr,
+    /// Firecracker TAP host CIDR.
+    ///
+    /// Firecracker-ONLY physical configuration, and therefore optional: the
+    /// source/replay realization path never reads it. Requiring it at startup
+    /// made every Runner a Firecracker Runner, which kept the worker off hosts
+    /// that can serve the source/replay path perfectly well (macOS Desktop).
     #[arg(long, env = "ATO_FC_TAP_HOST_CIDR")]
-    pub tap_host_cidr: String,
+    pub tap_host_cidr: Option<String>,
     #[arg(long, env = "ATO_RUNNER_SLOT_ID", default_value = "0")]
     pub slot_id: String,
     /// Host-wide capacity advertised to the control plane. Multiple worker
@@ -1050,7 +1075,7 @@ impl ConnectedWorker {
             slot_id: &self.config.slot_id,
             hidden_surface_listen: self.config.hidden_surface_listen,
             guest_surface_target: self.config.surface_target,
-            tap_host_cidr: &self.config.tap_host_cidr,
+            tap_host_cidr: self.config.tap_host_cidr.as_deref(),
         };
         let running = restore_portable_path(&graph, lease_root, &lease.id, &physical)?;
         self.api.report_status(&lease.id, "running")?;
@@ -1172,7 +1197,7 @@ impl ConnectedWorker {
             slot_id: &self.config.slot_id,
             hidden_surface_listen: self.config.hidden_surface_listen,
             guest_surface_target: self.config.surface_target,
-            tap_host_cidr: &self.config.tap_host_cidr,
+            tap_host_cidr: self.config.tap_host_cidr.as_deref(),
         };
         let running = restore_portable_path(&graph, lease_root, &lease.id, &physical)?;
         self.api.report_status(&lease.id, "running")?;
@@ -1357,6 +1382,19 @@ fn activity_surface_id(run_id: &str, lease_id: &str) -> String {
     format!("surface_{}", URL_SAFE_NO_PAD.encode(digest))
 }
 
+impl WorkerConfig {
+    /// Whether this host is configured to restore VM snapshots.
+    ///
+    /// One predicate, used by BOTH the capability advertisement and the VM
+    /// restore path, so what the Runner claims and what it can do cannot
+    /// drift apart.
+    pub fn firecracker_configured(&self) -> bool {
+        self.tap_host_cidr
+            .as_deref()
+            .is_some_and(|cidr| !cidr.trim().is_empty())
+    }
+}
+
 fn validate_config(config: &WorkerConfig) -> Result<()> {
     ensure!(!config.runner_id.trim().is_empty(), "runner id is empty");
     ensure!(
@@ -1379,10 +1417,15 @@ fn validate_config(config: &WorkerConfig) -> Result<()> {
         (1..=64).contains(&config.max_slots),
         "Runner max slots must be in [1, 64]"
     );
-    ensure!(
-        !config.tap_host_cidr.trim().is_empty() && config.tap_host_cidr.contains('/'),
-        "TAP host CIDR is invalid"
-    );
+    // Firecracker configuration is validated when it is PRESENT, and its
+    // absence is not an error: a Runner without it simply does not advertise
+    // the VM-snapshot capability, so no VM lease is ever routed to it.
+    if let Some(cidr) = config.tap_host_cidr.as_deref() {
+        ensure!(
+            !cidr.trim().is_empty() && cidr.contains('/'),
+            "TAP host CIDR is invalid"
+        );
+    }
     Ok(())
 }
 
@@ -1541,7 +1584,9 @@ struct RestorePhysicalConfig<'a> {
     slot_id: &'a str,
     hidden_surface_listen: SocketAddr,
     guest_surface_target: SocketAddr,
-    tap_host_cidr: &'a str,
+    /// Firecracker-only; `None` on a host without it. The source/replay path
+    /// never reads this.
+    tap_host_cidr: Option<&'a str>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2433,6 +2478,17 @@ fn restore_vm_path(
     lease_id: &str,
     physical: &RestorePhysicalConfig<'_>,
 ) -> Result<AcceptedRealization> {
+    // The Firecracker requirement belongs HERE, on the path that actually
+    // needs it — not at startup, where it excluded hosts that only ever serve
+    // the source/replay path. A Runner without it never advertises the
+    // VM-snapshot capability, so reaching this point at all means the control
+    // plane routed a VM lease to a Runner that said it could take one.
+    let tap_host_cidr = physical.tap_host_cidr.ok_or_else(|| {
+        anyhow::anyhow!(
+            "this Runner has no Firecracker configuration (ATO_FC_TAP_HOST_CIDR) \
+             and cannot restore a VM-snapshot Capsule"
+        )
+    })?;
     let root = ComputationRef::parse(&graph.report().root_computation_ref)?;
     let workspace = lease_root.join("workspace");
     fs::create_dir_all(&workspace)?;
@@ -2448,7 +2504,7 @@ fn restore_vm_path(
             guest_target: physical.guest_surface_target,
             uds_path: lease_root.join("surface-relay.sock"),
         }),
-        tap_host_cidr: Some(physical.tap_host_cidr.to_owned()),
+        tap_host_cidr: Some(tap_host_cidr.to_owned()),
         ..FirecrackerBackendConfig::default()
     };
     let backend = Arc::new(FirecrackerBackend::new(backend_config));
@@ -2748,7 +2804,7 @@ impl HttpRunnerApi {
             self.base, self.runner_id
         )))
         .json(&serde_json::json!({
-            "capabilities": RUNNER_CAPABILITIES,
+            "capabilities": runner_capabilities(config),
             "supported_lease_kinds": supported_lease_kinds(config),
             "supported_session_surfaces": [{
                 "kind": "web",
@@ -4174,7 +4230,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             surface_listen: "0.0.0.0:8420".parse().unwrap(),
             hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
             surface_target: "127.0.0.1:8080".parse().unwrap(),
-            tap_host_cidr: "172.16.0.1/24".to_owned(),
+            tap_host_cidr: Some("172.16.0.1/24".to_owned()),
             slot_id: "0".to_owned(),
             max_slots: 1,
             browser_chrome: None,
@@ -4196,7 +4252,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             surface_listen: "127.0.0.1:8420".parse().unwrap(),
             hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
             surface_target: "172.30.0.2:38865".parse().unwrap(),
-            tap_host_cidr: "172.30.0.1/24".to_owned(),
+            tap_host_cidr: Some("172.30.0.1/24".to_owned()),
             slot_id: "0".to_owned(),
             max_slots: 0,
             browser_chrome: None,
@@ -4229,7 +4285,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             surface_listen: "127.0.0.1:8420".parse().unwrap(),
             hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
             surface_target: "172.30.0.2:38865".parse().unwrap(),
-            tap_host_cidr: "172.30.0.1/24".to_owned(),
+            tap_host_cidr: Some("172.30.0.1/24".to_owned()),
             slot_id: "0".to_owned(),
             max_slots: 1,
             browser_chrome: None,
@@ -4280,7 +4336,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             surface_listen: "127.0.0.1:8420".parse().unwrap(),
             hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
             surface_target: "172.30.0.2:38865".parse().unwrap(),
-            tap_host_cidr: "172.30.0.1/24".to_owned(),
+            tap_host_cidr: Some("172.30.0.1/24".to_owned()),
             slot_id: "0".to_owned(),
             max_slots: 1,
             browser_chrome: None,
@@ -4294,12 +4350,68 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
         );
     }
 
+    fn capability_test_config(tap_host_cidr: Option<&str>) -> WorkerConfig {
+        WorkerConfig {
+            api_base: "https://staging.api.ato.run".to_owned(),
+            runner_id: "runner".to_owned(),
+            runner_token: "token".to_owned(),
+            runner_credentials_file: None,
+            public_base_url: "https://runner.example".to_owned(),
+            work_root: PathBuf::from(".tmp/worker-test"),
+            surface_listen: "127.0.0.1:8420".parse().unwrap(),
+            hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
+            surface_target: "127.0.0.1:8080".parse().unwrap(),
+            tap_host_cidr: tap_host_cidr.map(str::to_owned),
+            slot_id: "0".to_owned(),
+            max_slots: 1,
+            browser_chrome: None,
+            run_control_verification_key: None,
+            once: true,
+        }
+    }
+
     #[test]
-    fn heartbeat_advertises_dispatch_and_vm_requirements() {
-        assert!(RUNNER_CAPABILITIES.contains(&"execution_abi=process"));
-        assert!(RUNNER_CAPABILITIES.contains(&"isolation=untrusted-v1"));
-        assert!(RUNNER_CAPABILITIES.contains(&"materializer=ato.materialize.vm.snapshot@1"));
-        assert!(RUNNER_CAPABILITIES.contains(&"backend=firecracker"));
+    fn a_firecracker_host_advertises_the_vm_snapshot_capability() {
+        let capabilities = runner_capabilities(&capability_test_config(Some("172.16.0.1/24")));
+        assert!(capabilities.contains(&"execution_abi=process"));
+        assert!(capabilities.contains(&"isolation=untrusted-v1"));
+        assert!(capabilities.contains(&"materializer=ato.materialize.vm.snapshot@1"));
+        assert!(capabilities.contains(&"backend=firecracker"));
+    }
+
+    #[test]
+    fn a_host_without_firecracker_advertises_only_what_it_can_do() {
+        // Advertising VM-snapshot unconditionally is a lie the control plane
+        // ACTS on: it would route a VM Capsule here and the lease would fail at
+        // materialization instead of never being offered.
+        let capabilities = runner_capabilities(&capability_test_config(None));
+        assert!(capabilities.contains(&"execution_abi=process"));
+        assert!(capabilities.contains(&"isolation=untrusted-v1"));
+        assert!(!capabilities.contains(&"materializer=ato.materialize.vm.snapshot@1"));
+        assert!(!capabilities.contains(&"backend=firecracker"));
+    }
+
+    #[test]
+    fn an_empty_tap_cidr_is_not_a_firecracker_host() {
+        assert!(!capability_test_config(Some("   ")).firecracker_configured());
+        assert!(capability_test_config(Some("172.16.0.1/24")).firecracker_configured());
+    }
+
+    #[test]
+    fn startup_no_longer_requires_firecracker_configuration() {
+        // The whole point: a host that can only serve the source/replay path
+        // must be able to START. Requiring TAP here made every Runner a
+        // Firecracker Runner.
+        let config = capability_test_config(None);
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn a_present_but_malformed_tap_cidr_is_still_rejected() {
+        // Optional does not mean unvalidated: a host that MEANT to configure
+        // Firecracker and got it wrong must fail loudly rather than silently
+        // drop the capability.
+        assert!(validate_config(&capability_test_config(Some("not-a-cidr"))).is_err());
     }
 
     #[test]
@@ -4315,7 +4427,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             surface_listen: "127.0.0.1:8420".parse().unwrap(),
             hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
             surface_target: "172.30.0.2:38865".parse().unwrap(),
-            tap_host_cidr: "172.30.0.1/24".to_owned(),
+            tap_host_cidr: Some("172.30.0.1/24".to_owned()),
             slot_id: "0".to_owned(),
             max_slots: 1,
             browser_chrome: None,
