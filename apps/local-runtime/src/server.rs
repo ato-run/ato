@@ -20,7 +20,7 @@ use ato_local_execution::{core_materializer_registry, start_durable, stop_and_se
 
 use ato_objects::LocalCapsuleRepository;
 
-use crate::protocol::{ErrorBody, ExecutionView, ProjectRequest, StartRequest};
+use crate::protocol::{ErrorBody, ExecutionList, ExecutionView, ProjectRequest, StartRequest};
 
 /// How long a worker is given to exit on its own after the stop request has
 /// terminated its process group, before this host escalates. Generous: the
@@ -125,6 +125,9 @@ impl Server {
         let outcome = match (request.method.as_str(), request.path.as_str()) {
             ("POST", "/v1/executions") => self.start(&request.body),
             ("POST", "/v1/executions/stop") => self.stop(&request.body),
+            ("POST", "/v1/executions/list") => {
+                return self.respond_list(&mut stream);
+            }
             ("POST", "/v1/executions/status") => self.status(&request.body),
             _ => {
                 return respond(
@@ -192,6 +195,51 @@ impl Server {
     fn reap_workers(&self) {
         let mut workers = self.workers.lock().expect("worker list poisoned");
         reap(&mut workers, WORKER_EXIT_GRACE);
+    }
+
+    /// List the Computations this runtime holds, with each one's execution
+    /// state.
+    ///
+    /// Still execution vocabulary: a project and its status, nothing about what
+    /// the Capsule means to a product. A Coordinator needs this to answer "what
+    /// can be run here" without a second inventory of its own — the work root
+    /// already IS the inventory, and duplicating it into a database would give
+    /// the same question two answers.
+    fn list(&self) -> Result<Vec<ExecutionView>> {
+        let mut views = Vec::new();
+        let entries = match std::fs::read_dir(&self.work_root) {
+            Ok(entries) => entries,
+            Err(_) => return Ok(views),
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            // A directory is a Computation only if it holds a repository. Any
+            // other directory in the work root is somebody else's business.
+            if !path.join("capsule.toml").is_file() {
+                continue;
+            }
+            let Ok(repository) = LocalCapsuleRepository::open(&path) else {
+                continue;
+            };
+            if let Ok(view) = view(&repository, &path) {
+                views.push(view);
+            }
+        }
+        views.sort_by(|left, right| left.project.cmp(&right.project));
+        Ok(views)
+    }
+
+    fn respond_list(&self, stream: &mut TcpStream) -> Result<()> {
+        match self.list() {
+            Ok(views) => respond(stream, 200, &ExecutionList { executions: views }),
+            Err(error) => respond(
+                stream,
+                400,
+                &ErrorBody {
+                    error: format!("{error:#}"),
+                },
+            ),
+        }
     }
 
     fn stop(&self, body: &str) -> Result<ExecutionView> {
@@ -470,5 +518,39 @@ mod tests {
             started.elapsed() < Duration::from_secs(5),
             "reap waited for the process instead of escalating"
         );
+    }
+
+    /// The work root is the inventory. Anything in it that is not a Capsule is
+    /// somebody else's directory and must not appear as one.
+    #[test]
+    fn lists_only_directories_that_hold_a_capsule() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("not-a-capsule")).unwrap();
+        std::fs::create_dir(root.path().join("also-not")).unwrap();
+        std::fs::write(root.path().join("also-not/readme.md"), "hello").unwrap();
+        std::fs::write(root.path().join("loose-file.txt"), "hello").unwrap();
+
+        let server = Server {
+            listener: TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap(),
+            work_root: root.path().to_path_buf(),
+            credential: "x".repeat(64),
+            workers: Mutex::new(Vec::new()),
+        };
+
+        assert!(server.list().unwrap().is_empty());
+    }
+
+    /// A missing work root is an empty listing, not an error: a runtime that
+    /// has never run anything is a normal state, not a broken one.
+    #[test]
+    fn an_absent_work_root_lists_nothing() {
+        let server = Server {
+            listener: TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap(),
+            work_root: PathBuf::from("/nonexistent/ato/work/root"),
+            credential: "x".repeat(64),
+            workers: Mutex::new(Vec::new()),
+        };
+
+        assert!(server.list().unwrap().is_empty());
     }
 }
