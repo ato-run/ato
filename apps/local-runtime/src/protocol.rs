@@ -30,6 +30,15 @@ pub struct ProjectRequest {
     pub project: String,
 }
 
+/// A listing of the Computations a runtime holds.
+///
+/// A wrapper rather than a bare array so the response can grow a cursor or a
+/// summary later without becoming a different shape.
+#[derive(Debug, Serialize)]
+pub struct ExecutionList {
+    pub executions: Vec<ExecutionView>,
+}
+
 /// What the runtime knows about an execution.
 ///
 /// `head` and `record_seq` are the Computation's own evolution markers, carried
