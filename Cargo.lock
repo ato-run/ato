@@ -439,6 +439,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ato-local-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ato-computation",
+ "ato-local-execution",
+ "ato-objects",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "ato-materializer-api"
 version = "0.1.0"
 dependencies = [
