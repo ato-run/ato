@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use ato_local_execution::authoring::{initial_computation, load_config};
-use ato_local_execution::{core_materializer_registry, start_durable, stop_active};
+use ato_local_execution::{core_materializer_registry, start_durable, stop_and_seal};
 use ato_objects::LocalCapsuleRepository;
 
 use crate::protocol::{ErrorBody, ExecutionView, ProjectRequest, StartRequest};
@@ -137,8 +137,17 @@ impl Server {
         let request: ProjectRequest = serde_json::from_str(body).context("invalid stop request")?;
         let project = self.resolve(&request.project)?;
         let repository = LocalCapsuleRepository::open(&project)?;
-        stop_active(&repository)?;
-        view(&repository, &project)
+        // The full seal, not just the quiesce: stopping is five steps, and
+        // `evolve_workspace` inside them is where the head actually moves.
+        let sealed = stop_and_seal(&repository)?;
+        let mut view = view(&repository, &project)?;
+        if let Some(sealed) = sealed {
+            view.execution_id = sealed.run.token;
+            view.head = sealed.head.to_string();
+            view.status = "sealed".to_owned();
+            view.pid = None;
+        }
+        Ok(view)
     }
 
     fn status(&self, body: &str) -> Result<ExecutionView> {
