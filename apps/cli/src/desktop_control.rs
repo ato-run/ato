@@ -13,7 +13,7 @@ use ato_ipc::desktop_control::{DesktopRunStatus, DesktopRunView, DesktopSurfaceV
 use ato_ipc::session_surface::WEB_SURFACE_PROFILE;
 use ato_objects::{ActiveRun, LocalCapsuleRepository};
 
-use crate::authoring::load_runtime_state;
+use ato_local_execution::authoring::load_runtime_state;
 
 /// Inspects the active Run of `project` and returns a presentation-oriented
 /// view. There is intentionally no active Run → surface derivation outside

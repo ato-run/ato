@@ -28,7 +28,7 @@ use ato_objects::{
 };
 use serde::{Deserialize, Serialize};
 
-pub(crate) const AUTHORING_SEMANTICS_ID: &str = "ato.authoring@1";
+pub const AUTHORING_SEMANTICS_ID: &str = "ato.authoring@1";
 const BROWSER_PROTOCOL_ID: &str = "ato.browser@1";
 const BROWSER_NODE_ID: &str = "ato.browser";
 const SOURCE_NODE_ID: &str = "ato.source";
@@ -38,7 +38,7 @@ const MAX_WORKSPACE_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct AuthoringConfig {
+pub struct AuthoringConfig {
     pub schema: u32,
     #[serde(default)]
     pub process: Vec<ProcessConfig>,
@@ -58,7 +58,7 @@ pub(crate) struct AuthoringConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ProcessConfig {
+pub struct ProcessConfig {
     pub id: String,
     pub command: Vec<String>,
     #[serde(default = "default_cwd")]
@@ -67,7 +67,7 @@ pub(crate) struct ProcessConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct AdapterConfig {
+pub struct AdapterConfig {
     #[serde(rename = "use")]
     pub use_adapter: String,
     #[serde(default)]
@@ -88,7 +88,7 @@ pub(crate) struct AdapterConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct PortConfig {
+pub struct PortConfig {
     pub id: String,
     pub node: String,
     pub protocol: String,
@@ -103,14 +103,14 @@ pub(crate) struct PortConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ConnectionConfig {
+pub struct ConnectionConfig {
     pub from: String,
     pub to: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct BindingConfig {
+pub struct BindingConfig {
     pub id: String,
     pub environment: String,
     #[serde(default = "default_binding_protocol")]
@@ -119,14 +119,14 @@ pub(crate) struct BindingConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct EncapConfig {
+pub struct EncapConfig {
     #[serde(default)]
     pub materializers: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct WorkspaceConfig {
+pub struct WorkspaceConfig {
     #[serde(default)]
     pub include: Vec<String>,
     #[serde(default)]
@@ -135,7 +135,7 @@ pub(crate) struct WorkspaceConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct AuthoringState {
+pub struct AuthoringState {
     version: u32,
     pub config: AuthoringConfig,
     pub workspace_snapshot: String,
@@ -162,7 +162,7 @@ fn default_binding_protocol() -> String {
     "ato.binding@1".to_owned()
 }
 
-pub(crate) fn load_config(project: &Path) -> Result<AuthoringConfig> {
+pub fn load_config(project: &Path) -> Result<AuthoringConfig> {
     let path = project.join("capsule.toml");
     let text = fs::read_to_string(&path)
         .with_context(|| format!("failed to read authoring config {}", path.display()))?;
@@ -238,7 +238,7 @@ pub(crate) fn load_config(project: &Path) -> Result<AuthoringConfig> {
     Ok(config)
 }
 
-pub(crate) fn workspace_policy(config: &AuthoringConfig) -> Result<WorkspaceCapturePolicy> {
+pub fn workspace_policy(config: &AuthoringConfig) -> Result<WorkspaceCapturePolicy> {
     WorkspaceCapturePolicy::new(
         config.workspace.include.clone(),
         config.workspace.exclude.clone(),
@@ -246,7 +246,7 @@ pub(crate) fn workspace_policy(config: &AuthoringConfig) -> Result<WorkspaceCapt
     .map_err(Into::into)
 }
 
-pub(crate) fn initial_computation(
+pub fn initial_computation(
     repository: &LocalCapsuleRepository,
     config: AuthoringConfig,
 ) -> Result<ComputationRef> {
@@ -448,7 +448,7 @@ fn seal_authored_source(
     seal_composite(objects, nodes, connections, exports, boundary(&config)?)
 }
 
-pub(crate) fn adapter_instances(
+pub fn adapter_instances(
     config: &AuthoringConfig,
     bindings: &BTreeMap<String, String>,
     isolated_processes: bool,
@@ -628,7 +628,7 @@ fn project_peer_address(
     Ok(())
 }
 
-pub(crate) fn load_state(
+pub fn load_state(
     reference: &ComputationRef,
     objects: &dyn ObjectResolver,
 ) -> Result<AuthoringState> {
@@ -707,7 +707,7 @@ fn decode_legacy_authoring_state(mut value: serde_json::Value) -> Result<Authori
     Ok(serde_json::from_value(value)?)
 }
 
-pub(crate) fn load_runtime_state(
+pub fn load_runtime_state(
     reference: &ComputationRef,
     objects: &dyn ObjectResolver,
 ) -> Result<AuthoringState> {
@@ -785,7 +785,7 @@ fn load_composite(
     Ok(decode_composite_residual(&bytes)?)
 }
 
-pub(crate) fn evolve_workspace(
+pub fn evolve_workspace(
     repository: &LocalCapsuleRepository,
     branch: &str,
     start: &ComputationRef,
@@ -940,7 +940,7 @@ fn evolve_composite_snapshot(
     )
 }
 
-pub(crate) fn seal_state(
+pub fn seal_state(
     objects: &dyn ObjectStore,
     config: AuthoringConfig,
     workspace_snapshot: ContentRef,
@@ -975,7 +975,7 @@ fn seal_authoring_state(
 
 /// Commits an Adapter-declared semantic transition without making its Record,
 /// sequence, timestamp, or other evidence part of computation identity.
-pub(crate) fn evolve_observation(
+pub fn evolve_observation(
     objects: &dyn ObjectStore,
     start: &ComputationRef,
     observation: &AdapterObservation,
@@ -1221,10 +1221,7 @@ role = "server"
     }
 }
 
-pub(crate) fn load_snapshot(
-    reference: &str,
-    objects: &dyn ObjectResolver,
-) -> Result<WorkspaceSnapshot> {
+pub fn load_snapshot(reference: &str, objects: &dyn ObjectResolver) -> Result<WorkspaceSnapshot> {
     let reference = ContentRef::parse(reference)?;
     let metadata = objects.metadata(&reference)?;
     let bytes = read_exact_object(
