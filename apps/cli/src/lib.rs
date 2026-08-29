@@ -25,8 +25,6 @@ use ato_computation::{ComputationRef, ContentRef};
 use ato_materializer_api::{
     ContractContext, MaterializerContext, MaterializerRegistry, accept_candidate,
 };
-use ato_materializer_replay::{ReplayMaterializer, ReplayMaterializerV2};
-use ato_materializer_snapshot::{SnapshotMaterializer, WorkspaceSnapshotMaterializer};
 use ato_materializer_vm_snapshot::{
     FirecrackerBackend, FirecrackerBackendConfig, FirecrackerRecordCaptureBarrier,
     FirecrackerRecordCaptureLease, SealedRecordFrontierVerifier, VmSnapshotError,
@@ -766,11 +764,11 @@ pub(crate) fn cli_materializers() -> Result<MaterializerRegistry> {
 }
 
 fn materializer_registry() -> Result<MaterializerRegistry> {
-    let mut registry = MaterializerRegistry::default();
-    registry.register(Arc::new(ReplayMaterializer))?;
-    registry.register(Arc::new(ReplayMaterializerV2))?;
-    registry.register(Arc::new(SnapshotMaterializer))?;
-    registry.register(Arc::new(WorkspaceSnapshotMaterializer))?;
+    // The shared core, plus the one materializer whose backend this host
+    // actually has. Identical contents to before the split — Replay,
+    // ReplayV2, Snapshot, WorkspaceSnapshot, VmSnapshot — just no longer
+    // duplicated with the library.
+    let mut registry = ato_local_execution::core_materializer_registry()?;
     registry.register(Arc::new(VmSnapshotMaterializer::new(
         Arc::new(FirecrackerBackend::new(FirecrackerBackendConfig::default())),
         Arc::new(RecordWriterFrontierVerifier),

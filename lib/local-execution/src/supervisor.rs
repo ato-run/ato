@@ -50,6 +50,16 @@ fn enter(state: SupervisorState) {
     let _ = state;
 }
 
+/// Start a durable execution and supervise it.
+///
+/// # Contract for host binaries
+///
+/// The run is supervised by a CHILD PROCESS spawned as
+/// `current_exe __worker <project> <branch> <head> <token> [descriptor]`.
+/// Any binary that calls this must therefore recognise `__worker` in its own
+/// argv and hand it to [`worker`]. A host that does not will re-execute itself
+/// in its normal mode, the run will never become active, and the failure looks
+/// like a materialization problem rather than a wiring one.
 pub fn start_durable(
     repository: &LocalCapsuleRepository,
     branch: &str,
