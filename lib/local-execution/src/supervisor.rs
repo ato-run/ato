@@ -26,18 +26,18 @@ use ato_objects::{
 use ato_player::Player;
 use ato_record_writer::{RecordPipeline, RecordWriterConfig};
 
-use crate::{
-    adapter_registry,
-    authoring::{adapter_instances, evolve_observation, load_runtime_state, workspace_policy},
-    materializer_registry, record_schema_registry,
+use crate::MaterializerFactory;
+use crate::authoring::{
+    adapter_instances, evolve_observation, load_runtime_state, workspace_policy,
 };
+use crate::registry::{adapter_registry, record_schema_registry};
 
 const STOP_REQUEST: &str = "runs/stop.request";
 const STOP_ACK: &str = "runs/stop.ack";
 static RUN_TOKEN_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SupervisorState {
+pub enum SupervisorState {
     Preparing,
     Starting,
     Active,
@@ -50,12 +50,13 @@ fn enter(state: SupervisorState) {
     let _ = state;
 }
 
-pub(crate) fn start_durable(
+pub fn start_durable(
     repository: &LocalCapsuleRepository,
     branch: &str,
     head: &ComputationRef,
     bindings: &BTreeMap<String, String>,
     replay_records: Option<&[RecordEnvelope]>,
+    materializers: MaterializerFactory<'_>,
 ) -> Result<()> {
     let token = format!(
         "{}-{}-{}",
@@ -80,7 +81,7 @@ pub(crate) fn start_durable(
     };
     repository.claim_active_run(&lease)?;
     let descriptor = match replay_records
-        .map(|records| encode_replay(repository, head, records))
+        .map(|records| encode_replay(repository, head, records, materializers))
         .transpose()
     {
         Ok(descriptor) => descriptor,
@@ -157,11 +158,12 @@ fn encode_replay(
     repository: &LocalCapsuleRepository,
     target: &ComputationRef,
     records: &[RecordEnvelope],
+    materializers: MaterializerFactory<'_>,
 ) -> Result<ContentRef> {
     let state = load_runtime_state(target, repository.objects())?;
     let policy = workspace_policy(&state.config)?;
     let adapters = adapter_registry()?;
-    let materializers = materializer_registry()?;
+    let materializers = materializers()?;
     let context = MaterializerContext {
         objects: repository.objects(),
         adapters: &adapters,
@@ -180,12 +182,13 @@ fn encode_replay(
         .encode(target, &context)?)
 }
 
-pub(crate) fn worker(
+pub fn worker(
     project: &Path,
     branch: &str,
     head: &ComputationRef,
     token: &str,
     descriptor: Option<&ContentRef>,
+    materializers: MaterializerFactory<'_>,
 ) -> Result<()> {
     let repository = LocalCapsuleRepository::open(project)?;
     enter(SupervisorState::Preparing);
@@ -226,14 +229,14 @@ pub(crate) fn worker(
         inner: Arc::clone(&sink),
     });
     if let Some(descriptor) = descriptor {
-        let driver = CliRealizationDriver::with_observations(
+        let driver = LocalRealizationDriver::with_observations(
             repository.project(),
             &bindings,
             observation_gate.clone(),
             false,
         );
         let policy = workspace_policy(&config)?;
-        let materializers = materializer_registry()?;
+        let materializers = materializers()?;
         let context = MaterializerContext {
             objects: repository.objects(),
             adapters: &registry,
@@ -349,7 +352,7 @@ pub(crate) fn worker(
     }
 }
 
-pub(crate) fn stop_active(repository: &LocalCapsuleRepository) -> Result<Option<ActiveRun>> {
+pub fn stop_active(repository: &LocalCapsuleRepository) -> Result<Option<ActiveRun>> {
     enter(SupervisorState::Stopping);
     let Some(run) = repository.active_run()? else {
         return Ok(None);
@@ -410,15 +413,15 @@ fn observed_nanos() -> u128 {
         .map_or(0, |value| value.as_nanos())
 }
 
-pub(crate) struct CliRealizationDriver {
+pub struct LocalRealizationDriver {
     project: std::path::PathBuf,
     bindings: BTreeMap<String, String>,
     observations: Arc<dyn ObservationSink>,
     isolated_processes: bool,
 }
 
-impl CliRealizationDriver {
-    pub(crate) fn new(project: &Path, bindings: &BTreeMap<String, String>) -> Self {
+impl LocalRealizationDriver {
+    pub fn new(project: &Path, bindings: &BTreeMap<String, String>) -> Self {
         Self::with_observations(project, bindings, Arc::new(IgnoreObservations), true)
     }
 
@@ -437,7 +440,7 @@ impl CliRealizationDriver {
     }
 }
 
-impl RealizationDriver for CliRealizationDriver {
+impl RealizationDriver for LocalRealizationDriver {
     fn begin(&self, anchor: &ComputationRef) -> Result<Box<dyn ReplayRuntime>, MaterializerError> {
         let repository =
             LocalCapsuleRepository::open(&self.project).map_err(materializer_operation)?;
@@ -535,7 +538,7 @@ impl RealizationDriver for CliRealizationDriver {
 
 type SharedAdapterSessions = Arc<Mutex<Vec<Box<dyn ato_adapter_api::AttachedAdapter>>>>;
 
-pub(crate) fn preflight_actuator_provider_registry() -> Result<ActuatorProviderRegistry> {
+pub fn preflight_actuator_provider_registry() -> Result<ActuatorProviderRegistry> {
     actuator_provider_registry(None, None)
 }
 
@@ -548,7 +551,7 @@ fn actuator_provider_registry(
     for id in adapters.ids() {
         let operations = adapters.get(id)?.supported_operations();
         if !operations.is_empty() {
-            providers.register(Arc::new(CliAttachedActuatorProvider {
+            providers.register(Arc::new(LocalAttachedActuatorProvider {
                 id: id.to_owned(),
                 adapter_id: id.to_owned(),
                 operations,
@@ -560,7 +563,7 @@ fn actuator_provider_registry(
     Ok(providers)
 }
 
-struct CliAttachedActuatorProvider {
+struct LocalAttachedActuatorProvider {
     id: String,
     adapter_id: String,
     operations: Vec<SupportedOperation>,
@@ -568,7 +571,7 @@ struct CliAttachedActuatorProvider {
     anchor: Option<ComputationRef>,
 }
 
-impl ActuatorProvider for CliAttachedActuatorProvider {
+impl ActuatorProvider for LocalAttachedActuatorProvider {
     fn id(&self) -> &str {
         &self.id
     }
