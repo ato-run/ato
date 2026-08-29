@@ -28,12 +28,17 @@
 
 pub mod authoring;
 pub mod registry;
+pub mod seal;
 pub mod supervisor;
 
 use anyhow::Result;
 use ato_materializer_api::MaterializerRegistry;
 
-pub use registry::{adapter_registry, contract_verifier_registry, record_schema_registry};
+pub use registry::{
+    adapter_registry, contract_verifier_registry, core_materializer_registry,
+    record_schema_registry,
+};
+pub use seal::{SealedExecution, SealedRunRecordFrontier, atomic_write, stop_and_seal};
 pub use supervisor::{
     LocalRealizationDriver, preflight_actuator_provider_registry, start_durable, stop_active,
     worker,

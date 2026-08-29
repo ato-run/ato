@@ -35,7 +35,9 @@ use ato_adapter_workspace::{
     WORKSPACE_RENAME_OPERATION, WorkspaceAdapter, WorkspaceMutation, decode_mutation,
 };
 use ato_contracts::{HttpEndpointVerifier, WorkspaceContentVerifier};
-use ato_materializer_api::ContractVerifierRegistry;
+use ato_materializer_api::{ContractVerifierRegistry, MaterializerRegistry};
+use ato_materializer_replay::{ReplayMaterializer, ReplayMaterializerV2};
+use ato_materializer_snapshot::{SnapshotMaterializer, WorkspaceSnapshotMaterializer};
 use ato_record_writer::RecordSchemaRegistry;
 
 pub fn adapter_registry() -> Result<AdapterRegistry> {
@@ -147,4 +149,18 @@ pub fn contract_verifier_registry() -> Result<ContractVerifierRegistry> {
 pub(crate) fn operation(protocol_id: &str, operation_id: &str) -> SupportedOperation {
     SupportedOperation::new(protocol_id, operation_id, 1, Default::default())
         .expect("built-in Record operation identifiers are valid")
+}
+
+/// The materializers every host can realize, whatever hardware it has.
+///
+/// Replay and Snapshot need no hypervisor, so they belong here. VM Snapshot
+/// does not: its physical backend is platform-specific, so a composition root
+/// that HAS one adds it to this set — see `MaterializerFactory`.
+pub fn core_materializer_registry() -> Result<MaterializerRegistry> {
+    let mut registry = MaterializerRegistry::default();
+    registry.register(Arc::new(ReplayMaterializer))?;
+    registry.register(Arc::new(ReplayMaterializerV2))?;
+    registry.register(Arc::new(SnapshotMaterializer))?;
+    registry.register(Arc::new(WorkspaceSnapshotMaterializer))?;
+    Ok(registry)
 }
