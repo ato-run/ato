@@ -10,7 +10,7 @@ pub mod activity_mcp;
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -52,11 +52,11 @@ pub use crate::object_transport::{
     upload_staging_negative_test_object_graph, vm_capture_receipt_refs,
 };
 use ato_local_execution::authoring::{
-    evolve_workspace, initial_computation, load_config, load_runtime_state, workspace_policy,
+    initial_computation, load_config, load_runtime_state, workspace_policy,
 };
 use ato_local_execution::registry::{adapter_registry, contract_verifier_registry};
 use ato_local_execution::supervisor::{
-    LocalRealizationDriver, preflight_actuator_provider_registry, start_durable, stop_active,
+    LocalRealizationDriver, preflight_actuator_provider_registry, start_durable,
 };
 
 #[derive(Parser)]
@@ -346,15 +346,9 @@ fn resume(args: ResumeArgs) -> Result<()> {
 fn stop(capsule: &str) -> Result<()> {
     let project = project_path(capsule, false)?;
     let repository = LocalCapsuleRepository::open(project)?;
-    repository
-        .active_run()?
-        .context("Capsule has no active Run")?;
-    let stopped = stop_active(&repository)?.context("Capsule has no active Run")?;
-    let head = evolve_workspace(&repository, &stopped.branch, &stopped.head)?;
-    seal_run_record_frontier(&repository, &stopped, &head)?;
-    repository.update_head(&stopped.branch, Some(&stopped.branch_base), &head)?;
-    repository.release_active_run(&stopped.token)?;
-    println!("sealed {} at {head}", stopped.branch);
+    let sealed =
+        ato_local_execution::stop_and_seal(&repository)?.context("Capsule has no active Run")?;
+    println!("sealed {} at {}", sealed.run.branch, sealed.head);
     Ok(())
 }
 
@@ -377,7 +371,7 @@ fn encap(args: EncapArgs) -> Result<()> {
     let references = reference_registry()?;
     let bundle =
         export_bundle_with_materializations(&target, &entries, repository.objects(), &references)?;
-    atomic_write(&args.output, &encode_bundle(&bundle)?)?;
+    ato_local_execution::atomic_write(&args.output, &encode_bundle(&bundle)?)?;
     println!("{target}");
     Ok(())
 }
@@ -517,61 +511,9 @@ fn upload(args: UploadArgs) -> Result<()> {
     )?;
     receipt.vm_materialization_descriptor_ref = vm_materialization_descriptor_ref;
     receipt.record_frontier_ref = record_frontier_ref;
-    atomic_write(&args.receipt, &serde_jcs::to_vec(&receipt)?)?;
+    ato_local_execution::atomic_write(&args.receipt, &serde_jcs::to_vec(&receipt)?)?;
     println!("{} {}", receipt.bundle_id, receipt.root_computation_ref);
     Ok(())
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SealedRunRecordFrontier {
-    version: u32,
-    run_id: String,
-    branch: String,
-    anchor_computation_ref: String,
-    target_computation_ref: String,
-    record_frontier_ref: String,
-}
-
-fn seal_run_record_frontier(
-    repository: &LocalCapsuleRepository,
-    run: &ato_objects::ActiveRun,
-    target: &ComputationRef,
-) -> Result<()> {
-    let frontier_ref_path = repository
-        .root()
-        .join("runs")
-        .join(format!("{}.record-frontier", run.token));
-    let record_frontier_ref = fs::read_to_string(&frontier_ref_path).with_context(|| {
-        format!(
-            "missing Capture Barrier receipt at {}",
-            frontier_ref_path.display()
-        )
-    })?;
-    let record_frontier_ref = ContentRef::parse(record_frontier_ref.trim())?;
-    let frontier = load_frontier(
-        &repository.root().join("records"),
-        &run.token,
-        &record_frontier_ref,
-    )?;
-    if frontier.frontier_digest != record_frontier_ref {
-        bail!("Capture Barrier returned a different RecordFrontier identity");
-    }
-    let association = SealedRunRecordFrontier {
-        version: 1,
-        run_id: run.token.clone(),
-        branch: run.branch.clone(),
-        anchor_computation_ref: run.branch_base.to_string(),
-        target_computation_ref: target.to_string(),
-        record_frontier_ref: record_frontier_ref.to_string(),
-    };
-    atomic_write(
-        &repository
-            .root()
-            .join("runs")
-            .join(format!("{}.sealed-record-frontier.json", run.token)),
-        &serde_jcs::to_vec(&association)?,
-    )
 }
 
 fn load_run_record_frontier(
@@ -594,7 +536,8 @@ fn load_run_record_frontier(
             continue;
         }
         let bytes = fs::read(&path)?;
-        let association: SealedRunRecordFrontier = serde_json::from_slice(&bytes)?;
+        let association: ato_local_execution::SealedRunRecordFrontier =
+            serde_json::from_slice(&bytes)?;
         if association.version != 1 || serde_jcs::to_vec(&association)? != bytes {
             bail!(
                 "non-canonical sealed Run/RecordFrontier association at {}",
@@ -880,21 +823,6 @@ fn parse_binding(value: &str) -> Result<(String, String), String> {
         return Err("binding id and value must be non-empty".to_owned());
     }
     Ok((name.to_owned(), value.to_owned()))
-}
-
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent)?;
-    let temporary = parent.join(format!(
-        ".{}.{}.new",
-        path.file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("capsule"),
-        std::process::id()
-    ));
-    fs::write(&temporary, bytes)?;
-    fs::rename(temporary, path)?;
-    Ok(())
 }
 
 #[cfg(test)]
