@@ -367,6 +367,7 @@ fn respond<T: serde::Serialize>(stream: &mut TcpStream, status: u16, body: &T) -
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::process::Command as TestCommand;
 
     use super::*;
@@ -433,6 +434,7 @@ mod tests {
     /// called `try_wait` once would pass this by luck on a slow machine and
     /// fail on a fast one, so the aliveness is checked, not assumed.
     #[test]
+    #[cfg(unix)]
     fn reaps_a_worker_that_exits_after_the_stop_request() {
         let child = TestCommand::new("/bin/sh")
             .args(["-c", "sleep 0.3"])
@@ -452,6 +454,7 @@ mod tests {
     /// A worker that outlives the grace is killed and then waited on. Without
     /// the kill it stays a live orphan; without the wait it becomes a zombie.
     #[test]
+    #[cfg(unix)]
     fn escalates_when_a_worker_outlives_the_grace() {
         let child = TestCommand::new("/bin/sh")
             .args(["-c", "sleep 30"])
