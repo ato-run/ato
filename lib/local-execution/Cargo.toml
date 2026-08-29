@@ -26,7 +26,11 @@ repository = "https://github.com/ato-run/ato"
 dist = false
 
 [package.metadata.ato-architecture]
-layer = "service"
+# The composition layer, not a service: this crate's whole job is to wire
+# adapters, materializers and the player together into a local execution host.
+# It lives under lib/ because two hosts (the CLI and the Local Runtime) share
+# it, but architecturally it sits where `apps/cli` sits.
+layer = "app"
 
 [lib]
 name = "ato_local_execution"
