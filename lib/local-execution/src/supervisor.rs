@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -67,7 +67,7 @@ pub fn start_durable(
     bindings: &BTreeMap<String, String>,
     replay_records: Option<&[RecordEnvelope]>,
     materializers: MaterializerFactory<'_>,
-) -> Result<()> {
+) -> Result<Child> {
     let token = format!(
         "{}-{}-{}",
         std::process::id(),
@@ -121,7 +121,7 @@ fn start_claimed(
     bindings: &BTreeMap<String, String>,
     token: &str,
     descriptor: Option<&ContentRef>,
-) -> Result<()> {
+) -> Result<Child> {
     let log_path = repository.root().join("runs/output.log");
     let stdout = OpenOptions::new()
         .create(true)
@@ -148,7 +148,12 @@ fn start_claimed(
             .active_run()?
             .is_some_and(|run| run.token == token && run.status == "active")
         {
-            return Ok(());
+            // The handle goes to the caller, not to `drop`. A durable run
+            // outlives the call, so only the host knows when — and whether —
+            // to wait on it; a host that keeps running must reap it, and a
+            // host that exits leaves it to init. Owning that decision here
+            // would be guessing.
+            return Ok(child);
         }
         if child.try_wait()?.is_some() {
             bail!(

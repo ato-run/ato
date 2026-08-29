@@ -10,10 +10,13 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::process::Child;
+use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use ato_local_execution::authoring::{initial_computation, load_config};
 use ato_local_execution::{core_materializer_registry, start_durable, stop_and_seal};
+
 use ato_objects::LocalCapsuleRepository;
 
 use crate::protocol::{ErrorBody, ExecutionView, ProjectRequest, StartRequest};
@@ -22,6 +25,10 @@ pub struct Server {
     listener: TcpListener,
     work_root: PathBuf,
     credential: String,
+    /// Workers this host spawned. A durable run outlives the request that
+    /// started it, so the handle is kept rather than dropped: this process
+    /// stays alive for the life of the app and must wait on its own children.
+    workers: Mutex<Vec<Child>>,
 }
 
 impl Server {
@@ -37,6 +44,7 @@ impl Server {
             listener,
             work_root,
             credential,
+            workers: Mutex::new(Vec::new()),
         })
     }
 
@@ -122,7 +130,7 @@ impl Server {
         };
 
         let bindings: BTreeMap<String, String> = request.bindings;
-        start_durable(
+        let worker = start_durable(
             &repository,
             "main",
             &head,
@@ -130,7 +138,18 @@ impl Server {
             None,
             &core_materializer_registry,
         )?;
+        self.workers
+            .lock()
+            .expect("worker list poisoned")
+            .push(worker);
         view(&repository, &project)
+    }
+
+    /// Wait on every worker that has already exited. Never blocks on one still
+    /// running: `try_wait` reaps the finished and leaves the live alone.
+    fn reap_workers(&self) {
+        let mut workers = self.workers.lock().expect("worker list poisoned");
+        workers.retain_mut(|worker| !matches!(worker.try_wait(), Ok(Some(_))));
     }
 
     fn stop(&self, body: &str) -> Result<ExecutionView> {
@@ -140,6 +159,10 @@ impl Server {
         // The full seal, not just the quiesce: stopping is five steps, and
         // `evolve_workspace` inside them is where the head actually moves.
         let sealed = stop_and_seal(&repository)?;
+        // This host outlives every run it starts, so it — unlike the CLI —
+        // must wait on the workers it spawned. Without this each execution
+        // leaves a zombie for as long as the app is open.
+        self.reap_workers();
         let mut view = view(&repository, &project)?;
         if let Some(sealed) = sealed {
             view.execution_id = sealed.run.token;
@@ -345,6 +368,7 @@ mod tests {
             listener: TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap(),
             work_root: root.path().to_path_buf(),
             credential: "x".repeat(64),
+            workers: Mutex::new(Vec::new()),
         };
         assert!(server.resolve("inside").is_ok());
         assert!(server.resolve("../../etc").is_err());
