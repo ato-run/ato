@@ -43,6 +43,7 @@ ato-browser-semantics = { path = "../../extensions/semantics/browser", version =
 ato-computation = { path = "../../lib/computation", version = "0.1.0" }
 ato-ipc = { path = "../../lib/ipc", version = "0.1.0" }
 ato-kernel = { path = "../../lib/kernel", version = "0.1.0" }
+ato-local-execution = { path = "../../lib/local-execution", version = "0.1.0" }
 ato-objects = { path = "../../lib/objects", version = "0.1.0" }
 ato-record-writer = { path = "../../extensions/record-writer", version = "0.1.0" }
 ato-runtime-object-graph = { path = "../runtime-object-graph", version = "0.1.0" }

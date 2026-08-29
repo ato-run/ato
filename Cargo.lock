@@ -253,6 +253,7 @@ dependencies = [
  "ato-contracts",
  "ato-ipc",
  "ato-kernel",
+ "ato-local-execution",
  "ato-materializer-api",
  "ato-materializer-replay",
  "ato-materializer-snapshot",
@@ -405,6 +406,36 @@ dependencies = [
  "ato-computation",
  "ato-objects",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ato-local-execution"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ato-adapter-api",
+ "ato-adapter-binding",
+ "ato-adapter-browser",
+ "ato-adapter-http",
+ "ato-adapter-process",
+ "ato-adapter-pty",
+ "ato-adapter-workspace",
+ "ato-browser-semantics",
+ "ato-compose",
+ "ato-computation",
+ "ato-contracts",
+ "ato-materializer-api",
+ "ato-materializer-replay",
+ "ato-materializer-snapshot",
+ "ato-objects",
+ "ato-player",
+ "ato-record-writer",
+ "blake3",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "tempfile",
+ "toml",
 ]
 
 [[package]]
