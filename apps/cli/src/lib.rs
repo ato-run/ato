@@ -282,6 +282,8 @@ fn init(args: InitArgs) -> Result<()> {
             None,
             &cli_materializers,
         )?;
+        // The CLI exits here, so the run is reparented to init and reaped by
+        // it. Nothing to wait on.
     }
     Ok(())
 }
