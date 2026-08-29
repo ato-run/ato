@@ -10,18 +10,64 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::process::Child;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use ato_local_execution::authoring::{initial_computation, load_config};
 use ato_local_execution::{core_materializer_registry, start_durable, stop_and_seal};
+
 use ato_objects::LocalCapsuleRepository;
 
 use crate::protocol::{ErrorBody, ExecutionView, ProjectRequest, StartRequest};
+
+/// How long a worker is given to exit on its own after the stop request has
+/// terminated its process group, before this host escalates. Generous: the
+/// worker is sealing durable state, and killing it early would be worse than
+/// waiting.
+const WORKER_EXIT_GRACE: Duration = Duration::from_secs(5);
+
+/// Poll cadence while waiting — matches the supervisor's own 25ms cadence.
+const WORKER_EXIT_POLL: Duration = Duration::from_millis(25);
+
+/// Reap exited workers, waiting up to `grace` for each one that is still
+/// running and escalating to `kill` + a blocking `wait` if it outlives that.
+///
+/// Escalation is the point: without it a worker that ignores or is slow to act
+/// on SIGTERM stays a live orphan, and without the blocking `wait` afterwards
+/// it becomes a zombie instead. Termination itself is not re-implemented here —
+/// `stop_and_seal` already used the process adapter's `terminate_process_tree`.
+fn reap(workers: &mut Vec<Child>, grace: Duration) {
+    let deadline = Instant::now() + grace;
+    workers.retain_mut(|worker| {
+        loop {
+            match worker.try_wait() {
+                // Exited and reaped by the `try_wait` itself.
+                Ok(Some(_)) => return false,
+                // Not waitable any more; retaining the handle would leak it.
+                Err(_) => return false,
+                Ok(None) => {}
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(WORKER_EXIT_POLL);
+        }
+        // Outlived the grace: SIGKILL, then wait so it cannot become a zombie.
+        let _ = worker.kill();
+        worker.wait().is_err()
+    });
+}
 
 pub struct Server {
     listener: TcpListener,
     work_root: PathBuf,
     credential: String,
+    /// Workers this host spawned. A durable run outlives the request that
+    /// started it, so the handle is kept rather than dropped: this process
+    /// stays alive for the life of the app and must wait on its own children.
+    workers: Mutex<Vec<Child>>,
 }
 
 impl Server {
@@ -37,6 +83,7 @@ impl Server {
             listener,
             work_root,
             credential,
+            workers: Mutex::new(Vec::new()),
         })
     }
 
@@ -122,7 +169,7 @@ impl Server {
         };
 
         let bindings: BTreeMap<String, String> = request.bindings;
-        start_durable(
+        let worker = start_durable(
             &repository,
             "main",
             &head,
@@ -130,7 +177,21 @@ impl Server {
             None,
             &core_materializer_registry,
         )?;
+        self.workers
+            .lock()
+            .expect("worker list poisoned")
+            .push(worker);
         view(&repository, &project)
+    }
+
+    /// Wait for the workers this host spawned to actually be gone.
+    ///
+    /// `stop_and_seal` has already asked the process tree to terminate, but
+    /// exit is asynchronous: the worker is often still running when the stop
+    /// request returns. A single `try_wait` would therefore reap only by luck.
+    fn reap_workers(&self) {
+        let mut workers = self.workers.lock().expect("worker list poisoned");
+        reap(&mut workers, WORKER_EXIT_GRACE);
     }
 
     fn stop(&self, body: &str) -> Result<ExecutionView> {
@@ -140,6 +201,10 @@ impl Server {
         // The full seal, not just the quiesce: stopping is five steps, and
         // `evolve_workspace` inside them is where the head actually moves.
         let sealed = stop_and_seal(&repository)?;
+        // This host outlives every run it starts, so it — unlike the CLI —
+        // must wait on the workers it spawned. Without this each execution
+        // leaves a zombie for as long as the app is open.
+        self.reap_workers();
         let mut view = view(&repository, &project)?;
         if let Some(sealed) = sealed {
             view.execution_id = sealed.run.token;
@@ -302,6 +367,9 @@ fn respond<T: serde::Serialize>(stream: &mut TcpStream, status: u16, body: &T) -
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::process::Command as TestCommand;
+
     use super::*;
 
     #[test]
@@ -345,6 +413,7 @@ mod tests {
             listener: TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap(),
             work_root: root.path().to_path_buf(),
             credential: "x".repeat(64),
+            workers: Mutex::new(Vec::new()),
         };
         assert!(server.resolve("inside").is_ok());
         assert!(server.resolve("../../etc").is_err());
@@ -358,5 +427,48 @@ mod tests {
         let address = server.listener.local_addr().unwrap();
         assert!(address.ip().is_loopback(), "bound {address}");
         assert_ne!(server.port(), 0);
+    }
+
+    /// A worker that is still running when the stop request returns must still
+    /// be reaped. Asserting it is alive first is the point: a `reap` that only
+    /// called `try_wait` once would pass this by luck on a slow machine and
+    /// fail on a fast one, so the aliveness is checked, not assumed.
+    #[test]
+    #[cfg(unix)]
+    fn reaps_a_worker_that_exits_after_the_stop_request() {
+        let child = TestCommand::new("/bin/sh")
+            .args(["-c", "sleep 0.3"])
+            .spawn()
+            .unwrap();
+        let mut workers = vec![child];
+
+        assert!(
+            workers[0].try_wait().unwrap().is_none(),
+            "worker must still be running when reaping starts, or this test proves nothing"
+        );
+
+        reap(&mut workers, Duration::from_secs(5));
+        assert!(workers.is_empty(), "the worker was not reaped");
+    }
+
+    /// A worker that outlives the grace is killed and then waited on. Without
+    /// the kill it stays a live orphan; without the wait it becomes a zombie.
+    #[test]
+    #[cfg(unix)]
+    fn escalates_when_a_worker_outlives_the_grace() {
+        let child = TestCommand::new("/bin/sh")
+            .args(["-c", "sleep 30"])
+            .spawn()
+            .unwrap();
+        let mut workers = vec![child];
+
+        let started = Instant::now();
+        reap(&mut workers, Duration::from_millis(100));
+
+        assert!(workers.is_empty(), "the worker was not reaped");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "reap waited for the process instead of escalating"
+        );
     }
 }
