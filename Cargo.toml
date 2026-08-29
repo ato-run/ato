@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "apps/cli",
+    "apps/local-runtime",
     "apps/connected-realization-worker",
     "apps/firecracker-guest-image",
     "apps/runtime-object-graph",
