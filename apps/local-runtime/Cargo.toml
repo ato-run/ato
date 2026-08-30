@@ -33,5 +33,11 @@ ato-objects = { path = "../../lib/objects", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# SIGTERM handling with a safe API, so this crate keeps `forbid(unsafe_code)`.
+# Only the iterator feature: the flag and the wake-up are ours, and this is
+# used purely to learn that a signal arrived.
+[target.'cfg(unix)'.dependencies]
+signal-hook = { version = "0.3", default-features = false, features = ["iterator"] }
+
 [dev-dependencies]
 tempfile = "3"

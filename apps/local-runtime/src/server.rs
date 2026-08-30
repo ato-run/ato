@@ -11,7 +11,8 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Child;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -68,6 +69,13 @@ pub struct Server {
     /// started it, so the handle is kept rather than dropped: this process
     /// stays alive for the life of the app and must wait on its own children.
     workers: Mutex<Vec<Child>>,
+    /// Set from the signal thread; observed by the accept loop.
+    ///
+    /// The signal side does no work beyond setting this and waking the loop.
+    /// Shutdown then runs on the ordinary path, through the same canonical
+    /// Stop every client uses — there is no second teardown routine that could
+    /// drift from the real one.
+    shutdown: Arc<AtomicBool>,
 }
 
 impl Server {
@@ -84,6 +92,7 @@ impl Server {
             work_root,
             credential,
             workers: Mutex::new(Vec::new()),
+            shutdown: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -94,8 +103,16 @@ impl Server {
             .unwrap_or(0)
     }
 
+    /// The flag the signal thread sets, and the port to wake this loop on.
+    pub fn shutdown_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.shutdown)
+    }
+
     pub fn serve(&self) -> Result<()> {
         for stream in self.listener.incoming() {
+            if self.shutdown.load(Ordering::SeqCst) {
+                break;
+            }
             match stream {
                 Ok(stream) => {
                     if let Err(error) = self.handle(stream) {
@@ -105,8 +122,42 @@ impl Server {
                 }
                 Err(error) => eprintln!("ato-local-runtime: accept failed: {error}"),
             }
+            if self.shutdown.load(Ordering::SeqCst) {
+                break;
+            }
         }
+        self.stop_everything();
         Ok(())
+    }
+
+    /// Stop every execution this runtime owns, through the canonical Stop.
+    ///
+    /// This is what makes the runtime — not its parent — responsible for its
+    /// own process tree. A Desktop that reached in to kill workers would have
+    /// to know how executions are structured, and would skip the seal.
+    fn stop_everything(&self) {
+        let projects: Vec<PathBuf> = self
+            .list()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|view| view.status == "active")
+            .map(|view| PathBuf::from(&view.project))
+            .collect();
+
+        for project in projects {
+            let stopped = LocalCapsuleRepository::open(&project)
+                .map_err(anyhow::Error::from)
+                .and_then(|repository| stop_and_seal(&repository));
+            if let Err(error) = stopped {
+                // Reported, not propagated: one Capsule that cannot be sealed
+                // must not strand the others still to be stopped.
+                eprintln!(
+                    "ato-local-runtime: stopping {} failed: {error:#}",
+                    project.display()
+                );
+            }
+        }
+        self.reap_workers();
     }
 
     fn handle(&self, mut stream: TcpStream) -> Result<()> {
@@ -462,6 +513,7 @@ mod tests {
             work_root: root.path().to_path_buf(),
             credential: "x".repeat(64),
             workers: Mutex::new(Vec::new()),
+            shutdown: Arc::new(AtomicBool::new(false)),
         };
         assert!(server.resolve("inside").is_ok());
         assert!(server.resolve("../../etc").is_err());
@@ -535,6 +587,7 @@ mod tests {
             work_root: root.path().to_path_buf(),
             credential: "x".repeat(64),
             workers: Mutex::new(Vec::new()),
+            shutdown: Arc::new(AtomicBool::new(false)),
         };
 
         assert!(server.list().unwrap().is_empty());
@@ -549,6 +602,7 @@ mod tests {
             work_root: PathBuf::from("/nonexistent/ato/work/root"),
             credential: "x".repeat(64),
             workers: Mutex::new(Vec::new()),
+            shutdown: Arc::new(AtomicBool::new(false)),
         };
 
         assert!(server.list().unwrap().is_empty());

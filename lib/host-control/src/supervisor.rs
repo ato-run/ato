@@ -90,6 +90,22 @@ impl<H: RunnerHost> ProcessSupervisor<H> {
         }
     }
 
+    /// Terminate every supervised child, giving each `grace` to exit on its
+    /// own first. Idempotent, like [`Self::shutdown`].
+    pub fn shutdown_gracefully(&mut self, grace: std::time::Duration) -> Result<(), HostError> {
+        let mut first_err = None;
+        for child in self.children.iter_mut() {
+            if let Err(e) = child.terminate_group_gracefully(grace) {
+                first_err.get_or_insert(e);
+            }
+        }
+        self.children.clear();
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
     /// Borrow the underlying host (e.g. to resolve a binary before spawning).
     pub fn host(&self) -> &H {
         &self.host

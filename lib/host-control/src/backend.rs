@@ -51,6 +51,16 @@ pub trait ManagedChild: Send {
     /// Terminate the whole process group. Idempotent — safe to call on an
     /// already-dead child.
     fn terminate_group(&mut self) -> Result<(), HostError>;
+
+    /// Ask the process group to exit, allowing it `grace` to do so before
+    /// hard teardown. Idempotent.
+    ///
+    /// The default is the hard teardown, so a host that cannot ask politely is
+    /// still correct — just less gentle. Hosts that own work worth finishing
+    /// should override it.
+    fn terminate_group_gracefully(&mut self, _grace: std::time::Duration) -> Result<(), HostError> {
+        self.terminate_group()
+    }
 }
 
 /// Where a host should direct a supervised child's stdout/stderr.
