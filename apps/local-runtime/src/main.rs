@@ -83,8 +83,41 @@ fn run() -> Result<()> {
     emit(&Event::Ready { port });
     eprintln!("ato-local-runtime: ready on 127.0.0.1:{port}");
 
+    install_shutdown_signal(server.shutdown_flag(), port);
+
     server.serve()
 }
+
+/// Ask the serve loop to stop when the host asks this process to stop.
+///
+/// The signal side deliberately does almost nothing: it sets a flag and makes
+/// a throwaway loopback connection so the blocked `accept` returns. All actual
+/// teardown then happens on the ordinary loop, through the same canonical Stop
+/// a client would call — so there is no second shutdown path to drift from the
+/// real one, and nothing that must be async-signal-safe.
+#[cfg(unix)]
+fn install_shutdown_signal(flag: std::sync::Arc<std::sync::atomic::AtomicBool>, port: u16) {
+    use signal_hook::consts::{SIGINT, SIGTERM};
+    use signal_hook::iterator::Signals;
+
+    let Ok(mut signals) = Signals::new([SIGTERM, SIGINT]) else {
+        // A runtime that cannot register the handler still runs; it simply
+        // loses the graceful path, which the parent's hard teardown covers.
+        eprintln!("ato-local-runtime: could not install the shutdown signal handler");
+        return;
+    };
+    std::thread::spawn(move || {
+        if signals.forever().next().is_some() {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            // Unblock `accept`. The connection is closed immediately; its only
+            // job is to make the loop look at the flag.
+            let _ = std::net::TcpStream::connect(("127.0.0.1", port));
+        }
+    });
+}
+
+#[cfg(not(unix))]
+fn install_shutdown_signal(_flag: std::sync::Arc<std::sync::atomic::AtomicBool>, _port: u16) {}
 
 /// Read the per-launch machine credential.
 ///

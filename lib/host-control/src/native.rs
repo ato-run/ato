@@ -102,6 +102,59 @@ pub fn terminate_process_group(pid: u32) -> Result<(), HostError> {
 /// wrapper itself has exited.
 ///
 /// No-op on non-Unix: Windows has no process groups, and its teardown walks the
+/// Is any process still alive in the group led by `pid`?
+///
+/// Signal 0 performs the permission and existence checks without delivering
+/// anything, which is the only portable way to ask "is this group still there"
+/// without racing a wait.
+#[cfg(unix)]
+fn process_group_alive(pid: u32) -> bool {
+    // SAFETY: kill(2) with signal 0 delivers nothing; it only reports whether
+    // the target group exists and is signalable.
+    let rc = unsafe { libc::kill(-(pid as libc::pid_t), 0) };
+    rc == 0
+}
+
+/// Ask a process group to exit, and give it a bounded chance to do so before
+/// taking it down.
+///
+/// The difference from [`terminate_process_group`] is the chance itself. A
+/// process that owns work — an execution, a database write, a child tree of its
+/// own — needs to hear "stop" and finish, and SIGKILL never gives it that. But
+/// waiting forever is its own failure, so the wait is bounded and the fallback
+/// is the same hard teardown as before.
+///
+/// On Windows there is no signal to ask with, so this is the hard teardown
+/// immediately — documented rather than pretended otherwise.
+pub fn terminate_process_group_gracefully(
+    pid: u32,
+    grace: std::time::Duration,
+) -> Result<(), HostError> {
+    if pid <= 1 {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: as above — a negative pid addresses the process group.
+        let rc = unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGTERM) };
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(()); // already gone: the desired end state
+            }
+        }
+        let deadline = std::time::Instant::now() + grace;
+        while std::time::Instant::now() < deadline {
+            if !process_group_alive(pid) {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+    // Outlived the grace, or a platform with nothing to ask with.
+    terminate_process_group(pid)
+}
+
 /// process tree via `taskkill /T` instead. This is the spawn-side pair of
 /// [`terminate_process_group`]; [`NativeHost::spawn`] applies it for you, and it
 /// is exposed for callers that build their own `Command` yet want the same
@@ -204,6 +257,19 @@ impl ManagedChild for NativeChild {
             .exit_code
             .lock()
             .expect("native child exit-code mutex poisoned")
+    }
+
+    fn terminate_group_gracefully(&mut self, grace: std::time::Duration) -> Result<(), HostError> {
+        let result = terminate_process_group_gracefully(self.pid, grace);
+        if let Ok(mut guard) = self.handle.lock()
+            && let Some(mut child) = guard.take()
+        {
+            // No kill() here: the group was asked to leave and given time, so
+            // the handle is waited on rather than shot. `wait` returns at once
+            // for a process that already exited.
+            let _ = child.wait();
+        }
+        result
     }
 
     fn terminate_group(&mut self) -> Result<(), HostError> {
