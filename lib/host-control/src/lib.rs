@@ -28,6 +28,6 @@ pub use backend::{
 };
 pub use native::{
     CommandNoWindowExt, NativeChild, NativeHost, mark_process_group_leader, resolve_on_path,
-    terminate_process_group,
+    terminate_process_group, terminate_process_group_gracefully,
 };
 pub use supervisor::ProcessSupervisor;
