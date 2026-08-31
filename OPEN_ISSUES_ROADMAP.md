@@ -83,7 +83,7 @@ v1。Browser は built-in に昇格させず、draft
 | Record correlation | [x] | durable appendが返すRecord IDをActivity receiptの`record_ref`へ接続 |
 | CI vertical E2E | [~] | Rust実Browser E2EとActivity Room 3-actor E2EはPASS。次は同一jobでPublic URL作成からfinal head / Record / secret scan / orphan確認までを通す |
 | Staging acceptance | [ ] | production相当stagingで同一Acceptanceを最低5回実行し、全runのreceiptを保存する。手動ブラウザ確認はgateに数えない |
-| Join→Interactive SLO | [~] | participation milestone保存は既存。次はURL open→accepted→Runner ready→Surface connected→first ACKを相関し、p50 / p95 / success rateと6区間のbreakdown receiptをCI artifact化する |
+| Join→Interactive SLO | [~] | 6区間、4つのproduct span、p50 / p95 / success rate、failure stageの共通receipt集計とunit testは実装済み。次は実milestoneを相関しCI/staging artifactとして保存する |
 
 **Release判定:** 最後の3項目（CI vertical E2E、staging 5回、SLO receipt）が完了するまで
 Browser Activity pathをrelease-readyと呼ばない。
@@ -197,7 +197,7 @@ Materialization / provider / orchestration の責務として追跡する。
 | QUALITY-002 | [ ] failure taxonomy を統一する | authoring / resolve / placement / materialize / attach / activate / interact / quiesce / restore を分類し、E999 や文字列判定に退化させない | #1194 |
 | QUALITY-003 | [ ] fault-injection E2E を定期実行する | process crash、disk full、network loss、expired secret、corrupt object、Unhealthy、partial attach を disposable host で実行し、receipt と cleanup を検証する | #1235、#1160 |
 | QUALITY-004 | [ ] feature / posture drift を検出する | build artifact、runner、deployment ごとの supported feature と effective isolation を machine-readable に比較し、staging / production drift を通知する | #1196 |
-| QUALITY-005 | [~] product loop の SLO を計測する | participation milestoneは保存済み。残りはPublic URL open→accepted→Runner ready→Surface connected→first ACKのp50 / p95 / success rateを集計し、coordination / queue / materialization / runner startup / transport / surface setupへ分解したreceiptをCI/stagingで保存する | Web-first product goal |
+| QUALITY-005 | [~] product loop の SLO を計測する | milestone保存と共通receipt集計（4 span、6区間、p50 / p95 / success rate、failure stage）は実装済み。残りは実Acceptance milestoneを入力してCI/staging artifactを保存する | Web-first product goal |
 | QUALITY-006 | [ ] release gate を1つにまとめる | format / clippy / unit / conformance / sample corpus / cross-platform / security negative / AODD receipt の必須・条件付き・informational を明記する | ADAPTER-006、QUALITY-001 |
 
 ## 9. 実行順と exit gate
