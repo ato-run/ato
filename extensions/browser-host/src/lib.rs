@@ -517,12 +517,51 @@ fn launch_chrome(chrome: &Path, profile: &Path, headless: bool) -> Result<Child>
             .arg("--disable-gpu")
             .arg("--disable-dev-shm-usage");
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Every hosted Browser owns a distinct process group. Cleanup can
+        // therefore collect Chrome helpers without touching another Run.
+        command.process_group(0);
+    }
     command.spawn().context("launch private Chrome")
 }
 
 fn stop_child(child: &mut Child) -> Result<()> {
+    #[cfg(unix)]
+    stop_process_group(child)?;
+    #[cfg(not(unix))]
     if child.try_wait()?.is_none() {
         child.kill().context("stop Browser Chrome")?;
+        child.wait().context("wait for Browser Chrome")?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn stop_process_group(child: &mut Child) -> Result<()> {
+    let process_group = child.id();
+    let group = format!("-{process_group}");
+    let _ = Command::new("kill")
+        .args(["-TERM", "--", group.as_str()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if child.try_wait()?.is_some() {
+            break;
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+    // TERM may have reaped the browser leader while an unresponsive helper
+    // remains. KILL the same owned group and then reap the leader if needed.
+    let _ = Command::new("kill")
+        .args(["-KILL", "--", group.as_str()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    if child.try_wait()?.is_none() {
         child.wait().context("wait for Browser Chrome")?;
     }
     Ok(())

@@ -9,7 +9,7 @@
 
 mod activity_controller;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -24,14 +24,16 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail, ensure};
+#[cfg(test)]
+use ato_adapter_api::Stylus;
 use ato_adapter_api::{
     ActuatorProviderRegistry, AdapterAttachContext, AdapterContext, AdapterInstance,
     AdapterRegistry, AttachedAdapter, IgnoreObservations, LiveOperation, LiveOperationDispatcher,
-    Stylus, WorkspaceCapturePolicy,
+    WorkspaceCapturePolicy,
 };
 use ato_adapter_browser::{
-    BROWSER_PROTOCOL_ID, BrowserAdapter, BrowserAdapterConfig, BrowserInputMode,
-    BrowserSurfaceTracker, RawWebMcpSnapshotV1,
+    BROWSER_PROTOCOL_ID, BrowserAdapter, BrowserAdapterConfig, BrowserChannelScope,
+    BrowserInputMode, BrowserSurfaceTracker, RawWebMcpSnapshotV1,
     register_record_schemas as register_browser_record_schemas,
 };
 use ato_adapter_workspace::restore_workspace;
@@ -217,6 +219,7 @@ struct RunnerBrowserRecordSubmission {
     port: PortId,
     stream: String,
     next_local_seq: Arc<AtomicU64>,
+    record_refs: Arc<Mutex<BTreeMap<String, String>>>,
 }
 
 impl BrowserRecordSubmission for RunnerBrowserRecordSubmission {
@@ -224,8 +227,9 @@ impl BrowserRecordSubmission for RunnerBrowserRecordSubmission {
         // `operation` contains the exact event/transition/run_seq/operation_id
         // accepted by the authority. Record metadata stays outside semantic
         // identity; the portable Record itself remains only the Browser action.
-        self.stylus
-            .record(RecordCandidate {
+        let record_ref = self
+            .stylus
+            .record_with_receipt(RecordCandidate {
                 protocol_id: ProtocolId::parse(BROWSER_PROTOCOL_ID)
                     .expect("static Browser Protocol ID"),
                 operation_id: ato_computation::OperationId::parse(
@@ -243,7 +247,20 @@ impl BrowserRecordSubmission for RunnerBrowserRecordSubmission {
                 caused_by: Vec::new(),
                 observed_at: OffsetDateTime::now_utc().unix_timestamp().to_string(),
             })
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?
+            .to_string();
+        self.record_refs
+            .lock()
+            .map_err(|_| "Browser Record reference cache poisoned".to_owned())?
+            .insert(operation.operation_id.clone(), record_ref);
+        Ok(())
+    }
+
+    fn record_ref(&self, operation_id: &str) -> Option<String> {
+        self.record_refs
+            .lock()
+            .ok()
+            .and_then(|refs| refs.get(operation_id).cloned())
     }
 }
 
@@ -284,6 +301,10 @@ trait BrowserControlIngress: Send + Sync {
     fn control_operation_retry_stage(&self, _operation_id: &str) -> BrowserOperationRetryStage {
         BrowserOperationRetryStage::BeforeApply
     }
+
+    fn control_operation_record_ref(&self, _operation_id: &str) -> Option<String> {
+        None
+    }
 }
 
 impl<A, P, R> BrowserControlIngress for BrowserOperationIngress<A, P, R>
@@ -321,6 +342,10 @@ where
 
     fn control_operation_retry_stage(&self, operation_id: &str) -> BrowserOperationRetryStage {
         self.operation_retry_stage(operation_id)
+    }
+
+    fn control_operation_record_ref(&self, operation_id: &str) -> Option<String> {
+        self.record_ref(operation_id)
     }
 }
 
@@ -1066,6 +1091,7 @@ impl ConnectedWorker {
             self.api.clone(),
             self.config.browser_chrome.as_deref(),
             self.config.run_control_verification_key.as_deref(),
+            None,
             &self.config.runner_id,
             &format!("http://{}/", self.config.hidden_surface_listen),
         )?;
@@ -1176,6 +1202,14 @@ impl ConnectedWorker {
         };
         let running = restore_portable_path(&graph, lease_root, &lease.id, &physical)?;
         self.api.report_status(&lease.id, "running")?;
+        let browser_channel_scope = BrowserChannelScope {
+            activity_id: session.activity_id.clone(),
+            run_id: session.run_id.clone(),
+            epoch: lease.id.clone(),
+            expires_at_unix_seconds: OffsetDateTime::parse(&session.expires_at, &Rfc3339)
+                .context("Activity executor expiry is not RFC3339")?
+                .unix_timestamp(),
+        };
         let mut browser = start_hosted_browser_runtime(
             &graph,
             lease,
@@ -1185,6 +1219,7 @@ impl ConnectedWorker {
             self.api.clone(),
             self.config.browser_chrome.as_deref(),
             self.config.run_control_verification_key.as_deref(),
+            Some(browser_channel_scope),
             &self.config.runner_id,
             &format!("http://{}/", self.config.hidden_surface_listen),
         )?
@@ -2260,6 +2295,7 @@ fn start_hosted_browser_runtime(
     api: HttpRunnerApi,
     chrome: Option<&Path>,
     run_control_verification_key: Option<&str>,
+    channel_scope: Option<BrowserChannelScope>,
     runner_id: &str,
     browser_target_url: &str,
 ) -> Result<Option<HostedBrowserRuntime>> {
@@ -2301,6 +2337,7 @@ fn start_hosted_browser_runtime(
             expected_origin: browser_origin.clone(),
             allowed_non_text_codes: BTreeSet::new(),
             input_mode: BrowserInputMode::ApplyOnly,
+            channel_scope,
         })?,
     };
     let mut attached = registry.attach_all(
@@ -2368,6 +2405,7 @@ fn start_hosted_browser_runtime(
             port: binding.port.clone(),
             stream: format!("browser-{}", lease.id),
             next_local_seq: Arc::new(AtomicU64::new(0)),
+            record_refs: Arc::new(Mutex::new(BTreeMap::new())),
         },
     ));
     let control_capability = BrowserControlCapability {
@@ -3423,6 +3461,54 @@ mod tests {
     }
 
     #[test]
+    fn presentation_refresh_does_not_change_computation_head_or_records() {
+        let records = TestRecords::default();
+        let submitted = Arc::clone(&records.0);
+        let ingress = BrowserOperationIngress::new(
+            browser_authority(),
+            PortId::parse("browser").unwrap(),
+            TestBrowserActuator::default(),
+            TestPersistence,
+            records,
+        );
+        ingress
+            .accept_with_operation_id(
+                "operation-before-presentation".to_owned(),
+                ato_adapter_browser::BrowserEvent::Click {
+                    x_normalized: 0.25,
+                    y_normalized: 0.75,
+                    button: 0,
+                },
+            )
+            .expect("authoritative operation");
+        let before = ingress.freeze().unwrap();
+        ingress.unfreeze();
+        let mut published = Vec::new();
+
+        for frame in [vec![0xff, 0xd8, 0xff, 0xd9], vec![1, 2, 3, 4]] {
+            let mut next_frame_at = Instant::now() - Duration::from_secs(1);
+            refresh_activity_presentation_frame(
+                &mut next_frame_at,
+                || Ok(frame),
+                |frame| {
+                    published.push(frame);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        }
+
+        let after = ingress.freeze().unwrap();
+        assert_eq!(published.len(), 2);
+        assert_eq!(after, before, "presentation must not evolve the Run head");
+        assert_eq!(
+            submitted.lock().unwrap().len(),
+            1,
+            "presentation must not submit an operation Record"
+        );
+    }
+
+    #[test]
     fn normal_lease_cleanup_removes_activity_operation_journal() {
         let temporary = tempfile::tempdir().expect("lease tempdir");
         let lease_root = temporary.path().join("leases/lease-cleanup");
@@ -3768,6 +3854,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
                         expected_origin: origin.clone(),
                         allowed_non_text_codes: BTreeSet::new(),
                         input_mode: BrowserInputMode::ApplyOnly,
+                        channel_scope: None,
                     })
                     .unwrap(),
                 }],
