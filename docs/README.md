@@ -41,8 +41,10 @@ or the worked example in the [README](../README.md#a-concrete-example).
    [Materialization](concepts/materialization.md) — the concepts
 2. [Core architecture](core-architecture.md) — library responsibilities and
    dependency direction
-3. [Accepted RFCs](rfcs/README.md) — normative current architecture
-4. [AGENTS.md](../AGENTS.md) — before changing architecture or implementation
+3. [COOP and Ato](coop.md) — how human/agent collaboration maps onto Ato
+   without becoming a new Semantic Core primitive
+4. [Accepted RFCs](rfcs/README.md) — normative current architecture
+5. [AGENTS.md](../AGENTS.md) — before changing architecture or implementation
 
 **Research / theory**
 
@@ -68,6 +70,8 @@ or the worked example in the [README](../README.md#a-concrete-example).
 
 - [Core architecture](core-architecture.md) — library responsibilities and
   dependency direction.
+- [COOP and Ato](coop.md) — non-normative integration model for human/agent
+  shared and parallel work.
 - [Accepted RFCs](rfcs/README.md) — normative current architecture.
 - [Local lifecycle](run.md) — verified CLI behavior.
 - [Capsule bundle](capsule.md) — transport and identity.

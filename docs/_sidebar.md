@@ -6,6 +6,7 @@
   - [Glossary](glossary-reference.md)
 - Architecture
   - [Core architecture](core-architecture.md)
+  - [COOP and Ato](coop.md)
   - [Local lifecycle](run.md)
   - [Capsule bundle](capsule.md)
   - [Snapshot materialization](snapshot.md)
