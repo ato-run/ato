@@ -21,8 +21,9 @@ pub use manifest::{
     validate_connect_source, validate_relative_path,
 };
 pub use output::{
-    ExtractedStaticWebOutput, StaticWebOutputPlan, extract_static_web_output,
-    extract_static_web_output_with_browser_runner,
+    ExtractedStaticWebOutput, INSTANCE_STATE_BRIDGE_PATH, INSTANCE_STATE_ELEMENT_ID,
+    StaticWebInstrumentation, StaticWebOutputPlan, extract_static_web_output,
+    extract_static_web_output_instrumented, extract_static_web_output_with_browser_runner,
 };
 pub use receipt::{
     STATIC_WEB_BLOB_V1_SCHEMA, STATIC_WEB_BUNDLE_RECEIPT_V1_SCHEMA, StaticWebBlobMetadataV1,

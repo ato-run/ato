@@ -17,6 +17,26 @@ const BROWSER_RUNNER_BRIDGE_PATH: &str = "__ato/browser-runner-bridge-v0.1.2.js"
 const BROWSER_RUNNER_BRIDGE_JS: &[u8] = include_bytes!("../assets/browser-runner-bridge-v0.1.2.js");
 const BROWSER_RUNNER_BRIDGE_TAG: &str = r#"<meta name="ato-browser-runner-controller-origins" content="https://ato.run,https://stg-app.ato.run"><meta name="ato-browser-runner-verifier-origins" content="https://api.ato.run,https://staging.api.ato.run"><meta name="ato-browser-runner-state-observation" content="dom_text"><script type="module" src="/__ato/browser-runner-bridge-v0.1.2.js"></script>"#;
 
+/// Reserved artifact path of the Browser Instance State Bridge (State lane).
+pub const INSTANCE_STATE_BRIDGE_PATH: &str = "__ato/instance-state-bridge-v1.js";
+/// `id` of the injected state document the bridge hydrates from. The delivery
+/// edge rewrites ONLY this element's text content; `null` is the artifact
+/// placeholder, which keeps the bridge inert wherever no ComputeInstance backs
+/// the request (the public Static Web lane serves these same bytes).
+pub const INSTANCE_STATE_ELEMENT_ID: &str = "__ato_instance_state_v1";
+const INSTANCE_STATE_BRIDGE_JS: &[u8] = include_bytes!("../assets/instance-state-bridge-v1.js");
+const INSTANCE_STATE_BRIDGE_TAG: &str = r#"<script id="__ato_instance_state_v1" type="application/json">null</script><script src="/__ato/instance-state-bridge-v1.js"></script>"#;
+
+/// Which materialized-copy instrumentation an extraction applies. Every field
+/// is opt-in: the default leaves the built output byte-for-byte untouched.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StaticWebInstrumentation {
+    /// `ato.browser@1` Operation lane bridge.
+    pub browser_runner_bridge: bool,
+    /// `ato.materialize.browser@1` State lane bridge.
+    pub instance_state_bridge: bool,
+}
+
 /// An explicit materialization decision for immutable static output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StaticWebOutputPlan {
@@ -79,7 +99,7 @@ pub fn extract_static_web_output(
     image_root: &Path,
     plan: &StaticWebOutputPlan,
 ) -> Result<ExtractedStaticWebOutput> {
-    extract_static_web_output_with_browser_runner(image_root, plan, false)
+    extract_static_web_output_instrumented(image_root, plan, StaticWebInstrumentation::default())
 }
 
 /// Extracts a static output tree and, when explicitly selected, instruments
@@ -88,6 +108,23 @@ pub fn extract_static_web_output_with_browser_runner(
     image_root: &Path,
     plan: &StaticWebOutputPlan,
     browser_runner_enabled: bool,
+) -> Result<ExtractedStaticWebOutput> {
+    extract_static_web_output_instrumented(
+        image_root,
+        plan,
+        StaticWebInstrumentation {
+            browser_runner_bridge: browser_runner_enabled,
+            ..StaticWebInstrumentation::default()
+        },
+    )
+}
+
+/// Extracts a static output tree, applying every selected instrumentation to
+/// the materialized copy only. The source `image_root` is never written to.
+pub fn extract_static_web_output_instrumented(
+    image_root: &Path,
+    plan: &StaticWebOutputPlan,
+    instrumentation: StaticWebInstrumentation,
 ) -> Result<ExtractedStaticWebOutput> {
     plan.validate()?;
     let source = image_root.join(&plan.image_output_root);
@@ -103,8 +140,14 @@ pub fn extract_static_web_output_with_browser_runner(
         .context("create static web extraction workspace")?;
     let output_root = workspace.path().join("output");
     copy_tree_no_links(&source, &output_root)?;
-    if browser_runner_enabled {
+    if instrumentation.browser_runner_bridge {
         inject_browser_runner_bridge(&output_root, &plan.entry_path)?;
+    }
+    // Injected LAST so it lands ahead of every other script: the State lane
+    // bridge is parser-blocking and must finish hydrating before any App
+    // script — or the Operation lane bridge — observes `localStorage`.
+    if instrumentation.instance_state_bridge {
+        inject_instance_state_bridge(&output_root, &plan.entry_path)?;
     }
     Ok(ExtractedStaticWebOutput {
         _workspace: workspace,
@@ -113,26 +156,57 @@ pub fn extract_static_web_output_with_browser_runner(
 }
 
 fn inject_browser_runner_bridge(output_root: &Path, entry_path: &str) -> Result<()> {
-    let bridge_path = output_root.join(BROWSER_RUNNER_BRIDGE_PATH);
+    inject_bridge(
+        output_root,
+        entry_path,
+        "Browser Runner",
+        BROWSER_RUNNER_BRIDGE_PATH,
+        BROWSER_RUNNER_BRIDGE_JS,
+        BROWSER_RUNNER_BRIDGE_TAG,
+    )
+}
+
+fn inject_instance_state_bridge(output_root: &Path, entry_path: &str) -> Result<()> {
+    inject_bridge(
+        output_root,
+        entry_path,
+        "Instance State",
+        INSTANCE_STATE_BRIDGE_PATH,
+        INSTANCE_STATE_BRIDGE_JS,
+        INSTANCE_STATE_BRIDGE_TAG,
+    )
+}
+
+/// Writes a reserved bridge asset and splices its tag ahead of the entry
+/// document's first script. Fails closed on a reserved-path collision: the
+/// built output owning that path would otherwise be silently overwritten.
+fn inject_bridge(
+    output_root: &Path,
+    entry_path: &str,
+    label: &str,
+    reserved_path: &str,
+    asset: &[u8],
+    tag: &str,
+) -> Result<()> {
+    let bridge_path = output_root.join(reserved_path);
     if bridge_path.exists() {
-        bail!("static output already contains reserved path {BROWSER_RUNNER_BRIDGE_PATH}");
+        bail!("static output already contains reserved path {reserved_path}");
     }
 
     let entry = output_root.join(entry_path);
     let html = fs::read_to_string(&entry)
-        .with_context(|| format!("read Browser Runner entry HTML {}", entry.display()))?;
+        .with_context(|| format!("read {label} entry HTML {}", entry.display()))?;
     let insertion = find_bridge_insertion(&html);
-    let mut instrumented = String::with_capacity(html.len() + BROWSER_RUNNER_BRIDGE_TAG.len());
+    let mut instrumented = String::with_capacity(html.len() + tag.len());
     instrumented.push_str(&html[..insertion]);
-    instrumented.push_str(BROWSER_RUNNER_BRIDGE_TAG);
+    instrumented.push_str(tag);
     instrumented.push_str(&html[insertion..]);
 
     fs::create_dir_all(bridge_path.parent().expect("bridge path has parent"))
-        .context("create reserved Browser Runner bridge directory")?;
-    fs::write(&bridge_path, BROWSER_RUNNER_BRIDGE_JS)
-        .context("write versioned Browser Runner bridge artifact")?;
+        .context("create reserved bridge directory")?;
+    fs::write(&bridge_path, asset).context("write versioned bridge artifact")?;
     fs::write(&entry, instrumented)
-        .with_context(|| format!("write Browser Runner entry HTML {}", entry.display()))?;
+        .with_context(|| format!("write {label} entry HTML {}", entry.display()))?;
     Ok(())
 }
 
@@ -312,6 +386,126 @@ mod tests {
         );
     }
 
+    fn instrumentation(instance_state: bool) -> StaticWebInstrumentation {
+        StaticWebInstrumentation {
+            browser_runner_bridge: false,
+            instance_state_bridge: instance_state,
+        }
+    }
+
+    #[test]
+    fn instance_state_flag_off_preserves_built_bytes() {
+        let image = tempfile::tempdir().unwrap();
+        let output = image.path().join("srv/app/dist");
+        fs::create_dir_all(&output).unwrap();
+        let original = b"<html><script src=\"application.js\"></script></html>";
+        fs::write(output.join("index.html"), original).unwrap();
+
+        let extracted =
+            extract_static_web_output_instrumented(image.path(), &plan(), instrumentation(false))
+                .unwrap();
+        assert_eq!(
+            fs::read(extracted.output_root().join("index.html")).unwrap(),
+            original
+        );
+        assert!(
+            !extracted
+                .output_root()
+                .join(INSTANCE_STATE_BRIDGE_PATH)
+                .exists()
+        );
+    }
+
+    #[test]
+    fn instance_state_bridge_is_parser_blocking_and_precedes_app_scripts() {
+        let image = tempfile::tempdir().unwrap();
+        let output = image.path().join("srv/app/dist");
+        fs::create_dir_all(&output).unwrap();
+        let original = b"<!doctype html><html><head></head><body><script src=\"application.js\"></script></body></html>";
+        fs::write(output.join("index.html"), original).unwrap();
+
+        let extracted =
+            extract_static_web_output_instrumented(image.path(), &plan(), instrumentation(true))
+                .unwrap();
+        let materialized = fs::read_to_string(extracted.output_root().join("index.html")).unwrap();
+
+        assert_eq!(fs::read(output.join("index.html")).unwrap(), original);
+        assert_eq!(materialized.matches(INSTANCE_STATE_BRIDGE_TAG).count(), 1);
+        // The App must never read localStorage before hydration completes.
+        assert!(
+            materialized.find(INSTANCE_STATE_BRIDGE_TAG).unwrap()
+                < materialized.find("application.js").unwrap()
+        );
+        // Neither `defer` nor `async`: the tag has to block the parser.
+        assert!(!INSTANCE_STATE_BRIDGE_TAG.contains("defer"));
+        assert!(!INSTANCE_STATE_BRIDGE_TAG.contains("async"));
+        // The state document is a placeholder in the artifact; only the
+        // delivery edge that knows the ComputeInstance fills it in.
+        assert!(materialized.contains(
+            "<script id=\"__ato_instance_state_v1\" type=\"application/json\">null</script>"
+        ));
+        assert_eq!(
+            fs::read(extracted.output_root().join(INSTANCE_STATE_BRIDGE_PATH)).unwrap(),
+            INSTANCE_STATE_BRIDGE_JS
+        );
+    }
+
+    #[test]
+    fn instance_state_bridge_hydrates_before_the_operation_lane_bridge() {
+        let image = tempfile::tempdir().unwrap();
+        let output = image.path().join("srv/app/dist");
+        fs::create_dir_all(&output).unwrap();
+        fs::write(
+            output.join("index.html"),
+            b"<!doctype html><html><head></head><body><script src=\"application.js\"></script></body></html>",
+        )
+        .unwrap();
+
+        let extracted = extract_static_web_output_instrumented(
+            image.path(),
+            &plan(),
+            StaticWebInstrumentation {
+                browser_runner_bridge: true,
+                instance_state_bridge: true,
+            },
+        )
+        .unwrap();
+        let materialized = fs::read_to_string(extracted.output_root().join("index.html")).unwrap();
+
+        assert!(
+            materialized.find(INSTANCE_STATE_BRIDGE_TAG).unwrap()
+                < materialized
+                    .find(r#"<script type="module" src="/__ato/browser-runner-bridge-v0.1.2.js">"#)
+                    .unwrap()
+        );
+        assert!(
+            extracted
+                .output_root()
+                .join(BROWSER_RUNNER_BRIDGE_PATH)
+                .exists()
+        );
+        assert!(
+            extracted
+                .output_root()
+                .join(INSTANCE_STATE_BRIDGE_PATH)
+                .exists()
+        );
+    }
+
+    #[test]
+    fn instance_state_injection_fails_closed_on_reserved_path_collision() {
+        let image = tempfile::tempdir().unwrap();
+        let output = image.path().join("srv/app/dist");
+        fs::create_dir_all(output.join("__ato")).unwrap();
+        fs::write(output.join("index.html"), "<html></html>").unwrap();
+        fs::write(output.join(INSTANCE_STATE_BRIDGE_PATH), "attacker bytes").unwrap();
+
+        assert!(
+            extract_static_web_output_instrumented(image.path(), &plan(), instrumentation(true))
+                .is_err()
+        );
+    }
+
     #[test]
     fn plan_never_infers_a_dist_directory() {
         let mut explicit = plan();
@@ -337,5 +531,59 @@ mod tests {
         fs::write(output.join("index.html"), "built").unwrap();
         fs::hard_link(output.join("index.html"), output.join("duplicate.html")).unwrap();
         assert!(extract_static_web_output(image.path(), &plan()).is_err());
+    }
+}
+
+/// The State lane's format is owned by `ato.materialize.browser@1`, but it is
+/// READ by an asset shipped from this crate. These tests are the only place
+/// the two are pinned to each other; without them the bridge and the
+/// Materializer could drift into two incompatible "localStorage state" formats
+/// with nothing failing until a user's data silently fails to restore.
+#[cfg(test)]
+mod state_contract_tests {
+    use ato_materializer_browser::{
+        BROWSER_MATERIALIZER_ID, BrowserLocalStorageEntryV1, BrowserStateV1, encode_state,
+    };
+
+    use super::{INSTANCE_STATE_BRIDGE_JS, INSTANCE_STATE_ELEMENT_ID};
+
+    const FIXTURE: &str =
+        include_str!("../tests/fixtures/instance-state-hydration-v1/canonical.json");
+
+    #[test]
+    fn state_fixture_is_canonical_browser_materialization_v1() {
+        let parsed: BrowserStateV1 = serde_json::from_str(FIXTURE).unwrap();
+        assert_eq!(parsed.version, 1);
+        assert_eq!(
+            parsed.local_storage,
+            vec![
+                BrowserLocalStorageEntryV1 {
+                    key: "expenses".to_owned(),
+                    value: r#"[{"id":"e1","amount":1280,"label":"Coffee"}]"#.to_owned(),
+                },
+                BrowserLocalStorageEntryV1 {
+                    key: "ui.theme".to_owned(),
+                    value: "dark".to_owned(),
+                },
+            ]
+        );
+        // Byte-exact: the edge injects these bytes verbatim, so a re-encode
+        // that differs would mean the injected document is not what the
+        // Materializer would have produced for the same state.
+        assert_eq!(encode_state(&parsed).unwrap(), FIXTURE.as_bytes());
+        assert_eq!(BROWSER_MATERIALIZER_ID, "ato.materialize.browser@1");
+    }
+
+    #[test]
+    fn bridge_asset_matches_the_state_contract() {
+        let bridge = std::str::from_utf8(INSTANCE_STATE_BRIDGE_JS).unwrap();
+        assert!(bridge.contains(&format!("\"{INSTANCE_STATE_ELEMENT_ID}\"")));
+        assert!(bridge.contains("STATE_VERSION = 1"));
+        assert!(bridge.contains("local_storage"));
+        assert!(bridge.contains("\"ato.browser-instance-state@1\""));
+        assert!(bridge.contains("\"/__ato/instance-state/local-storage\""));
+        // Inert without an instance behind the request: the same artifact
+        // bytes are served on the public Static Web lane.
+        assert!(bridge.contains("if (!injected) return;"));
     }
 }

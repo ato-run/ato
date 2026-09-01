@@ -22,3 +22,9 @@ tempfile = "3"
 thiserror = "2"
 unicode-normalization = "0.1"
 url = "2"
+
+[dev-dependencies]
+# Dev-only: pins the State lane's on-the-wire format to the Browser
+# Materializer that owns it. arch-check ignores dev edges, and no shipped
+# artifact links this crate.
+ato-materializer-browser = { path = "../browser", version = "0.1.0" }

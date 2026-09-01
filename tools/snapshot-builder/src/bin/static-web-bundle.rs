@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use ato_materializer_static_web::{
-    StaticWebOutputPlan, extract_static_web_output_with_browser_runner, produce_static_web_bundle,
+    StaticWebInstrumentation, StaticWebOutputPlan, extract_static_web_output_instrumented,
+    produce_static_web_bundle,
 };
 use serde::Deserialize;
 
@@ -17,6 +18,9 @@ struct BundlePlan {
     spa_fallback: bool,
     connect_src: Vec<String>,
     browser_runner_bridge: bool,
+    /// Optional so plans written before the State lane existed still parse.
+    #[serde(default)]
+    instance_state_bridge: bool,
 }
 
 fn main() -> Result<()> {
@@ -31,7 +35,10 @@ fn main() -> Result<()> {
         .with_context(|| format!("read static web plan {}", plan_path.display()))?;
     let input: BundlePlan = serde_json::from_slice(&input)
         .with_context(|| format!("parse static web plan {}", plan_path.display()))?;
-    let browser_runner_bridge = input.browser_runner_bridge;
+    let instrumentation = StaticWebInstrumentation {
+        browser_runner_bridge: input.browser_runner_bridge,
+        instance_state_bridge: input.instance_state_bridge,
+    };
     let plan = StaticWebOutputPlan {
         materialization_id: input.materialization_id,
         image_output_root: input.image_output_root,
@@ -39,8 +46,7 @@ fn main() -> Result<()> {
         spa_fallback: input.spa_fallback,
         connect_src: input.connect_src,
     };
-    let extracted =
-        extract_static_web_output_with_browser_runner(image_root, &plan, browser_runner_bridge)?;
+    let extracted = extract_static_web_output_instrumented(image_root, &plan, instrumentation)?;
     let produced =
         produce_static_web_bundle(&plan, extracted.output_root(), destination_parent, &[])?;
     println!("{}", String::from_utf8(produced.receipt_bytes)?);

@@ -510,6 +510,7 @@ name = "ato-materializer-static-web"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ato-materializer-browser",
  "data-encoding",
  "hex",
  "serde",
