@@ -97,6 +97,7 @@ const RUNNER_CAPABILITIES: &[&str] = &[
     "isolation=untrusted-v1",
     "materializer=ato.materialize.vm.snapshot@1",
     "backend=firecracker",
+    "activity-coop-trace-v0",
 ];
 const ACTIVE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const ACTIVITY_FRAME_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
@@ -1051,6 +1052,11 @@ impl ConnectedWorker {
             &command.bundle_id,
             &command.expected_root_computation_ref,
         )?;
+        emit_coop_trace(
+            command.trace_id.as_deref(),
+            "capsule_resolved",
+            trace_started_at,
+        );
         let index: ObjectGraphIndexV1 = serde_json::from_slice(source.index_bytes())
             .context("runtime graph index is not valid JSON")?;
         let expectation = GraphDownloadExpectation {
@@ -1077,6 +1083,11 @@ impl ConnectedWorker {
             guest_surface_target: self.config.surface_target,
             tap_host_cidr: &self.config.tap_host_cidr,
         };
+        emit_coop_trace(
+            command.trace_id.as_deref(),
+            "realization_selected",
+            trace_started_at,
+        );
         let running = restore_portable_path(&graph, lease_root, &lease.id, &physical)?;
         self.api.report_status(&lease.id, "running")?;
 
@@ -1165,10 +1176,26 @@ impl ConnectedWorker {
         command: &ActivityLeaseCommand,
         lease_root: &Path,
     ) -> Result<()> {
+        let trace_started_at = Instant::now();
+        emit_coop_trace(
+            command.trace_id.as_deref(),
+            "runner_accepted",
+            trace_started_at,
+        );
         let session = self
             .api
             .activity_executor_session(&command.activity_id, &command.activity_run_id)?;
         validate_activity_executor_session(&session, lease, command)?;
+        emit_coop_trace(
+            command.trace_id.as_deref(),
+            "run_contract_verified",
+            trace_started_at,
+        );
+        emit_coop_trace(
+            command.trace_id.as_deref(),
+            "materialization_started",
+            trace_started_at,
+        );
         let source = self.api.graph_source(
             &lease.id,
             &session.source.bundle_id,
@@ -1201,7 +1228,13 @@ impl ConnectedWorker {
             tap_host_cidr: &self.config.tap_host_cidr,
         };
         let running = restore_portable_path(&graph, lease_root, &lease.id, &physical)?;
+        emit_coop_trace(
+            command.trace_id.as_deref(),
+            "materialization_completed",
+            trace_started_at,
+        );
         self.api.report_status(&lease.id, "running")?;
+        emit_coop_trace(command.trace_id.as_deref(), "run_started", trace_started_at);
         let browser_channel_scope = BrowserChannelScope {
             activity_id: session.activity_id.clone(),
             run_id: session.run_id.clone(),
@@ -1210,6 +1243,16 @@ impl ConnectedWorker {
                 .context("Activity executor expiry is not RFC3339")?
                 .unix_timestamp(),
         };
+        emit_coop_trace(
+            command.trace_id.as_deref(),
+            "adapter_runtime_start",
+            trace_started_at,
+        );
+        emit_coop_trace(
+            command.trace_id.as_deref(),
+            "adapter_attach_start",
+            trace_started_at,
+        );
         let mut browser = start_hosted_browser_runtime(
             &graph,
             lease,
@@ -1224,6 +1267,11 @@ impl ConnectedWorker {
             &format!("http://{}/", self.config.hidden_surface_listen),
         )?
         .context("Activity source does not contain an explicit Browser Computation")?;
+        emit_coop_trace(
+            command.trace_id.as_deref(),
+            "surface_transport_start",
+            trace_started_at,
+        );
         let controller = ActivityControllerServer::start(
             ActivityControllerPageConfig {
                 run_id: session.run_id.clone(),
@@ -1234,6 +1282,17 @@ impl ConnectedWorker {
             browser.activity_ingress(),
             &lease_root.join("activity-operation-receipts"),
         )?;
+        emit_coop_trace(
+            command.trace_id.as_deref(),
+            "adapter_handshake_complete",
+            trace_started_at,
+        );
+        emit_coop_trace(
+            command.trace_id.as_deref(),
+            "adapter_ready",
+            trace_started_at,
+        );
+        emit_coop_trace(command.trace_id.as_deref(), "run_ready", trace_started_at);
         browser.open_auxiliary_target(controller.target_url())?;
         let execution_id = format!("activity:{}:{}", lease.run_id, lease.id);
         // A restarted Browser context must not reuse an older Room surface
@@ -1461,6 +1520,10 @@ fn validate_lease(lease: &ClaimedLease, now: SystemTime) -> Result<()> {
             ensure!(
                 command.activity_run_id == lease.run_id,
                 "Activity lease Run identity mismatch"
+            );
+            ensure!(
+                command.trace_id.as_deref().is_none_or(valid_coop_trace_id),
+                "Activity lease Coop trace identity is invalid"
             );
         }
     }
@@ -2683,6 +2746,30 @@ struct PortableLeaseCommand {
 struct ActivityLeaseCommand {
     activity_id: String,
     activity_run_id: String,
+    #[serde(default)]
+    trace_id: Option<String>,
+}
+
+fn valid_coop_trace_id(value: &str) -> bool {
+    value.len() == 37
+        && value.starts_with("coop_")
+        && value[5..].bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn emit_coop_trace(trace_id: Option<&str>, stage: &str, started_at: Instant) {
+    let Some(trace_id) = trace_id.filter(|value| valid_coop_trace_id(value)) else {
+        return;
+    };
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "event":"ato.coop.trace",
+            "trace_id":trace_id,
+            "component":"connected-realization-worker",
+            "stage":stage,
+            "elapsed_ms":(started_at.elapsed().as_secs_f64() * 10000.0).round() / 10.0,
+        })
+    );
 }
 
 #[derive(Debug, Deserialize)]
