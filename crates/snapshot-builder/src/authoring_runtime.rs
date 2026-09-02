@@ -1936,6 +1936,7 @@ pub fn render_inferred_capsule_toml(
         .first()
         .map(String::as_str)
         .ok_or_else(|| "Program Intent launch argv is empty".to_string())?;
+    let launch_program = program;
     let (port, path) = match &normalized.intent.readiness {
         ReadinessIntentV1::Http { port, path, .. } => (*port, path.as_str()),
         _ => {
@@ -1945,6 +1946,11 @@ pub fn render_inferred_capsule_toml(
     let url = format!("http://127.0.0.1:{port}{path}");
     let url_literal =
         serde_json::to_string(&url).map_err(|error| format!("encode readiness URL: {error}"))?;
+    // Match on the executable NAME, not the whole argv[0]. A launch may name
+    // an interpreter by absolute path — a workspace venv is exactly that
+    // (`/app/.venv/bin/python`) — and comparing the full string would refuse a
+    // runtime the readiness probe understands perfectly well.
+    let program = program.rsplit('/').next().unwrap_or(program);
     let seal_at = match program {
         "deno" => SealAtV1 {
             command: vec![
@@ -1965,7 +1971,9 @@ pub fn render_inferred_capsule_toml(
         },
         "python" | "python3" => SealAtV1 {
             command: vec![
-                "python3".to_string(),
+                // The launch's own interpreter, so readiness cannot pass on an
+                // interpreter the application never runs on.
+                launch_program.to_string(),
                 "-c".to_string(),
                 format!(
                     "import urllib.request; urllib.request.urlopen({url_literal}, timeout=10).read()"
@@ -3123,6 +3131,22 @@ mod python_inference_tests {
         let intent = infer_authoring_intent(root.path()).expect("setuptools is pip-installable");
         let steps = format!("{:?}", intent.intent.build_steps);
         assert!(steps.contains("pip install --no-cache-dir ."));
+    }
+
+    #[test]
+    fn readiness_is_derived_for_an_interpreter_named_by_absolute_path() {
+        // A workspace venv names its interpreter by path
+        // (`/app/.venv/bin/python`). Matching the whole argv[0] refused it,
+        // and the whole Formation died at manifest generation with "no safe
+        // readiness command is available" — observed on staging.
+        let root = python_fixture();
+        let intent = infer_authoring_intent(root.path()).unwrap();
+        let toml = render_inferred_capsule_toml(&intent).expect("readiness is derivable");
+        assert!(toml.contains("[seal_at]"), "{toml}");
+        // And it probes with the SAME interpreter the launch uses, so
+        // readiness cannot pass on one the application never runs on.
+        assert!(toml.contains("/app/.venv/bin/python"), "{toml}");
+        assert!(toml.contains("urllib.request.urlopen"), "{toml}");
     }
 
     #[test]

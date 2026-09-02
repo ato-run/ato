@@ -88,7 +88,9 @@ pub struct StaticWebLaneInputs<'a> {
 pub fn derive_materialization_id(build_config_revision_id: &str) -> Result<String, String> {
     let digest = format!(
         "sha256:{:x}",
-        Sha256::digest(format!("{MATERIALIZATION_ID_DOMAIN}\0{build_config_revision_id}"))
+        Sha256::digest(format!(
+            "{MATERIALIZATION_ID_DOMAIN}\0{build_config_revision_id}"
+        ))
     );
     // Reuse the delivery contract's base32 encoder (host labels are
     // `<env>-<52 base32 chars>` over the same alphabet) instead of a second
@@ -138,12 +140,16 @@ pub fn produce_and_register_static_web(
         )
     })?;
     let build_config_revision_id =
-        inputs.work.build_config_revision_id.as_deref().ok_or_else(|| {
-            StaticWebLaneFailure::new(
-                STATIC_WEB_PREPARE_FAILED,
-                "static_web claim carries no build_config_revision_id",
-            )
-        })?;
+        inputs
+            .work
+            .build_config_revision_id
+            .as_deref()
+            .ok_or_else(|| {
+                StaticWebLaneFailure::new(
+                    STATIC_WEB_PREPARE_FAILED,
+                    "static_web claim carries no build_config_revision_id",
+                )
+            })?;
     let plan_digest = inputs.work.plan_digest.as_deref().ok_or_else(|| {
         StaticWebLaneFailure::new(
             STATIC_WEB_PREPARE_FAILED,
@@ -152,26 +158,25 @@ pub fn produce_and_register_static_web(
     })?;
 
     // ── The DECLARED output root, from the manifest the build ran with.
-    let manifest = capsule::types::manifest_v1::CapsuleManifestV1::from_toml(
-        inputs.effective_manifest_toml,
-    )
-    .map_err(|error| {
-        StaticWebLaneFailure::new(
-            STATIC_WEB_BUNDLE_INVALID,
-            format!("re-parse the Effective Manifest: {error}"),
-        )
-    })?;
+    let manifest =
+        capsule::types::manifest_v1::CapsuleManifestV1::from_toml(inputs.effective_manifest_toml)
+            .map_err(|error| {
+            StaticWebLaneFailure::new(
+                STATIC_WEB_BUNDLE_INVALID,
+                format!("re-parse the Effective Manifest: {error}"),
+            )
+        })?;
     let declared = manifest
         .outputs
         .as_ref()
         .and_then(|outputs| outputs.static_web.as_ref())
         .ok_or_else(|| {
-        StaticWebLaneFailure::new(
-            STATIC_WEB_OUTPUT_MISSING,
-            "the static_web lane requires an [outputs.static_web] declaration in the \
+            StaticWebLaneFailure::new(
+                STATIC_WEB_OUTPUT_MISSING,
+                "the static_web lane requires an [outputs.static_web] declaration in the \
              Effective Manifest",
-        )
-    })?;
+            )
+        })?;
 
     // The claim's plan-embedded id (server-derived, deterministic per Build
     // Config Revision) is used verbatim when present, so the registry row and
@@ -221,10 +226,7 @@ pub fn produce_and_register_static_web(
         extract_static_web_output(inputs.exported_guest_rootfs, &plan).map_err(|error| {
             // Symlinks/hard links escaping or replacing the tree are the
             // traversal class; the extractor refuses them all.
-            StaticWebLaneFailure::new(
-                STATIC_WEB_OUTPUT_OUTSIDE_WORKSPACE,
-                format!("{error:#}"),
-            )
+            StaticWebLaneFailure::new(STATIC_WEB_OUTPUT_OUTSIDE_WORKSPACE, format!("{error:#}"))
         })?;
     if !extracted.output_root().join(&declared.entry_path).is_file() {
         return Err(StaticWebLaneFailure::new(
@@ -267,10 +269,7 @@ pub fn produce_and_register_static_web(
         lease_token: inputs.work.lease_token.expose(),
         worker_claim_id,
     };
-    let manifest_digest = format!(
-        "sha256:{:x}",
-        Sha256::digest(&produced.manifest_bytes)
-    );
+    let manifest_digest = format!("sha256:{:x}", Sha256::digest(&produced.manifest_bytes));
     let prepare = client
         .post(
             "prepare",
@@ -304,7 +303,13 @@ pub fn produce_and_register_static_web(
         .map(|blob| (blob.digest.clone(), blob.size))
         .collect();
     for chunk in blobs.chunks(BLOB_BATCH) {
-        upload_blob_chunk(&client, &produced, &materialization_id, producer_generation, chunk)?;
+        upload_blob_chunk(
+            &client,
+            &produced,
+            &materialization_id,
+            producer_generation,
+            chunk,
+        )?;
     }
     for chunk in blobs.chunks(BLOB_BATCH) {
         let verified = client
@@ -587,9 +592,9 @@ impl RegistryClient<'_> {
                     "static-web {endpoint} refused (HTTP {status}, {code}): {message}"
                 ))
             }
-            Err(ureq::Error::Transport(transport)) => {
-                Err(format!("static-web {endpoint} transport error: {transport}"))
-            }
+            Err(ureq::Error::Transport(transport)) => Err(format!(
+                "static-web {endpoint} transport error: {transport}"
+            )),
         }
     }
 }
@@ -620,7 +625,10 @@ mod tests {
         let plan = serde_json::json!({
             "static_web_output": { "materialization_id": valid }
         });
-        assert_eq!(plan_materialization_id(Some(&plan)).as_deref(), Some(valid.as_str()));
+        assert_eq!(
+            plan_materialization_id(Some(&plan)).as_deref(),
+            Some(valid.as_str())
+        );
         for bogus in ["swm-not-base32", "swm_TOOSHORT", "mat_fixture", ""] {
             let plan = serde_json::json!({
                 "static_web_output": { "materialization_id": bogus }
@@ -628,10 +636,7 @@ mod tests {
             assert_eq!(plan_materialization_id(Some(&plan)), None, "{bogus:?}");
         }
         assert_eq!(plan_materialization_id(None), None);
-        assert_eq!(
-            plan_materialization_id(Some(&serde_json::json!({}))),
-            None
-        );
+        assert_eq!(plan_materialization_id(Some(&serde_json::json!({}))), None);
     }
 
     #[test]
