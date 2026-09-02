@@ -111,3 +111,46 @@ additions, never opportunistic modernization.
 - Porting, refactoring, or re-testing the legacy daemon.
 - Changing its snapshot / VM lane.
 - Deciding the shape of the replacement — that is F1/F2, after P3.
+
+## Measured finding: v1 cannot commit a process build's output (blocks P3.0)
+
+Established by running the FastAPI fixture through the real staging Formation
+three times, not by reading code. Each run was refused by the v1 subset, and
+each refusal was correct.
+
+1. Declaring the pinned interpreter as a `ToolchainRequirementV1` emits
+   `[tools]`, which ADR-015 §7 refuses: *"a pinned tool is a dependency, and
+   per-dependency derivation and output digests have no producer yet, so its
+   identity could not be measured."* Removing the declaration and
+   single-sourcing the pin inside the materializer clears this one.
+2. With `[tools]` gone, the same intake refuses `[[build.steps]]`: *"this build
+   has no declared guest output root, so its projection could not be
+   committed."*
+
+The second refusal is the structural one. `[[build.steps]]` is admitted only
+when `outputs.static_web` is present (`ManifestV1::validate_for_interactive_capture`),
+because the v1 manifest has exactly **one** output projection and it is
+web-shaped. `NormalizedProgramIntentV1::build_output_roots` is already the
+general concept — a `Vec<WorkspacePathV1>` — but the manifest projection that
+fills it reads `outputs.static_web.root` and nothing else.
+
+A Python process app needs precisely what does not exist: a declared guest
+output root (`/app`, holding the source and its `.venv`) whose contents can be
+measured and committed.
+
+There is no honest reuse available. `produce_static_web_bundle` does
+content-address an arbitrary tree, but its manifest is a web-serving manifest
+(`entry_path`, `spa_fallback`) and its transport registers a *static web
+materialization* in ato-api. Pushing a `.venv` through it would make a process
+app indistinguishable from a static web app to delivery — a category error, not
+a shortcut. It is the only output-projection producer the builder has.
+
+**Consequence for the tracks.** Carrying installed Python dependencies as a
+Formation artifact requires a second, generic output projection plus its digest
+producer and its commit path in ato-api. That is the FormationResult contract
+(F1), which is already sequenced *after* P3. So P3 does not get its dependency
+story from the legacy v1 Formation, and P3.1–P3.5 proceed on a
+dependency-free process fixture: that still exercises Generic Process Dynamic
+Compute, InstanceState, writer fencing and sleep/wake, which is what the
+Runtime track owns. Dependency materialization stays open, on F1, and must not
+be reported as done.
