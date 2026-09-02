@@ -579,6 +579,13 @@ mod state_contract_tests {
         let bridge = std::str::from_utf8(INSTANCE_STATE_BRIDGE_JS).unwrap();
         assert!(bridge.contains(&format!("\"{INSTANCE_STATE_ELEMENT_ID}\"")));
         assert!(bridge.contains("STATE_VERSION = 1"));
+        // `storage.setItem = fn` does NOT shadow the prototype method: Storage's
+        // named-property setter runs instead and writes an actual entry, so the
+        // patch's own function source ends up stored — and, on staging, was
+        // committed into InstanceState as if it were the App's data. Defining
+        // an own property is what avoids the named setter entirely.
+        assert!(bridge.contains("Object.defineProperty(storage, name,"));
+        assert!(!bridge.contains("storage.setItem = function"));
         assert!(bridge.contains("local_storage"));
         assert!(bridge.contains("\"ato.browser-instance-state@1\""));
         assert!(bridge.contains("\"/__ato/instance-state/local-storage\""));
