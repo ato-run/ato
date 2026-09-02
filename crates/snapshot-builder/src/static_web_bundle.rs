@@ -574,8 +574,7 @@ mod tests {
         let image = fixture_root();
         #[cfg(unix)]
         {
-            std::os::unix::fs::symlink("index.html", image.path().join("dist/link.html"))
-                .unwrap();
+            std::os::unix::fs::symlink("index.html", image.path().join("dist/link.html")).unwrap();
             let extracted = extract_static_web_output(image.path(), &plan());
             assert!(extracted.is_ok(), "internal link must be materialized");
 

@@ -15,6 +15,9 @@ use capsule::contract::static_web_manifest::{
 };
 use tempfile::TempDir;
 
+use crate::static_web_instance_state::{
+    INSTANCE_STATE_BRIDGE_PATH, INSTANCE_STATE_PLACEHOLDER, instance_state_head,
+};
 use crate::static_web_replay_bridge::{
     REPLAY_BRIDGE_PATH, REPLAY_BRIDGE_SCRIPT_TAG, REPLAY_BRIDGE_V0_JS,
 };
@@ -143,7 +146,9 @@ pub fn extract_static_web_output(
 ) -> Result<ExtractedStaticWebOutput> {
     let replay_enabled =
         std::env::var("STATIC_WEB_REPLAY_BRIDGE_ENABLED").is_ok_and(|value| value == "true");
-    extract_static_web_output_with_replay(image_root, plan, replay_enabled)
+    let instance_state_enabled = std::env::var("STATIC_WEB_INSTANCE_STATE_BRIDGE_ENABLED")
+        .is_ok_and(|value| value == "true");
+    extract_static_web_output_instrumented(image_root, plan, replay_enabled, instance_state_enabled)
 }
 
 /// Explicit variant used by tests and staging orchestration. `false` preserves
@@ -152,6 +157,18 @@ pub fn extract_static_web_output_with_replay(
     image_root: &Path,
     plan: &StaticWebOutputPlan,
     replay_enabled: bool,
+) -> Result<ExtractedStaticWebOutput> {
+    extract_static_web_output_instrumented(image_root, plan, replay_enabled, false)
+}
+
+/// Every instrumentation is opt-in; the default reproduces the built bytes.
+/// Instrumented bytes are content-addressed like any other file, so selecting
+/// one produces a DIFFERENT artifact rather than mutating an existing one.
+pub fn extract_static_web_output_instrumented(
+    image_root: &Path,
+    plan: &StaticWebOutputPlan,
+    replay_enabled: bool,
+    instance_state_enabled: bool,
 ) -> Result<ExtractedStaticWebOutput> {
     plan.validate()?;
     // The source must be reached through REAL directories only. `symlink_metadata`
@@ -209,6 +226,12 @@ pub fn extract_static_web_output_with_replay(
     if replay_enabled {
         instrument_replay_bridge(&output_root, &plan.entry_path)?;
     }
+    // Injected LAST so it precedes every other script in the document: the
+    // State lane must finish hydrating before the App — or the replay bridge —
+    // observes `localStorage`.
+    if instance_state_enabled {
+        instrument_instance_state(&output_root, &plan.entry_path)?;
+    }
     Ok(ExtractedStaticWebOutput {
         _workspace: workspace,
         output_root,
@@ -220,6 +243,27 @@ pub fn extract_static_web_output_with_replay(
 /// so a sibling that merely shares a string prefix cannot pass.
 fn is_beneath(canonical_path: &Path, canonical_root: &Path) -> bool {
     canonical_path != canonical_root && canonical_path.starts_with(canonical_root)
+}
+
+/// Declares the State lane in the artifact itself. Only the placeholder's
+/// TEXT is replaced at serve time, so the delivery edge never has to splice
+/// structure into a document it did not build.
+fn instrument_instance_state(output_root: &Path, entry_path: &str) -> Result<()> {
+    let entry = output_root.join(entry_path);
+    let html = fs::read_to_string(&entry)
+        .with_context(|| format!("read instance state entry HTML {}", entry.display()))?;
+    if html.contains(INSTANCE_STATE_BRIDGE_PATH) || html.contains(INSTANCE_STATE_PLACEHOLDER) {
+        bail!("static output already declares the instance state lane");
+    }
+    let head = instance_state_head();
+    let insertion = find_replay_insertion(&html);
+    let mut instrumented = String::with_capacity(html.len() + head.len());
+    instrumented.push_str(&html[..insertion]);
+    instrumented.push_str(&head);
+    instrumented.push_str(&html[insertion..]);
+    fs::write(&entry, instrumented)
+        .with_context(|| format!("write instance state entry HTML {}", entry.display()))?;
+    Ok(())
 }
 
 fn instrument_replay_bridge(output_root: &Path, entry_path: &str) -> Result<()> {
@@ -289,12 +333,8 @@ fn copy_tree_resolving_links(
     canonical_root: &Path,
     visited: &mut std::collections::BTreeSet<PathBuf>,
 ) -> Result<()> {
-    let canonical_source = fs::canonicalize(source).with_context(|| {
-        format!(
-            "canonicalize static output directory {}",
-            source.display()
-        )
-    })?;
+    let canonical_source = fs::canonicalize(source)
+        .with_context(|| format!("canonicalize static output directory {}", source.display()))?;
     if !visited.insert(canonical_source.clone()) {
         bail!(
             "static output contains a symlink cycle: {}",
@@ -665,10 +705,12 @@ mod tests {
             fs::read_to_string(root.join("lib-core/engine.js")).unwrap(),
             "js"
         );
-        assert!(!fs::symlink_metadata(root.join("home.html"))
-            .unwrap()
-            .file_type()
-            .is_symlink());
+        assert!(
+            !fs::symlink_metadata(root.join("home.html"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 
     #[cfg(unix)]
@@ -721,5 +763,89 @@ mod tests {
             extract_static_web_output(image.path(), &escaping).is_err(),
             "the second 'a' component is a symlink and must be refused"
         );
+    }
+}
+
+#[cfg(test)]
+mod instance_state_tests {
+    use super::*;
+    use crate::static_web_instance_state::{
+        INSTANCE_STATE_BRIDGE_PATH, INSTANCE_STATE_PLACEHOLDER,
+    };
+
+    fn plan() -> StaticWebOutputPlan {
+        StaticWebOutputPlan {
+            materialization_id: "mat_instance_state".into(),
+            image_output_root: PathBuf::from("dist"),
+            entry_path: "index.html".into(),
+            spa_fallback: true,
+            connect_src: vec![],
+        }
+    }
+
+    fn image(html: &str) -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("dist")).unwrap();
+        fs::write(root.path().join("dist/index.html"), html).unwrap();
+        root
+    }
+
+    const APP: &str =
+        "<!doctype html><html><head></head><body><script src=\"/app.js\"></script></body></html>";
+
+    #[test]
+    fn off_preserves_the_built_bytes() {
+        let root = image(APP);
+        let extracted =
+            extract_static_web_output_instrumented(root.path(), &plan(), false, false).unwrap();
+        assert_eq!(
+            fs::read_to_string(extracted.output_root().join("index.html")).unwrap(),
+            APP
+        );
+    }
+
+    #[test]
+    fn declares_the_lane_ahead_of_the_app() {
+        let root = image(APP);
+        let extracted =
+            extract_static_web_output_instrumented(root.path(), &plan(), false, true).unwrap();
+        let html = fs::read_to_string(extracted.output_root().join("index.html")).unwrap();
+
+        assert!(html.contains(INSTANCE_STATE_PLACEHOLDER));
+        assert!(html.contains(INSTANCE_STATE_BRIDGE_PATH));
+        // Hydration must precede the App's first script.
+        assert!(html.find(INSTANCE_STATE_BRIDGE_PATH).unwrap() < html.find("/app.js").unwrap());
+        // The placeholder must precede the bridge that reads it.
+        assert!(
+            html.find(INSTANCE_STATE_PLACEHOLDER).unwrap()
+                < html.find(INSTANCE_STATE_BRIDGE_PATH).unwrap()
+        );
+        // No JS file is emitted: the instance host serves the bridge, so only
+        // one copy of it exists while this builder is on the old topology.
+        assert!(
+            !extracted
+                .output_root()
+                .join(INSTANCE_STATE_BRIDGE_PATH)
+                .exists()
+        );
+    }
+
+    #[test]
+    fn state_lane_precedes_the_replay_bridge() {
+        let root = image(APP);
+        let extracted =
+            extract_static_web_output_instrumented(root.path(), &plan(), true, true).unwrap();
+        let html = fs::read_to_string(extracted.output_root().join("index.html")).unwrap();
+        assert!(
+            html.find(INSTANCE_STATE_BRIDGE_PATH).unwrap() < html.find(REPLAY_BRIDGE_PATH).unwrap()
+        );
+    }
+
+    #[test]
+    fn refuses_a_document_that_already_declares_the_lane() {
+        let root = image(&format!(
+            "<html><head></head>{INSTANCE_STATE_PLACEHOLDER}</html>"
+        ));
+        assert!(extract_static_web_output_instrumented(root.path(), &plan(), false, true).is_err());
     }
 }
