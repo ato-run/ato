@@ -13,6 +13,7 @@ pub mod computation;
 pub mod desktop_control;
 pub mod error;
 pub mod net;
+pub mod runtime_launch;
 pub mod session_surface;
 pub mod terminal_surface;
 

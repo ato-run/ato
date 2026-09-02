@@ -393,8 +393,11 @@ name = "ato-ipc"
 version = "0.1.0"
 dependencies = [
  "dirs",
+ "hex",
  "serde",
+ "serde_jcs",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
 ]
 
