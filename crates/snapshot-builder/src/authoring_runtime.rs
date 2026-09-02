@@ -12,18 +12,17 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use capsule::authoring_intent::{
     NormalizedProgramIntentEnvelopeV1, ProgramCommandDraftV1, ProgramIntentDraftV1,
-    ProgramIntentOrigin, ReadinessIntentV1, WorkspacePathV1, draft_from_capsule_manifest_v1,
-    normalize_program_intent, to_capsule_manifest_v1,
+    ProgramIntentOrigin, ReadinessIntentV1, ToolchainRequirementV1, WorkspacePathV1,
+    draft_from_capsule_manifest_v1, normalize_program_intent, to_capsule_manifest_v1,
 };
-use capsule::types::manifest_v1::{
-    MetadataAssetsV1, SealAtV1, StaticWebOutputV1, StoreMetadataV1,
-};
+use capsule::types::manifest_v1::{MetadataAssetsV1, SealAtV1, StaticWebOutputV1, StoreMetadataV1};
 use serde::{Deserialize, Deserializer, Serialize};
 use snapshot::archive_only_build::ArchiveOnlyBuildInput;
 use snapshot::authoring_evidence::{
     BuilderAuthenticationV1, ClassifiedStateDiffV1, CleanReplayReceiptV1, MediaRepairReceiptV1,
     ReadyStateSealReceiptV1,
 };
+use snapshot::rootfs_builder::V1_GUEST_WORKING_DIRECTORY;
 
 const AUTHORING_BASE_PATH: &str = "/v1/capsule-snapshots/authoring";
 const SCREENSHOT_COMPLETION_INITIAL_RETRY_DELAY: Duration = Duration::from_millis(250);
@@ -215,7 +214,6 @@ impl AuthoringWork {
             .and_then(|publication| publication.resolved_publication_lane.as_deref())
             == Some("static_web")
     }
-
 
     /// The explicitly declared Static Web output plan for this claim, when the
     /// saved Build Config Revision declared one. `None` ⇒ snapshot-only.
@@ -1055,6 +1053,178 @@ fn parse_http_rejection(body: &str, status: u16) -> (String, Option<String>) {
     (code, detail)
 }
 
+/// The Python runtime a v0 Python Compute is formed against.
+///
+/// Declared ONCE and referenced by both the build steps and the launch, so the
+/// build and the Run cannot drift onto different interpreters. It is carried
+/// into the Program Intent as a logical `ToolchainRequirementV1`; the paths
+/// below are this materializer's ABI, not part of the schema.
+const V1_PYTHON_VERSION: &str = "3.12.7";
+/// python-build-standalone release tag providing that version.
+const V1_PYTHON_BUILD_TAG: &str = "20241002";
+
+/// Ato's deterministic toolchain layout.
+///
+/// Deliberately NOT under `$HOME`: the image builds as root and the Runner
+/// runs as a service user, so a home-relative path would resolve to two
+/// different places and the extracted venv would point at nothing. This is the
+/// compatibility contract for v0 — builder and Runner materialize the same
+/// version to the same absolute path on the same target.
+const V1_TOOLCHAIN_ROOT: &str = "/opt/ato/toolchains";
+
+fn v1_python_home() -> String {
+    format!("{V1_TOOLCHAIN_ROOT}/python-{V1_PYTHON_VERSION}/python")
+}
+
+/// A Python application, formed against a MANAGED interpreter.
+///
+/// The base image ships its own `python3`, and using it is what a naive
+/// implementation would do. It is wrong twice over: the image's interpreter is
+/// whatever the base tag happens to carry, and installing into its global
+/// site-packages leaves the dependencies inside the image rather than in the
+/// workspace that travels to the Runner.
+///
+/// So the build provisions a relocatable interpreter at a deterministic path
+/// and creates the venv from it, inside the workspace. The workspace is then
+/// the materialization: `.venv` travels with it, and the Runner resolves the
+/// same interpreter at the same path.
+///
+/// Measured on staging: the host's system Python (3.14) cannot install this
+/// fixture's pinned dependencies at all — `pydantic-core` publishes no wheel
+/// for it and the source build fails. Pinning the interpreter is not
+/// hygiene here, it is the difference between building and not.
+fn infer_python_intent(source_root: &Path) -> Result<NormalizedProgramIntentEnvelopeV1, String> {
+    let has_requirements = source_root.join("requirements.txt").is_file();
+    let has_pyproject = source_root.join("pyproject.toml").is_file();
+
+    // v0 installs what pip can install unaided. A project driven by Poetry,
+    // PDM or Hatch needs its own backend, and guessing would produce a build
+    // that fails deep inside dependency resolution instead of here.
+    if !has_requirements && has_pyproject {
+        let manifest = std::fs::read_to_string(source_root.join("pyproject.toml"))
+            .map_err(|error| format!("read pyproject.toml: {error}"))?;
+        if !pyproject_is_pip_installable(&manifest) {
+            return Err(
+                "python inference supports requirements.txt or a pip-installable pyproject.toml; this project declares a build backend Ato v0 does not drive"
+                    .to_string(),
+            );
+        }
+    }
+
+    let entrypoint = infer_python_asgi_entrypoint(source_root)?;
+    let python_home = v1_python_home();
+    let managed_python = format!("{python_home}/bin/python3");
+    let venv_python = format!("{V1_GUEST_WORKING_DIRECTORY}/.venv/bin/python");
+    let archive = format!(
+        "cpython-{V1_PYTHON_VERSION}+{V1_PYTHON_BUILD_TAG}-x86_64-unknown-linux-gnu-install_only.tar.gz"
+    );
+    let url = format!(
+        "https://github.com/astral-sh/python-build-standalone/releases/download/{V1_PYTHON_BUILD_TAG}/{archive}"
+    );
+    let install = if has_requirements {
+        format!("{venv_python} -m pip install --no-cache-dir -r requirements.txt")
+    } else {
+        format!("{venv_python} -m pip install --no-cache-dir .")
+    };
+
+    let shell = |script: String| ProgramCommandDraftV1::Argv {
+        argv: vec!["/bin/sh".to_string(), "-lc".to_string(), script],
+        cwd: WorkspacePathV1::root(),
+        requested_environment: Vec::new(),
+        required_tools: Vec::new(),
+    };
+
+    normalize_program_intent(ProgramIntentDraftV1 {
+        schema: capsule::authoring_intent::PROGRAM_INTENT_DRAFT_V1_SCHEMA.to_string(),
+        origin: ProgramIntentOrigin::Inference,
+        toolchains: vec![ToolchainRequirementV1 {
+            name: "python".to_string(),
+            version_constraint: V1_PYTHON_VERSION.to_string(),
+        }],
+        build_steps: vec![
+            // Fetched with the base image's own interpreter: `python:*-slim`
+            // ships no curl, and adding one would mean apt in the build.
+            shell(format!(
+                "set -eu; mkdir -p {root}/python-{version}; \
+                 python3 -c \"import urllib.request,sys; urllib.request.urlretrieve(sys.argv[1], '/tmp/ato-python.tar.gz')\" '{url}'; \
+                 tar -xzf /tmp/ato-python.tar.gz -C {root}/python-{version}; \
+                 rm -f /tmp/ato-python.tar.gz; \
+                 {managed_python} --version",
+                root = V1_TOOLCHAIN_ROOT,
+                version = V1_PYTHON_VERSION,
+            )),
+            // `--copies` so the venv carries a real interpreter rather than a
+            // symlink into the toolchain; `pyvenv.cfg` still names the base
+            // install, which is why its path must be deterministic.
+            shell(format!(
+                "set -eu; {managed_python} -m venv --copies {workdir}/.venv",
+                workdir = V1_GUEST_WORKING_DIRECTORY,
+            )),
+            shell(format!("set -eu; {install}")),
+        ],
+        launch: ProgramCommandDraftV1::Argv {
+            argv: vec![
+                venv_python.clone(),
+                "-m".to_string(),
+                "uvicorn".to_string(),
+                entrypoint,
+                "--host".to_string(),
+                "0.0.0.0".to_string(),
+                "--port".to_string(),
+                "8000".to_string(),
+            ],
+            cwd: WorkspacePathV1::root(),
+            requested_environment: Vec::new(),
+            required_tools: Vec::new(),
+        },
+        readiness: ReadinessIntentV1::Http {
+            port: 8000,
+            // v0 CONVENTION, not inference. A general Python repository does
+            // not advertise a health path, and pretending to derive one would
+            // produce a readiness probe that silently never fires.
+            path: "/health".to_string(),
+            timeout_seconds: 120,
+        },
+        build_output_roots: Vec::new(),
+        bindings: Vec::new(),
+        unresolved: Vec::new(),
+    })
+    .map_err(|error| error.to_string())
+}
+
+/// Whether pip alone can install this project.
+fn pyproject_is_pip_installable(manifest: &str) -> bool {
+    let backend = manifest
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("build-backend"))
+        .unwrap_or_default();
+    if backend.is_empty() {
+        // PEP 517 default: setuptools. pip handles it.
+        return true;
+    }
+    ["setuptools", "flit_core", "hatchling", "poetry.core"]
+        .iter()
+        .any(|known| backend.contains(known))
+        && !backend.contains("poetry.core")
+}
+
+/// The ASGI application to serve.
+///
+/// Convention over cleverness: a v0 Python Compute declares its app at
+/// `main:app`. Scanning a repository for something that looks like an ASGI
+/// callable would sometimes be right and sometimes launch the wrong module,
+/// and a wrong guess here is indistinguishable from a broken application.
+fn infer_python_asgi_entrypoint(source_root: &Path) -> Result<String, String> {
+    if source_root.join("main.py").is_file() {
+        return Ok("main:app".to_string());
+    }
+    Err(
+        "python inference requires a root main.py exposing an ASGI `app` (Ato v0 convention); other entrypoints need explicit manifest metadata"
+            .to_string(),
+    )
+}
+
 /// Infer the narrow source families supported by Authoring Model v1.
 ///
 /// The inference is intentionally source-based and fail-closed. A repository
@@ -1072,14 +1242,20 @@ pub fn infer_authoring_intent(
     // must never be routed into the dependency-free static-file path below —
     // that would silently skip dependency install and the app's own start
     // script (ato-api#443).
-    if source_root.join("package.json").is_file()
-        && !static_site_with_tooling_only(source_root)
-    {
+    if source_root.join("package.json").is_file() && !static_site_with_tooling_only(source_root) {
         return infer_package_managed_intent(source_root);
+    }
+    // Python is checked AFTER package.json so a repository carrying both keeps
+    // today's package-managed lane; a Python project that also ships a
+    // front-end package.json is not a v0 shape.
+    if source_root.join("requirements.txt").is_file()
+        || source_root.join("pyproject.toml").is_file()
+    {
+        return infer_python_intent(source_root);
     }
     if !source_root.join("index.html").is_file() {
         return Err(
-            "source inference requires deno.json with a plain Fresh start task, package.json for a package-managed application, or a root index.html for a dependency-free static application"
+            "source inference requires deno.json with a plain Fresh start task, package.json for a package-managed application, requirements.txt or pyproject.toml for a Python application, or a root index.html for a dependency-free static application"
                 .to_string(),
         );
     }
@@ -1393,10 +1569,15 @@ fn infer_vite_static_web_outputs(source_root: &Path) -> Option<StaticWebOutputV1
 /// this cheap read cannot resolve (an expression, a variable) returns `None`
 /// so the caller emits no declaration rather than a wrong one.
 fn vite_out_dir(source_root: &Path) -> Option<String> {
-    let config = ["vite.config.ts", "vite.config.js", "vite.config.mts", "vite.config.mjs"]
-        .iter()
-        .map(|name| source_root.join(name))
-        .find(|path| path.is_file());
+    let config = [
+        "vite.config.ts",
+        "vite.config.js",
+        "vite.config.mts",
+        "vite.config.mjs",
+    ]
+    .iter()
+    .map(|name| source_root.join(name))
+    .find(|path| path.is_file());
     let Some(config) = config else {
         // No config file at all still means the Vite default output dir.
         return Some("dist".to_string());
@@ -1576,7 +1757,10 @@ pub fn resolve_authoring_recipe(
         // The generated manifest keeps its run command; `[outputs.static_web]`
         // is additive, and re-validation below keeps the declaration inside
         // the same constraints an authored one must satisfy.
-        parsed.outputs.get_or_insert_with(Default::default).static_web = Some(static_web);
+        parsed
+            .outputs
+            .get_or_insert_with(Default::default)
+            .static_web = Some(static_web);
         parsed
             .validate()
             .map_err(|error| format!("validate inferred [outputs.static_web]: {error}"))?;
@@ -1884,8 +2068,14 @@ mod tests {
         }))
         .expect("current API plan extension parses");
 
-        assert_eq!(work._source_build_attempt_id.as_deref(), Some("build_current_wire"));
-        assert_eq!(work._authoring_toml.as_deref(), Some("schema_version = \\\"1\\\""));
+        assert_eq!(
+            work._source_build_attempt_id.as_deref(),
+            Some("build_current_wire")
+        );
+        assert_eq!(
+            work._authoring_toml.as_deref(),
+            Some("schema_version = \\\"1\\\"")
+        );
         assert_eq!(
             work._authoring_toml_digest.as_deref(),
             Some("sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
@@ -2236,19 +2426,25 @@ mod tests {
     fn vite_production_shape_declares_the_framework_output_dir() {
         let default_out = vite_fixture(Some("export default { plugins: [] }\n"));
         assert_eq!(
-            infer_static_web_outputs(default_out.path()).expect("static").root,
+            infer_static_web_outputs(default_out.path())
+                .expect("static")
+                .root,
             "dist"
         );
         let no_config = vite_fixture(None);
         assert_eq!(
-            infer_static_web_outputs(no_config.path()).expect("static").root,
+            infer_static_web_outputs(no_config.path())
+                .expect("static")
+                .root,
             "dist"
         );
         let overridden = vite_fixture(Some(
             "export default { build: { outDir: \"public/site\" } }\n",
         ));
         assert_eq!(
-            infer_static_web_outputs(overridden.path()).expect("static").root,
+            infer_static_web_outputs(overridden.path())
+                .expect("static")
+                .root,
             "public/site"
         );
     }
@@ -2764,7 +2960,9 @@ mod static_tooling_precedence_tests {
         // jspaint: only electron packaging scripts, nothing that serves.
         let dir = repo(
             true,
-            Some(r#"{"name":"x","scripts":{"electron:start":"electron .","release":"gh release"}}"#),
+            Some(
+                r#"{"name":"x","scripts":{"electron:start":"electron .","release":"gh release"}}"#,
+            ),
         );
         assert!(static_site_with_tooling_only(dir.path()));
         // No scripts key at all.
@@ -2780,7 +2978,10 @@ mod static_tooling_precedence_tests {
             r#"{"serve":"http-server"}"#,
             r#"{"preview":"vite preview"}"#,
         ] {
-            let dir = repo(true, Some(&format!(r#"{{"name":"x","scripts":{scripts}}}"#)));
+            let dir = repo(
+                true,
+                Some(&format!(r#"{{"name":"x","scripts":{scripts}}}"#)),
+            );
             assert!(
                 !static_site_with_tooling_only(dir.path()),
                 "must stay package-managed for {scripts}"
@@ -2798,5 +2999,142 @@ mod static_tooling_precedence_tests {
     fn an_unreadable_or_malformed_package_json_fails_closed() {
         let dir = repo(true, Some("{not json"));
         assert!(!static_site_with_tooling_only(dir.path()));
+    }
+}
+
+/// The Python Formation lane.
+///
+/// These assertions are about the two things that actually broke on staging:
+/// which interpreter the build uses, and whether the dependencies end up
+/// somewhere the workspace can carry to a Runner.
+#[cfg(test)]
+mod python_inference_tests {
+    use super::*;
+
+    fn fixture(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        for (name, body) in files {
+            std::fs::write(root.path().join(name), body).unwrap();
+        }
+        root
+    }
+
+    fn python_fixture() -> tempfile::TempDir {
+        fixture(&[
+            ("requirements.txt", "fastapi==0.115.6\nuvicorn==0.34.0\n"),
+            ("main.py", "app = object()\n"),
+        ])
+    }
+
+    #[test]
+    fn a_requirements_project_is_recognised() {
+        let root = python_fixture();
+        let intent = infer_authoring_intent(root.path()).expect("python is inferred");
+        assert_eq!(intent.intent.toolchains.len(), 1);
+        assert_eq!(intent.intent.toolchains[0].name, "python");
+        // The version is a LOGICAL requirement carried in the intent, so the
+        // build and the Run resolve the same interpreter.
+        assert_eq!(
+            intent.intent.toolchains[0].version_constraint,
+            V1_PYTHON_VERSION
+        );
+    }
+
+    #[test]
+    fn the_build_never_uses_the_base_image_interpreter_for_dependencies() {
+        // Measured on staging: the wrong interpreter cannot install this
+        // fixture's pinned dependencies at all. Installing with the image's
+        // own `python3` would also leave them in its global site-packages,
+        // where the workspace cannot carry them to a Runner.
+        let root = python_fixture();
+        let intent = infer_authoring_intent(root.path()).unwrap();
+        let steps = format!("{:?}", intent.intent.build_steps);
+        assert!(steps.contains("/opt/ato/toolchains/python-3.12.7/python/bin/python3"));
+        assert!(steps.contains("/app/.venv/bin/python -m pip install"));
+        // The dependency install must not be a bare `pip install`.
+        assert!(!steps.contains("\"pip install"));
+    }
+
+    #[test]
+    fn dependencies_land_in_the_workspace_venv() {
+        let root = python_fixture();
+        let intent = infer_authoring_intent(root.path()).unwrap();
+        let steps = format!("{:?}", intent.intent.build_steps);
+        // `--copies`, so the venv carries a real interpreter rather than a
+        // symlink into the toolchain directory.
+        assert!(steps.contains("-m venv --copies /app/.venv"));
+    }
+
+    #[test]
+    fn the_launch_runs_the_workspace_interpreter() {
+        let root = python_fixture();
+        let intent = infer_authoring_intent(root.path()).unwrap();
+        let launch = format!("{:?}", intent.intent.launch);
+        assert!(launch.contains("/app/.venv/bin/python"));
+        assert!(launch.contains("uvicorn"));
+        assert!(launch.contains("main:app"));
+        assert!(launch.contains("0.0.0.0"));
+    }
+
+    #[test]
+    fn readiness_is_declared_as_a_convention_not_guessed_per_repository() {
+        let root = python_fixture();
+        let intent = infer_authoring_intent(root.path()).unwrap();
+        match &intent.intent.readiness {
+            ReadinessIntentV1::Http { port, path, .. } => {
+                assert_eq!(*port, 8000);
+                assert_eq!(path, "/health");
+            }
+            other => panic!("expected an http readiness probe, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_python_project_without_the_v0_entrypoint_is_refused() {
+        // Guessing an ASGI callable would sometimes launch the wrong module,
+        // and a wrong guess is indistinguishable from a broken application.
+        let root = fixture(&[("requirements.txt", "fastapi\n")]);
+        let error = infer_authoring_intent(root.path()).unwrap_err();
+        assert!(error.contains("main.py"), "{error}");
+    }
+
+    #[test]
+    fn an_unsupported_packaging_backend_is_refused_rather_than_attempted() {
+        let root = fixture(&[
+            (
+                "pyproject.toml",
+                "[build-system]\nbuild-backend = \"poetry.core.masonry.api\"\n",
+            ),
+            ("main.py", "app = object()\n"),
+        ]);
+        let error = infer_authoring_intent(root.path()).unwrap_err();
+        assert!(error.contains("build backend"), "{error}");
+    }
+
+    #[test]
+    fn a_pip_installable_pyproject_is_accepted() {
+        let root = fixture(&[
+            (
+                "pyproject.toml",
+                "[build-system]\nbuild-backend = \"setuptools.build_meta\"\n",
+            ),
+            ("main.py", "app = object()\n"),
+        ]);
+        let intent = infer_authoring_intent(root.path()).expect("setuptools is pip-installable");
+        let steps = format!("{:?}", intent.intent.build_steps);
+        assert!(steps.contains("pip install --no-cache-dir ."));
+    }
+
+    #[test]
+    fn a_node_project_still_takes_the_package_managed_lane() {
+        // A repository carrying both keeps today's behaviour; Python must not
+        // capture it.
+        let root = fixture(&[
+            ("package.json", r#"{"scripts":{"start":"vite"}}"#),
+            ("requirements.txt", "fastapi\n"),
+            ("main.py", "app = object()\n"),
+        ]);
+        let intent = infer_authoring_intent(root.path()).unwrap();
+        assert!(intent.intent.toolchains.is_empty());
     }
 }
