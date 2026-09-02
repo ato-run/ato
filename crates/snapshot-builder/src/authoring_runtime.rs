@@ -12,8 +12,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use capsule::authoring_intent::{
     NormalizedProgramIntentEnvelopeV1, ProgramCommandDraftV1, ProgramIntentDraftV1,
-    ProgramIntentOrigin, ReadinessIntentV1, ToolchainRequirementV1, WorkspacePathV1,
-    draft_from_capsule_manifest_v1, normalize_program_intent, to_capsule_manifest_v1,
+    ProgramIntentOrigin, ReadinessIntentV1, WorkspacePathV1, draft_from_capsule_manifest_v1,
+    normalize_program_intent, to_capsule_manifest_v1,
 };
 use capsule::types::manifest_v1::{MetadataAssetsV1, SealAtV1, StaticWebOutputV1, StoreMetadataV1};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -1137,10 +1137,22 @@ fn infer_python_intent(source_root: &Path) -> Result<NormalizedProgramIntentEnve
     normalize_program_intent(ProgramIntentDraftV1 {
         schema: capsule::authoring_intent::PROGRAM_INTENT_DRAFT_V1_SCHEMA.to_string(),
         origin: ProgramIntentOrigin::Inference,
-        toolchains: vec![ToolchainRequirementV1 {
-            name: "python".to_string(),
-            version_constraint: V1_PYTHON_VERSION.to_string(),
-        }],
+        // NOT declared as a `ToolchainRequirementV1`.
+        //
+        // That is where a pinned runtime belongs, and where it will go — but
+        // the v1 authoring subset refuses `[tools]` on purpose (ADR-015 §7): a
+        // pinned tool is a dependency, and per-dependency derivation and
+        // output digests have no producer yet, so its identity cannot be
+        // measured. Emitting one fails the whole Formation, which is the
+        // subset behaving correctly rather than a bug to route around.
+        //
+        // The requirement is still single-sourced: `V1_PYTHON_VERSION` and
+        // `v1_python_home()` below derive BOTH the build steps and the launch,
+        // so the build and the Run cannot drift onto different interpreters.
+        // Until the subset can carry it, that single source is this
+        // materializer's ABI rather than part of the schema — which is
+        // precisely what the FormationResult contract (F1) has to fix.
+        toolchains: Vec::new(),
         build_steps: vec![
             // Fetched with the base image's own interpreter: `python:*-slim`
             // ships no curl, and adding one would mean apt in the build.
@@ -3038,14 +3050,18 @@ mod python_inference_tests {
     fn a_requirements_project_is_recognised() {
         let root = python_fixture();
         let intent = infer_authoring_intent(root.path()).expect("python is inferred");
-        assert_eq!(intent.intent.toolchains.len(), 1);
-        assert_eq!(intent.intent.toolchains[0].name, "python");
-        // The version is a LOGICAL requirement carried in the intent, so the
-        // build and the Run resolve the same interpreter.
-        assert_eq!(
-            intent.intent.toolchains[0].version_constraint,
-            V1_PYTHON_VERSION
-        );
+        // The pinned interpreter is NOT declared as a toolchain: the v1 subset
+        // refuses `[tools]` (ADR-015 §7) and emitting one fails Formation
+        // outright — observed on staging before this was corrected.
+        assert!(intent.intent.toolchains.is_empty());
+        // It is single-sourced instead: the same constant reaches the build
+        // steps and the launch, so the two cannot drift onto different
+        // interpreters.
+        let steps = format!("{:?}", intent.intent.build_steps);
+        let launch = format!("{:?}", intent.intent.launch);
+        assert!(steps.contains(V1_PYTHON_VERSION));
+        assert!(steps.contains("/app/.venv/bin/python"));
+        assert!(launch.contains("/app/.venv/bin/python"));
     }
 
     #[test]
