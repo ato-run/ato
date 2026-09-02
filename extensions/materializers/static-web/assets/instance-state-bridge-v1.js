@@ -164,23 +164,41 @@
     return current;
   }
 
+  /**
+   * The patched methods MUST be non-enumerable.
+   *
+   * `Storage`'s methods live on its prototype, so a plain assignment creates
+   * an OWN enumerable property — and an App that enumerates its data with
+   * `Object.keys(localStorage)` or `for (key in localStorage)` would then see
+   * "setItem", "removeItem" and "clear" among its own keys. Defining them
+   * without `enumerable` keeps the patch invisible to the App.
+   */
+  function definePatch(name, implementation) {
+    Object.defineProperty(storage, name, {
+      value: implementation,
+      writable: true,
+      configurable: true,
+      enumerable: false,
+    });
+  }
+
   function patchStorageApi() {
     try {
-      storage.setItem = function (key, value) {
+      definePatch("setItem", function (key, value) {
         var normalizedKey = String(key);
         var normalizedValue = String(value);
         rawSetItem(normalizedKey, normalizedValue);
         recordSet(normalizedKey, normalizedValue);
-      };
-      storage.removeItem = function (key) {
+      });
+      definePatch("removeItem", function (key) {
         var normalizedKey = String(key);
         rawRemoveItem(normalizedKey);
         recordRemove(normalizedKey);
-      };
-      storage.clear = function () {
+      });
+      definePatch("clear", function () {
         rawClear();
         recordClear();
-      };
+      });
     } catch (error) {
       /* Storage methods are not writable here; SNAPSHOT_MS still covers us. */
     }
