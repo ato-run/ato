@@ -56,6 +56,14 @@ pub enum RuntimeLaunchSpecError {
     ForbiddenField { field: String },
     /// An endpoint name is declared twice.
     EndpointConflict { name: String },
+    /// An identity or reference that everything else keys off is empty.
+    EmptyIdentity { field: String },
+    /// An OCI reference is not content-addressed.
+    InvalidImageDigest { reference: String },
+    /// An endpoint's allocation and its ports disagree.
+    InvalidEndpoint { name: String },
+    /// A timeout is zero, or shutdown bounds are inconsistent.
+    InvalidLifecycle { field: String },
 }
 
 impl RuntimeLaunchSpecError {
@@ -72,6 +80,10 @@ impl RuntimeLaunchSpecError {
             Self::InvalidReadiness { .. } => "ATO_ERR_RUNTIME_LAUNCH_SPEC_INVALID_READINESS",
             Self::ForbiddenField { .. } => "ATO_ERR_RUNTIME_LAUNCH_SPEC_FORBIDDEN_FIELD",
             Self::EndpointConflict { .. } => "ATO_ERR_RUNTIME_LAUNCH_SPEC_ENDPOINT_CONFLICT",
+            Self::EmptyIdentity { .. } => "ATO_ERR_RUNTIME_LAUNCH_SPEC_EMPTY_IDENTITY",
+            Self::InvalidImageDigest { .. } => "ATO_ERR_RUNTIME_LAUNCH_SPEC_INVALID_IMAGE_DIGEST",
+            Self::InvalidEndpoint { .. } => "ATO_ERR_RUNTIME_LAUNCH_SPEC_INVALID_ENDPOINT",
+            Self::InvalidLifecycle { .. } => "ATO_ERR_RUNTIME_LAUNCH_SPEC_INVALID_LIFECYCLE",
         }
     }
 }
@@ -128,8 +140,12 @@ pub struct ProcessRealizationV1 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OciRealizationV1 {
-    /// A DIGEST reference. A mutable tag cannot establish identity, so the
-    /// control plane resolves it before the spec is built.
+    /// A content-addressed DIGEST, `sha256:<64 hex>`.
+    ///
+    /// A mutable tag (`python:latest`) cannot establish identity: the same
+    /// spec would launch different code on different days, and its digest
+    /// would name something that is not reproducible. The control plane
+    /// resolves the tag before building the spec, and this is validated.
     pub image_digest_ref: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub argv: Option<Vec<String>>,
@@ -172,16 +188,28 @@ pub enum StateAccessV1 {
 #[serde(deny_unknown_fields)]
 pub struct StateAttachmentV1 {
     pub state_key: String,
-    /// Absent for an instance that has never been written.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// `null` for an instance that has never been written.
+    ///
+    /// Always serialized, including when null: this field is semantically
+    /// nullable rather than optional, and skipping it would make Rust and
+    /// TypeScript canonicalize the SAME spec into different bytes — which the
+    /// cross-language fixtures exist to prevent.
+    #[serde(default)]
     pub revision_ref: Option<String>,
     /// Absolute path INSIDE the guest, e.g. `/data`.
     pub mount_target: String,
     pub access: StateAccessV1,
-    /// P2 fills this in. Declared now so the wire shape does not change when
-    /// fencing starts being enforced.
+    /// A NON-SECRET monotonic fence identifying the current writer generation.
+    ///
+    /// Deliberately not a capability. This spec is designed to be persisted
+    /// and digested onto a Run receipt, so a bearer token here would publish
+    /// an authorization secret. Authorization is the authenticated Runner plus
+    /// the assigned Run; this value only lets a commit be REFUSED when a newer
+    /// writer has since taken the slot.
+    ///
+    /// P2 populates it. Absent means no writer generation has been assigned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub writer_fencing_token: Option<String>,
+    pub writer_fence: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -225,6 +253,14 @@ pub enum ReadinessV1 {
 }
 
 impl ReadinessV1 {
+    fn timeout_ms(&self) -> u64 {
+        match self {
+            Self::Http { timeout_ms, .. }
+            | Self::Tcp { timeout_ms, .. }
+            | Self::Process { timeout_ms } => *timeout_ms,
+        }
+    }
+
     fn endpoint_name(&self) -> Option<&str> {
         match self {
             Self::Http { endpoint_name, .. } | Self::Tcp { endpoint_name, .. } => {
@@ -276,6 +312,29 @@ impl RuntimeLaunchSpecV1 {
             });
         }
 
+        // Everything downstream keys off these. An empty one is not a
+        // degraded launch, it is an unattributable one — no receipt, no
+        // correlation, no way to tell whose state was touched.
+        for (field, value) in [
+            ("context.run_id", &self.context.run_id),
+            ("context.compute_id", &self.context.compute_id),
+            ("context.compute_schema_id", &self.context.compute_schema_id),
+            (
+                "context.compute_instance_id",
+                &self.context.compute_instance_id,
+            ),
+            (
+                "workspace.materialization_ref",
+                &self.workspace.materialization_ref,
+            ),
+        ] {
+            if value.is_empty() {
+                return Err(RuntimeLaunchSpecError::EmptyIdentity {
+                    field: field.to_owned(),
+                });
+            }
+        }
+
         match &self.realization {
             LaunchRealizationV1::Process(process) => {
                 if process.argv.is_empty() || process.argv[0].is_empty() {
@@ -283,8 +342,10 @@ impl RuntimeLaunchSpecV1 {
                 }
             }
             LaunchRealizationV1::Oci(oci) => {
-                if oci.image_digest_ref.is_empty() {
-                    return Err(RuntimeLaunchSpecError::EmptyArgv);
+                if !is_content_addressed_digest(&oci.image_digest_ref) {
+                    return Err(RuntimeLaunchSpecError::InvalidImageDigest {
+                        reference: oci.image_digest_ref.clone(),
+                    });
                 }
                 if let Some(argv) = &oci.argv
                     && (argv.is_empty() || argv[0].is_empty())
@@ -344,18 +405,71 @@ impl RuntimeLaunchSpecV1 {
                     name: endpoint.name.clone(),
                 });
             }
+            // Allocation and ports must agree. `preferred` without a port is a
+            // preference for nothing; `automatic` WITH one reads as a request
+            // the Runner is free to ignore, and a caller that believed it was
+            // honoured would build a URL against a port nobody bound.
+            let consistent = match endpoint.allocation {
+                EndpointAllocationV1::Preferred => {
+                    matches!(endpoint.preferred_port, Some(port) if port != 0)
+                }
+                EndpointAllocationV1::Automatic => endpoint.preferred_port.is_none(),
+            };
+            if !consistent || matches!(endpoint.guest_port, Some(0)) {
+                return Err(RuntimeLaunchSpecError::InvalidEndpoint {
+                    name: endpoint.name.clone(),
+                });
+            }
         }
 
-        if let Some(name) = self.readiness.endpoint_name()
-            && !endpoint_names.contains(name)
-        {
-            return Err(RuntimeLaunchSpecError::InvalidReadiness {
-                endpoint: name.to_owned(),
+        if let Some(name) = self.readiness.endpoint_name() {
+            let Some(endpoint) = self.endpoints.iter().find(|item| item.name == name) else {
+                return Err(RuntimeLaunchSpecError::InvalidReadiness {
+                    endpoint: name.to_owned(),
+                });
+            };
+            // A probe needs somewhere to connect. An endpoint without a guest
+            // port cannot be probed, so readiness would silently never fire.
+            if endpoint.guest_port.is_none() {
+                return Err(RuntimeLaunchSpecError::InvalidReadiness {
+                    endpoint: name.to_owned(),
+                });
+            }
+        }
+
+        if self.readiness.timeout_ms() == 0 {
+            return Err(RuntimeLaunchSpecError::InvalidLifecycle {
+                field: "readiness.timeout_ms".to_owned(),
+            });
+        }
+        // Zero would mean "kill immediately", making the graceful bound a lie.
+        if self.lifecycle.graceful_shutdown_ms == 0 {
+            return Err(RuntimeLaunchSpecError::InvalidLifecycle {
+                field: "lifecycle.graceful_shutdown_ms".to_owned(),
+            });
+        }
+        // The force bound must come strictly after the graceful one, or the
+        // workload is killed before it has been asked to stop.
+        if self.lifecycle.force_kill_after_ms <= self.lifecycle.graceful_shutdown_ms {
+            return Err(RuntimeLaunchSpecError::InvalidLifecycle {
+                field: "lifecycle.force_kill_after_ms".to_owned(),
             });
         }
 
         Ok(())
     }
+}
+
+/// `sha256:<64 lowercase hex>`. A tag is refused: the same spec must always
+/// name the same image, or its digest names something unreproducible.
+fn is_content_addressed_digest(reference: &str) -> bool {
+    let Some(hex) = reference.strip_prefix("sha256:") else {
+        return false;
+    };
+    hex.len() == 64
+        && hex
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 /// A cwd must stay inside the workspace. Absolute paths and `..` are refused

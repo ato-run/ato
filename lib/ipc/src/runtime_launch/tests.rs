@@ -45,13 +45,147 @@ fn the_two_realizations_differ_only_in_the_realization_arm() {
 
 #[test]
 fn canonical_bytes_are_the_fixture_bytes() {
-    // The fixture IS the canonical form, so ato-api can be checked against the
-    // same file rather than against a second hand-maintained description.
-    let process = process_spec();
+    // BOTH fixtures, not just one. The process fixture alone hid a real
+    // asymmetry: `revision_ref` is null in the OCI case, and a
+    // `skip_serializing_if` on the Rust side omitted it while TypeScript
+    // emitted `null` — the same spec canonicalizing to different bytes in the
+    // two languages these fixtures exist to keep aligned.
+    for fixture in [PROCESS_FIXTURE, OCI_FIXTURE] {
+        let spec = RuntimeLaunchSpecV1::parse(fixture).expect("fixture is valid");
+        assert_eq!(
+            String::from_utf8(spec.canonical_bytes().unwrap()).unwrap(),
+            fixture.trim_end()
+        );
+    }
+}
+
+#[test]
+fn an_oci_reference_must_be_content_addressed() {
+    // A mutable tag would launch different code on different days while the
+    // spec digest claimed reproducibility.
+    for reference in [
+        "python:latest",
+        "sha256:tooshort",
+        "",
+        "sha256:ZZZZ5c6ff1b2c1cbb2f8d9a4e5f60718293a4b5c6d7e8f90112233445566778899",
+        &format!("sha256:{}", "A".repeat(64)),
+    ] {
+        let mut spec = RuntimeLaunchSpecV1::parse(OCI_FIXTURE).unwrap();
+        spec.realization = LaunchRealizationV1::Oci(OciRealizationV1 {
+            image_digest_ref: reference.to_owned(),
+            argv: None,
+            working_dir: None,
+        });
+        assert_eq!(
+            spec.validate().unwrap_err().code(),
+            "ATO_ERR_RUNTIME_LAUNCH_SPEC_INVALID_IMAGE_DIGEST",
+            "reference {reference:?} should be refused"
+        );
+    }
+}
+
+#[test]
+fn an_empty_identity_is_refused() {
+    // An unattributable launch: no receipt, no correlation, no way to say
+    // whose state was touched.
+    let cases: [(&str, fn(&mut RuntimeLaunchSpecV1)); 5] = [
+        ("run_id", |spec| spec.context.run_id.clear()),
+        ("compute_id", |spec| spec.context.compute_id.clear()),
+        ("compute_schema_id", |spec| {
+            spec.context.compute_schema_id.clear()
+        }),
+        ("compute_instance_id", |spec| {
+            spec.context.compute_instance_id.clear()
+        }),
+        ("materialization_ref", |spec| {
+            spec.workspace.materialization_ref.clear()
+        }),
+    ];
+    for (label, mutate) in cases {
+        let mut spec = process_spec();
+        mutate(&mut spec);
+        assert_eq!(
+            spec.validate().unwrap_err().code(),
+            "ATO_ERR_RUNTIME_LAUNCH_SPEC_EMPTY_IDENTITY",
+            "{label} should be refused"
+        );
+    }
+}
+
+#[test]
+fn endpoint_allocation_and_ports_must_agree() {
+    // `preferred` with no port prefers nothing; `automatic` WITH one reads as
+    // a request the Runner may ignore, and a caller that believed it was
+    // honoured would build a URL against a port nobody bound.
+    let mut spec = process_spec();
+    spec.endpoints[0].allocation = EndpointAllocationV1::Preferred;
+    spec.endpoints[0].preferred_port = None;
     assert_eq!(
-        String::from_utf8(process.canonical_bytes().unwrap()).unwrap(),
-        PROCESS_FIXTURE.trim_end()
+        spec.validate().unwrap_err().code(),
+        "ATO_ERR_RUNTIME_LAUNCH_SPEC_INVALID_ENDPOINT"
     );
+
+    let mut spec = process_spec();
+    spec.endpoints[0].allocation = EndpointAllocationV1::Preferred;
+    spec.endpoints[0].preferred_port = Some(0);
+    assert!(spec.validate().is_err());
+
+    let mut spec = process_spec();
+    spec.endpoints[0].preferred_port = Some(9000);
+    assert_eq!(
+        spec.validate().unwrap_err().code(),
+        "ATO_ERR_RUNTIME_LAUNCH_SPEC_INVALID_ENDPOINT"
+    );
+
+    let mut spec = process_spec();
+    spec.endpoints[0].guest_port = Some(0);
+    assert!(spec.validate().is_err());
+}
+
+#[test]
+fn probed_readiness_requires_a_reachable_endpoint() {
+    // Without a guest port there is nowhere to connect, so readiness would
+    // silently never fire.
+    let mut spec = process_spec();
+    spec.endpoints[0].guest_port = None;
+    assert_eq!(
+        spec.validate().unwrap_err().code(),
+        "ATO_ERR_RUNTIME_LAUNCH_SPEC_INVALID_READINESS"
+    );
+}
+
+#[test]
+fn zero_and_inconsistent_timeouts_are_refused() {
+    let mut spec = process_spec();
+    spec.readiness = ReadinessV1::Process { timeout_ms: 0 };
+    assert_eq!(
+        spec.validate().unwrap_err().code(),
+        "ATO_ERR_RUNTIME_LAUNCH_SPEC_INVALID_LIFECYCLE"
+    );
+
+    let mut spec = process_spec();
+    spec.lifecycle.graceful_shutdown_ms = 0;
+    assert!(spec.validate().is_err());
+
+    // Killed before being asked to stop.
+    let mut spec = process_spec();
+    spec.lifecycle.force_kill_after_ms = spec.lifecycle.graceful_shutdown_ms;
+    assert_eq!(
+        spec.validate().unwrap_err().code(),
+        "ATO_ERR_RUNTIME_LAUNCH_SPEC_INVALID_LIFECYCLE"
+    );
+}
+
+#[test]
+fn the_writer_fence_is_a_number_not_a_capability() {
+    // The spec is persisted and digested onto a Run receipt, so a bearer token
+    // here would publish an authorization secret. The fence only lets a stale
+    // commit be refused; authorization is the authenticated Runner + Run.
+    let spec = process_spec();
+    assert_eq!(spec.state_attachments[0].writer_fence, Some(12));
+    let rendered = serde_json::to_string(&spec).unwrap();
+    assert!(rendered.contains("\"writer_fence\":12"));
+    assert!(!rendered.contains("writer_fencing_token"));
 }
 
 #[test]
