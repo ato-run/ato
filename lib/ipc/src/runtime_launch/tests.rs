@@ -88,7 +88,8 @@ fn an_oci_reference_must_be_content_addressed() {
 fn an_empty_identity_is_refused() {
     // An unattributable launch: no receipt, no correlation, no way to say
     // whose state was touched.
-    let cases: [(&str, fn(&mut RuntimeLaunchSpecV1)); 5] = [
+    type Blank = fn(&mut RuntimeLaunchSpecV1);
+    let cases: [(&str, Blank); 5] = [
         ("run_id", |spec| spec.context.run_id.clear()),
         ("compute_id", |spec| spec.context.compute_id.clear()),
         ("compute_schema_id", |spec| {
