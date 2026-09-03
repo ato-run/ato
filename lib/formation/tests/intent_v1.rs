@@ -336,17 +336,16 @@ fn a_pip_venv_uses_the_provisioned_interpreter() {
     let plan = compile_build_plan(&intent, "/app", "x86_64-linux-gnu").expect("plans");
     assert_eq!(plan.steps[0].name, "provision-python");
     let venv = &plan.steps[1];
+    let script = venv.argv.join(" ");
     // Created BY the provisioned interpreter, not by the host's.
-    assert_eq!(
-        venv.argv[0],
-        format!("{}/bin/python3", python_home("3.12.7"))
-    );
-    // NOT `--copies`: an install_only build links against a shared libpython,
-    // and copying only the executable produces a venv that cannot start. The
-    // symlink resolves because the toolchain path is the same at build time
-    // and at runtime.
-    assert!(!venv.argv.contains(&"--copies".to_owned()));
-    assert!(venv.argv.contains(&"venv".to_owned()));
+    assert!(script.contains(&format!("{}/bin/python3", python_home("3.12.7"))));
+    // Self-contained: the executable is copied AND the shared libpython is
+    // vendored beside it. A symlinked venv cannot survive the artifact format
+    // (which refuses links), and `--copies` alone leaves the loader without
+    // libpython — both observed, the second through a Runner that had already
+    // materialized the workspace.
+    assert!(script.contains("--copies"));
+    assert!(script.contains("libpython"));
     assert!(!venv.needs_network, "creating a venv needs no network");
     assert!(plan.steps[2].needs_network);
 }
