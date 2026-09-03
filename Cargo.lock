@@ -407,6 +407,7 @@ dependencies = [
  "anyhow",
  "ato-formation",
  "ato-ipc",
+ "ato-materializer-static-web",
  "ato-sandbox",
  "clap",
  "libc",

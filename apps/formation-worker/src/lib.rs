@@ -7,3 +7,4 @@
 
 pub mod build;
 pub mod sandbox;
+pub mod static_lane;
