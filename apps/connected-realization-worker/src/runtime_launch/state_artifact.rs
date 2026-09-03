@@ -31,6 +31,16 @@ pub const STATE_ARTIFACT_FORMAT: &str = "ato.state.filesystem@1";
 /// tenant. Matches the control plane's 64 MiB so neither side is the surprise.
 pub const MAX_STATE_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
 
+/// The largest WORKSPACE this Runner will materialize.
+///
+/// Larger than a state artifact, and for a different reason. State is what a
+/// tenant's users typed; a workspace is a build output that legitimately
+/// carries an interpreter and an installed dependency tree — the Python
+/// acceptance fixture is 112 MB with a stripped CPython and FastAPI in it. One
+/// limit for both would either refuse ordinary workspaces or let state grow to
+/// a size nothing intends.
+pub const MAX_WORKSPACE_ARTIFACT_BYTES: usize = 1024 * 1024 * 1024;
+
 /// A packed state tree together with the content address of its bytes.
 pub struct StateArtifact {
     digest: String,
@@ -154,9 +164,37 @@ pub fn pack_state_tree(root: &Path) -> Result<StateArtifact> {
 /// would open a truncated SQLite file and, at best, fail confusingly. On any
 /// error the staging directory is removed and `destination` is untouched.
 pub fn unpack_state_tree(bytes: &[u8], expected_digest: &str, destination: &Path) -> Result<()> {
+    unpack_tree_bounded(
+        bytes,
+        expected_digest,
+        destination,
+        MAX_STATE_ARTIFACT_BYTES,
+    )
+}
+
+/// The same expansion, under a workspace-sized bound.
+pub fn unpack_workspace_tree(
+    bytes: &[u8],
+    expected_digest: &str,
+    destination: &Path,
+) -> Result<()> {
+    unpack_tree_bounded(
+        bytes,
+        expected_digest,
+        destination,
+        MAX_WORKSPACE_ARTIFACT_BYTES,
+    )
+}
+
+fn unpack_tree_bounded(
+    bytes: &[u8],
+    expected_digest: &str,
+    destination: &Path,
+    limit: usize,
+) -> Result<()> {
     ensure!(
-        bytes.len() <= MAX_STATE_ARTIFACT_BYTES,
-        "state artifact is {} bytes, over the {MAX_STATE_ARTIFACT_BYTES} byte limit",
+        bytes.len() <= limit,
+        "artifact is {} bytes, over the {limit} byte limit",
         bytes.len()
     );
 
@@ -179,7 +217,7 @@ pub fn unpack_state_tree(bytes: &[u8], expected_digest: &str, destination: &Path
 
     // Errors propagate out of this block, and `staging` is removed on drop —
     // so a failure anywhere leaves `destination` exactly as it was.
-    expand_into(bytes, staging.path())?;
+    expand_into(bytes, staging.path(), limit)?;
 
     if destination.exists() {
         let discarded = tempfile::Builder::new()
@@ -206,7 +244,7 @@ pub fn unpack_state_tree(bytes: &[u8], expected_digest: &str, destination: &Path
     Ok(())
 }
 
-fn expand_into(bytes: &[u8], staging: &Path) -> Result<()> {
+fn expand_into(bytes: &[u8], staging: &Path, limit: usize) -> Result<()> {
     let mut archive = tar::Archive::new(Cursor::new(bytes));
     // The archive is content-addressed but NOT trusted: its digest proves only
     // that it is the artifact the control plane named, not that whoever
@@ -238,8 +276,8 @@ fn expand_into(bytes: &[u8], staging: &Path) -> Result<()> {
         // uncompressed today, and the check keeps that from being load-bearing.
         expanded = expanded.saturating_add(entry.header().size().unwrap_or(0));
         ensure!(
-            expanded <= MAX_STATE_ARTIFACT_BYTES as u64,
-            "state archive expands past the {MAX_STATE_ARTIFACT_BYTES} byte limit"
+            expanded <= limit as u64,
+            "archive expands past the {limit} byte limit"
         );
 
         if let Some(directory) = target.parent() {
