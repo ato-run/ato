@@ -1,6 +1,14 @@
 //! The Formation worker binary, and the in-sandbox shim it re-enters as.
 
-use anyhow::{Result, anyhow};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use anyhow::{Context, Result, anyhow};
+use ato_formation::source::SourceLimits;
+use ato_formation_worker::api::{FormationApi, PublishOutcome};
+use ato_formation_worker::job::{GitHubTarballFetcher, JobContext, TreePacker, run_job};
+use ato_formation_worker::pack::pack_tree;
+use ato_formation_worker::sandbox::{BuildLimits, require_containment};
 use ato_sandbox::{SandboxPolicy, apply_sandbox, is_sandbox_supported, set_no_new_privs};
 
 fn main() -> Result<()> {
@@ -17,10 +25,82 @@ fn main() -> Result<()> {
         return sandbox_exec(&args[2..]);
     }
 
-    Err(anyhow!(
-        "the Formation worker's job loop is not implemented in this slice (B1-E wires \
-         publication; B1-H wires the gateway). `sandbox-exec` is available."
-    ))
+    run_one(&args[1..])
+}
+
+/// Run one job to completion.
+///
+/// One job per invocation rather than a polling daemon, deliberately. The
+/// control plane already owns queueing, idempotency and the attempt fence; a
+/// second scheduler inside the worker would be a second place where "which
+/// attempt is current" gets decided — and the old builder's daemon is exactly
+/// what B1 is not carrying forward.
+fn run_one(args: &[String]) -> Result<()> {
+    let need = |name: &str| -> Result<String> {
+        flag(args, name)
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| anyhow!("{name} is required"))
+    };
+    let api_base = need("--api-base")?;
+    let job_id = need("--job-id")?;
+    let compute_id = need("--compute-id")?;
+    let capsule_revision_id = need("--capsule-revision-id")?;
+    let work_root = PathBuf::from(need("--work-root")?);
+    let worker_id = flag(args, "--worker-id").unwrap_or("formation-worker");
+    let token = std::env::var("ATO_FORMATION_TOKEN")
+        .map_err(|_| anyhow!("ATO_FORMATION_TOKEN is required"))?;
+
+    // Refuse BEFORE claiming: a job this worker cannot contain should not
+    // consume an attempt fence on its way to failing.
+    require_containment()?;
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(900))
+        .build()?;
+    let api = FormationApi::new(client.clone(), api_base, token);
+    let shim = std::env::current_exe().context("cannot locate this worker's own binary")?;
+    let fetcher = GitHubTarballFetcher::new(client);
+
+    let outcome = run_job(
+        &JobContext {
+            api: &api,
+            fetcher: &fetcher,
+            packer: &DeterministicTreePacker,
+            work_root: &work_root,
+            shim: &shim,
+            worker_id,
+            limits: BuildLimits::default(),
+            source_limits: SourceLimits::default(),
+        },
+        &job_id,
+        &compute_id,
+        &capsule_revision_id,
+    )?;
+
+    println!(
+        "[formation] job={} attempt={} fence={} closure={} materialization={} outcome={:?}",
+        job_id,
+        outcome.attempt.attempt_id,
+        outcome.attempt.attempt_fence,
+        outcome.closure_ref,
+        outcome.materialization_ref,
+        outcome.outcome
+    );
+    match outcome.outcome {
+        PublishOutcome::Accepted { .. } => Ok(()),
+        // A refusal is the control plane doing its job. Exiting non-zero says
+        // so without pretending the build itself failed.
+        PublishOutcome::Refused { code } => Err(anyhow!("result refused: {code}")),
+    }
+}
+
+/// Packs a tree the way the Runner expects to receive it.
+struct DeterministicTreePacker;
+
+impl TreePacker for DeterministicTreePacker {
+    fn pack(&self, root: &Path) -> Result<Vec<u8>> {
+        pack_tree(root)
+    }
 }
 
 fn sandbox_exec(args: &[String]) -> Result<()> {
