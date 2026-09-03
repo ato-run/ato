@@ -5,9 +5,11 @@
 //! secret or a real host path from becoming reachable to the guest agent, the
 //! CLI or netd, all of which link the contract crate.
 
+pub mod lease;
 pub mod process_executor;
 pub mod resolved;
 pub mod sandbox;
 pub mod sandbox_exec;
 pub mod session;
 pub mod state_artifact;
+pub mod workspace;
