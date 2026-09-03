@@ -139,6 +139,12 @@ pub fn sandboxed_build_command(
         argv.push(flag.to_owned());
     }
     for [flag, source, target] in [
+        // `/bin` and `/sbin` are usrmerge symlinks on most modern
+        // distributions, and binding only `/usr` leaves them dangling — a
+        // `#!/bin/sh` then fails with "No such file or directory", which is
+        // measured behaviour here rather than a guess.
+        ["--ro-bind-try", "/bin", "/bin"],
+        ["--ro-bind-try", "/sbin", "/sbin"],
         ["--ro-bind-try", "/lib", "/lib"],
         ["--ro-bind-try", "/lib64", "/lib64"],
         ["--ro-bind", "/usr", "/usr"],
