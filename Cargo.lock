@@ -329,10 +329,12 @@ dependencies = [
  "ato-realization-planner",
  "ato-record-writer",
  "ato-runtime-object-graph",
+ "ato-sandbox",
  "base64 0.22.1",
  "clap",
  "hex",
  "hmac",
+ "libc",
  "rand 0.8.6",
  "reqwest",
  "serde",
@@ -342,6 +344,7 @@ dependencies = [
  "tar",
  "tempfile",
  "time",
+ "tracing",
  "tungstenite",
  "url",
 ]
@@ -605,6 +608,19 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ato-sandbox"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "landlock",
+ "libc",
+ "serde",
+ "tempfile",
+ "tracing",
 ]
 
 [[package]]
@@ -986,6 +1002,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1e6a265c649f3f5979b601d26f1d05ada116434c87741c9493cb56218f76cbc"
 dependencies = [
  "heck",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "enumflags2"
+version = "0.7.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1027f7680c853e056ebcec683615fb6fbbc07dbaa13b4d5d9442b146ded4ecef"
+dependencies = [
+ "enumflags2_derive",
+]
+
+[[package]]
+name = "enumflags2_derive"
+version = "0.7.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67c78a4d8fdf9953a5c9d458f9efe940fd97a0cab0941c075a813ac594733827"
+dependencies = [
  "proc-macro2",
  "quote",
  "syn",
@@ -1618,6 +1654,17 @@ dependencies = [
  "cfg-if",
  "futures-util",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "landlock"
+version = "0.4.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cca98e95f35b29d469dade6724c6f96cec9236640f745a0e99b0334ec320ab1"
+dependencies = [
+ "enumflags2",
+ "libc",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

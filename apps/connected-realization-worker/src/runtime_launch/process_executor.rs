@@ -23,7 +23,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
-use ato_adapter_process::{ProcessAdapter, ProcessHandle, ProcessSpec, terminate_process_tree};
+use ato_adapter_process::{
+    ProcessAdapter, ProcessHandle, ProcessSpec, force_kill_process_tree, process_group_is_alive,
+};
 use ato_ipc::runtime_launch::{
     LaunchRealizationV1, ReadinessV1, RuntimeLaunchSpecV1, StateAccessV1,
 };
@@ -39,14 +41,14 @@ use super::resolved::ResolvedRuntimeLaunchContext;
 /// is exactly the thing a multi-tenant Runner must never do.
 pub const STATE_WORKING_ROOT: &str = ".ato/state";
 
-/// The environment variable that tells a `process` workload where its state is.
+/// A convenience variable naming a state attachment's GUEST path.
 ///
-/// **This is the `process` realization's ABI, and it is a convention, not a
-/// contract the spec expresses.** A container realization (P5) will honour
-/// `mount_target` literally as a bind mount, and then the workload sees the
-/// path the spec named. Here it cannot, so the real path is handed over by
-/// name. Written down rather than assumed, because a silent convention is how
-/// a workload ends up reading an empty directory and reporting success.
+/// No longer an ABI. The workload now finds its state at
+/// `attachment.mount_target` — a real bind mount inside the sandbox — so a
+/// ComputeSchema can declare `DATABASE_PATH=/data/app.sqlite` and mean it
+/// under both the process and the future OCI realization. This variable is
+/// kept because it costs nothing and helps a workload that would rather be
+/// told, but nothing has to read it and nothing should depend on it.
 pub fn state_path_env_name(state_key: &str) -> String {
     format!(
         "ATO_STATE_PATH_{}",
@@ -137,42 +139,130 @@ impl LaunchedProcess {
         &self.run_id
     }
 
-    /// Stop the workload, gracefully first and forcibly after the deadline.
+    /// Has the workload already exited on its own?
     ///
-    /// Termination targets the process GROUP. A workload that forked children
-    /// — a dev server spawning a reloader, say — would otherwise leave them
-    /// holding the state directory open after the Run is reported stopped.
-    pub fn stop(mut self, lifecycle: &ato_ipc::runtime_launch::LifecycleV1) -> Result<()> {
+    /// A server that exits during readiness has failed; waiting for the
+    /// timeout would turn a two-second failure into a sixty-second one and
+    /// report the wrong cause.
+    pub fn exited(&mut self) -> Result<Option<std::process::ExitStatus>> {
+        self.handle
+            .try_wait()
+            .context("failed to poll the workload")
+    }
+
+    /// Stop the workload and prove it is gone.
+    ///
+    /// ```text
+    /// SIGTERM the group
+    ///   -> wait up to graceful_shutdown_ms
+    ///   -> still alive? SIGKILL the group
+    ///   -> wait up to force_kill_after_ms
+    ///   -> reap
+    ///   -> verify the subtree is gone
+    /// ```
+    ///
+    /// Returning before the subtree is gone would be the dangerous kind of
+    /// wrong: the caller packs state next, and a surviving child still writing
+    /// to the state directory produces a torn SQLite file whose digest makes
+    /// the corruption permanent.
+    ///
+    /// Termination targets the process GROUP throughout. A workload that
+    /// forked children — a dev server spawning a reloader — would otherwise
+    /// leave them behind.
+    pub fn stop(mut self, lifecycle: &ato_ipc::runtime_launch::LifecycleV1) -> Result<StopOutcome> {
         let group = self.handle.process_group();
         let pid = self.handle.pid();
+
+        if let Some(status) = self
+            .handle
+            .try_wait()
+            .context("failed to reap the workload")?
+        {
+            return finish_stop(group, StopKind::AlreadyExited, Some(status));
+        }
+
         self.handle
             .terminate()
             .context("failed to signal the workload")?;
-
-        let deadline =
-            Instant::now() + Duration::from_millis(lifecycle.graceful_shutdown_ms.max(1));
-        while Instant::now() < deadline {
-            if self
-                .handle
-                .try_wait()
-                .context("failed to reap the workload")?
-                .is_some()
-            {
-                return Ok(());
-            }
-            std::thread::sleep(Duration::from_millis(25));
+        if let Some(status) = wait_for_exit(&mut self.handle, lifecycle.graceful_shutdown_ms)? {
+            return finish_stop(group, StopKind::Graceful, Some(status));
         }
-        terminate_process_tree(pid, group).context("failed to force-stop the workload")?;
-        Ok(())
+
+        force_kill_process_tree(pid, group).context("failed to force-stop the workload")?;
+        let status = wait_for_exit(&mut self.handle, lifecycle.force_kill_after_ms.max(1))?;
+        finish_stop(group, StopKind::Forced, status)
     }
 }
 
-/// Spawn the workload described by `spec`.
+/// How a workload ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopKind {
+    /// It had already exited before the Runner asked.
+    AlreadyExited,
+    /// It exited within `graceful_shutdown_ms` of SIGTERM.
+    Graceful,
+    /// It had to be killed.
+    Forced,
+}
+
+/// The result of stopping, and the evidence that it worked.
+#[derive(Debug, Clone)]
+pub struct StopOutcome {
+    pub kind: StopKind,
+    pub exit_status: Option<std::process::ExitStatus>,
+}
+
+fn wait_for_exit(
+    handle: &mut ProcessHandle,
+    budget_ms: u64,
+) -> Result<Option<std::process::ExitStatus>> {
+    let deadline = Instant::now() + Duration::from_millis(budget_ms);
+    loop {
+        if let Some(status) = handle.try_wait().context("failed to reap the workload")? {
+            return Ok(Some(status));
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Refuse to report a stop the subtree did not honour.
+fn finish_stop(
+    group: u32,
+    kind: StopKind,
+    exit_status: Option<std::process::ExitStatus>,
+) -> Result<StopOutcome> {
+    if group != 0 {
+        // The direct child is reaped by now; this asks about everything it
+        // spawned. Give the kernel a moment to tear the group down first.
+        for _ in 0..50 {
+            if !process_group_is_alive(group) {
+                return Ok(StopOutcome { kind, exit_status });
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        anyhow::bail!(
+            "process group {group} survived termination; refusing to pack state that a live \
+             process may still be writing"
+        );
+    }
+    Ok(StopOutcome { kind, exit_status })
+}
+
+/// Spawn the workload described by `spec`, contained.
+///
+/// Containment is a precondition, not an enhancement: a Runner that cannot
+/// contain a workload refuses the Run rather than running it unconfined and
+/// reporting success.
 pub fn launch_process(
     spec: &RuntimeLaunchSpecV1,
     context: &ResolvedRuntimeLaunchContext,
 ) -> Result<LaunchedProcess> {
     let process_spec = process_spec_for(spec, context)?;
+    super::sandbox::require_containment()?;
+
     // Every attachment's directory must exist before the workload starts. An
     // app that finds its state path missing does not wait for it; it either
     // fails or, worse, creates its own somewhere else.
@@ -184,10 +274,39 @@ pub fn launch_process(
             )
         })?;
     }
-    let adapter = ProcessAdapter::new(process_spec).context("process spec is unusable")?;
+
+    let shim = std::env::current_exe().context("cannot locate this Runner's own binary")?;
+    let policy_path = context.workspace_root().join(".ato/sandbox-policy.json");
+    let sandboxed = super::sandbox::sandboxed_command(
+        context,
+        &process_spec.command,
+        &shim,
+        &policy_path,
+        true,
+    )?;
+    if let Some(parent) = policy_path.parent() {
+        std::fs::create_dir_all(parent).context("failed to create the sandbox policy directory")?;
+    }
+    std::fs::write(
+        &policy_path,
+        serde_json::to_vec_pretty(&sandboxed.policy)
+            .context("failed to serialize the sandbox policy")?,
+    )
+    .context("failed to write the sandbox policy")?;
+
+    let adapter = ProcessAdapter::new(ProcessSpec {
+        // The workload's cwd is set INSIDE the sandbox (`--chdir /app`), so
+        // the outer command runs from the workspace root and the guest cwd is
+        // the spec's, not the Runner's.
+        cwd: PathBuf::new(),
+        command: sandboxed.argv,
+        environment: super::sandbox::guest_environment(context),
+        ..process_spec
+    })
+    .context("sandboxed process spec is unusable")?;
     let handle = adapter
         .spawn(context.workspace_root())
-        .context("failed to spawn the workload")?;
+        .context("failed to spawn the contained workload")?;
     Ok(LaunchedProcess {
         handle,
         run_id: spec.context.run_id.clone(),
@@ -215,7 +334,7 @@ pub fn writable_state_keys(context: &ResolvedRuntimeLaunchContext) -> Vec<&str> 
 pub fn wait_until_ready(
     spec: &RuntimeLaunchSpecV1,
     context: &ResolvedRuntimeLaunchContext,
-    launched: &LaunchedProcess,
+    launched: &mut LaunchedProcess,
     probe: &dyn ReadinessProbe,
 ) -> Result<()> {
     let (timeout_ms, target) = match &spec.readiness {
@@ -244,6 +363,15 @@ pub fn wait_until_ready(
         return Ok(());
     };
     loop {
+        // Checked BEFORE the probe: a workload that exited has failed, and
+        // waiting out the timeout would report a timeout instead of the real
+        // cause.
+        if let Some(status) = launched.exited()? {
+            bail!(
+                "workload for run {} exited before becoming ready ({status})",
+                launched.run_id()
+            );
+        }
         match probe.probe(port, &path) {
             Ok(()) => return Ok(()),
             Err(error) => {
@@ -462,7 +590,7 @@ mod tests {
             path: "/health".to_owned(),
             timeout_ms: 10,
         };
-        let launched = LaunchedProcess {
+        let mut launched = LaunchedProcess {
             handle: spawn_true(),
             run_id: spec.context.run_id.clone(),
         };
@@ -472,7 +600,8 @@ mod tests {
                 panic!("an unallocated endpoint must not be probed")
             }
         }
-        let error = wait_until_ready(&spec, &fixture.context, &launched, &NeverProbed).unwrap_err();
+        let error =
+            wait_until_ready(&spec, &fixture.context, &mut launched, &NeverProbed).unwrap_err();
         assert!(error.to_string().contains("not allocated"), "{error}");
         let _ = launched.stop(&LifecycleV1 {
             graceful_shutdown_ms: 100,
@@ -489,7 +618,7 @@ mod tests {
             path: "/health".to_owned(),
             timeout_ms: 60,
         };
-        let launched = LaunchedProcess {
+        let mut launched = LaunchedProcess {
             handle: spawn_sleep(),
             run_id: spec.context.run_id.clone(),
         };
@@ -500,7 +629,7 @@ mod tests {
             }
         }
         let error =
-            wait_until_ready(&spec, &fixture.context, &launched, &AlwaysRefused).unwrap_err();
+            wait_until_ready(&spec, &fixture.context, &mut launched, &AlwaysRefused).unwrap_err();
         // The last probe failure is carried, because "not ready" without a
         // reason is the least useful diagnostic there is.
         assert!(error.to_string().contains("connection refused"), "{error}");
@@ -514,6 +643,13 @@ mod tests {
 
     #[test]
     fn a_launched_workload_actually_runs_and_stops() {
+        if !super::super::sandbox::containment_available() {
+            // Not a skip worth hiding: this Runner cannot contain a workload,
+            // so it must not launch one. The behaviour under test only exists
+            // on a host that can (see the staging acceptance).
+            eprintln!("skipping: `bwrap` is not available, so no workload may be launched here");
+            return;
+        }
         let fixture = context_with_state(StateAccessV1::ReadWrite);
         let mut spec = spec(PROCESS_FIXTURE);
         spec.realization =
