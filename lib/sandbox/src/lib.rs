@@ -414,6 +414,35 @@ pub fn set_no_new_privs() -> std::io::Result<()> {
     Ok(())
 }
 
+/// Cap how many processes this user may have, for this process and its children.
+///
+/// A ceiling the kernel enforces rather than one a supervisor watches for: a
+/// fork bomb inside a build should exhaust its own limit long before it
+/// exhausts the host's, and a watcher only notices after the damage.
+///
+/// Lives here for the same reason `set_no_new_privs` does — the callers deny
+/// `unsafe_code`, and an OS primitive belongs with the other OS primitives.
+#[cfg(target_os = "linux")]
+pub fn set_process_limit(limit: u64) -> std::io::Result<()> {
+    let rlimit = libc::rlimit {
+        rlim_cur: limit,
+        rlim_max: limit,
+    };
+    // SAFETY: `setrlimit` reads one caller-provided struct of scalars and
+    // returns a status. It cannot leave the process in an inconsistent state.
+    let result = unsafe { libc::setrlimit(libc::RLIMIT_NPROC, &rlimit) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn set_process_limit(_limit: u64) -> std::io::Result<()> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -528,33 +557,4 @@ mod tests {
         assert!(removed.is_empty());
         assert_eq!(clean.len(), 2);
     }
-}
-
-/// Cap how many processes this user may have, for this process and its children.
-///
-/// A ceiling the kernel enforces rather than one a supervisor watches for: a
-/// fork bomb inside a build should exhaust its own limit long before it
-/// exhausts the host's, and a watcher only notices after the damage.
-///
-/// Lives here for the same reason `set_no_new_privs` does — the callers deny
-/// `unsafe_code`, and an OS primitive belongs with the other OS primitives.
-#[cfg(target_os = "linux")]
-pub fn set_process_limit(limit: u64) -> std::io::Result<()> {
-    let rlimit = libc::rlimit {
-        rlim_cur: limit,
-        rlim_max: limit,
-    };
-    // SAFETY: `setrlimit` reads one caller-provided struct of scalars and
-    // returns a status. It cannot leave the process in an inconsistent state.
-    let result = unsafe { libc::setrlimit(libc::RLIMIT_NPROC, &rlimit) };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-pub fn set_process_limit(_limit: u64) -> std::io::Result<()> {
-    Ok(())
 }
