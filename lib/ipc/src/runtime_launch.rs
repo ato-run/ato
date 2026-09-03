@@ -556,7 +556,5 @@ impl RuntimeLaunchSpecV1 {
     }
 }
 
-pub mod resolved;
-
 #[cfg(test)]
 mod tests;
