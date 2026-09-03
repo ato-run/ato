@@ -54,17 +54,38 @@ pub fn prepare_run(
     context: &ResolvedRuntimeLaunchContext,
     transport: &dyn StateArtifactTransport,
 ) -> Result<PreparedRun> {
-    let mut grants = Vec::new();
+    let mut grants: Vec<(String, StateWriterGrant)> = Vec::new();
     for state_key in writable_state_keys(context) {
-        let grant = transport
-            .acquire_writer(state_key)
-            .with_context(|| format!("failed to acquire the writer for state `{state_key}`"))?;
-        let working = state_working_copy(context.workspace_root(), state_key);
-        materialize_working_copy(transport, &grant, &working).with_context(|| {
-            format!("failed to materialize the working copy for state `{state_key}`")
-        })?;
-        grants.push((state_key.to_owned(), grant));
+        // Every failure past the FIRST successful acquisition has to give back
+        // what it already took. A partially-prepared Run that keeps its grants
+        // leaves those slots held by a Run that will never exist, and no later
+        // Run can have them.
+        let step = (|| -> Result<()> {
+            let grant = transport
+                .acquire_writer(state_key)
+                .with_context(|| format!("failed to acquire the writer for state `{state_key}`"))?;
+            let working = state_working_copy(context.workspace_root(), state_key);
+            match materialize_working_copy(transport, &grant, &working) {
+                Ok(()) => {
+                    grants.push((state_key.to_owned(), grant));
+                    Ok(())
+                }
+                Err(error) => {
+                    // This grant is not in `grants` yet, so release it here or
+                    // it is lost.
+                    let _ = transport.abort_writer(state_key, grant.writer_fence);
+                    Err(error).with_context(|| {
+                        format!("failed to materialize the working copy for state `{state_key}`")
+                    })
+                }
+            }
+        })();
+        if let Err(error) = step {
+            release_all(transport, &grants, WriterRelease::Aborted);
+            return Err(error);
+        }
     }
+
     // The spec's fence and the grant's fence must agree, or the control plane
     // handed out the slot between projection and acquisition. Refusing here
     // means a Run never starts believing it holds a generation it does not.
@@ -74,6 +95,7 @@ pub fn prepare_run(
             grants.iter().find(|(key, _)| key == &attachment.state_key),
         ) && expected != grant.writer_fence
         {
+            release_all(transport, &grants, WriterRelease::Aborted);
             anyhow::bail!(
                 "state `{}` was re-assigned between projection and acquisition (spec fence {}, \
                  grant fence {})",
@@ -84,6 +106,48 @@ pub fn prepare_run(
         }
     }
     Ok(PreparedRun { grants })
+}
+
+/// Why a slot is being given back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriterRelease {
+    /// The Run finished normally.
+    Released,
+    /// The Run failed, or never started.
+    Aborted,
+}
+
+/// Give every held slot back, best effort.
+///
+/// Best effort on purpose, and never fatal: this runs on the failure path, and
+/// turning "could not release" into a hard error would replace a recoverable
+/// stuck slot with a lost one. A slot the control plane never hears about is
+/// still recoverable — the lease expires and the fence advances — but only if
+/// the Runner does not abandon the rest of its cleanup first.
+pub fn release_all(
+    transport: &dyn StateArtifactTransport,
+    grants: &[(String, StateWriterGrant)],
+    reason: WriterRelease,
+) {
+    for (state_key, grant) in grants {
+        let outcome = match reason {
+            WriterRelease::Released => transport.release_writer(state_key, grant.writer_fence),
+            WriterRelease::Aborted => transport.abort_writer(state_key, grant.writer_fence),
+        };
+        if let Err(error) = outcome {
+            tracing::warn!(
+                state_key = %state_key,
+                writer_fence = grant.writer_fence,
+                %error,
+                "failed to give back a state writer; the slot stays held until the fence advances"
+            );
+        }
+    }
+}
+
+/// Give back every slot this Run holds, without committing anything.
+pub fn abort_run(transport: &dyn StateArtifactTransport, prepared: &PreparedRun) {
+    release_all(transport, &prepared.grants, WriterRelease::Aborted);
 }
 
 /// Commit whatever the workload wrote, once it has stopped.
@@ -99,9 +163,17 @@ pub fn commit_run(
 ) -> Result<Vec<RunStateOutcome>> {
     let mut outcomes = Vec::new();
     for (state_key, grant) in &prepared.grants {
+        // Whatever happens below, this slot is given back before the function
+        // returns — see the release at the end and the abort on the error
+        // path.
         let working = state_working_copy(context.workspace_root(), state_key);
-        let artifact = pack_state_tree(&working)
-            .with_context(|| format!("failed to pack state `{state_key}`"))?;
+        let artifact = match pack_state_tree(&working) {
+            Ok(artifact) => artifact,
+            Err(error) => {
+                release_all(transport, &prepared.grants, WriterRelease::Aborted);
+                return Err(error).with_context(|| format!("failed to pack state `{state_key}`"));
+            }
+        };
 
         // An unchanged tree is not a new revision. Committing one anyway would
         // grow the history with rows that restore to exactly what came before.
@@ -115,15 +187,22 @@ pub fn commit_run(
             continue;
         }
 
-        let revision = transport
-            .commit(
-                state_key,
-                grant.writer_fence,
-                grant.revision_ref.as_deref(),
-                &format!("{commit_request_id}:{state_key}"),
-                &artifact,
-            )
-            .with_context(|| format!("failed to commit state `{state_key}`"))?;
+        let revision = match transport.commit(
+            state_key,
+            grant.writer_fence,
+            grant.revision_ref.as_deref(),
+            &format!("{commit_request_id}:{state_key}"),
+            &artifact,
+        ) {
+            Ok(revision) => revision,
+            Err(error) => {
+                // A refused commit is not a reason to keep the slot. The bytes
+                // are lost either way; holding the slot only adds a second
+                // failure for the next Run.
+                release_all(transport, &prepared.grants, WriterRelease::Aborted);
+                return Err(error).with_context(|| format!("failed to commit state `{state_key}`"));
+            }
+        };
         outcomes.push(RunStateOutcome {
             state_key: state_key.clone(),
             parent_revision_ref: grant.revision_ref.clone(),
@@ -131,6 +210,9 @@ pub fn commit_run(
             writer_fence: grant.writer_fence,
         });
     }
+    // Success, no-op and everything in between end here: the slot goes back so
+    // the next Run can take it immediately.
+    release_all(transport, &prepared.grants, WriterRelease::Released);
     Ok(outcomes)
 }
 
@@ -142,14 +224,23 @@ pub fn start_run(
     probe: &dyn ReadinessProbe,
 ) -> Result<(PreparedRun, LaunchedProcess)> {
     let prepared = prepare_run(spec, context, transport)?;
-    let launched = launch_process(spec, context)?;
-    match wait_until_ready(spec, context, &launched, probe) {
+    let mut launched = match launch_process(spec, context) {
+        Ok(launched) => launched,
+        Err(error) => {
+            // Spawn failure is the easiest path to a permanently stuck slot:
+            // the Run never existed, so nothing else would ever release it.
+            abort_run(transport, &prepared);
+            return Err(error);
+        }
+    };
+    match wait_until_ready(spec, context, &mut launched, probe) {
         Ok(()) => Ok((prepared, launched)),
         Err(error) => {
-            // A workload that never became ready still gets stopped. Leaving
-            // it running would leave the slot held by a Run nobody is
-            // watching.
+            // A workload that never became ready still gets stopped AND still
+            // gives its slots back. Leaving either behind turns one failed Run
+            // into an App that can never start again.
             let _ = launched.stop(&spec.lifecycle);
+            abort_run(transport, &prepared);
             Err(error)
         }
     }
@@ -164,7 +255,13 @@ pub fn finish_run(
     launched: LaunchedProcess,
     commit_request_id: &str,
 ) -> Result<Vec<RunStateOutcome>> {
-    launched.stop(&spec.lifecycle)?;
+    if let Err(error) = launched.stop(&spec.lifecycle) {
+        // The subtree may still be alive, so packing is refused — but the
+        // slot is still given back, because a stuck slot would outlive the
+        // stuck process.
+        abort_run(transport, prepared);
+        return Err(error);
+    }
     commit_run(context, transport, prepared, commit_request_id)
 }
 
@@ -201,12 +298,21 @@ mod tests {
         head_digest: Option<String>,
         artifacts: BTreeMap<String, Vec<u8>>,
         revisions: Vec<String>,
+        /// Who currently holds the slot. `None` means free — which is what
+        /// every failure path has to restore.
+        held_by_fence: Option<u64>,
+        releases: Vec<(u64, &'static str)>,
     }
 
     impl StateArtifactTransport for FakeControlPlane {
         fn acquire_writer(&self, _state_key: &str) -> Result<StateWriterGrant> {
             let mut plane = self.inner.lock().expect("lock");
+            anyhow::ensure!(
+                plane.held_by_fence.is_none(),
+                "the slot is already held; a previous Run never gave it back"
+            );
             plane.fence += 1;
+            plane.held_by_fence = Some(plane.fence);
             Ok(StateWriterGrant {
                 revision_ref: plane.head.clone(),
                 artifact_digest: plane.head_digest.clone(),
@@ -245,6 +351,24 @@ mod tests {
             plane.head_digest = Some(artifact.digest().to_owned());
             plane.revisions.push(revision.clone());
             Ok(revision)
+        }
+
+        fn release_writer(&self, _state_key: &str, writer_fence: u64) -> Result<()> {
+            let mut plane = self.inner.lock().expect("lock");
+            plane.releases.push((writer_fence, "released"));
+            if plane.held_by_fence == Some(writer_fence) {
+                plane.held_by_fence = None;
+            }
+            Ok(())
+        }
+
+        fn abort_writer(&self, _state_key: &str, writer_fence: u64) -> Result<()> {
+            let mut plane = self.inner.lock().expect("lock");
+            plane.releases.push((writer_fence, "aborted"));
+            if plane.held_by_fence == Some(writer_fence) {
+                plane.held_by_fence = None;
+            }
+            Ok(())
         }
     }
 
@@ -417,8 +541,8 @@ while True:
 
     #[test]
     fn an_app_woken_a_second_time_continues_from_its_own_state() {
-        if !python3_is_available() {
-            eprintln!("skipping: python3 is not on PATH");
+        if !python3_is_available() || !super::super::sandbox::containment_available() {
+            eprintln!("skipping: needs python3 and a Runner that can contain a workload");
             return;
         }
         let plane = FakeControlPlane::default();
@@ -481,8 +605,8 @@ while True:
 
     #[test]
     fn a_run_that_changed_nothing_does_not_mint_a_revision() {
-        if !python3_is_available() {
-            eprintln!("skipping: python3 is not on PATH");
+        if !python3_is_available() || !super::super::sandbox::containment_available() {
+            eprintln!("skipping: needs python3 and a Runner that can contain a workload");
             return;
         }
         let plane = FakeControlPlane::default();
@@ -539,5 +663,69 @@ while True:
             state_artifact_digest(pack_state_tree(&target).expect("repacks").bytes()),
             state_artifact_digest(artifact.bytes())
         );
+    }
+
+    #[test]
+    fn a_spawn_failure_gives_the_slot_straight_back() {
+        // The failure that matters most: the Run never existed, so nothing
+        // else would ever release it, and the App would be permanently stuck.
+        let plane = FakeControlPlane::default();
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let context = context_for(workspace.path(), 39_106);
+        let mut spec = spec_for("run_nonexistent", Some(1), "unused", 39_106);
+        spec.realization = LaunchRealizationV1::Process(ProcessRealizationV1 {
+            argv: vec!["/nonexistent/program".to_owned()],
+        });
+        assert!(start_run(&spec, &context, &plane, &AlwaysReady).is_err());
+
+        let inner = plane.inner.lock().expect("lock");
+        assert_eq!(inner.held_by_fence, None, "the slot is still held");
+        assert_eq!(inner.releases, vec![(1, "aborted")]);
+    }
+
+    #[test]
+    fn a_failed_run_does_not_block_the_next_one() {
+        let plane = FakeControlPlane::default();
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let context = context_for(workspace.path(), 39_107);
+        let mut spec = spec_for("run_doomed", Some(1), "unused", 39_107);
+        spec.realization = LaunchRealizationV1::Process(ProcessRealizationV1 {
+            argv: vec!["/nonexistent/program".to_owned()],
+        });
+        assert!(start_run(&spec, &context, &plane, &AlwaysReady).is_err());
+
+        // The acceptance criterion: a DIFFERENT Run can take the same
+        // state_key immediately, with an advanced fence.
+        let grant = plane.acquire_writer("app_data").expect("the slot is free");
+        assert_eq!(grant.writer_fence, 2);
+    }
+
+    #[test]
+    fn a_stale_projection_releases_what_it_already_took() {
+        let plane = FakeControlPlane::default();
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let context = context_for(workspace.path(), 39_108);
+        // Projected at generation 7, granted 1 — the slot moved underneath it.
+        let spec = spec_for("run_stale_release", Some(7), "unused", 39_108);
+        prepare_run(&spec, &context, &plane).unwrap_err();
+
+        let inner = plane.inner.lock().expect("lock");
+        assert_eq!(inner.held_by_fence, None);
+        assert_eq!(inner.releases, vec![(1, "aborted")]);
+    }
+
+    #[test]
+    fn a_no_op_run_releases_the_slot_too() {
+        if !python3_is_available() || !super::super::sandbox::containment_available() {
+            eprintln!("skipping: needs python3 and a Runner that can contain a workload");
+            return;
+        }
+        let plane = FakeControlPlane::default();
+        run_once(&plane, "run_seed", "only-row", 39_109);
+        let inner = plane.inner.lock().expect("lock");
+        // Committed or not, the slot goes back — otherwise a wake that changed
+        // nothing would be indistinguishable from a crash.
+        assert_eq!(inner.held_by_fence, None);
+        assert!(inner.releases.iter().any(|(_, why)| *why == "released"));
     }
 }
