@@ -60,7 +60,33 @@ fn bounded_diagnostic(name: &str, stream: &[u8]) -> String {
     } else {
         trimmed.to_owned()
     };
-    format!("[{name}] {}", ato_formation::source::redact_url(&tail))
+    // Redact URLs INSIDE the text rather than passing the whole diagnostic
+    // through a URL redactor: `redact_url` returns "<redacted>" for anything
+    // that is not a URL, which turned every build failure into a message with
+    // no content at all.
+    format!("[{name}] {}", redact_urls_in(&tail))
+}
+
+/// Replace any URL in free text with its scheme, host and path.
+///
+/// A pre-signed grant's query string IS the credential, and a build log can
+/// carry one the source itself printed. Everything around the URL is kept,
+/// because that is where the reason usually is.
+fn redact_urls_in(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("http") {
+        let (before, tail) = rest.split_at(start);
+        out.push_str(before);
+        let end = tail
+            .find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+            .unwrap_or(tail.len());
+        let (url, remainder) = tail.split_at(end);
+        out.push_str(&ato_formation::source::redact_url(url));
+        rest = remainder;
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Execute a plan's steps, in order, each under isolation.
