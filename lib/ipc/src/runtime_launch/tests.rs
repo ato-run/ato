@@ -1,4 +1,3 @@
-
 use super::*;
 
 const PROCESS_FIXTURE: &str =
