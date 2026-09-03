@@ -9,6 +9,7 @@ members = [
     "lib/computation",
     "lib/kernel",
     "lib/local-execution",
+    "lib/formation",
     "lib/objects",
     "lib/sandbox",
     "extensions/adapters/api",
