@@ -684,10 +684,21 @@ pub fn compile_build_plan(
                 // a tree the artifact format refuses to carry.
                 //
                 // `venv` makes its own links too — `lib64 -> lib` on a 64-bit
-                // host — so the last step replaces every remaining link with
-                // its target. Both were found by the pack REFUSING them, which
-                // is the format working: a link that survived into an artifact
-                // would resolve against whatever the Runner happened to have.
+                // host. The first attempt replaced every link with a COPY of
+                // its target, which turned `lib64` into a duplicate of the
+                // whole `lib` tree and took the artifact from 112 MB to 198 MB.
+                // `lib64` only exists to point at `lib`, so it is removed
+                // rather than materialized.
+                //
+                // pip goes with it: it is a build-time tool, and 13 MB of
+                // installer that every instance downloads and no Run executes
+                // is 13 MB nobody asked for.
+                //
+                // Whatever links remain are deleted, not followed. They were
+                // found by the pack REFUSING them, which is the format working:
+                // a link that survived into an artifact would resolve against
+                // whatever the Runner happened to have, rather than against
+                // what the build produced.
                 argv: vec![
                     "/bin/sh".to_owned(),
                     "-euc".to_owned(),
@@ -700,8 +711,9 @@ pub fn compile_build_plan(
                          mkdir -p {root}/.venv/lib && \
                          cp -L {home}/lib/libpython*.so* {root}/.venv/lib/ && \
                          {root}/.venv/bin/python -m ensurepip --upgrade --default-pip && \
-                         find {root}/.venv -type l -exec sh -c \
-                           'for l; do t=$(readlink -f \"$l\") && rm \"$l\" && cp -R \"$t\" \"$l\"; done' _ {{}} + && \
+                         rm -rf {root}/.venv/lib64 && \
+                         {root}/.venv/bin/python -m pip uninstall -y -q pip setuptools || true && \
+                         find {root}/.venv -depth -type l -delete && \
                          {root}/.venv/bin/python -V",
                         interp = interpreter.clone().unwrap_or_else(|| "python3".to_owned()),
                     ),
