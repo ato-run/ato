@@ -34,8 +34,8 @@ It holds. `POST /v1/internal/compute-instances/:id/runs` now takes `{}`.
 | D | idempotency | **PASS** — a resubmitted key returns the same job |
 | E | stale attempt | **PASS** — `409 formation_attempt_superseded`; a duplicate completion is `409 formation_result_already_accepted` |
 | F | build sandbox | **PASS** — source read-only, output writable, host sentinel invisible, env not inherited, denied network genuinely fails, allowed network reaches the index |
-| G | Static Formation lane | **NOT RUN** — see below |
-| H | Python Formation → Run | **PASS** — `{}` in, `{"status":"ok","db_path":"/data/app.sqlite"}` out |
+| G | Static Formation lane | **PASS** — a pinned source formed into a manifest/receipt/blobs bundle by the canonical materializer; schema registered as `static_web`, no process realization, **0 Runner runs** |
+| H | Python Formation → Run | **PASS** — unattended worker: claim → pinned fetch → build → publish → schema; then `{}` in, `{"status":"ok","db_path":"/data/app.sqlite"}` out |
 | I | state continuation | **PASS** — three Runs of one instance, fences 1→2→3, revisions chained, `note-A` survives to the third |
 | J | tenant isolation | **PASS** — B and C start empty on the same schema; B never sees A |
 | K | existing artifact compatibility | **PASS** — both Static instances open unmodified, P0 bridge live, the untouched one has **0 runs** |
@@ -73,24 +73,40 @@ None of these would have surfaced from reading the code.
 The last one is the one worth keeping: it was only findable by putting a real
 Formation artifact through a real Runner.
 
+## The artifact was three times larger than it needed to be
+
+Worth recording, because the mistake generated most of this record's second
+half. The workspace VENDORED the whole CPython — libpython plus the standard
+library — and that single decision produced, in order:
+
+- 198 MB artifacts (85 MB of which was a `lib64 -> lib` link materialized as a
+  copy of the whole `lib` tree)
+- past the control plane's 100 MB request cap, so a multipart upload
+- past a Worker's 128 MB memory, so a streaming download and a digest check
+  moved to the Runner
+- a venv that could not start, because `--copies` leaves the loader without
+  libpython and symlinks cannot cross the artifact format
+
+`runtime_requirements` already said `python = 3.12.7`, the Runner already
+provisions it at a fixed shared path, and the runtime sandbox already binds that
+path read-only. The build was ignoring all three.
+
+The artifact now carries the source and its installed dependencies and nothing
+else: **11 MB**, down from 198 MB. The launch names the provisioned interpreter
+and is told where its dependencies are through `PYTHONPATH`.
+
 ## Not done, and not claimed
 
-**Scenario G — the Static Formation lane.** The canonical materializer is on
-nightly (I0) and existing Static artifacts are verified compatible (Scenario K),
-but no Static build has been run *through* FormationServiceV1, and no shadow
-comparison against the existing Static path has been performed. The gateway and
-comparator that would drive it are implemented and tested; the lane itself is
-not wired.
+**No shadow comparison against the existing Static path.** The Static lane runs
+and produces a correct bundle, but it has not been run side by side with the
+path that produced the current Static instances, so nothing here shows the two
+agree. The gateway and semantic comparator are implemented and tested; the
+comparison itself has not been performed.
 
 **Untrusted public Python publish is not enabled**, per ADR-018. `uv sync` needs
 the network, bwrap cannot express "the package index and nothing else", and the
 contract refuses `publish_enabled` together with a dependency-resolving network.
 The Python lane is allowlist-only on staging.
-
-**The Formation worker's job loop is not wired.** The sandbox, the build runner,
-the fence and the shim are implemented and exercised; the claim/publish loop
-that would drive them unattended is not, so the acceptance drove the steps
-explicitly through the real API and the real sandbox.
 
 **`uv sync` was not exercised.** The fixture carries `requirements.txt`, so the
 pip lane ran. The `uv` lane is compiled and unit-tested, not run on staging.
