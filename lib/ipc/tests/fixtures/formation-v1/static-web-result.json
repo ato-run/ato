@@ -1,0 +1,60 @@
+{
+  "protocol": "ato.formation-result.v1",
+  "job_id": "fjob_01M1K2STATICFIXTURE00000",
+  "attempt_id": "fatt_01M1K2STATICATTEMPT0001",
+  "attempt_fence": 1,
+  "status": "succeeded",
+  "formation_key": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+  "source_revision_ref": "srev_01M1K2STATICREVISION001",
+  "source_closure_ref": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+  "program_intent_ref": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "effective_build_plan_ref": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "compute_schema_ref": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "materializations": [
+    {
+      "kind": "static_web",
+      "content_ref": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "media_type": "application/vnd.ato.static-web-bundle.v1",
+      "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "size_bytes": 184320,
+      "target": {
+        "triple": "wasm32-browser",
+        "workspace_guest_root": "/app"
+      },
+      "compatibility": {
+        "evaluator": "browser"
+      },
+      "producer": "ato-materializer-static-web/0.1.0"
+    }
+  ],
+  "runtime_requirements": [],
+  "realization_candidates": [
+    {
+      "kind": "static_browser",
+      "materialization_ref": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "entry_path": "index.html",
+      "spa_fallback": true
+    }
+  ],
+  "exported_ports": [],
+  "readiness_contracts": [],
+  "state_slot_declarations": [
+    {
+      "state_key": "browser_state",
+      "mount_target": "/state",
+      "access": "read_write",
+      "protocol": "ato.materialize.browser@1"
+    }
+  ],
+  "binding_requirements": [],
+  "provenance": {
+    "formation_service_version": "0.1.0",
+    "builder_catalog_version": "catalog-2026-09",
+    "policy_version": "formation-policy-v1",
+    "network_policy": "denied",
+    "isolation": "bubblewrap+landlock;network=denied",
+    "field_origins": {}
+  },
+  "diagnostics": [],
+  "deterministic_inputs_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+}
