@@ -1,0 +1,33 @@
+[package]
+name = "ato-formation-worker"
+version = "0.1.0"
+edition = "2024"
+description = "Executes Formation jobs in an isolated build sandbox"
+license = "Apache-2.0 OR MPL-2.0"
+repository = "https://github.com/ato-run/ato"
+
+[package.metadata.dist]
+dist = false
+
+[package.metadata.ato-architecture]
+layer = "app"
+
+[[bin]]
+name = "ato-formation-worker"
+path = "src/bin/ato-formation-worker.rs"
+
+[dependencies]
+anyhow = "1"
+ato-formation = { path = "../../lib/formation", version = "0.1.0" }
+ato-ipc = { path = "../../lib/ipc", version = "0.1.0" }
+ato-sandbox = { path = "../../lib/sandbox", version = "0.1.0" }
+clap = { version = "4.5", features = ["derive", "env"] }
+libc = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+
+[dev-dependencies]
+tempfile = "3"
