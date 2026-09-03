@@ -681,8 +681,13 @@ pub fn compile_build_plan(
                 //
                 // `cp -L`, not `-a`: the toolchain ships `libpython3.12.so` as
                 // a link to `.so.1.0`, and preserving it would put a symlink in
-                // a tree the artifact format refuses to carry. Dereferencing
-                // costs one duplicated file and makes the workspace packable.
+                // a tree the artifact format refuses to carry.
+                //
+                // `venv` makes its own links too — `lib64 -> lib` on a 64-bit
+                // host — so the last step replaces every remaining link with
+                // its target. Both were found by the pack REFUSING them, which
+                // is the format working: a link that survived into an artifact
+                // would resolve against whatever the Runner happened to have.
                 argv: vec![
                     "/bin/sh".to_owned(),
                     "-euc".to_owned(),
@@ -695,6 +700,8 @@ pub fn compile_build_plan(
                          mkdir -p {root}/.venv/lib && \
                          cp -L {home}/lib/libpython*.so* {root}/.venv/lib/ && \
                          {root}/.venv/bin/python -m ensurepip --upgrade --default-pip && \
+                         find {root}/.venv -type l -exec sh -c \
+                           'for l; do t=$(readlink -f \"$l\") && rm \"$l\" && cp -R \"$t\" \"$l\"; done' _ {{}} + && \
                          {root}/.venv/bin/python -V",
                         interp = interpreter.clone().unwrap_or_else(|| "python3".to_owned()),
                     ),
