@@ -206,9 +206,33 @@ Established by measurement:
   `runtime_launch` capability and **no ingress rows at all**, so nothing it runs
   is publicly reachable.
 
-The remaining step is two INSERTs into staging D1 — one `runner_ingress`, one
-`runner_ingress_slots` — pointing that Runner at the s2 slot, with
-`ato-hosted-runner-slot2` stopped for the verification window and the rows
-revoked afterwards. That borrows a shared staging slot, and it is a write to a
-remote database; both are decisions for a person, not for this session to take
-on its own.
+### What a verification run needs, measured
+
+The D1 half is settled and reversible, and was exercised end to end:
+
+- `runner_ingress.base_hostname` and `runner_ingress_slots.hostname` are both
+  UNIQUE among non-revoked rows. A slot is owned by exactly ONE Runner, which
+  is correct — so borrowing one is explicit: revoke the incumbent slot row,
+  insert the borrower's, and restore afterwards. Scripts:
+  `p4_ingress_borrow.sql` / `p4_ingress_restore.sql`.
+- The Cloudflare Tunnel routes are per-hostname, not wildcard: `s3-rstg002`
+  and `s4-rstg002` do not resolve at all. A NEW slot therefore cannot be added
+  without a Cloudflare dashboard change, which is why the verification borrows
+  an existing one rather than creating capacity.
+- All three routed slots (`s0`/`s1`/`s2-rstg002`) belong to Runners that are
+  live and heartbeating, so any borrow degrades a real lane for its window.
+- The runtime-launch worker must be BUILT ON THE RUNNER: the release binary
+  from a darwin workstation is not executable there.
+
+The step that remains is starting the runtime-launch worker on the runner host
+with the routed slot's port and hostname:
+
+    ./target/release/ato-connected-realization-worker \
+      --public-base-url https://s2-rstg002.ato.run \
+      --surface-listen 127.0.0.1:8422 \
+      --work-root … --slot-id p4stable --max-slots 1
+
+Starting a long-lived process on a shared staging host is the one action this
+session could not take on its own. Staging was returned to its exact prior
+state after the attempt: the s2 slot is back with its original Runner and
+`active`, no borrower rows remain, and all three runner services are running.
