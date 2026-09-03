@@ -26,7 +26,9 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::detect::{DetectorEvidence, FieldOrigin, FieldOrigins};
+use crate::detect::{
+    DetectorEvidence, FieldOrigin, FieldOrigins, NodeEvidence, PythonEvidence, ViteOutDir,
+};
 
 /// Python versions this build knows how to provision, newest first.
 ///
@@ -90,6 +92,8 @@ pub enum IntentError {
     AmbiguousLockfiles { found: String },
     #[error("python {requested} is not in the supported runtime catalog")]
     UnsupportedPython { requested: String },
+    #[error("node {requested} is not satisfied by any version this resolver provisions")]
+    UnsupportedNode { requested: String },
     #[error("{field} is malformed: {detail}")]
     Malformed { field: &'static str, detail: String },
 }
@@ -101,6 +105,7 @@ impl IntentError {
             Self::RequiresAuthoring { .. } => "intent_requires_authoring",
             Self::AmbiguousLockfiles { .. } => "intent_ambiguous_lockfiles",
             Self::UnsupportedPython { .. } => "intent_unsupported_python",
+            Self::UnsupportedNode { .. } => "intent_unsupported_node",
             Self::Malformed { .. } => "intent_malformed",
         }
     }
@@ -126,6 +131,27 @@ pub enum DependencyPlan {
     PipRequirements { reproducibility: String },
     /// Nothing to install.
     None,
+}
+
+/// How a generated Static site is built.
+///
+/// Every field is resolved from the source's own declarations. None of it is a
+/// runtime realization: a ComputeSchema formed from this still says "browser",
+/// and nothing here ever becomes a process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StaticBuildProfileV1 {
+    pub package_manager: PackageManager,
+    /// Exact. A range never survives this far.
+    pub node_version: String,
+    /// The package script to run, e.g. `build`.
+    pub build_script: String,
+    /// Where the build writes the site, relative to the workspace root.
+    pub output_root: String,
+    /// Whether a lockfile pins the dependency graph. Recorded because a build
+    /// without one is not reproducible, and a plan that implied otherwise
+    /// would be lying about what it did.
+    pub lockfile_pinned: bool,
 }
 
 /// The normalized intent. Digestible, and the input to the build plan.
@@ -154,6 +180,10 @@ pub struct ProgramIntentV1 {
     pub static_entry_path: Option<String>,
     #[serde(default)]
     pub static_spa_fallback: bool,
+    /// Present only when the Static site is GENERATED. Omitted for a
+    /// source-static intent, so those digests are unchanged by this addition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_build: Option<StaticBuildProfileV1>,
 }
 
 pub const PROGRAM_INTENT_V1_SCHEMA: &str = "ato.program-intent.v1";
@@ -269,19 +299,341 @@ fn choose_lane(
     })
 }
 
+
+// ─── Static Build Profile v1 ────────────────────────────────────────────────
+//
+// A Static Compute is evaluated by the browser, but that says nothing about
+// whether its files EXIST in the source. Two shapes reach the same
+// realization:
+//
+//   source-static   source tree → selection → Static output
+//   built-static    source tree → build     → generated output → Static output
+//
+// Not two product lanes: the realization is identical, and only Formation
+// differs. Treating Static as "never needs a build" was measured wrong by
+// B1-S — `ato-e2e-static-spa@1e1be10` published its stale checked-in `dist/`
+// (STATIC_FIXTURE_V2) where the existing path published a real Vite build of
+// the source (STATIC_FIXTURE_V1). Different application code, reported as
+// success.
+//
+// Node here is a BUILD TOOL and nothing else. This profile never yields a Node
+// process, a Node runtime realization, or a Node RuntimeLaunchSpec. "Built
+// with Node" is not "runs on Node".
+
+/// Node versions this resolver will provision, lowest first.
+///
+/// Carried over verbatim from the existing Builder's ladder so that a source
+/// which resolved to a given Node there resolves to the same one here. All
+/// four are published on nodejs.org as `linux-x64` tarballs (verified).
+pub const NODE_VERSION_LADDER: &[&str] = &["18.20.4", "20.20.2", "22.14.0", "24.18.0"];
+
+/// The version used when the source declares nothing. Also the existing
+/// Builder's default, for the same reason.
+pub const DEFAULT_NODE: &str = "20.20.2";
+
+/// Packages whose presence means the repository serves itself.
+///
+/// A dependency set containing one of these is a server, and a server is not a
+/// Static Compute however plainly its build script reads.
+const SERVER_FRAMEWORKS: &[&str] = &[
+    "express",
+    "fastify",
+    "koa",
+    "@hapi/hapi",
+    "next",
+    "nuxt",
+    "@remix-run/node",
+    "@sveltejs/kit",
+    "socket.io",
+    "ws",
+];
+
+pub fn node_home(version: &str) -> String {
+    format!("{TOOLCHAIN_ROOT}/node/{version}")
+}
+
+/// The official Node distribution. `.tar.gz`, so the sandbox needs no `xz`.
+pub fn node_download_url(version: &str, triple: &str) -> String {
+    format!("https://nodejs.org/dist/v{version}/node-v{version}-{triple}.tar.gz")
+}
+
+fn node_triple(target_triple: &str) -> &'static str {
+    if target_triple.starts_with("aarch64") {
+        "linux-arm64"
+    } else {
+        "linux-x64"
+    }
+}
+
+/// Which package manager runs the build, and how reproducibly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PackageManager {
+    Npm,
+    Pnpm,
+    Yarn,
+    Bun,
+}
+
+impl PackageManager {
+    pub fn program(self) -> &'static str {
+        match self {
+            Self::Npm => "npm",
+            Self::Pnpm => "pnpm",
+            Self::Yarn => "yarn",
+            Self::Bun => "bun",
+        }
+    }
+
+    fn parse(name: &str) -> Option<Self> {
+        match name {
+            "npm" => Some(Self::Npm),
+            "pnpm" => Some(Self::Pnpm),
+            "yarn" => Some(Self::Yarn),
+            "bun" => Some(Self::Bun),
+            _ => None,
+        }
+    }
+}
+
+/// Split a package script into argv, or refuse.
+///
+/// Refuses anything that is not a plain invocation: shell operators, quotes,
+/// redirection, substitution. `npm run build:app && cp -r x y` is a program
+/// this reader must not pretend to understand.
+fn plain_task_argv(script: &str) -> Option<Vec<String>> {
+    let script = script.trim();
+    if script.is_empty()
+        || script.chars().any(|c| {
+            matches!(
+                c,
+                '\'' | '"' | '\\' | ';' | '|' | '&' | '$' | '<' | '>' | '(' | ')' | '`'
+            ) || c.is_control()
+        })
+    {
+        return None;
+    }
+    Some(script.split_ascii_whitespace().map(str::to_owned).collect())
+}
+
+fn tail_is(argv: &[String], tail: [&str; 2]) -> bool {
+    argv.len() >= 2 && argv[argv.len() - 2] == tail[0] && argv[argv.len() - 1] == tail[1]
+}
+
+/// The package manager, from the source's own declarations.
+///
+/// `packageManager` wins because it is the author saying so. Otherwise a
+/// single lockfile decides. Several lockfiles naming DIFFERENT managers is
+/// ambiguous and fails closed: picking one would silently resolve a dependency
+/// graph the author never chose.
+fn resolve_package_manager(node: &NodeEvidence) -> Result<PackageManager, IntentError> {
+    if let Some(declared) = node.package_manager.as_deref() {
+        let name = declared.split('@').next().unwrap_or_default();
+        return PackageManager::parse(name).ok_or_else(|| IntentError::Malformed {
+            field: "package.json packageManager",
+            detail: format!("unsupported package manager {name:?}"),
+        });
+    }
+    let mut found: Vec<PackageManager> = Vec::new();
+    for (present, manager) in [
+        (node.has_package_lock || node.has_npm_shrinkwrap, PackageManager::Npm),
+        (node.has_pnpm_lock, PackageManager::Pnpm),
+        (node.has_yarn_lock, PackageManager::Yarn),
+        (node.has_bun_lock, PackageManager::Bun),
+    ] {
+        if present && !found.contains(&manager) {
+            found.push(manager);
+        }
+    }
+    match found.as_slice() {
+        // No lockfile at all: npm is available wherever package.json is
+        // honored. Recorded as the weakest reproducibility below — nothing is
+        // pinned, and the plan must say so rather than imply a lock.
+        [] => Ok(PackageManager::Npm),
+        [single] => Ok(*single),
+        multiple => Err(IntentError::AmbiguousLockfiles {
+            found: multiple
+                .iter()
+                .map(|manager| manager.program())
+                .collect::<Vec<_>>()
+                .join(", "),
+        }),
+    }
+}
+
+/// The exact Node version, from the source's own declarations.
+///
+/// The host's `node` is never the answer. Which Node a build used is a
+/// property of the source, not of whichever machine claimed the job — the same
+/// lesson the Python lane learned when a host's 3.14 silently changed what
+/// `pydantic-core` did.
+fn resolve_node_version(node: &NodeEvidence) -> Result<String, IntentError> {
+    let exact = |raw: &str| -> Result<String, IntentError> {
+        let trimmed = raw.trim().trim_start_matches('v');
+        let version = semver::Version::parse(trimmed).map_err(|error| IntentError::Malformed {
+            field: "node version",
+            detail: format!("{raw:?} is not an exact version: {error}"),
+        })?;
+        Ok(version.to_string())
+    };
+    if let Some(raw) = node.node_version_file.as_deref() {
+        return exact(raw);
+    }
+    if let Some(raw) = node.node_version_alt_file.as_deref() {
+        return exact(raw);
+    }
+    if let Some(raw) = node.volta_node.as_deref() {
+        return exact(raw);
+    }
+    if let Some(raw) = node.engines_node.as_deref() {
+        let requirement =
+            semver::VersionReq::parse(raw).map_err(|error| IntentError::Malformed {
+                field: "package.json engines.node",
+                detail: format!("{raw:?} is not a parseable range: {error}"),
+            })?;
+        let default = semver::Version::parse(DEFAULT_NODE).expect("DEFAULT_NODE is exact");
+        if requirement.matches(&default) {
+            return Ok(DEFAULT_NODE.to_owned());
+        }
+        return NODE_VERSION_LADDER
+            .iter()
+            .filter_map(|candidate| semver::Version::parse(candidate).ok())
+            .find(|candidate| requirement.matches(candidate))
+            .map(|version| version.to_string())
+            .ok_or_else(|| IntentError::UnsupportedNode {
+                requested: raw.to_owned(),
+            });
+    }
+    Ok(DEFAULT_NODE.to_owned())
+}
+
+/// What the source says about building itself, when it says it unambiguously.
+///
+/// `None` is "this is a source-static site", never "build it anyway and hope".
+/// Every refusal below is deliberate: the alternative to a clear answer is a
+/// wrong artifact that reports success.
+///
+/// Note what is NOT consulted: whether a `dist/` exists. Fixture B ships a
+/// checked-in `dist/` that is a DIFFERENT VERSION of the app from its source,
+/// so "the output directory is already here" is evidence of nothing.
+fn detect_static_build(
+    evidence: &DetectorEvidence,
+) -> Result<Option<StaticBuildProfileV1>, IntentError> {
+    let Some(node) = evidence.node.as_ref() else {
+        return Ok(None);
+    };
+    let (Some(build), Some(preview)) = (
+        node.script_build.as_deref().and_then(plain_task_argv),
+        node.script_preview.as_deref().and_then(plain_task_argv),
+    ) else {
+        return Ok(None);
+    };
+    // The same gate the existing path used: `vite build` + `vite preview`, both
+    // plain. A compound build script is a program, and this is not its
+    // interpreter.
+    if !tail_is(&build, ["vite", "build"]) || !tail_is(&preview, ["vite", "preview"]) {
+        return Ok(None);
+    }
+    if node
+        .dependency_names
+        .iter()
+        .any(|name| SERVER_FRAMEWORKS.contains(&name.as_str()))
+    {
+        return Ok(None);
+    }
+    let output_root = match &node.vite_out_dir {
+        ViteOutDir::Unset => "dist".to_owned(),
+        ViteOutDir::Literal(literal) => literal.trim_matches('/').to_owned(),
+        // An override that exists but cannot be read is the one case where
+        // guessing is worst: `dist` would be published while the build wrote
+        // somewhere else, and the artifact would be stale-or-empty rather than
+        // wrong-and-obvious.
+        ViteOutDir::Unreadable => {
+            return Err(IntentError::RequiresAuthoring {
+                field: "static.output_root",
+                why: "vite.config declares a build.outDir this reader cannot resolve to a \
+                      literal; declare the output root rather than have one guessed",
+            });
+        }
+    };
+    Ok(Some(StaticBuildProfileV1 {
+        package_manager: resolve_package_manager(node)?,
+        node_version: resolve_node_version(node)?,
+        // The SCRIPT name, not the command. `<pm> run build` is what the
+        // existing path ran, and running the script keeps the package's own
+        // definition authoritative.
+        build_script: "build".to_owned(),
+        output_root,
+        // Weakest honest statement: only a lockfile pins a graph.
+        lockfile_pinned: node.has_package_lock
+            || node.has_npm_shrinkwrap
+            || node.has_pnpm_lock
+            || node.has_yarn_lock
+            || node.has_bun_lock,
+    }))
+}
+
 fn compile_static(
     evidence: &DetectorEvidence,
     overrides: &AuthoredOverrides,
     origins: &mut FieldOrigins,
 ) -> Result<ProgramIntentV1, IntentError> {
+    // Is the site generated, or is it the source tree?
+    //
+    // Decided from the source's own declarations, before anything looks at
+    // which directories exist. `static.build` overrides it — an author saying
+    // "this needs no build" or "this does" outranks inference — and
+    // `"required"` with nothing to infer from is a refusal, not a guess.
+    let detected_build = detect_static_build(evidence)?;
+    let static_build = match overrides.get("static.build").map(str::trim) {
+        Some("none") => {
+            origins.insert("static.build".to_owned(), FieldOrigin::Authored);
+            None
+        }
+        Some("required") => {
+            origins.insert("static.build".to_owned(), FieldOrigin::Authored);
+            Some(detected_build.ok_or(IntentError::RequiresAuthoring {
+                field: "static.build",
+                why: "`static.build = required` was declared, but this source declares no                       build this profile can reproduce: a package.json with plain                       `vite build` and `vite preview` scripts is what it reads",
+            })?)
+        }
+        Some(other) => {
+            return Err(IntentError::Malformed {
+                field: "static.build",
+                detail: format!("expected `required` or `none`, got {other:?}"),
+            });
+        }
+        None => {
+            if detected_build.is_some() {
+                origins.insert("static.build".to_owned(), FieldOrigin::DetectedFromSource);
+            }
+            detected_build
+        }
+    };
+
     // A `dist/` that happens to exist does NOT select the Static lane's output.
     // A repository can carry a checked-in build directory, a vendored example
     // or a stale artifact, and publishing one because it looked like an output
     // is how the wrong bytes get served.
+    //
+    // A built-static site answers this differently: its output root is where
+    // the BUILD writes, taken from the same declaration that established there
+    // is a build at all — still never from a directory that merely exists.
     let output_root = match overrides.get("static.output_root") {
         Some(declared) => {
             origins.insert("static.output_root".to_owned(), FieldOrigin::Authored);
             declared.trim_matches('/').to_owned()
+        }
+        None if static_build.is_some() => {
+            origins.insert(
+                "static.output_root".to_owned(),
+                FieldOrigin::DetectedFromSource,
+            );
+            static_build
+                .as_ref()
+                .expect("just matched Some")
+                .output_root
+                .clone()
         }
         None => {
             let has_root_html = evidence
@@ -325,11 +677,30 @@ fn compile_static(
         }
     };
 
+    // Node lands in `runtime` for a BUILT static site, exactly as Python does
+    // for a process — a toolchain the build provisions. It is not a runtime the
+    // Compute runs on: this intent has no argv, no port and no state, and a
+    // browser evaluates what it produces.
+    let mut runtime = BTreeMap::new();
+    if let Some(build) = static_build.as_ref() {
+        runtime.insert("node".to_owned(), build.node_version.clone());
+    }
+    let dependencies = match static_build.as_ref() {
+        None => DependencyPlan::None,
+        Some(build) if build.lockfile_pinned => DependencyPlan::UvFrozen,
+        Some(_) => DependencyPlan::PipRequirements {
+            // No lockfile: the package manager resolves the graph at build
+            // time, so two builds of this same pinned commit can differ. Said
+            // plainly rather than implied.
+            reproducibility: "unpinned-package-manager-resolution".to_owned(),
+        },
+    };
+
     Ok(ProgramIntentV1 {
         schema: PROGRAM_INTENT_V1_SCHEMA.to_owned(),
         lane: Lane::StaticWeb,
-        runtime: BTreeMap::new(),
-        dependencies: DependencyPlan::None,
+        runtime,
+        dependencies,
         // A Static Compute is evaluated by the browser. It has no process, so
         // it has no argv, and inventing one would imply a Runner it must not
         // need.
@@ -342,6 +713,7 @@ fn compile_static(
         static_output_root: Some(output_root),
         static_entry_path: Some(entry_path),
         static_spa_fallback: spa_fallback,
+        static_build,
     })
 }
 
@@ -351,13 +723,52 @@ fn compile_python(
     workspace_guest_root: &str,
     origins: &mut FieldOrigins,
 ) -> Result<ProgramIntentV1, IntentError> {
-    let python = evidence
-        .python
-        .as_ref()
-        .ok_or_else(|| IntentError::NoLane {
-            detail: "the Python lane was selected but the source carries no Python marker"
-                .to_owned(),
-        })?;
+    // A Python program need not declare dependencies.
+    //
+    // `ato-e2e-compute-server@4f442f1` is one: a stdlib-only `server.py` with
+    // no `requirements.txt`, no `pyproject.toml` and no `.python-version`. The
+    // existing path formed it from an authored capsule.toml, and B1-S measured
+    // that Formation refused it — not for want of authoring, which was
+    // present, but for want of a DEPENDENCY marker. Those are different
+    // things, and requiring the second is a rule that says every Python app
+    // must have dependencies.
+    //
+    // Only the AUTHORED lane gets this. `choose_lane` is untouched, so a
+    // static repository carrying a stray `build.py` is still a static
+    // repository — auto-detection keeps needing a marker, and nothing here
+    // makes a Python lane the answer to a question nobody asked.
+    let marker_less;
+    let python = match evidence.python.as_ref() {
+        Some(python) => python,
+        None => {
+            if origins.get("lane") != Some(&FieldOrigin::Authored) {
+                return Err(IntentError::NoLane {
+                    detail: "the Python lane was selected but the source carries no Python marker"
+                        .to_owned(),
+                });
+            }
+            let modules: Vec<String> = evidence
+                .present_files
+                .iter()
+                .filter(|name| name.ends_with(".py"))
+                .cloned()
+                .collect();
+            if modules.is_empty() {
+                return Err(IntentError::NoLane {
+                    detail: "the Python lane was authored, but the source root holds no Python                              module and no dependency marker — there is nothing here to run"
+                        .to_owned(),
+                });
+            }
+            // Everything else stays absent, which is the accurate reading:
+            // no lockfile, no requirements, no declared version. The runtime
+            // falls to the policy default and dependencies resolve to None.
+            marker_less = PythonEvidence {
+                top_level_modules: modules,
+                ..PythonEvidence::default()
+            };
+            &marker_less
+        }
+    };
 
     // ── runtime ─────────────────────────────────────────────────────────────
     // Priority is fixed and stated: authored, then .python-version, then
@@ -477,6 +888,8 @@ fn compile_python(
         static_output_root: None,
         static_entry_path: None,
         static_spa_fallback: false,
+        // A Python process is never a built static site.
+        static_build: None,
         // `workspace_guest_root` shapes the build plan, not the intent: the
         // intent says WHAT to run, the plan says where. It is still checked
         // here, because an argv that cannot resolve under it is not a launch.
@@ -636,6 +1049,32 @@ pub fn compile_build_plan(
         .map(|version| format!("{}/bin/python3", python_home(version)));
 
     let mut steps = Vec::new();
+
+    // The Static build toolchain, provisioned exactly like the Python one and
+    // for exactly the same reason: the host's `node` is whatever the host
+    // happens to have, and which Node built an artifact must be a property of
+    // the source. `node` and `npm` both live under `{home}/bin`.
+    if let (Some(build), Lane::StaticWeb) = (intent.static_build.as_ref(), intent.lane) {
+        let home = node_home(&build.node_version);
+        steps.push(BuildStepV1 {
+            name: "provision-node".to_owned(),
+            argv: vec![
+                "/bin/sh".to_owned(),
+                "-euc".to_owned(),
+                format!(
+                    "if [ ! -x {home}/bin/node ]; then mkdir -p {home} && \
+                     curl -fsSL '{url}' | tar -xz --strip-components=1 -C {home}; fi; \
+                     {home}/bin/node -v",
+                    url = node_download_url(
+                        &build.node_version,
+                        node_triple(target_triple)
+                    ),
+                ),
+            ],
+            needs_network: true,
+        });
+    }
+
     if let (Some(version), Lane::PythonProcess) = (python.as_deref(), intent.lane) {
         let home = python_home(version);
         steps.push(BuildStepV1 {
@@ -657,7 +1096,63 @@ pub fn compile_build_plan(
     }
 
     match (&intent.lane, &intent.dependencies) {
-        (Lane::StaticWeb, _) => {}
+        (Lane::StaticWeb, _) => {
+            if let Some(build) = intent.static_build.as_ref() {
+                let home = node_home(&build.node_version);
+                let manager = build.package_manager;
+                // Every command runs through the provisioned toolchain's own
+                // bin directory. Prepending it to PATH rather than calling an
+                // absolute path is deliberate: `npm` re-invokes `node`, and a
+                // build whose PATH still found the host's would provision one
+                // Node and build with another.
+                let with_toolchain = |command: String| -> Vec<String> {
+                    vec![
+                        "/bin/sh".to_owned(),
+                        "-euc".to_owned(),
+                        format!("export PATH={home}/bin:$PATH; cd {root}; {command}"),
+                    ]
+                };
+
+                // Install, in the most reproducible mode the lockfile allows.
+                // `npm ci` REQUIRES a lock and deletes node_modules first; with
+                // no lock it cannot run at all, so `npm install` is the honest
+                // command and the intent already recorded that the graph is
+                // unpinned.
+                let install = match (manager, build.lockfile_pinned) {
+                    (PackageManager::Npm, true) => "npm ci".to_owned(),
+                    (PackageManager::Npm, false) => "npm install".to_owned(),
+                    (PackageManager::Pnpm, _) => {
+                        "corepack enable && pnpm install --frozen-lockfile".to_owned()
+                    }
+                    (PackageManager::Yarn, _) => {
+                        "corepack enable && yarn install --frozen-lockfile".to_owned()
+                    }
+                    (PackageManager::Bun, _) => "bun install --frozen-lockfile".to_owned(),
+                };
+                steps.push(BuildStepV1 {
+                    name: "install-node-dependencies".to_owned(),
+                    argv: with_toolchain(install),
+                    needs_network: true,
+                });
+
+                // Run the package's OWN build script. Reconstructing the
+                // command from the script's text would make this the authority
+                // on what the build is; running the script keeps the package
+                // the authority.
+                steps.push(BuildStepV1 {
+                    name: "static-build".to_owned(),
+                    argv: with_toolchain(format!(
+                        "{} run {}",
+                        manager.program(),
+                        build.build_script
+                    )),
+                    // The build itself resolves nothing from the network. A
+                    // build that reached out here would be fetching something
+                    // the install step did not pin.
+                    needs_network: false,
+                });
+            }
+        }
         (Lane::PythonProcess, DependencyPlan::UvFrozen) => {
             steps.push(BuildStepV1 {
                 name: "uv-sync".to_owned(),

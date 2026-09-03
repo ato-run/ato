@@ -274,6 +274,27 @@ fn build_environment(network: NetworkPolicy) -> Vec<(String, String)> {
         // Never prompt: a build that blocks on input is a build that burns its
         // whole timeout and reports nothing useful.
         env.push(("PIP_NO_INPUT".to_owned(), "1".to_owned()));
+        // npm and its friends default their caches to `$HOME`, which here IS
+        // the workspace — so an install would write `.npm/` into the tree that
+        // becomes the artifact. Point them at the cache mount instead.
+        env.push((
+            "npm_config_cache".to_owned(),
+            format!("{GUEST_CACHE_ROOT}/npm"),
+        ));
+        env.push((
+            "COREPACK_HOME".to_owned(),
+            format!("{GUEST_CACHE_ROOT}/corepack"),
+        ));
+        // Corepack must not stop to ask whether it may download a package
+        // manager, and must not refuse a `packageManager` pin it cannot match
+        // byte-for-byte; both turn an install into a hung or failed build.
+        env.push(("COREPACK_ENABLE_DOWNLOAD_PROMPT".to_owned(), "0".to_owned()));
+        env.push(("COREPACK_ENABLE_STRICT".to_owned(), "0".to_owned()));
+        // No interactive prompts, no funding/audit chatter that can fail a
+        // build on a network hiccup unrelated to the dependency graph.
+        env.push(("NPM_CONFIG_FUND".to_owned(), "false".to_owned()));
+        env.push(("NPM_CONFIG_AUDIT".to_owned(), "false".to_owned()));
+        env.push(("CI".to_owned(), "1".to_owned()));
     }
     env
 }
