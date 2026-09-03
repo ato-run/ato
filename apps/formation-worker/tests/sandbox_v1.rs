@@ -273,3 +273,56 @@ fn worker_binary() -> String {
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| "/nonexistent".to_owned())
 }
+
+#[test]
+fn the_landlock_policy_covers_every_path_the_binds_provide() {
+    if !containment_available() {
+        eprintln!("skipping: bwrap is unavailable");
+        return;
+    }
+    // The two lists describe the same world and have drifted twice. Each time
+    // the symptom was "Permission denied" on a path the mount namespace had
+    // demonstrably provided — the least useful shape a sandbox error can take.
+    let (_root, source, workspace) = dirs();
+    let built =
+        command(&["true"], &source, &workspace, None, NetworkPolicy::Denied).expect("command");
+    let argv = built.argv.join(" ");
+    let policy = &built.policy;
+
+    let readable: Vec<String> = policy
+        .read_only_paths
+        .iter()
+        .chain(policy.read_write_paths.iter())
+        .map(|path| path.display().to_string())
+        .collect();
+
+    for required in ["/bin", "/sbin", "/usr", "/lib", "/lib64"] {
+        assert!(
+            argv.contains(&format!("--ro-bind-try {required} {required}")),
+            "{required} is not bound"
+        );
+        assert!(
+            readable.iter().any(|path| path == required),
+            "{required} is bound but Landlock would deny it"
+        );
+    }
+    // Supplied by --proc and --dev rather than a bind, so absent from the bind
+    // list and required in the policy anyway.
+    for supplied in ["/dev", "/proc"] {
+        assert!(
+            readable.iter().any(|path| path == supplied),
+            "{supplied} is provided by bwrap but Landlock would deny it"
+        );
+    }
+    // Writable exactly where output may appear.
+    let writable: Vec<String> = policy
+        .read_write_paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
+    assert!(writable.iter().any(|path| path == "/app"));
+    assert!(
+        !writable.iter().any(|path| path == "/src"),
+        "the source must never be writable"
+    );
+}
