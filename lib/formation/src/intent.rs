@@ -60,10 +60,15 @@ pub fn python_home(version: &str) -> String {
 }
 
 /// Where python-build-standalone publishes a relocatable build.
+///
+/// The `+` in the asset name is percent-encoded. GitHub serves the release
+/// asset under `%2B`, and a literal `+` in the path returns an HTML error page
+/// that `tar` then fails to read — which is what the acceptance saw first, as
+/// "gzip: unexpected end of file".
 pub fn python_download_url(version: &str, triple: &str) -> String {
     format!(
         "https://github.com/astral-sh/python-build-standalone/releases/download/\
-{PYTHON_BUILD_TAG}/cpython-{version}+{PYTHON_BUILD_TAG}-{triple}-install_only.tar.gz"
+{PYTHON_BUILD_TAG}/cpython-{version}%2B{PYTHON_BUILD_TAG}-{triple}-install_only.tar.gz"
     )
 }
 
