@@ -130,7 +130,16 @@ impl FormationApi {
                 self.base
             ))
             .bearer_auth(&self.token)
-            .json(&serde_json::json!({ "key": key, "upload_id": upload_id, "parts": parts }))
+            // The digest travels with the completion because the control
+            // plane cannot buffer a workspace-sized object to compute it. The
+            // Runner recomputes it on download and refuses a mismatch, so a
+            // wrong value yields an artifact nothing will run.
+            .json(&serde_json::json!({
+                "key": key,
+                "upload_id": upload_id,
+                "digest": digest_of(bytes),
+                "parts": parts,
+            }))
             .send()?
             .error_for_status()
             .context("failed to complete the multipart publication")?
@@ -182,6 +191,11 @@ impl FormationApi {
                 .to_owned(),
         })
     }
+}
+
+fn digest_of(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
 #[derive(Debug, PartialEq, Eq)]
