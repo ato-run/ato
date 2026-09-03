@@ -653,25 +653,36 @@ pub fn compile_build_plan(
             });
         }
         (Lane::PythonProcess, DependencyPlan::PipRequirements { .. }) => {
+            let home = python.as_deref().map(python_home).unwrap_or_default();
             steps.push(BuildStepV1 {
                 name: "create-venv".to_owned(),
-                // NOT `--copies`, and the reason is measured. A
-                // python-build-standalone `install_only` build links against a
-                // shared `libpython3.12.so`, and `--copies` copies only the
-                // executable — the copy then dies with "cannot open shared
-                // object file" the moment anything runs it.
+                // The workspace must be SELF-CONTAINED, and neither of the two
+                // obvious venv shapes is, on its own:
                 //
-                // A symlinked venv is correct here BECAUSE the toolchain lives
-                // at a deterministic absolute path that is the same during the
-                // build and at runtime. That is the whole reason
-                // TOOLCHAIN_ROOT is fixed rather than temporary, and it is why
-                // `runtime_requirements` carries the interpreter version: the
-                // Runner must provision the same one before it launches.
+                // - a symlinked venv points at the toolchain, and the artifact
+                //   format cannot carry symlinks (a link is a way out of the
+                //   tree, so the packer refuses them);
+                // - `--copies` copies `bin/python3` and not the shared
+                //   `libpython3.12.so` a python-build-standalone install_only
+                //   build links against, so the copy dies with "cannot open
+                //   shared object file".
+                //
+                // Both were observed on the acceptance host, the second one
+                // through a Runner that had already materialized the workspace.
+                // So: copy the executable AND vendor the runtime library beside
+                // it, which is where the loader already looks
+                // (`bin/../lib/`). The artifact then depends on nothing the
+                // host happens to have.
                 argv: vec![
-                    interpreter.clone().unwrap_or_else(|| "python3".to_owned()),
-                    "-m".to_owned(),
-                    "venv".to_owned(),
-                    format!("{root}/.venv"),
+                    "/bin/sh".to_owned(),
+                    "-euc".to_owned(),
+                    format!(
+                        "{interp} -m venv --copies {root}/.venv && \
+                         mkdir -p {root}/.venv/lib && \
+                         cp -a {home}/lib/libpython*.so* {root}/.venv/lib/ && \
+                         {root}/.venv/bin/python -V",
+                        interp = interpreter.clone().unwrap_or_else(|| "python3".to_owned()),
+                    ),
                 ],
                 needs_network: false,
             });
