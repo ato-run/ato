@@ -94,6 +94,9 @@ pub fn process_spec_for(
         .context("resolved cwd escaped the workspace after resolution")?
         .to_path_buf();
 
+    // Host-path form, used only where there is no sandbox to give the
+    // attachment a guest path. `guest_environment` overrides both of these for
+    // a real launch.
     let mut environment = context.environment_for_spawn();
     for attachment in context.state_attachments() {
         environment.insert(
@@ -103,6 +106,12 @@ pub fn process_spec_for(
                 .to_str()
                 .context("state working copy path is not valid UTF-8")?
                 .to_owned(),
+        );
+    }
+    for endpoint in context.endpoints() {
+        environment.insert(
+            super::sandbox::endpoint_port_env_name(&endpoint.name),
+            endpoint.host_port.to_string(),
         );
     }
 
