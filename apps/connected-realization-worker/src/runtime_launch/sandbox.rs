@@ -234,6 +234,38 @@ pub fn sandboxed_command(
     })
 }
 
+/// The variable naming the host port the Runner actually allocated for an
+/// endpoint.
+///
+/// **Process realization ABI.** A process realization shares the host network
+/// namespace, so there is no guest->host NAT to translate a fixed guest port:
+/// the port the workload binds IS a real host port, and only the Runner knows
+/// which one was free. A workload that hardcoded 8000 would collide with the
+/// next tenant, so the spec's endpoint name is lowered to a variable instead:
+///
+/// ```text
+/// endpoint "http"  ->  Runner allocates a free host port
+///                  ->  ATO_ENDPOINT_HTTP_PORT=<that port>
+///                  ->  workload binds it; readiness probes the same port
+/// ```
+///
+/// This is ABI, not wire schema — an OCI realization has real port mapping and
+/// will not need it. B1 can adapt an OSS project that expects `PORT` at
+/// Formation time rather than teaching the Runner about it.
+pub fn endpoint_port_env_name(endpoint_name: &str) -> String {
+    format!(
+        "ATO_ENDPOINT_{}_PORT",
+        endpoint_name
+            .chars()
+            .map(|character| if character.is_ascii_alphanumeric() {
+                character.to_ascii_uppercase()
+            } else {
+                '_'
+            })
+            .collect::<String>()
+    )
+}
+
 /// Environment the workload sees, in GUEST terms.
 ///
 /// The resolved context's state paths are HOST paths; inside the sandbox the
@@ -246,6 +278,12 @@ pub fn guest_environment(context: &ResolvedRuntimeLaunchContext) -> BTreeMap<Str
         environment.insert(
             super::process_executor::state_path_env_name(attachment.state_key()),
             attachment.guest_target().to_owned(),
+        );
+    }
+    for endpoint in context.endpoints() {
+        environment.insert(
+            endpoint_port_env_name(&endpoint.name),
+            endpoint.host_port.to_string(),
         );
     }
     environment
