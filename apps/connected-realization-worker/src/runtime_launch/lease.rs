@@ -120,11 +120,18 @@ pub struct ResolvedRun {
 }
 
 /// Materialize the workspace and the state, and resolve the launch.
+/// `assigned_ports` names the host port an endpoint MUST bind, by endpoint name.
+///
+/// The Runner still owns port selection — this is the Runner telling itself
+/// which of its own ingress slots this endpoint is being published on, not the
+/// control plane picking a port it cannot know is free. An endpoint with no
+/// assignment keeps the ephemeral allocation below.
 pub fn resolve_run(
     spec: &RuntimeLaunchSpecV1,
     lease_root: &Path,
     workspace: &dyn WorkspaceTransport,
     state: &dyn StateArtifactTransport,
+    assigned_ports: &BTreeMap<String, u16>,
 ) -> Result<ResolvedRun> {
     let workspace_root =
         materialize_workspace(workspace, &spec.workspace.materialization_ref, lease_root)?;
@@ -132,7 +139,14 @@ pub fn resolve_run(
     let mut endpoint_ports = BTreeMap::new();
     let mut endpoints = Vec::new();
     for endpoint in &spec.endpoints {
-        let port = allocate_host_port()?;
+        let port = match assigned_ports.get(&endpoint.name) {
+            // A slot port is bound because that is where the ingress already
+            // sends traffic. If it is taken, failing here is right: binding
+            // somewhere else would produce a Run nothing can reach while
+            // reporting a URL that says otherwise.
+            Some(assigned) => *assigned,
+            None => allocate_host_port()?,
+        };
         endpoint_ports.insert(endpoint.name.clone(), port);
         endpoints.push(allocate_endpoint(endpoint, port));
     }
