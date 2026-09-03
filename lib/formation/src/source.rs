@@ -370,14 +370,16 @@ fn common_prefix(paths: &[PathBuf]) -> Option<String> {
     if paths.len() < 2 {
         return None;
     }
-    paths
-        .iter()
-        .all(|path| {
-            matches!(path.components().next(), Some(Component::Normal(part))
-                if part.to_str() == Some(candidate.as_str()))
-                && path.components().count() > 1
-        })
-        .then_some(candidate)
+    let shares_prefix = |path: &PathBuf| {
+        matches!(path.components().next(), Some(Component::Normal(part))
+            if part.to_str() == Some(candidate.as_str()))
+    };
+    // The wrapper's OWN entry is one component deep — a tarball lists the
+    // directory as well as its contents — so requiring every path to be deeper
+    // than one would reject exactly the archive this is meant to unwrap.
+    let all_share = paths.iter().all(shares_prefix);
+    let has_contents = paths.iter().any(|path| path.components().count() > 1);
+    (all_share && has_contents).then_some(candidate)
 }
 
 fn strip_prefix(relative: &Path, prefix: Option<&str>) -> PathBuf {
@@ -957,6 +959,67 @@ mod tests {
             measure_source_tree(&plain, LIMITS).unwrap(),
             measure_source_tree(&compressed, LIMITS).unwrap()
         );
+    }
+
+    /// Like `archive`, but also lists the wrapper directory itself — which a
+    /// real tarball does, and which is what made the first fix miss.
+    fn wrapped_archive(prefix: &str, entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut bytes);
+            let mut header = tar::Header::new_ustar();
+            header.set_size(0);
+            header.set_mode(0o755);
+            header.set_mtime(0);
+            header.set_entry_type(tar::EntryType::Directory);
+            builder
+                .append_data(&mut header, format!("{prefix}/"), std::io::empty())
+                .expect("append");
+            for (name, contents) in entries {
+                let mut header = tar::Header::new_ustar();
+                header.set_size(contents.len() as u64);
+                header.set_mode(0o644);
+                header.set_mtime(0);
+                header.set_entry_type(tar::EntryType::Regular);
+                builder
+                    .append_data(
+                        &mut header,
+                        format!("{prefix}/{name}"),
+                        Cursor::new(*contents),
+                    )
+                    .expect("append");
+            }
+            builder.finish().expect("finish");
+        }
+        bytes
+    }
+
+    #[test]
+    fn a_wrapper_listed_as_its_own_entry_is_still_stripped() {
+        // A real tarball lists `<repo>-<sha>/` as a directory entry alongside
+        // its contents. Requiring every path to be deeper than one component
+        // rejected exactly the archive this exists to unwrap — which is how the
+        // worker ended up detecting an empty source.
+        let bare = archive(&[("app.py", b"print(1)\n"), ("README", b"hi\n")], 0);
+        let wrapped = wrapped_archive(
+            "fixture-922b112",
+            &[("app.py", b"print(1)\n"), ("README", b"hi\n")],
+        );
+        assert_eq!(
+            measure_source_tree(&bare, LIMITS).unwrap(),
+            measure_source_tree(&wrapped, LIMITS).unwrap()
+        );
+
+        let digest = content_ref(&wrapped);
+        let verified = DownloadedArchive::new(wrapped)
+            .verify_archive_digest(&digest)
+            .unwrap()
+            .verify_tree_digest(None, LIMITS)
+            .unwrap();
+        let staging = tempfile::tempdir().expect("tempdir");
+        let root = verified.materialize(staging.path(), "", LIMITS).unwrap();
+        assert!(root.join("app.py").is_file());
+        assert!(!root.join("fixture-922b112").exists());
     }
 
     #[test]
