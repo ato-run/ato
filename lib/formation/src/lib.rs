@@ -6,4 +6,6 @@
 //! control plane. Keeping the domain pure is what makes a build plan testable
 //! without a build.
 
+pub mod detect;
+pub mod intent;
 pub mod source;
