@@ -43,7 +43,25 @@ pub const TOOLCHAIN_ROOT: &str = "/opt/ato/toolchains";
 const SYSTEM_READ_ONLY: &[&str] = &[
     // `/bin` and `/sbin` are usrmerge symlinks on most modern distributions,
     // and binding only `/usr` leaves them dangling.
-    "/bin", "/sbin", "/lib", "/lib64", "/usr", "/etc",
+    "/bin", "/sbin", "/lib", "/lib64", "/usr",
+];
+
+/// Configuration files a build needs, bound INDIVIDUALLY.
+///
+/// Not `/etc` wholesale, which is measured rather than stylistic: on a
+/// systemd-resolved host `/etc/resolv.conf` is a symlink into `/run`, and
+/// bind-mounting the directory carries the link without its target — DNS then
+/// fails inside the sandbox with "Temporary failure in name resolution" while
+/// `/etc` is demonstrably present. Binding the file lets bwrap resolve it.
+///
+/// Binding less of `/etc` is also simply better: a build has no business
+/// reading the host's user database or its service configuration.
+const SYSTEM_CONFIG_FILES: &[&str] = &[
+    "/etc/resolv.conf",
+    "/etc/hosts",
+    "/etc/ssl",
+    "/etc/ca-certificates",
+    "/etc/pki",
 ];
 
 /// What the build may reach.
@@ -154,7 +172,7 @@ pub fn sandboxed_build_command(
     for flag in ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"] {
         argv.push(flag.to_owned());
     }
-    for path in SYSTEM_READ_ONLY {
+    for path in SYSTEM_READ_ONLY.iter().chain(SYSTEM_CONFIG_FILES) {
         // `--ro-bind-try`: a strict bind against a missing source aborts bwrap
         // before the build runs, and a path that does not exist cannot be
         // exposed, so skipping it weakens nothing.
