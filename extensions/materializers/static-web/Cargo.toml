@@ -1,0 +1,30 @@
+[package]
+name = "ato-materializer-static-web"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MPL-2.0"
+description = "Deterministic immutable Static Web Bundle materialization"
+
+[package.metadata.dist]
+dist = false
+
+[package.metadata.ato-architecture]
+layer = "app"
+
+[dependencies]
+anyhow = "1"
+data-encoding = "2"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+thiserror = "2"
+unicode-normalization = "0.1"
+url = "2"
+
+[dev-dependencies]
+# Dev-only: pins the State lane's on-the-wire format to the Browser
+# Materializer that owns it. arch-check ignores dev edges, and no shipped
+# artifact links this crate.
+ato-materializer-browser = { path = "../browser", version = "0.1.0" }

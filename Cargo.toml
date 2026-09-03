@@ -26,6 +26,7 @@ members = [
     "extensions/materializers/snapshot",
     "extensions/materializers/snapshot/guest-agent",
     "extensions/materializers/api",
+    "extensions/materializers/static-web",
     "extensions/materializers/replay",
     "extensions/materializers/vm-snapshot",
     "extensions/materializers/browser",
