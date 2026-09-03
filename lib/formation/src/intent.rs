@@ -444,6 +444,21 @@ fn compile_python(
             origins.insert(format!("env.{name}"), FieldOrigin::Authored);
         }
     }
+    // Where the workspace's installed dependencies are. The interpreter comes
+    // from the provisioned toolchain and knows nothing about this workspace, so
+    // it is told rather than expected to guess.
+    let minor = resolved
+        .rsplit_once('.')
+        .map(|(head, _)| head)
+        .unwrap_or(resolved.as_str());
+    public_env.insert(
+        "PYTHONPATH".to_owned(),
+        format!(
+            "{}/.venv/lib/python{minor}/site-packages",
+            workspace_guest_root.trim_end_matches('/')
+        ),
+    );
+    origins.insert("env.PYTHONPATH".to_owned(), FieldOrigin::PolicyDefault);
 
     let mut runtime = BTreeMap::new();
     runtime.insert("python".to_owned(), resolved);
@@ -479,6 +494,10 @@ impl ProgramIntentV1 {
         if let Some(program) = self.launch_argv.first()
             && program.starts_with('/')
             && !program.starts_with(&format!("{}/", workspace_guest_root.trim_end_matches('/')))
+            // A launch may name the PROVISIONED interpreter, which lives
+            // outside the workspace on purpose: it is a runtime requirement
+            // shared across every app on the host, not part of any one of them.
+            && !program.starts_with(&format!("{TOOLCHAIN_ROOT}/"))
         {
             return Err(IntentError::Malformed {
                 field: "launch.argv",
@@ -658,76 +677,58 @@ pub fn compile_build_plan(
             });
         }
         (Lane::PythonProcess, DependencyPlan::PipRequirements { .. }) => {
-            let home = python.as_deref().map(python_home).unwrap_or_default();
+            // Dependencies only. The INTERPRETER is a runtime requirement,
+            // not part of the app, and vendoring it was a mistake with a long
+            // tail: it took the artifact past the control plane's 100 MB
+            // request cap and past a Worker's memory, which then needed a
+            // multipart upload and a streaming download to work around — all
+            // of it caused by putting a shared, reusable runtime inside a
+            // per-app artifact.
+            //
+            // `runtime_requirements` already says which interpreter this needs
+            // and the Runner already provisions it at a fixed path, shared
+            // across every app on the host. `--without-pip` because pip is a
+            // build-time tool, and `python -m venv` only to get a
+            // site-packages layout the launch can point at; nothing from the
+            // venv's `bin/` survives into the artifact.
             steps.push(BuildStepV1 {
-                name: "create-venv".to_owned(),
-                // The workspace must be SELF-CONTAINED, and neither of the two
-                // obvious venv shapes is, on its own:
-                //
-                // - a symlinked venv points at the toolchain, and the artifact
-                //   format cannot carry symlinks (a link is a way out of the
-                //   tree, so the packer refuses them);
-                // - `--copies` copies `bin/python3` and not the shared
-                //   `libpython3.12.so` a python-build-standalone install_only
-                //   build links against, so the copy dies with "cannot open
-                //   shared object file".
-                //
-                // Both were observed on the acceptance host, the second one
-                // through a Runner that had already materialized the workspace.
-                // So: copy the executable AND vendor the runtime library beside
-                // it, which is where the loader already looks
-                // (`bin/../lib/`). The artifact then depends on nothing the
-                // host happens to have.
-                //
-                // `cp -L`, not `-a`: the toolchain ships `libpython3.12.so` as
-                // a link to `.so.1.0`, and preserving it would put a symlink in
-                // a tree the artifact format refuses to carry.
-                //
-                // `venv` makes its own links too — `lib64 -> lib` on a 64-bit
-                // host. The first attempt replaced every link with a COPY of
-                // its target, which turned `lib64` into a duplicate of the
-                // whole `lib` tree and took the artifact from 112 MB to 198 MB.
-                // `lib64` only exists to point at `lib`, so it is removed
-                // rather than materialized.
-                //
-                // pip goes with it: it is a build-time tool, and 13 MB of
-                // installer that every instance downloads and no Run executes
-                // is 13 MB nobody asked for.
-                //
-                // Whatever links remain are deleted, not followed. They were
-                // found by the pack REFUSING them, which is the format working:
-                // a link that survived into an artifact would resolve against
-                // whatever the Runner happened to have, rather than against
-                // what the build produced.
+                name: "create-site-packages".to_owned(),
                 argv: vec![
                     "/bin/sh".to_owned(),
                     "-euc".to_owned(),
-                    // `--without-pip` first, and the ORDER matters: `venv`
-                    // bootstraps pip by running the copied interpreter, which
-                    // cannot start until libpython sits beside it. Creating the
-                    // venv complete would fail before the copy ever happened.
                     format!(
-                        "{interp} -m venv --copies --without-pip {root}/.venv && \
-                         mkdir -p {root}/.venv/lib && \
-                         cp -L {home}/lib/libpython*.so* {root}/.venv/lib/ && \
-                         {root}/.venv/bin/python -m ensurepip --upgrade --default-pip && \
-                         rm -rf {root}/.venv/lib64 && \
-                         {root}/.venv/bin/python -m pip uninstall -y -q pip setuptools || true && \
-                         find {root}/.venv -depth -type l -delete && \
-                         {root}/.venv/bin/python -V",
+                        "{interp} -m venv --without-pip {root}/.venv && \
+                         rm -rf {root}/.venv/bin {root}/.venv/lib64 {root}/.venv/pyvenv.cfg",
                         interp = interpreter.clone().unwrap_or_else(|| "python3".to_owned()),
                     ),
                 ],
                 needs_network: false,
             });
+            let site_packages = python
+                .as_deref()
+                .map(|version| {
+                    let minor = version
+                        .rsplit_once('.')
+                        .map(|(head, _)| head)
+                        .unwrap_or(version);
+                    format!("{root}/.venv/lib/python{minor}/site-packages")
+                })
+                .unwrap_or_else(|| format!("{root}/.venv/lib/site-packages"));
             steps.push(BuildStepV1 {
                 name: "pip-install".to_owned(),
+                // Installed WITH the provisioned interpreter and targeted at
+                // the workspace's site-packages. `--no-compile` because
+                // bytecode is derived, regenerates on first import, and would
+                // otherwise double the artifact for nothing.
                 argv: vec![
-                    format!("{root}/.venv/bin/python"),
+                    interpreter.clone().unwrap_or_else(|| "python3".to_owned()),
                     "-m".to_owned(),
                     "pip".to_owned(),
                     "install".to_owned(),
                     "--no-input".to_owned(),
+                    "--no-compile".to_owned(),
+                    "--target".to_owned(),
+                    site_packages,
                     "-r".to_owned(),
                     format!("{root}/requirements.txt"),
                 ],

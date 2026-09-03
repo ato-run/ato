@@ -330,24 +330,71 @@ fn the_build_plan_pins_what_it_installs() {
 }
 
 #[test]
-fn a_pip_venv_uses_the_provisioned_interpreter() {
+fn the_artifact_carries_dependencies_and_not_the_interpreter() {
     let dir = tree(&[("requirements.txt", "fastapi==0.115.6\n"), ("app.py", "\n")]);
     let intent = compile(dir.path(), &notes_overrides()).0.expect("compiles");
     let plan = compile_build_plan(&intent, "/app", "x86_64-linux-gnu").expect("plans");
+
     assert_eq!(plan.steps[0].name, "provision-python");
-    let venv = &plan.steps[1];
-    let script = venv.argv.join(" ");
-    // Created BY the provisioned interpreter, not by the host's.
-    assert!(script.contains(&format!("{}/bin/python3", python_home("3.12.7"))));
-    // Self-contained: the executable is copied AND the shared libpython is
-    // vendored beside it. A symlinked venv cannot survive the artifact format
-    // (which refuses links), and `--copies` alone leaves the loader without
-    // libpython — both observed, the second through a Runner that had already
-    // materialized the workspace.
-    assert!(script.contains("--copies"));
-    assert!(script.contains("libpython"));
-    assert!(!venv.needs_network, "creating a venv needs no network");
-    assert!(plan.steps[2].needs_network);
+    let layout = plan.steps[1].argv.join(" ");
+    // Nothing from the venv's bin/ survives: the interpreter is a runtime
+    // requirement shared across every app on the host, and vendoring it into a
+    // per-app artifact took the workspace past the control plane's request cap
+    // and past a Worker's memory.
+    assert!(layout.contains("--without-pip"));
+    assert!(layout.contains("rm -rf /app/.venv/bin"));
+
+    let install = &plan.steps[2];
+    // Installed BY the provisioned interpreter, INTO the workspace.
+    assert_eq!(
+        install.argv[0],
+        format!("{}/bin/python3", python_home("3.12.7"))
+    );
+    assert!(install.argv.contains(&"--target".to_owned()));
+    assert!(
+        install.argv.iter().any(|a| a.contains("site-packages")),
+        "dependencies must land in the workspace"
+    );
+    // Bytecode is derived and regenerates on first import; shipping it would
+    // roughly double the artifact for nothing.
+    assert!(install.argv.contains(&"--no-compile".to_owned()));
+    assert!(install.needs_network);
+}
+
+#[test]
+fn the_launch_is_told_where_its_dependencies_are() {
+    let dir = tree(&[("requirements.txt", "fastapi==0.115.6\n"), ("app.py", "\n")]);
+    let intent = compile(dir.path(), &notes_overrides()).0.expect("compiles");
+    // The provisioned interpreter knows nothing about this workspace, so it is
+    // told rather than expected to guess.
+    assert_eq!(
+        intent.public_env.get("PYTHONPATH").map(String::as_str),
+        Some("/app/.venv/lib/python3.12/site-packages")
+    );
+}
+
+#[test]
+fn a_launch_may_name_the_provisioned_interpreter() {
+    let dir = tree(&[("requirements.txt", "fastapi==0.115.6\n"), ("app.py", "\n")]);
+    let mut over = notes_overrides();
+    over.0.insert(
+        "launch.argv".to_owned(),
+        format!("{}/bin/python3 -m uvicorn app:app", python_home("3.12.7")),
+    );
+    // It lives outside the workspace on purpose: it is shared across every app
+    // on the host, not part of any one of them.
+    assert!(compile(dir.path(), &over).0.is_ok());
+
+    // Anything else absolute is still refused — it would not exist inside the
+    // sandbox.
+    over.0.insert(
+        "launch.argv".to_owned(),
+        "/usr/bin/python3 -m app".to_owned(),
+    );
+    assert_eq!(
+        compile(dir.path(), &over).0.unwrap_err().code(),
+        "intent_malformed"
+    );
 }
 
 #[test]
