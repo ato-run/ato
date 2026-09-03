@@ -398,6 +398,7 @@ dependencies = [
  "anyhow",
  "ato-ipc",
  "flate2",
+ "semver",
  "serde",
  "serde_jcs",
  "serde_json",
