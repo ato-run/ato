@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 mod activity_controller;
+pub mod runtime_launch;
 
 use std::collections::BTreeSet;
 use std::fs;
