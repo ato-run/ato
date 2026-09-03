@@ -1,0 +1,26 @@
+[package]
+name = "ato-formation"
+version = "0.1.0"
+edition = "2024"
+description = "Formation domain: source closure, program intent, effective build plan"
+license = "Apache-2.0 OR MPL-2.0"
+repository = "https://github.com/ato-run/ato"
+
+[package.metadata.dist]
+dist = false
+
+[package.metadata.ato-architecture]
+layer = "lib"
+
+[dependencies]
+anyhow = "1"
+ato-ipc = { path = "../ipc", version = "0.1.0" }
+serde = { version = "1", features = ["derive"] }
+serde_jcs = "0.1"
+serde_json = "1"
+sha2 = "0.10"
+tar = "0.4"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
