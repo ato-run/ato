@@ -291,6 +291,53 @@ pub fn terminate_process_tree(pid: u32, process_group: u32) -> Result<(), Proces
     Ok(())
 }
 
+/// SIGKILL the whole process group.
+///
+/// Separate from [`terminate_process_tree`] because the two are different
+/// steps of one lifecycle, not alternatives: a graceful stop asks, and this
+/// one does not. A supervisor that only ever asked would leave a workload
+/// ignoring SIGTERM holding its state directory open forever.
+#[cfg(unix)]
+pub fn force_kill_process_tree(pid: u32, process_group: u32) -> Result<(), ProcessError> {
+    if pid != process_group {
+        return Err(ProcessError::UnownedProcessGroup);
+    }
+    let status = Command::new("kill")
+        .args(["-KILL", "--", &format!("-{process_group}")])
+        .status()?;
+    // A group that has already exited is the outcome this call wanted, so a
+    // non-zero status is not on its own a failure. The caller verifies the
+    // subtree is gone rather than trusting either result.
+    let _ = status;
+    Ok(())
+}
+
+/// Whether any process in the group is still alive.
+///
+/// `kill(-pgid, 0)` performs the permission and existence check without
+/// delivering a signal, which is exactly the "did the subtree actually
+/// disappear" question a supervisor must answer before packing state.
+#[cfg(unix)]
+pub fn process_group_is_alive(process_group: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", "--", &format!("-{process_group}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+pub fn force_kill_process_tree(pid: u32, process_group: u32) -> Result<(), ProcessError> {
+    terminate_process_tree(pid, process_group)
+}
+
+#[cfg(windows)]
+pub fn process_group_is_alive(_process_group: u32) -> bool {
+    false
+}
+
 #[cfg(windows)]
 pub fn terminate_process_tree(pid: u32, process_group: u32) -> Result<(), ProcessError> {
     if pid != process_group {
