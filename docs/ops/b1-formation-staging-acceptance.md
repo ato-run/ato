@@ -114,3 +114,104 @@ pip lane ran. The `uv` lane is compiled and unit-tested, not run on staging.
 ## Production
 
 Unchanged.
+
+## B1-S §1 — Static shadow comparison (fixture C: 2048)
+
+**Verdict: FAIL — 1 unexpected semantic drift, 7 files.**
+
+Same pinned source on both sides:
+`gabrielecirulli/2048@478b6ec346e3787f589e4af751378d06ded4cbbc`, no subdirectory.
+
+| | PRIMARY (existing Static path) | SHADOW (FormationServiceV1) |
+|---|---|---|
+| materialization | `swm_iuxlwt2dqf3kmgcwfw2efj76u2kdq3htvfh4tlrw2q56sgjcp6pq` | `sha256:11a330e4bf1e20fc40fa771b1488e76dba81a33c966c33b8bda726a8391ddea7` |
+| manifest digest | `sha256:fd471ae757708841f084b11d777b6bd1782bac7b78cb1696a736eb5cf46e8ba2` | — |
+| files published | 27 + injected bridge | 20 + injected bridges |
+
+The pinned source tree holds 33 files. The two paths disagree about which of
+them are part of the site.
+
+### Difference 1 — non-servable source files — EXPECTED VERSIONED DIFFERENCE
+
+`.gitignore`, `.jshintrc`, `CONTRIBUTING.md`, `README.md`, `Rakefile`,
+`style/helpers.scss`, `style/main.scss`.
+
+Both paths agree these are repository files, not site files. The existing path
+drops them; Formation initially REFUSED the whole build on the first one it
+could not type. Refusing is not a stricter reading of the same contract — it
+turns every repository-root static Compute from "publishes" into "build error"
+at cutover. Formation now selects, using the producer's own `media_type_for`
+table so selection and production cannot disagree. Resolved; no drift.
+
+No build ran on either side: `style/main.scss` is dropped and the checked-in
+`style/main.css` is published unchanged. The existing Static path is a
+selection over the source tree, not a build.
+
+### Difference 2 — instrumentation — EXPECTED VERSIONED DIFFERENCE
+
+The existing path injects `__ato/replay-bridge-v0.js`. The Formation lane
+injected nothing, because it called `produce_static_web_bundle` directly and
+skipped `extract_static_web_output_*`, which is where the browser-runner and
+instance-state bridges are applied. A site formed that way would have looked
+correct and silently lost its Browser Instance State. Fixed by extracting
+before producing. Resolved; no drift.
+
+### Difference 3 — media-type coverage — UNEXPECTED SEMANTIC DRIFT ⛔
+
+Seven files the live artifact serves are absent from the Formation bundle:
+
+    favicon.ico                                  image/x-icon
+    style/fonts/ClearSans-{Bold,Light,Regular}-webfont.woff   font/woff
+    style/fonts/ClearSans-{Bold,Light,Regular}-webfont.eot    application/vnd.ms-fontobject
+
+`media_type_for` in `ato-materializer-static-web` covers `woff2` but not
+`woff`, and covers neither `ico` nor `eot`. The live manifest names all three
+media types, so the artifact now serving on staging was produced by a table
+WIDER than the canonical materializer's.
+
+This is not an I0 transplant regression: `origin/main`'s table is identical to
+nightly's. The wider table belonged to the legacy Builder daemon. The
+consequence is that **the canonical materializer cannot reproduce a live
+staging artifact** — Formation only inherits that gap by calling it.
+
+Effect on the software's meaning: the favicon disappears and the Clear Sans
+faces lose their `woff`/`eot` sources. The `.svg` face survives, so the page
+renders in a fallback rather than breaking — a degraded site, not a dead one,
+which is precisely the kind of difference a digest comparison alone would have
+called "just a different hash".
+
+**The Static lane does not go primary.** Closing this requires widening the
+canonical table to cover `image/x-icon`, `font/woff` and
+`application/vnd.ms-fontobject`. That changes which byte sequences the
+materializer will admit into an artifact identity, so it is the materializer
+owner's decision, not Formation's, and not one to make silently to get a gate
+to pass.
+
+## B1-S §3 — Shadow side-effect zero — PASS
+
+Measured on staging D1 after the shadow attempt that ran to `Accepted`
+(job `fjob_01M1KNNCG4B2078VWVJXVRW9XP`, attempt `fatt_01M1KP7EK0TQ7103PPEZ0AW2NN`,
+fence 2, materialization
+`sha256:11a330e4bf1e20fc40fa771b1488e76dba81a33c966c33b8bda726a8391ddea7`):
+
+- `formation_results` for the job: **0** — the gateway returned
+  `registered: false`, so no result was ever accepted into the registry.
+- newest `compute_schemas` row on the compute: `12:44:17Z`, 23 minutes BEFORE
+  the shadow attempt. No Compute was published.
+- no ComputeInstance, Run, stable URL, Listing or Post was created. There is no
+  path to one: every downstream object derives from an accepted result, and
+  there is none.
+
+The worker's own line reports the same thing from the other side:
+`outcome=Accepted { compute_schema_id: "" }` — the attempt succeeded and named
+no schema, which is what shadow means.
+
+## B1-S §4 — Shadow failure isolation — PASS
+
+The FIRST shadow attempt on this job failed outright
+(`unsupported static web media type: .gitignore`). Nothing downstream moved:
+`formation_results` stayed at 0, the job remained claimable, and the fence
+advanced to 2 for the retry. The live artifact
+`swm_iuxlwt2dqf3kmgcwfw2efj76u2kdq3htvfh4tlrw2q56sgjcp6pq` was untouched —
+shadow holds no writer position over it and never did. A shadow failure is a
+shadow failure.
