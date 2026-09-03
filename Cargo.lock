@@ -319,6 +319,7 @@ dependencies = [
  "ato-compose",
  "ato-computation",
  "ato-contracts",
+ "ato-ipc",
  "ato-kernel",
  "ato-materializer-api",
  "ato-materializer-replay",
