@@ -313,6 +313,7 @@ dependencies = [
  "anyhow",
  "ato-adapter-api",
  "ato-adapter-browser",
+ "ato-adapter-process",
  "ato-adapter-workspace",
  "ato-browser-host",
  "ato-browser-semantics",
