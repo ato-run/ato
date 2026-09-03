@@ -4,6 +4,7 @@ members = [
     "apps/cli",
     "apps/local-runtime",
     "apps/connected-realization-worker",
+    "apps/formation-worker",
     "apps/firecracker-guest-image",
     "apps/runtime-object-graph",
     "lib/computation",

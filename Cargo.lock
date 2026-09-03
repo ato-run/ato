@@ -401,6 +401,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ato-formation-worker"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ato-formation",
+ "ato-ipc",
+ "ato-sandbox",
+ "clap",
+ "libc",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "ato-host-control"
 version = "0.1.0"
 dependencies = [
