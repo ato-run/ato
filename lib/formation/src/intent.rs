@@ -61,14 +61,19 @@ pub fn python_home(version: &str) -> String {
 
 /// Where python-build-standalone publishes a relocatable build.
 ///
-/// The `+` in the asset name is percent-encoded. GitHub serves the release
-/// asset under `%2B`, and a literal `+` in the path returns an HTML error page
-/// that `tar` then fails to read — which is what the acceptance saw first, as
-/// "gzip: unexpected end of file".
+/// `install_only_stripped`, not `install_only`. The unstripped build ships a
+/// **207 MB** `libpython3.12.so.1.0`, and the workspace vendors that library —
+/// which took the acceptance artifact to 471 MB before anyone noticed. Debug
+/// symbols in a published workspace are pure weight: nothing downstream can
+/// use them, and every instance pays to move them.
+///
+/// The `+` in the asset name is percent-encoded. GitHub serves the asset under
+/// `%2B`, and a literal `+` returns an HTML error page that `tar` then fails to
+/// read — seen first as "gzip: unexpected end of file".
 pub fn python_download_url(version: &str, triple: &str) -> String {
     format!(
         "https://github.com/astral-sh/python-build-standalone/releases/download/\
-{PYTHON_BUILD_TAG}/cpython-{version}%2B{PYTHON_BUILD_TAG}-{triple}-install_only.tar.gz"
+{PYTHON_BUILD_TAG}/cpython-{version}%2B{PYTHON_BUILD_TAG}-{triple}-install_only_stripped.tar.gz"
     )
 }
 
@@ -676,10 +681,15 @@ pub fn compile_build_plan(
                 argv: vec![
                     "/bin/sh".to_owned(),
                     "-euc".to_owned(),
+                    // `--without-pip` first, and the ORDER matters: `venv`
+                    // bootstraps pip by running the copied interpreter, which
+                    // cannot start until libpython sits beside it. Creating the
+                    // venv complete would fail before the copy ever happened.
                     format!(
-                        "{interp} -m venv --copies {root}/.venv && \
+                        "{interp} -m venv --copies --without-pip {root}/.venv && \
                          mkdir -p {root}/.venv/lib && \
                          cp -a {home}/lib/libpython*.so* {root}/.venv/lib/ && \
+                         {root}/.venv/bin/python -m ensurepip --upgrade --default-pip && \
                          {root}/.venv/bin/python -V",
                         interp = interpreter.clone().unwrap_or_else(|| "python3".to_owned()),
                     ),
