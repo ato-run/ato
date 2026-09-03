@@ -330,7 +330,7 @@ fn the_build_plan_pins_what_it_installs() {
 }
 
 #[test]
-fn a_pip_venv_is_built_with_copies() {
+fn a_pip_venv_uses_the_provisioned_interpreter() {
     let dir = tree(&[("requirements.txt", "fastapi==0.115.6\n"), ("app.py", "\n")]);
     let intent = compile(dir.path(), &notes_overrides()).0.expect("compiles");
     let plan = compile_build_plan(&intent, "/app", "x86_64-linux-gnu").expect("plans");
@@ -341,9 +341,12 @@ fn a_pip_venv_is_built_with_copies() {
         venv.argv[0],
         format!("{}/bin/python3", python_home("3.12.7"))
     );
-    // A venv of symlinks points at an interpreter that does not exist once the
-    // workspace moves to a Runner.
-    assert!(venv.argv.contains(&"--copies".to_owned()));
+    // NOT `--copies`: an install_only build links against a shared libpython,
+    // and copying only the executable produces a venv that cannot start. The
+    // symlink resolves because the toolchain path is the same at build time
+    // and at runtime.
+    assert!(!venv.argv.contains(&"--copies".to_owned()));
+    assert!(venv.argv.contains(&"venv".to_owned()));
     assert!(!venv.needs_network, "creating a venv needs no network");
     assert!(plan.steps[2].needs_network);
 }

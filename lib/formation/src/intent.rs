@@ -655,13 +655,22 @@ pub fn compile_build_plan(
         (Lane::PythonProcess, DependencyPlan::PipRequirements { .. }) => {
             steps.push(BuildStepV1 {
                 name: "create-venv".to_owned(),
-                // `--copies`: a venv of symlinks points at an interpreter that
-                // does not exist once the workspace moves to a Runner.
+                // NOT `--copies`, and the reason is measured. A
+                // python-build-standalone `install_only` build links against a
+                // shared `libpython3.12.so`, and `--copies` copies only the
+                // executable — the copy then dies with "cannot open shared
+                // object file" the moment anything runs it.
+                //
+                // A symlinked venv is correct here BECAUSE the toolchain lives
+                // at a deterministic absolute path that is the same during the
+                // build and at runtime. That is the whole reason
+                // TOOLCHAIN_ROOT is fixed rather than temporary, and it is why
+                // `runtime_requirements` carries the interpreter version: the
+                // Runner must provision the same one before it launches.
                 argv: vec![
                     interpreter.clone().unwrap_or_else(|| "python3".to_owned()),
                     "-m".to_owned(),
                     "venv".to_owned(),
-                    "--copies".to_owned(),
                     format!("{root}/.venv"),
                 ],
                 needs_network: false,
