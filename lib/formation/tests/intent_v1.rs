@@ -84,11 +84,11 @@ fn the_same_source_compiles_to_the_same_digests() {
         second.canonical_digest().unwrap()
     );
     assert_eq!(
-        compile_build_plan(&first, "/app")
+        compile_build_plan(&first, "/app", "x86_64-linux-gnu")
             .unwrap()
             .canonical_digest()
             .unwrap(),
-        compile_build_plan(&second, "/app")
+        compile_build_plan(&second, "/app", "x86_64-linux-gnu")
             .unwrap()
             .canonical_digest()
             .unwrap()
@@ -307,12 +307,23 @@ fn a_launch_outside_the_workspace_root_is_refused() {
 fn the_build_plan_pins_what_it_installs() {
     let dir = tree(NOTES);
     let intent = compile(dir.path(), &notes_overrides()).0.expect("compiles");
-    let plan = compile_build_plan(&intent, "/app").expect("plans");
+    let plan = compile_build_plan(&intent, "/app", "x86_64-linux-gnu").expect("plans");
+    // The interpreter is PROVISIONED, never taken from the host: the acceptance
+    // host runs 3.14, for which pydantic-core publishes no wheel, and a plan
+    // that said `python3` fell back to compiling a Rust extension and failed.
+    assert_eq!(plan.steps[0].name, "provision-python");
+    assert!(plan.steps[0].argv.join(" ").contains("3.12.7"));
+    let sync = &plan.steps[1];
     // `--frozen`: without it `uv` may update the lock, and the build would
     // silently resolve something else than the author committed.
-    assert!(plan.steps[0].argv.contains(&"--frozen".to_owned()));
+    assert!(sync.argv.contains(&"--frozen".to_owned()));
     assert!(
-        plan.steps[0].needs_network,
+        sync.argv
+            .contains(&format!("{}/bin/python3", python_home("3.12.7"))),
+        "uv must be pointed at the provisioned interpreter"
+    );
+    assert!(
+        sync.needs_network,
         "dependency resolution is declared, not assumed"
     );
     assert_eq!(plan.workspace_guest_root, "/app");
@@ -322,15 +333,19 @@ fn the_build_plan_pins_what_it_installs() {
 fn a_pip_venv_is_built_with_copies() {
     let dir = tree(&[("requirements.txt", "fastapi==0.115.6\n"), ("app.py", "\n")]);
     let intent = compile(dir.path(), &notes_overrides()).0.expect("compiles");
-    let plan = compile_build_plan(&intent, "/app").expect("plans");
+    let plan = compile_build_plan(&intent, "/app", "x86_64-linux-gnu").expect("plans");
+    assert_eq!(plan.steps[0].name, "provision-python");
+    let venv = &plan.steps[1];
+    // Created BY the provisioned interpreter, not by the host's.
+    assert_eq!(
+        venv.argv[0],
+        format!("{}/bin/python3", python_home("3.12.7"))
+    );
     // A venv of symlinks points at an interpreter that does not exist once the
     // workspace moves to a Runner.
-    assert!(plan.steps[0].argv.contains(&"--copies".to_owned()));
-    assert!(
-        !plan.steps[0].needs_network,
-        "creating a venv needs no network"
-    );
-    assert!(plan.steps[1].needs_network);
+    assert!(venv.argv.contains(&"--copies".to_owned()));
+    assert!(!venv.needs_network, "creating a venv needs no network");
+    assert!(plan.steps[2].needs_network);
 }
 
 #[test]
@@ -340,7 +355,7 @@ fn a_static_plan_runs_no_steps() {
         .0
         .expect("compiles");
     assert!(
-        compile_build_plan(&intent, "/app")
+        compile_build_plan(&intent, "/app", "x86_64-linux-gnu")
             .expect("plans")
             .steps
             .is_empty()

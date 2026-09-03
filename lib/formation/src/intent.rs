@@ -38,6 +38,35 @@ pub const SUPPORTED_PYTHON: &[&str] = &["3.13.1", "3.12.7", "3.11.11"];
 /// Used when nothing pins a version. Named so a reader can see the choice.
 pub const DEFAULT_PYTHON: &str = "3.12.7";
 
+/// Where a provisioned interpreter lives, inside the build sandbox AND inside
+/// the runtime sandbox.
+///
+/// One deterministic path, because a venv created during the build records the
+/// absolute path of the interpreter that made it. A build that used a
+/// temporary directory produces a `pyvenv.cfg` and shebangs pointing somewhere
+/// that does not exist at runtime, and the failure arrives as an import error
+/// far from its cause.
+pub const TOOLCHAIN_ROOT: &str = "/opt/ato/toolchains";
+
+/// The release of python-build-standalone this catalog is pinned to.
+///
+/// Pinned rather than "latest": a moving upstream would silently change what a
+/// formation key means, and two builds of the same commit could differ.
+pub const PYTHON_BUILD_TAG: &str = "20241016";
+
+/// The absolute path of a provisioned interpreter.
+pub fn python_home(version: &str) -> String {
+    format!("{TOOLCHAIN_ROOT}/python/{version}")
+}
+
+/// Where python-build-standalone publishes a relocatable build.
+pub fn python_download_url(version: &str, triple: &str) -> String {
+    format!(
+        "https://github.com/astral-sh/python-build-standalone/releases/download/\
+{PYTHON_BUILD_TAG}/cpython-{version}+{PYTHON_BUILD_TAG}-{triple}-install_only.tar.gz"
+    )
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum IntentError {
     #[error("no lane matched this source: {detail}")]
@@ -562,38 +591,77 @@ fn split_argv(raw: &str) -> Result<Vec<String>, IntentError> {
 pub fn compile_build_plan(
     intent: &ProgramIntentV1,
     workspace_guest_root: &str,
+    target_triple: &str,
 ) -> Result<EffectiveBuildPlanV1, IntentError> {
     let root = workspace_guest_root.trim_end_matches('/');
-    let steps = match (&intent.lane, &intent.dependencies) {
-        (Lane::StaticWeb, _) => Vec::new(),
-        (Lane::PythonProcess, DependencyPlan::UvFrozen) => vec![BuildStepV1 {
-            name: "uv-sync".to_owned(),
-            // `--frozen`: the lock is the answer. Without it `uv` may update the
-            // lock and the build would silently resolve something else.
+    // The interpreter is PROVISIONED, never taken from the host.
+    //
+    // Measured, not assumed: the acceptance host runs Python 3.14, for which
+    // `pydantic-core` publishes no wheel, so a plan that said `python3` fell
+    // back to building a Rust extension from source and failed on a missing
+    // linker. Which interpreter a build uses cannot be a property of whichever
+    // machine claimed the job.
+    let python = intent.runtime.get("python").cloned();
+    let interpreter = python
+        .as_deref()
+        .map(|version| format!("{}/bin/python3", python_home(version)));
+
+    let mut steps = Vec::new();
+    if let (Some(version), Lane::PythonProcess) = (python.as_deref(), intent.lane) {
+        let home = python_home(version);
+        steps.push(BuildStepV1 {
+            name: "provision-python".to_owned(),
+            // Idempotent: an already-provisioned toolchain is reused, so a
+            // second build on the same host does not re-download it.
             argv: vec![
-                "uv".to_owned(),
-                "sync".to_owned(),
-                "--frozen".to_owned(),
-                "--project".to_owned(),
-                root.to_owned(),
+                "/bin/sh".to_owned(),
+                "-euc".to_owned(),
+                format!(
+                    "if [ ! -x {home}/bin/python3 ]; then mkdir -p {home} && \
+                     curl -fsSL '{url}' | tar -xz --strip-components=1 -C {home}; fi; \
+                     {home}/bin/python3 -V",
+                    url = python_download_url(version, &python_triple(target_triple)),
+                ),
             ],
             needs_network: true,
-        }],
-        (Lane::PythonProcess, DependencyPlan::PipRequirements { .. }) => vec![
-            BuildStepV1 {
+        });
+    }
+
+    match (&intent.lane, &intent.dependencies) {
+        (Lane::StaticWeb, _) => {}
+        (Lane::PythonProcess, DependencyPlan::UvFrozen) => {
+            steps.push(BuildStepV1 {
+                name: "uv-sync".to_owned(),
+                // `--frozen`: the lock is the answer. Without it `uv` may
+                // update the lock and the build silently resolves something
+                // other than what the author committed.
+                argv: vec![
+                    "uv".to_owned(),
+                    "sync".to_owned(),
+                    "--frozen".to_owned(),
+                    "--project".to_owned(),
+                    root.to_owned(),
+                    "--python".to_owned(),
+                    interpreter.clone().unwrap_or_else(|| "python3".to_owned()),
+                ],
+                needs_network: true,
+            });
+        }
+        (Lane::PythonProcess, DependencyPlan::PipRequirements { .. }) => {
+            steps.push(BuildStepV1 {
                 name: "create-venv".to_owned(),
                 // `--copies`: a venv of symlinks points at an interpreter that
                 // does not exist once the workspace moves to a Runner.
                 argv: vec![
-                    "python3".to_owned(),
+                    interpreter.clone().unwrap_or_else(|| "python3".to_owned()),
                     "-m".to_owned(),
                     "venv".to_owned(),
                     "--copies".to_owned(),
                     format!("{root}/.venv"),
                 ],
                 needs_network: false,
-            },
-            BuildStepV1 {
+            });
+            steps.push(BuildStepV1 {
                 name: "pip-install".to_owned(),
                 argv: vec![
                     format!("{root}/.venv/bin/python"),
@@ -605,10 +673,10 @@ pub fn compile_build_plan(
                     format!("{root}/requirements.txt"),
                 ],
                 needs_network: true,
-            },
-        ],
-        (Lane::PythonProcess, DependencyPlan::None) => Vec::new(),
-    };
+            });
+        }
+        (Lane::PythonProcess, DependencyPlan::None) => {}
+    }
 
     Ok(EffectiveBuildPlanV1 {
         schema: EFFECTIVE_BUILD_PLAN_V1_SCHEMA.to_owned(),
@@ -618,4 +686,17 @@ pub fn compile_build_plan(
         steps,
         output_root: intent.static_output_root.clone().unwrap_or_default(),
     })
+}
+
+/// The python-build-standalone triple for an Ato target triple.
+///
+/// Distinct vocabularies, mapped explicitly rather than by string surgery: an
+/// unmapped target falls back to the common Linux build, and a wrong guess here
+/// produces an interpreter that cannot run.
+fn python_triple(target_triple: &str) -> String {
+    match target_triple {
+        "x86_64-linux-gnu" => "x86_64-unknown-linux-gnu".to_owned(),
+        "aarch64-linux-gnu" => "aarch64-unknown-linux-gnu".to_owned(),
+        other => other.to_owned(),
+    }
 }
