@@ -7,4 +7,5 @@
 
 pub mod process_executor;
 pub mod resolved;
+pub mod session;
 pub mod state_artifact;
