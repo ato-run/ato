@@ -1064,13 +1064,19 @@ impl ConnectedWorker {
         let port = active
             .endpoint_port("http")
             .context("the launch declared no `http` endpoint to report")?;
-        self.api.report_ready(
-            &lease.id,
-            &execution_id,
-            &format!("http://127.0.0.1:{port}"),
-            port,
-            None,
-        )?;
+        // No ready_url. A process realization is reachable only on the
+        // Runner's own loopback, and the control plane stores a ready_url only
+        // when it is non-loopback and under the Runner's public base. Reporting
+        // the loopback address is refused, and synthesizing a public one would
+        // publish a URL that serves nothing. Ready with no URL is the honest
+        // report the API already models; the stable instance host is P4.
+        self.api
+            .report_ready(&lease.id, &execution_id, None, Some(port), None)?;
+        eprintln!(
+            "[runtime-launch] run={} ready pid={} endpoint=127.0.0.1:{port}",
+            lease.run_id,
+            active.pid()
+        );
 
         // ACTIVE. The control plane decides when this ends.
         let stop = || -> Result<bool> { Ok(self.api.control(&lease.id)?.stop_requested) };
@@ -1185,8 +1191,8 @@ impl ConnectedWorker {
         self.api.report_ready(
             &lease.id,
             &execution_id,
-            &self.config.public_base_url,
-            ready_local_port(&self.config),
+            Some(&self.config.public_base_url),
+            Some(ready_local_port(&self.config)),
             browser.as_ref().map(|runtime| runtime.control_capability()),
         )?;
         let mut last_control = Instant::now() - Duration::from_secs(1);
@@ -2821,8 +2827,18 @@ struct BrowserControlReport<'a> {
 #[derive(Serialize)]
 struct ReadyReport<'a> {
     execution_id: &'a str,
-    ready_url: &'a str,
-    local_port: u16,
+    /// Omitted when the realization has no externally reachable URL.
+    ///
+    /// The control plane stores a ready_url ONLY when the Runner proved it is
+    /// non-loopback and under the Runner's public base, and treats an absent
+    /// one as an honest "ready, no URL". A process realization has neither a
+    /// stable host nor an ingress until P4, so reporting a loopback URL — or
+    /// worse, synthesizing a public one that serves nothing — would be a lie
+    /// the API is right to refuse.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ready_url: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    local_port: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     control: Option<BrowserControlReport<'a>>,
 }
@@ -2942,8 +2958,8 @@ impl HttpRunnerApi {
         &self,
         lease_id: &str,
         execution_id: &str,
-        ready_url: &str,
-        local_port: u16,
+        ready_url: Option<&str>,
+        local_port: Option<u16>,
         control: Option<BrowserControlCapability>,
     ) -> Result<()> {
         self.authorized(
