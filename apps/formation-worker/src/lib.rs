@@ -5,6 +5,9 @@
 //! state revision — a build produces an artifact, and what happens to that
 //! artifact afterwards is somebody else's decision.
 
+pub mod api;
 pub mod build;
+pub mod job;
+pub mod pack;
 pub mod sandbox;
 pub mod static_lane;
