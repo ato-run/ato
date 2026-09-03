@@ -284,9 +284,24 @@ fn expand_into(bytes: &[u8], staging: &Path, limit: usize) -> Result<()> {
             std::fs::create_dir_all(directory)
                 .with_context(|| format!("failed to create {}", directory.display()))?;
         }
+        // The mode is read BEFORE unpacking, because `unpack` consumes the
+        // entry.
+        let executable = entry.header().mode().unwrap_or(0o644) & 0o100 != 0;
         entry
             .unpack(&target)
             .with_context(|| format!("failed to write state file {}", relative.display()))?;
+        // `set_preserve_permissions(false)` above is right — an archive must
+        // not dictate host permissions — but it also drops the one bit the
+        // packer deliberately recorded. Restoring just that bit is the
+        // difference between a workspace whose interpreter runs and one whose
+        // launch fails with a bare exit code, which is exactly how this was
+        // found.
+        #[cfg(unix)]
+        if executable {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
+                .with_context(|| format!("failed to mark {} executable", relative.display()))?;
+        }
     }
     Ok(())
 }
@@ -837,5 +852,38 @@ mod tests {
             unpack_state_tree(&oversized, &state_artifact_digest(&oversized), &target).unwrap_err();
         assert!(error.to_string().contains("over the"), "{error}");
         assert!(!target.exists());
+    }
+
+    #[test]
+    fn an_executable_survives_the_round_trip() {
+        // The packer records the owner-execute bit and the unpacker used to
+        // drop it, so a materialized workspace arrived with a non-executable
+        // interpreter. The Run then failed with a bare exit code and nothing
+        // to read — which is how this was actually found.
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let source = tempfile::tempdir().expect("tempdir");
+        let program = source.path().join("bin/python");
+        std::fs::create_dir_all(program.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&program, "#!/bin/sh\nexit 0\n").expect("write");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        std::fs::write(source.path().join("data.txt"), "plain").expect("write");
+
+        let artifact = pack_state_tree(source.path()).expect("packs");
+        let restored = tempfile::tempdir().expect("tempdir");
+        let target = restored.path().join("tree");
+        unpack_state_tree(artifact.bytes(), artifact.digest(), &target).expect("unpacks");
+
+        let mode = std::fs::metadata(target.join("bin/python"))
+            .expect("stat")
+            .permissions()
+            .mode();
+        assert!(mode & 0o100 != 0, "the interpreter lost its execute bit");
+        // And a plain file does not gain one.
+        let plain = std::fs::metadata(target.join("data.txt"))
+            .expect("stat")
+            .permissions()
+            .mode();
+        assert!(plain & 0o111 == 0, "a data file must not become executable");
     }
 }
