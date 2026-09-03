@@ -33,13 +33,15 @@ fn command(
 ) -> anyhow::Result<SandboxedBuildCommand> {
     sandboxed_build_command(
         &argv.iter().map(|a| (*a).to_owned()).collect::<Vec<_>>(),
-        source,
-        workspace,
-        cache,
-        Path::new("/usr/local/bin/ato-formation-worker"),
-        Path::new("/tmp/policy.json"),
-        network,
-        BuildLimits::default(),
+        &BuildSandbox {
+            source_root: source,
+            workspace_root: workspace,
+            cache_root: cache,
+            shim: Path::new("/usr/local/bin/ato-formation-worker"),
+            policy_host_path: Path::new("/tmp/policy.json"),
+            network,
+            limits: BuildLimits::default(),
+        },
     )
 }
 
@@ -154,15 +156,19 @@ fn a_step_that_declared_no_network_does_not_get_one() {
     };
     // The job's policy allows the network; the step did not ask for it. The
     // narrower of the two wins.
+    let binary = worker_binary();
     let outcome = run_build(
         &plan,
         attempt(1),
-        &source,
-        &workspace,
-        None,
-        Path::new(&worker_binary()),
-        NetworkPolicy::DependencyResolution,
-        BuildLimits::default(),
+        &BuildSandbox {
+            source_root: &source,
+            workspace_root: &workspace,
+            cache_root: None,
+            shim: Path::new(&binary),
+            policy_host_path: Path::new("/tmp/policy.json"),
+            network: NetworkPolicy::DependencyResolution,
+            limits: BuildLimits::default(),
+        },
     );
     assert!(outcome.is_ok(), "{outcome:?}");
     drop(root);
@@ -183,15 +189,19 @@ fn a_networked_step_under_a_denied_policy_is_refused() {
         }],
         output_root: String::new(),
     };
+    let binary = worker_binary();
     let error = run_build(
         &plan,
         attempt(1),
-        &source,
-        &workspace,
-        None,
-        Path::new(&worker_binary()),
-        NetworkPolicy::Denied,
-        BuildLimits::default(),
+        &BuildSandbox {
+            source_root: &source,
+            workspace_root: &workspace,
+            cache_root: None,
+            shim: Path::new(&binary),
+            policy_host_path: Path::new("/tmp/policy.json"),
+            network: NetworkPolicy::Denied,
+            limits: BuildLimits::default(),
+        },
     )
     .unwrap_err();
     assert!(format!("{error}").contains("denies it"), "{error}");

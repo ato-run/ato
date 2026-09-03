@@ -9,14 +9,14 @@
 //! would overwrite a newer result with older bytes, and nothing downstream
 //! could tell.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use ato_formation::intent::{BuildStepV1, EffectiveBuildPlanV1};
 
-use crate::sandbox::{BuildLimits, GUEST_WORKSPACE_ROOT, NetworkPolicy, sandboxed_build_command};
+use crate::sandbox::{BuildSandbox, GUEST_WORKSPACE_ROOT, NetworkPolicy, sandboxed_build_command};
 
 /// One execution of a job.
 #[derive(Debug, Clone)]
@@ -67,13 +67,16 @@ fn bounded_diagnostic(name: &str, stream: &[u8]) -> String {
 pub fn run_build(
     plan: &EffectiveBuildPlanV1,
     attempt: BuildAttempt,
-    source_root: &Path,
-    workspace_root: &Path,
-    cache_root: Option<&Path>,
-    shim: &Path,
-    network: NetworkPolicy,
-    limits: BuildLimits,
+    sandbox: &BuildSandbox<'_>,
 ) -> Result<BuildOutcome> {
+    let (source_root, workspace_root, cache_root, shim, network, limits) = (
+        sandbox.source_root,
+        sandbox.workspace_root,
+        sandbox.cache_root,
+        sandbox.shim,
+        sandbox.network,
+        sandbox.limits,
+    );
     std::fs::create_dir_all(workspace_root)
         .with_context(|| format!("cannot create {}", workspace_root.display()))?;
 
@@ -98,13 +101,15 @@ pub fn run_build(
 
         let command = sandboxed_build_command(
             &step.argv,
-            source_root,
-            workspace_root,
-            cache_root,
-            shim,
-            &policy_path,
-            step_network,
-            limits,
+            &BuildSandbox {
+                source_root,
+                workspace_root,
+                cache_root,
+                shim,
+                policy_host_path: &policy_path,
+                network: step_network,
+                limits,
+            },
         )?;
         std::fs::write(
             &policy_path,

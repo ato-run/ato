@@ -95,16 +95,33 @@ pub struct SandboxedBuildCommand {
 ///
 /// The source is read-only because a build that edits its own source produces
 /// an artifact whose closure ref no longer describes it.
+pub struct BuildSandbox<'a> {
+    /// Read-only inside the sandbox.
+    pub source_root: &'a Path,
+    /// The only place output may appear.
+    pub workspace_root: &'a Path,
+    /// Present only when the policy allows a network to fill it.
+    pub cache_root: Option<&'a Path>,
+    /// This worker's own binary, re-entered as the Landlock shim.
+    pub shim: &'a Path,
+    pub policy_host_path: &'a Path,
+    pub network: NetworkPolicy,
+    pub limits: BuildLimits,
+}
+
 pub fn sandboxed_build_command(
     workload_argv: &[String],
-    source_root: &Path,
-    workspace_root: &Path,
-    cache_root: Option<&Path>,
-    shim: &Path,
-    policy_host_path: &Path,
-    network: NetworkPolicy,
-    limits: BuildLimits,
+    sandbox: &BuildSandbox<'_>,
 ) -> Result<SandboxedBuildCommand> {
+    let BuildSandbox {
+        source_root,
+        workspace_root,
+        cache_root,
+        shim,
+        policy_host_path,
+        network,
+        limits,
+    } = *sandbox;
     ensure!(!workload_argv.is_empty(), "build step has no argv");
     require_containment()?;
 
