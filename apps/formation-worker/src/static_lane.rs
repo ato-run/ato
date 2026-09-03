@@ -86,7 +86,28 @@ pub fn materialize_static(
         destination_parent,
         runtime_secret_canaries,
     )
-    .context("static web bundle production failed")?;
+    .map_err(|error| {
+        // The producer refuses a file it cannot type, and that refusal is the
+        // contract working: a bundle serves what it contains, and it will not
+        // serve bytes it has no media type for.
+        //
+        // What it cannot say is what to do about it, because it does not know a
+        // repository root from a build output. A source root carrying a
+        // LICENSE, a Rakefile and a .gitignore is a repository, not a site —
+        // and the remedy is to declare which directory IS the site, not to
+        // start dropping files the author did not ask to drop.
+        if error
+            .to_string()
+            .contains("unsupported static web media type")
+        {
+            return error.context(
+                "this output root contains files a static site cannot serve. Declare \
+                 `static.output_root` to name the directory that is the site, rather than \
+                 publishing a repository root",
+            );
+        }
+        error.context("static web bundle production failed")
+    })?;
 
     let manifest_digest = bundle.receipt.manifest_digest.clone();
     let total_bytes = bundle
