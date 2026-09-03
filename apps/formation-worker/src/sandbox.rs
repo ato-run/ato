@@ -280,18 +280,36 @@ fn build_environment(network: NetworkPolicy) -> Vec<(String, String)> {
 
 /// The Landlock policy the shim applies, in GUEST paths.
 fn landlock_policy(with_cache: bool) -> SandboxPolicy {
-    let mut writable = vec![PathBuf::from(GUEST_WORKSPACE_ROOT), PathBuf::from("/tmp")];
+    let mut writable = vec![
+        PathBuf::from(GUEST_WORKSPACE_ROOT),
+        PathBuf::from("/tmp"),
+        // Provisioning writes here on a first build and reads on every later
+        // one.
+        PathBuf::from(TOOLCHAIN_ROOT),
+    ];
     if with_cache {
         writable.push(PathBuf::from(GUEST_CACHE_ROOT));
     }
     let (read_write, _) = filter_sensitive_paths(&writable);
-    let (read_only, _) = filter_sensitive_paths(&[
-        PathBuf::from(GUEST_SOURCE_ROOT),
-        PathBuf::from("/usr"),
-        PathBuf::from("/lib"),
-        PathBuf::from("/lib64"),
-        PathBuf::from("/etc"),
-    ]);
+
+    // The SAME lists the binds use. Two lists drift, and the drift arrives as
+    // "Permission denied" on a path the mount namespace demonstrably provided
+    // — which is the least useful shape a sandbox error can take.
+    let mut readable: Vec<PathBuf> = SYSTEM_READ_ONLY
+        .iter()
+        .chain(SYSTEM_CONFIG_FILES)
+        .map(PathBuf::from)
+        .collect();
+    readable.push(PathBuf::from(GUEST_SOURCE_ROOT));
+    // The symlink targets the config files resolve through.
+    readable.push(PathBuf::from("/run"));
+    // bwrap supplies these with --proc and --dev rather than a bind, so they
+    // are absent from the bind list and must be named anyway. Without /dev,
+    // CPython cannot open /dev/urandom and dies during pre-initialization.
+    readable.push(PathBuf::from("/dev"));
+    readable.push(PathBuf::from("/proc"));
+    let (read_only, _) = filter_sensitive_paths(&readable);
+
     SandboxPolicy::new()
         .allow_read_write(read_write)
         .allow_read_only(read_only)
