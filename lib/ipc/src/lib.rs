@@ -12,6 +12,7 @@ pub mod binding_lease;
 pub mod computation;
 pub mod desktop_control;
 pub mod error;
+pub mod formation;
 pub mod net;
 pub mod runtime_launch;
 pub mod session_surface;
