@@ -409,7 +409,7 @@ fn compile_python(
     let mut runtime = BTreeMap::new();
     runtime.insert("python".to_owned(), resolved);
 
-    Ok(ProgramIntentV1 {
+    ProgramIntentV1 {
         schema: PROGRAM_INTENT_V1_SCHEMA.to_owned(),
         lane: Lane::PythonProcess,
         runtime,
@@ -424,9 +424,10 @@ fn compile_python(
         static_entry_path: None,
         static_spa_fallback: false,
         // `workspace_guest_root` shapes the build plan, not the intent: the
-        // intent says WHAT to run, the plan says where.
+        // intent says WHAT to run, the plan says where. It is still checked
+        // here, because an argv that cannot resolve under it is not a launch.
     }
-    .with_guest_root_checked(workspace_guest_root)?)
+    .with_guest_root_checked(workspace_guest_root)
 }
 
 impl ProgramIntentV1 {
