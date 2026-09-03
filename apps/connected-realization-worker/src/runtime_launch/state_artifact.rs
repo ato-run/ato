@@ -23,6 +23,14 @@ use sha2::{Digest, Sha256};
 /// The state protocol this module implements. A Runner refuses any other.
 pub const STATE_ARTIFACT_FORMAT: &str = "ato.state.filesystem@1";
 
+/// The largest state artifact this Runner will pack or accept.
+///
+/// Enforced on BOTH sides. The control plane's limit protects the control
+/// plane; this one protects the Runner, which unpacks attacker-influenced
+/// bytes onto its own disk and would otherwise fill it on behalf of one
+/// tenant. Matches the control plane's 64 MiB so neither side is the surprise.
+pub const MAX_STATE_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
+
 /// A packed state tree together with the content address of its bytes.
 pub struct StateArtifact {
     digest: String,
@@ -73,11 +81,34 @@ pub fn state_artifact_digest(bytes: &[u8]) -> String {
 /// only part a restored tree needs to honour.
 pub fn pack_state_tree(root: &Path) -> Result<StateArtifact> {
     let mut files = BTreeSet::new();
-    collect_files(root, root, &mut files)?;
+    let mut directories = BTreeSet::new();
+    collect_entries(root, root, &mut files, &mut directories)?;
 
     let mut bytes = Vec::new();
     {
         let mut builder = tar::Builder::new(&mut bytes);
+        // Directories are recorded, including empty ones. `filesystem@1` names
+        // a filesystem tree, and an empty directory is part of one: an app
+        // that creates `uploads/` on first start and finds it gone after a
+        // wake has lost state, even though no file was ever in it.
+        for relative in &directories {
+            let mut header = tar::Header::new_ustar();
+            header.set_size(0);
+            header.set_mode(0o755);
+            header.set_mtime(0);
+            header.set_uid(0);
+            header.set_gid(0);
+            header.set_entry_type(tar::EntryType::Directory);
+            let name = format!(
+                "{}/",
+                relative
+                    .to_str()
+                    .context("state directory name is not valid UTF-8")?
+            );
+            builder
+                .append_data(&mut header, &name, std::io::empty())
+                .with_context(|| format!("failed to pack state directory {name}"))?;
+        }
         for relative in &files {
             let absolute = root.join(relative);
             let contents = std::fs::read(&absolute)
@@ -109,12 +140,26 @@ pub fn pack_state_tree(root: &Path) -> Result<StateArtifact> {
     })
 }
 
-/// Verify a downloaded artifact and expand it into `destination`.
+/// Verify a downloaded artifact and expand it into `destination`, atomically.
 ///
-/// Fail closed, in this order: the digest is checked BEFORE a single byte is
-/// written, and every entry's path is checked before it is opened. A tree that
-/// fails either check leaves nothing behind.
+/// Fail closed at every step, in this order:
+///
+/// 1. the byte count is checked, before anything is parsed;
+/// 2. the digest is verified, before a single byte is written;
+/// 3. every entry path is checked, before it is opened;
+/// 4. the tree is built in a SIBLING directory and only then moved into place.
+///
+/// Step 4 is what makes it atomic. Unpacking straight into `destination` and
+/// failing halfway would leave a partial tree that looks like state — an app
+/// would open a truncated SQLite file and, at best, fail confusingly. On any
+/// error the staging directory is removed and `destination` is untouched.
 pub fn unpack_state_tree(bytes: &[u8], expected_digest: &str, destination: &Path) -> Result<()> {
+    ensure!(
+        bytes.len() <= MAX_STATE_ARTIFACT_BYTES,
+        "state artifact is {} bytes, over the {MAX_STATE_ARTIFACT_BYTES} byte limit",
+        bytes.len()
+    );
+
     let actual = state_artifact_digest(bytes);
     if actual != expected_digest {
         // Deliberately does not name the destination or echo the bytes: a
@@ -122,9 +167,46 @@ pub fn unpack_state_tree(bytes: &[u8], expected_digest: &str, destination: &Path
         bail!("state artifact digest mismatch: expected {expected_digest}, computed {actual}");
     }
 
-    std::fs::create_dir_all(destination)
-        .with_context(|| format!("failed to create {}", destination.display()))?;
+    let parent = destination
+        .parent()
+        .context("state destination has no parent directory")?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create {}", parent.display()))?;
+    let staging = tempfile::Builder::new()
+        .prefix(".ato-state-staging-")
+        .tempdir_in(parent)
+        .context("failed to create the state staging directory")?;
 
+    // Errors propagate out of this block, and `staging` is removed on drop —
+    // so a failure anywhere leaves `destination` exactly as it was.
+    expand_into(bytes, staging.path())?;
+
+    if destination.exists() {
+        let discarded = tempfile::Builder::new()
+            .prefix(".ato-state-replaced-")
+            .tempdir_in(parent)
+            .context("failed to stage the replaced state directory")?;
+        let discarded_path = discarded.path().join("previous");
+        std::fs::rename(destination, &discarded_path)
+            .with_context(|| format!("failed to move aside {}", destination.display()))?;
+        // The swap. If THIS fails the old tree is put back, because a
+        // destination that exists neither as the old state nor as the new one
+        // is the one outcome with no recovery.
+        if let Err(error) = std::fs::rename(staging.path(), destination) {
+            let _ = std::fs::rename(&discarded_path, destination);
+            return Err(error).context("failed to swap in the materialized state");
+        }
+    } else {
+        std::fs::rename(staging.path(), destination)
+            .context("failed to move the materialized state into place")?;
+    }
+    // The rename consumed the staging directory; keep its guard from trying to
+    // remove a path that is now the live state.
+    let _ = staging.keep();
+    Ok(())
+}
+
+fn expand_into(bytes: &[u8], staging: &Path) -> Result<()> {
     let mut archive = tar::Archive::new(Cursor::new(bytes));
     // The archive is content-addressed but NOT trusted: its digest proves only
     // that it is the artifact the control plane named, not that whoever
@@ -133,18 +215,36 @@ pub fn unpack_state_tree(bytes: &[u8], expected_digest: &str, destination: &Path
     archive.set_unpack_xattrs(false);
     archive.set_overwrite(true);
 
+    let mut expanded: u64 = 0;
     for entry in archive.entries().context("state archive is unreadable")? {
         let mut entry = entry.context("state archive entry is unreadable")?;
+        let entry_type = entry.header().entry_type();
         ensure!(
-            entry.header().entry_type().is_file(),
+            entry_type.is_file() || entry_type.is_dir(),
             "state archive carries a non-regular entry, which this format does not define"
         );
         let path = entry.path().context("state archive entry has no path")?;
         let relative = safe_relative_path(path.as_ref())?;
-        let target = destination.join(&relative);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
+        let target = staging.join(&relative);
+
+        if entry_type.is_dir() {
+            std::fs::create_dir_all(&target)
+                .with_context(|| format!("failed to create {}", relative.display()))?;
+            continue;
+        }
+
+        // Bound the EXPANDED size too. A compressed-format archive could
+        // otherwise be small on the wire and unbounded on disk; this format is
+        // uncompressed today, and the check keeps that from being load-bearing.
+        expanded = expanded.saturating_add(entry.header().size().unwrap_or(0));
+        ensure!(
+            expanded <= MAX_STATE_ARTIFACT_BYTES as u64,
+            "state archive expands past the {MAX_STATE_ARTIFACT_BYTES} byte limit"
+        );
+
+        if let Some(directory) = target.parent() {
+            std::fs::create_dir_all(directory)
+                .with_context(|| format!("failed to create {}", directory.display()))?;
         }
         entry
             .unpack(&target)
@@ -177,7 +277,12 @@ fn safe_relative_path(path: &Path) -> Result<PathBuf> {
     Ok(safe)
 }
 
-fn collect_files(root: &Path, directory: &Path, files: &mut BTreeSet<PathBuf>) -> Result<()> {
+fn collect_entries(
+    root: &Path,
+    directory: &Path,
+    files: &mut BTreeSet<PathBuf>,
+    directories: &mut BTreeSet<PathBuf>,
+) -> Result<()> {
     let entries = std::fs::read_dir(directory)
         .with_context(|| format!("failed to read {}", directory.display()))?;
     for entry in entries {
@@ -195,7 +300,12 @@ fn collect_files(root: &Path, directory: &Path, files: &mut BTreeSet<PathBuf>) -
             );
         }
         if metadata.is_dir() {
-            collect_files(root, &path, files)?;
+            directories.insert(
+                path.strip_prefix(root)
+                    .context("state directory escaped the state root")?
+                    .to_path_buf(),
+            );
+            collect_entries(root, &path, files, directories)?;
         } else if metadata.is_file() {
             let relative = path
                 .strip_prefix(root)
@@ -261,6 +371,25 @@ pub trait StateArtifactTransport {
         commit_request_id: &str,
         artifact: &StateArtifact,
     ) -> Result<String>;
+
+    /// Give the slot back after a Run finished with it.
+    ///
+    /// Distinct from `abort_writer` only in intent, and both must be safe to
+    /// call: a slot left held by a Run that is gone is a slot no future Run can
+    /// take, which turns one failure into a permanently stuck App. Releasing
+    /// twice, or releasing a slot someone else has since taken, is a no-op
+    /// rather than an error.
+    fn release_writer(&self, state_key: &str, writer_fence: u64) -> Result<()>;
+
+    /// Give the slot back after a Run FAILED with it.
+    ///
+    /// Separate from `release_writer` so the control plane can tell the two
+    /// apart in its own records; the fencing effect is identical. Default
+    /// implementation defers to release, because getting the slot back matters
+    /// more than distinguishing why.
+    fn abort_writer(&self, state_key: &str, writer_fence: u64) -> Result<()> {
+        self.release_writer(state_key, writer_fence)
+    }
 }
 
 /// The real transport: lease-scoped, bearer-authenticated requests to the
@@ -342,6 +471,36 @@ impl StateArtifactTransport for LeaseStateArtifactTransport {
             .error_for_status()
             .context("failed to download the state artifact")?;
         Ok(response.bytes()?.to_vec())
+    }
+
+    fn release_writer(&self, state_key: &str, writer_fence: u64) -> Result<()> {
+        self.client
+            .post(self.url("writers/release"))
+            .bearer_auth(&self.token)
+            .json(&serde_json::json!({
+                "state_key": state_key,
+                "writer_fence": writer_fence,
+                "outcome": "released",
+            }))
+            .send()?
+            .error_for_status()
+            .context("failed to release the state writer")?;
+        Ok(())
+    }
+
+    fn abort_writer(&self, state_key: &str, writer_fence: u64) -> Result<()> {
+        self.client
+            .post(self.url("writers/release"))
+            .bearer_auth(&self.token)
+            .json(&serde_json::json!({
+                "state_key": state_key,
+                "writer_fence": writer_fence,
+                "outcome": "aborted",
+            }))
+            .send()?
+            .error_for_status()
+            .context("failed to abort the state writer")?;
+        Ok(())
     }
 
     fn commit(
@@ -549,6 +708,9 @@ mod tests {
             ) -> Result<String> {
                 unreachable!()
             }
+            fn release_writer(&self, _key: &str, _fence: u64) -> Result<()> {
+                Ok(())
+            }
         }
 
         let destination = tempfile::tempdir().expect("tempdir");
@@ -573,5 +735,69 @@ mod tests {
         let rendered = format!("{:?}", pack_state_tree(source.path()).expect("packs"));
         assert!(!rendered.contains("sqlite-bytes"));
         assert!(rendered.contains("sha256:"));
+    }
+
+    #[test]
+    fn an_empty_directory_survives_a_round_trip() {
+        // `filesystem@1` names a filesystem TREE. An app that creates
+        // `uploads/` on first start and finds it gone after a wake has lost
+        // state, even though no file was ever in it.
+        let source = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(source.path().join("uploads")).expect("mkdir");
+        std::fs::create_dir_all(source.path().join("nested/deep")).expect("mkdir");
+        let artifact = pack_state_tree(source.path()).expect("packs");
+
+        let restored = tempfile::tempdir().expect("tempdir");
+        let target = restored.path().join("state");
+        unpack_state_tree(artifact.bytes(), artifact.digest(), &target).expect("unpacks");
+        assert!(target.join("uploads").is_dir());
+        assert!(target.join("nested/deep").is_dir());
+        assert_eq!(
+            pack_state_tree(&target).expect("repacks").digest(),
+            artifact.digest()
+        );
+    }
+
+    #[test]
+    fn a_failed_unpack_leaves_the_previous_state_intact() {
+        // The dangerous outcome is not "the restore failed" — it is a
+        // destination holding half a tree that looks like state, where an app
+        // opens a truncated database and reports success.
+        let previous = tempfile::tempdir().expect("tempdir");
+        let live = previous.path().join("state");
+        std::fs::create_dir_all(&live).expect("mkdir");
+        std::fs::write(live.join("app.sqlite"), b"the-real-state").expect("write");
+
+        let hostile = archive_with_entry("../escape");
+        let digest = state_artifact_digest(&hostile);
+        unpack_state_tree(&hostile, &digest, &live).unwrap_err();
+
+        assert_eq!(
+            std::fs::read(live.join("app.sqlite")).expect("read"),
+            b"the-real-state"
+        );
+        // And no staging leftovers beside it.
+        let strays: Vec<_> = std::fs::read_dir(previous.path())
+            .expect("read_dir")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".ato-state")
+            })
+            .collect();
+        assert!(strays.is_empty(), "staging directories were left behind");
+    }
+
+    #[test]
+    fn an_oversized_artifact_is_refused_before_it_is_written() {
+        let destination = tempfile::tempdir().expect("tempdir");
+        let target = destination.path().join("state");
+        let oversized = vec![0u8; MAX_STATE_ARTIFACT_BYTES + 1];
+        let error =
+            unpack_state_tree(&oversized, &state_artifact_digest(&oversized), &target).unwrap_err();
+        assert!(error.to_string().contains("over the"), "{error}");
+        assert!(!target.exists());
     }
 }
