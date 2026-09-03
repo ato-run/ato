@@ -334,6 +334,17 @@ fn safe_entry_path(path: &Path, limits: SourceLimits) -> Result<PathBuf, SourceE
     Ok(safe)
 }
 
+/// PAX and GNU headers describe the ARCHIVE, not the tree inside it.
+fn is_archive_metadata(entry_type: tar::EntryType) -> bool {
+    matches!(
+        entry_type,
+        tar::EntryType::XGlobalHeader
+            | tar::EntryType::XHeader
+            | tar::EntryType::GNULongName
+            | tar::EntryType::GNULongLink
+    )
+}
+
 fn entry_kind(entry_type: tar::EntryType) -> Option<&'static str> {
     match entry_type {
         tar::EntryType::Symlink => Some("a symlink"),
@@ -403,6 +414,13 @@ fn entry_paths(archive: &[u8], limits: SourceLimits) -> Result<Vec<PathBuf>, Sou
         let entry = entry.map_err(|error| {
             SourceError::Unusable(format!("source archive entry is unreadable: {error}"))
         })?;
+        // A GitHub tarball opens with `pax_global_header`, which is metadata
+        // about the archive rather than a file in the tree. Counting it as a
+        // path means no common prefix is ever found, and the wrapper directory
+        // survives — which is what left the worker detecting an empty source.
+        if is_archive_metadata(entry.header().entry_type()) {
+            continue;
+        }
         if let Some(kind) = entry_kind(entry.header().entry_type()) {
             return Err(SourceError::UnsupportedEntry {
                 kind,
@@ -437,6 +455,9 @@ pub fn measure_source_tree(archive: &[u8], limits: SourceLimits) -> Result<Strin
             SourceError::Unusable(format!("source archive entry is unreadable: {error}"))
         })?;
         let entry_type = entry.header().entry_type();
+        if is_archive_metadata(entry_type) {
+            continue;
+        }
         if let Some(kind) = entry_kind(entry_type) {
             return Err(SourceError::UnsupportedEntry {
                 kind,
@@ -521,6 +542,9 @@ fn expand_archive(
             SourceError::Unusable(format!("source archive entry is unreadable: {error}"))
         })?;
         let entry_type = entry.header().entry_type();
+        if is_archive_metadata(entry_type) {
+            continue;
+        }
         if let Some(kind) = entry_kind(entry_type) {
             return Err(SourceError::UnsupportedEntry {
                 kind,
