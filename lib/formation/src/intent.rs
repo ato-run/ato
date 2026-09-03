@@ -678,6 +678,11 @@ pub fn compile_build_plan(
                 // it, which is where the loader already looks
                 // (`bin/../lib/`). The artifact then depends on nothing the
                 // host happens to have.
+                //
+                // `cp -L`, not `-a`: the toolchain ships `libpython3.12.so` as
+                // a link to `.so.1.0`, and preserving it would put a symlink in
+                // a tree the artifact format refuses to carry. Dereferencing
+                // costs one duplicated file and makes the workspace packable.
                 argv: vec![
                     "/bin/sh".to_owned(),
                     "-euc".to_owned(),
@@ -688,7 +693,7 @@ pub fn compile_build_plan(
                     format!(
                         "{interp} -m venv --copies --without-pip {root}/.venv && \
                          mkdir -p {root}/.venv/lib && \
-                         cp -a {home}/lib/libpython*.so* {root}/.venv/lib/ && \
+                         cp -L {home}/lib/libpython*.so* {root}/.venv/lib/ && \
                          {root}/.venv/bin/python -m ensurepip --upgrade --default-pip && \
                          {root}/.venv/bin/python -V",
                         interp = interpreter.clone().unwrap_or_else(|| "python3".to_owned()),
