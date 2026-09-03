@@ -40,6 +40,15 @@ use super::resolved::ResolvedRuntimeLaunchContext;
 pub const GUEST_APP_ROOT: &str = "/app";
 /// Where the Runner binary is bound so it can act as the Landlock shim.
 const GUEST_SHIM: &str = "/.ato/runner";
+/// Where provisioned toolchains live, at the SAME absolute path Formation
+/// built against.
+///
+/// A workspace's venv is a set of symlinks into its interpreter, because a
+/// python-build-standalone build links against a shared libpython and copying
+/// only the executable produces a venv that cannot start. The symlinks resolve
+/// here or nowhere, which is why this path is fixed on both sides rather than
+/// temporary on either.
+pub const TOOLCHAIN_ROOT: &str = "/opt/ato/toolchains";
 /// Where the serialized Landlock policy is bound.
 const GUEST_POLICY: &str = "/.ato/sandbox-policy.json";
 
@@ -133,9 +142,17 @@ pub fn landlock_policy(mounts: &[GuestMount]) -> SandboxPolicy {
             .map(|mount| PathBuf::from(&mount.guest_path))
             .chain([
                 PathBuf::from("/usr"),
+                PathBuf::from("/bin"),
+                PathBuf::from("/sbin"),
                 PathBuf::from("/lib"),
                 PathBuf::from("/lib64"),
                 PathBuf::from("/etc"),
+                PathBuf::from(TOOLCHAIN_ROOT),
+                // bwrap provides these with --proc and --dev rather than a
+                // bind. Without /dev, CPython cannot open /dev/urandom and dies
+                // during pre-initialization.
+                PathBuf::from("/dev"),
+                PathBuf::from("/proc"),
             ])
             .collect::<Vec<_>>(),
     );
@@ -188,6 +205,17 @@ pub fn sandboxed_command(
         argv.extend([
             "--tmpfs".to_owned(),
             sensitive.to_string_lossy().into_owned(),
+        ]);
+    }
+
+    // The toolchain root, read-only. A Run may use an interpreter; it may not
+    // change one, and a workload that could would change it for every other
+    // tenant on the host.
+    if std::path::Path::new(TOOLCHAIN_ROOT).is_dir() {
+        argv.extend([
+            "--ro-bind".to_owned(),
+            TOOLCHAIN_ROOT.to_owned(),
+            TOOLCHAIN_ROOT.to_owned(),
         ]);
     }
 
