@@ -420,3 +420,295 @@ fn detection_never_follows_a_symlink() {
     // Following it would let a link in the source decide what the project is.
     assert!(detect(dir.path()).expect("detects").python.is_none());
 }
+
+// ─── Static Build Profile v1 ────────────────────────────────────────────────
+
+/// Fixture B, reduced to what decides the profile. The checked-in `dist/` is a
+/// DIFFERENT version of the app from the source — the same trap the real
+/// `ato-e2e-static-spa@1e1be10` sets, and the reason "a dist exists" can never
+/// mean "no build needed".
+fn vite_fixture(extra: &[(&str, &str)]) -> tempfile::TempDir {
+    let mut files = vec![
+        (
+            "package.json",
+            r#"{"name":"f","private":true,"type":"module",
+                "scripts":{"dev":"vite","build":"vite build","preview":"vite preview"},
+                "devDependencies":{"vite":"^7.1.11"}}"#,
+        ),
+        (
+            "vite.config.js",
+            "import { defineConfig } from \"vite\";\n\
+             export default defineConfig({ build: { outDir: \"dist\" } });\n",
+        ),
+        ("index.html", "<script type=\"module\" src=\"/src/app.js\"></script>"),
+        ("src/app.js", "console.log('NEW_BUILD_SENTINEL')"),
+        // Stale, committed, and a different app.
+        ("dist/index.html", "<script src=\"/app.js\"></script>"),
+        ("dist/app.js", "console.log('OLD_PREBUILT_SENTINEL')"),
+    ];
+    files.extend_from_slice(extra);
+    tree(&files)
+}
+
+fn static_intent(dir: &Path, pairs: &[(&str, &str)]) -> Result<ProgramIntentV1, IntentError> {
+    let evidence = detect(dir).expect("detect");
+    let mut origins = FieldOrigins::default();
+    compile_intent(&evidence, &overrides(pairs), "/app", &mut origins)
+}
+
+#[test]
+fn vite_source_is_built_static_and_never_publishes_the_checked_in_dist() {
+    let dir = vite_fixture(&[]);
+    let intent = static_intent(dir.path(), &[]).expect("vite fixture compiles");
+    let build = intent
+        .static_build
+        .as_ref()
+        .expect("a vite build/preview pair is a built-static site");
+
+    assert_eq!(build.package_manager, PackageManager::Npm);
+    assert_eq!(build.node_version, DEFAULT_NODE);
+    assert_eq!(build.build_script, "build");
+    assert_eq!(build.output_root, "dist");
+    // No lockfile in this fixture: the plan must not imply a pinned graph.
+    assert!(!build.lockfile_pinned);
+    assert_eq!(intent.runtime.get("node").map(String::as_str), Some(DEFAULT_NODE));
+    // The output root is where the BUILD writes. That it coincides with the
+    // stale committed directory is exactly why the build step matters.
+    assert_eq!(intent.static_output_root.as_deref(), Some("dist"));
+
+    let plan = compile_build_plan(&intent, "/app", "x86_64-unknown-linux-gnu").expect("plan");
+    let names: Vec<&str> = plan.steps.iter().map(|step| step.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["provision-node", "install-node-dependencies", "static-build"],
+        "a built-static plan provisions, installs, then builds"
+    );
+    assert_eq!(plan.output_root, "dist");
+
+    let joined = plan.steps[2].argv.join(" ");
+    assert!(joined.contains("npm run build"), "runs the package's own script: {joined}");
+    assert!(
+        joined.contains(&format!("{}/bin", node_home(DEFAULT_NODE))),
+        "the build runs on the PROVISIONED toolchain, not the host's node: {joined}"
+    );
+    // The build resolves nothing from the network; only the install does.
+    assert!(plan.steps[1].needs_network);
+    assert!(!plan.steps[2].needs_network);
+}
+
+#[test]
+fn a_lockfile_selects_the_reproducible_install_and_its_package_manager() {
+    for (lockfile, expected, command) in [
+        ("package-lock.json", PackageManager::Npm, "npm ci"),
+        ("pnpm-lock.yaml", PackageManager::Pnpm, "pnpm install --frozen-lockfile"),
+        ("yarn.lock", PackageManager::Yarn, "yarn install --frozen-lockfile"),
+    ] {
+        let dir = vite_fixture(&[(lockfile, "{}")]);
+        let intent = static_intent(dir.path(), &[]).expect("compiles");
+        let build = intent.static_build.as_ref().expect("built-static");
+        assert_eq!(build.package_manager, expected, "{lockfile}");
+        assert!(build.lockfile_pinned, "{lockfile}");
+        let plan = compile_build_plan(&intent, "/app", "x86_64-unknown-linux-gnu").expect("plan");
+        assert!(
+            plan.steps[1].argv.join(" ").contains(command),
+            "{lockfile} must install with {command}"
+        );
+    }
+}
+
+#[test]
+fn two_package_managers_disagreeing_is_ambiguous_and_fails_closed() {
+    let dir = vite_fixture(&[("package-lock.json", "{}"), ("pnpm-lock.yaml", "{}")]);
+    let error = static_intent(dir.path(), &[]).expect_err("two lockfiles cannot both be right");
+    assert_eq!(error.code(), "intent_ambiguous_lockfiles");
+}
+
+#[test]
+fn corepack_package_manager_outranks_the_lockfiles() {
+    let dir = vite_fixture(&[
+        ("package-lock.json", "{}"),
+        (
+            "package.json",
+            r#"{"name":"f","private":true,"packageManager":"pnpm@9.1.0",
+                "scripts":{"build":"vite build","preview":"vite preview"}}"#,
+        ),
+    ]);
+    let intent = static_intent(dir.path(), &[]).expect("compiles");
+    assert_eq!(
+        intent.static_build.as_ref().expect("built").package_manager,
+        PackageManager::Pnpm
+    );
+}
+
+#[test]
+fn node_version_comes_from_the_source_and_never_from_the_host() {
+    for (file, contents, expected) in [
+        (".nvmrc", "v22.14.0", "22.14.0"),
+        (".node-version", "18.20.4", "18.20.4"),
+    ] {
+        let dir = vite_fixture(&[(file, contents)]);
+        let intent = static_intent(dir.path(), &[]).expect("compiles");
+        assert_eq!(intent.static_build.expect("built").node_version, expected);
+    }
+
+    // A RANGE resolves through the ladder, and never survives as a range.
+    let dir = vite_fixture(&[(
+        "package.json",
+        r#"{"name":"f","private":true,"engines":{"node":">=22"},
+            "scripts":{"build":"vite build","preview":"vite preview"}}"#,
+    )]);
+    let intent = static_intent(dir.path(), &[]).expect("compiles");
+    assert_eq!(intent.static_build.expect("built").node_version, "22.14.0");
+
+    // A range no provisioned version satisfies is a refusal, not a default.
+    let dir = vite_fixture(&[(
+        "package.json",
+        r#"{"name":"f","private":true,"engines":{"node":">=99"},
+            "scripts":{"build":"vite build","preview":"vite preview"}}"#,
+    )]);
+    assert_eq!(
+        static_intent(dir.path(), &[]).expect_err("unsatisfiable").code(),
+        "intent_unsupported_node"
+    );
+}
+
+#[test]
+fn a_literal_out_dir_override_is_honored_and_an_unreadable_one_refuses() {
+    let dir = vite_fixture(&[(
+        "vite.config.js",
+        "export default { build: { outDir: \"site\" } };\n",
+    )]);
+    let intent = static_intent(dir.path(), &[]).expect("compiles");
+    assert_eq!(intent.static_build.expect("built").output_root, "site");
+
+    // Computed: publishing `dist` here would serve a directory the build never
+    // wrote — stale or empty, and reported as success.
+    let dir = vite_fixture(&[(
+        "vite.config.js",
+        "const target = process.env.OUT;\nexport default { build: { outDir: target } };\n",
+    )]);
+    assert_eq!(
+        static_intent(dir.path(), &[]).expect_err("computed outDir").code(),
+        "intent_requires_authoring"
+    );
+}
+
+#[test]
+fn source_static_stays_source_static() {
+    // 2048's shape: a root index.html, no package.json at all.
+    let dir = tree(&[("index.html", "<h1>2048</h1>"), ("js/app.js", "//")]);
+    let intent = static_intent(dir.path(), &[]).expect("compiles");
+    assert!(intent.static_build.is_none(), "no build was declared, so none is run");
+    assert!(intent.runtime.is_empty());
+    let plan = compile_build_plan(&intent, "/app", "x86_64-unknown-linux-gnu").expect("plan");
+    assert!(plan.steps.is_empty(), "a source-static site builds nothing");
+}
+
+#[test]
+fn a_server_in_the_dependency_set_is_not_a_static_site() {
+    let dir = vite_fixture(&[(
+        "package.json",
+        r#"{"name":"f","private":true,"dependencies":{"express":"^4"},
+            "scripts":{"build":"vite build","preview":"vite preview"}}"#,
+    )]);
+    let intent = static_intent(dir.path(), &[]).expect("compiles");
+    assert!(
+        intent.static_build.is_none(),
+        "a package that depends on a server serves itself; it is not a built-static site"
+    );
+}
+
+#[test]
+fn a_compound_build_script_is_not_interpreted() {
+    let dir = vite_fixture(&[(
+        "package.json",
+        r#"{"name":"f","private":true,
+            "scripts":{"build":"vite build && cp -r extra dist","preview":"vite preview"}}"#,
+    )]);
+    let intent = static_intent(dir.path(), &[]).expect("compiles");
+    assert!(
+        intent.static_build.is_none(),
+        "a build script with shell operators is a program, not a declaration"
+    );
+}
+
+#[test]
+fn authored_static_build_overrides_the_inference_in_both_directions() {
+    let dir = vite_fixture(&[]);
+    let intent = static_intent(dir.path(), &[("static.build", "none")]).expect("compiles");
+    assert!(intent.static_build.is_none());
+
+    // `required` with nothing to infer refuses rather than inventing a build.
+    let plain = tree(&[("index.html", "<h1>hi</h1>")]);
+    assert_eq!(
+        static_intent(plain.path(), &[("static.build", "required")])
+            .expect_err("nothing to build")
+            .code(),
+        "intent_requires_authoring"
+    );
+}
+
+// ─── marker-less Python, under an authored lane ─────────────────────────────
+
+#[test]
+fn an_authored_python_lane_accepts_a_stdlib_program_with_no_dependency_marker() {
+    // `ato-e2e-compute-server`'s shape: one module, nothing else.
+    let dir = tree(&[("server.py", "import http.server\n"), ("README.md", "#")]);
+    let evidence = detect(dir.path()).expect("detect");
+    let mut origins = FieldOrigins::default();
+    let intent = compile_intent(
+        &evidence,
+        &overrides(&[
+            ("lane", "python_process"),
+            ("launch.argv", "python3 server.py"),
+            ("port.http", "8080"),
+            ("readiness.http_path", "/"),
+        ]),
+        "/app",
+        &mut origins,
+    )
+    .expect("an authored Python lane with a module is enough");
+
+    assert_eq!(intent.lane, Lane::PythonProcess);
+    assert_eq!(intent.launch_argv, ["python3", "server.py"]);
+    assert_eq!(intent.exported_ports, [("http".to_owned(), 8080)]);
+    assert_eq!(intent.readiness_http_path.as_deref(), Some("/"));
+    // Nothing declared, nothing installed — said accurately rather than
+    // inferred from a file that is not there.
+    assert_eq!(intent.dependencies, DependencyPlan::None);
+    assert_eq!(intent.runtime.get("python").map(String::as_str), Some(DEFAULT_PYTHON));
+
+    let plan = compile_build_plan(&intent, "/app", "x86_64-unknown-linux-gnu").expect("plan");
+    let names: Vec<&str> = plan.steps.iter().map(|step| step.name.as_str()).collect();
+    assert_eq!(names, ["provision-python"], "an interpreter, and no install");
+}
+
+#[test]
+fn a_marker_less_python_lane_is_never_chosen_on_its_own() {
+    // The risk this guards: a static site with a helper script must not become
+    // a Python process because a `.py` exists.
+    let dir = tree(&[("index.html", "<h1>site</h1>"), ("tools/build.py", "#")]);
+    let evidence = detect(dir.path()).expect("detect");
+    let mut origins = FieldOrigins::default();
+    let intent = compile_intent(&evidence, &overrides(&[]), "/app", &mut origins)
+        .expect("compiles as what it is");
+    assert_eq!(intent.lane, Lane::StaticWeb);
+
+    // And an authored Python lane over a source with no module at all still
+    // refuses: there is nothing to run.
+    let dir = tree(&[("index.html", "<h1>site</h1>")]);
+    let evidence = detect(dir.path()).expect("detect");
+    let mut origins = FieldOrigins::default();
+    let error = compile_intent(
+        &evidence,
+        &overrides(&[
+            ("lane", "python_process"),
+            ("launch.argv", "python3 server.py"),
+            ("port.http", "8080"),
+        ]),
+        "/app",
+        &mut origins,
+    )
+    .expect_err("no module, no lane");
+    assert_eq!(error.code(), "intent_no_lane");
+}

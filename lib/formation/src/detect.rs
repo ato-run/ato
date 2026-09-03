@@ -71,10 +71,56 @@ pub struct StaticWebEvidence {
 pub struct NodeEvidence {
     pub has_package_json: bool,
     pub has_package_lock: bool,
+    pub has_npm_shrinkwrap: bool,
     pub has_pnpm_lock: bool,
     pub has_yarn_lock: bool,
+    pub has_bun_lock: bool,
+    /// `.nvmrc`, verbatim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_version_file: Option<String>,
+    /// `.node-version`, verbatim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_version_alt_file: Option<String>,
+    /// Corepack's `packageManager`, verbatim — `"pnpm@9.1.0"`, not `"pnpm"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_manager: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volta_node: Option<String>,
+    /// `engines.node`, verbatim. A RANGE, reported unresolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engines_node: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_build: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_preview: Option<String>,
+    /// `dependencies` + `devDependencies` keys. Names only: what a package
+    /// depends ON decides whether it is a site or a server.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependency_names: Vec<String>,
+    /// The Vite config file name, when one is present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vite_config_file: Option<String>,
+    /// What `build.outDir` reads as.
+    #[serde(default)]
+    pub vite_out_dir: ViteOutDir,
+}
+
+/// What a cheap read of `vite.config.*` can say about `build.outDir`.
+///
+/// Three answers, not two. "No override" and "an override this read cannot
+/// resolve" are different facts, and collapsing them is how a build publishes
+/// `dist` for a project that writes somewhere else.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "value")]
+pub enum ViteOutDir {
+    /// No config file, or a config that never mentions `outDir`.
+    #[default]
+    Unset,
+    /// A literal string override.
+    Literal(String),
+    /// An override that is present but not a readable literal — an expression,
+    /// a variable, or more than one occurrence.
+    Unreadable,
 }
 
 const PYTHON_MARKERS: &[&str] = &[
@@ -87,6 +133,41 @@ const PYTHON_MARKERS: &[&str] = &[
 ];
 
 const OUTPUT_DIR_CANDIDATES: &[&str] = &["dist", "build", "out", "public", "_site"];
+
+const VITE_CONFIG_FILES: &[&str] = &[
+    "vite.config.ts",
+    "vite.config.js",
+    "vite.config.mts",
+    "vite.config.mjs",
+];
+
+/// Read `build.outDir` out of a Vite config without executing it.
+///
+/// Deliberately shallow, in the same spirit as `extract_requires_python`: this
+/// is EVIDENCE. A config that computes its output directory is reported as
+/// unreadable, and the intent compiler decides what to do about that — it does
+/// not get a `dist` invented for it.
+fn extract_vite_out_dir(text: &str) -> ViteOutDir {
+    let Some(index) = text.find("outDir") else {
+        return ViteOutDir::Unset;
+    };
+    let after = &text[index + "outDir".len()..];
+    // A second occurrence means two answers. Refuse both.
+    if after.contains("outDir") {
+        return ViteOutDir::Unreadable;
+    }
+    let Some(rest) = after.trim_start().strip_prefix(':') else {
+        return ViteOutDir::Unreadable;
+    };
+    let rest = rest.trim_start();
+    let Some(quote) = rest.chars().next().filter(|c| matches!(c, '"' | '\'')) else {
+        return ViteOutDir::Unreadable;
+    };
+    match rest[1..].split(quote).next() {
+        Some(literal) if !literal.is_empty() => ViteOutDir::Literal(literal.to_owned()),
+        _ => ViteOutDir::Unreadable,
+    }
+}
 
 /// Read a source tree and report what is there.
 ///
@@ -152,12 +233,59 @@ pub fn detect(root: &Path) -> std::io::Result<DetectorEvidence> {
         has_package_json: has("package.json"),
     });
 
-    let node = has("package.json").then(|| NodeEvidence {
-        has_package_json: true,
-        has_package_lock: has("package-lock.json"),
-        has_pnpm_lock: has("pnpm-lock.yaml"),
-        has_yarn_lock: has("yarn.lock"),
-        node_version_file: read_trimmed(".nvmrc"),
+    let node = has("package.json").then(|| {
+        let package_json = std::fs::read_to_string(root.join("package.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+        let string_at = |path: &[&str]| -> Option<String> {
+            let mut cursor = package_json.as_ref()?;
+            for key in path {
+                cursor = cursor.get(key)?;
+            }
+            cursor.as_str().map(str::to_owned)
+        };
+        let mut dependency_names = Vec::new();
+        for section in ["dependencies", "devDependencies"] {
+            if let Some(map) = package_json
+                .as_ref()
+                .and_then(|value| value.get(section))
+                .and_then(serde_json::Value::as_object)
+            {
+                dependency_names.extend(map.keys().cloned());
+            }
+        }
+        dependency_names.sort();
+        dependency_names.dedup();
+
+        let vite_config_file = VITE_CONFIG_FILES
+            .iter()
+            .find(|name| root.join(name).is_file())
+            .map(|name| (*name).to_owned());
+        let vite_out_dir = match vite_config_file.as_deref() {
+            None => ViteOutDir::Unset,
+            Some(name) => std::fs::read_to_string(root.join(name))
+                .map(|text| extract_vite_out_dir(&text))
+                .unwrap_or(ViteOutDir::Unreadable),
+        };
+
+        NodeEvidence {
+            has_package_json: true,
+            has_package_lock: has("package-lock.json"),
+            has_npm_shrinkwrap: has("npm-shrinkwrap.json"),
+            has_pnpm_lock: has("pnpm-lock.yaml"),
+            has_yarn_lock: has("yarn.lock"),
+            has_bun_lock: has("bun.lock") || has("bun.lockb"),
+            node_version_file: read_trimmed(".nvmrc"),
+            node_version_alt_file: read_trimmed(".node-version"),
+            package_manager: string_at(&["packageManager"]),
+            volta_node: string_at(&["volta", "node"]),
+            engines_node: string_at(&["engines", "node"]),
+            script_build: string_at(&["scripts", "build"]),
+            script_preview: string_at(&["scripts", "preview"]),
+            dependency_names,
+            vite_config_file,
+            vite_out_dir,
+        }
     });
 
     Ok(DetectorEvidence {
