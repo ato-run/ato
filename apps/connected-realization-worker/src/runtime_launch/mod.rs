@@ -6,3 +6,4 @@
 //! CLI or netd, all of which link the contract crate.
 
 pub mod resolved;
+pub mod state_artifact;
