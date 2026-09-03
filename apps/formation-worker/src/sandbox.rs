@@ -29,6 +29,22 @@ pub const GUEST_SOURCE_ROOT: &str = "/src";
 pub const GUEST_WORKSPACE_ROOT: &str = "/app";
 /// Where a dependency cache may live, when one is allowed.
 pub const GUEST_CACHE_ROOT: &str = "/cache";
+/// Where provisioned toolchains live — the same path at build time and at
+/// runtime, because a venv records the absolute path of the interpreter that
+/// made it.
+pub const TOOLCHAIN_ROOT: &str = "/opt/ato/toolchains";
+
+/// System paths a build may read and execute.
+///
+/// ONE list, used for both the bind mounts and the Landlock policy. They
+/// describe the same world and drifted apart once already: the policy omitted
+/// `/bin`, Landlock denied exec of `/bin/sh`, and the failure read as
+/// "Permission denied" on a path the mount namespace had faithfully provided.
+const SYSTEM_READ_ONLY: &[&str] = &[
+    // `/bin` and `/sbin` are usrmerge symlinks on most modern distributions,
+    // and binding only `/usr` leaves them dangling.
+    "/bin", "/sbin", "/lib", "/lib64", "/usr", "/etc",
+];
 
 /// What the build may reach.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,22 +154,23 @@ pub fn sandboxed_build_command(
     for flag in ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"] {
         argv.push(flag.to_owned());
     }
-    for [flag, source, target] in [
-        // `/bin` and `/sbin` are usrmerge symlinks on most modern
-        // distributions, and binding only `/usr` leaves them dangling — a
-        // `#!/bin/sh` then fails with "No such file or directory", which is
-        // measured behaviour here rather than a guess.
-        ["--ro-bind-try", "/bin", "/bin"],
-        ["--ro-bind-try", "/sbin", "/sbin"],
-        ["--ro-bind-try", "/lib", "/lib"],
-        ["--ro-bind-try", "/lib64", "/lib64"],
-        ["--ro-bind", "/usr", "/usr"],
-        ["--ro-bind-try", "/etc/resolv.conf", "/etc/resolv.conf"],
-        ["--ro-bind-try", "/etc/hosts", "/etc/hosts"],
-        ["--ro-bind-try", "/etc/ssl", "/etc/ssl"],
-    ] {
-        argv.extend([flag.to_owned(), source.to_owned(), target.to_owned()]);
+    for path in SYSTEM_READ_ONLY {
+        // `--ro-bind-try`: a strict bind against a missing source aborts bwrap
+        // before the build runs, and a path that does not exist cannot be
+        // exposed, so skipping it weakens nothing.
+        argv.extend([
+            "--ro-bind-try".to_owned(),
+            (*path).to_owned(),
+            (*path).to_owned(),
+        ]);
     }
+    // Toolchains are provisioned into a shared root and reused across builds,
+    // so this one is writable.
+    argv.extend([
+        "--bind".to_owned(),
+        TOOLCHAIN_ROOT.to_owned(),
+        TOOLCHAIN_ROOT.to_owned(),
+    ]);
 
     // Every credential directory becomes an empty tmpfs. `--unshare-all` plus
     // explicit binds already means they are absent; this makes a future
