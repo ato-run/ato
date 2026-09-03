@@ -26,10 +26,29 @@
 //! parallel model; `SourceClosureRef` is derived from those same facts.
 
 use std::collections::BTreeSet;
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::path::{Component, Path, PathBuf};
 
 use sha2::{Digest, Sha256};
+
+/// Decompress if the bytes are gzipped, otherwise return them unchanged.
+///
+/// A codeload tarball arrives as `.tar.gz` and a hand-built upload may not.
+/// Sniffing the magic rather than trusting a filename means the caller does
+/// not have to know which it fetched — and a `tar` reader handed gzip bytes
+/// fails with "numeric field did not have utf-8 text", which reads like a
+/// corrupt archive rather than a compressed one.
+fn decompressed(bytes: &[u8]) -> Result<std::borrow::Cow<'_, [u8]>, SourceError> {
+    if bytes.len() < 2 || bytes[0] != 0x1f || bytes[1] != 0x8b {
+        return Ok(std::borrow::Cow::Borrowed(bytes));
+    }
+    let mut decoder = flate2::read::GzDecoder::new(Cursor::new(bytes));
+    let mut out = Vec::new();
+    decoder.read_to_end(&mut out).map_err(|error| {
+        SourceError::Unusable(format!("source archive is not readable gzip: {error}"))
+    })?;
+    Ok(std::borrow::Cow::Owned(out))
+}
 
 /// How a tree was measured. Part of the closure identity on purpose.
 ///
@@ -334,12 +353,80 @@ fn entry_kind(entry_type: tar::EntryType) -> Option<&'static str> {
 /// Symlinks, hard links, devices and FIFOs are refused rather than measured. A
 /// source tree is files and directories; the rest are ways to reach outside it
 /// once it lands on a disk.
+/// Strip a single wrapping directory when EVERY entry shares one.
+///
+/// A codeload tarball wraps the tree in `<repo>-<sha>/`, which is transport
+/// packaging and not part of the source. Measuring it would make the same tree
+/// hash differently depending on where it was fetched from — exactly the thing
+/// a closure identity exists to prevent. Stripped only when every entry agrees,
+/// so an archive that genuinely has a top-level directory keeps it.
+fn common_prefix(paths: &[PathBuf]) -> Option<String> {
+    let first = paths.first()?.components().next()?;
+    let Component::Normal(candidate) = first else {
+        return None;
+    };
+    let candidate = candidate.to_str()?.to_owned();
+    // A single-file archive has no wrapper to strip.
+    if paths.len() < 2 {
+        return None;
+    }
+    paths
+        .iter()
+        .all(|path| {
+            matches!(path.components().next(), Some(Component::Normal(part))
+                if part.to_str() == Some(candidate.as_str()))
+                && path.components().count() > 1
+        })
+        .then_some(candidate)
+}
+
+fn strip_prefix(relative: &Path, prefix: Option<&str>) -> PathBuf {
+    match prefix {
+        Some(prefix) => relative
+            .strip_prefix(prefix)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|_| relative.to_path_buf()),
+        None => relative.to_path_buf(),
+    }
+}
+
+/// Every entry path in an archive, checked for containment.
+fn entry_paths(archive: &[u8], limits: SourceLimits) -> Result<Vec<PathBuf>, SourceError> {
+    let mut paths = Vec::new();
+    let mut tar = tar::Archive::new(Cursor::new(archive));
+    for entry in tar
+        .entries()
+        .map_err(|error| SourceError::Unusable(format!("source archive is unreadable: {error}")))?
+    {
+        let entry = entry.map_err(|error| {
+            SourceError::Unusable(format!("source archive entry is unreadable: {error}"))
+        })?;
+        if let Some(kind) = entry_kind(entry.header().entry_type()) {
+            return Err(SourceError::UnsupportedEntry {
+                kind,
+                path: entry
+                    .path()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default(),
+            });
+        }
+        let path = entry
+            .path()
+            .map_err(|error| SourceError::Unusable(format!("entry has no path: {error}")))?
+            .into_owned();
+        paths.push(safe_entry_path(&path, limits)?);
+    }
+    Ok(paths)
+}
+
 pub fn measure_source_tree(archive: &[u8], limits: SourceLimits) -> Result<String, SourceError> {
     let mut entries: BTreeSet<(String, String)> = BTreeSet::new();
     let mut total: u64 = 0;
     let mut count = 0usize;
 
-    let mut tar = tar::Archive::new(Cursor::new(archive));
+    let archive = decompressed(archive)?;
+    let prefix = common_prefix(&entry_paths(archive.as_ref(), limits)?);
+    let mut tar = tar::Archive::new(Cursor::new(archive.as_ref()));
     for entry in tar
         .entries()
         .map_err(|error| SourceError::Unusable(format!("source archive is unreadable: {error}")))?
@@ -361,7 +448,10 @@ pub fn measure_source_tree(archive: &[u8], limits: SourceLimits) -> Result<Strin
             .path()
             .map_err(|error| SourceError::Unusable(format!("entry has no path: {error}")))?
             .into_owned();
-        let relative = safe_entry_path(&path, limits)?;
+        let relative = strip_prefix(&safe_entry_path(&path, limits)?, prefix.as_deref());
+        if relative.as_os_str().is_empty() {
+            continue;
+        }
 
         if entry_type.is_dir() {
             // Directories are part of the tree: an empty `fixtures/` that
@@ -413,7 +503,9 @@ fn expand_archive(
         SourceError::Unusable(format!("cannot create {}: {error}", destination.display()))
     })?;
 
-    let mut tar = tar::Archive::new(Cursor::new(archive));
+    let archive = decompressed(archive)?;
+    let prefix = common_prefix(&entry_paths(archive.as_ref(), limits)?);
+    let mut tar = tar::Archive::new(Cursor::new(archive.as_ref()));
     tar.set_preserve_permissions(false);
     tar.set_unpack_xattrs(false);
     tar.set_overwrite(true);
@@ -440,7 +532,10 @@ fn expand_archive(
             .path()
             .map_err(|error| SourceError::Unusable(format!("entry has no path: {error}")))?
             .into_owned();
-        let relative = safe_entry_path(&path, limits)?;
+        let relative = strip_prefix(&safe_entry_path(&path, limits)?, prefix.as_deref());
+        if relative.as_os_str().is_empty() {
+            continue;
+        }
         let target = destination.join(&relative);
 
         if entry_type.is_dir() {
@@ -841,5 +936,82 @@ mod tests {
             measure_source_tree(&with_dir, LIMITS).unwrap(),
             measure_source_tree(&empty, LIMITS).unwrap()
         );
+    }
+
+    fn gzipped(raw: &[u8]) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(raw).expect("gzip");
+        encoder.finish().expect("gzip")
+    }
+
+    #[test]
+    fn a_gzipped_archive_measures_the_same_as_a_plain_one() {
+        // A codeload tarball arrives gzipped and a hand-built upload may not.
+        // A tar reader handed gzip bytes fails with "numeric field did not have
+        // utf-8 text", which reads like a corrupt archive rather than a
+        // compressed one — observed on the acceptance host.
+        let plain = archive(&[("app.py", b"print(1)\n")], 0);
+        let compressed = gzipped(&plain);
+        assert_eq!(
+            measure_source_tree(&plain, LIMITS).unwrap(),
+            measure_source_tree(&compressed, LIMITS).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_transport_wrapper_directory_is_not_part_of_the_source() {
+        // codeload wraps the tree in `<repo>-<sha>/`. Measuring that would make
+        // the same tree hash differently depending on where it was fetched
+        // from, which is exactly what a closure identity exists to prevent.
+        let bare = archive(&[("app.py", b"print(1)\n"), ("README", b"hi\n")], 0);
+        let wrapped = archive(
+            &[
+                ("repo-922b112/app.py", b"print(1)\n"),
+                ("repo-922b112/README", b"hi\n"),
+            ],
+            0,
+        );
+        assert_eq!(
+            measure_source_tree(&bare, LIMITS).unwrap(),
+            measure_source_tree(&wrapped, LIMITS).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_real_top_level_directory_is_kept() {
+        // Stripping happens only when EVERY entry shares one prefix. A source
+        // that genuinely has `src/` alongside `README` keeps it.
+        let with_dir = archive(&[("src/app.py", b"1"), ("README", b"hi")], 0);
+        let flattened = archive(&[("app.py", b"1"), ("README", b"hi")], 0);
+        assert_ne!(
+            measure_source_tree(&with_dir, LIMITS).unwrap(),
+            measure_source_tree(&flattened, LIMITS).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_wrapped_archive_materializes_without_its_wrapper() {
+        let wrapped = archive(
+            &[
+                ("repo-922b112/app.py", b"print(1)\n"),
+                ("repo-922b112/lib/util.py", b"x = 1\n"),
+            ],
+            0,
+        );
+        let digest = content_ref(&wrapped);
+        let verified = DownloadedArchive::new(wrapped)
+            .verify_archive_digest(&digest)
+            .expect("bytes")
+            .verify_tree_digest(None, LIMITS)
+            .expect("tree");
+        let staging = tempfile::tempdir().expect("tempdir");
+        let root = verified
+            .materialize(staging.path(), "", LIMITS)
+            .expect("materializes");
+        // `/app` must contain app.py, not repo-922b112/app.py.
+        assert!(root.join("app.py").is_file());
+        assert!(root.join("lib/util.py").is_file());
+        assert!(!root.join("repo-922b112").exists());
     }
 }
