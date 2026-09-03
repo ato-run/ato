@@ -1,0 +1,95 @@
+{
+  "protocol": "ato.formation-result.v1",
+  "job_id": "fjob_01M1K2NOTESFIXTURE000000",
+  "attempt_id": "fatt_01M1K2NOTESATTEMPT00001",
+  "attempt_fence": 1,
+  "status": "succeeded",
+  "formation_key": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "source_revision_ref": "srev_01M1K2NOTESREVISION0001",
+  "source_closure_ref": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+  "program_intent_ref": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+  "effective_build_plan_ref": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+  "compute_schema_ref": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+  "materializations": [
+    {
+      "kind": "process_workspace",
+      "content_ref": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      "media_type": "application/vnd.ato.process-workspace.v1+tar",
+      "digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      "size_bytes": 41287680,
+      "target": {
+        "triple": "x86_64-linux-gnu",
+        "workspace_guest_root": "/app"
+      },
+      "compatibility": {
+        "libc": "glibc-2.39",
+        "os": "linux"
+      },
+      "producer": "ato-formation-worker/0.1.0"
+    }
+  ],
+  "runtime_requirements": [
+    {
+      "name": "python",
+      "version": "3.12.7",
+      "resolution": "authored"
+    }
+  ],
+  "realization_candidates": [
+    {
+      "kind": "process",
+      "argv": [
+        "/app/.venv/bin/python",
+        "-m",
+        "uvicorn",
+        "app:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000"
+      ],
+      "cwd_relative": "",
+      "public_env": {
+        "DATABASE_PATH": "/data/app.sqlite"
+      },
+      "workspace_materialization_ref": "sha256:6666666666666666666666666666666666666666666666666666666666666666"
+    }
+  ],
+  "exported_ports": [
+    {
+      "name": "http",
+      "protocol": "http",
+      "guest_port": 8000
+    }
+  ],
+  "readiness_contracts": [
+    {
+      "kind": "http",
+      "port_name": "http",
+      "path": "/health"
+    }
+  ],
+  "state_slot_declarations": [
+    {
+      "state_key": "app_data",
+      "mount_target": "/data",
+      "access": "read_write",
+      "protocol": "ato.state.filesystem@1"
+    }
+  ],
+  "binding_requirements": [],
+  "provenance": {
+    "formation_service_version": "0.1.0",
+    "builder_catalog_version": "catalog-2026-09",
+    "policy_version": "formation-policy-v1",
+    "network_policy": "dependency_resolution",
+    "isolation": "bubblewrap+landlock;network=host;trusted-allowlist",
+    "field_origins": {
+      "launch.argv": "authored",
+      "runtime.python": "authored",
+      "state.app_data": "authored"
+    }
+  },
+  "diagnostics": [],
+  "deterministic_inputs_digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+}
