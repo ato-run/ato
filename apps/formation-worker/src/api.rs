@@ -48,27 +48,98 @@ impl FormationApi {
             .json()?)
     }
 
-    /// Publish a workspace artifact through a control-plane grant.
+    /// How much of an artifact goes in one request.
     ///
-    /// The worker never learns a bucket name or an object key. It sends bytes;
-    /// the control plane derives where they go and returns the content address
-    /// it recorded.
+    /// Well under the control plane's 100 MB request cap, with room for
+    /// framing. A process workspace carrying an interpreter and an installed
+    /// dependency tree is comfortably over that cap — the acceptance fixture is
+    /// 112 MB — so a single POST is not a publication path for this artifact.
+    const PART_BYTES: usize = 48 * 1024 * 1024;
+
+    /// Publish a workspace artifact.
+    ///
+    /// The worker never learns a bucket name or a final object key. It sends
+    /// parts to a staging key the control plane derived, and the control plane
+    /// digests what actually arrived and files it under that address — so the
+    /// artifact's identity comes from its bytes rather than from the worker's
+    /// claim about them.
     pub fn publish_artifact(&self, bytes: &[u8]) -> Result<String> {
-        let response: serde_json::Value = self
+        if bytes.len() <= Self::PART_BYTES {
+            let response: serde_json::Value = self
+                .client
+                .post(format!("{}/v1/internal/workspaces", self.base))
+                .bearer_auth(&self.token)
+                .header("content-type", "application/octet-stream")
+                .body(bytes.to_vec())
+                .send()?
+                .error_for_status()
+                .context("failed to publish the workspace artifact")?
+                .json()?;
+            return response
+                .get("materialization_ref")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+                .context("publication receipt names no materialization");
+        }
+
+        let started: serde_json::Value = self
             .client
-            .post(format!("{}/v1/internal/workspaces", self.base))
+            .post(format!("{}/v1/internal/workspaces/multipart", self.base))
             .bearer_auth(&self.token)
-            .header("content-type", "application/octet-stream")
-            .body(bytes.to_vec())
+            .json(&serde_json::json!({}))
             .send()?
             .error_for_status()
-            .context("failed to publish the workspace artifact")?
+            .context("failed to begin a multipart publication")?
             .json()?;
-        response
+        let key = started["key"]
+            .as_str()
+            .context("no staging key")?
+            .to_owned();
+        let upload_id = started["upload_id"]
+            .as_str()
+            .context("no upload id")?
+            .to_owned();
+
+        let mut parts = Vec::new();
+        for (index, chunk) in bytes.chunks(Self::PART_BYTES).enumerate() {
+            // R2 part numbers start at 1.
+            let part_number = index + 1;
+            let uploaded: serde_json::Value = self
+                .client
+                .put(format!(
+                    "{}/v1/internal/workspaces/multipart?key={key}&upload_id={upload_id}&part={part_number}",
+                    self.base
+                ))
+                .bearer_auth(&self.token)
+                .header("content-type", "application/octet-stream")
+                .body(chunk.to_vec())
+                .send()?
+                .error_for_status()
+                .with_context(|| format!("failed to upload part {part_number}"))?
+                .json()?;
+            parts.push(serde_json::json!({
+                "part_number": uploaded["part_number"],
+                "etag": uploaded["etag"],
+            }));
+        }
+
+        let completed: serde_json::Value = self
+            .client
+            .post(format!(
+                "{}/v1/internal/workspaces/multipart/complete",
+                self.base
+            ))
+            .bearer_auth(&self.token)
+            .json(&serde_json::json!({ "key": key, "upload_id": upload_id, "parts": parts }))
+            .send()?
+            .error_for_status()
+            .context("failed to complete the multipart publication")?
+            .json()?;
+        completed
             .get("materialization_ref")
             .and_then(serde_json::Value::as_str)
             .map(ToOwned::to_owned)
-            .context("publication receipt names no materialization")
+            .context("completion receipt names no materialization")
     }
 
     /// Offer a result. The control plane decides whether it counts.
