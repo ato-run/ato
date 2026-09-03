@@ -208,7 +208,10 @@ pub fn run_job(
             let produced = crate::static_lane::materialize_static(
                 &intent,
                 &plan,
-                &output_root,
+                // The WORKSPACE root, not the already-resolved output root:
+                // the lane resolves `static.output_root` itself, and handing it
+                // a resolved path made it look for `site/site`.
+                &built.workspace_root,
                 &attempt_root.join("bundle"),
                 &format!("swm_{}", &claimed.attempt_id),
                 // No canaries: this build redeems no secrets, so there is
