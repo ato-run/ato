@@ -195,8 +195,32 @@ pub fn run_job(
     )?;
 
     // ── materialize and publish ─────────────────────────────────────────────
+    //
+    // The two lanes produce different KINDS of artifact, and the difference is
+    // not cosmetic. A process workspace is a tree the Runner mounts; a Static
+    // Web materialization is a manifest, a receipt and content-addressed blobs
+    // the browser evaluator already knows how to read. Packing a static site as
+    // a workspace would publish an artifact nothing can serve.
     let output_root = crate::build::output_root(&built, &plan)?;
-    let packed = context.packer.pack(&output_root)?;
+    let packed = match intent.lane {
+        Lane::PythonProcess => context.packer.pack(&output_root)?,
+        Lane::StaticWeb => {
+            let produced = crate::static_lane::materialize_static(
+                &intent,
+                &plan,
+                &output_root,
+                &attempt_root.join("bundle"),
+                &format!("swm_{}", &claimed.attempt_id),
+                // No canaries: this build redeems no secrets, so there is
+                // nothing to scan for — and an empty list is NOT a claim that
+                // the output was scanned.
+                &[],
+            )?;
+            // The bundle directory IS the artifact: manifest, receipt and blobs
+            // together, exactly as the materializer laid them out.
+            context.packer.pack(&produced.bundle.bundle_root)?
+        }
+    };
     let materialization_ref = context.api.publish_artifact(&packed)?;
 
     let result = compose_result(
@@ -325,7 +349,12 @@ fn compose_result(
         "materializations": [{
             "kind": kind,
             "content_ref": materialization_ref,
-            "media_type": "application/vnd.ato.process-workspace.v1+tar",
+            // Per lane: a consumer that reached for the wrong reader would
+            // find a tar where it expected a bundle, and say so unhelpfully.
+            "media_type": match intent.lane {
+                Lane::PythonProcess => "application/vnd.ato.process-workspace.v1+tar",
+                Lane::StaticWeb => "application/vnd.ato.static-web-bundle.v1+tar",
+            },
             "digest": materialization_ref,
             "size_bytes": size_bytes,
             "target": { "triple": triple, "workspace_guest_root": guest_root },
