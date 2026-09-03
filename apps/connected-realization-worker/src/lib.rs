@@ -93,11 +93,15 @@ const PORTABLE_CAPSULE_LEASE_KIND: &str = "portable_capsule_v2";
 const ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND: &str = "activity_browser_executor_v0";
 const RUNNER_CAPABILITIES: &[&str] = &[
     "execution_abi=process",
+    runtime_launch::lease::RUNTIME_LAUNCH_LEASE_KIND,
     "isolation=untrusted-v1",
     "materializer=ato.materialize.vm.snapshot@1",
     "backend=firecracker",
 ];
 const ACTIVE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+/// A Run that is never stopped is still not immortal. The cap exists so a lost
+/// control plane cannot leave a workload and its state slot held forever.
+const RUNTIME_LAUNCH_MAX_LIFETIME: Duration = Duration::from_secs(60 * 60);
 const ACTIVITY_FRAME_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 const ACTIVITY_FRAME_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const GUEST_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
@@ -1007,6 +1011,9 @@ impl ConnectedWorker {
             LeaseCommand::Activity(command) => {
                 self.execute_activity_lease(lease, command, &lease_root)
             }
+            LeaseCommand::RuntimeLaunch(command) => {
+                self.execute_runtime_launch_lease(lease, command, &lease_root)
+            }
         };
         let cleanup = cleanup_lease_directory(&lease_root);
         match (result, cleanup) {
@@ -1014,6 +1021,95 @@ impl ConnectedWorker {
             (Err(error), _) => Err(error),
             (Ok(()), Err(error)) => Err(error),
         }
+    }
+
+    /// One Dynamic Compute Run: contained process, real state, real stop.
+    ///
+    /// The Run stays ACTIVE after readiness rather than committing there. A
+    /// Run that ended at readiness would make every App a batch job — up,
+    /// declared ready, torn down before anyone used it — and the state it
+    /// committed would be the state of an App nobody touched.
+    fn execute_runtime_launch_lease(
+        &self,
+        lease: &ClaimedLease,
+        command: &runtime_launch::lease::RuntimeLaunchLeaseCommand,
+        lease_root: &Path,
+    ) -> Result<()> {
+        // Proven before anything is materialized: if the spec that arrived is
+        // not the one the control plane digested onto the Run, the Runner
+        // would execute something the receipt does not describe.
+        let spec = runtime_launch::lease::verified_spec(command)?;
+
+        let workspace = runtime_launch::workspace::LeaseWorkspaceTransport::new(
+            self.api.client.clone(),
+            self.api.base.clone(),
+            lease.id.clone(),
+            self.api.token.clone(),
+        );
+        let state = runtime_launch::state_artifact::LeaseStateArtifactTransport::new(
+            self.api.client.clone(),
+            self.api.base.clone(),
+            lease.id.clone(),
+            self.api.token.clone(),
+        );
+
+        let resolved = runtime_launch::lease::resolve_run(&spec, lease_root, &workspace, &state)?;
+        let probe =
+            runtime_launch::process_executor::LoopbackReadinessProbe::new(self.api.client.clone());
+        let active = runtime_launch::lease::start(&spec, resolved, &state, &probe)?;
+
+        let execution_id = spec
+            .canonical_digest()
+            .map_err(|error| anyhow::anyhow!("cannot digest the launch spec: {error}"))?;
+        let port = active
+            .endpoint_port("http")
+            .context("the launch declared no `http` endpoint to report")?;
+        // No ready_url. A process realization is reachable only on the
+        // Runner's own loopback, and the control plane stores a ready_url only
+        // when it is non-loopback and under the Runner's public base. Reporting
+        // the loopback address is refused, and synthesizing a public one would
+        // publish a URL that serves nothing. Ready with no URL is the honest
+        // report the API already models; the stable instance host is P4.
+        self.api
+            .report_ready(&lease.id, &execution_id, None, Some(port), None)?;
+        eprintln!(
+            "[runtime-launch] run={} ready pid={} endpoint=127.0.0.1:{port}",
+            lease.run_id,
+            active.pid()
+        );
+
+        // ACTIVE. The control plane decides when this ends.
+        let stop = || -> Result<bool> { Ok(self.api.control(&lease.id)?.stop_requested) };
+        let outcome = runtime_launch::lease::wait_for_stop(
+            &stop,
+            Duration::from_millis(500),
+            Some(Instant::now() + RUNTIME_LAUNCH_MAX_LIFETIME),
+        );
+
+        // Whether the stop was requested or the lifetime ran out, the Run is
+        // finished the same way: stop, prove the subtree is gone, pack, commit,
+        // release. A lifetime overrun must not skip the commit — the App's
+        // users produced that state either way.
+        let committed = runtime_launch::lease::finish(
+            &spec,
+            active,
+            &state,
+            &format!("commit_{}", lease.run_id),
+        );
+        outcome?;
+        let committed = committed?;
+        for entry in &committed {
+            eprintln!(
+                "[runtime-launch] run={} state={} fence={} {} -> {}",
+                lease.run_id,
+                entry.state_key,
+                entry.writer_fence,
+                entry.parent_revision_ref.as_deref().unwrap_or("<new>"),
+                entry.revision_ref.as_deref().unwrap_or("<unchanged>")
+            );
+        }
+        self.api.report_stopped(&lease.id, &execution_id)?;
+        Ok(())
     }
 
     fn execute_portable_lease(
@@ -1095,8 +1191,8 @@ impl ConnectedWorker {
         self.api.report_ready(
             &lease.id,
             &execution_id,
-            &self.config.public_base_url,
-            ready_local_port(&self.config),
+            Some(&self.config.public_base_url),
+            Some(ready_local_port(&self.config)),
             browser.as_ref().map(|runtime| runtime.control_capability()),
         )?;
         let mut last_control = Instant::now() - Duration::from_secs(1);
@@ -1417,6 +1513,20 @@ fn validate_lease(lease: &ClaimedLease, now: SystemTime) -> Result<()> {
             );
             ComputationRef::parse(&command.expected_root_computation_ref)
                 .context("lease root ComputationRef is invalid")?;
+        }
+        LeaseCommand::RuntimeLaunch(command) => {
+            ensure!(
+                command.run_id == lease.run_id,
+                "runtime launch lease Run identity mismatch"
+            );
+            ensure!(
+                valid_control_id(&command.compute_instance_id),
+                "runtime launch lease ComputeInstance scope is invalid"
+            );
+            ensure!(
+                valid_sha256_digest(&command.launch_spec_digest),
+                "runtime launch lease spec digest is invalid"
+            );
         }
         LeaseCommand::Activity(command) => {
             ensure!(
@@ -2620,11 +2730,13 @@ struct ClaimedLease {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind")]
-enum LeaseCommand {
+pub(crate) enum LeaseCommand {
     #[serde(rename = "portable_capsule_v2")]
     Portable(PortableLeaseCommand),
     #[serde(rename = "activity_browser_executor_v0")]
     Activity(ActivityLeaseCommand),
+    #[serde(rename = "runtime_launch")]
+    RuntimeLaunch(runtime_launch::lease::RuntimeLaunchLeaseCommand),
 }
 
 #[derive(Debug, Deserialize)]
@@ -2715,8 +2827,18 @@ struct BrowserControlReport<'a> {
 #[derive(Serialize)]
 struct ReadyReport<'a> {
     execution_id: &'a str,
-    ready_url: &'a str,
-    local_port: u16,
+    /// Omitted when the realization has no externally reachable URL.
+    ///
+    /// The control plane stores a ready_url ONLY when the Runner proved it is
+    /// non-loopback and under the Runner's public base, and treats an absent
+    /// one as an honest "ready, no URL". A process realization has neither a
+    /// stable host nor an ingress until P4, so reporting a loopback URL — or
+    /// worse, synthesizing a public one that serves nothing — would be a lie
+    /// the API is right to refuse.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ready_url: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    local_port: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     control: Option<BrowserControlReport<'a>>,
 }
@@ -2836,8 +2958,8 @@ impl HttpRunnerApi {
         &self,
         lease_id: &str,
         execution_id: &str,
-        ready_url: &str,
-        local_port: u16,
+        ready_url: Option<&str>,
+        local_port: Option<u16>,
         control: Option<BrowserControlCapability>,
     ) -> Result<()> {
         self.authorized(
@@ -2948,6 +3070,12 @@ impl HttpRunnerApi {
 
 fn supported_lease_kinds(config: &WorkerConfig) -> Vec<&'static str> {
     let mut kinds = vec![PORTABLE_CAPSULE_LEASE_KIND];
+    // Only advertised where the workload can actually be contained. A Runner
+    // that took `runtime_launch` leases it must then refuse would look
+    // available to the scheduler and fail every Run it won.
+    if runtime_launch::lease::RUNTIME_LAUNCH_SUPPORTED() {
+        kinds.push(runtime_launch::lease::RUNTIME_LAUNCH_LEASE_KIND);
+    }
     if config.browser_chrome.as_deref().is_some_and(Path::is_file)
         && config
             .run_control_verification_key
