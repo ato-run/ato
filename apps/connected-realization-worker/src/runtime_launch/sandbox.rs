@@ -66,8 +66,13 @@ pub struct SandboxedCommand {
 /// `--ro-bind-try` for the optional ones: a strict bind against a missing
 /// source makes bwrap abort before the workload ever runs, and a path that
 /// does not exist cannot be exposed, so skipping it weakens nothing.
-fn system_read_only_binds() -> [[&'static str; 3]; 6] {
+fn system_read_only_binds() -> [[&'static str; 3]; 8] {
     [
+        // `/bin` and `/sbin` are usrmerge symlinks on most modern
+        // distributions; binding only `/usr` leaves them dangling and a
+        // `#!/bin/sh` fails with "No such file or directory".
+        ["--ro-bind-try", "/bin", "/bin"],
+        ["--ro-bind-try", "/sbin", "/sbin"],
         ["--ro-bind-try", "/lib", "/lib"],
         ["--ro-bind-try", "/lib64", "/lib64"],
         ["--ro-bind", "/usr", "/usr"],
