@@ -23,6 +23,7 @@ use ato_formation::intent::{
     AuthoredOverrides, EffectiveBuildPlanV1, Lane, ProgramIntentV1, compile_build_plan,
     compile_intent,
 };
+use ato_formation::manifest::{parse_manifest_overrides, read_manifest_overrides};
 use ato_formation::preset::{preset_overrides, select_preset};
 use ato_formation::source::{DownloadedArchive, SourceClosureRef, SourceLimits};
 
@@ -221,6 +222,21 @@ pub fn run_claimed_job(
                 .collect()
         })
         .unwrap_or_default();
+
+    // What the author wrote down, layered UNDER the job's explicit overrides.
+    //
+    // Two places a manifest can arrive from, one meaning: the control plane may
+    // hand one over in the job (an upload carries the `capsule.toml` the person
+    // dropped), and the source tree may simply contain one. The job's copy wins
+    // when both exist, because it is the one the control plane accepted and
+    // stored — but both go through `ato_formation::manifest`, so neither can
+    // come to mean something the other does not.
+    //
+    // Under `authoring.overrides` and over an App Preset. An override written
+    // into the job is the caller being specific about THIS build; the manifest
+    // is the author being specific about the App; a preset is neither, and
+    // stays the last resort.
+    layer_authored_manifest(job, &source_root, &mut authored)?;
 
     // An App Preset, when the job did not author its own lane.
     //
@@ -558,4 +574,119 @@ pub fn preflight(job: &serde_json::Value) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Layer the author's `capsule.toml` under whatever the job already said.
+///
+/// Two doors, one meaning. The control plane may carry the manifest in the job
+/// — an upload keeps the `capsule.toml` the person dropped — and a source tree
+/// may simply contain one. The job's copy wins when both exist, because it is
+/// the one the control plane accepted and recorded; and both go through the
+/// single parser in `ato_formation::manifest`, so the two doors cannot come to
+/// mean different things.
+///
+/// `entry().or_insert` and not `insert`: an override written into the job is
+/// the caller being specific about THIS build, and a document in the tree does
+/// not get to overrule it.
+fn layer_authored_manifest(
+    job: &serde_json::Value,
+    source_root: &Path,
+    authored: &mut BTreeMap<String, String>,
+) -> Result<()> {
+    let manifest = match job["authoring"]["manifest_toml"].as_str() {
+        Some(text) => parse_manifest_overrides(text).map_err(|error| anyhow::anyhow!("{error}"))?,
+        None => read_manifest_overrides(source_root)
+            .map_err(|error| anyhow::anyhow!("{error}"))?
+            .unwrap_or_default(),
+    };
+    for (key, value) in manifest.0 {
+        authored.entry(key).or_insert(value);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod manifest_layering_tests {
+    use super::*;
+    use serde_json::json;
+
+    const IN_THE_TREE: &str = "[run]\ncommand = \"python3 tree.py\"\n[web]\nport = 8000\n";
+    const IN_THE_JOB: &str = "[run]\ncommand = \"python3 job.py\"\n[web]\nport = 9000\n";
+
+    fn tree_with(manifest: Option<&str>) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        if let Some(text) = manifest {
+            std::fs::write(
+                dir.path().join(ato_formation::manifest::MANIFEST_FILE_NAME),
+                text,
+            )
+            .expect("write");
+        }
+        dir
+    }
+
+    fn layered(job: serde_json::Value, dir: &Path) -> BTreeMap<String, String> {
+        let mut authored = BTreeMap::new();
+        layer_authored_manifest(&job, dir, &mut authored).expect("layers");
+        authored
+    }
+
+    #[test]
+    fn the_jobs_manifest_is_read_and_no_longer_dropped_on_the_floor() {
+        let dir = tree_with(None);
+        let authored = layered(
+            json!({ "authoring": { "manifest_toml": IN_THE_JOB } }),
+            dir.path(),
+        );
+        assert_eq!(
+            authored.get("launch.argv").map(String::as_str),
+            Some("python3 job.py")
+        );
+        assert_eq!(authored.get("port.http").map(String::as_str), Some("9000"));
+    }
+
+    #[test]
+    fn a_manifest_sitting_in_the_source_tree_is_read_too() {
+        let dir = tree_with(Some(IN_THE_TREE));
+        let authored = layered(json!({ "authoring": { "overrides": {} } }), dir.path());
+        assert_eq!(
+            authored.get("launch.argv").map(String::as_str),
+            Some("python3 tree.py")
+        );
+    }
+
+    #[test]
+    fn the_job_manifest_wins_over_the_one_in_the_tree() {
+        let dir = tree_with(Some(IN_THE_TREE));
+        let authored = layered(
+            json!({ "authoring": { "manifest_toml": IN_THE_JOB } }),
+            dir.path(),
+        );
+        assert_eq!(authored.get("port.http").map(String::as_str), Some("9000"));
+    }
+
+    #[test]
+    fn an_explicit_job_override_outranks_the_manifest() {
+        let dir = tree_with(Some(IN_THE_TREE));
+        let mut authored = BTreeMap::from([("port.http".to_owned(), "7000".to_owned())]);
+        layer_authored_manifest(&json!({}), dir.path(), &mut authored).expect("layers");
+        assert_eq!(authored.get("port.http").map(String::as_str), Some("7000"));
+        assert_eq!(
+            authored.get("launch.argv").map(String::as_str),
+            Some("python3 tree.py")
+        );
+    }
+
+    #[test]
+    fn a_tree_with_no_manifest_authors_nothing() {
+        let dir = tree_with(None);
+        assert!(layered(json!({}), dir.path()).is_empty());
+    }
+
+    #[test]
+    fn a_broken_manifest_fails_the_job_rather_than_being_ignored() {
+        let dir = tree_with(Some("[run\n"));
+        let mut authored = BTreeMap::new();
+        assert!(layer_authored_manifest(&json!({}), dir.path(), &mut authored).is_err());
+    }
 }

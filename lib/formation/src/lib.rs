@@ -8,5 +8,6 @@
 
 pub mod detect;
 pub mod intent;
+pub mod manifest;
 pub mod preset;
 pub mod source;
