@@ -14,6 +14,7 @@
 //! lease, no state revision — a build produces an artifact, and what happens to
 //! that artifact afterwards is somebody else's decision.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -22,6 +23,7 @@ use ato_formation::intent::{
     AuthoredOverrides, EffectiveBuildPlanV1, Lane, ProgramIntentV1, compile_build_plan,
     compile_intent,
 };
+use ato_formation::preset::{preset_overrides, select_preset};
 use ato_formation::source::{DownloadedArchive, SourceClosureRef, SourceLimits};
 
 use crate::api::{FormationApi, PublishOutcome};
@@ -148,7 +150,7 @@ pub struct JobContext<'a> {
     pub source_limits: SourceLimits,
 }
 
-/// Run one job.
+/// Claim one named job, then run it.
 pub fn run_job(
     context: &JobContext<'_>,
     job_id: &str,
@@ -156,12 +158,33 @@ pub fn run_job(
     capsule_revision_id: &str,
 ) -> Result<JobOutcome> {
     let claimed = context.api.claim(job_id, context.worker_id)?;
-    let attempt = BuildAttempt {
-        job_id: job_id.to_owned(),
-        attempt_id: claimed.attempt_id.clone(),
-        attempt_fence: claimed.attempt_fence,
-    };
-    let job = &claimed.job;
+    run_claimed_job(
+        context,
+        &BuildAttempt {
+            job_id: job_id.to_owned(),
+            attempt_id: claimed.attempt_id,
+            attempt_fence: claimed.attempt_fence,
+        },
+        &claimed.job,
+        compute_id,
+        capsule_revision_id,
+    )
+}
+
+/// Run a job whose attempt is already claimed.
+///
+/// Split out from `run_job` because a queue-polling worker learns which job it
+/// has BY claiming — there is no name to pass in beforehand. The attempt fence
+/// still comes from the control plane either way; nothing here decides which
+/// attempt is current.
+pub fn run_claimed_job(
+    context: &JobContext<'_>,
+    attempt: &BuildAttempt,
+    job: &serde_json::Value,
+    compute_id: &str,
+    capsule_revision_id: &str,
+) -> Result<JobOutcome> {
+    let attempt = attempt.clone();
 
     // ── source ──────────────────────────────────────────────────────────────
     let source = &job["source"];
@@ -179,7 +202,7 @@ pub fn run_job(
         )?;
     let closure_ref = verified.closure_ref(subdirectory)?;
 
-    let attempt_root = context.work_root.join(&claimed.attempt_id);
+    let attempt_root = context.work_root.join(&attempt.attempt_id);
     let source_root = verified.materialize(
         &attempt_root.join("source"),
         subdirectory,
@@ -188,18 +211,52 @@ pub fn run_job(
 
     // ── intent ──────────────────────────────────────────────────────────────
     let evidence = detect(&source_root).context("detection failed")?;
-    let overrides = AuthoredOverrides(
-        job["authoring"]["overrides"]
-            .as_object()
-            .map(|map| {
-                map.iter()
-                    .filter_map(|(key, value)| {
-                        value.as_str().map(|text| (key.clone(), text.to_owned()))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
-    );
+    let mut authored: BTreeMap<String, String> = job["authoring"]["overrides"]
+        .as_object()
+        .map(|map| {
+            map.iter()
+                .filter_map(|(key, value)| {
+                    value.as_str().map(|text| (key.clone(), text.to_owned()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // An App Preset, when the job did not author its own lane.
+    //
+    // The preset expands into the SAME override vocabulary an author would
+    // have written by hand, and is layered UNDERNEATH what the job actually
+    // said — so a preset never overrules an explicit intent, and there is
+    // still exactly one thing the compiler reads. A job that names its lane
+    // (every B1 acceptance fixture does) is untouched by this.
+    let preset = if authored.contains_key("lane") {
+        None
+    } else {
+        Some(select_preset(&evidence).map_err(|mismatch| {
+            // The mismatch message is written for the person who uploaded the
+            // source, and is the whole value of the preset layer: "no lane
+            // matched" would name our dispatch instead of their problem.
+            anyhow::anyhow!("{}", mismatch.message)
+        })?)
+    };
+    if let Some(preset) = preset {
+        // A preset that installs from a registry cannot run under a job whose
+        // policy denies the network. Saying so here, by name, beats letting
+        // `npm ci` fail three steps later with a DNS error the person who
+        // uploaded a folder has no way to interpret.
+        if preset.resolves_dependencies()
+            && job["policy"]["network"].as_str() != Some("dependency_resolution")
+        {
+            bail!(
+                "{} needs to install its dependencies, which this lane does not allow",
+                preset.label()
+            );
+        }
+        for (key, value) in preset_overrides(preset) {
+            authored.entry(key.to_owned()).or_insert(value);
+        }
+    }
+    let overrides = AuthoredOverrides(authored);
     let guest_root = job["target"]["workspace_guest_root"]
         .as_str()
         .unwrap_or("/app");
@@ -264,7 +321,7 @@ pub fn run_job(
                 // a resolved path made it look for `site/site`.
                 &built.workspace_root,
                 &attempt_root.join("bundle"),
-                &format!("swm_{}", &claimed.attempt_id),
+                &format!("swm_{}", &attempt.attempt_id),
                 // No canaries: this build redeems no secrets, so there is
                 // nothing to scan for — and an empty list is NOT a claim that
                 // the output was scanned.
@@ -289,7 +346,7 @@ pub fn run_job(
                 .map(|blob| blob.digest.clone())
                 .collect();
             context.api.publish_static_bundle(
-                &claimed.attempt_id,
+                &attempt.attempt_id,
                 &produced.bundle.bundle_root,
                 &produced.bundle.receipt.manifest_digest,
                 &blob_digests,

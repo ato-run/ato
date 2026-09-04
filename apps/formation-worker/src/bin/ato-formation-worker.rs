@@ -6,7 +6,10 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use ato_formation::source::SourceLimits;
 use ato_formation_worker::api::{FormationApi, PublishOutcome};
-use ato_formation_worker::job::{PinnedSourceFetcher, JobContext, TreePacker, run_job};
+use ato_formation_worker::build::BuildAttempt;
+use ato_formation_worker::job::{
+    JobContext, PinnedSourceFetcher, TreePacker, run_claimed_job, run_job,
+};
 use ato_formation_worker::pack::pack_tree;
 use ato_formation_worker::sandbox::{BuildLimits, require_containment};
 use ato_sandbox::{SandboxPolicy, apply_sandbox, is_sandbox_supported, set_no_new_privs};
@@ -25,7 +28,128 @@ fn main() -> Result<()> {
         return sandbox_exec(&args[2..]);
     }
 
+    if args.get(1).is_some_and(|arg| arg == "serve") {
+        return serve(&args[2..]);
+    }
+
     run_one(&args[1..])
+}
+
+/// Poll for work, run it, repeat.
+///
+/// The one-shot path below stays the acceptance and debugging tool; this is
+/// what makes a person dropping an HTML file into the PWA possible, since
+/// nobody is standing at a terminal to type the job id.
+///
+/// It is still not a scheduler. The control plane hands out the attempt and
+/// its fence exactly as before — this loop only asks "is there anything?", and
+/// takes whichever job it is given. Which attempt is current is decided in one
+/// place, and that place is not here.
+fn serve(args: &[String]) -> Result<()> {
+    let api_base = flag(args, "--api-base")
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| anyhow!("--api-base is required"))?;
+    let work_root = PathBuf::from(
+        flag(args, "--work-root").ok_or_else(|| anyhow!("--work-root is required"))?,
+    );
+    let worker_id = flag(args, "--worker-id").unwrap_or("formation-worker");
+    let idle = Duration::from_millis(
+        flag(args, "--poll-ms")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(2000),
+    );
+    let token = std::env::var("ATO_FORMATION_TOKEN")
+        .map_err(|_| anyhow!("ATO_FORMATION_TOKEN is required"))?;
+
+    // Once, at startup. A host that cannot contain a build must refuse to
+    // serve rather than accept jobs and fail them one at a time.
+    require_containment()?;
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(900))
+        .build()?;
+    let api = FormationApi::new(client.clone(), api_base.clone(), token.clone());
+    let shim = std::env::current_exe().context("cannot locate this worker's own binary")?;
+    let fetcher = PinnedSourceFetcher::new(client, api_base, token);
+    let context = JobContext {
+        api: &api,
+        fetcher: &fetcher,
+        packer: &DeterministicTreePacker,
+        work_root: &work_root,
+        shim: &shim,
+        worker_id,
+        limits: BuildLimits::default(),
+        source_limits: SourceLimits::default(),
+    };
+
+    println!("[formation] serving as {worker_id}");
+    loop {
+        // A poll that fails is a transient control-plane or network problem,
+        // not a reason to end the service: exiting here would need an operator
+        // to notice and restart, for something that usually clears itself.
+        let work = match api.claim_next(worker_id) {
+            Ok(work) => work,
+            Err(error) => {
+                eprintln!("[formation] claim failed: {error:#}");
+                std::thread::sleep(idle);
+                continue;
+            }
+        };
+        let Some(work) = work else {
+            std::thread::sleep(idle);
+            continue;
+        };
+
+        let attempt = BuildAttempt {
+            job_id: work.job_id.clone(),
+            attempt_id: work.attempt_id.clone(),
+            attempt_fence: work.attempt_fence,
+        };
+        // Empty rather than invented: a job submitted before the control plane
+        // recorded a target has no target, and guessing one would attach this
+        // result to something nobody asked for.
+        let compute_id = work.compute_id.clone().unwrap_or_default();
+        let revision_id = work.capsule_revision_id.clone().unwrap_or_default();
+
+        match run_claimed_job(&context, &attempt, &work.job, &compute_id, &revision_id) {
+            Ok(outcome) => {
+                println!(
+                    "[formation] job={} attempt={} closure={} materialization={} outcome={:?}",
+                    work.job_id,
+                    work.attempt_id,
+                    outcome.closure_ref,
+                    outcome.materialization_ref,
+                    outcome.outcome
+                );
+                // A result the rollout discarded leaves nothing for whoever is
+                // waiting to poll for. Saying so ends their wait with a fact
+                // instead of a timeout.
+                if let PublishOutcome::NotRegistered { mode, .. } = &outcome.outcome {
+                    let _ = api.report_failure(
+                        &work.attempt_id,
+                        &format!("this app was built but not kept: the {mode} lane is not live yet"),
+                    );
+                }
+            }
+            // The attempt is already failed by whoever refused it, or will be
+            // reaped. Logging and continuing keeps one bad upload from taking
+            // the queue down with it.
+            Err(error) => {
+                eprintln!(
+                    "[formation] job={} attempt={} failed: {error:#}",
+                    work.job_id, work.attempt_id
+                );
+                // The full error stays in this log; what crosses back is the
+                // one sentence the person who uploaded the source can act on.
+                if let Err(report) = api.report_failure(
+                    &work.attempt_id,
+                    "the app could not be built from this source",
+                ) {
+                    eprintln!("[formation] could not report the failure: {report:#}");
+                }
+            }
+        }
+    }
 }
 
 /// Run one job to completion.
@@ -90,6 +214,11 @@ fn run_one(args: &[String]) -> Result<()> {
     );
     match outcome.outcome {
         PublishOutcome::Accepted { .. } => Ok(()),
+        // The build worked; the rollout said not to keep it. Exiting non-zero
+        // stops that reading as a finished App.
+        PublishOutcome::NotRegistered { mode, reason } => {
+            Err(anyhow!("result not registered ({mode}): {reason}"))
+        }
         // A refusal is the control plane doing its job. Exiting non-zero says
         // so without pretending the build itself failed.
         PublishOutcome::Refused { code } => Err(anyhow!("result refused: {code}")),
