@@ -16,6 +16,9 @@ pub const BUNDLE_VERSION: u32 = 2;
 const MAX_BUNDLE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_BUNDLE_OBJECTS: usize = 100_000;
 const MAX_BUNDLE_OBJECT_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_GRAPH_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_GRAPH_OBJECTS: usize = 10_000;
+const MAX_GRAPH_LOGICAL_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObjectLink {
@@ -118,6 +121,50 @@ pub struct BundleMaterialization {
     pub descriptor_ref: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphRestoreCapability {
+    Supported,
+    VerifyOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphMaterialization {
+    pub id: String,
+    pub descriptor_ref: String,
+    pub restore_capability: GraphRestoreCapability,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphObjectKind {
+    Computation,
+    Materialization,
+    Payload,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphObjectDescriptor {
+    pub content_ref: String,
+    pub size_bytes: u64,
+    pub kind: GraphObjectKind,
+    pub references: Vec<String>,
+}
+
+/// Reachable object closure for the large-object transport lane.
+///
+/// `root_computation_ref` is supplied by the caller and is never derived from
+/// the descriptor list, materialization bytes, or transport index ordering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObjectGraphClosure {
+    pub root_computation_ref: String,
+    pub objects: Vec<GraphObjectDescriptor>,
+    pub materializations: Vec<GraphMaterialization>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BundleIndex {
@@ -184,6 +231,8 @@ pub enum BundleError {
     DuplicateMaterializer(String),
     #[error("bundle contains duplicate materializer `{0}`")]
     DuplicateMaterialization(String),
+    #[error("declared object graph does not equal references decoded from object content")]
+    DeclaredGraphMismatch,
     #[error("bundle signature is malformed")]
     MalformedSignature,
     #[error("bundle signature verification failed")]
@@ -243,6 +292,142 @@ pub fn export_bundle_with_materializations(
         },
         payloads,
     })
+}
+
+pub fn export_object_graph(
+    root: &ComputationRef,
+    materializations: &[GraphMaterialization],
+    objects: &dyn ObjectResolver,
+    references: &ReferenceRegistry,
+) -> Result<ObjectGraphClosure, BundleError> {
+    let mut materializer_ids = BTreeSet::new();
+    let mut descriptors = BTreeMap::new();
+    for materialization in materializations {
+        if !materializer_ids.insert(materialization.id.clone()) {
+            return Err(BundleError::DuplicateMaterialization(
+                materialization.id.clone(),
+            ));
+        }
+        reject_path(&materialization.descriptor_ref)?;
+        let descriptor = parse_content(&materialization.descriptor_ref)?;
+        if descriptors
+            .insert(descriptor, materialization.id.clone())
+            .is_some()
+        {
+            return Err(BundleError::DuplicateObject(
+                materialization.descriptor_ref.clone(),
+            ));
+        }
+    }
+
+    let mut queue = VecDeque::from([ObjectLink::Computation(root.clone())]);
+    let mut graph = BTreeMap::<ContentRef, (GraphObjectKind, u64, BTreeSet<ContentRef>)>::new();
+    while let Some(link) = queue.pop_front() {
+        let reference = match &link {
+            ObjectLink::Computation(computation) => computation.content_ref().clone(),
+            ObjectLink::Content(content) => content.clone(),
+        };
+        if graph.contains_key(&reference) {
+            continue;
+        }
+        if graph.len() >= MAX_GRAPH_OBJECTS {
+            return Err(BundleError::TooManyObjects(graph.len() + 1));
+        }
+        let metadata = objects.metadata(&reference)?;
+        if metadata.size > MAX_GRAPH_OBJECT_BYTES {
+            return Err(BundleError::OversizedObject {
+                reference: reference.to_string(),
+                size: metadata.size,
+                maximum: MAX_GRAPH_OBJECT_BYTES,
+            });
+        }
+
+        let (kind, outgoing) = match link {
+            ObjectLink::Computation(computation) => {
+                let resolved = resolve_computation(objects, &computation)?;
+                let extractor = references
+                    .get(&resolved.object().semantics)
+                    .ok_or_else(|| {
+                        BundleError::MissingExtractor(resolved.object().semantics.clone())
+                    })?;
+                let mut outgoing = extractor.outgoing(&resolved, objects)?;
+                outgoing.push(ObjectLink::Content(resolved.object().residual.clone()));
+                if &computation == root {
+                    outgoing.extend(descriptors.keys().cloned().map(ObjectLink::Content));
+                }
+                (GraphObjectKind::Computation, outgoing)
+            }
+            ObjectLink::Content(content) => match descriptors.get(&content) {
+                Some(materializer_id) => {
+                    let extractor = references
+                        .materializer(materializer_id)
+                        .ok_or_else(|| BundleError::MissingMaterializer(materializer_id.clone()))?;
+                    (
+                        GraphObjectKind::Materialization,
+                        extractor.outgoing(&content, objects)?,
+                    )
+                }
+                None => (GraphObjectKind::Payload, Vec::new()),
+            },
+        };
+        let outgoing_refs = outgoing
+            .iter()
+            .map(|link| match link {
+                ObjectLink::Computation(computation) => computation.content_ref().clone(),
+                ObjectLink::Content(content) => content.clone(),
+            })
+            .collect::<BTreeSet<_>>();
+        queue.extend(outgoing);
+        graph.insert(reference, (kind, metadata.size, outgoing_refs));
+    }
+
+    let logical_bytes = graph.values().try_fold(0_u64, |total, (_, size, _)| {
+        total.checked_add(*size).ok_or(BundleError::BundleTooLarge {
+            actual: u64::MAX,
+            maximum: MAX_GRAPH_LOGICAL_BYTES,
+        })
+    })?;
+    if logical_bytes > MAX_GRAPH_LOGICAL_BYTES {
+        return Err(BundleError::BundleTooLarge {
+            actual: logical_bytes,
+            maximum: MAX_GRAPH_LOGICAL_BYTES,
+        });
+    }
+
+    Ok(ObjectGraphClosure {
+        root_computation_ref: root.to_string(),
+        objects: graph
+            .into_iter()
+            .map(
+                |(reference, (kind, size_bytes, references))| GraphObjectDescriptor {
+                    content_ref: reference.to_string(),
+                    size_bytes,
+                    kind,
+                    references: references
+                        .into_iter()
+                        .map(|item| item.to_string())
+                        .collect(),
+                },
+            )
+            .collect(),
+        materializations: materializations.to_vec(),
+    })
+}
+
+/// Recomputes the complete semantic closure from decoded object content and
+/// requires byte-for-byte descriptor equality with the declared graph.
+/// Client-provided `references` are never used as traversal input.
+pub fn verify_declared_object_graph(
+    declared: &ObjectGraphClosure,
+    objects: &dyn ObjectResolver,
+    references: &ReferenceRegistry,
+) -> Result<ObjectGraphClosure, BundleError> {
+    let root = parse_computation(&declared.root_computation_ref)?;
+    let derived = export_object_graph(&root, &declared.materializations, objects, references)?;
+    if &derived != declared {
+        return Err(BundleError::DeclaredGraphMismatch);
+    }
+    Ok(derived)
 }
 
 pub fn sign_bundle(
@@ -523,6 +708,28 @@ mod tests {
         }
     }
 
+    struct TestMaterializationReferences;
+
+    impl MaterializationReferences for TestMaterializationReferences {
+        fn materializer_id(&self) -> &str {
+            "ato.materialize.vm.snapshot@1"
+        }
+
+        fn outgoing(
+            &self,
+            descriptor: &ContentRef,
+            objects: &dyn ObjectResolver,
+        ) -> Result<Vec<ObjectLink>, BundleError> {
+            let metadata = objects.metadata(descriptor)?;
+            let bytes = read_exact_object(objects, descriptor, metadata.size, 1024)?;
+            let references: Vec<String> = serde_json::from_slice(&bytes)?;
+            references
+                .into_iter()
+                .map(|reference| parse_content(&reference).map(ObjectLink::Content))
+                .collect()
+        }
+    }
+
     fn fixture() -> (MemoryObjectStore, ReferenceRegistry, ComputationRef) {
         let objects = MemoryObjectStore::default();
         let semantics = SemanticsId::parse("example.bundle@1").unwrap();
@@ -559,6 +766,80 @@ mod tests {
 
         assert_eq!(imported, root);
         assert!(destination.contains(root.content_ref()));
+    }
+
+    #[test]
+    fn object_graph_keeps_computation_identity_separate_from_vm_bytes() {
+        let (objects, mut references, root) = fixture();
+        references
+            .register_materializer(Arc::new(TestMaterializationReferences))
+            .unwrap();
+        let first_vm = objects.put(b"first VM bytes").unwrap();
+        let second_vm = objects.put(b"different VM bytes").unwrap();
+        let first_descriptor = objects
+            .put(&serde_jcs::to_vec(&vec![first_vm.to_string()]).unwrap())
+            .unwrap();
+        let second_descriptor = objects
+            .put(&serde_jcs::to_vec(&vec![second_vm.to_string()]).unwrap())
+            .unwrap();
+        let materialization = |descriptor: &ContentRef| GraphMaterialization {
+            id: "ato.materialize.vm.snapshot@1".to_owned(),
+            descriptor_ref: descriptor.to_string(),
+            restore_capability: GraphRestoreCapability::Supported,
+        };
+
+        let first = export_object_graph(
+            &root,
+            &[materialization(&first_descriptor)],
+            &objects,
+            &references,
+        )
+        .unwrap();
+        let second = export_object_graph(
+            &root,
+            &[materialization(&second_descriptor)],
+            &objects,
+            &references,
+        )
+        .unwrap();
+
+        assert_eq!(first.root_computation_ref, root.to_string());
+        assert_eq!(second.root_computation_ref, root.to_string());
+        assert_ne!(first.objects, second.objects);
+        let root_object = first
+            .objects
+            .iter()
+            .find(|object| object.content_ref == root.to_string())
+            .unwrap();
+        assert!(
+            root_object
+                .references
+                .contains(&first_descriptor.to_string())
+        );
+        assert!(first.objects.iter().any(|object| {
+            object.content_ref == first_descriptor.to_string()
+                && object.kind == GraphObjectKind::Materialization
+                && object.references == vec![first_vm.to_string()]
+        }));
+    }
+
+    #[test]
+    fn object_graph_validation_rejects_client_reference_claims() {
+        let (objects, references, root) = fixture();
+        let closure = export_object_graph(&root, &[], &objects, &references).unwrap();
+        assert_eq!(
+            verify_declared_object_graph(&closure, &objects, &references).unwrap(),
+            closure
+        );
+
+        let mut forged = closure;
+        forged.objects[0]
+            .references
+            .push(format!("blake3:{}", "f".repeat(64)));
+        assert!(matches!(
+            verify_declared_object_graph(&forged, &objects, &references),
+            Err(BundleError::DeclaredGraphMismatch)
+        ));
     }
 
     #[test]

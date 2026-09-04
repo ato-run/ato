@@ -2,40 +2,62 @@
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
-mod authoring;
-mod supervisor;
+mod desktop_control;
+mod object_transport;
+
+pub mod activity_client;
+pub mod activity_mcp;
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use ato_adapter_api::{AdapterContext, AdapterRegistry};
-use ato_adapter_binding::BindingAdapter;
-use ato_adapter_http::HttpAdapter;
-use ato_adapter_process::ProcessLifecycleAdapter;
-use ato_adapter_pty::PtyAdapter;
-use ato_adapter_workspace::{WorkspaceAdapter, restore_workspace};
-use ato_compose::ComposeReferences;
+use ato_adapter_api::AdapterContext;
+#[cfg(test)]
+use ato_adapter_browser::{
+    BROWSER_CLICK_OPERATION, BROWSER_KEYBOARD_OPERATION, BROWSER_PROTOCOL_ID,
+};
+use ato_adapter_workspace::restore_workspace;
 use ato_computation::{ComputationRef, ContentRef};
 use ato_materializer_api::{
-    Compatibility, MaterializerContext, MaterializerRegistry, RestoreCapability,
+    ContractContext, MaterializerContext, MaterializerRegistry, accept_candidate,
 };
-use ato_materializer_replay::{ReplayMaterializer, ReplayReferences};
-use ato_materializer_snapshot::{SnapshotMaterializer, SnapshotReferences};
+use ato_materializer_vm_snapshot::{
+    FirecrackerBackend, FirecrackerBackendConfig, FirecrackerRecordCaptureBarrier,
+    FirecrackerRecordCaptureLease, SealedRecordFrontierVerifier, VmSnapshotError,
+    VmSnapshotMaterializer,
+};
 use ato_objects::{
-    BranchOrigin, BundleMaterialization, CapsuleSelector, LocalCapsuleRepository, RecordId,
-    ReferenceRegistry, decode_bundle, encode_bundle, export_bundle_with_materializations,
-    import_bundle,
+    BranchOrigin, BundleMaterialization, CapsuleSelector, GraphMaterialization,
+    GraphRestoreCapability, LocalCapsuleRepository, RecordId, ReferenceRegistry, decode_bundle,
+    encode_bundle, export_bundle_with_materializations, export_object_graph, import_bundle,
+    resolve_computation,
 };
+use ato_realization_planner::{
+    MaterializationCandidate, Placement, PlannerPolicy, RealizationPlanner, TargetEnvironment,
+    TrustBoundary,
+};
+use ato_record_writer::{
+    CaptureBarrier, PausedCapture, load_frontier, records_for_frontier, verify_frontier_object,
+};
+use ato_runtime_object_graph::standard_reference_registry;
 use clap::{Args, Parser, Subcommand};
 
-use crate::authoring::{
-    AuthoringReferences, evolve_workspace, initial_computation, load_config, load_runtime_state,
-    workspace_policy,
+pub use crate::object_transport::{
+    ExportedPort, HttpObjectTransportApi, ObjectGraphIndexV1, ObjectUploadReceipt, RequiredBinding,
+    UploadConfig, VisibilityPolicy, upload_http_object_graph,
+    upload_staging_negative_test_object_graph, vm_capture_receipt_refs,
 };
-use crate::supervisor::{CliRealizationDriver, start_durable, stop_active};
+use ato_local_execution::authoring::{
+    initial_computation, load_config, load_runtime_state, workspace_policy,
+};
+use ato_local_execution::registry::{adapter_registry, contract_verifier_registry};
+use ato_local_execution::supervisor::{
+    LocalRealizationDriver, preflight_actuator_provider_registry, start_durable,
+};
 
 #[derive(Parser)]
 #[command(
@@ -60,6 +82,18 @@ enum Commands {
     Encap(EncapArgs),
     /// Consume a portable .capsule ephemerally.
     Run(RunArgs),
+    /// Upload a content-addressed Capsule object graph.
+    Upload(UploadArgs),
+    /// Report this binary's build identity (version, commit, profile).
+    ///
+    /// `--version` stays exactly as it was — a human-readable release-line
+    /// string. This is the machine-readable form, and the only way to learn
+    /// which commit a given `ato` artifact was built from.
+    Version {
+        /// Emit a single JSON object instead of human-readable lines.
+        #[arg(long)]
+        json: bool,
+    },
     #[command(name = "__worker", hide = true)]
     Worker {
         project: PathBuf,
@@ -68,6 +102,17 @@ enum Commands {
         token: String,
         descriptor: Option<String>,
     },
+    #[command(name = "__desktop", hide = true)]
+    Desktop {
+        #[command(subcommand)]
+        command: DesktopCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum DesktopCommands {
+    /// Inspect the active Run of a Capsule project as a single JSON object.
+    Inspect { project: String },
 }
 
 #[derive(Debug, Args)]
@@ -104,27 +149,113 @@ struct RunArgs {
     bindings: Vec<(String, String)>,
 }
 
+#[derive(Debug, Args)]
+struct UploadArgs {
+    selector: String,
+    #[arg(long = "materialize")]
+    materializers: Vec<String>,
+    #[arg(long, env = "ATO_API_URL")]
+    api_url: String,
+    #[arg(long, env = "ATO_API_TOKEN", hide_env_values = true)]
+    auth_token: String,
+    #[arg(long, value_enum, default_value = "private")]
+    visibility: VisibilityPolicy,
+    #[arg(long)]
+    idempotency_key: Option<String>,
+    #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u8).range(1..=32))]
+    concurrency: u8,
+    #[arg(long, default_value_t = 4)]
+    retry_attempts: usize,
+    #[arg(long, default_value_t = 120)]
+    validation_poll_attempts: usize,
+    #[arg(long, default_value_t = 1_000)]
+    validation_poll_ms: u64,
+    #[arg(long, default_value = "object-upload-receipt.json")]
+    receipt: PathBuf,
+}
+
+/// The build's own identity: what this binary is, not merely which release
+/// line it belongs to.
+///
+/// `--version` reports the crate version, which every build of a release line
+/// shares. Desktop assembly pins its Ato support crates and its bundled Runner
+/// to one Ato revision and must be able to VERIFY that from the artifact, so
+/// the commit is baked in at build time (see build.rs) and reported here.
+#[derive(serde::Serialize)]
+pub struct BuildIdentity {
+    /// Crate version — the same string `--version` prints.
+    pub version: &'static str,
+    /// Full git commit the binary was built from, or `"unknown"`.
+    pub git_commit: &'static str,
+    /// Whether the working tree was dirty. `"true"` / `"false"` / `"unknown"`;
+    /// tri-state on purpose, since "could not tell" is not "clean".
+    pub git_dirty: &'static str,
+    /// Cargo profile, so a release claim is checkable.
+    pub profile: &'static str,
+}
+
+impl BuildIdentity {
+    pub fn current() -> Self {
+        Self {
+            version: env!("CARGO_PKG_VERSION"),
+            git_commit: env!("ATO_BUILD_GIT_SHA"),
+            git_dirty: env!("ATO_BUILD_GIT_DIRTY"),
+            profile: if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            },
+        }
+    }
+}
+
+fn version(json: bool) -> Result<()> {
+    let identity = BuildIdentity::current();
+    if json {
+        println!("{}", serde_json::to_string(&identity)?);
+    } else {
+        println!("ato {}", identity.version);
+        println!("commit: {}", identity.git_commit);
+        println!("dirty: {}", identity.git_dirty);
+        println!("profile: {}", identity.profile);
+    }
+    Ok(())
+}
+
 pub fn run() -> Result<()> {
     match Cli::parse().command {
+        Commands::Version { json } => version(json),
         Commands::Init(args) => init(args),
         Commands::Resume(args) => resume(args),
         Commands::Stop { capsule } => stop(&capsule),
         Commands::Encap(args) => encap(args),
         Commands::Run(args) => run_capsule(args),
+        Commands::Upload(args) => upload(args),
         Commands::Worker {
             project,
             branch,
             head,
             token,
             descriptor,
-        } => supervisor::worker(
+        } => ato_local_execution::supervisor::worker(
             &project,
             &branch,
             &ComputationRef::parse(head)?,
             &token,
             descriptor.map(ContentRef::parse).transpose()?.as_ref(),
+            &cli_materializers,
         ),
+        Commands::Desktop { command } => match command {
+            DesktopCommands::Inspect { project } => desktop_inspect(&project),
+        },
     }
+}
+
+fn desktop_inspect(project: &str) -> Result<()> {
+    let path = project_path(project, false)?;
+    let view = desktop_control::inspect(&path)?;
+    println!("{}", serde_json::to_string(&view)?);
+    Ok(())
 }
 
 fn init(args: InitArgs) -> Result<()> {
@@ -143,7 +274,16 @@ fn init(args: InitArgs) -> Result<()> {
     repository.create_branch("main", &initial, None)?;
     println!("{initial}");
     if !args.initial_only {
-        start_durable(&repository, "main", &initial, &bindings, None)?;
+        start_durable(
+            &repository,
+            "main",
+            &initial,
+            &bindings,
+            None,
+            &cli_materializers,
+        )?;
+        // The CLI exits here, so the run is reparented to init and reaped by
+        // it. Nothing to wait on.
     }
     Ok(())
 }
@@ -199,6 +339,7 @@ fn resume(args: ResumeArgs) -> Result<()> {
         &selected,
         &args.bindings.into_iter().collect(),
         Some(&replay_records),
+        &cli_materializers,
     )?;
     println!("resumed {branch} at {selected}");
     Ok(())
@@ -207,14 +348,9 @@ fn resume(args: ResumeArgs) -> Result<()> {
 fn stop(capsule: &str) -> Result<()> {
     let project = project_path(capsule, false)?;
     let repository = LocalCapsuleRepository::open(project)?;
-    repository
-        .active_run()?
-        .context("Capsule has no active Run")?;
-    let stopped = stop_active(&repository)?.context("Capsule has no active Run")?;
-    let head = evolve_workspace(&repository, &stopped.branch, &stopped.head)?;
-    repository.update_head(&stopped.branch, Some(&stopped.branch_base), &head)?;
-    repository.release_active_run(&stopped.token)?;
-    println!("sealed {} at {head}", stopped.branch);
+    let sealed =
+        ato_local_execution::stop_and_seal(&repository)?.context("Capsule has no active Run")?;
+    println!("sealed {} at {}", sealed.run.branch, sealed.head);
     Ok(())
 }
 
@@ -224,10 +360,6 @@ fn encap(args: EncapArgs) -> Result<()> {
     let repository = LocalCapsuleRepository::open(project)?;
     let target = repository.resolve(&selector)?;
     let state = load_runtime_state(&target, repository.objects())?;
-    let records = repository.records_for_causal_branch(&selector.branch, selector.record)?;
-    let adapters = adapter_registry()?;
-    let materializers = materializer_registry()?;
-    let capture_policy = workspace_policy(&state.config)?;
     let selected = if args.materializers.is_empty() {
         if state.config.encap.materializers.is_empty() {
             vec!["ato.replay@1".to_owned()]
@@ -237,20 +369,57 @@ fn encap(args: EncapArgs) -> Result<()> {
     } else {
         args.materializers
     };
+    let entries = encode_materializations(&repository, &selector, &target, &state, selected)?;
+    let references = reference_registry()?;
+    let bundle =
+        export_bundle_with_materializations(&target, &entries, repository.objects(), &references)?;
+    ato_local_execution::atomic_write(&args.output, &encode_bundle(&bundle)?)?;
+    println!("{target}");
+    Ok(())
+}
+
+fn encode_materializations(
+    repository: &LocalCapsuleRepository,
+    selector: &CapsuleSelector,
+    target: &ComputationRef,
+    state: &ato_local_execution::authoring::AuthoringState,
+    selected: Vec<String>,
+) -> Result<Vec<BundleMaterialization>> {
+    let records = repository.records_for_causal_branch(&selector.branch, selector.record)?;
+    let adapters = adapter_registry()?;
+    let materializers = materializer_registry()?;
+    let capture_policy = workspace_policy(&state.config)?;
+    let (records_v2, replay_anchor, record_frontier_ref) = if selected
+        .iter()
+        .any(|materializer| materializer == "ato.replay@2")
+    {
+        let (records, anchor, frontier) =
+            load_run_record_frontier(repository, &selector.branch, target)?;
+        (records, Some(anchor), Some(frontier))
+    } else {
+        (Vec::new(), None, None)
+    };
     let context = MaterializerContext {
         objects: repository.objects(),
         adapters: &adapters,
         records: &records,
+        records_v2: &records_v2,
+        replay_anchor: replay_anchor
+            .as_ref()
+            .or_else(|| records.first().map(|record| &record.head_before)),
+        record_frontier_ref: record_frontier_ref.as_ref(),
         workspace: repository.project(),
         workspace_policy: &capture_policy,
         realization: None,
+        contracts: &[],
+        runner_capabilities: None,
     };
     let mut entries = Vec::new();
     for id in selected {
         let materializer = materializers.get(&id)?;
-        let descriptor = materializer.encode(&target, &context)?;
+        let descriptor = materializer.encode(target, &context)?;
         let verified = materializer.verify(&descriptor, &context)?;
-        if verified != target {
+        if &verified != target {
             bail!("materializer `{id}` verified a different computation {verified}");
         }
         entries.push(BundleMaterialization {
@@ -258,12 +427,152 @@ fn encap(args: EncapArgs) -> Result<()> {
             descriptor_ref: descriptor.to_string(),
         });
     }
+    Ok(entries)
+}
+
+fn upload(args: UploadArgs) -> Result<()> {
+    let selector: CapsuleSelector = args.selector.parse()?;
+    let project = project_path(&selector.capsule, false)?;
+    let repository = LocalCapsuleRepository::open(project)?;
+    let target = repository.resolve(&selector)?;
+    let state = load_runtime_state(&target, repository.objects())?;
+    let selected = if args.materializers.is_empty() {
+        if state.config.encap.materializers.is_empty() {
+            vec!["ato.replay@2".to_owned()]
+        } else {
+            state.config.encap.materializers.clone()
+        }
+    } else {
+        args.materializers
+    };
+    let entries = encode_materializations(&repository, &selector, &target, &state, selected)?;
+    let graph_materializations = entries
+        .iter()
+        .map(|entry| GraphMaterialization {
+            id: entry.materializer_id.clone(),
+            descriptor_ref: entry.descriptor_ref.clone(),
+            restore_capability: if entry.materializer_id == "ato.snapshot@1" {
+                GraphRestoreCapability::VerifyOnly
+            } else {
+                GraphRestoreCapability::Supported
+            },
+        })
+        .collect::<Vec<_>>();
     let references = reference_registry()?;
-    let bundle =
-        export_bundle_with_materializations(&target, &entries, repository.objects(), &references)?;
-    atomic_write(&args.output, &encode_bundle(&bundle)?)?;
-    println!("{target}");
+    let closure = export_object_graph(
+        &target,
+        &graph_materializations,
+        repository.objects(),
+        &references,
+    )?;
+    let exported_ports = resolve_computation(repository.objects(), &target)?
+        .object()
+        .boundary
+        .iter()
+        .map(|(port, definition)| ExportedPort {
+            port_id: port.to_string(),
+            protocol: definition.protocol.to_string(),
+            role: definition.role.to_string(),
+        })
+        .collect();
+    let required_bindings = state
+        .config
+        .binding
+        .iter()
+        .map(|binding| RequiredBinding {
+            id: binding.id.clone(),
+            schema: binding.protocol.clone(),
+        })
+        .collect();
+    let index =
+        ObjectGraphIndexV1::new(closure, exported_ports, required_bindings, args.visibility);
+    let idempotency_key = args.idempotency_key.unwrap_or_else(|| {
+        format!(
+            "ato-object-upload-v1-{}",
+            index.digest().expect("JCS index")
+        )
+    });
+    if !(16..=160).contains(&idempotency_key.len()) {
+        bail!("idempotency key must contain between 16 and 160 bytes");
+    }
+    let api = HttpObjectTransportApi::new(&args.api_url, args.auth_token)?;
+    let (vm_materialization_descriptor_ref, record_frontier_ref) =
+        object_transport::vm_capture_receipt_refs(&index, repository.objects())?;
+    let mut receipt = upload_http_object_graph(
+        &api,
+        &index,
+        repository.objects(),
+        &references,
+        &idempotency_key,
+        UploadConfig {
+            concurrency: usize::from(args.concurrency),
+            retry_attempts: args.retry_attempts,
+            validation_poll_attempts: args.validation_poll_attempts,
+            validation_poll_interval: Duration::from_millis(args.validation_poll_ms),
+        },
+    )?;
+    receipt.vm_materialization_descriptor_ref = vm_materialization_descriptor_ref;
+    receipt.record_frontier_ref = record_frontier_ref;
+    ato_local_execution::atomic_write(&args.receipt, &serde_jcs::to_vec(&receipt)?)?;
+    println!("{} {}", receipt.bundle_id, receipt.root_computation_ref);
     Ok(())
+}
+
+fn load_run_record_frontier(
+    repository: &LocalCapsuleRepository,
+    branch: &str,
+    target: &ComputationRef,
+) -> Result<(
+    Vec<ato_objects::RecordEnvelopeV2>,
+    ComputationRef,
+    ContentRef,
+)> {
+    let mut matches = Vec::new();
+    for entry in fs::read_dir(repository.root().join("runs"))? {
+        let path = entry?.path();
+        if !path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.ends_with(".sealed-record-frontier.json"))
+        {
+            continue;
+        }
+        let bytes = fs::read(&path)?;
+        let association: ato_local_execution::SealedRunRecordFrontier =
+            serde_json::from_slice(&bytes)?;
+        if association.version != 1 || serde_jcs::to_vec(&association)? != bytes {
+            bail!(
+                "non-canonical sealed Run/RecordFrontier association at {}",
+                path.display()
+            );
+        }
+        if association.branch == branch && association.target_computation_ref == target.to_string()
+        {
+            matches.push(association);
+        }
+    }
+    let [association] = matches.as_slice() else {
+        bail!(
+            "ato.replay@2 requires exactly one sealed RecordFrontier for {target}; found {}",
+            matches.len()
+        );
+    };
+    let reference = ContentRef::parse(&association.record_frontier_ref)?;
+    let frontier = load_frontier(
+        &repository.root().join("records"),
+        &association.run_id,
+        &reference,
+    )?;
+    let records = records_for_frontier(
+        &repository.root().join("records"),
+        &frontier,
+        repository.objects(),
+    )?;
+    Ok((
+        records,
+        ComputationRef::parse(&association.anchor_computation_ref)?,
+        reference,
+    ))
 }
 
 fn run_capsule(args: RunArgs) -> Result<()> {
@@ -299,87 +608,178 @@ fn run_capsule(args: RunArgs) -> Result<()> {
     }
     let adapters = adapter_registry()?;
     let materializers = materializer_registry()?;
+    let actuator_providers = preflight_actuator_provider_registry()?;
+    let contract_verifiers = contract_verifier_registry()?;
+    let runner_capabilities = FirecrackerBackend::new(FirecrackerBackendConfig::default()).probe();
     let capture_policy = workspace_policy(&state.config)?;
-    let driver = CliRealizationDriver::new(&project, &bindings);
+    let driver = LocalRealizationDriver::new(&project, &bindings);
     let context = MaterializerContext {
         objects: repository.objects(),
         adapters: &adapters,
         records: &[],
+        records_v2: &[],
+        replay_anchor: None,
+        record_frontier_ref: None,
         workspace: &project,
         workspace_policy: &capture_policy,
         realization: Some(&driver),
+        contracts: &[],
+        runner_capabilities: Some(&runner_capabilities),
     };
-    let mut candidates = bundle.index.materializations.clone();
-    candidates.sort_by(|left, right| left.materializer_id.cmp(&right.materializer_id));
-    let mut diagnostics = Vec::new();
-    let mut restored = None;
-    for candidate in candidates {
-        let descriptor = ContentRef::parse(&candidate.descriptor_ref)?;
-        let materializer = match materializers.get(&candidate.materializer_id) {
-            Ok(materializer) => materializer,
-            Err(_) => {
-                diagnostics.push(format!(
-                    "{}: implementation missing",
-                    candidate.materializer_id
-                ));
-                continue;
-            }
-        };
-        if materializer.restore_capability() != RestoreCapability::Supported {
-            diagnostics.push(format!("{}: verify-only", candidate.materializer_id));
-            continue;
-        }
-        if materializer.compatibility(&descriptor, &context) != Compatibility::Compatible {
-            diagnostics.push(format!("{}: incompatible", candidate.materializer_id));
-            continue;
-        }
-        restored = Some(materializer.restore(&descriptor, &context)?);
-        break;
+    let target_environment = TargetEnvironment {
+        id: "local".to_owned(),
+        placement: Placement::Local,
+        trust_boundary: TrustBoundary::Local,
+    };
+    let candidates = bundle
+        .index
+        .materializations
+        .iter()
+        .map(|candidate| {
+            Ok(MaterializationCandidate {
+                materializer_id: candidate.materializer_id.clone(),
+                descriptor_ref: ContentRef::parse(&candidate.descriptor_ref)?,
+                environment: target_environment.clone(),
+                context: MaterializerContext {
+                    objects: context.objects,
+                    adapters: context.adapters,
+                    records: context.records,
+                    records_v2: context.records_v2,
+                    replay_anchor: context.replay_anchor,
+                    record_frontier_ref: context.record_frontier_ref,
+                    workspace: context.workspace,
+                    workspace_policy: context.workspace_policy,
+                    realization: context.realization,
+                    contracts: context.contracts,
+                    runner_capabilities: context.runner_capabilities,
+                },
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let port_bindings = Vec::new();
+    let policy = PlannerPolicy::default();
+    let plan = RealizationPlanner {
+        target: &root,
+        materializers: &materializers,
+        actuator_providers: &actuator_providers,
+        contract_verifiers: &contract_verifiers,
+        port_bindings: &port_bindings,
+        policy: &policy,
     }
-    let realization = restored.ok_or_else(|| {
-        anyhow::anyhow!(
-            "no compatible restore-capable Materialization: {}",
-            diagnostics.join("; ")
-        )
-    })?;
+    .plan(candidates)
+    .map_err(|error| anyhow::anyhow!("no acceptable Realization path: {error}"))?;
+    let selected = plan
+        .candidates
+        .first()
+        .context("Realization Planner returned no candidate")?;
+    let materializer = materializers.get(&selected.materializer_id)?;
+    let contracts = materializer.contracts(&selected.descriptor_ref, &context)?;
+    let realization = materializer.restore(&selected.descriptor_ref, &context)?;
     if realization.target() != &root {
         bail!(
             "Materialization restored {}, expected bundle root {root}",
             realization.target()
         );
     }
-    realization.run().map_err(Into::into)
+    let contract_context = ContractContext {
+        objects: repository.objects(),
+        workspace: &project,
+    };
+    let accepted = accept_candidate(
+        realization,
+        &contracts,
+        &contract_verifiers,
+        &contract_context,
+    )?;
+    accepted.run().map_err(Into::into)
 }
 
-pub(crate) fn adapter_registry() -> Result<AdapterRegistry> {
-    let mut registry = AdapterRegistry::default();
-    registry.register(Arc::new(ProcessLifecycleAdapter))?;
-    registry.register(Arc::new(PtyAdapter))?;
-    registry.register(Arc::new(WorkspaceAdapter))?;
-    registry.register(Arc::new(BindingAdapter))?;
-    registry.register(Arc::new(HttpAdapter))?;
-    Ok(registry)
+/// The CLI's materializer set, injected into `ato-local-execution`.
+///
+/// This is the composition root's answer to "what can this host realize". The
+/// library never builds this itself: VM Snapshot is an Ato SEMANTIC capability
+/// whose physical backend is platform-specific (Firecracker on Linux today),
+/// and welding it into the library would force every consumer — including a
+/// Desktop runtime that only realizes source/replay — to link a hypervisor.
+///
+/// The CLI's answer is unchanged from before the extraction, so its behaviour
+/// is too.
+pub(crate) fn cli_materializers() -> Result<MaterializerRegistry> {
+    materializer_registry()
 }
 
 fn materializer_registry() -> Result<MaterializerRegistry> {
-    let mut registry = MaterializerRegistry::default();
-    registry.register(Arc::new(ReplayMaterializer))?;
-    registry.register(Arc::new(SnapshotMaterializer))?;
+    // The shared core, plus the one materializer whose backend this host
+    // actually has. Identical contents to before the split — Replay,
+    // ReplayV2, Snapshot, WorkspaceSnapshot, VmSnapshot — just no longer
+    // duplicated with the library.
+    let mut registry = ato_local_execution::core_materializer_registry()?;
+    registry.register(Arc::new(VmSnapshotMaterializer::new(
+        Arc::new(FirecrackerBackend::new(FirecrackerBackendConfig::default())),
+        Arc::new(RecordWriterFrontierVerifier),
+    )))?;
     Ok(registry)
 }
 
+struct RecordWriterFrontierVerifier;
+
+/// Application-layer bridge between the independently layered Record Writer
+/// and VM Materializer capture capability.
+pub struct RecordWriterCaptureBarrier {
+    inner: CaptureBarrier,
+}
+
+impl RecordWriterCaptureBarrier {
+    pub fn new(inner: CaptureBarrier) -> Self {
+        Self { inner }
+    }
+}
+
+struct RecordWriterCaptureLease {
+    frontier: ContentRef,
+    _paused: PausedCapture,
+}
+
+impl FirecrackerRecordCaptureLease for RecordWriterCaptureLease {
+    fn frontier_ref(&self) -> &ContentRef {
+        &self.frontier
+    }
+}
+
+impl FirecrackerRecordCaptureBarrier for RecordWriterCaptureBarrier {
+    fn pause_and_seal(
+        &self,
+    ) -> std::result::Result<Box<dyn FirecrackerRecordCaptureLease>, VmSnapshotError> {
+        let paused = self
+            .inner
+            .pause_and_seal()
+            .map_err(|error| VmSnapshotError::Backend(error.to_string()))?;
+        Ok(Box::new(RecordWriterCaptureLease {
+            frontier: paused.frontier.frontier_digest.clone(),
+            _paused: paused,
+        }))
+    }
+}
+
+impl SealedRecordFrontierVerifier for RecordWriterFrontierVerifier {
+    fn verify(
+        &self,
+        reference: &ContentRef,
+        objects: &dyn ato_objects::ObjectResolver,
+    ) -> std::result::Result<(), VmSnapshotError> {
+        verify_frontier_object(reference, objects)
+            .map(|_| ())
+            .map_err(|error| VmSnapshotError::InvalidDescriptor(error.to_string()))
+    }
+}
+
 fn reference_registry() -> Result<ReferenceRegistry> {
-    let mut registry = ReferenceRegistry::default();
-    registry.register(Arc::new(AuthoringReferences::new()))?;
-    registry.register(Arc::new(ComposeReferences::default()))?;
-    registry.register_materializer(Arc::new(ReplayReferences))?;
-    registry.register_materializer(Arc::new(SnapshotReferences))?;
-    Ok(registry)
+    standard_reference_registry()
 }
 
 fn preflight(
     repository: &LocalCapsuleRepository,
-    config: &authoring::AuthoringConfig,
+    config: &ato_local_execution::authoring::AuthoringConfig,
     bindings: &BTreeMap<String, String>,
 ) -> Result<()> {
     let registry = adapter_registry()?;
@@ -387,7 +787,9 @@ fn preflight(
         workspace: repository.project(),
         objects: repository.objects(),
     };
-    for instance in authoring::adapter_instances(config, bindings, false, false)? {
+    for instance in
+        ato_local_execution::authoring::adapter_instances(config, bindings, false, false)?
+    {
         registry
             .get(&instance.adapter_id)?
             .preflight(&instance, &context)?;
@@ -425,21 +827,6 @@ fn parse_binding(value: &str) -> Result<(String, String), String> {
     Ok((name.to_owned(), value.to_owned()))
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent)?;
-    let temporary = parent.join(format!(
-        ".{}.{}.new",
-        path.file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("capsule"),
-        std::process::id()
-    ));
-    fs::write(&temporary, bytes)?;
-    fs::rename(temporary, path)?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,6 +838,29 @@ mod tests {
         }
         for removed in ["lock", "decap", "snapshot"] {
             assert!(Cli::try_parse_from(["ato", removed]).is_err());
+        }
+        assert!(
+            Cli::try_parse_from([
+                "ato",
+                "upload",
+                "value",
+                "--api-url",
+                "https://staging.api.ato.run",
+                "--auth-token",
+                "redacted",
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn hidden_machine_commands_do_not_appear_in_help() {
+        use clap::CommandFactory;
+        let help = Cli::command().render_long_help().to_string();
+        assert!(!help.contains("__worker"));
+        assert!(!help.contains("__desktop"));
+        for public in ["init", "resume", "stop", "encap", "run"] {
+            assert!(help.contains(public));
         }
     }
 
@@ -473,6 +883,41 @@ mod tests {
         assert_eq!(
             ato_materializer_snapshot::SNAPSHOT_MATERIALIZER_ID,
             "ato.snapshot@1"
+        );
+    }
+
+    #[test]
+    fn browser_record_schema_is_operation_specific() {
+        let payload =
+            ato_adapter_browser::encode_event(&ato_adapter_browser::BrowserEvent::Click {
+                x_normalized: 0.5,
+                y_normalized: 0.5,
+                button: 0,
+            })
+            .unwrap();
+        let candidate = |operation_id: &str| ato_objects::RecordCandidate {
+            protocol_id: ato_computation::ProtocolId::parse(BROWSER_PROTOCOL_ID).unwrap(),
+            operation_id: ato_computation::OperationId::parse(operation_id).unwrap(),
+            port_id: ato_computation::PortId::parse("ui.main").unwrap(),
+            payload: payload.clone(),
+            payload_version: 1,
+            required_features: Default::default(),
+            recorded_by: Some("example.browser-adapter@1".to_owned()),
+            stream: "browser.test".to_owned(),
+            local_seq: 1,
+            caused_by: Vec::new(),
+            observed_at: "0".to_owned(),
+        };
+        let schemas = ato_local_execution::registry::record_schema_registry().unwrap();
+        schemas
+            .validate_candidate(&candidate(BROWSER_CLICK_OPERATION))
+            .expect("click payload should match the click operation");
+        assert!(
+            schemas
+                .validate_candidate(&candidate(BROWSER_KEYBOARD_OPERATION))
+                .unwrap_err()
+                .to_string()
+                .contains("does not match")
         );
     }
 }

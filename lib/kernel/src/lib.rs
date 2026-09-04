@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use ato_computation::{
     ComputationObject, ComputationRef, ContentRef, PortId, ProtocolId, ResolvedComputation, RoleId,
@@ -130,6 +130,189 @@ pub struct Transition {
     pub from: ComputationRef,
     pub offer: TransitionOffer,
     pub to: ComputationRef,
+}
+
+/// Result of one externally applied operation. `record_error` is deliberately
+/// informational: record persistence must not roll back an accepted
+/// computation transition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedOperation {
+    pub transition: Transition,
+    pub run_seq: u64,
+    pub record_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingHeadPersistence {
+    pub transition: Transition,
+    pub run_seq: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunHeadSnapshot {
+    pub head: ComputationRef,
+    pub run_seq: u64,
+}
+
+#[derive(Debug, Error)]
+pub enum EvolutionError {
+    #[error(transparent)]
+    Kernel(#[from] KernelError),
+    #[error("run evolution is frozen")]
+    Frozen,
+    #[error("head persistence is pending for run sequence {0}")]
+    PersistencePending(u64),
+    #[error("external actuator rejected the operation: {0}")]
+    Apply(String),
+    #[error("head persistence failed after the actuator accepted the operation: {0}")]
+    Persist(String),
+}
+
+struct RunEvolutionState {
+    run: Run,
+    run_seq: u64,
+    frozen: bool,
+    pending_persistence: Option<PendingHeadPersistence>,
+}
+
+/// Serializes external operation acceptance for one live Run.
+///
+/// This authority intentionally owns no product, activity, adapter, or Record
+/// semantics. Callers derive through the registered Kernel semantics, apply
+/// their physical operation, and only then make the transition visible. A
+/// persistence failure therefore advances the in-memory logical head but
+/// fail-closes later operations until the same transition has been persisted.
+pub struct RunEvolutionAuthority {
+    kernel: Kernel,
+    state: Mutex<RunEvolutionState>,
+}
+
+impl RunEvolutionAuthority {
+    pub fn new(kernel: Kernel, initial_head: ComputationRef) -> Self {
+        Self {
+            kernel,
+            state: Mutex::new(RunEvolutionState {
+                run: Run { head: initial_head },
+                run_seq: 0,
+                frozen: false,
+                pending_persistence: None,
+            }),
+        }
+    }
+
+    pub fn current_head(&self) -> RunHeadSnapshot {
+        let state = self.state.lock().expect("run evolution mutex poisoned");
+        RunHeadSnapshot {
+            head: state.run.head.clone(),
+            run_seq: state.run_seq,
+        }
+    }
+
+    /// Waits for an in-flight acceptance, then prevents a later operation from
+    /// crossing the returned logical frontier.
+    pub fn freeze(&self) -> Result<RunHeadSnapshot, EvolutionError> {
+        let mut state = self.state.lock().expect("run evolution mutex poisoned");
+        if let Some(pending) = &state.pending_persistence {
+            return Err(EvolutionError::PersistencePending(pending.run_seq));
+        }
+        state.frozen = true;
+        Ok(RunHeadSnapshot {
+            head: state.run.head.clone(),
+            run_seq: state.run_seq,
+        })
+    }
+
+    pub fn unfreeze(&self) {
+        self.state
+            .lock()
+            .expect("run evolution mutex poisoned")
+            .frozen = false;
+    }
+
+    pub fn pending_persistence(&self) -> Option<PendingHeadPersistence> {
+        self.state
+            .lock()
+            .expect("run evolution mutex poisoned")
+            .pending_persistence
+            .clone()
+    }
+
+    /// Validates that an offer is currently derivable without applying or
+    /// committing it. Specialized Protocol runtimes may use this before a
+    /// physical operation which is known to remain derivable at every
+    /// successor frontier; generic callers should continue using `accept`.
+    pub fn validate_offer(&self, offer: &TransitionOffer) -> Result<(), EvolutionError> {
+        let state = self.state.lock().expect("run evolution mutex poisoned");
+        if state.frozen {
+            return Err(EvolutionError::Frozen);
+        }
+        if let Some(pending) = &state.pending_persistence {
+            return Err(EvolutionError::PersistencePending(pending.run_seq));
+        }
+        self.kernel.derive_transition(&state.run.head, offer)?;
+        Ok(())
+    }
+
+    /// Accepts one external operation in two phases. The `apply` closure is
+    /// invoked only after a successor is derived, and the Run head advances
+    /// only after it succeeds. `persist_head` is deliberately after commit:
+    /// physical success must never be represented as a rolled-back operation.
+    pub fn accept<A, P, R>(
+        &self,
+        offer: &TransitionOffer,
+        apply: A,
+        persist_head: P,
+        record: R,
+    ) -> Result<AcceptedOperation, EvolutionError>
+    where
+        A: FnOnce() -> Result<(), String>,
+        P: FnOnce(&PendingHeadPersistence) -> Result<(), String>,
+        R: FnOnce(&Transition, u64) -> Result<(), String>,
+    {
+        let mut state = self.state.lock().expect("run evolution mutex poisoned");
+        if state.frozen {
+            return Err(EvolutionError::Frozen);
+        }
+        if let Some(pending) = &state.pending_persistence {
+            return Err(EvolutionError::PersistencePending(pending.run_seq));
+        }
+
+        let transition = self.kernel.derive_transition(&state.run.head, offer)?;
+        apply().map_err(EvolutionError::Apply)?;
+        self.kernel
+            .commit_derived_transition(&mut state.run, &transition)?;
+        state.run_seq += 1;
+        let pending = PendingHeadPersistence {
+            transition: transition.clone(),
+            run_seq: state.run_seq,
+        };
+        if let Err(error) = persist_head(&pending) {
+            state.pending_persistence = Some(pending);
+            return Err(EvolutionError::Persist(error));
+        }
+
+        let record_error = record(&transition, state.run_seq).err();
+        Ok(AcceptedOperation {
+            transition,
+            run_seq: state.run_seq,
+            record_error,
+        })
+    }
+
+    /// Retries only the transition that already succeeded physically. While it
+    /// is pending, `accept` remains fail-closed.
+    pub fn retry_pending_persistence<P>(&self, persist_head: P) -> Result<bool, EvolutionError>
+    where
+        P: FnOnce(&PendingHeadPersistence) -> Result<(), String>,
+    {
+        let mut state = self.state.lock().expect("run evolution mutex poisoned");
+        let Some(pending) = state.pending_persistence.clone() else {
+            return Ok(false);
+        };
+        persist_head(&pending).map_err(EvolutionError::Persist)?;
+        state.pending_persistence = None;
+        Ok(true)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -273,6 +456,11 @@ pub enum KernelError {
     },
     #[error("semantics changed the selected transition offer while deriving its successor")]
     TransitionOfferMismatch,
+    #[error("derived transition starts at {transition_from}, but Run head is {run_head}")]
+    TransitionHeadMismatch {
+        run_head: ComputationRef,
+        transition_from: ComputationRef,
+    },
     #[error(transparent)]
     Semantic(#[from] SemanticError),
     #[error(transparent)]
@@ -383,10 +571,28 @@ impl Kernel {
         }
     }
 
+    /// Commit an already-derived transition only if it still starts at this
+    /// Run's current head. External authorities call this after the physical
+    /// Actuator has accepted the operation.
+    pub fn commit_derived_transition(
+        &self,
+        run: &mut Run,
+        transition: &Transition,
+    ) -> Result<(), KernelError> {
+        if run.head != transition.from {
+            return Err(KernelError::TransitionHeadMismatch {
+                run_head: run.head.clone(),
+                transition_from: transition.from.clone(),
+            });
+        }
+        self.commit_transition(transition);
+        run.head = transition.to.clone();
+        Ok(())
+    }
+
     pub fn step(&self, run: &mut Run, offer: &TransitionOffer) -> Result<Transition, KernelError> {
         let transition = self.derive_transition(&run.head, offer)?;
-        self.commit_transition(&transition);
-        run.head = transition.to.clone();
+        self.commit_derived_transition(run, &transition)?;
         Ok(transition)
     }
 

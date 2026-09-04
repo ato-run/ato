@@ -1,0 +1,627 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Ato hosted activity controller</title>
+  <style nonce="__ATO_NONCE__">
+    html,body{width:100%;height:100%;margin:0;background:#030503;overflow:hidden}
+    canvas{position:fixed;width:1px;height:1px;opacity:0;pointer-events:none}
+  </style>
+</head>
+<body>
+  <canvas id="activity-media"></canvas>
+  <script nonce="__ATO_NONCE__">
+  (() => {
+    "use strict";
+    const config = __ATO_CONFIG__;
+    const roomProtocol = "ato.activity.room@1";
+    const roomWebSocketProtocol = "ato.activity.room.v1";
+    const mediaCanvas = document.getElementById("activity-media");
+    const mediaContext = mediaCanvas.getContext("2d", { alpha: false });
+    let room = null;
+    let roomOutboundSequence = 0;
+    let roomInboundSequence = 0;
+    let roomIdentity = null;
+    let roomReconnectAttempt = 0;
+    let roomReconnectTimer = null;
+    let roomHeartbeatTimer = null;
+    // Exponential backoff resets only after a connection has proven stable
+    // (held longer than this window), never on the bare room.connected event:
+    // a socket opened and immediately replaced would otherwise restart the
+    // storm at the minimum delay every time.
+    const ROOM_STABLE_CONNECTION_MS = 10_000;
+    let roomConnectedAt = 0;
+    let mediaReady = false;
+    let mediaStream = null;
+    let readyReported = false;
+    let ending = false;
+    let inputChain = Promise.resolve();
+    const subscribers = new Set();
+    const peers = new Map();
+    const settledOperations = new Map();
+    const receiptOutbox = new Map();
+    let surfaceRevision = 0;
+    let operationsSurfaceEpoch = 0;
+
+    connectRoom();
+    pumpFrame();
+    pumpSurface();
+
+    function connectRoom() {
+      if (ending) return;
+      roomOutboundSequence = 0;
+      roomInboundSequence = 0;
+      roomIdentity = null;
+      const socket = new WebSocket(config.roomUrl, [
+        roomWebSocketProtocol,
+        `activity-executor.${config.executorCredential}`,
+      ]);
+      room = socket;
+      socket.addEventListener("message", (event) => {
+        if (socket !== room) return;
+        let envelope;
+        try { envelope = JSON.parse(String(event.data)); } catch { return fail(); }
+        if (!isObject(envelope) || envelope.protocol !== roomProtocol ||
+            !Number.isSafeInteger(envelope.seq) || envelope.seq <= roomInboundSequence ||
+            typeof envelope.type !== "string") return fail();
+        roomInboundSequence = envelope.seq;
+        receiveRoom(envelope.type, isObject(envelope.payload) ? envelope.payload : {});
+      });
+      socket.addEventListener("close", (event) => {
+        logRoomClose("close", event.code, event.reason, socket);
+        scheduleRoomReconnect(socket);
+      });
+      socket.addEventListener("error", () => {
+        if (!ending) socket.close();
+        logRoomClose("error", null, null, socket);
+        scheduleRoomReconnect(socket);
+      });
+    }
+
+    function logRoomClose(kind, code, reason, socket) {
+      const details = {
+        kind,
+        code: code ?? null,
+        reason: reason ? String(reason).slice(0, 120) : null,
+        uptime_ms: roomConnectedAt > 0 ? Date.now() - roomConnectedAt : 0,
+        reconnect_attempt: roomReconnectAttempt,
+        connection_id: roomIdentity ? roomIdentity.connectionId : null,
+        run_id: config.runId,
+      };
+      try { console.warn("[ato.room] closed", JSON.stringify(details)); } catch {}
+    }
+
+    function scheduleRoomReconnect(socket) {
+      if (ending || socket !== room || roomReconnectTimer !== null) return;
+      stopRoomHeartbeat();
+      roomIdentity = null;
+      // A connection that lasted beyond the stability window proved the
+      // service reachable; only then does backoff restart from the minimum.
+      if (roomConnectedAt > 0 && Date.now() - roomConnectedAt >= ROOM_STABLE_CONNECTION_MS) {
+        roomReconnectAttempt = 0;
+      }
+      roomConnectedAt = 0;
+      for (const participantId of [...peers.keys()]) stopParticipant(participantId, false);
+      roomReconnectAttempt += 1;
+      if (roomReconnectAttempt > 8) return fail();
+      const delay = roomReconnectDelay(roomReconnectAttempt);
+      roomReconnectTimer = setTimeout(() => {
+        roomReconnectTimer = null;
+        connectRoom();
+      }, delay);
+    }
+
+    function roomReconnectDelay(attempt) {
+      const base = Math.min(5000, 100 * (2 ** (attempt - 1)));
+      // ±20% jitter so a fleet of controllers never reconnects in lockstep.
+      return Math.max(1, Math.round(base * (0.8 + Math.random() * 0.4)));
+    }
+
+    function receiveRoom(type, payload) {
+      if (type === "room.connected") {
+        if (typeof payload.connection_id !== "string" ||
+            !Number.isSafeInteger(payload.media_generation)) return fail();
+        roomIdentity = {
+          connectionId: payload.connection_id,
+          mediaGeneration: payload.media_generation,
+        };
+        // NOTE: roomReconnectAttempt is intentionally NOT reset here. Resetting
+        // on connect lets a connect/close storm restart at the minimum delay
+        // forever; backoff decays only after ROOM_STABLE_CONNECTION_MS of an
+        // uninterrupted connection (see scheduleRoomReconnect).
+        roomConnectedAt = Date.now();
+        startRoomHeartbeat(room);
+        surfaceRevision = 0;
+        operationsSurfaceEpoch = 0;
+        for (const participant of Array.isArray(payload.participant_connections)
+          ? payload.participant_connections : []) {
+          if (isObject(participant) && typeof participant.participant_id === "string" &&
+              Array.isArray(participant.subscribable_run_ids) &&
+              participant.subscribable_run_ids.includes(config.runId)) {
+            subscribers.add(participant.participant_id);
+          }
+        }
+        announceReady();
+        replayReceiptOutbox();
+        return;
+      }
+      if (type === "participant.connected" && typeof payload.participant_id === "string") {
+        subscribers.add(payload.participant_id);
+        void startPeer(payload.participant_id).catch(fail);
+        return;
+      }
+      if (type === "participant.disconnected" && typeof payload.participant_id === "string") {
+        stopParticipant(payload.participant_id, true);
+        return;
+      }
+      if (type === "run.input") {
+        inputChain = inputChain.then(() => applyInput(payload)).catch(fail);
+        return;
+      }
+      if (type === "run.operation.invoke") {
+        void applyOperation(payload).catch((error) => publishOperationFailure(payload, error));
+        return;
+      }
+      if (type === "run.operation.abort") {
+        void abortOperation(payload).catch((error) => publishAbortFailure(payload, error));
+        return;
+      }
+      if (type === "run.media.answer" || type === "run.media.ice") {
+        if (matchesPublishedPeer(payload)) {
+          void applyMediaSignal(type, payload).catch(() => stopPeer(payload.peer_id, true));
+        }
+        return;
+      }
+      if (type === "run.media.closed") {
+        stopPeer(payload.peer_id, false);
+        return;
+      }
+      if (type === "activity.started") {
+        const delay = Math.max(0, Date.parse(payload.starts_at) - Date.parse(payload.server_now));
+        if (!Number.isFinite(delay)) return fail();
+        setTimeout(() => sendRoom("run.state", { run_id: config.runId, state: "live" }), delay);
+        return;
+      }
+      if (type === "activity.ended") void end();
+    }
+
+    function startRoomHeartbeat(socket) {
+      stopRoomHeartbeat();
+      roomHeartbeatTimer = setInterval(() => {
+        if (ending || socket !== room || socket.readyState !== WebSocket.OPEN) return;
+        sendRoom("runner.ping", {});
+      }, 5000);
+    }
+
+    function stopRoomHeartbeat() {
+      if (roomHeartbeatTimer === null) return;
+      clearInterval(roomHeartbeatTimer);
+      roomHeartbeatTimer = null;
+    }
+
+    async function applyInput(input) {
+      if (!isObject(input) || input.run_id !== config.runId ||
+          typeof input.operation_id !== "string") throw new Error("invalid input");
+      let response;
+      let receipt;
+      for (;;) {
+        try {
+          response = await hostFetch("/input", input);
+        } catch {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          continue;
+        }
+        if (response.ok && response.status !== 202) {
+          try {
+            receipt = await response.json();
+            break;
+          } catch {
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            continue;
+          }
+        }
+        let error;
+        try {
+          error = await responseError(response);
+        } catch {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          continue;
+        }
+        if (response.status !== 202 && ![
+          "operation_in_flight", "operation_queued_before_apply", "physical_commit_pending"
+        ].includes(error)) {
+          throw new Error(error);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      sendReceipt("run.operation.receipt", {
+        run_id: config.runId,
+        run_sequence: receipt.run_sequence,
+        operation_id: receipt.operation_id,
+        actor_participant_id: receipt.actor_participant_id,
+        client_sequence: receipt.client_sequence,
+        result: receipt.result,
+        adapter_id: "ato.browser@1",
+        applied_at: receipt.applied_at,
+      });
+    }
+
+    async function applyOperation(input) {
+      if (!isObject(input) || typeof input.operation_id !== "string" ||
+          typeof input.descriptor_id !== "string") throw new Error("invalid_operation");
+      let response;
+      let receipt;
+      let ambiguousAttempts = 0;
+      for (;;) {
+        try {
+          response = await hostFetch("/operation/invoke", input);
+        } catch {
+          ambiguousAttempts += 1;
+          if (ambiguousAttempts > 8) {
+            // The Runner may already have committed and journaled this exact
+            // operation. Never manufacture a terminal failure from an
+            // ambiguous loopback response; reconnect so Room reconciliation
+            // redelivers the same idempotency key.
+            if (room && room.readyState < WebSocket.CLOSING) {
+              room.close(1012, "operation receipt reconciliation");
+            }
+            return;
+          }
+          await new Promise((resolve) => setTimeout(
+            resolve,
+            Math.min(2000, 50 * (2 ** (ambiguousAttempts - 1))),
+          ));
+          continue;
+        }
+        if (response.ok && response.status !== 202) {
+          try {
+            receipt = await response.json();
+            break;
+          } catch {
+            ambiguousAttempts += 1;
+            if (ambiguousAttempts > 8) {
+              if (room && room.readyState < WebSocket.CLOSING) {
+                room.close(1012, "operation receipt reconciliation");
+              }
+              return;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            continue;
+          }
+        }
+        let error;
+        try {
+          error = await responseError(response);
+        } catch {
+          ambiguousAttempts += 1;
+          if (ambiguousAttempts > 8) {
+            if (room && room.readyState < WebSocket.CLOSING) {
+              room.close(1012, "operation receipt reconciliation");
+            }
+            return;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          continue;
+        }
+        if (response.status !== 202 && ![
+          "operation_in_flight", "operation_queued_before_apply", "physical_commit_pending"
+        ].includes(error)) throw new Error(error);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      rememberSettlement(input);
+      sendReceipt("run.operation.receipt", {
+        run_id: receipt.target_run_id,
+        target_run_id: receipt.target_run_id,
+        run_sequence: receipt.run_sequence,
+        operation_id: receipt.operation_id,
+        actor_participant_id: receipt.actor_participant_id,
+        actor_id: receipt.actor_id,
+        actor_run_id: receipt.actor_run_id,
+        controller_session_id: receipt.controller_session_id,
+        controller_epoch: receipt.controller_epoch,
+        surface_id: receipt.surface_id,
+        surface_epoch: receipt.surface_epoch,
+        client_sequence: receipt.client_sequence,
+        result: receipt.result,
+        error: receipt.error,
+        output: receipt.output,
+        adapter_id: "ato.browser@1",
+        applied_at: receipt.applied_at,
+      });
+    }
+
+    async function abortOperation(input) {
+      if (!isObject(input) || typeof input.operation_id !== "string") {
+        throw new Error("invalid_operation");
+      }
+      const settled = settledOperations.get(input.operation_id);
+      if (settled && sameOperationScope(settled, input)) {
+        sendReceipt("run.operation.abort.receipt", {
+          operation_id: input.operation_id,
+          actor_id: input.actor_id,
+          actor_run_id: input.actor_run_id,
+          controller_session_id: input.controller_session_id,
+          controller_epoch: input.controller_epoch,
+          target_run_id: input.target_run_id ?? input.run_id ?? config.runId,
+          surface_id: input.surface_id,
+          surface_epoch: input.surface_epoch,
+          status: "failed",
+          best_effort_result: "already_settled",
+          requested_at: new Date().toISOString(),
+        });
+        return;
+      }
+      const response = await hostFetch("/operation/abort", input);
+      if (!response.ok) throw new Error(await responseError(response));
+      sendReceipt("run.operation.abort.receipt", await response.json());
+    }
+
+    function publishOperationFailure(input, error) {
+      const reason = error instanceof Error ? error.message : "operation_failed";
+      rememberSettlement(input);
+      sendReceipt("run.operation.receipt", {
+        run_id: input?.target_run_id ?? input?.run_id ?? config.runId,
+        target_run_id: input?.target_run_id ?? input?.run_id ?? config.runId,
+        operation_id: input?.operation_id,
+        actor_id: input?.actor_id,
+        actor_run_id: input?.actor_run_id,
+        controller_session_id: input?.controller_session_id,
+        controller_epoch: input?.controller_epoch,
+        surface_id: input?.surface_id,
+        surface_epoch: input?.surface_epoch,
+        client_sequence: input?.client_sequence,
+        result: reason === "operation_aborted" ? "aborted" : "failed",
+        error: reason,
+        adapter_id: "ato.browser@1",
+      });
+    }
+
+    function rememberSettlement(input) {
+      if (!isObject(input) || typeof input.operation_id !== "string") return;
+      settledOperations.delete(input.operation_id);
+      settledOperations.set(input.operation_id, input);
+      while (settledOperations.size > 1024) {
+        settledOperations.delete(settledOperations.keys().next().value);
+      }
+    }
+
+    function sameOperationScope(left, right) {
+      return left.descriptor_id === right.descriptor_id &&
+        left.actor_id === right.actor_id && left.actor_run_id === right.actor_run_id &&
+        left.controller_session_id === right.controller_session_id &&
+        left.controller_epoch === right.controller_epoch &&
+        (left.target_run_id ?? left.run_id) === (right.target_run_id ?? right.run_id) &&
+        left.surface_id === right.surface_id && left.surface_epoch === right.surface_epoch;
+    }
+
+    function publishAbortFailure(input, error) {
+      sendReceipt("run.operation.abort.receipt", {
+        operation_id: input?.operation_id,
+        actor_id: input?.actor_id,
+        actor_run_id: input?.actor_run_id,
+        controller_session_id: input?.controller_session_id,
+        controller_epoch: input?.controller_epoch,
+        target_run_id: input?.target_run_id ?? input?.run_id ?? config.runId,
+        surface_id: input?.surface_id,
+        surface_epoch: input?.surface_epoch,
+        status: "failed",
+        best_effort_result: error instanceof Error ? error.message : "operation_failed",
+      });
+    }
+
+    async function startPeer(participantId) {
+      if (!roomIdentity || !mediaReady || peers.has(participantId)) return;
+      const signal = {
+        run_id: config.runId,
+        peer_id: `peer_${cryptoToken()}`,
+        media_generation: roomIdentity.mediaGeneration,
+        publisher_connection_id: roomIdentity.connectionId,
+        subscriber_participant_id: participantId,
+      };
+      const connection = new RTCPeerConnection({ iceServers: config.iceServers });
+      peers.set(participantId, { signal, connection });
+      if (!mediaStream) mediaStream = mediaCanvas.captureStream(30);
+      for (const track of mediaStream.getTracks()) connection.addTrack(track, mediaStream);
+      connection.addEventListener("icecandidate", (event) => {
+        if (event.candidate) {
+          sendRoom("run.media.ice", { ...signal, candidate: event.candidate.toJSON() });
+        }
+      });
+      connection.addEventListener("connectionstatechange", () => {
+        if (["failed", "closed"].includes(connection.connectionState)) {
+          stopPeer(signal.peer_id, true);
+        }
+      });
+      const offer = await connection.createOffer();
+      await connection.setLocalDescription(offer);
+      // The Room's mediaSdpSchema requires `sdp` to be a bare string; sending
+      // the RTCSessionDescription object trips schema validation and the Room
+      // fences this socket with 1008 "Invalid media offer".
+      sendRoom("run.media.offer", {
+        ...signal,
+        sdp: offer.sdp ?? "",
+      });
+    }
+
+    function announceReady() {
+      if (!mediaReady || !roomIdentity) return;
+      for (const participantId of subscribers) void startPeer(participantId).catch(fail);
+      sendRoom("run.state", { run_id: config.runId, state: "paused" });
+      if (!readyReported) {
+        readyReported = true;
+        void hostFetch("/ready", {});
+      }
+    }
+
+    function stopParticipant(participantId, publish) {
+      subscribers.delete(participantId);
+      const peer = peers.get(participantId);
+      if (peer) stopPeer(peer.signal.peer_id, publish);
+    }
+
+    function stopPeer(peerId, publish) {
+      const entry = [...peers.entries()].find(([, peer]) => peer.signal.peer_id === peerId);
+      if (!entry) return;
+      const [participantId, peer] = entry;
+      peers.delete(participantId);
+      peer.connection.close();
+      if (publish) sendRoom("run.media.stop", peer.signal);
+    }
+
+    function matchesPublishedPeer(payload) {
+      return isObject(payload) && [...peers.values()].some(({ signal }) =>
+        signal.peer_id === payload.peer_id &&
+        signal.publisher_connection_id === payload.publisher_connection_id &&
+        signal.subscriber_participant_id === payload.subscriber_participant_id);
+    }
+
+    async function applyMediaSignal(type, payload) {
+      const peer = [...peers.values()].find(({ signal }) => signal.peer_id === payload.peer_id);
+      if (!peer) return;
+      if (type === "run.media.answer") {
+        await peer.connection.setRemoteDescription(
+          { type: "answer", sdp: payload.sdp },
+        );
+      }
+      else if (payload.candidate) await peer.connection.addIceCandidate(payload.candidate);
+    }
+
+    async function pumpFrame() {
+      if (ending) return;
+      try {
+        const response = await fetch("/frame", {
+          headers: { "x-ato-activity-host": config.hostSecret },
+          cache: "no-store",
+        });
+        if (response.ok && response.status !== 204) {
+          const bitmap = await createImageBitmap(await response.blob());
+          if (mediaCanvas.width !== bitmap.width || mediaCanvas.height !== bitmap.height) {
+            mediaCanvas.width = bitmap.width;
+            mediaCanvas.height = bitmap.height;
+          }
+          mediaContext.drawImage(bitmap, 0, 0);
+          bitmap.close();
+          if (!mediaReady) {
+            mediaReady = true;
+            announceReady();
+          }
+        }
+      } catch { return fail(); }
+      setTimeout(pumpFrame, 50);
+    }
+
+    async function pumpSurface() {
+      if (ending) return;
+      try {
+        const response = await fetch("/surface", {
+          headers: { "x-ato-activity-host": config.hostSecret },
+          cache: "no-store",
+        });
+        if (response.ok && response.status !== 204) {
+          const surface = await response.json();
+          if (Number.isSafeInteger(surface.revision) && surface.revision > surfaceRevision &&
+              isObject(surface.observation) && Array.isArray(surface.operations)) {
+            surfaceRevision = surface.revision;
+            sendRoom("surface.observe", surface.observation);
+            if (surface.observation.surface_epoch !== operationsSurfaceEpoch) {
+              operationsSurfaceEpoch = surface.observation.surface_epoch;
+              sendRoom("surface.operations.replace", {
+                surface_id: surface.observation.surface_id,
+                target_run_id: surface.observation.target_run_id,
+                surface_epoch: surface.observation.surface_epoch,
+                operations: surface.operations,
+              });
+            }
+          }
+        }
+      } catch { /* A transient poll failure does not end the hosted Run. */ }
+      setTimeout(pumpSurface, 250);
+    }
+
+    function sendRoom(type, payload) {
+      if (room?.readyState !== WebSocket.OPEN) return;
+      room.send(JSON.stringify({
+        protocol: roomProtocol,
+        seq: ++roomOutboundSequence,
+        type,
+        payload,
+      }));
+    }
+
+    function sendReceipt(type, payload) {
+      const operationId = typeof payload?.operation_id === "string"
+        ? payload.operation_id : cryptoToken();
+      const key = `${type}:${operationId}`;
+      receiptOutbox.delete(key);
+      receiptOutbox.set(key, { type, payload });
+      while (receiptOutbox.size > 1024) {
+        receiptOutbox.delete(receiptOutbox.keys().next().value);
+      }
+      sendRoom(type, payload);
+    }
+
+    function replayReceiptOutbox() {
+      for (const { type, payload } of receiptOutbox.values()) sendRoom(type, payload);
+    }
+
+    async function end() {
+      if (ending) return;
+      ending = true;
+      for (const { signal, connection } of [...peers.values()]) {
+        sendRoom("run.media.stop", signal);
+        connection.close();
+      }
+      peers.clear();
+      for (const track of mediaStream?.getTracks() ?? []) track.stop();
+      room?.close(1000, "Activity ended");
+      if (roomReconnectTimer !== null) clearTimeout(roomReconnectTimer);
+      stopRoomHeartbeat();
+      await hostFetch("/end", {});
+    }
+
+    function fail() {
+      if (ending) return;
+      ending = true;
+      stopRoomHeartbeat();
+      void hostFetch("/failure", {
+        reason: "controller_fail_called",
+        reconnect_attempt: roomReconnectAttempt,
+        connection_id: roomIdentity ? roomIdentity.connectionId : null,
+        uptime_ms: roomConnectedAt > 0 ? Date.now() - roomConnectedAt : 0,
+      });
+    }
+
+    function hostFetch(path, body) {
+      return fetch(path, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-ato-activity-host": config.hostSecret,
+        },
+        body: JSON.stringify(body),
+        cache: "no-store",
+      });
+    }
+
+    async function responseError(response) {
+      const value = await response.json();
+      if (!isObject(value) || typeof value.error !== "string") {
+        throw new Error("ambiguous loopback response");
+      }
+      return value.error;
+    }
+
+    function cryptoToken() {
+      const bytes = crypto.getRandomValues(new Uint8Array(18));
+      return btoa(String.fromCharCode(...bytes))
+        .replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+    }
+
+    function isObject(value) {
+      return value !== null && typeof value === "object" && !Array.isArray(value);
+    }
+  })();
+  </script>
+</body>
+</html>

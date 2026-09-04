@@ -2,39 +2,63 @@
 resolver = "2"
 members = [
     "apps/cli",
+    "apps/local-runtime",
+    "apps/connected-realization-worker",
+    "apps/formation-worker",
+    "apps/firecracker-guest-image",
+    "apps/runtime-object-graph",
     "lib/computation",
     "lib/kernel",
+    "lib/local-execution",
+    "lib/formation",
     "lib/objects",
+    "lib/sandbox",
     "extensions/adapters/api",
     "extensions/adapters/process",
     "extensions/adapters/pty",
     "extensions/adapters/workspace",
     "extensions/adapters/binding",
     "extensions/adapters/http",
+    "extensions/adapters/browser",
+    "extensions/browser-host",
+    "extensions/semantics/browser",
+    "extensions/player",
+    "extensions/record-writer",
     "lib/compose",
     "extensions/materializers/snapshot",
     "extensions/materializers/snapshot/guest-agent",
     "extensions/materializers/api",
-    "extensions/materializers/replay",
     "extensions/materializers/static-web",
+    "extensions/materializers/replay",
+    "extensions/materializers/vm-snapshot",
+    "extensions/materializers/browser",
+    "extensions/contracts",
+    "extensions/planner",
     "tools/snapshot-builder",
+    "tools/legacy-vm-inspector",
     "tools/arch-check",
     "lib/ipc",
+    "lib/host-control",
     "services/netd",
 ]
 
-# `desktop` (and its xtask) are kept OUT of the workspace because their
-# git-only deps (`gpui`, `gpui-component`, `wry`, ...) lack crates.io versions
-# and cause `cargo package --workspace` to fail. release-plz invokes
-# `cargo package` to compute version diffs even for crates marked
-# `release = false`, so excluding them entirely is the only reliable fix.
-# Builds inside `apps/desktop/` still work — the directory just has its
-# own Cargo.lock instead of sharing the workspace lockfile.
+# `desktop` (and its xtask) are kept OUT of the workspace so they keep their own
+# Cargo.lock and release lifecycle. release-plz invokes `cargo package` to
+# compute version diffs even for crates marked `release = false`, and excluding
+# them entirely is the reliable way to keep that off their manifests.
+#
+# The original reason given here was that their git-only deps (`gpui`,
+# `gpui-component`, `wry`) lack crates.io versions. That is no longer true of
+# anything in the tree: the GPUI shell was dismantled and `apps/desktop` now
+# depends only on `anyhow`, `ato-ipc` and `serde_json`, all on crates.io. The
+# exclusion is kept for the lockfile/release-plz reasons above, not that one.
+# Builds inside `apps/desktop/` still work.
 exclude = [
     "apps/desktop",
     "apps/desktop/xtask",
     "apps/desktop/.tmp",
     "apps/desktop/vendor",
+    "apps/desktop-tauri",
     "services/ato-tsnetd",
     "extensions/providers/nacelle",
     "extensions/semantics/workspace",
