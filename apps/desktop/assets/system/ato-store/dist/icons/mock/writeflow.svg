@@ -1,7 +1,0 @@
-<svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <rect width="64" height="64" rx="32" fill="#fff7ed"/>
-  <!-- Feather pen -->
-  <path d="M44 12 C44 12 50 18 48 28 L28 48 L20 52 L24 44 L44 24 C46 18 44 12 44 12Z" fill="#f97316" opacity="0.9"/>
-  <path d="M28 48 L24 44" stroke="#ea580c" stroke-width="2" stroke-linecap="round"/>
-  <path d="M44 12 L28 28" stroke="#fed7aa" stroke-width="1.5" stroke-linecap="round"/>
-</svg>
