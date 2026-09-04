@@ -38,16 +38,32 @@ use sha2::{Digest, Sha256};
 /// not have to know which it fetched — and a `tar` reader handed gzip bytes
 /// fails with "numeric field did not have utf-8 text", which reads like a
 /// corrupt archive rather than a compressed one.
+/// Zstandard's magic number, little-endian.
+const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
+
+/// Decompress by what the BYTES say, not by what the URL ended in.
+///
+/// GitHub serves gzip; an uploaded archive arrives zstd-compressed. Sniffing
+/// the magic number rather than trusting a filename or a content-type means a
+/// source that arrives by a third transport tomorrow needs nothing here — and
+/// that a mislabelled archive is read correctly rather than confidently
+/// misread.
 fn decompressed(bytes: &[u8]) -> Result<std::borrow::Cow<'_, [u8]>, SourceError> {
-    if bytes.len() < 2 || bytes[0] != 0x1f || bytes[1] != 0x8b {
-        return Ok(std::borrow::Cow::Borrowed(bytes));
+    if bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b {
+        let mut decoder = flate2::read::GzDecoder::new(Cursor::new(bytes));
+        let mut out = Vec::new();
+        decoder.read_to_end(&mut out).map_err(|error| {
+            SourceError::Unusable(format!("source archive is not readable gzip: {error}"))
+        })?;
+        return Ok(std::borrow::Cow::Owned(out));
     }
-    let mut decoder = flate2::read::GzDecoder::new(Cursor::new(bytes));
-    let mut out = Vec::new();
-    decoder.read_to_end(&mut out).map_err(|error| {
-        SourceError::Unusable(format!("source archive is not readable gzip: {error}"))
-    })?;
-    Ok(std::borrow::Cow::Owned(out))
+    if bytes.len() >= 4 && bytes[..4] == ZSTD_MAGIC {
+        let out = zstd::stream::decode_all(Cursor::new(bytes)).map_err(|error| {
+            SourceError::Unusable(format!("source archive is not readable zstd: {error}"))
+        })?;
+        return Ok(std::borrow::Cow::Owned(out));
+    }
+    Ok(std::borrow::Cow::Borrowed(bytes))
 }
 
 /// How a tree was measured. Part of the closure identity on purpose.

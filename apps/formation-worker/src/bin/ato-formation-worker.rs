@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use ato_formation::source::SourceLimits;
 use ato_formation_worker::api::{FormationApi, PublishOutcome};
-use ato_formation_worker::job::{GitHubTarballFetcher, JobContext, TreePacker, run_job};
+use ato_formation_worker::job::{PinnedSourceFetcher, JobContext, TreePacker, run_job};
 use ato_formation_worker::pack::pack_tree;
 use ato_formation_worker::sandbox::{BuildLimits, require_containment};
 use ato_sandbox::{SandboxPolicy, apply_sandbox, is_sandbox_supported, set_no_new_privs};
@@ -57,9 +57,11 @@ fn run_one(args: &[String]) -> Result<()> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(900))
         .build()?;
-    let api = FormationApi::new(client.clone(), api_base, token);
+    let api = FormationApi::new(client.clone(), api_base.clone(), token.clone());
     let shim = std::env::current_exe().context("cannot locate this worker's own binary")?;
-    let fetcher = GitHubTarballFetcher::new(client);
+    // The fetcher needs the API too: an uploaded source is asked for by job,
+    // through the control plane, rather than from a public URL.
+    let fetcher = PinnedSourceFetcher::new(client, api_base, token);
 
     let outcome = run_job(
         &JobContext {
