@@ -9,6 +9,20 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+/// A claimed job, plus what its result attaches to.
+///
+/// The target rides with the claim because a service is handed a job, not a
+/// command line.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ClaimedFormationWork {
+    pub job_id: String,
+    pub attempt_id: String,
+    pub attempt_fence: u64,
+    pub compute_id: Option<String>,
+    pub capsule_revision_id: Option<String>,
+    pub job: serde_json::Value,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ClaimedFormationJob {
     pub attempt_id: String,
@@ -46,6 +60,49 @@ impl FormationApi {
             .error_for_status()
             .context("failed to claim a Formation attempt")?
             .json()?)
+    }
+
+    /// Take the next queued job, or nothing.
+    ///
+    /// An empty queue is the normal case for a service, so it returns `None`
+    /// rather than an error: a worker that logged a failure every poll would
+    /// bury the one that mattered.
+    pub fn claim_next(&self, worker_id: &str) -> Result<Option<ClaimedFormationWork>> {
+        let response: serde_json::Value = self
+            .client
+            .post(format!(
+                "{}/v1/internal/formation/claim?worker_id={worker_id}",
+                self.base
+            ))
+            .bearer_auth(&self.token)
+            .json(&serde_json::json!({}))
+            .send()?
+            .error_for_status()
+            .context("failed to ask for Formation work")?
+            .json()?;
+        if response["job_id"].is_null() {
+            return Ok(None);
+        }
+        Ok(Some(serde_json::from_value(response)?))
+    }
+
+    /// Say that an attempt produced nothing.
+    ///
+    /// The reason is short and written for the person who uploaded the source,
+    /// not copied from stderr: a build's output can carry a host path or a
+    /// credential a tool echoed, and neither belongs in something a user reads.
+    pub fn report_failure(&self, attempt_id: &str, reason: &str) -> Result<()> {
+        self.client
+            .post(format!(
+                "{}/v1/internal/formation/attempts/{attempt_id}/failure",
+                self.base
+            ))
+            .bearer_auth(&self.token)
+            .json(&serde_json::json!({ "reason": reason }))
+            .send()?
+            .error_for_status()
+            .context("failed to report a Formation failure")?;
+        Ok(())
     }
 
     /// How much of an artifact goes in one request.
@@ -236,6 +293,24 @@ impl FormationApi {
         let status = response.status();
         let body: serde_json::Value = response.json().unwrap_or_default();
         if status.is_success() {
+            // 200 is not acceptance. A shadow run answers 200 with
+            // `registered: false` — it validated the result, compared it and
+            // threw it away — and reading that as success is how a lane that
+            // registers nothing comes to look like a lane that works.
+            if body.get("registered").and_then(serde_json::Value::as_bool) == Some(false) {
+                return Ok(PublishOutcome::NotRegistered {
+                    mode: body
+                        .get("mode")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unknown")
+                        .to_owned(),
+                    reason: body
+                        .get("reason")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                });
+            }
             return Ok(PublishOutcome::Accepted {
                 compute_schema_id: body
                     .get("compute_schema_id")
@@ -264,6 +339,13 @@ pub enum PublishOutcome {
     Accepted {
         compute_schema_id: String,
     },
+    /// Computed, compared, and deliberately not registered: the lane is off
+    /// or in shadow for this caller. Not a failure of the build, and not a
+    /// success for whoever is waiting on an App.
+    NotRegistered {
+        mode: String,
+        reason: String,
+    },
     /// Refused by the control plane — a superseded attempt, a duplicate
     /// completion, a result the contract rejected.
     Refused {
@@ -279,6 +361,8 @@ impl PublishOutcome {
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Accepted { .. } => false,
+            // Retrying would produce the same decision from the same policy.
+            Self::NotRegistered { .. } => false,
             Self::Refused { code } => !matches!(
                 code.as_str(),
                 "formation_attempt_superseded"
