@@ -49,9 +49,8 @@ fn serve(args: &[String]) -> Result<()> {
     let api_base = flag(args, "--api-base")
         .map(ToOwned::to_owned)
         .ok_or_else(|| anyhow!("--api-base is required"))?;
-    let work_root = PathBuf::from(
-        flag(args, "--work-root").ok_or_else(|| anyhow!("--work-root is required"))?,
-    );
+    let work_root =
+        PathBuf::from(flag(args, "--work-root").ok_or_else(|| anyhow!("--work-root is required"))?);
     let worker_id = flag(args, "--worker-id").unwrap_or("formation-worker");
     let idle = Duration::from_millis(
         flag(args, "--poll-ms")
@@ -127,7 +126,9 @@ fn serve(args: &[String]) -> Result<()> {
                 if let PublishOutcome::NotRegistered { mode, .. } = &outcome.outcome {
                     let _ = api.report_failure(
                         &work.attempt_id,
-                        &format!("this app was built but not kept: the {mode} lane is not live yet"),
+                        &format!(
+                            "this app was built but not kept: the {mode} lane is not live yet"
+                        ),
                     );
                 }
             }

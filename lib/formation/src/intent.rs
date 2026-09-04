@@ -332,7 +332,6 @@ fn choose_lane(
     })
 }
 
-
 // ─── Static Build Profile v1 ────────────────────────────────────────────────
 //
 // A Static Compute is evaluated by the browser, but that says nothing about
@@ -469,7 +468,10 @@ fn resolve_package_manager(node: &NodeEvidence) -> Result<PackageManager, Intent
     }
     let mut found: Vec<PackageManager> = Vec::new();
     for (present, manager) in [
-        (node.has_package_lock || node.has_npm_shrinkwrap, PackageManager::Npm),
+        (
+            node.has_package_lock || node.has_npm_shrinkwrap,
+            PackageManager::Npm,
+        ),
         (node.has_pnpm_lock, PackageManager::Pnpm),
         (node.has_yarn_lock, PackageManager::Yarn),
         (node.has_bun_lock, PackageManager::Bun),
@@ -606,7 +608,6 @@ fn detect_static_build(
     }))
 }
 
-
 /// `node-static/v1`, as a fixed contract rather than an inference.
 ///
 /// The preset selector has already established that a `package.json`, a
@@ -618,10 +619,13 @@ fn detect_static_build(
 fn fixed_node_static_build(
     evidence: &DetectorEvidence,
 ) -> Result<StaticBuildProfileV1, IntentError> {
-    let node = evidence.node.as_ref().ok_or(IntentError::RequiresAuthoring {
-        field: "static.build",
-        why: "a built web app needs a package.json; this source has none",
-    })?;
+    let node = evidence
+        .node
+        .as_ref()
+        .ok_or(IntentError::RequiresAuthoring {
+            field: "static.build",
+            why: "a built web app needs a package.json; this source has none",
+        })?;
     if node.script_build.is_none() {
         return Err(IntentError::RequiresAuthoring {
             field: "static.build",
@@ -1144,10 +1148,7 @@ pub fn compile_build_plan(
                     "if [ ! -x {home}/bin/node ]; then mkdir -p {home} && \
                      curl -fsSL '{url}' | tar -xz --strip-components=1 -C {home}; fi; \
                      {home}/bin/node -v",
-                    url = node_download_url(
-                        &build.node_version,
-                        node_triple(target_triple)
-                    ),
+                    url = node_download_url(&build.node_version, node_triple(target_triple)),
                 ),
             ],
             needs_network: true,
