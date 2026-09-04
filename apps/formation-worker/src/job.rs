@@ -30,23 +30,32 @@ use crate::sandbox::{BuildLimits, BuildSandbox, NetworkPolicy};
 
 /// Fetching a pinned source. A trait so the whole job is testable offline.
 pub trait SourceFetcher {
-    /// Bytes of the archive for a pinned revision.
-    fn fetch(&self, source: &serde_json::Value) -> Result<Vec<u8>>;
+    /// Bytes of the archive this job's source names.
+    ///
+    /// The job id is a parameter because not every source can be fetched from
+    /// the source alone: a GitHub commit has a URL anybody can derive, and an
+    /// uploaded archive does not — those bytes are the control plane's, and the
+    /// worker asks for them by naming the job it is running.
+    fn fetch(&self, job_id: &str, source: &serde_json::Value) -> Result<Vec<u8>>;
 }
 
-/// The real fetcher: a codeload tarball for a pinned commit.
-pub struct GitHubTarballFetcher {
+/// The real fetcher, for every source kind the contract admits.
+pub struct PinnedSourceFetcher {
     client: reqwest::blocking::Client,
+    api_base: String,
+    token: String,
 }
 
-impl GitHubTarballFetcher {
-    pub fn new(client: reqwest::blocking::Client) -> Self {
-        Self { client }
+impl PinnedSourceFetcher {
+    pub fn new(client: reqwest::blocking::Client, api_base: String, token: String) -> Self {
+        Self {
+            client,
+            api_base: api_base.trim_end_matches('/').to_owned(),
+            token,
+        }
     }
-}
 
-impl SourceFetcher for GitHubTarballFetcher {
-    fn fetch(&self, source: &serde_json::Value) -> Result<Vec<u8>> {
+    fn github(&self, source: &serde_json::Value) -> Result<Vec<u8>> {
         let owner = source["owner"].as_str().context("source has no owner")?;
         let repository = source["repository"]
             .as_str()
@@ -69,6 +78,46 @@ impl SourceFetcher for GitHubTarballFetcher {
                 )
             })?;
         Ok(response.bytes()?.to_vec())
+    }
+
+    /// Bytes the requester already uploaded.
+    ///
+    /// Asked for BY JOB. The worker does not name the upload: the control
+    /// plane reads the job's own source, checks the upload belongs to whoever
+    /// submitted it, and serves the digest the job names. A worker that could
+    /// choose the object would be choosing what it builds.
+    fn uploaded(&self, job_id: &str) -> Result<Vec<u8>> {
+        let url = format!(
+            "{}/v1/internal/formation/jobs/{job_id}/source-archive",
+            self.api_base
+        );
+        let response = self
+            .client
+            .get(&url)
+            .bearer_auth(&self.token)
+            .send()?
+            .error_for_status()
+            .with_context(|| {
+                format!(
+                    "failed to fetch the uploaded source for {job_id} from {}",
+                    ato_formation::source::redact_url(&url)
+                )
+            })?;
+        Ok(response.bytes()?.to_vec())
+    }
+}
+
+impl SourceFetcher for PinnedSourceFetcher {
+    fn fetch(&self, job_id: &str, source: &serde_json::Value) -> Result<Vec<u8>> {
+        match source["kind"].as_str() {
+            Some("git_hub") => self.github(source),
+            Some("uploaded_archive") => self.uploaded(job_id),
+            // `existing_source_closure` names a closure that is already
+            // materialized; nothing needs fetching, and reaching here means a
+            // caller asked for bytes that were never going to arrive.
+            Some(other) => anyhow::bail!("source kind {other:?} has no fetcher"),
+            None => anyhow::bail!("source names no kind"),
+        }
     }
 }
 
@@ -117,7 +166,8 @@ pub fn run_job(
     // ── source ──────────────────────────────────────────────────────────────
     let source = &job["source"];
     let subdirectory = source["subdirectory"].as_str().unwrap_or("");
-    let archive = context.fetcher.fetch(source)?;
+    let job_id = job["job_id"].as_str().context("job names no id")?;
+    let archive = context.fetcher.fetch(job_id, source)?;
     let archive_digest = digest(&archive);
     // Both checks, in order. Intact bytes of a DIFFERENT tree pass the first
     // and must not pass the second.
