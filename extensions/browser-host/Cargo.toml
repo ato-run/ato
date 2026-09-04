@@ -1,0 +1,24 @@
+[package]
+name = "ato-browser-host"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MPL-2.0"
+description = "Runner-owned private Chrome lifecycle for ato.browser@1"
+
+[package.metadata.dist]
+dist = false
+
+[package.metadata.ato-architecture]
+layer = "app"
+
+[dependencies]
+anyhow = "1"
+ato-adapter-browser = { path = "../adapters/browser", version = "0.1.0" }
+base64 = "0.22"
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+tungstenite = "0.28"
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"

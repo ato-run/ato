@@ -1,0 +1,31 @@
+{
+  "protocol": "ato.formation-job.v1",
+  "job_id": "fjob_01M1K2NOTESFIXTURE000000",
+  "request_idempotency_key": "notes-fixture-first-submission",
+  "source": {
+    "kind": "git_hub",
+    "owner": "ato-run",
+    "repository": "fixture-fastapi-sqlite-process",
+    "requested_ref": "main",
+    "resolved_commit_sha": "922b112b0e1d4c5a9f3e7a2c6d8b4f1a0e9c3d7b",
+    "subdirectory": ""
+  },
+  "requested_outputs": ["process_workspace"],
+  "target": {
+    "triple": "x86_64-linux-gnu",
+    "workspace_guest_root": "/app"
+  },
+  "policy": {
+    "policy_version": "formation-policy-v1",
+    "network": "dependency_resolution",
+    "publish_enabled": false
+  },
+  "authoring": {
+    "manifest_toml": "schema_version = \"1\"\n",
+    "overrides": {
+      "launch.argv": "/app/.venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8000",
+      "runtime.python": "3.12.7",
+      "state.app_data.mount": "/data"
+    }
+  }
+}

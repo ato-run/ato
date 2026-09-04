@@ -13,7 +13,7 @@ use crate::manifest::{
     STATIC_WEB_MANIFEST_V1_SCHEMA, StaticWebFileV1, StaticWebManifestV1, StaticWebRoutingV1,
     validate_relative_path,
 };
-use crate::output::StaticWebOutputPlan;
+use crate::output::{ExtractedStaticWebOutput, StaticWebOutputPlan};
 pub use crate::receipt::{
     StaticWebBlobMetadataV1, StaticWebBlobReceiptV1, StaticWebBundleReceiptV1,
 };
@@ -48,12 +48,22 @@ pub struct ProducedStaticWebBundle {
 /// The final directory is never overwritten. All validation and runtime-secret
 /// canary checks complete in a temporary sibling first, so failure leaves no
 /// partial bundle. An empty canary list is *not* a generic secret scan claim.
+/// Produces the immutable bundle from an EXTRACTED output tree.
+///
+/// The first parameter is an `ExtractedStaticWebOutput`, not a path, on
+/// purpose. Extraction is where the browser-runner and instance-state bridges
+/// are injected, and a caller that reached the producer with a bare directory
+/// had skipped it — which is exactly what the Formation Static lane did, and
+/// what B1-S caught: a bundle that looked correct and had silently lost its
+/// Browser Instance State. Taking the proof type means that mistake no longer
+/// has a spelling.
 pub fn produce_static_web_bundle(
     plan: &StaticWebOutputPlan,
-    built_output_root: &Path,
+    built: &ExtractedStaticWebOutput,
     destination_parent: &Path,
     runtime_secret_canaries: &[&[u8]],
 ) -> Result<ProducedStaticWebBundle> {
+    let built_output_root = built.output_root();
     plan.validate()?;
     let source_meta = fs::symlink_metadata(built_output_root)
         .with_context(|| format!("read built static output {}", built_output_root.display()))?;
@@ -265,9 +275,31 @@ fn reject_hard_link(_metadata: &fs::Metadata, _path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn media_type_for(path: &str) -> Option<&'static str> {
+/// The one media-type table. Exported so the Formation Static lane can ask the
+/// same question the producer will ask, rather than keeping a second copy of
+/// the extension list that could answer differently.
+pub fn media_type_for(path: &str) -> Option<&'static str> {
     let extension = Path::new(path).extension()?.to_str()?;
     match extension {
+        // ── live-artifact compatibility, not new format support ──────────
+        //
+        // These three were dropped from this table at some point while the
+        // legacy Builder daemon kept emitting them, and staging is serving
+        // artifacts that contain all three today. B1-S measured the gap on
+        // `gabrielecirulli/2048@478b6ec`: the live manifest names
+        // `image/x-icon`, `font/woff` and `application/vnd.ms-fontobject`,
+        // and this table could type none of them — so re-forming that source
+        // lost a favicon and two of the three Clear Sans font sources, and
+        // still reported success.
+        //
+        // Deliberately only these three. The table stays an explicit,
+        // deterministic list: no OS MIME database, no content sniffing, and
+        // nothing added because it "seemed useful too". `woff2` was already
+        // here; `woff` and `eot` are its older siblings that real pages still
+        // reference from the same `@font-face` block.
+        "ico" => Some("image/x-icon"),
+        "woff" => Some("font/woff"),
+        "eot" => Some("application/vnd.ms-fontobject"),
         "js" | "mjs" => Some("application/javascript; charset=utf-8"),
         "json" => Some("application/json; charset=utf-8"),
         "wasm" => Some("application/wasm"),
@@ -318,12 +350,8 @@ mod tests {
         let extracted = extract_static_web_output(image.path(), &plan()).unwrap();
         let one_parent = tempfile::tempdir().unwrap();
         let two_parent = tempfile::tempdir().unwrap();
-        let one =
-            produce_static_web_bundle(&plan(), extracted.output_root(), one_parent.path(), &[])
-                .unwrap();
-        let two =
-            produce_static_web_bundle(&plan(), extracted.output_root(), two_parent.path(), &[])
-                .unwrap();
+        let one = produce_static_web_bundle(&plan(), &extracted, one_parent.path(), &[]).unwrap();
+        let two = produce_static_web_bundle(&plan(), &extracted, two_parent.path(), &[]).unwrap();
         assert_eq!(one.manifest_bytes, two.manifest_bytes);
         assert_eq!(one.receipt.manifest_digest, two.receipt.manifest_digest);
         assert!(one.receipt.production_host_label.starts_with("p-"));
@@ -356,11 +384,9 @@ mod tests {
         let plain_parent = tempfile::tempdir().unwrap();
         let bridged_parent = tempfile::tempdir().unwrap();
         let plain_bundle =
-            produce_static_web_bundle(&plan(), plain.output_root(), plain_parent.path(), &[])
-                .unwrap();
+            produce_static_web_bundle(&plan(), &plain, plain_parent.path(), &[]).unwrap();
         let bridged_bundle =
-            produce_static_web_bundle(&plan(), bridged.output_root(), bridged_parent.path(), &[])
-                .unwrap();
+            produce_static_web_bundle(&plan(), &bridged, bridged_parent.path(), &[]).unwrap();
 
         assert_ne!(
             plain_bundle.receipt.manifest_digest,
@@ -387,7 +413,7 @@ mod tests {
         let extracted = extract_static_web_output(image.path(), &plan()).unwrap();
         let parent = tempfile::tempdir().unwrap();
         assert!(
-            produce_static_web_bundle(&plan(), extracted.output_root(), parent.path(), &[])
+            produce_static_web_bundle(&plan(), &extracted, parent.path(), &[])
                 .unwrap_err()
                 .to_string()
                 .contains("source maps")
@@ -398,14 +424,96 @@ mod tests {
         let extracted = extract_static_web_output(image.path(), &plan()).unwrap();
         let parent = tempfile::tempdir().unwrap();
         assert!(
-            produce_static_web_bundle(
-                &plan(),
-                extracted.output_root(),
-                parent.path(),
-                &[b"secret-value"]
-            )
-            .is_err()
+            produce_static_web_bundle(&plan(), &extracted, parent.path(), &[b"secret-value"])
+                .is_err()
         );
+    }
+
+    /// Live-artifact compatibility, fixed as a regression test.
+    ///
+    /// This is NOT a "we now support fonts and icons" feature test. Staging is
+    /// serving a static artifact formed from
+    /// `gabrielecirulli/2048@478b6ec346e3787f589e4af751378d06ded4cbbc` whose
+    /// manifest names `image/x-icon`, `font/woff` and
+    /// `application/vnd.ms-fontobject`. This table could type none of them, so
+    /// re-forming that same source through the canonical materializer dropped
+    /// a favicon and six font files — three `.woff` and three `.eot` — and
+    /// reported success. The page still rendered, in a fallback face, which is
+    /// why a digest-only comparison would have called it "just a new hash".
+    ///
+    /// The fixture reproduces the shape of that live manifest, not the live
+    /// manifest itself: the smallest set of paths that would have regressed.
+    #[test]
+    fn live_artifact_icon_and_legacy_font_media_types_are_preserved() {
+        let image = fixture_root();
+        let dist = image.path().join("dist");
+        fs::create_dir_all(dist.join("style/fonts")).unwrap();
+        fs::write(dist.join("favicon.ico"), b"icon-bytes").unwrap();
+        for weight in ["Bold", "Light", "Regular"] {
+            fs::write(
+                dist.join(format!("style/fonts/ClearSans-{weight}-webfont.woff")),
+                format!("woff-bytes-{weight}").as_bytes(),
+            )
+            .unwrap();
+            fs::write(
+                dist.join(format!("style/fonts/ClearSans-{weight}-webfont.eot")),
+                format!("eot-bytes-{weight}").as_bytes(),
+            )
+            .unwrap();
+        }
+
+        let extracted = extract_static_web_output(image.path(), &plan()).unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let produced = produce_static_web_bundle(&plan(), &extracted, parent.path(), &[]).unwrap();
+        let manifest: serde_json::Value = serde_json::from_slice(&produced.manifest_bytes).unwrap();
+        let files = manifest["files"].as_object().unwrap();
+
+        // Present, and typed exactly as the live manifest types them.
+        assert_eq!(files["favicon.ico"]["media_type"], "image/x-icon");
+        for weight in ["Bold", "Light", "Regular"] {
+            assert_eq!(
+                files[&format!("style/fonts/ClearSans-{weight}-webfont.woff")]["media_type"],
+                "font/woff"
+            );
+            assert_eq!(
+                files[&format!("style/fonts/ClearSans-{weight}-webfont.eot")]["media_type"],
+                "application/vnd.ms-fontobject"
+            );
+        }
+        // Every one of them survives to a blob; typing a file and then failing
+        // to publish it would be the same regression wearing a different hat.
+        // The font fixtures carry distinct bytes so that identical-content
+        // blob deduplication — correct, and exercised elsewhere — cannot make
+        // a dropped file look like a shared one.
+        assert_eq!(produced.receipt.blobs.len(), files.len());
+    }
+
+    /// The compatibility fix added exactly three extensions and nothing else.
+    /// A table that grows by "while we are here" stops being a contract.
+    #[test]
+    fn media_type_table_was_widened_by_exactly_three_extensions() {
+        assert_eq!(media_type_for("a.ico"), Some("image/x-icon"));
+        assert_eq!(media_type_for("a.woff"), Some("font/woff"));
+        assert_eq!(
+            media_type_for("a.eot"),
+            Some("application/vnd.ms-fontobject")
+        );
+        // Neighbours a MIME database would have brought along, still refused.
+        for path in [
+            "a.ttf",
+            "a.otf",
+            "a.md",
+            "a.scss",
+            "a.map",
+            "a.xml",
+            "a.pdf",
+            "a.mp4",
+            "a.ico.bak",
+            "Rakefile",
+            ".gitignore",
+        ] {
+            assert_eq!(media_type_for(path), None, "{path} must not be typed");
+        }
     }
 
     #[test]
@@ -414,10 +522,7 @@ mod tests {
         fs::write(image.path().join("dist/installer.exe"), b"binary").unwrap();
         let extracted = extract_static_web_output(image.path(), &plan()).unwrap();
         let parent = tempfile::tempdir().unwrap();
-        assert!(
-            produce_static_web_bundle(&plan(), extracted.output_root(), parent.path(), &[])
-                .is_err()
-        );
+        assert!(produce_static_web_bundle(&plan(), &extracted, parent.path(), &[]).is_err());
     }
 
     #[cfg(unix)]

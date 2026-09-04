@@ -1,0 +1,366 @@
+//! The isolation a Formation build runs under (ADR-018).
+//!
+//! ## A different threat model from the runtime sandbox
+//!
+//! P3's runtime sandbox confines a workload an owner already chose to run.
+//! This confines code chosen by whoever submitted a repository: `uv sync` runs
+//! arbitrary build-backend hooks, a `setup.py` runs at install time, and a
+//! postinstall script is ordinary practice. The substrate is therefore chosen
+//! on the assumption that **the build is the attacker**.
+//!
+//! The two policies share a crate (`ato-sandbox`) and must not share settings.
+//! A runtime workload is allowed the network; a build is not, unless its plan
+//! declared it needs one and its policy permits it.
+//!
+//! ## What this refuses to do
+//!
+//! Run unconfined. A worker that cannot contain a build refuses the job, and
+//! says so, rather than producing an artifact nobody can vouch for.
+
+use std::path::{Path, PathBuf};
+
+use anyhow::{Result, bail, ensure};
+use ato_sandbox::{SandboxPolicy, filter_sensitive_paths, sensitive_paths};
+
+/// Where the source appears inside the build sandbox. Read-only.
+pub const GUEST_SOURCE_ROOT: &str = "/src";
+/// Where the workspace is assembled. The ONLY writable declared path besides
+/// the cache and `/tmp`.
+pub const GUEST_WORKSPACE_ROOT: &str = "/app";
+/// Where a dependency cache may live, when one is allowed.
+pub const GUEST_CACHE_ROOT: &str = "/cache";
+/// Where provisioned toolchains live — the same path at build time and at
+/// runtime, because a venv records the absolute path of the interpreter that
+/// made it.
+pub const TOOLCHAIN_ROOT: &str = "/opt/ato/toolchains";
+
+/// System paths a build may read and execute.
+///
+/// ONE list, used for both the bind mounts and the Landlock policy. They
+/// describe the same world and drifted apart once already: the policy omitted
+/// `/bin`, Landlock denied exec of `/bin/sh`, and the failure read as
+/// "Permission denied" on a path the mount namespace had faithfully provided.
+const SYSTEM_READ_ONLY: &[&str] = &[
+    // `/bin` and `/sbin` are usrmerge symlinks on most modern distributions,
+    // and binding only `/usr` leaves them dangling.
+    "/bin", "/sbin", "/lib", "/lib64", "/usr",
+];
+
+/// Configuration files a build needs, bound INDIVIDUALLY.
+///
+/// Not `/etc` wholesale, which is measured rather than stylistic: on a
+/// systemd-resolved host `/etc/resolv.conf` is a symlink into `/run`, and
+/// bind-mounting the directory carries the link without its target — DNS then
+/// fails inside the sandbox with "Temporary failure in name resolution" while
+/// `/etc` is demonstrably present. Binding the file lets bwrap resolve it.
+///
+/// Binding less of `/etc` is also simply better: a build has no business
+/// reading the host's user database or its service configuration.
+const SYSTEM_CONFIG_FILES: &[&str] = &[
+    "/etc/resolv.conf",
+    "/etc/hosts",
+    "/etc/ssl",
+    "/etc/ca-certificates",
+    "/etc/pki",
+];
+
+/// What the build may reach.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkPolicy {
+    /// `--unshare-net`. Real isolation, and the only policy this build can
+    /// currently ENFORCE for an untrusted source.
+    Denied,
+    /// The host's network, shared. Honest about what it is: bubblewrap cannot
+    /// express "the package index and nothing else", so this is unrestricted
+    /// egress and is confined to trusted sources by policy above, not here.
+    DependencyResolution,
+}
+
+impl NetworkPolicy {
+    /// The exact string recorded in provenance, so a later reader can tell
+    /// whether an artifact was built under isolation or not.
+    pub fn provenance(self) -> &'static str {
+        match self {
+            Self::Denied => "bubblewrap+landlock;network=denied",
+            Self::DependencyResolution => {
+                "bubblewrap+landlock;network=host-unrestricted;trusted-only"
+            }
+        }
+    }
+}
+
+/// Resource ceilings. Enforced, not advisory.
+#[derive(Debug, Clone, Copy)]
+pub struct BuildLimits {
+    pub wall_clock_seconds: u64,
+    pub max_processes: u64,
+    pub max_output_bytes: u64,
+}
+
+impl Default for BuildLimits {
+    fn default() -> Self {
+        Self {
+            wall_clock_seconds: 15 * 60,
+            max_processes: 512,
+            max_output_bytes: 1024 * 1024 * 1024,
+        }
+    }
+}
+
+/// A build step, lowered onto the host.
+#[derive(Debug, Clone)]
+pub struct SandboxedBuildCommand {
+    pub argv: Vec<String>,
+    pub policy: SandboxPolicy,
+    pub network: NetworkPolicy,
+}
+
+/// Build the bwrap argv for one build step.
+///
+/// Mirrors the runtime sandbox's shape deliberately — the same namespaces, the
+/// same sensitive-path tmpfs overlay, the same Landlock shim — and differs in
+/// exactly the places a build must differ:
+///
+/// ```text
+/// source     --ro-bind-->  /src      the build may read it, never write it
+/// workspace  --bind----->  /app      the only place output may appear
+/// cache      --bind----->  /cache    when a network policy allows one
+/// ```
+///
+/// The source is read-only because a build that edits its own source produces
+/// an artifact whose closure ref no longer describes it.
+pub struct BuildSandbox<'a> {
+    /// Read-only inside the sandbox.
+    pub source_root: &'a Path,
+    /// The only place output may appear.
+    pub workspace_root: &'a Path,
+    /// Present only when the policy allows a network to fill it.
+    pub cache_root: Option<&'a Path>,
+    /// This worker's own binary, re-entered as the Landlock shim.
+    pub shim: &'a Path,
+    pub policy_host_path: &'a Path,
+    pub network: NetworkPolicy,
+    pub limits: BuildLimits,
+}
+
+pub fn sandboxed_build_command(
+    workload_argv: &[String],
+    sandbox: &BuildSandbox<'_>,
+) -> Result<SandboxedBuildCommand> {
+    let BuildSandbox {
+        source_root,
+        workspace_root,
+        cache_root,
+        shim,
+        policy_host_path,
+        network,
+        limits,
+    } = *sandbox;
+    ensure!(!workload_argv.is_empty(), "build step has no argv");
+    require_containment()?;
+
+    let mut argv: Vec<String> = vec![
+        "bwrap".to_owned(),
+        "--unshare-all".to_owned(),
+        "--die-with-parent".to_owned(),
+        "--new-session".to_owned(),
+    ];
+    if network == NetworkPolicy::DependencyResolution {
+        argv.push("--share-net".to_owned());
+    }
+
+    for flag in ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"] {
+        argv.push(flag.to_owned());
+    }
+    for path in SYSTEM_READ_ONLY.iter().chain(SYSTEM_CONFIG_FILES) {
+        // `--ro-bind-try`: a strict bind against a missing source aborts bwrap
+        // before the build runs, and a path that does not exist cannot be
+        // exposed, so skipping it weakens nothing.
+        argv.extend([
+            "--ro-bind-try".to_owned(),
+            (*path).to_owned(),
+            (*path).to_owned(),
+        ]);
+    }
+    // Toolchains are provisioned into a shared root and reused across builds,
+    // so this one is writable.
+    argv.extend([
+        "--bind".to_owned(),
+        TOOLCHAIN_ROOT.to_owned(),
+        TOOLCHAIN_ROOT.to_owned(),
+    ]);
+
+    // Every credential directory becomes an empty tmpfs. `--unshare-all` plus
+    // explicit binds already means they are absent; this makes a future
+    // accidental bind harmless, and it is cheap.
+    for sensitive in sensitive_paths() {
+        argv.extend([
+            "--tmpfs".to_owned(),
+            sensitive.to_string_lossy().into_owned(),
+        ]);
+    }
+
+    let source = path_str(source_root, "source root")?;
+    let workspace = path_str(workspace_root, "workspace root")?;
+    argv.extend(["--ro-bind".to_owned(), source, GUEST_SOURCE_ROOT.to_owned()]);
+    argv.extend([
+        "--bind".to_owned(),
+        workspace,
+        GUEST_WORKSPACE_ROOT.to_owned(),
+    ]);
+    if let Some(cache) = cache_root {
+        argv.extend([
+            "--bind".to_owned(),
+            path_str(cache, "cache root")?,
+            GUEST_CACHE_ROOT.to_owned(),
+        ]);
+    }
+
+    argv.extend([
+        "--ro-bind".to_owned(),
+        path_str(shim, "shim")?,
+        "/.ato/formation".to_owned(),
+    ]);
+    argv.extend([
+        "--ro-bind".to_owned(),
+        path_str(policy_host_path, "policy")?,
+        "/.ato/build-policy.json".to_owned(),
+    ]);
+
+    // `--clearenv` then a strict allowlist. A build inherits nothing: an
+    // ambient token in the worker's environment is exactly what an untrusted
+    // build would go looking for.
+    argv.push("--clearenv".to_owned());
+    for (name, value) in build_environment(network) {
+        argv.extend(["--setenv".to_owned(), name, value]);
+    }
+
+    argv.extend(["--chdir".to_owned(), GUEST_WORKSPACE_ROOT.to_owned()]);
+    argv.extend([
+        "/.ato/formation".to_owned(),
+        "sandbox-exec".to_owned(),
+        "--policy".to_owned(),
+        "/.ato/build-policy.json".to_owned(),
+        "--max-processes".to_owned(),
+        limits.max_processes.to_string(),
+        "--".to_owned(),
+    ]);
+    argv.extend(workload_argv.iter().cloned());
+
+    Ok(SandboxedBuildCommand {
+        argv,
+        policy: landlock_policy(cache_root.is_some()),
+        network,
+    })
+}
+
+/// The env a build sees. Everything else is cleared.
+fn build_environment(network: NetworkPolicy) -> Vec<(String, String)> {
+    let mut env = vec![
+        ("PATH".to_owned(), "/usr/local/bin:/usr/bin:/bin".to_owned()),
+        ("HOME".to_owned(), GUEST_WORKSPACE_ROOT.to_owned()),
+        ("TMPDIR".to_owned(), "/tmp".to_owned()),
+        // Byte-code writing off: `/src` is read-only, and CPython dies trying
+        // to create `__pycache__` beside a module it imported from there.
+        ("PYTHONDONTWRITEBYTECODE".to_owned(), "1".to_owned()),
+        // A build must not pick up a user site-packages that is not part of
+        // its declared dependencies.
+        ("PYTHONNOUSERSITE".to_owned(), "1".to_owned()),
+        ("LANG".to_owned(), "C.UTF-8".to_owned()),
+    ];
+    if network == NetworkPolicy::DependencyResolution {
+        env.push(("UV_CACHE_DIR".to_owned(), GUEST_CACHE_ROOT.to_owned()));
+        env.push(("PIP_CACHE_DIR".to_owned(), GUEST_CACHE_ROOT.to_owned()));
+        // Never prompt: a build that blocks on input is a build that burns its
+        // whole timeout and reports nothing useful.
+        env.push(("PIP_NO_INPUT".to_owned(), "1".to_owned()));
+        // npm and its friends default their caches to `$HOME`, which here IS
+        // the workspace — so an install would write `.npm/` into the tree that
+        // becomes the artifact. Point them at the cache mount instead.
+        env.push((
+            "npm_config_cache".to_owned(),
+            format!("{GUEST_CACHE_ROOT}/npm"),
+        ));
+        env.push((
+            "COREPACK_HOME".to_owned(),
+            format!("{GUEST_CACHE_ROOT}/corepack"),
+        ));
+        // Corepack must not stop to ask whether it may download a package
+        // manager, and must not refuse a `packageManager` pin it cannot match
+        // byte-for-byte; both turn an install into a hung or failed build.
+        env.push(("COREPACK_ENABLE_DOWNLOAD_PROMPT".to_owned(), "0".to_owned()));
+        env.push(("COREPACK_ENABLE_STRICT".to_owned(), "0".to_owned()));
+        // No interactive prompts, no funding/audit chatter that can fail a
+        // build on a network hiccup unrelated to the dependency graph.
+        env.push(("NPM_CONFIG_FUND".to_owned(), "false".to_owned()));
+        env.push(("NPM_CONFIG_AUDIT".to_owned(), "false".to_owned()));
+        env.push(("CI".to_owned(), "1".to_owned()));
+    }
+    env
+}
+
+/// The Landlock policy the shim applies, in GUEST paths.
+fn landlock_policy(with_cache: bool) -> SandboxPolicy {
+    let mut writable = vec![
+        PathBuf::from(GUEST_WORKSPACE_ROOT),
+        PathBuf::from("/tmp"),
+        // Provisioning writes here on a first build and reads on every later
+        // one.
+        PathBuf::from(TOOLCHAIN_ROOT),
+    ];
+    if with_cache {
+        writable.push(PathBuf::from(GUEST_CACHE_ROOT));
+    }
+    let (read_write, _) = filter_sensitive_paths(&writable);
+
+    // The SAME lists the binds use. Two lists drift, and the drift arrives as
+    // "Permission denied" on a path the mount namespace demonstrably provided
+    // — which is the least useful shape a sandbox error can take.
+    let mut readable: Vec<PathBuf> = SYSTEM_READ_ONLY
+        .iter()
+        .chain(SYSTEM_CONFIG_FILES)
+        .map(PathBuf::from)
+        .collect();
+    readable.push(PathBuf::from(GUEST_SOURCE_ROOT));
+    // The symlink targets the config files resolve through.
+    readable.push(PathBuf::from("/run"));
+    // bwrap supplies these with --proc and --dev rather than a bind, so they
+    // are absent from the bind list and must be named anyway. Without /dev,
+    // CPython cannot open /dev/urandom and dies during pre-initialization.
+    readable.push(PathBuf::from("/dev"));
+    readable.push(PathBuf::from("/proc"));
+    let (read_only, _) = filter_sensitive_paths(&readable);
+
+    SandboxPolicy::new()
+        .allow_read_write(read_write)
+        .allow_read_only(read_only)
+}
+
+fn path_str(path: &Path, what: &str) -> Result<String> {
+    path.to_str()
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("{what} path is not valid UTF-8"))
+}
+
+fn which_bwrap() -> Option<PathBuf> {
+    std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .map(|directory| directory.join("bwrap"))
+            .find(|candidate| candidate.is_file())
+    })
+}
+
+pub fn containment_available() -> bool {
+    which_bwrap().is_some()
+}
+
+/// Refuse rather than degrade.
+pub fn require_containment() -> Result<()> {
+    if containment_available() {
+        return Ok(());
+    }
+    bail!(
+        "this Formation worker cannot contain a build: `bwrap` is not on PATH. Refusing to run \
+         submitted code unconfined."
+    )
+}

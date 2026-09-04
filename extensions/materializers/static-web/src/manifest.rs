@@ -173,6 +173,11 @@ pub fn is_allowed_media_type(media_type: &str) -> bool {
             | "application/json; charset=utf-8"
             | "application/wasm"
             | "application/octet-stream"
+            // Live-artifact compatibility; see `media_type_for`. Kept in
+            // the same order as that table so the two lists stay readable
+            // side by side.
+            | "application/vnd.ms-fontobject"
+            | "font/woff"
             | "font/woff2"
             | "image/avif"
             | "image/gif"
@@ -180,6 +185,7 @@ pub fn is_allowed_media_type(media_type: &str) -> bool {
             | "image/png"
             | "image/svg+xml"
             | "image/webp"
+            | "image/x-icon"
             | "text/css; charset=utf-8"
             | "text/html; charset=utf-8"
             | "text/javascript; charset=utf-8"

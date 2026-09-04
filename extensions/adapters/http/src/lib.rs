@@ -1,10 +1,11 @@
-//! HTTP request and response are deliberately separate adapter records.
+//! Inbound HTTP requests are replayable operations. Responses are runtime output.
 
 #![forbid(unsafe_code)]
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
@@ -13,12 +14,14 @@ use std::time::Duration;
 use ato_adapter_api::{
     AdapterAttachContext, AdapterCapabilities, AdapterContext, AdapterError, AdapterFactory,
     AdapterInstance, AdapterObservation, AttachedAdapter, ObservationEffect, ObservationSink,
+    Stylus, SupportedOperation,
 };
-use ato_objects::{RecordEnvelope, read_exact_object};
+use ato_objects::{RecordCandidate, RecordEnvelope, read_exact_object};
 use serde::{Deserialize, Serialize};
 
 pub const HTTP_ADAPTER_ID: &str = "ato.http@1";
 pub const HTTP_PROTOCOL_ID: &str = "ato.http@1";
+pub const HTTP_REQUEST_OPERATION: &str = "request";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -78,6 +81,13 @@ impl AdapterFactory for HttpAdapter {
         }
     }
 
+    fn supported_operations(&self) -> Vec<SupportedOperation> {
+        vec![
+            SupportedOperation::new(HTTP_PROTOCOL_ID, HTTP_REQUEST_OPERATION, 1, BTreeSet::new())
+                .expect("valid static HTTP operation"),
+        ]
+    }
+
     fn preflight(
         &self,
         instance: &AdapterInstance,
@@ -95,15 +105,14 @@ impl AdapterFactory for HttpAdapter {
         if let Some(path) = &config.ready_path {
             wait_until_ready(config.upstream, path)?;
         }
-        let listener = TcpListener::bind(config.listen)?;
-        listener.set_nonblocking(true)?;
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let failure = Arc::new(Mutex::new(None));
         let observed_responses = Arc::new(Mutex::new(VecDeque::new()));
         Ok(Box::new(HttpSession {
             instance_id: instance.instance_id.clone(),
+            stream_id: format!("http.{}", instance.instance_id),
             config,
-            listener: Some(listener),
+            stylus: Arc::clone(&context.stylus),
             observations: Arc::clone(&context.observations),
             stop,
             failure,
@@ -147,8 +156,9 @@ fn wait_until_ready(upstream: SocketAddr, path: &str) -> Result<(), AdapterError
 
 struct HttpSession {
     instance_id: String,
+    stream_id: String,
     config: HttpAdapterConfig,
-    listener: Option<TcpListener>,
+    stylus: Arc<dyn Stylus>,
     observations: Arc<dyn ObservationSink>,
     stop: Arc<std::sync::atomic::AtomicBool>,
     failure: Arc<Mutex<Option<String>>>,
@@ -173,17 +183,20 @@ impl AttachedAdapter for HttpSession {
         record.adapter_id == HTTP_ADAPTER_ID && record.port_id.as_str() == self.config.port_id
     }
 
-    fn activate(&mut self) -> Result<(), AdapterError> {
-        let Some(listener) = self.listener.take() else {
+    fn publish(&mut self) -> Result<(), AdapterError> {
+        if self.join.is_some() {
             return Ok(());
-        };
+        }
+        let listener = TcpListener::bind(self.config.listen)?;
+        listener.set_nonblocking(true)?;
         self.join = Some(spawn_proxy(
             listener,
             self.config.clone(),
+            self.stream_id.clone(),
+            Arc::clone(&self.stylus),
             Arc::clone(&self.observations),
             Arc::clone(&self.stop),
             Arc::clone(&self.failure),
-            Arc::clone(&self.observed_responses),
         ));
         Ok(())
     }
@@ -285,12 +298,14 @@ fn read_event(
 fn spawn_proxy(
     listener: TcpListener,
     config: HttpAdapterConfig,
+    stream_id: String,
+    stylus: Arc<dyn Stylus>,
     observations: Arc<dyn ObservationSink>,
     stop: Arc<std::sync::atomic::AtomicBool>,
     failure: Arc<Mutex<Option<String>>>,
-    observed_responses: Arc<Mutex<VecDeque<HttpEvent>>>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
+        let local_seq = AtomicU64::new(0);
         loop {
             match listener.accept() {
                 Ok((mut client, _)) => {
@@ -300,13 +315,25 @@ fn spawn_proxy(
                         &ato_computation::PortId::parse(&config.port_id)
                             .expect("preflight validated HTTP port id"),
                         &mut |observation: AdapterObservation| {
-                            if observation.direction == ato_objects::Direction::Outbound
-                                && let Ok(event) = decode_event(&observation.payload)
-                                && let Ok(mut queue) = observed_responses.lock()
-                            {
-                                queue.push_back(event);
-                            }
-                            if let Err(error) = observations.emit(observation)
+                            let candidate = RecordCandidate {
+                                protocol_id: observation.protocol_id.clone(),
+                                operation_id: ato_computation::OperationId::parse(
+                                    HTTP_REQUEST_OPERATION,
+                                )
+                                .expect("valid static HTTP operation"),
+                                port_id: observation.port_id.clone(),
+                                payload: observation.payload.clone(),
+                                payload_version: 1,
+                                required_features: BTreeSet::new(),
+                                recorded_by: Some(HTTP_ADAPTER_ID.to_owned()),
+                                stream: stream_id.clone(),
+                                local_seq: local_seq.fetch_add(1, Ordering::Relaxed) + 1,
+                                caused_by: Vec::new(),
+                                observed_at: observed_now(),
+                            };
+                            if let Err(error) = stylus
+                                .record(candidate)
+                                .and_then(|_| observations.emit(observation))
                                 && let Ok(mut slot) = failure.lock()
                             {
                                 *slot = Some(error.to_string());
@@ -332,6 +359,12 @@ fn spawn_proxy(
             }
         }
     })
+}
+
+fn observed_now() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or_else(|_| "0".to_owned(), |value| value.as_secs().to_string())
 }
 
 fn encode_request(event: &HttpEvent) -> Result<Vec<u8>, AdapterError> {
@@ -382,6 +415,11 @@ fn proxy_exchange(
     port_id: &ato_computation::PortId,
     observe: &mut impl FnMut(ato_adapter_api::AdapterObservation),
 ) -> std::io::Result<()> {
+    // The supervising listener is nonblocking so it can observe shutdown.
+    // Accepted sockets inherit that mode on some platforms (including macOS),
+    // where `write_all` can otherwise stop at the socket-buffer boundary with
+    // `WouldBlock` and leave the browser with a truncated response body.
+    client.set_nonblocking(false)?;
     let request_bytes = read_http_message(client)?;
     let request = parse_request(&request_bytes)?;
     observe(ato_adapter_api::AdapterObservation {
@@ -398,18 +436,7 @@ fn proxy_exchange(
     let mut upstream_stream = connect_with_retry(upstream)?;
     upstream_stream.write_all(&request_bytes)?;
     let response_bytes = read_http_message(&mut upstream_stream)?;
-    let response = parse_response(&response_bytes)?;
     client.write_all(&response_bytes)?;
-    observe(ato_adapter_api::AdapterObservation {
-        adapter_id: HTTP_ADAPTER_ID.to_owned(),
-        protocol_id: ato_computation::ProtocolId::parse(HTTP_PROTOCOL_ID)
-            .expect("valid static HTTP protocol id"),
-        port_id: port_id.clone(),
-        direction: ato_objects::Direction::Outbound,
-        payload: encode_event(&response).map_err(std::io::Error::other)?,
-        caused_by: Vec::new(),
-        effect: ObservationEffect::Evidence,
-    });
     Ok(())
 }
 
@@ -519,10 +546,133 @@ fn invalid_http() -> std::io::Error {
 
 #[cfg(test)]
 mod tests {
+    use ato_adapter_api::{IgnoreObservations, IgnoreRecords};
+    use ato_objects::MemoryObjectStore;
+
     use super::*;
 
+    #[derive(Default)]
+    struct CapturingStylus {
+        candidates: Mutex<Vec<RecordCandidate>>,
+    }
+
+    impl Stylus for CapturingStylus {
+        fn record(&self, candidate: RecordCandidate) -> Result<(), AdapterError> {
+            self.candidates.lock().unwrap().push(candidate);
+            Ok(())
+        }
+    }
+
     #[test]
-    fn request_and_response_are_distinct_protocol_events() {
+    fn proxy_forwards_large_response_from_nonblocking_listener_without_truncation() {
+        let response_body = vec![b'x'; 2 * 1024 * 1024];
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let upstream = upstream_listener.local_addr().unwrap();
+        let upstream_body = response_body.clone();
+        let upstream_thread = thread::spawn(move || {
+            let (mut stream, _) = upstream_listener.accept().unwrap();
+            read_http_message(&mut stream).unwrap();
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                upstream_body.len()
+            );
+            stream.write_all(head.as_bytes()).unwrap();
+            stream.write_all(&upstream_body).unwrap();
+        });
+
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy = proxy_listener.local_addr().unwrap();
+        proxy_listener.set_nonblocking(true).unwrap();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let failure = Arc::new(Mutex::new(None));
+        let stylus = Arc::new(CapturingStylus::default());
+        let proxy_thread = spawn_proxy(
+            proxy_listener,
+            HttpAdapterConfig {
+                listen: proxy,
+                upstream,
+                port_id: "app.http".to_owned(),
+                ready_path: None,
+            },
+            "http.test".to_owned(),
+            stylus.clone(),
+            Arc::new(ato_adapter_api::IgnoreObservations),
+            Arc::clone(&stop),
+            Arc::clone(&failure),
+        );
+
+        let mut client = connect_with_retry(proxy).unwrap();
+        client
+            .write_all(b"GET /asset.js HTTP/1.1\r\nHost: test\r\nContent-Length: 0\r\n\r\n")
+            .unwrap();
+        let response = parse_response(&read_http_message(&mut client).unwrap()).unwrap();
+        let HttpEvent::Response { status, body, .. } = response else {
+            panic!("proxy returned a request event")
+        };
+        assert_eq!(status, 200);
+        assert_eq!(body, response_body);
+
+        upstream_thread.join().unwrap();
+        stop.store(true, std::sync::atomic::Ordering::Release);
+        TcpStream::connect(proxy).unwrap();
+        proxy_thread.join().unwrap();
+        assert!(failure.lock().unwrap().is_none());
+        let candidates = stylus.candidates.lock().unwrap();
+        assert_eq!(
+            candidates.len(),
+            1,
+            "the response is runtime output, not a Record"
+        );
+        assert_eq!(candidates[0].operation_id.as_str(), HTTP_REQUEST_OPERATION);
+        assert!(matches!(
+            decode_event(&candidates[0].payload).unwrap(),
+            HttpEvent::Request { .. }
+        ));
+    }
+
+    #[test]
+    fn external_listener_stays_hidden_until_publish() {
+        let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listen = reservation.local_addr().unwrap();
+        drop(reservation);
+        let objects = MemoryObjectStore::default();
+        let runtime = AdapterContext {
+            workspace: std::path::Path::new("."),
+            objects: &objects,
+        };
+        let context = AdapterAttachContext {
+            runtime,
+            stylus: Arc::new(IgnoreRecords),
+            observations: Arc::new(IgnoreObservations),
+        };
+        let instance = AdapterInstance {
+            instance_id: "http.main".to_owned(),
+            adapter_id: HTTP_ADAPTER_ID.to_owned(),
+            config: serde_json::to_value(HttpAdapterConfig {
+                listen,
+                upstream: "127.0.0.1:1".parse().unwrap(),
+                port_id: "app.http".to_owned(),
+                ready_path: None,
+            })
+            .unwrap(),
+        };
+
+        let mut session = HttpAdapter.attach(&instance, &context).unwrap();
+        let probe = TcpListener::bind(listen).unwrap();
+        drop(probe);
+        session.activate().unwrap();
+        let probe = TcpListener::bind(listen).unwrap();
+        drop(probe);
+
+        session.publish().unwrap();
+
+        assert!(TcpListener::bind(listen).is_err());
+        session.quiesce(&context.runtime).unwrap();
+        assert!(TcpListener::bind(listen).is_ok());
+    }
+
+    #[test]
+    fn legacy_reader_keeps_request_and_response_payloads_distinct() {
         let request = encode_event(&HttpEvent::Request {
             method: "POST".to_owned(),
             path: "/increment".to_owned(),
