@@ -1,9 +1,0 @@
-<svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <rect width="64" height="64" rx="32" fill="#f5f3ff"/>
-  <!-- Audio waveform bars -->
-  <rect x="10" y="28" width="6" height="8" rx="3" fill="#7c3aed"/>
-  <rect x="20" y="20" width="6" height="24" rx="3" fill="#7c3aed"/>
-  <rect x="30" y="14" width="6" height="36" rx="3" fill="#6d28d9"/>
-  <rect x="40" y="20" width="6" height="24" rx="3" fill="#7c3aed"/>
-  <rect x="50" y="28" width="6" height="8" rx="3" fill="#7c3aed"/>
-</svg>

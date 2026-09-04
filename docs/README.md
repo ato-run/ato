@@ -25,7 +25,7 @@ Materialization
 ```
 
 This is a summary, not a substitute for the [Glossary](glossary-reference.md)
-or the worked example in the [README](../README.md#a-concrete-example).
+or the worked example in [Computation](concepts/computation.md).
 
 ## Pick a reading path
 
