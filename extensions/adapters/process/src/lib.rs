@@ -368,6 +368,25 @@ pub enum ProcessError {
 mod tests {
     use super::*;
 
+    fn process_group_alive(process_group: u32) -> bool {
+        Command::new("kill")
+            .args(["-0", "--", &format!("-{process_group}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    fn wait_for_process_group_exit(process_group: u32) {
+        for _ in 0..100 {
+            if !process_group_alive(process_group) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("process group {process_group} remained orphaned");
+    }
+
     #[test]
     fn host_environment_does_not_cross_the_process_boundary() {
         assert!(std::env::var_os("HOME").is_some());
@@ -428,5 +447,48 @@ mod tests {
                 .unwrap()
                 .success()
         );
+    }
+
+    #[test]
+    fn run_owned_process_groups_collect_grandchildren_without_cross_run_kill() {
+        let adapter = |id: &str| {
+            ProcessAdapter::new(ProcessSpec {
+                id: id.to_owned(),
+                command: vec![
+                    "/bin/sh".to_owned(),
+                    "-c".to_owned(),
+                    "sleep 60 & wait".to_owned(),
+                ],
+                cwd: PathBuf::from("."),
+                environment: BTreeMap::new(),
+                isolated_group: true,
+            })
+            .unwrap()
+        };
+        let first = adapter("run-first")
+            .spawn(PathBuf::from(".").as_path())
+            .unwrap();
+        let second = adapter("run-second")
+            .spawn(PathBuf::from(".").as_path())
+            .unwrap();
+        let first_group = first.process_group();
+        let second_group = second.process_group();
+        assert!(process_group_alive(first_group));
+        assert!(process_group_alive(second_group));
+
+        drop(first);
+        wait_for_process_group_exit(first_group);
+        assert!(
+            process_group_alive(second_group),
+            "cleaning one Run must not signal another Run's process group"
+        );
+
+        drop(second);
+        wait_for_process_group_exit(second_group);
+        let orphan_process_count = [first_group, second_group]
+            .into_iter()
+            .filter(|group| process_group_alive(*group))
+            .count();
+        assert_eq!(orphan_process_count, 0);
     }
 }

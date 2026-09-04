@@ -260,6 +260,8 @@ struct HostedAbortInput {
 struct ActivityOperationReceipt {
     #[serde(skip_serializing_if = "Option::is_none")]
     run_sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    record_ref: Option<String>,
     operation_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     actor_participant_id: Option<String>,
@@ -1155,6 +1157,9 @@ fn apply_input(
     let record_evidence_persisted = accepted.record_error.is_none();
     let receipt = ActivityOperationReceipt {
         run_sequence: Some(accepted.run_seq),
+        record_ref: context
+            .ingress
+            .control_operation_record_ref(&input.operation_id),
         operation_id: input.operation_id.clone(),
         actor_participant_id: Some(input.actor_participant_id),
         actor_id: None,
@@ -1398,20 +1403,26 @@ fn apply_operation(
         .lock()
         .map_err(|_| anyhow::anyhow!("Activity abort mutex poisoned"))?;
     let abort_requested = retained_abort_requested || abort_requests.remove(&input.operation_id);
-    let (run_sequence, result, error, output) = match accepted {
-        Ok(accepted) => (
-            Some(accepted.run_seq),
-            if abort_requested {
-                "applied_after_abort_requested"
-            } else {
-                "applied"
-            },
-            None,
-            serde_json::json!({
-                "adapter_ack":true,
-                "record_evidence_persisted":accepted.record_error.is_none()
-            }),
-        ),
+    let (run_sequence, result, error, output, record_ref) = match accepted {
+        Ok(accepted) => {
+            let record_ref = context
+                .ingress
+                .control_operation_record_ref(&input.operation_id);
+            (
+                Some(accepted.run_seq),
+                if abort_requested {
+                    "applied_after_abort_requested"
+                } else {
+                    "applied"
+                },
+                None,
+                serde_json::json!({
+                    "adapter_ack":true,
+                    "record_evidence_persisted":accepted.record_error.is_none()
+                }),
+                record_ref,
+            )
+        }
         Err(error)
             if matches!(
                 stable_operation_error(&error),
@@ -1458,11 +1469,13 @@ fn apply_operation(
                 },
                 Some(code.to_owned()),
                 serde_json::json!({"error":code}),
+                None,
             )
         }
     };
     let receipt = ActivityOperationReceipt {
         run_sequence,
+        record_ref,
         operation_id: input.operation_id.clone(),
         actor_participant_id: provenance.actor_participant_id.clone(),
         actor_id: Some(provenance.actor_id.clone()),
@@ -2367,6 +2380,7 @@ mod tests {
             b"first".to_vec(),
             ActivityOperationReceipt {
                 run_sequence: Some(1),
+                record_ref: None,
                 operation_id: "op-1".to_owned(),
                 actor_participant_id: Some("participant-1".to_owned()),
                 actor_id: None,
@@ -2762,6 +2776,7 @@ mod tests {
     fn receipt_serialization_carries_actor_controller_and_runner_ordering() {
         let receipt = ActivityOperationReceipt {
             run_sequence: Some(91),
+            record_ref: Some("record:test-91".to_owned()),
             operation_id: "operation-91".to_owned(),
             actor_participant_id: None,
             actor_id: Some("actor-1".to_owned()),
@@ -2779,6 +2794,7 @@ mod tests {
         };
         let value = serde_json::to_value(receipt).expect("receipt should serialize");
         assert_eq!(value["run_sequence"], 91);
+        assert_eq!(value["record_ref"], "record:test-91");
         assert_eq!(value["actor_id"], "actor-1");
         assert_eq!(value["actor_run_id"], "actor-run-1");
         assert_eq!(value["controller_session_id"], "controller-session-1");
@@ -2796,6 +2812,7 @@ mod tests {
         );
         let receipt = ActivityOperationReceipt {
             run_sequence: Some(92),
+            record_ref: Some("record:test-92".to_owned()),
             operation_id: input.operation_id.clone(),
             actor_participant_id: None,
             actor_id: Some(input.actor_id.clone()),

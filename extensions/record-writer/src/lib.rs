@@ -245,6 +245,67 @@ impl AsyncRecordStylus {
     pub fn health(&self) -> Result<(), RecordWriterError> {
         check_failure(&self.failure)
     }
+
+    /// Submits one candidate and waits until its immutable Record envelope is
+    /// durably appended. Interactive control planes use the returned ID as
+    /// evidence correlation; ordinary capture remains asynchronous.
+    pub fn record_with_receipt(
+        &self,
+        candidate: RecordCandidate,
+    ) -> Result<RecordIdV2, RecordWriterError> {
+        let _submission = self
+            .submission_gate
+            .lock()
+            .map_err(|_| RecordWriterError::Poisoned("submission gate"))?;
+        if self.paused.load(Ordering::Acquire) {
+            return Err(RecordWriterError::CapturePaused);
+        }
+        self.health()?;
+        candidate
+            .validate()
+            .map_err(|error| RecordWriterError::InvalidPayload {
+                operation: candidate.operation_id.to_string(),
+                reason: error.to_string(),
+            })?;
+        if candidate.payload.len() > self.max_candidate_bytes {
+            return Err(RecordWriterError::InvalidPayload {
+                operation: candidate.operation_id.to_string(),
+                reason: format!(
+                    "Record candidate is {} bytes; maximum is {}",
+                    candidate.payload.len(),
+                    self.max_candidate_bytes
+                ),
+            });
+        }
+        let stream = candidate.stream.clone();
+        let local_seq = candidate.local_seq;
+        let (reply, receiver) = sync_channel(1);
+        match self.sender.try_send(WriterCommand::Record {
+            candidate: Box::new(candidate),
+            reply: Some(reply),
+        }) {
+            Ok(()) => {
+                let mut accepted = self
+                    .accepted
+                    .write()
+                    .map_err(|_| RecordWriterError::Poisoned("accepted watermark"))?;
+                accepted
+                    .entry(stream)
+                    .and_modify(|value| *value = (*value).max(local_seq))
+                    .or_insert(local_seq);
+            }
+            Err(TrySendError::Full(_)) => {
+                set_failure(&self.failure, RecordWriterError::QueueFull.to_string());
+                return Err(RecordWriterError::QueueFull);
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                return Err(RecordWriterError::Disconnected);
+            }
+        }
+        receiver
+            .recv()
+            .map_err(|_| RecordWriterError::Disconnected)?
+    }
 }
 
 impl Stylus for AsyncRecordStylus {
@@ -271,7 +332,10 @@ impl Stylus for AsyncRecordStylus {
         }
         let stream = candidate.stream.clone();
         let local_seq = candidate.local_seq;
-        match self.sender.try_send(WriterCommand::Record(candidate)) {
+        match self.sender.try_send(WriterCommand::Record {
+            candidate: Box::new(candidate),
+            reply: None,
+        }) {
             Ok(()) => {
                 let mut accepted = self.accepted.write().map_err(|_| {
                     AdapterError::Operation("Record watermark lock poisoned".to_owned())
@@ -388,7 +452,10 @@ impl Drop for PausedCapture {
 }
 
 enum WriterCommand {
-    Record(RecordCandidate),
+    Record {
+        candidate: Box<RecordCandidate>,
+        reply: Option<SyncSender<Result<RecordIdV2, RecordWriterError>>>,
+    },
     Barrier {
         observed_through: BTreeMap<String, u64>,
         reply: SyncSender<Result<RecordFrontier, RecordWriterError>>,
@@ -402,11 +469,13 @@ fn writer_loop(
 ) {
     while let Ok(command) = receiver.recv() {
         match command {
-            WriterCommand::Record(candidate) => {
-                if check_failure(&failure).is_ok()
-                    && let Err(error) = state.append(candidate)
-                {
+            WriterCommand::Record { candidate, reply } => {
+                let result = check_failure(&failure).and_then(|_| state.append(*candidate));
+                if let Err(error) = &result {
                     set_failure(&failure, error.to_string());
+                }
+                if let Some(reply) = reply {
+                    let _ = reply.send(result);
                 }
             }
             WriterCommand::Barrier {
@@ -523,7 +592,7 @@ impl WriterState {
         })
     }
 
-    fn append(&mut self, candidate: RecordCandidate) -> Result<(), RecordWriterError> {
+    fn append(&mut self, candidate: RecordCandidate) -> Result<RecordIdV2, RecordWriterError> {
         candidate.validate()?;
         self.schemas.validate_candidate(&candidate)?;
         for cause in &candidate.caused_by {
@@ -562,13 +631,14 @@ impl WriterState {
             .write()
             .map_err(|_| RecordWriterError::Poisoned("published watermark"))? =
             self.processed.clone();
+        let record_id = record.id.clone();
         self.active_records.push(record);
         if self.active_records.len() >= self.config.max_segment_records
             || self.active_bytes >= self.config.max_segment_bytes
         {
             self.seal_active()?;
         }
-        Ok(())
+        Ok(record_id)
     }
 
     fn seal_active(&mut self) -> Result<(), RecordWriterError> {
@@ -1408,6 +1478,34 @@ mod tests {
 
         let frontier = pipeline.barrier.seal().unwrap();
         assert_eq!(frontier.last_writer_order, 1);
+    }
+
+    #[test]
+    fn interactive_submission_returns_the_durable_record_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let objects = Arc::new(MemoryObjectStore::default());
+        let pipeline = RecordPipeline::start(
+            config(directory.path()),
+            objects.clone(),
+            schemas(|_| Ok(())),
+        )
+        .unwrap();
+
+        let record_id = pipeline
+            .stylus
+            .record_with_receipt(candidate("pty.main", 1, b"interactive"))
+            .expect("interactive submission should wait for durable append");
+        let frontier = pipeline.barrier.seal().unwrap();
+        let records = records_for_frontier(
+            &directory.path().join("records"),
+            &frontier,
+            objects.as_ref(),
+        )
+        .unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, record_id);
+        pipeline.shutdown().unwrap();
     }
 
     #[test]

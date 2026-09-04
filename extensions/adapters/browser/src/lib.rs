@@ -67,6 +67,18 @@ pub enum BrowserInputMode {
     ApplyOnly,
 }
 
+/// Ephemeral authority scope for a hosted Public Activity Browser channel.
+/// Actor authorization remains at the Activity Controller boundary because
+/// one Browser realization is intentionally shared by multiple actors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserChannelScope {
+    pub activity_id: String,
+    pub run_id: String,
+    pub epoch: String,
+    pub expires_at_unix_seconds: i64,
+}
+
 impl BrowserInputMode {
     pub(crate) fn observes_trusted_events(self) -> bool {
         matches!(self, Self::ObserveAndApply)
@@ -82,6 +94,8 @@ pub struct BrowserAdapterConfig {
     pub allowed_non_text_codes: BTreeSet<String>,
     #[serde(default)]
     pub input_mode: BrowserInputMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_scope: Option<BrowserChannelScope>,
 }
 
 #[derive(Default)]
@@ -246,6 +260,7 @@ impl AdapterFactory for BrowserAdapter {
                 input_mode: config.input_mode,
                 channel_credential,
                 browser_session,
+                channel_scope: config.channel_scope.clone(),
             },
             stylus,
             context.observations.clone(),
@@ -541,6 +556,29 @@ fn parse_config(instance: &AdapterInstance) -> Result<BrowserAdapterConfig, Adap
             )));
         }
     }
+    if let Some(scope) = &config.channel_scope {
+        for (name, value) in [
+            ("activity_id", scope.activity_id.as_str()),
+            ("run_id", scope.run_id.as_str()),
+            ("epoch", scope.epoch.as_str()),
+        ] {
+            if value.is_empty()
+                || value.len() > 256
+                || !value.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
+                })
+            {
+                return Err(AdapterError::InvalidConfig(format!(
+                    "Browser channel scope {name} is invalid"
+                )));
+            }
+        }
+        if scope.expires_at_unix_seconds <= observed_unix_seconds() {
+            return Err(AdapterError::InvalidConfig(
+                "Browser channel scope is expired".to_owned(),
+            ));
+        }
+    }
     Ok(config)
 }
 
@@ -569,9 +607,13 @@ fn random_credential() -> String {
 }
 
 fn observed_now() -> String {
+    observed_unix_seconds().to_string()
+}
+
+fn observed_unix_seconds() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or_else(|_| "0".to_owned(), |value| value.as_secs().to_string())
+        .map_or(0, |value| value.as_secs().try_into().unwrap_or(i64::MAX))
 }
 
 fn read_event(
@@ -955,6 +997,7 @@ mod tests {
                     expected_origin: origin.to_owned(),
                     allowed_non_text_codes: codes,
                     input_mode: BrowserInputMode::ObserveAndApply,
+                    channel_scope: None,
                 })
                 .expect("test config should serialize"),
             };
@@ -981,6 +1024,7 @@ mod tests {
                 expected_origin: "http://127.0.0.1:3000".to_owned(),
                 allowed_non_text_codes: BTreeSet::new(),
                 input_mode: BrowserInputMode::ObserveAndApply,
+                channel_scope: None,
             })
             .expect("test config should serialize"),
         };
@@ -1040,6 +1084,10 @@ mod tests {
                     .expect("ack should be text")
                     .contains("hello_ack")
             );
+            let hello: serde_json::Value =
+                serde_json::from_str(hello.to_text().expect("ack should remain readable as text"))
+                    .expect("hello ack should decode");
+            assert_eq!(hello["last_sequence"], 0);
             socket
                 .send(Message::Text(
                     serde_json::json!({
@@ -1071,9 +1119,13 @@ mod tests {
             release_apply_rx.recv().expect("test should release apply");
             socket
                 .send(Message::Text(
-                    serde_json::json!({"type": "ack", "request_id": apply["request_id"]})
-                        .to_string()
-                        .into(),
+                    serde_json::json!({
+                        "type": "ack",
+                        "request_id": apply["request_id"],
+                        "sequence": apply["sequence"]
+                    })
+                    .to_string()
+                    .into(),
                 ))
                 .expect("apply ack should send");
             let quiesce: serde_json::Value = serde_json::from_str(
@@ -1096,9 +1148,13 @@ mod tests {
                 .expect("frontier event should send");
             socket
                 .send(Message::Text(
-                    serde_json::json!({"type": "quiesced", "request_id": quiesce["request_id"]})
-                        .to_string()
-                        .into(),
+                    serde_json::json!({
+                        "type": "quiesced",
+                        "request_id": quiesce["request_id"],
+                        "sequence": quiesce["sequence"]
+                    })
+                    .to_string()
+                    .into(),
                 ))
                 .expect("quiesce ack should send");
         });
