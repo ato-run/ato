@@ -252,6 +252,7 @@ pub fn run_job(
     // the browser evaluator already knows how to read. Packing a static site as
     // a workspace would publish an artifact nothing can serve.
     let output_root = crate::build::output_root(&built, &plan)?;
+    let mut static_bundle: Option<crate::static_lane::StaticFormationOutput> = None;
     let packed = match intent.lane {
         Lane::PythonProcess => context.packer.pack(&output_root)?,
         Lane::StaticWeb => {
@@ -269,12 +270,38 @@ pub fn run_job(
                 // the output was scanned.
                 &[],
             )?;
-            // The bundle directory IS the artifact: manifest, receipt and blobs
-            // together, exactly as the materializer laid them out.
-            context.packer.pack(&produced.bundle.bundle_root)?
+            static_bundle = Some(produced);
+            Vec::new()
         }
     };
-    let materialization_ref = context.api.publish_artifact(&packed)?;
+
+    // A Static artifact's identity is its MANIFEST digest, and a process
+    // artifact's is the digest of its packed workspace. They are published to
+    // different stores for the same reason: the edge serves a static bundle by
+    // reading its objects, while a Runner unpacks a workspace tar.
+    let materialization_ref = match &static_bundle {
+        Some(produced) => {
+            let blob_digests: Vec<String> = produced
+                .bundle
+                .receipt
+                .blobs
+                .iter()
+                .map(|blob| blob.digest.clone())
+                .collect();
+            context.api.publish_static_bundle(
+                &claimed.attempt_id,
+                &produced.bundle.bundle_root,
+                &produced.bundle.receipt.manifest_digest,
+                &blob_digests,
+            )?;
+            produced.bundle.receipt.manifest_digest.clone()
+        }
+        None => context.api.publish_artifact(&packed)?,
+    };
+    let artifact_bytes = match &static_bundle {
+        Some(produced) => produced.bundle.receipt.total_size,
+        None => packed.len() as u64,
+    };
 
     let result = compose_result(
         &attempt,
@@ -284,7 +311,11 @@ pub fn run_job(
         &intent_digest,
         &plan_digest,
         &materialization_ref,
-        packed.len() as u64,
+        // The artifact's real size, whichever store it went to. Reporting the
+        // packed length for a static bundle would say zero — the bundle is
+        // never packed — and a receipt that under-reported size would be
+        // describing something that does not exist.
+        artifact_bytes,
         triple,
         guest_root,
         network,
