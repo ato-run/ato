@@ -235,3 +235,19 @@ fn a_manifest_that_would_change_the_build_silently_is_refused() {
         }
     );
 }
+
+#[test]
+fn the_committed_fixture_is_the_manifest_these_tests_describe() {
+    // The acceptance runbook tells somebody to upload
+    // `samples/fastapi-sqlite-personal`. If that folder's manifest and the
+    // fixture in this file ever drift, the runbook stops testing the thing
+    // these tests pin — and nothing would say so.
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../samples/fastapi-sqlite-personal/capsule.toml"
+    );
+    let committed = std::fs::read_to_string(path).expect("the fixture is committed");
+    let from_file = parse_manifest_overrides(&committed).expect("the fixture parses");
+    let from_here = parse_manifest_overrides(FIXTURE_MANIFEST).expect("parses");
+    assert_eq!(from_file, from_here);
+}

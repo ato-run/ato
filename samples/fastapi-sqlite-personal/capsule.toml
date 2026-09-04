@@ -1,0 +1,28 @@
+# The Step 10 fixture, and the whole reason this folder becomes a server
+# rather than a page: nothing here is inferred.
+#
+#   [run].command      the launch, exactly as written. No framework or
+#                      filename is ever read to produce one.
+#   [web].port         the port this listens on, declared, not detected.
+#   [state.app_data]   the ONE writable slot. It exists because this says so;
+#                      without it `/data` would be scratch space that vanishes
+#                      when the app sleeps, which is data loss wearing a
+#                      friendly face.
+schema_version = "1"
+name = "fastapi-sqlite-personal"
+
+[tools]
+python = "3.12.7"
+
+[run]
+command = "/opt/ato/toolchains/python/3.12.7/bin/python3 -m uvicorn main:app --host 0.0.0.0 --port 8000"
+
+[web]
+port = 8000
+readiness_path = "/health"
+
+[state.app_data]
+mount = "/data"
+
+[env]
+APP_DB_PATH = "/data/app.sqlite"
