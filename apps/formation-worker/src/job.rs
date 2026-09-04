@@ -14,18 +14,21 @@
 //! lease, no state revision — a build produces an artifact, and what happens to
 //! that artifact afterwards is somebody else's decision.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use ato_formation::authoring::{AuthoringProvenance, BindingContext, BoundDerivation, bind};
+use ato_formation::capsule_toml::{parse_capsule_toml, read_capsule_toml};
 use ato_formation::detect::{FieldOrigins, detect};
 use ato_formation::intent::{
     AuthoredOverrides, EffectiveBuildPlanV1, Lane, ProgramIntentV1, compile_build_plan,
     compile_intent,
 };
-use ato_formation::manifest::{parse_manifest_overrides, read_manifest_overrides};
-use ato_formation::preset::{preset_overrides, select_preset};
+use ato_formation::preset::{select_preset, synthesize_authoring};
+use ato_formation::projection::project;
 use ato_formation::source::{DownloadedArchive, SourceClosureRef, SourceLimits};
+use ato_formation::verify::{CandidateObservation, ContractVerification, verify};
 
 use crate::api::{FormationApi, PublishOutcome};
 use crate::build::{BuildAttempt, run_build};
@@ -210,8 +213,77 @@ pub fn run_claimed_job(
         context.source_limits,
     )?;
 
-    // ── intent ──────────────────────────────────────────────────────────────
+    // ── authoring ───────────────────────────────────────────────────────────
+    //
+    // Two frontends, one compiler. `capsule.toml` and an App Preset each
+    // produce the same pair — a Contract draft and a Derivation draft — and
+    // from here nothing can tell which door a build came through.
+    //
+    // The strict rule: a `capsule.toml` that is present is parsed strictly and
+    // NEVER falls back to a Preset. An author who supplied a route and a
+    // contract has said what they want; replacing that with a guess because
+    // their document did not parse is the one failure mode this whole split
+    // exists to prevent.
     let evidence = detect(&source_root).context("detection failed")?;
+    let authored_toml = match job["authoring"]["manifest_toml"].as_str() {
+        // The control plane's copy of the author's document wins over the one
+        // in the tree: it is the one it accepted and recorded. Both go through
+        // the same parser, so the two cannot come to mean different things.
+        Some(text) => Some(text.to_owned()),
+        None => read_capsule_toml(&source_root).map_err(|error| anyhow::anyhow!("{error}"))?,
+    };
+    let draft = match authored_toml {
+        Some(text) => parse_capsule_toml(&text).map_err(|error| anyhow::anyhow!("{error}"))?,
+        None => {
+            let preset = select_preset(&evidence).map_err(|mismatch| {
+                // Written for the person who uploaded the source. "No lane
+                // matched" would name our dispatch instead of their problem.
+                anyhow::anyhow!("{}", mismatch.message)
+            })?;
+            // A Preset that installs from a registry cannot run under a job
+            // whose policy denies the network. Saying so by name beats letting
+            // `npm ci` fail three steps later with a DNS error the person who
+            // uploaded a folder has no way to interpret.
+            if preset.resolves_dependencies()
+                && job["policy"]["network"].as_str() != Some("dependency_resolution")
+            {
+                bail!(
+                    "{} needs to install its dependencies, which this lane does not allow",
+                    preset.label()
+                );
+            }
+            synthesize_authoring(preset)
+        }
+    };
+
+    // ── bind: drafts become addressable ─────────────────────────────────────
+    //
+    // A draft names a workspace by path and may ask for an observation to be
+    // captured rather than stated. Binding resolves both against the closure
+    // this build has already verified, and only then is there something to
+    // hash. The Contract's digest is the Capsule's identity; the Derivation's
+    // is this route's, separately.
+    let (contract, derivation) = bind(
+        &draft,
+        &BindingContext {
+            source_closure_ref: closure_ref.as_str(),
+        },
+    )
+    .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let contract_ref = contract
+        .contract_ref()
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let derivation_ref = derivation
+        .derivation_ref()
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+
+    // ── project onto this worker's execution machinery ──────────────────────
+    //
+    // `ProgramIntent` and `EffectiveBuildPlan` are below this line: an
+    // execution plan for running THIS Derivation on THIS worker, and never an
+    // input to either digest above.
+    let projected = project(&derivation, &contract).map_err(|error| anyhow::anyhow!("{error}"))?;
+
     let mut authored: BTreeMap<String, String> = job["authoring"]["overrides"]
         .as_object()
         .map(|map| {
@@ -222,54 +294,21 @@ pub fn run_claimed_job(
                 .collect()
         })
         .unwrap_or_default();
-
-    // What the author wrote down, layered UNDER the job's explicit overrides.
-    //
-    // Two places a manifest can arrive from, one meaning: the control plane may
-    // hand one over in the job (an upload carries the `capsule.toml` the person
-    // dropped), and the source tree may simply contain one. The job's copy wins
-    // when both exist, because it is the one the control plane accepted and
-    // stored — but both go through `ato_formation::manifest`, so neither can
-    // come to mean something the other does not.
-    //
-    // Under `authoring.overrides` and over an App Preset. An override written
-    // into the job is the caller being specific about THIS build; the manifest
-    // is the author being specific about the App; a preset is neither, and
-    // stays the last resort.
-    layer_authored_manifest(job, &source_root, &mut authored)?;
-
-    // An App Preset, when the job did not author its own lane.
-    //
-    // The preset expands into the SAME override vocabulary an author would
-    // have written by hand, and is layered UNDERNEATH what the job actually
-    // said — so a preset never overrules an explicit intent, and there is
-    // still exactly one thing the compiler reads. A job that names its lane
-    // (every B1 acceptance fixture does) is untouched by this.
-    let preset = if authored.contains_key("lane") {
-        None
-    } else {
-        Some(select_preset(&evidence).map_err(|mismatch| {
-            // The mismatch message is written for the person who uploaded the
-            // source, and is the whole value of the preset layer: "no lane
-            // matched" would name our dispatch instead of their problem.
-            anyhow::anyhow!("{}", mismatch.message)
-        })?)
-    };
-    if let Some(preset) = preset {
-        // A preset that installs from a registry cannot run under a job whose
-        // policy denies the network. Saying so here, by name, beats letting
-        // `npm ci` fail three steps later with a DNS error the person who
-        // uploaded a folder has no way to interpret.
-        if preset.resolves_dependencies()
-            && job["policy"]["network"].as_str() != Some("dependency_resolution")
-        {
-            bail!(
-                "{} needs to install its dependencies, which this lane does not allow",
-                preset.label()
-            );
+    match draft.provenance {
+        // An author who wrote a route is authoritative over it. A job override
+        // silently changing an authored argv is the same sin as a Preset
+        // fallback, arriving through a different door.
+        AuthoringProvenance::Authored => {
+            for (key, value) in projected.overrides.0.clone() {
+                authored.insert(key, value);
+            }
         }
-        for (key, value) in preset_overrides(preset) {
-            authored.entry(key.to_owned()).or_insert(value);
+        // Nobody stated an intent, so an explicit override from the caller is
+        // the most specific thing anybody said.
+        AuthoringProvenance::PresetSynthesized { .. } => {
+            for (key, value) in projected.overrides.0.clone() {
+                authored.entry(key).or_insert(value);
+            }
         }
     }
     let overrides = AuthoredOverrides(authored);
@@ -376,6 +415,21 @@ pub fn run_claimed_job(
         None => packed.len() as u64,
     };
 
+    // ── verify: C' ⊨ K ──────────────────────────────────────────────────────
+    //
+    // Formation succeeds when the candidate satisfies the Contract, not when
+    // the build finished. A build can publish an artifact and report success
+    // while producing something that satisfies nothing the author said had to
+    // be true — and under a model where the Capsule's identity IS the
+    // Contract, sealing on "the build worked" mints an identity nobody checked.
+    let verification = verify(
+        &contract,
+        &observe_candidate(&derivation, &projected, static_bundle.as_ref()),
+    );
+    if let Some((id, code, detail)) = verification.failure() {
+        bail!("the build did not satisfy this app's contract ({id}, {code}): {detail}");
+    }
+
     let result = compose_result(
         &attempt,
         &closure_ref,
@@ -392,6 +446,9 @@ pub fn run_claimed_job(
         triple,
         guest_root,
         network,
+        &contract_ref,
+        &derivation_ref,
+        &verification,
     )?;
     let outcome = context
         .api
@@ -451,6 +508,9 @@ fn compose_result(
     triple: &str,
     guest_root: &str,
     network: NetworkPolicy,
+    contract_ref: &str,
+    derivation_ref: &str,
+    verification: &ContractVerification,
 ) -> Result<serde_json::Value> {
     let (kind, candidate) = match intent.lane {
         Lane::PythonProcess => (
@@ -547,6 +607,33 @@ fn compose_result(
             "field_origins": {},
         },
         "diagnostics": [],
+        // The Capsule this build formed, the route that formed it, and what
+        // was actually decided about the Contract. Carried on the existing
+        // result rather than in a new store: a receipt nobody can read beside
+        // the thing it describes is evidence in name only.
+        "contract_ref": contract_ref,
+        "derivation_ref": derivation_ref,
+        "contract_verification": {
+            "summary": verification.summary(),
+            "observations": verification
+                .verdicts
+                .iter()
+                .map(|verdict| {
+                    let (result, detail) = match &verdict.outcome {
+                        ato_formation::verify::ObservationOutcome::Satisfied => {
+                            ("satisfied", String::new())
+                        }
+                        ato_formation::verify::ObservationOutcome::Deferred { by } => {
+                            ("deferred", by.clone())
+                        }
+                        ato_formation::verify::ObservationOutcome::Failed { code, detail } => {
+                            (*code, detail.clone())
+                        }
+                    };
+                    serde_json::json!({ "id": verdict.id, "result": result, "detail": detail })
+                })
+                .collect::<Vec<_>>(),
+        },
         "deterministic_inputs_digest": formation_key,
     }))
 }
@@ -576,117 +663,45 @@ pub fn preflight(job: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
-/// Layer the author's `capsule.toml` under whatever the job already said.
+/// What the executed Derivation actually produced, in the terms the Contract
+/// observes.
 ///
-/// Two doors, one meaning. The control plane may carry the manifest in the job
-/// — an upload keeps the `capsule.toml` the person dropped — and a source tree
-/// may simply contain one. The job's copy wins when both exist, because it is
-/// the one the control plane accepted and recorded; and both go through the
-/// single parser in `ato_formation::manifest`, so the two doors cannot come to
-/// mean different things.
-///
-/// `entry().or_insert` and not `insert`: an override written into the job is
-/// the caller being specific about THIS build, and a document in the tree does
-/// not get to overrule it.
-fn layer_authored_manifest(
-    job: &serde_json::Value,
-    source_root: &Path,
-    authored: &mut BTreeMap<String, String>,
-) -> Result<()> {
-    let manifest = match job["authoring"]["manifest_toml"].as_str() {
-        Some(text) => parse_manifest_overrides(text).map_err(|error| anyhow::anyhow!("{error}"))?,
-        None => read_manifest_overrides(source_root)
-            .map_err(|error| anyhow::anyhow!("{error}"))?
-            .unwrap_or_default(),
-    };
-    for (key, value) in manifest.0 {
-        authored.entry(key).or_insert(value);
+/// Deliberately built from things this worker HOLDS. A static surface knows
+/// which paths it serves because it just wrote the manifest; a process
+/// candidate does not exist yet — it starts on a Runner — so its HTTP
+/// observation is handed to the readiness gate the projection derived from the
+/// very same Contract, and to nothing else.
+fn observe_candidate(
+    derivation: &BoundDerivation,
+    projected: &ato_formation::projection::DerivationProjection,
+    static_bundle: Option<&crate::static_lane::StaticFormationOutput>,
+) -> CandidateObservation {
+    let mut statically_served_paths = BTreeSet::new();
+    if let Some(bundle) = static_bundle {
+        // The entry document answers `/`, and answers its own path. Read from
+        // the receipt that was just published, so this is a statement about the
+        // artifact rather than about the plan that hoped to produce it.
+        //
+        // Only these two: a Contract observing some other path is not
+        // silently assumed to be served, it is reported unverifiable.
+        statically_served_paths.insert("/".to_owned());
+        statically_served_paths.insert(format!("/{}", bundle.bundle.receipt.entry_path));
     }
-    Ok(())
-}
-
-#[cfg(test)]
-mod manifest_layering_tests {
-    use super::*;
-    use serde_json::json;
-
-    const IN_THE_TREE: &str = "[run]\ncommand = \"python3 tree.py\"\n[web]\nport = 8000\n";
-    const IN_THE_JOB: &str = "[run]\ncommand = \"python3 job.py\"\n[web]\nport = 9000\n";
-
-    fn tree_with(manifest: Option<&str>) -> tempfile::TempDir {
-        let dir = tempfile::tempdir().expect("tempdir");
-        if let Some(text) = manifest {
-            std::fs::write(
-                dir.path().join(ato_formation::manifest::MANIFEST_FILE_NAME),
-                text,
-            )
-            .expect("write");
-        }
-        dir
-    }
-
-    fn layered(job: serde_json::Value, dir: &Path) -> BTreeMap<String, String> {
-        let mut authored = BTreeMap::new();
-        layer_authored_manifest(&job, dir, &mut authored).expect("layers");
-        authored
-    }
-
-    #[test]
-    fn the_jobs_manifest_is_read_and_no_longer_dropped_on_the_floor() {
-        let dir = tree_with(None);
-        let authored = layered(
-            json!({ "authoring": { "manifest_toml": IN_THE_JOB } }),
-            dir.path(),
-        );
-        assert_eq!(
-            authored.get("launch.argv").map(String::as_str),
-            Some("python3 job.py")
-        );
-        assert_eq!(authored.get("port.http").map(String::as_str), Some("9000"));
-    }
-
-    #[test]
-    fn a_manifest_sitting_in_the_source_tree_is_read_too() {
-        let dir = tree_with(Some(IN_THE_TREE));
-        let authored = layered(json!({ "authoring": { "overrides": {} } }), dir.path());
-        assert_eq!(
-            authored.get("launch.argv").map(String::as_str),
-            Some("python3 tree.py")
-        );
-    }
-
-    #[test]
-    fn the_job_manifest_wins_over_the_one_in_the_tree() {
-        let dir = tree_with(Some(IN_THE_TREE));
-        let authored = layered(
-            json!({ "authoring": { "manifest_toml": IN_THE_JOB } }),
-            dir.path(),
-        );
-        assert_eq!(authored.get("port.http").map(String::as_str), Some("9000"));
-    }
-
-    #[test]
-    fn an_explicit_job_override_outranks_the_manifest() {
-        let dir = tree_with(Some(IN_THE_TREE));
-        let mut authored = BTreeMap::from([("port.http".to_owned(), "7000".to_owned())]);
-        layer_authored_manifest(&json!({}), dir.path(), &mut authored).expect("layers");
-        assert_eq!(authored.get("port.http").map(String::as_str), Some("7000"));
-        assert_eq!(
-            authored.get("launch.argv").map(String::as_str),
-            Some("python3 tree.py")
-        );
-    }
-
-    #[test]
-    fn a_tree_with_no_manifest_authors_nothing() {
-        let dir = tree_with(None);
-        assert!(layered(json!({}), dir.path()).is_empty());
-    }
-
-    #[test]
-    fn a_broken_manifest_fails_the_job_rather_than_being_ignored() {
-        let dir = tree_with(Some("[run\n"));
-        let mut authored = BTreeMap::new();
-        assert!(layer_authored_manifest(&json!({}), dir.path(), &mut authored).is_err());
+    CandidateObservation {
+        input_refs: derivation
+            .inputs
+            .iter()
+            .map(|input| (input.id.clone(), input.content_ref.clone()))
+            .collect(),
+        exported_ports: derivation
+            .ports
+            .iter()
+            .map(|port| port.id.clone())
+            .collect(),
+        statically_served_paths,
+        runtime_readiness: projected
+            .readiness
+            .as_ref()
+            .map(|readiness| (readiness.port_id.clone(), readiness.path.clone())),
     }
 }

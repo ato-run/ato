@@ -1,28 +1,83 @@
-# The Step 10 fixture, and the whole reason this folder becomes a server
-# rather than a page: nothing here is inferred.
+# A Contract, and one Derivation that proposes a way to reach it.
 #
-#   [run].command      the launch, exactly as written. No framework or
-#                      filename is ever read to produce one.
-#   [web].port         the port this listens on, declared, not detected.
-#   [state.app_data]   the ONE writable slot. It exists because this says so;
-#                      without it `/data` would be scratch space that vanishes
-#                      when the app sleeps, which is data loss wearing a
-#                      friendly face.
-schema_version = "1"
-name = "fastapi-sqlite-personal"
+# This file is not a software manifest and not a build description. The
+# `[[contract.require]]` block is what this Capsule IS — the observable
+# conditions that decide whether a future computation counts as the same
+# resumable point. Everything else is one route to getting there.
+#
+# Nothing below is inferred. The argv is the launch, exactly as written; the
+# port is declared, not detected; and `[[state]]` exists because this says so —
+# without it `/data` would be scratch space that vanishes when the app sleeps,
+# which is data loss wearing a friendly face.
+schema = "ato.capsule/1"
 
-[tools]
-python = "3.12.7"
+# ── the route ───────────────────────────────────────────────────────────────
 
-[run]
-command = "/opt/ato/toolchains/python/3.12.7/bin/python3 -m uvicorn main:app --host 0.0.0.0 --port 8000"
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
 
-[web]
-port = 8000
-readiness_path = "/health"
+[[runtime]]
+name = "python"
+version = "3.12.7"
 
-[state.app_data]
+[[state]]
+id = "app_data"
+use = "ato.state.filesystem@1"
 mount = "/data"
+access = "read-write"
 
-[env]
+[[derive.step]]
+id = "app"
+use = "ato.process@1"
+op = "serve"
+argv = [
+  "/opt/ato/toolchains/python/3.12.7/bin/python3",
+  "-m", "uvicorn", "main:app",
+  "--host", "0.0.0.0",
+  "--port", "8000",
+]
+
+[derive.step.env]
 APP_DB_PATH = "/data/app.sqlite"
+
+[[port]]
+id = "app.http"
+use = "ato.http@1"
+from = "app"
+guest_port = 8000
+
+# ── what must be true ───────────────────────────────────────────────────────
+#
+# Deliberately weak about content and strong about availability: this app's
+# notes change every time somebody writes one, so observing the response body
+# would mint a new Capsule on every save. What the author wants preserved is
+# "this app is up and answering", and the source it was formed from.
+
+[[contract.require]]
+id = "app-responds"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/health"
+
+[contract.require.expect]
+status = 200
+
+[[contract.require]]
+id = "source-identity"
+use = "ato.contract.workspace@1"
+input = "workspace"
+
+[contract.require.expect]
+digest = "capture"
+
+# ── effects ─────────────────────────────────────────────────────────────────
+#
+# Nothing this route does outlives the continuation it produces. Satisfying the
+# same Contract twice and being safe to run twice are different claims, and
+# this is where the second one is made.
+
+[effects]
+default = "pure"

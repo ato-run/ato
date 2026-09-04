@@ -11,18 +11,28 @@ Companion runbooks: `p4-stable-instance-host.md` (the stable URL, cold wake and
 seal that this builds on) and `b1-formation-staging-acceptance.md` (Formation's
 own staging lane).
 
+Read `docs/rfcs/…` Capsule Process Model v0.2 first if the words below are new:
+a Capsule's identity IS its Contract `K`, and a Derivation is one executable
+route to satisfying it. `capsule.toml` and Presets are two authoring frontends
+for the same Contract + Derivation pipeline.
+
 ---
 
 ## 0. What is being tested, and what is not
 
-**Tested here.** Add App with a folder that declares a process; the stable URL
-serving that process on its first request; data surviving sleep and wake;
-isolation between two Apps; the Storage number; Remove App.
+**Tested here.** Add App with a folder whose `capsule.toml` declares a process
+route; the stable URL serving that process on its first request; data surviving
+sleep and wake; isolation between two Apps; the Storage number; Remove App.
+
+Also worth reading off the Formation result while you are in the API: every
+successful build now records `contract_ref`, `derivation_ref` and a
+`contract_verification` block naming, per observation, whether it was satisfied
+at formation time or deferred to the run-time readiness gate.
 
 **Not tested here, already pinned by tests.** Cold-wake single flight
 (`ato-api src/tests/p4b-single-flight-wake.test.ts`), the endpoint's lifetime
-(`p4a-instance-endpoint.test.ts`), the manifest → intent compilation
-(`ato lib/formation/tests/manifest_v1.rs`), the state-slot refusals and the
+(`p4a-instance-endpoint.test.ts`), the authoring pipeline and both digests
+(`ato lib/formation/tests/authoring_v1.rs`), the state-slot refusals and the
 first-request lane choice (`ato-api src/tests/personal-apps-process-v0.test.ts`).
 
 **Explicitly out of scope for Step 10.** Update S1 → S2 for a Process App.
@@ -41,20 +51,18 @@ merge gate and is not driven below.
 | PWA | `stg-app.ato.run` at the Step 10 merge |
 | Account | one staging account, its user id to hand |
 
-Two staging vars, both on the API worker:
+One staging var, on the API worker:
 
 ```
 PERSONAL_APPS_V0_ENABLED = "true"                     # already set
-PERSONAL_APPS_PROCESS_ACCOUNT_ALLOWLIST = "user:<the acceptance account>"
 ```
 
-The allowlist is the whole gate. **Unset it in production and leave it unset.**
-With it unset every upload keeps today's behaviour exactly — Static only,
-network denied — which is what makes this deployable before it is accepted.
-
-Confirm it took effect before starting: with the flag unset, step 3 below
-produces a Static App and step 5 never wakes anything. That is the flag working,
-not the lane failing.
+There is **no process allowlist**. `requested_outputs` is an admission
+contract — what Formation MAY return — not a lane selector, so Add App asks for
+`["static_web", "process_workspace"]` for everybody. What is actually produced
+comes from executing the Derivation the author wrote or the Preset synthesized;
+a folder of HTML still forms a static surface because that is what its
+Derivation does, not because the control plane decided so in advance.
 
 ## 2. The fixture
 
@@ -63,23 +71,51 @@ not the lane failing.
 - `main.py` — a note keeper. `POST /api/notes` writes to SQLite, `GET /api/notes`
   reads it back, `/` is a page that does both, `/health` opens the database.
 - `requirements.txt` — `fastapi`, `uvicorn`, pinned.
-- `capsule.toml` — the authored intent, and the only reason this becomes a
-  server:
+- `capsule.toml` — a **Contract** and one **Derivation** that proposes a way to
+  reach it. `[[contract.require]]` is what this Capsule IS: the observable
+  conditions that decide whether a future computation counts as the same
+  resumable point. Everything else is one route there.
 
 ```toml
-[run]
-command = "/opt/ato/toolchains/python/3.12.7/bin/python3 -m uvicorn main:app --host 0.0.0.0 --port 8000"
+schema = "ato.capsule/1"
 
-[web]
-port = 8000
-readiness_path = "/health"
+[[derive.step]]
+id = "app"
+use = "ato.process@1"
+op = "serve"
+argv = ["/opt/ato/toolchains/python/3.12.7/bin/python3", "-m", "uvicorn",
+        "main:app", "--host", "0.0.0.0", "--port", "8000"]
 
-[state.app_data]
+[[port]]
+id = "app.http"
+use = "ato.http@1"
+from = "app"
+guest_port = 8000
+
+[[state]]
+id = "app_data"
+use = "ato.state.filesystem@1"
 mount = "/data"
 
-[env]
-APP_DB_PATH = "/data/app.sqlite"
+[[contract.require]]
+id = "app-responds"
+use = "ato.contract.http@1"
+port = "app.http"
+path = "/health"
+[contract.require.expect]
+status = 200
+
+[[contract.require]]
+id = "source-identity"
+use = "ato.contract.workspace@1"
+input = "workspace"
+[contract.require.expect]
+digest = "capture"
 ```
+
+The full file is in the repo. Note what the Contract deliberately does NOT
+observe: the response body. This app's notes change on every save, so observing
+them would mint a new Capsule identity each time somebody typed.
 
 Copy the folder to the desktop. It is uploaded as a folder, as it stands, with
 no packaging step.
@@ -107,10 +143,16 @@ no packaging step.
   `https://cinst-….stg-app.ato.run/` URL, "permanent link", Open App, Copy link.
 - No Start / Launch / Wake button. There is nothing for a person to start.
 
-*If it fails:* the failure line is written for the uploader. `launch.argv must
-be authored` means the folder's `capsule.toml` did not reach Formation — check
-the upload actually carried it, and that `/v1/authoring-sources/local/uploads`
-returned 201 rather than `manifest_invalid`.
+*If it fails:* the failure line is written for the uploader.
+
+- `derive.step.app.argv ... never inferred` — the folder's `capsule.toml` did
+  reach Formation and is missing something. Fix the document; it is never
+  replaced by a guess.
+- `unsupported_capsule_schema` — the document declares neither
+  `schema = "ato.capsule/1"` nor a store `schema_version`. Refused on purpose.
+- `did not satisfy this app's contract` — the build ran and the candidate did
+  not satisfy `K`. Formation succeeds on `C' ⊨ K`, not on "the build finished",
+  so this is the system working.
 
 ## 4. First open — the cold wake, on the App's own URL
 
@@ -207,10 +249,6 @@ Open **App Info** for the first App.
 
 ## 11. Afterwards
 
-- **Remove `PERSONAL_APPS_PROCESS_ACCOUNT_ALLOWLIST` from staging** if the
-  account is not staying in the lane. Leaving an account in it is a live path
-  that installs dependencies from the network on every Add.
-- It must never be set in production until this runbook has passed.
 - Report which branch is on `stg-app.ato.run`.
 
 ## 12. What cannot be checked without the Runner
