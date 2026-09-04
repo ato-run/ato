@@ -31,6 +31,16 @@ pub const STATE_ARTIFACT_FORMAT: &str = "ato.state.filesystem@1";
 /// tenant. Matches the control plane's 64 MiB so neither side is the surprise.
 pub const MAX_STATE_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
 
+/// The largest WORKSPACE this Runner will materialize.
+///
+/// Larger than a state artifact, and for a different reason. State is what a
+/// tenant's users typed; a workspace is a build output that legitimately
+/// carries an interpreter and an installed dependency tree — the Python
+/// acceptance fixture is 112 MB with a stripped CPython and FastAPI in it. One
+/// limit for both would either refuse ordinary workspaces or let state grow to
+/// a size nothing intends.
+pub const MAX_WORKSPACE_ARTIFACT_BYTES: usize = 1024 * 1024 * 1024;
+
 /// A packed state tree together with the content address of its bytes.
 pub struct StateArtifact {
     digest: String,
@@ -154,9 +164,37 @@ pub fn pack_state_tree(root: &Path) -> Result<StateArtifact> {
 /// would open a truncated SQLite file and, at best, fail confusingly. On any
 /// error the staging directory is removed and `destination` is untouched.
 pub fn unpack_state_tree(bytes: &[u8], expected_digest: &str, destination: &Path) -> Result<()> {
+    unpack_tree_bounded(
+        bytes,
+        expected_digest,
+        destination,
+        MAX_STATE_ARTIFACT_BYTES,
+    )
+}
+
+/// The same expansion, under a workspace-sized bound.
+pub fn unpack_workspace_tree(
+    bytes: &[u8],
+    expected_digest: &str,
+    destination: &Path,
+) -> Result<()> {
+    unpack_tree_bounded(
+        bytes,
+        expected_digest,
+        destination,
+        MAX_WORKSPACE_ARTIFACT_BYTES,
+    )
+}
+
+fn unpack_tree_bounded(
+    bytes: &[u8],
+    expected_digest: &str,
+    destination: &Path,
+    limit: usize,
+) -> Result<()> {
     ensure!(
-        bytes.len() <= MAX_STATE_ARTIFACT_BYTES,
-        "state artifact is {} bytes, over the {MAX_STATE_ARTIFACT_BYTES} byte limit",
+        bytes.len() <= limit,
+        "artifact is {} bytes, over the {limit} byte limit",
         bytes.len()
     );
 
@@ -179,7 +217,7 @@ pub fn unpack_state_tree(bytes: &[u8], expected_digest: &str, destination: &Path
 
     // Errors propagate out of this block, and `staging` is removed on drop —
     // so a failure anywhere leaves `destination` exactly as it was.
-    expand_into(bytes, staging.path())?;
+    expand_into(bytes, staging.path(), limit)?;
 
     if destination.exists() {
         let discarded = tempfile::Builder::new()
@@ -206,7 +244,7 @@ pub fn unpack_state_tree(bytes: &[u8], expected_digest: &str, destination: &Path
     Ok(())
 }
 
-fn expand_into(bytes: &[u8], staging: &Path) -> Result<()> {
+fn expand_into(bytes: &[u8], staging: &Path, limit: usize) -> Result<()> {
     let mut archive = tar::Archive::new(Cursor::new(bytes));
     // The archive is content-addressed but NOT trusted: its digest proves only
     // that it is the artifact the control plane named, not that whoever
@@ -238,17 +276,32 @@ fn expand_into(bytes: &[u8], staging: &Path) -> Result<()> {
         // uncompressed today, and the check keeps that from being load-bearing.
         expanded = expanded.saturating_add(entry.header().size().unwrap_or(0));
         ensure!(
-            expanded <= MAX_STATE_ARTIFACT_BYTES as u64,
-            "state archive expands past the {MAX_STATE_ARTIFACT_BYTES} byte limit"
+            expanded <= limit as u64,
+            "archive expands past the {limit} byte limit"
         );
 
         if let Some(directory) = target.parent() {
             std::fs::create_dir_all(directory)
                 .with_context(|| format!("failed to create {}", directory.display()))?;
         }
+        // The mode is read BEFORE unpacking, because `unpack` consumes the
+        // entry.
+        let executable = entry.header().mode().unwrap_or(0o644) & 0o100 != 0;
         entry
             .unpack(&target)
             .with_context(|| format!("failed to write state file {}", relative.display()))?;
+        // `set_preserve_permissions(false)` above is right — an archive must
+        // not dictate host permissions — but it also drops the one bit the
+        // packer deliberately recorded. Restoring just that bit is the
+        // difference between a workspace whose interpreter runs and one whose
+        // launch fails with a bare exit code, which is exactly how this was
+        // found.
+        #[cfg(unix)]
+        if executable {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
+                .with_context(|| format!("failed to mark {} executable", relative.display()))?;
+        }
     }
     Ok(())
 }
@@ -799,5 +852,38 @@ mod tests {
             unpack_state_tree(&oversized, &state_artifact_digest(&oversized), &target).unwrap_err();
         assert!(error.to_string().contains("over the"), "{error}");
         assert!(!target.exists());
+    }
+
+    #[test]
+    fn an_executable_survives_the_round_trip() {
+        // The packer records the owner-execute bit and the unpacker used to
+        // drop it, so a materialized workspace arrived with a non-executable
+        // interpreter. The Run then failed with a bare exit code and nothing
+        // to read — which is how this was actually found.
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let source = tempfile::tempdir().expect("tempdir");
+        let program = source.path().join("bin/python");
+        std::fs::create_dir_all(program.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&program, "#!/bin/sh\nexit 0\n").expect("write");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        std::fs::write(source.path().join("data.txt"), "plain").expect("write");
+
+        let artifact = pack_state_tree(source.path()).expect("packs");
+        let restored = tempfile::tempdir().expect("tempdir");
+        let target = restored.path().join("tree");
+        unpack_state_tree(artifact.bytes(), artifact.digest(), &target).expect("unpacks");
+
+        let mode = std::fs::metadata(target.join("bin/python"))
+            .expect("stat")
+            .permissions()
+            .mode();
+        assert!(mode & 0o100 != 0, "the interpreter lost its execute bit");
+        // And a plain file does not gain one.
+        let plain = std::fs::metadata(target.join("data.txt"))
+            .expect("stat")
+            .permissions()
+            .mode();
+        assert!(plain & 0o111 == 0, "a data file must not become executable");
     }
 }
