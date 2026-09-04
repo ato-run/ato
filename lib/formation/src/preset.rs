@@ -16,10 +16,12 @@
 //!
 //! ## A preset is authoring provenance, not runtime truth
 //!
-//!     single-html/v1
-//!           │ compile once
-//!           ▼
-//!     ProgramIntent  ──►  EffectiveBuildPlan  ──►  ComputeSchema
+//! ```text
+//! single-html/v1
+//!       | compile once
+//!       v
+//! ProgramIntent  ->  EffectiveBuildPlan  ->  ComputeSchema
+//! ```
 //!
 //! The ComputeSchema stores the RESOLVED semantics, never the preset name to be
 //! re-interpreted later. That is what makes versioning honest: if
