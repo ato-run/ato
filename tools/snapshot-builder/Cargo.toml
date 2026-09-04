@@ -15,15 +15,8 @@ layer = "tool"
 name = "snapshot-builder"
 path = "src/main.rs"
 
-[[bin]]
-name = "static-web-bundle"
-path = "src/bin/static-web-bundle.rs"
-
 [dependencies]
 anyhow = "1"
 ato-computation = { path = "../../lib/computation", version = "0.1.0" }
 ato-objects = { path = "../../lib/objects", version = "0.1.0" }
 ato-materializer-snapshot = { path = "../../extensions/materializers/snapshot", version = "0.1.0" }
-ato-materializer-static-web = { path = "../../extensions/materializers/static-web", version = "0.1.0" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
