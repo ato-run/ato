@@ -1053,7 +1053,22 @@ impl ConnectedWorker {
             self.api.token.clone(),
         );
 
-        let resolved = runtime_launch::lease::resolve_run(&spec, lease_root, &workspace, &state)?;
+        // P4-A: publish the process on this Runner's ingress slot.
+        //
+        // `surface_listen` is the loopback port the slot's reverse proxy
+        // already forwards to, and `public_base_url` is the hostname it
+        // forwards from. Both are existing Runner configuration — the control
+        // plane never picks a host port, because only the Runner knows what is
+        // free and the stable URL must not depend on it.
+        let mut assigned_ports = std::collections::BTreeMap::new();
+        assigned_ports.insert("http".to_owned(), self.config.surface_listen.port());
+        let resolved = runtime_launch::lease::resolve_run(
+            &spec,
+            lease_root,
+            &workspace,
+            &state,
+            &assigned_ports,
+        )?;
         let probe =
             runtime_launch::process_executor::LoopbackReadinessProbe::new(self.api.client.clone());
         let active = runtime_launch::lease::start(&spec, resolved, &state, &probe)?;
@@ -1064,18 +1079,28 @@ impl ConnectedWorker {
         let port = active
             .endpoint_port("http")
             .context("the launch declared no `http` endpoint to report")?;
-        // No ready_url. A process realization is reachable only on the
-        // Runner's own loopback, and the control plane stores a ready_url only
-        // when it is non-loopback and under the Runner's public base. Reporting
-        // the loopback address is refused, and synthesizing a public one would
-        // publish a URL that serves nothing. Ready with no URL is the honest
-        // report the API already models; the stable instance host is P4.
-        self.api
-            .report_ready(&lease.id, &execution_id, None, Some(port), None)?;
+        // The ready_url is the ingress slot's public hostname, and the process
+        // is listening on the loopback port that slot forwards to. Before P4
+        // this reported no URL at all, honestly: a process realization was
+        // reachable only on the Runner's own loopback, and synthesizing a
+        // public address would have published a URL that served nothing. It
+        // serves something now.
+        //
+        // The API still validates the hostname against this Runner's active
+        // ingress slots, so a misconfigured `public_base_url` is refused rather
+        // than believed.
+        self.api.report_ready(
+            &lease.id,
+            &execution_id,
+            Some(&self.config.public_base_url),
+            Some(port),
+            None,
+        )?;
         eprintln!(
-            "[runtime-launch] run={} ready pid={} endpoint=127.0.0.1:{port}",
+            "[runtime-launch] run={} ready pid={} endpoint=127.0.0.1:{port} public={}",
             lease.run_id,
-            active.pid()
+            active.pid(),
+            self.config.public_base_url
         );
 
         // ACTIVE. The control plane decides when this ends.

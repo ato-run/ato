@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use super::state_artifact::{state_artifact_digest, unpack_state_tree};
+use super::state_artifact::{state_artifact_digest, unpack_workspace_tree};
 
 /// Where a lease's workspace is materialized.
 pub fn workspace_root(lease_root: &Path) -> PathBuf {
@@ -113,7 +113,7 @@ pub fn materialize_workspace(
     }
 
     let root = workspace_root(lease_root);
-    unpack_state_tree(&bytes, materialization_ref, &root)
+    unpack_workspace_tree(&bytes, materialization_ref, &root)
         .context("failed to materialize the workspace")?;
     Ok(root)
 }
