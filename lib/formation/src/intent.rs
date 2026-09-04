@@ -29,6 +29,7 @@ use sha2::{Digest, Sha256};
 use crate::detect::{
     DetectorEvidence, FieldOrigin, FieldOrigins, NodeEvidence, PythonEvidence, ViteOutDir,
 };
+use crate::preset::{AppPreset, preset_overrides};
 
 /// Python versions this build knows how to provision, newest first.
 ///
@@ -250,6 +251,38 @@ impl AuthoredOverrides {
             .map(String::as_str)
             .filter(|v| !v.is_empty())
     }
+}
+
+/// Compile evidence plus authored intent into a normalized intent.
+///
+/// An App Preset, when one is selected, is expanded into the SAME authored
+/// overrides a person could have written by hand, and then compiled by the
+/// path below. That is what stops a preset from becoming a second way to
+/// describe an App: it is a short name for a set of decisions, not a parallel
+/// language, and the intent it produces has no memory of which door it came
+/// through.
+pub fn compile_intent_for_preset(
+    preset: AppPreset,
+    evidence: &DetectorEvidence,
+    overrides: &AuthoredOverrides,
+    workspace_guest_root: &str,
+    origins: &mut FieldOrigins,
+) -> Result<ProgramIntentV1, IntentError> {
+    let mut merged = overrides.0.clone();
+    for (key, value) in preset_overrides(preset) {
+        // An explicit override wins. A preset is a default set, and a person
+        // who states something meant it.
+        merged.entry(key.to_owned()).or_insert(value);
+        origins
+            .entry(key.to_owned())
+            .or_insert(FieldOrigin::PolicyDefault);
+    }
+    compile_intent(
+        evidence,
+        &AuthoredOverrides(merged),
+        workspace_guest_root,
+        origins,
+    )
 }
 
 /// Compile evidence plus authored intent into a normalized intent.
@@ -573,6 +606,42 @@ fn detect_static_build(
     }))
 }
 
+
+/// `node-static/v1`, as a fixed contract rather than an inference.
+///
+/// The preset selector has already established that a `package.json`, a
+/// lockfile and a `build` script exist; this turns them into the plan. What it
+/// does NOT do is read the build script's text to decide whether it is "really"
+/// Vite. A project whose build writes somewhere other than `dist/` fails later,
+/// at the output root, with a sentence that says so — a better failure than a
+/// heuristic quietly picking a different directory.
+fn fixed_node_static_build(
+    evidence: &DetectorEvidence,
+) -> Result<StaticBuildProfileV1, IntentError> {
+    let node = evidence.node.as_ref().ok_or(IntentError::RequiresAuthoring {
+        field: "static.build",
+        why: "a built web app needs a package.json; this source has none",
+    })?;
+    if node.script_build.is_none() {
+        return Err(IntentError::RequiresAuthoring {
+            field: "static.build",
+            why: "a built web app needs a `build` script in package.json — Ato runs \
+                  `npm run build` and publishes what it writes to `dist/`",
+        });
+    }
+    Ok(StaticBuildProfileV1 {
+        package_manager: resolve_package_manager(node)?,
+        node_version: resolve_node_version(node)?,
+        build_script: "build".to_owned(),
+        output_root: crate::preset::NODE_STATIC_OUTPUT_ROOT.to_owned(),
+        lockfile_pinned: node.has_package_lock
+            || node.has_npm_shrinkwrap
+            || node.has_pnpm_lock
+            || node.has_yarn_lock
+            || node.has_bun_lock,
+    })
+}
+
 fn compile_static(
     evidence: &DetectorEvidence,
     overrides: &AuthoredOverrides,
@@ -592,10 +661,20 @@ fn compile_static(
         }
         Some("required") => {
             origins.insert("static.build".to_owned(), FieldOrigin::Authored);
-            Some(detected_build.ok_or(IntentError::RequiresAuthoring {
-                field: "static.build",
-                why: "`static.build = required` was declared, but this source declares no                       build this profile can reproduce: a package.json with plain                       `vite build` and `vite preview` scripts is what it reads",
-            })?)
+            // `node-static/v1`'s contract, and the whole of it:
+            //
+            //     npm ci  ->  npm run build  ->  dist/
+            //
+            // Not "whatever this project seems to do". The detected profile is
+            // used when it agrees; otherwise the fixed contract is applied and
+            // the project is expected to meet it. That is the trade this preset
+            // makes deliberately: Ato grows no build-command, output-directory
+            // or package-manager settings, and a person has one rule to
+            // remember.
+            Some(match detected_build {
+                Some(build) => build,
+                None => fixed_node_static_build(evidence)?,
+            })
         }
         Some(other) => {
             return Err(IntentError::Malformed {
