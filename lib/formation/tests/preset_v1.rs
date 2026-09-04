@@ -32,11 +32,17 @@ const PACKAGE_JSON: &str = r#"{"name":"a","scripts":{"build":"vite build"}}"#;
 fn a_lone_html_file_is_the_narrowest_preset() {
     // Not `static-files/v1` with one file in it. Both describe the same
     // artifact; the narrower one promises less and can be relied on more.
-    assert_eq!(preset_of(&[("expense.html", "<h1>hi</h1>")]), Ok(AppPreset::SingleHtml));
+    assert_eq!(
+        preset_of(&[("expense.html", "<h1>hi</h1>")]),
+        Ok(AppPreset::SingleHtml)
+    );
     // The name does not have to be `index.html` — `expense.html` is what an
     // editor exports, and demanding the rename is Ato asking to be
     // accommodated.
-    assert_eq!(preset_of(&[("index.html", "<h1>hi</h1>")]), Ok(AppPreset::SingleHtml));
+    assert_eq!(
+        preset_of(&[("index.html", "<h1>hi</h1>")]),
+        Ok(AppPreset::SingleHtml)
+    );
 }
 
 #[test]
@@ -84,7 +90,11 @@ fn a_project_is_a_built_web_app_only_when_it_can_be_built_reproducibly() {
     // something different on a different day.
     let error = preset_of(&[("package.json", PACKAGE_JSON)]).expect_err("no lockfile");
     assert_eq!(error.code, "preset_node_static_needs_lockfile");
-    assert!(error.message.contains("package-lock.json"), "{}", error.message);
+    assert!(
+        error.message.contains("package-lock.json"),
+        "{}",
+        error.message
+    );
 
     // No build script: there is nothing to run.
     let error = preset_of(&[
@@ -148,7 +158,11 @@ fn the_security_matrix_is_a_property_of_the_preset() {
 #[test]
 fn node_is_never_the_word_shown_to_a_person() {
     // It is the tool that BUILDS the App, not what the App runs on.
-    for preset in [AppPreset::SingleHtml, AppPreset::StaticFiles, AppPreset::NodeStatic] {
+    for preset in [
+        AppPreset::SingleHtml,
+        AppPreset::StaticFiles,
+        AppPreset::NodeStatic,
+    ] {
         let label = preset.label();
         assert!(!label.to_lowercase().contains("node"), "{label}");
         assert!(!label.to_lowercase().contains("npm"), "{label}");
@@ -179,7 +193,10 @@ fn single_html_builds_nothing_and_runs_nothing() {
     assert_eq!(intent.lane, Lane::StaticWeb);
     assert!(intent.static_build.is_none(), "single-html/v1 never builds");
     assert!(intent.launch_argv.is_empty(), "single-html/v1 never runs");
-    assert!(intent.exported_ports.is_empty(), "single-html/v1 has no port");
+    assert!(
+        intent.exported_ports.is_empty(),
+        "single-html/v1 has no port"
+    );
     assert_eq!(intent.static_entry_path.as_deref(), Some("index.html"));
 
     let plan = compile_build_plan(&intent, "/app", "x86_64-unknown-linux-gnu").expect("plan");
@@ -213,7 +230,11 @@ fn node_static_is_npm_ci_then_npm_run_build_into_dist() {
     let names: Vec<&str> = plan.steps.iter().map(|step| step.name.as_str()).collect();
     assert_eq!(
         names,
-        ["provision-node", "install-node-dependencies", "static-build"],
+        [
+            "provision-node",
+            "install-node-dependencies",
+            "static-build"
+        ],
     );
     assert!(plan.steps[1].argv.join(" ").contains("npm ci"));
     assert!(plan.steps[2].argv.join(" ").contains("npm run build"));
@@ -223,15 +244,23 @@ fn node_static_is_npm_ci_then_npm_run_build_into_dist() {
 #[test]
 fn an_explicit_override_beats_the_preset() {
     // A preset is a set of defaults. Somebody who states a value meant it.
-    let dir = tree(&[("index.html", "<h1>hi</h1>"), ("site/index.html", "<h1>x</h1>")]);
+    let dir = tree(&[
+        ("index.html", "<h1>hi</h1>"),
+        ("site/index.html", "<h1>x</h1>"),
+    ]);
     let evidence = detect(dir.path()).expect("detect");
     let mut origins = FieldOrigins::default();
     let overrides = AuthoredOverrides(BTreeMap::from([(
         "static.output_root".to_owned(),
         "site".to_owned(),
     )]));
-    let intent =
-        compile_intent_for_preset(AppPreset::StaticFiles, &evidence, &overrides, "/app", &mut origins)
-            .expect("compiles");
+    let intent = compile_intent_for_preset(
+        AppPreset::StaticFiles,
+        &evidence,
+        &overrides,
+        "/app",
+        &mut origins,
+    )
+    .expect("compiles");
     assert_eq!(intent.static_output_root.as_deref(), Some("site"));
 }
