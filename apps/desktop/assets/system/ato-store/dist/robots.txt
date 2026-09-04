@@ -1,6 +1,0 @@
-User-agent: *
-Disallow: /admin/
-Disallow: /install.sh
-Disallow: /install.ps1
-Disallow: /install-win.ps1
-Sitemap: https://ato.run/sitemap.xml
