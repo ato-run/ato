@@ -8,4 +8,5 @@
 
 pub mod detect;
 pub mod intent;
+pub mod preset;
 pub mod source;
