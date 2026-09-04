@@ -63,6 +63,67 @@ impl FormationApi {
     /// digests what actually arrived and files it under that address — so the
     /// artifact's identity comes from its bytes rather than from the worker's
     /// claim about them.
+    /// Put a Static Web bundle where the edge reads it.
+    ///
+    /// A static artifact is a manifest plus content-addressed blobs, and the
+    /// edge serves those objects directly — so the bundle is published as its
+    /// parts, not as a packed tar. Packing it would produce an artifact nothing
+    /// can serve without first unpacking it somewhere, and the somewhere would
+    /// have to be the Worker.
+    ///
+    /// Blobs go first. A manifest that is readable before the bytes it names
+    /// would leave a window in which the edge could resolve an App to a
+    /// half-published site.
+    pub fn publish_static_bundle(
+        &self,
+        attempt_id: &str,
+        bundle_root: &std::path::Path,
+        manifest_digest: &str,
+        blob_digests: &[String],
+    ) -> Result<()> {
+        for digest in blob_digests {
+            let hex = digest
+                .strip_prefix("sha256:")
+                .context("blob digest is not sha256")?;
+            let path = bundle_root.join("blobs").join("sha256").join(hex);
+            let bytes = std::fs::read(&path)
+                .with_context(|| format!("cannot read blob {}", path.display()))?;
+            self.put_static_object(
+                &format!(
+                    "{}/v1/internal/formation/attempts/{attempt_id}/static-blobs/{digest}",
+                    self.base
+                ),
+                bytes,
+            )?;
+        }
+        let manifest = std::fs::read(bundle_root.join("manifest.json"))
+            .context("cannot read the bundle manifest")?;
+        self.put_static_object(
+            &format!(
+                "{}/v1/internal/formation/attempts/{attempt_id}/static-manifest/{manifest_digest}",
+                self.base
+            ),
+            manifest,
+        )
+    }
+
+    fn put_static_object(&self, url: &str, bytes: Vec<u8>) -> Result<()> {
+        self.client
+            .put(url)
+            .bearer_auth(&self.token)
+            .header("content-type", "application/octet-stream")
+            .body(bytes)
+            .send()?
+            .error_for_status()
+            .with_context(|| {
+                format!(
+                    "failed to publish a static object to {}",
+                    ato_formation::source::redact_url(url)
+                )
+            })?;
+        Ok(())
+    }
+
     pub fn publish_artifact(&self, bytes: &[u8]) -> Result<String> {
         if bytes.len() <= Self::PART_BYTES {
             let response: serde_json::Value = self
