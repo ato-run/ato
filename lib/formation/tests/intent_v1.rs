@@ -440,7 +440,10 @@ fn vite_fixture(extra: &[(&str, &str)]) -> tempfile::TempDir {
             "import { defineConfig } from \"vite\";\n\
              export default defineConfig({ build: { outDir: \"dist\" } });\n",
         ),
-        ("index.html", "<script type=\"module\" src=\"/src/app.js\"></script>"),
+        (
+            "index.html",
+            "<script type=\"module\" src=\"/src/app.js\"></script>",
+        ),
         ("src/app.js", "console.log('NEW_BUILD_SENTINEL')"),
         // Stale, committed, and a different app.
         ("dist/index.html", "<script src=\"/app.js\"></script>"),
@@ -471,7 +474,10 @@ fn vite_source_is_built_static_and_never_publishes_the_checked_in_dist() {
     assert_eq!(build.output_root, "dist");
     // No lockfile in this fixture: the plan must not imply a pinned graph.
     assert!(!build.lockfile_pinned);
-    assert_eq!(intent.runtime.get("node").map(String::as_str), Some(DEFAULT_NODE));
+    assert_eq!(
+        intent.runtime.get("node").map(String::as_str),
+        Some(DEFAULT_NODE)
+    );
     // The output root is where the BUILD writes. That it coincides with the
     // stale committed directory is exactly why the build step matters.
     assert_eq!(intent.static_output_root.as_deref(), Some("dist"));
@@ -480,13 +486,20 @@ fn vite_source_is_built_static_and_never_publishes_the_checked_in_dist() {
     let names: Vec<&str> = plan.steps.iter().map(|step| step.name.as_str()).collect();
     assert_eq!(
         names,
-        ["provision-node", "install-node-dependencies", "static-build"],
+        [
+            "provision-node",
+            "install-node-dependencies",
+            "static-build"
+        ],
         "a built-static plan provisions, installs, then builds"
     );
     assert_eq!(plan.output_root, "dist");
 
     let joined = plan.steps[2].argv.join(" ");
-    assert!(joined.contains("npm run build"), "runs the package's own script: {joined}");
+    assert!(
+        joined.contains("npm run build"),
+        "runs the package's own script: {joined}"
+    );
     assert!(
         joined.contains(&format!("{}/bin", node_home(DEFAULT_NODE))),
         "the build runs on the PROVISIONED toolchain, not the host's node: {joined}"
@@ -500,8 +513,16 @@ fn vite_source_is_built_static_and_never_publishes_the_checked_in_dist() {
 fn a_lockfile_selects_the_reproducible_install_and_its_package_manager() {
     for (lockfile, expected, command) in [
         ("package-lock.json", PackageManager::Npm, "npm ci"),
-        ("pnpm-lock.yaml", PackageManager::Pnpm, "pnpm install --frozen-lockfile"),
-        ("yarn.lock", PackageManager::Yarn, "yarn install --frozen-lockfile"),
+        (
+            "pnpm-lock.yaml",
+            PackageManager::Pnpm,
+            "pnpm install --frozen-lockfile",
+        ),
+        (
+            "yarn.lock",
+            PackageManager::Yarn,
+            "yarn install --frozen-lockfile",
+        ),
     ] {
         let dir = vite_fixture(&[(lockfile, "{}")]);
         let intent = static_intent(dir.path(), &[]).expect("compiles");
@@ -567,7 +588,9 @@ fn node_version_comes_from_the_source_and_never_from_the_host() {
             "scripts":{"build":"vite build","preview":"vite preview"}}"#,
     )]);
     assert_eq!(
-        static_intent(dir.path(), &[]).expect_err("unsatisfiable").code(),
+        static_intent(dir.path(), &[])
+            .expect_err("unsatisfiable")
+            .code(),
         "intent_unsupported_node"
     );
 }
@@ -588,7 +611,9 @@ fn a_literal_out_dir_override_is_honored_and_an_unreadable_one_refuses() {
         "const target = process.env.OUT;\nexport default { build: { outDir: target } };\n",
     )]);
     assert_eq!(
-        static_intent(dir.path(), &[]).expect_err("computed outDir").code(),
+        static_intent(dir.path(), &[])
+            .expect_err("computed outDir")
+            .code(),
         "intent_requires_authoring"
     );
 }
@@ -598,7 +623,10 @@ fn source_static_stays_source_static() {
     // 2048's shape: a root index.html, no package.json at all.
     let dir = tree(&[("index.html", "<h1>2048</h1>"), ("js/app.js", "//")]);
     let intent = static_intent(dir.path(), &[]).expect("compiles");
-    assert!(intent.static_build.is_none(), "no build was declared, so none is run");
+    assert!(
+        intent.static_build.is_none(),
+        "no build was declared, so none is run"
+    );
     assert!(intent.runtime.is_empty());
     let plan = compile_build_plan(&intent, "/app", "x86_64-unknown-linux-gnu").expect("plan");
     assert!(plan.steps.is_empty(), "a source-static site builds nothing");
@@ -676,11 +704,18 @@ fn an_authored_python_lane_accepts_a_stdlib_program_with_no_dependency_marker() 
     // Nothing declared, nothing installed — said accurately rather than
     // inferred from a file that is not there.
     assert_eq!(intent.dependencies, DependencyPlan::None);
-    assert_eq!(intent.runtime.get("python").map(String::as_str), Some(DEFAULT_PYTHON));
+    assert_eq!(
+        intent.runtime.get("python").map(String::as_str),
+        Some(DEFAULT_PYTHON)
+    );
 
     let plan = compile_build_plan(&intent, "/app", "x86_64-unknown-linux-gnu").expect("plan");
     let names: Vec<&str> = plan.steps.iter().map(|step| step.name.as_str()).collect();
-    assert_eq!(names, ["provision-python"], "an interpreter, and no install");
+    assert_eq!(
+        names,
+        ["provision-python"],
+        "an interpreter, and no install"
+    );
 }
 
 #[test]
