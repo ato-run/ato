@@ -83,8 +83,7 @@ schema = "ato.capsule/1"
 id = "app"
 use = "ato.process@1"
 op = "serve"
-argv = ["/opt/ato/toolchains/python/3.12.7/bin/python3", "-m", "uvicorn",
-        "main:app", "--host", "0.0.0.0", "--port", "8000"]
+argv = ["/opt/ato/toolchains/python/3.12.7/bin/python3", "-B", "main.py"]
 
 [[port]]
 id = "app.http"
@@ -112,6 +111,12 @@ input = "workspace"
 [contract.require.expect]
 digest = "capture"
 ```
+
+`guest_port` is the logical endpoint declaration. A host-native Runner has no
+guest-to-host port translation, so it injects the physical listener as
+`ATO_ENDPOINT_HTTP_PORT`; `main.py` binds that value (and defaults to `8000`
+when run directly on a laptop). The `-B` flag keeps the source tree read-only by
+preventing Python bytecode writes beside `main.py`.
 
 The full file is in the repo. Note what the Contract deliberately does NOT
 observe: the response body. This app's notes change on every save, so observing

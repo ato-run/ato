@@ -275,7 +275,7 @@ mount = "/data"
 id = "app"
 use = "ato.process@1"
 op = "serve"
-argv = ["/opt/ato/toolchains/python/3.12.7/bin/python3", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+argv = ["/opt/ato/toolchains/python/3.12.7/bin/python3", "-B", "main.py"]
 
 [derive.step.env]
 APP_DB_PATH = "/data/app.sqlite"
@@ -324,9 +324,7 @@ status = 200
         assert_eq!(o.get("runtime.python"), Some("3.12.7"));
         assert_eq!(
             o.get("launch.argv"),
-            Some(
-                "/opt/ato/toolchains/python/3.12.7/bin/python3 -m uvicorn main:app --host 0.0.0.0 --port 8000"
-            )
+            Some("/opt/ato/toolchains/python/3.12.7/bin/python3 -B main.py")
         );
         assert_eq!(o.get("port.http"), Some("8000"));
         assert_eq!(o.get("state.app_data.mount"), Some("/data"));

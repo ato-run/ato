@@ -34,9 +34,7 @@ use = "ato.process@1"
 op = "serve"
 argv = [
   "/opt/ato/toolchains/python/3.12.7/bin/python3",
-  "-m", "uvicorn", "main:app",
-  "--host", "0.0.0.0",
-  "--port", "8000",
+  "-B", "main.py",
 ]
 
 [derive.step.env]

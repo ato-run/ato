@@ -22,6 +22,19 @@ DB_PATH = os.environ.get("APP_DB_PATH", "./app.sqlite")
 app = FastAPI()
 
 
+def endpoint_port() -> int:
+    """Return the physical port assigned by a host-native Runner.
+
+    The default keeps the sample convenient to run directly on a laptop. Ato's
+    process realization injects the assigned port because there is no
+    guest-to-host port translation in the host network namespace.
+    """
+    port = int(os.environ.get("ATO_ENDPOINT_HTTP_PORT", "8000"))
+    if not 1 <= port <= 65535:
+        raise ValueError("ATO_ENDPOINT_HTTP_PORT must be between 1 and 65535")
+    return port
+
+
 def connect() -> sqlite3.Connection:
     os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
     connection = sqlite3.connect(DB_PATH)
@@ -122,3 +135,9 @@ def index() -> HTMLResponse:
   load();
 </script>"""
     )
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=endpoint_port())
