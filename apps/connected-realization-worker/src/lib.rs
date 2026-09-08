@@ -73,7 +73,7 @@ use ato_runtime_object_graph::{
     download_and_validate_graph,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use clap::Parser;
+use clap::{Args, Parser};
 use hmac::{Hmac, Mac};
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use serde::{Deserialize, Serialize};
@@ -897,20 +897,50 @@ pub fn capture_capable_firecracker_backend(
     FirecrackerBackend::with_capture_source(config, source)
 }
 
+/// Firecracker-only settings. Process realizations do not require a VM network.
+#[derive(Debug, Clone, Default, Args)]
+pub struct VmBackendConfig {
+    #[arg(long, env = "ATO_RUNTIME_SURFACE_TARGET", requires = "tap_host_cidr")]
+    pub surface_target: Option<SocketAddr>,
+    #[arg(long, env = "ATO_FC_TAP_HOST_CIDR", requires = "surface_target")]
+    pub tap_host_cidr: Option<String>,
+}
+
+impl VmBackendConfig {
+    fn configured(&self) -> bool {
+        self.surface_target.is_some() && self.tap_host_cidr.is_some()
+    }
+
+    fn require(&self) -> Result<(SocketAddr, &str)> {
+        Ok((
+            self.surface_target
+                .context("VM backend surface target is not configured")?,
+            self.tap_host_cidr
+                .as_deref()
+                .context("VM backend TAP network is not configured")?,
+        ))
+    }
+}
+
 #[derive(Debug, Clone, Parser)]
 pub struct WorkerConfig {
     #[arg(long, env = "ATO_API_URL")]
     pub api_base: String,
     #[arg(long, env = "ATO_RUNNER_ID", default_value = "")]
     pub runner_id: String,
-    #[arg(long, env = "ATO_RUNNER_TOKEN", default_value = "")]
+    #[arg(
+        long,
+        env = "ATO_RUNNER_TOKEN",
+        default_value = "",
+        hide_env_values = true
+    )]
     pub runner_token: String,
     /// Existing canonical runner credential JSON. Explicit CLI/env identity
     /// values, when provided, must exactly match this file.
     #[arg(long, env = "ATO_RUNNER_CREDENTIALS_FILE")]
     pub runner_credentials_file: Option<PathBuf>,
     #[arg(long, env = "ATO_RUNNER_PUBLIC_BASE_URL")]
-    pub public_base_url: String,
+    pub public_base_url: Option<String>,
     #[arg(long, env = "ATO_RUNTIME_WORK_ROOT")]
     pub work_root: PathBuf,
     /// Loopback port consumed by the existing per-slot ingress.
@@ -927,12 +957,9 @@ pub struct WorkerConfig {
         default_value = "127.0.0.1:18420"
     )]
     pub hidden_surface_listen: SocketAddr,
-    /// Host-reachable guest endpoint behind the candidate-internal relay. This
-    /// is physical runtime configuration and never participates in identity.
-    #[arg(long, env = "ATO_RUNTIME_SURFACE_TARGET")]
-    pub surface_target: SocketAddr,
-    #[arg(long, env = "ATO_FC_TAP_HOST_CIDR")]
-    pub tap_host_cidr: String,
+    /// Physical VM settings are absent on process-only workers.
+    #[command(flatten)]
+    pub vm: VmBackendConfig,
     #[arg(long, env = "ATO_RUNNER_SLOT_ID", default_value = "0")]
     pub slot_id: String,
     /// Host-wide capacity advertised to the control plane. Multiple worker
@@ -1092,7 +1119,7 @@ impl ConnectedWorker {
         self.api.report_ready(
             &lease.id,
             &execution_id,
-            Some(&self.config.public_base_url),
+            self.config.public_base_url.as_deref(),
             Some(port),
             None,
         )?;
@@ -1100,7 +1127,10 @@ impl ConnectedWorker {
             "[runtime-launch] run={} ready pid={} endpoint=127.0.0.1:{port} public={}",
             lease.run_id,
             active.pid(),
-            self.config.public_base_url
+            self.config
+                .public_base_url
+                .as_deref()
+                .unwrap_or("<private>")
         );
 
         // ACTIVE. The control plane decides when this ends.
@@ -1166,13 +1196,14 @@ impl ConnectedWorker {
             &graph,
             &command.expected_root_computation_ref,
         )?);
+        let (surface_target, tap_host_cidr) = self.config.vm.require()?;
         let firecracker_work_root = self.config.work_root.join("fc");
         let physical = RestorePhysicalConfig {
             firecracker_work_root: &firecracker_work_root,
             slot_id: &self.config.slot_id,
             hidden_surface_listen: self.config.hidden_surface_listen,
-            guest_surface_target: self.config.surface_target,
-            tap_host_cidr: &self.config.tap_host_cidr,
+            guest_surface_target: surface_target,
+            tap_host_cidr,
         };
         let running = restore_portable_path(&graph, lease_root, &lease.id, &physical)?;
         self.api.report_status(&lease.id, "running")?;
@@ -1216,7 +1247,7 @@ impl ConnectedWorker {
         self.api.report_ready(
             &lease.id,
             &execution_id,
-            Some(&self.config.public_base_url),
+            self.config.public_base_url.as_deref(),
             Some(ready_local_port(&self.config)),
             browser.as_ref().map(|runtime| runtime.control_capability()),
         )?;
@@ -1288,13 +1319,14 @@ impl ConnectedWorker {
             &graph,
             &session.source.computation_ref,
         )?);
+        let (surface_target, tap_host_cidr) = self.config.vm.require()?;
         let firecracker_work_root = self.config.work_root.join("fc");
         let physical = RestorePhysicalConfig {
             firecracker_work_root: &firecracker_work_root,
             slot_id: &self.config.slot_id,
             hidden_surface_listen: self.config.hidden_surface_listen,
-            guest_surface_target: self.config.surface_target,
-            tap_host_cidr: &self.config.tap_host_cidr,
+            guest_surface_target: surface_target,
+            tap_host_cidr,
         };
         let running = restore_portable_path(&graph, lease_root, &lease.id, &physical)?;
         self.api.report_status(&lease.id, "running")?;
@@ -1502,9 +1534,29 @@ fn validate_config(config: &WorkerConfig) -> Result<()> {
         "Runner max slots must be in [1, 64]"
     );
     ensure!(
-        !config.tap_host_cidr.trim().is_empty() && config.tap_host_cidr.contains('/'),
-        "TAP host CIDR is invalid"
+        config.vm.surface_target.is_some() == config.vm.tap_host_cidr.is_some(),
+        "VM backend requires both a Surface target and a TAP host CIDR"
     );
+    if let Some(cidr) = config.vm.tap_host_cidr.as_deref() {
+        ensure!(
+            !cidr.trim().is_empty() && cidr.contains('/'),
+            "TAP host CIDR is invalid"
+        );
+    }
+    if let Some(base) = config.public_base_url.as_deref() {
+        let url = url::Url::parse(base).context("invalid public base URL")?;
+        ensure!(
+            matches!(url.scheme(), "http" | "https") && url.host_str().is_some(),
+            "public base URL must be HTTP(S)"
+        );
+        ensure!(
+            url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none(),
+            "public base URL must not contain credentials, query or fragment"
+        );
+    }
     Ok(())
 }
 
@@ -2896,7 +2948,7 @@ impl HttpRunnerApi {
             self.base, self.runner_id
         )))
         .json(&serde_json::json!({
-            "capabilities": RUNNER_CAPABILITIES,
+            "capabilities": runner_capabilities(config),
             "supported_lease_kinds": supported_lease_kinds(config),
             "supported_session_surfaces": [{
                 "kind": "web",
@@ -3093,15 +3145,36 @@ impl HttpRunnerApi {
     }
 }
 
+fn runner_capabilities(config: &WorkerConfig) -> Vec<&'static str> {
+    RUNNER_CAPABILITIES
+        .iter()
+        .copied()
+        .filter(|capability| {
+            if matches!(
+                *capability,
+                "materializer=ato.materialize.vm.snapshot@1" | "backend=firecracker"
+            ) {
+                config.vm.configured()
+            } else {
+                runtime_launch::lease::RUNTIME_LAUNCH_SUPPORTED()
+            }
+        })
+        .collect()
+}
+
 fn supported_lease_kinds(config: &WorkerConfig) -> Vec<&'static str> {
-    let mut kinds = vec![PORTABLE_CAPSULE_LEASE_KIND];
+    let mut kinds = Vec::new();
+    if config.vm.configured() {
+        kinds.push(PORTABLE_CAPSULE_LEASE_KIND);
+    }
     // Only advertised where the workload can actually be contained. A Runner
     // that took `runtime_launch` leases it must then refuse would look
     // available to the scheduler and fail every Run it won.
     if runtime_launch::lease::RUNTIME_LAUNCH_SUPPORTED() {
         kinds.push(runtime_launch::lease::RUNTIME_LAUNCH_LEASE_KIND);
     }
-    if config.browser_chrome.as_deref().is_some_and(Path::is_file)
+    if config.vm.configured()
+        && config.browser_chrome.as_deref().is_some_and(Path::is_file)
         && config
             .run_control_verification_key
             .as_deref()
@@ -4316,6 +4389,45 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
         );
     }
 
+    fn process_worker_config() -> WorkerConfig {
+        WorkerConfig::try_parse_from([
+            "worker",
+            "--api-base",
+            "http://127.0.0.1:8787",
+            "--runner-id",
+            "private-runner",
+            "--runner-token",
+            "test-token",
+            "--work-root",
+            ".tmp/private-worker",
+        ])
+        .expect("a process worker needs neither public ingress nor VM networking")
+    }
+
+    #[test]
+    fn process_worker_accepts_private_configuration_without_advertising_vm_leases() {
+        let config = process_worker_config();
+        validate_config(&config).expect("private process configuration");
+        assert!(config.public_base_url.is_none());
+        assert!(!supported_lease_kinds(&config).contains(&PORTABLE_CAPSULE_LEASE_KIND));
+        assert!(!runner_capabilities(&config).contains(&"backend=firecracker"));
+    }
+
+    #[test]
+    fn incomplete_vm_configuration_is_rejected_before_claiming_work() {
+        let mut config = process_worker_config();
+        config.vm.surface_target = Some("172.30.0.2:8080".parse().unwrap());
+        assert!(validate_config(&config).is_err());
+        assert!(config.vm.require().is_err());
+    }
+
+    #[test]
+    fn public_ingress_configuration_cannot_embed_credentials() {
+        let mut config = process_worker_config();
+        config.public_base_url = Some("https://user:secret@runner.example".to_owned());
+        assert!(validate_config(&config).is_err());
+    }
+
     #[test]
     fn surface_listener_must_be_hidden_loopback() {
         let config = WorkerConfig {
@@ -4323,12 +4435,14 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             runner_id: "runner".to_owned(),
             runner_token: "token".to_owned(),
             runner_credentials_file: None,
-            public_base_url: "https://runner.example".to_owned(),
+            public_base_url: Some("https://runner.example".to_owned()),
             work_root: PathBuf::from(".tmp/worker-test"),
             surface_listen: "0.0.0.0:8420".parse().unwrap(),
             hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
-            surface_target: "127.0.0.1:8080".parse().unwrap(),
-            tap_host_cidr: "172.16.0.1/24".to_owned(),
+            vm: VmBackendConfig {
+                surface_target: Some("127.0.0.1:8080".parse().unwrap()),
+                tap_host_cidr: Some("172.16.0.1/24".to_owned()),
+            },
             slot_id: "0".to_owned(),
             max_slots: 1,
             browser_chrome: None,
@@ -4345,12 +4459,14 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             runner_id: "runner".to_owned(),
             runner_token: "token".to_owned(),
             runner_credentials_file: None,
-            public_base_url: "https://runner.example".to_owned(),
+            public_base_url: Some("https://runner.example".to_owned()),
             work_root: PathBuf::from(".tmp/worker-test"),
             surface_listen: "127.0.0.1:8420".parse().unwrap(),
             hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
-            surface_target: "172.30.0.2:38865".parse().unwrap(),
-            tap_host_cidr: "172.30.0.1/24".to_owned(),
+            vm: VmBackendConfig {
+                surface_target: Some("172.30.0.2:38865".parse().unwrap()),
+                tap_host_cidr: Some("172.30.0.1/24".to_owned()),
+            },
             slot_id: "0".to_owned(),
             max_slots: 0,
             browser_chrome: None,
@@ -4378,12 +4494,14 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             runner_id: String::new(),
             runner_token: String::new(),
             runner_credentials_file: Some(credentials),
-            public_base_url: "https://runner.example".to_owned(),
+            public_base_url: Some("https://runner.example".to_owned()),
             work_root: directory.path().join("work"),
             surface_listen: "127.0.0.1:8420".parse().unwrap(),
             hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
-            surface_target: "172.30.0.2:38865".parse().unwrap(),
-            tap_host_cidr: "172.30.0.1/24".to_owned(),
+            vm: VmBackendConfig {
+                surface_target: Some("172.30.0.2:38865".parse().unwrap()),
+                tap_host_cidr: Some("172.30.0.1/24".to_owned()),
+            },
             slot_id: "0".to_owned(),
             max_slots: 1,
             browser_chrome: None,
@@ -4429,12 +4547,14 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             runner_id: "runner_1".to_owned(),
             runner_token: "token".to_owned(),
             runner_credentials_file: None,
-            public_base_url: "https://runner.example".to_owned(),
+            public_base_url: Some("https://runner.example".to_owned()),
             work_root: PathBuf::from(".tmp/worker"),
             surface_listen: "127.0.0.1:8420".parse().unwrap(),
             hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
-            surface_target: "172.30.0.2:38865".parse().unwrap(),
-            tap_host_cidr: "172.30.0.1/24".to_owned(),
+            vm: VmBackendConfig {
+                surface_target: Some("172.30.0.2:38865".parse().unwrap()),
+                tap_host_cidr: Some("172.30.0.1/24".to_owned()),
+            },
             slot_id: "0".to_owned(),
             max_slots: 1,
             browser_chrome: None,
@@ -4464,12 +4584,14 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             runner_id: "runner_1".to_owned(),
             runner_token: "token".to_owned(),
             runner_credentials_file: None,
-            public_base_url: "https://runner.example".to_owned(),
+            public_base_url: Some("https://runner.example".to_owned()),
             work_root: PathBuf::from(".tmp/worker"),
             surface_listen: "127.0.0.1:8420".parse().unwrap(),
             hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
-            surface_target: "172.30.0.2:38865".parse().unwrap(),
-            tap_host_cidr: "172.30.0.1/24".to_owned(),
+            vm: VmBackendConfig {
+                surface_target: Some("172.30.0.2:38865".parse().unwrap()),
+                tap_host_cidr: Some("172.30.0.1/24".to_owned()),
+            },
             slot_id: "0".to_owned(),
             max_slots: 1,
             browser_chrome: None,
