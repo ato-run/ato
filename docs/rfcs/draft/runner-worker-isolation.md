@@ -10,6 +10,12 @@ The worker is the shared realization engine. Managed provisioning and User enrol
 
 The existing CLI flags and environment names for configured managed workers are preserved. A public URL cannot carry credentials, query or fragment. Runner tokens are hidden in clap environment-value output.
 
+## Second increment: preserving failed work
+
+Each worker holds an OS file lock for its work root. A nonempty lease directory on startup blocks claims: it may contain uncommitted state or unresolved physical resources. Successful completion removes the lease directory; any execution, commit, report or cleanup error preserves it and exits the worker. Recovery must first prove physical shutdown and preserve/reconcile the working state; deleting the directory or advancing a timeout alone is not recovery. This host-local guard does not replace API allocation generations or quarantine records.
+
+Process execution continues active heartbeats. After reaping a group leader, stop escalates to SIGKILL if residual children remain, and verifies the group is gone before packing state. Linux tests execute the actual worker sandbox shim rather than libtest; readiness for a failed executable uses a real probe, not an always-successful fake.
+
 ## Remaining acceptance
 
-This increment does not claim closed execution: the control plane and runtime artifact transports are still HTTP-based. Coordinator abstraction, local/private storage acceptance, heartbeat resilience, durable state preservation on error, restart recovery and physical slot cleanup remain Phase 2 / Phase 1d work. Managed production replacement remains gated on new-artifact reproduction and the Phase 3 canary.
+This increment does not claim closed execution: the control plane and runtime artifact transports are still HTTP-based. Coordinator abstraction, local/private storage acceptance, retryable recovery/reconciliation and API slot generations remain Phase 2 / Phase 1d work. Managed production replacement remains gated on new-artifact reproduction and the Phase 3 canary.

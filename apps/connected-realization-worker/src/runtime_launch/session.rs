@@ -676,7 +676,17 @@ while True:
         spec.realization = LaunchRealizationV1::Process(ProcessRealizationV1 {
             argv: vec!["/nonexistent/program".to_owned()],
         });
-        assert!(start_run(&spec, &context, &plane, &AlwaysReady).is_err());
+        assert!(
+            start_run(
+                &spec,
+                &context,
+                &plane,
+                &super::super::process_executor::LoopbackReadinessProbe::new(
+                    reqwest::blocking::Client::new()
+                )
+            )
+            .is_err()
+        );
 
         let inner = plane.inner.lock().expect("lock");
         assert_eq!(inner.held_by_fence, None, "the slot is still held");
@@ -692,7 +702,17 @@ while True:
         spec.realization = LaunchRealizationV1::Process(ProcessRealizationV1 {
             argv: vec!["/nonexistent/program".to_owned()],
         });
-        assert!(start_run(&spec, &context, &plane, &AlwaysReady).is_err());
+        assert!(
+            start_run(
+                &spec,
+                &context,
+                &plane,
+                &super::super::process_executor::LoopbackReadinessProbe::new(
+                    reqwest::blocking::Client::new()
+                )
+            )
+            .is_err()
+        );
 
         // The acceptance criterion: a DIFFERENT Run can take the same
         // state_key immediately, with an advanced fence.

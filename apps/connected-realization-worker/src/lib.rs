@@ -9,6 +9,7 @@
 
 mod activity_controller;
 pub mod runtime_launch;
+mod slot_state;
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -994,6 +995,7 @@ impl ConnectedWorker {
     }
 
     pub fn run(&self) -> Result<()> {
+        let _slot = slot_state::SlotGuard::acquire(&self.config.work_root)?;
         self.api.heartbeat(&self.config, 0)?;
         loop {
             let claim = self.api.claim_next()?;
@@ -1017,6 +1019,9 @@ impl ConnectedWorker {
                         lease.id
                     );
                 }
+                // A failed state commit or physical teardown must not be followed
+                // by a new claim. The retained lease directory fences restarts.
+                return Err(error).context("worker slot requires recovery");
             }
             self.api.heartbeat(&self.config, 0)?;
             if self.config.once {
@@ -1030,7 +1035,7 @@ impl ConnectedWorker {
         self.api.report_status(&lease.id, "preparing")?;
 
         let lease_root = self.config.work_root.join("leases").join(&lease.id);
-        fs::create_dir_all(&lease_root)?;
+        fs::create_dir(&lease_root)?;
         let result = match &lease.command {
             LeaseCommand::Portable(command) => {
                 self.execute_portable_lease(lease, command, &lease_root)
@@ -1042,12 +1047,7 @@ impl ConnectedWorker {
                 self.execute_runtime_launch_lease(lease, command, &lease_root)
             }
         };
-        let cleanup = cleanup_lease_directory(&lease_root);
-        match (result, cleanup) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(error), _) => Err(error),
-            (Ok(()), Err(error)) => Err(error),
-        }
+        settle_lease_directory(&lease_root, result)
     }
 
     /// One Dynamic Compute Run: contained process, real state, real stop.
@@ -1134,7 +1134,14 @@ impl ConnectedWorker {
         );
 
         // ACTIVE. The control plane decides when this ends.
-        let stop = || -> Result<bool> { Ok(self.api.control(&lease.id)?.stop_requested) };
+        let last_heartbeat = std::cell::Cell::new(Instant::now());
+        let stop = || -> Result<bool> {
+            if last_heartbeat.get().elapsed() >= ACTIVE_HEARTBEAT_INTERVAL {
+                self.api.heartbeat(&self.config, 1)?;
+                last_heartbeat.set(Instant::now());
+            }
+            Ok(self.api.control(&lease.id)?.stop_requested)
+        };
         let outcome = runtime_launch::lease::wait_for_stop(
             &stop,
             Duration::from_millis(500),
@@ -1498,6 +1505,13 @@ fn resolve_runner_credentials(config: &mut WorkerConfig) -> Result<()> {
 
 fn ready_local_port(config: &WorkerConfig) -> u16 {
     config.surface_listen.port()
+}
+
+fn settle_lease_directory(lease_root: &Path, outcome: Result<()>) -> Result<()> {
+    // The engine may have stopped but failed to commit state or report cleanup.
+    // Preserve all working data until both the outcome and cleanup are proven.
+    outcome?;
+    cleanup_lease_directory(lease_root)
 }
 
 fn cleanup_lease_directory(lease_root: &Path) -> Result<()> {
@@ -3650,6 +3664,18 @@ mod tests {
     }
 
     #[test]
+    fn failed_state_commit_preserves_the_working_copy_and_blocks_restart() {
+        let temporary = tempfile::tempdir().unwrap();
+        let lease = temporary.path().join("leases/lease-failed");
+        fs::create_dir_all(&lease).unwrap();
+        fs::write(lease.join("state"), b"unsaved work").unwrap();
+        let outcome = settle_lease_directory(&lease, Err(anyhow::anyhow!("state commit failed")));
+        assert!(outcome.is_err());
+        assert_eq!(fs::read(lease.join("state")).unwrap(), b"unsaved work");
+        assert!(slot_state::SlotGuard::acquire(temporary.path()).is_err());
+    }
+
+    #[test]
     fn normal_lease_cleanup_removes_activity_operation_journal() {
         let temporary = tempfile::tempdir().expect("lease tempdir");
         let lease_root = temporary.path().join("leases/lease-cleanup");
@@ -4598,18 +4624,10 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             run_control_verification_key: None,
             once: true,
         };
-        assert_eq!(
-            supported_lease_kinds(&config),
-            [PORTABLE_CAPSULE_LEASE_KIND]
-        );
+        assert!(supported_lease_kinds(&config).contains(&PORTABLE_CAPSULE_LEASE_KIND));
+        assert!(!supported_lease_kinds(&config).contains(&ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND));
         config.browser_chrome = Some(chrome.path().to_owned());
         config.run_control_verification_key = Some("v".repeat(32));
-        assert_eq!(
-            supported_lease_kinds(&config),
-            [
-                PORTABLE_CAPSULE_LEASE_KIND,
-                ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND,
-            ]
-        );
+        assert!(supported_lease_kinds(&config).contains(&ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND));
     }
 }

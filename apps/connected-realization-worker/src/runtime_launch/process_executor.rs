@@ -187,19 +187,37 @@ impl LaunchedProcess {
             .try_wait()
             .context("failed to reap the workload")?
         {
-            return finish_stop(group, StopKind::AlreadyExited, Some(status));
+            return finish_stop(
+                pid,
+                group,
+                StopKind::AlreadyExited,
+                Some(status),
+                lifecycle.force_kill_after_ms,
+            );
         }
 
         self.handle
             .terminate()
             .context("failed to signal the workload")?;
         if let Some(status) = wait_for_exit(&mut self.handle, lifecycle.graceful_shutdown_ms)? {
-            return finish_stop(group, StopKind::Graceful, Some(status));
+            return finish_stop(
+                pid,
+                group,
+                StopKind::Graceful,
+                Some(status),
+                lifecycle.force_kill_after_ms,
+            );
         }
 
         force_kill_process_tree(pid, group).context("failed to force-stop the workload")?;
         let status = wait_for_exit(&mut self.handle, lifecycle.force_kill_after_ms.max(1))?;
-        finish_stop(group, StopKind::Forced, status)
+        finish_stop(
+            pid,
+            group,
+            StopKind::Forced,
+            status,
+            lifecycle.force_kill_after_ms,
+        )
     }
 }
 
@@ -239,9 +257,11 @@ fn wait_for_exit(
 
 /// Refuse to report a stop the subtree did not honour.
 fn finish_stop(
+    pid: u32,
     group: u32,
     kind: StopKind,
     exit_status: Option<std::process::ExitStatus>,
+    force_budget_ms: u64,
 ) -> Result<StopOutcome> {
     if group != 0 {
         // The direct child is reaped by now; this asks about everything it
@@ -249,6 +269,23 @@ fn finish_stop(
         for _ in 0..50 {
             if !process_group_is_alive(group) {
                 return Ok(StopOutcome { kind, exit_status });
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // Reaping the group leader does not prove its children have exited.
+        // bwrap may still own a namespace helper after the leader honors TERM.
+        force_kill_process_tree(pid, group)
+            .context("failed to force-stop residual workload children")?;
+        let deadline = Instant::now() + Duration::from_millis(force_budget_ms.max(1));
+        loop {
+            if !process_group_is_alive(group) {
+                return Ok(StopOutcome {
+                    kind: StopKind::Forced,
+                    exit_status,
+                });
+            }
+            if Instant::now() >= deadline {
+                break;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -285,6 +322,12 @@ pub fn launch_process(
     }
 
     let shim = std::env::current_exe().context("cannot locate this Runner's own binary")?;
+    // The libtest executable has no sandbox-exec command. Linux integration
+    // tests point at the built worker; production always uses its own binary.
+    #[cfg(test)]
+    let shim = std::env::var_os("ATO_TEST_WORKER_BIN")
+        .map(std::path::PathBuf::from)
+        .unwrap_or(shim);
     let policy_path = context.workspace_root().join(".ato/sandbox-policy.json");
     let sandboxed = super::sandbox::sandboxed_command(
         context,
