@@ -110,7 +110,14 @@ fn serve(args: &[String]) -> Result<()> {
         let compute_id = work.compute_id.clone().unwrap_or_default();
         let revision_id = work.capsule_revision_id.clone().unwrap_or_default();
 
-        match run_claimed_job(&context, &attempt, &work.job, &compute_id, &revision_id) {
+        match run_claimed_job(
+            &context,
+            &attempt,
+            &work.job,
+            &compute_id,
+            &revision_id,
+            work.operation_catalog_required,
+        ) {
             Ok(outcome) => {
                 println!(
                     "[formation] job={} attempt={} closure={} materialization={} outcome={:?}",
