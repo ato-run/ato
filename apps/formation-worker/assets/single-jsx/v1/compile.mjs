@@ -27,7 +27,8 @@
  * exits 65. The worker reads that line and reports the code and the sentence;
  * nothing else from this process reaches whoever uploaded the source.
  */
-import { readFileSync, writeFileSync, mkdirSync, copyFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -258,11 +259,6 @@ if (!prologue.some((line) => /^var React /.test(line))) {
 
 const outDir = resolve(out);
 mkdirSync(join(outDir, "vendor"), { recursive: true });
-copyFileSync(join(HERE, "react.production.min.js"), join(outDir, "vendor/react.js"));
-copyFileSync(
-  join(HERE, "react-dom.production.min.js"),
-  join(outDir, "vendor/react-dom.js"),
-);
 
 const epilogue = `
 var __ato_root = document.getElementById("root");
@@ -271,10 +267,40 @@ globalThis.ReactDOM.createRoot(__ato_root).render(
 );
 `;
 
-writeFileSync(
-  join(outDir, "app.js"),
+/**
+ * Every emitted file carries the digest of its own contents in its name.
+ *
+ * Not decoration. The app host serves instance assets `immutable` with a
+ * one-year max-age, which is correct only while a URL's bytes never change.
+ * A fixed `app.js` breaks that: after an update the document is fresh (it is
+ * served `no-store`) and points at the same `/app.js`, so a returning browser
+ * keeps running LAST YEAR'S code. Measured on staging — a patched source
+ * built, published and adopted, and the page still rendered the old title.
+ *
+ * Hashing the name makes the two agree: new bytes are a new URL, and the old
+ * URL nobody references any more may be cached forever without harm. React
+ * does not change between builds, so its files keep their names and stay
+ * cached across an update, which is the other half of why this is right.
+ */
+function emit(relativePath, contents) {
+  const digest = createHash("sha256").update(contents).digest("hex").slice(0, 16);
+  const at = relativePath.lastIndexOf(".");
+  const hashed = `${relativePath.slice(0, at)}.${digest}${relativePath.slice(at)}`;
+  writeFileSync(join(outDir, hashed), contents);
+  return hashed;
+}
+
+const reactPath = emit(
+  "vendor/react.js",
+  readFileSync(join(HERE, "react.production.min.js")),
+);
+const reactDomPath = emit(
+  "vendor/react-dom.js",
+  readFileSync(join(HERE, "react-dom.production.min.js")),
+);
+const appPath = emit(
+  "app.js",
   `(function () {\n"use strict";\n${prologue.join("\n")}\n${compiled.code}\n${epilogue}})();\n`,
-  "utf8",
 );
 
 /**
@@ -285,14 +311,16 @@ writeFileSync(
  * markup.
  */
 const title = defaultExportName === "__ato_app_default" ? "App" : defaultExportName;
-const template = readFileSync(join(HERE, "index.html.tmpl"), "utf8");
+const escapeHtml = (text) =>
+  text.replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
+  );
 writeFileSync(
   join(outDir, "index.html"),
-  template.replace(
-    "__ATO_TITLE__",
-    title.replace(/[&<>"']/g, (c) =>
-      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
-    ),
-  ),
+  readFileSync(join(HERE, "index.html.tmpl"), "utf8")
+    .replace("__ATO_TITLE__", escapeHtml(title))
+    .replace("__ATO_REACT__", reactPath)
+    .replace("__ATO_REACT_DOM__", reactDomPath)
+    .replace("__ATO_APP__", appPath),
   "utf8",
 );
