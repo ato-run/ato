@@ -15,8 +15,34 @@ use ato_formation_worker::pack::pack_tree;
 use ato_formation_worker::sandbox::{BuildLimits, require_containment};
 use ato_sandbox::{SandboxPolicy, apply_sandbox, is_sandbox_supported, set_no_new_privs};
 
+/// What produced this binary.
+///
+/// Printed at startup and by `--version`, so a deployed worker can be matched
+/// to a revision without hashing it and grepping for strings — which is what
+/// identifying one actually took. Any part a build could not determine reads
+/// `unknown` rather than a plausible substitute: a binary claiming a commit it
+/// was not built from ends an investigation with the wrong answer.
+fn build_identity() -> String {
+    format!(
+        "ato-formation-worker {} commit={} {} build_id={} {}",
+        env!("CARGO_PKG_VERSION"),
+        env!("ATO_BUILD_COMMIT"),
+        env!("ATO_BUILD_DIRTY"),
+        env!("ATO_BUILD_ID"),
+        env!("ATO_BUILD_RUSTC"),
+    )
+}
+
 fn main() -> Result<()> {
     let args = std::env::args().collect::<Vec<_>>();
+
+    if args
+        .get(1)
+        .is_some_and(|arg| arg == "--version" || arg == "-V")
+    {
+        println!("{}", build_identity());
+        return Ok(());
+    }
 
     // Re-entry from INSIDE the sandbox. bwrap sets up the namespaces, then
     // execs this binary, which restricts itself with Landlock and execs the
@@ -60,6 +86,12 @@ fn serve(args: &[String]) -> Result<()> {
     );
     let token = std::env::var("ATO_FORMATION_TOKEN")
         .map_err(|_| anyhow!("ATO_FORMATION_TOKEN is required"))?;
+
+    // First line in the journal, before anything can fail. The deployment
+    // record pairs this with the binary's SHA-256; together they answer "what
+    // is running" without a forensic exercise.
+    eprintln!("[formation] {}", build_identity());
+    eprintln!("[formation] serving api={api_base} worker_id={worker_id}");
 
     // Once, at startup. A host that cannot contain a build must refuse to
     // serve rather than accept jobs and fail them one at a time.
