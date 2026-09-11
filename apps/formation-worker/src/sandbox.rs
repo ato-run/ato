@@ -34,6 +34,14 @@ pub const GUEST_CACHE_ROOT: &str = "/cache";
 /// made it.
 pub const TOOLCHAIN_ROOT: &str = "/opt/ato/toolchains";
 
+/// Where platform-managed build assets live: the compilers and runtimes Ato
+/// owns, shipped with the builder rather than fetched by a build.
+///
+/// Re-exported from `ato_formation` so the bind list and the build plan cannot
+/// disagree about the path — which is the drift that produced "Permission
+/// denied" on a demonstrably-present directory once already.
+pub use ato_formation::intent::BUILD_ASSET_ROOT;
+
 /// System paths a build may read and execute.
 ///
 /// ONE list, used for both the bind mounts and the Landlock policy. They
@@ -190,6 +198,18 @@ pub fn sandboxed_build_command(
         TOOLCHAIN_ROOT.to_owned(),
     ]);
 
+    // Platform build assets — the compilers and runtimes Ato owns — are
+    // READ-ONLY. A toolchain is provisioned by the build that needs it, so its
+    // root is writable; these are shipped with the builder, and a build that
+    // could edit the compiler could change what every later build produces.
+    // `--ro-bind-try`: a builder with no platform assets provisioned is a
+    // deployment state, not a reason for every unrelated build to abort here.
+    argv.extend([
+        "--ro-bind-try".to_owned(),
+        BUILD_ASSET_ROOT.to_owned(),
+        BUILD_ASSET_ROOT.to_owned(),
+    ]);
+
     // Every credential directory becomes an empty tmpfs. `--unshare-all` plus
     // explicit binds already means they are absent; this makes a future
     // accidental bind harmless, and it is cheap.
@@ -322,6 +342,9 @@ fn landlock_policy(with_cache: bool) -> SandboxPolicy {
         .map(PathBuf::from)
         .collect();
     readable.push(PathBuf::from(GUEST_SOURCE_ROOT));
+    // Read-only on purpose: a build that could edit the compiler could change
+    // what every later build produces.
+    readable.push(PathBuf::from(BUILD_ASSET_ROOT));
     // The symlink targets the config files resolve through.
     readable.push(PathBuf::from("/run"));
     // bwrap supplies these with --proc and --dev rather than a bind, so they
