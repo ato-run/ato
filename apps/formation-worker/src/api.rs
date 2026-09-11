@@ -9,6 +9,46 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+/// The control plane caps a failure reason at 400 characters.
+pub const FAILURE_REASON_LIMIT: usize = 400;
+
+/// A failure as the control plane receives it: a code to branch on, the stage
+/// that refused it, and one sentence written for the uploader.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailureReport {
+    pub code: String,
+    pub stage: String,
+    pub message: String,
+}
+
+impl FailureReport {
+    /// A refusal that happened AFTER the build, while registering the result.
+    /// The build itself was fine, and saying "build failed" would send whoever
+    /// reads it to look in the wrong place.
+    pub fn publish(code: &str, message: String) -> Self {
+        Self {
+            code: code.to_owned(),
+            stage: "publish".to_owned(),
+            message: bounded_reason(&message),
+        }
+    }
+}
+
+/// Single-line, bounded failure text. Newlines become spaces so one failure
+/// stays one readable sentence, and the cut walks back to a character boundary.
+pub fn bounded_reason(reason: &str) -> String {
+    let single: String = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = single.trim();
+    if trimmed.len() <= FAILURE_REASON_LIMIT {
+        return trimmed.to_owned();
+    }
+    let mut end = FAILURE_REASON_LIMIT;
+    while end > 0 && !trimmed.is_char_boundary(end) {
+        end -= 1;
+    }
+    trimmed[..end].to_owned()
+}
+
 /// A claimed job, plus what its result attaches to.
 ///
 /// The target rides with the claim because a service is handed a job, not a
@@ -91,14 +131,23 @@ impl FormationApi {
     /// The reason is short and written for the person who uploaded the source,
     /// not copied from stderr: a build's output can carry a host path or a
     /// credential a tool echoed, and neither belongs in something a user reads.
-    pub fn report_failure(&self, attempt_id: &str, reason: &str) -> Result<()> {
+    /// Report a terminal failure.
+    ///
+    /// `code` and `stage` are additive on the control plane: an older API that
+    /// reads only `reason` behaves exactly as it did, and a code it does not
+    /// recognise is dropped there rather than rendered.
+    pub fn report_failure(&self, attempt_id: &str, failure: &FailureReport) -> Result<()> {
         self.client
             .post(format!(
                 "{}/v1/internal/formation/attempts/{attempt_id}/failure",
                 self.base
             ))
             .bearer_auth(&self.token)
-            .json(&serde_json::json!({ "reason": reason }))
+            .json(&serde_json::json!({
+                "reason": failure.message,
+                "code": failure.code,
+                "stage": failure.stage,
+            }))
             .send()?
             .error_for_status()
             .context("failed to report a Formation failure")?;

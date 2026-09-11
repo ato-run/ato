@@ -257,3 +257,118 @@ pub fn preset_overrides(preset: AppPreset) -> Vec<(&'static str, String)> {
         ],
     }
 }
+
+// ─────────────────────────────────────────────────── the Preset as a synthesizer
+//
+// A Preset is not a lane and not a second way to describe an App. It is a
+// synthesizer that produces the SAME pair — a Contract draft and a Derivation
+// draft — that an author would have written by hand for a source simple enough
+// to describe without help. Downstream, nothing can tell which frontend a draft
+// came through, and a hand-written `capsule.toml` that says the same things
+// canonicalizes to the same ContractRef and the same DerivationRef.
+
+use crate::authoring::{
+    AuthoringDraft, AuthoringProvenance, BROWSER_PROTOCOL, ContractDraft, DerivationDraft,
+    EffectClass, HTTP_PROTOCOL, HttpRequirement, InputDraft, InputIdentityRequirement,
+    ObservationDraft, Observed, PortDraft, RequirementDraft, StepDraft, WORKSPACE_PROTOCOL,
+};
+
+/// The input id a Preset gives the source tree.
+pub const PRESET_INPUT_ID: &str = "workspace";
+/// The step id a Preset gives the served surface.
+pub const PRESET_SERVE_STEP_ID: &str = "site";
+/// The port id a Preset exports.
+pub const PRESET_PORT_ID: &str = "app.http";
+/// The observation ids a Preset's contract carries.
+pub const PRESET_ROOT_OBSERVATION_ID: &str = "root";
+pub const PRESET_SOURCE_OBSERVATION_ID: &str = "source-identity";
+
+/// Synthesize the authoring pair for a source that fits a Preset.
+///
+/// ## Why the Contract is conservative
+///
+/// It observes the SOURCE's identity as well as "GET / is 200". Without that,
+/// every static page in the world that answers 200 would be the same Capsule —
+/// two unrelated uploads would collide onto one identity and one person's App
+/// could be resumed as another's. An author who genuinely wants that weak an
+/// identity can write it down; Ato must not choose it on their behalf.
+///
+/// The reverse matters just as much: Ato must never STRENGTHEN a Contract an
+/// author wrote. Source identity is added here because nobody stated an
+/// intent, not as a floor under everyone's.
+///
+/// System security policy — which files are never packed, what execution is
+/// admitted — is enforced elsewhere and is deliberately absent from `K`. It is
+/// not something the author chose to preserve, and putting it in the digest
+/// would make a policy change rewrite every Capsule identity.
+pub fn synthesize_authoring(preset: AppPreset) -> AuthoringDraft {
+    let (root, spa_fallback) = match preset {
+        AppPreset::SingleHtml | AppPreset::StaticFiles => (None, false),
+        AppPreset::NodeStatic => (Some(NODE_STATIC_OUTPUT_ROOT.to_owned()), true),
+    };
+    AuthoringDraft {
+        contract: ContractDraft {
+            requirements: vec![
+                ObservationDraft {
+                    id: PRESET_ROOT_OBSERVATION_ID.to_owned(),
+                    requirement: RequirementDraft::Http(HttpRequirement {
+                        port: PRESET_PORT_ID.to_owned(),
+                        method: "GET".to_owned(),
+                        path: "/".to_owned(),
+                        status: 200,
+                        body_digest: None,
+                    }),
+                },
+                ObservationDraft {
+                    id: PRESET_SOURCE_OBSERVATION_ID.to_owned(),
+                    requirement: RequirementDraft::InputIdentity(InputIdentityRequirement {
+                        input: PRESET_INPUT_ID.to_owned(),
+                        digest: Observed::Capture,
+                    }),
+                },
+            ],
+        },
+        derivation: DerivationDraft {
+            inputs: vec![InputDraft {
+                id: PRESET_INPUT_ID.to_owned(),
+                protocol: WORKSPACE_PROTOCOL.to_owned(),
+                path: ".".to_owned(),
+            }],
+            runtimes: vec![],
+            steps: vec![StepDraft {
+                id: PRESET_SERVE_STEP_ID.to_owned(),
+                protocol: BROWSER_PROTOCOL.to_owned(),
+                op: "serve".to_owned(),
+                argv: vec![],
+                cwd: String::new(),
+                env: Default::default(),
+                source: Some(PRESET_INPUT_ID.to_owned()),
+                root: root.clone(),
+                entry: Some(CANONICAL_ENTRY.to_owned()),
+                spa_fallback: Some(spa_fallback),
+            }],
+            ports: vec![PortDraft {
+                id: PRESET_PORT_ID.to_owned(),
+                protocol: HTTP_PROTOCOL.to_owned(),
+                from: PRESET_SERVE_STEP_ID.to_owned(),
+                guest_port: None,
+            }],
+            state: vec![],
+            // `node-static/v1` builds before it serves. That step is not yet
+            // expressible in `ato.capsule/1` — writing it out needs the
+            // resolver that picks the package manager and the Node version,
+            // which still lives in the execution projection — so it is carried
+            // here rather than pretended into an argv nobody resolved.
+            workspace_build: match preset {
+                AppPreset::NodeStatic => Some(NODE_STATIC_OUTPUT_ROOT.to_owned()),
+                _ => None,
+            },
+            // Serving files has no effect outside the continuation. A build
+            // that installs from a registry still has none that outlives it.
+            effects: EffectClass::Pure,
+        },
+        provenance: AuthoringProvenance::PresetSynthesized {
+            preset: preset.id(),
+        },
+    }
+}
