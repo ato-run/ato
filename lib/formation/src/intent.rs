@@ -241,7 +241,7 @@ impl EffectiveBuildPlanV1 {
 }
 
 /// What the author declared, flat, so the wire form stays a string map.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AuthoredOverrides(pub BTreeMap<String, String>);
 
 impl AuthoredOverrides {
