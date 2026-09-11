@@ -249,6 +249,15 @@ pub struct DerivationDraft {
     /// it changes what the route does, and deliberately not yet authorable —
     /// see the projection's `unsupported_step` refusal.
     pub workspace_build: Option<String>,
+    /// Which PLATFORM-MANAGED compiler builds the workspace, when one does.
+    ///
+    /// `workspace_build` says a build happens and where it writes;
+    /// this says WHO owns the toolchain. `node-static/v1` leaves it None,
+    /// because the package's own script is the authority there. Digested, for
+    /// the same reason `workspace_build` is: two routes that run different
+    /// compilers do different things, and a Capsule identity that could not
+    /// tell them apart would let one be resumed as the other.
+    pub workspace_compiler: Option<String>,
     pub effects: EffectClass,
 }
 
@@ -371,6 +380,10 @@ pub struct BoundDerivation {
     pub state: Vec<BoundState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_build: Option<String>,
+    // Absent from an existing derivation's JSON, so every Capsule formed
+    // before this existed digests exactly as it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_compiler: Option<String>,
     pub effects: EffectClass,
 }
 
@@ -563,6 +576,7 @@ fn bind_derivation(
         ports,
         state,
         workspace_build: draft.workspace_build.clone(),
+        workspace_compiler: draft.workspace_compiler.clone(),
         effects: draft.effects,
     })
 }
@@ -728,6 +742,7 @@ mod tests {
                 }],
                 state: vec![],
                 workspace_build: None,
+                workspace_compiler: None,
                 effects: EffectClass::Pure,
             },
             provenance,

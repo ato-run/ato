@@ -14,6 +14,7 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use ato_formation::failure::{FailureStage, FormationFailure};
 use ato_formation::intent::{BuildStepV1, EffectiveBuildPlanV1};
 
 use crate::sandbox::{BuildSandbox, GUEST_WORKSPACE_ROOT, NetworkPolicy, sandboxed_build_command};
@@ -204,6 +205,14 @@ fn run_step(step: &BuildStepV1, argv: &[String], budget: Duration) -> Result<Vec
                 let mut combined = output.stdout;
                 combined.extend_from_slice(&output.stderr);
                 if !status.success() {
+                    // A step that KNOWS why it refused says so in a line
+                    // written for the uploader. Without this the typed reason
+                    // is flattened into build output, and build output is
+                    // exactly what must not reach the uploader — so a person
+                    // who imported lodash would be told "the build failed".
+                    if let Some(failure) = typed_step_failure(&combined) {
+                        return Err(anyhow::Error::new(failure));
+                    }
                     bail!(
                         "build step {:?} failed ({status}): {}",
                         step.name,
@@ -221,6 +230,39 @@ fn run_step(step: &BuildStepV1, argv: &[String], budget: Duration) -> Result<Vec
             None => std::thread::sleep(Duration::from_millis(50)),
         }
     }
+}
+
+/// The typed failure a build step reported about itself, if it reported one.
+///
+/// The marker is a whole line so it cannot be produced by accident in the
+/// middle of other output, and the payload is JSON so a message may contain
+/// anything — including the newline a line-oriented format could not carry.
+///
+/// Only steps Ato itself ships emit this. A step running somebody's `npm run
+/// build` is not trusted to name its own failure code: it could mint any code
+/// a client branches on, and the uploader's own build script is the last thing
+/// that should decide what the platform says about it.
+fn typed_step_failure(output: &[u8]) -> Option<FormationFailure> {
+    const MARKER: &str = "ATO_FORMATION_FAILURE ";
+    #[derive(serde::Deserialize)]
+    struct Reported {
+        code: String,
+        message: String,
+    }
+    let text = String::from_utf8_lossy(output);
+    let payload = text
+        .lines()
+        .rev()
+        .find_map(|line| line.trim().strip_prefix(MARKER))?;
+    let reported: Reported = serde_json::from_str(payload).ok()?;
+    // The stage is NOT taken from the payload. Where a failure happened is the
+    // worker's own knowledge, and a step naming its own stage could claim to
+    // be an authoring refusal it is not.
+    Some(FormationFailure::new(
+        reported.code,
+        FailureStage::Build,
+        reported.message,
+    ))
 }
 
 fn terminate_group(pid: u32) {

@@ -47,6 +47,27 @@ use crate::detect::DetectorEvidence;
 pub const SINGLE_HTML_V1: &str = "single-html/v1";
 pub const STATIC_FILES_V1: &str = "static-files/v1";
 pub const NODE_STATIC_V1: &str = "node-static/v1";
+/// Exactly one `.jsx` React component, compiled by a platform-managed
+/// compiler. No `package.json`, no lockfile, no network.
+pub const SINGLE_JSX_V1: &str = "single-jsx/v1";
+
+/// The compiler `single-jsx/v1` names. Versioned in the same breath as the
+/// preset: a different compiler or a different React is a different preset.
+pub const SINGLE_JSX_COMPILER: &str = "single-jsx/v1";
+/// Where `single-jsx/v1` writes, so the existing Static output path applies
+/// unchanged.
+pub const SINGLE_JSX_OUTPUT_ROOT: &str = "dist";
+
+/// The Node the `single-jsx/v1` COMPILER runs on. Not a runtime the App has:
+/// a browser evaluates what the compiler produces.
+///
+/// Provisioned out of band with the compiler asset, never downloaded by the
+/// build — a build that fetched its own toolchain would need a network, and
+/// the whole point of this preset is that an untrusted upload does not.
+pub const SINGLE_JSX_NODE_VERSION: &str = "20.20.2";
+/// The React `single-jsx/v1` links, pinned by the platform. A different React
+/// is a different preset id.
+pub const SINGLE_JSX_REACT_VERSION: &str = "18.3.1";
 
 /// The one entry document every Static preset produces.
 pub const CANONICAL_ENTRY: &str = "index.html";
@@ -64,6 +85,10 @@ pub enum AppPreset {
     StaticFiles,
     /// `npm ci` → `npm run build` → `dist/`. Node is a build tool, not a runtime.
     NodeStatic,
+    /// Exactly one `.jsx` React component. A platform-managed compiler and a
+    /// pinned React turn it into `dist/` — the author supplies no build
+    /// configuration, and nothing is resolved from a network.
+    SingleJsx,
 }
 
 impl AppPreset {
@@ -72,6 +97,7 @@ impl AppPreset {
             Self::SingleHtml => SINGLE_HTML_V1,
             Self::StaticFiles => STATIC_FILES_V1,
             Self::NodeStatic => NODE_STATIC_V1,
+            Self::SingleJsx => SINGLE_JSX_V1,
         }
     }
 
@@ -85,6 +111,10 @@ impl AppPreset {
             Self::SingleHtml => "Single HTML",
             Self::StaticFiles => "Static website",
             Self::NodeStatic => "Built web app",
+            // Not "React app": the preset promises one component file, not a
+            // framework, and naming the framework is how the inference machine
+            // grows back.
+            Self::SingleJsx => "Single component",
         }
     }
 
@@ -94,6 +124,10 @@ impl AppPreset {
     /// rather than to a scan of the source: `node-static/v1` installs from a
     /// registry and is therefore trusted/allowlist-only, while the two
     /// build-free presets can take public untrusted uploads.
+    /// `single-jsx/v1` answers NO, and that is the point of it: the compiler
+    /// and the React it links are platform assets that are already on the
+    /// builder, so forming one takes a public untrusted upload with the
+    /// network denied — exactly like the two build-free presets.
     pub fn resolves_dependencies(self) -> bool {
         matches!(self, Self::NodeStatic)
     }
@@ -103,6 +137,7 @@ impl AppPreset {
             SINGLE_HTML_V1 => Some(Self::SingleHtml),
             STATIC_FILES_V1 => Some(Self::StaticFiles),
             NODE_STATIC_V1 => Some(Self::NodeStatic),
+            SINGLE_JSX_V1 => Some(Self::SingleJsx),
             _ => None,
         }
     }
@@ -165,6 +200,38 @@ pub fn select_preset(evidence: &DetectorEvidence) -> Result<AppPreset, PresetMis
             lower.ends_with(".html") || lower.ends_with(".htm")
         })
         .collect();
+
+    // ── single-jsx/v1 ───────────────────────────────────────────────────────
+    // One `.jsx` and nothing else that matters. Tried before the HTML shapes
+    // because it is the narrowest: a lone component file cannot be anything
+    // else, and the check is a file extension rather than a look inside.
+    let jsx_files: Vec<&&String> = meaningful
+        .iter()
+        .filter(|name| name.to_ascii_lowercase().ends_with(".jsx"))
+        .collect();
+    if meaningful.len() == 1 && jsx_files.len() == 1 {
+        return Ok(AppPreset::SingleJsx);
+    }
+    if meaningful.len() == 1 {
+        // TypeScript is a near miss worth naming. Refusing it as "no preset
+        // matched" would send somebody looking for the shape they already have.
+        let lower = meaningful[0].to_ascii_lowercase();
+        if lower.ends_with(".tsx") || lower.ends_with(".ts") {
+            return Err(PresetMismatch::new(
+                "preset_single_jsx_typescript_unsupported",
+                "Ato can compile a single React component written as `.jsx`. \
+                 TypeScript is not supported yet — save the file as `.jsx` \
+                 with the types removed.",
+            ));
+        }
+    }
+    if jsx_files.len() > 1 && !meaningful.iter().any(|name| *name == "package.json") {
+        return Err(PresetMismatch::new(
+            "preset_single_jsx_needs_one_file",
+            "Ato can compile ONE React component file. This upload has \
+             several — build it into a site and upload that instead.",
+        ));
+    }
 
     // ── single-html/v1 ──────────────────────────────────────────────────────
     // One HTML file and nothing else that matters. The file need not be called
@@ -246,6 +313,18 @@ pub fn preset_overrides(preset: AppPreset) -> Vec<(&'static str, String)> {
             // silently serves the entry document for a typo'd URL.
             ("static.spa_fallback", "false".to_owned()),
         ],
+        AppPreset::SingleJsx => vec![
+            ("lane", "static_web".to_owned()),
+            // The site is GENERATED, so the output root is where the compiler
+            // writes — never the source tree, which holds the `.jsx` and
+            // nothing a browser can open.
+            ("static.compile", SINGLE_JSX_COMPILER.to_owned()),
+            ("static.output_root", SINGLE_JSX_OUTPUT_ROOT.to_owned()),
+            ("static.entry_path", CANONICAL_ENTRY.to_owned()),
+            // One component, one document. There is nowhere to route to, and a
+            // fallback would serve the app for a typo'd asset URL.
+            ("static.spa_fallback", "false".to_owned()),
+        ],
         AppPreset::NodeStatic => vec![
             ("lane", "static_web".to_owned()),
             ("static.build", "required".to_owned()),
@@ -305,6 +384,9 @@ pub fn synthesize_authoring(preset: AppPreset) -> AuthoringDraft {
     let (root, spa_fallback) = match preset {
         AppPreset::SingleHtml | AppPreset::StaticFiles => (None, false),
         AppPreset::NodeStatic => (Some(NODE_STATIC_OUTPUT_ROOT.to_owned()), true),
+        // The compiler writes a single document; a fallback would serve it for
+        // a typo'd asset URL.
+        AppPreset::SingleJsx => (Some(SINGLE_JSX_OUTPUT_ROOT.to_owned()), false),
     };
     AuthoringDraft {
         contract: ContractDraft {
@@ -361,6 +443,15 @@ pub fn synthesize_authoring(preset: AppPreset) -> AuthoringDraft {
             // here rather than pretended into an argv nobody resolved.
             workspace_build: match preset {
                 AppPreset::NodeStatic => Some(NODE_STATIC_OUTPUT_ROOT.to_owned()),
+                // The compile is a workspace build like any other: it runs
+                // before the serve and writes the root that is served.
+                AppPreset::SingleJsx => Some(SINGLE_JSX_OUTPUT_ROOT.to_owned()),
+                _ => None,
+            },
+            // Who owns the toolchain. `node-static/v1` says nothing here: the
+            // package's own build script is the authority there.
+            workspace_compiler: match preset {
+                AppPreset::SingleJsx => Some(SINGLE_JSX_COMPILER.to_owned()),
                 _ => None,
             },
             // Serving files has no effect outside the continuation. A build

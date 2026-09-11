@@ -131,14 +131,22 @@ pub fn project(
                 "static.spa_fallback".to_owned(),
                 serve.spa_fallback.unwrap_or(false).to_string(),
             );
-            overrides.insert(
-                "static.build".to_owned(),
-                if derivation.workspace_build.is_some() {
-                    "required".to_owned()
-                } else {
-                    "none".to_owned()
-                },
-            );
+            // A platform compiler and an author's own build are alternatives,
+            // never both: one says Ato owns the toolchain, the other says the
+            // package does. Emitting `static.build = required` alongside a
+            // compiler would send a one-file upload down `npm ci`.
+            if let Some(compiler) = derivation.workspace_compiler.as_ref() {
+                overrides.insert("static.compile".to_owned(), compiler.clone());
+            } else {
+                overrides.insert(
+                    "static.build".to_owned(),
+                    if derivation.workspace_build.is_some() {
+                        "required".to_owned()
+                    } else {
+                        "none".to_owned()
+                    },
+                );
+            }
             None
         }
         PROCESS_PROTOCOL => {
