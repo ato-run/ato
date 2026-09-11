@@ -1,0 +1,4 @@
+# The pinned vendor bytes are provisioned, not committed — see VENDOR.lock.
+babel.standalone.js
+react.production.min.js
+react-dom.production.min.js

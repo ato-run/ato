@@ -29,7 +29,10 @@ use sha2::{Digest, Sha256};
 use crate::detect::{
     DetectorEvidence, FieldOrigin, FieldOrigins, NodeEvidence, PythonEvidence, ViteOutDir,
 };
-use crate::preset::{AppPreset, preset_overrides};
+use crate::preset::{
+    AppPreset, SINGLE_JSX_COMPILER, SINGLE_JSX_NODE_VERSION, SINGLE_JSX_OUTPUT_ROOT,
+    SINGLE_JSX_REACT_VERSION, preset_overrides,
+};
 
 /// Python versions this build knows how to provision, newest first.
 ///
@@ -155,6 +158,35 @@ pub struct StaticBuildProfileV1 {
     pub lockfile_pinned: bool,
 }
 
+/// A site produced by a PLATFORM-MANAGED compiler, not by the author's build.
+///
+/// The difference from `StaticBuildProfileV1` is who owns the toolchain. There
+/// the package is the authority: Ato runs the project's own `build` script and
+/// does not reconstruct what it does. Here Ato is: the author supplies one
+/// `.jsx` file and no configuration at all, and the compiler, the React it
+/// links and the document template are fixed assets on the builder.
+///
+/// Which means the versions have to be written down. A ComputeSchema records
+/// resolved semantics, and "compiled by single-jsx/v1" is only a resolved
+/// statement while `single-jsx/v1` means one thing forever. A different
+/// compiler or a different React is a different preset id, never a quiet
+/// redefinition of this one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StaticCompileProfileV1 {
+    /// The compiler id, e.g. `single-jsx/v1`.
+    pub compiler: String,
+    /// The authored file it compiles, relative to the workspace root. This is
+    /// the CANONICAL source; everything under `output_root` is derived from it.
+    pub entry_source: String,
+    /// Exact. The toolchain the compiler itself runs on.
+    pub node_version: String,
+    /// Exact. The runtime the produced document links, pinned by the platform.
+    pub react_version: String,
+    /// Where the compiler writes, relative to the workspace root.
+    pub output_root: String,
+}
+
 /// The normalized intent. Digestible, and the input to the build plan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -185,6 +217,10 @@ pub struct ProgramIntentV1 {
     /// source-static intent, so those digests are unchanged by this addition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub static_build: Option<StaticBuildProfileV1>,
+    /// Present only when a platform-managed compiler produces the site.
+    /// Omitted otherwise, so existing intents digest exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_compile: Option<StaticCompileProfileV1>,
 }
 
 pub const PROGRAM_INTENT_V1_SCHEMA: &str = "ato.program-intent.v1";
@@ -382,6 +418,19 @@ const SERVER_FRAMEWORKS: &[&str] = &[
 
 pub fn node_home(version: &str) -> String {
     format!("{TOOLCHAIN_ROOT}/node/{version}")
+}
+
+/// Where platform-managed build assets live — the compilers and runtimes Ato
+/// owns, as opposed to the toolchains a build provisions for itself.
+///
+/// Separate from `TOOLCHAIN_ROOT` because the trust story is different. A
+/// toolchain is fetched to satisfy a source's declaration; these are shipped
+/// with the builder and are the reason a preset can promise "no network".
+pub const BUILD_ASSET_ROOT: &str = "/opt/ato/assets";
+
+/// The directory holding one platform compiler, keyed by its versioned id.
+pub fn compiler_home(compiler: &str) -> String {
+    format!("{BUILD_ASSET_ROOT}/{compiler}")
 }
 
 /// The official Node distribution. `.tar.gz`, so the sandbox needs no `xz`.
@@ -616,6 +665,31 @@ fn detect_static_build(
 /// Vite. A project whose build writes somewhere other than `dist/` fails later,
 /// at the output root, with a sentence that says so — a better failure than a
 /// heuristic quietly picking a different directory.
+/// Which file `single-jsx/v1` compiles.
+///
+/// Exactly one `.jsx`, found rather than guessed at: with two there is no
+/// non-arbitrary way to pick, and with none this preset was selected for a
+/// source it does not describe.
+fn single_jsx_entry(evidence: &DetectorEvidence) -> Result<String, IntentError> {
+    let mut found: Vec<&String> = evidence
+        .present_files
+        .iter()
+        .filter(|name| name.to_ascii_lowercase().ends_with(".jsx"))
+        .collect();
+    found.sort();
+    match found.len() {
+        1 => Ok(found[0].clone()),
+        0 => Err(IntentError::RequiresAuthoring {
+            field: "static.compile",
+            why: "single-jsx/v1 compiles one .jsx file; this source has none",
+        }),
+        _ => Err(IntentError::RequiresAuthoring {
+            field: "static.compile",
+            why: "single-jsx/v1 compiles ONE .jsx file; this source has several",
+        }),
+    }
+}
+
 fn fixed_node_static_build(
     evidence: &DetectorEvidence,
 ) -> Result<StaticBuildProfileV1, IntentError> {
@@ -657,7 +731,37 @@ fn compile_static(
     // which directories exist. `static.build` overrides it — an author saying
     // "this needs no build" or "this does" outranks inference — and
     // `"required"` with nothing to infer from is a refusal, not a guess.
+    // A platform-managed compiler, named by the author or by a Preset. It is
+    // decided BEFORE `static.build` because the two are mutually exclusive:
+    // one says Ato owns the toolchain, the other says the package does, and a
+    // source claiming both has not said which authority applies.
+    let static_compile = match overrides.get("static.compile").map(str::trim) {
+        Some(SINGLE_JSX_COMPILER) => {
+            origins.insert("static.compile".to_owned(), FieldOrigin::Authored);
+            Some(StaticCompileProfileV1 {
+                compiler: SINGLE_JSX_COMPILER.to_owned(),
+                entry_source: single_jsx_entry(evidence)?,
+                node_version: SINGLE_JSX_NODE_VERSION.to_owned(),
+                react_version: SINGLE_JSX_REACT_VERSION.to_owned(),
+                output_root: SINGLE_JSX_OUTPUT_ROOT.to_owned(),
+            })
+        }
+        Some(other) => {
+            return Err(IntentError::Malformed {
+                field: "static.compile",
+                detail: format!("unknown compiler {other:?}; expected {SINGLE_JSX_COMPILER:?}"),
+            });
+        }
+        None => None,
+    };
     let detected_build = detect_static_build(evidence)?;
+    if static_compile.is_some() && overrides.get("static.build").is_some() {
+        return Err(IntentError::Malformed {
+            field: "static.compile",
+            detail: "a source cannot both name a platform compiler and declare its own build"
+                .to_owned(),
+        });
+    }
     let static_build = match overrides.get("static.build").map(str::trim) {
         Some("none") => {
             origins.insert("static.build".to_owned(), FieldOrigin::Authored);
@@ -706,6 +810,14 @@ fn compile_static(
         Some(declared) => {
             origins.insert("static.output_root".to_owned(), FieldOrigin::Authored);
             declared.trim_matches('/').to_owned()
+        }
+        None if static_compile.is_some() => {
+            origins.insert("static.output_root".to_owned(), FieldOrigin::PolicyDefault);
+            static_compile
+                .as_ref()
+                .expect("just matched Some")
+                .output_root
+                .clone()
         }
         None if static_build.is_some() => {
             origins.insert(
@@ -768,6 +880,13 @@ fn compile_static(
     if let Some(build) = static_build.as_ref() {
         runtime.insert("node".to_owned(), build.node_version.clone());
     }
+    // A compiled site records its compiler's Node too: which Node produced an
+    // artifact is a property of the artifact either way, and leaving it out
+    // would make two compiler versions indistinguishable in provenance.
+    if let Some(compile) = static_compile.as_ref() {
+        runtime.insert("node".to_owned(), compile.node_version.clone());
+        runtime.insert("react".to_owned(), compile.react_version.clone());
+    }
     let dependencies = match static_build.as_ref() {
         None => DependencyPlan::None,
         Some(build) if build.lockfile_pinned => DependencyPlan::UvFrozen,
@@ -797,6 +916,7 @@ fn compile_static(
         static_entry_path: Some(entry_path),
         static_spa_fallback: spa_fallback,
         static_build,
+        static_compile,
     })
 }
 
@@ -973,6 +1093,7 @@ fn compile_python(
         static_spa_fallback: false,
         // A Python process is never a built static site.
         static_build: None,
+        static_compile: None,
         // `workspace_guest_root` shapes the build plan, not the intent: the
         // intent says WHAT to run, the plan says where. It is still checked
         // here, because an argv that cannot resolve under it is not a launch.
@@ -1172,6 +1293,36 @@ pub fn compile_build_plan(
                 ),
             ],
             needs_network: true,
+        });
+    }
+
+    // The platform compiler. No provision step above it on purpose: it and its
+    // Node are shipped with the builder, and a build that downloaded its own
+    // compiler would need a network — which is the one thing this preset
+    // promises an untrusted upload does not get.
+    if let (Some(compile), Lane::StaticWeb) = (intent.static_compile.as_ref(), intent.lane) {
+        let home = node_home(&compile.node_version);
+        let compiler = compiler_home(&compile.compiler);
+        let entry = &compile.entry_source;
+        let out = &compile.output_root;
+        steps.push(BuildStepV1 {
+            name: "compile-single-jsx".to_owned(),
+            argv: vec![
+                "/bin/sh".to_owned(),
+                "-euc".to_owned(),
+                format!(
+                    "export PATH={home}/bin:$PATH; cd {root}; \
+                     if [ ! -f {compiler}/compile.mjs ]; then \
+                       printf '%s\\n' 'ATO_FORMATION_FAILURE \
+{{\"code\":\"single_jsx_compiler_unavailable\",\
+\"message\":\"This builder cannot compile a single component right now. \
+Nothing was changed — try again shortly.\"}}' >&2; exit 65; fi; \
+                     exec node {compiler}/compile.mjs --entry {entry} --out {out}",
+                ),
+            ],
+            // Nothing is resolved from anywhere. Everything this step reads is
+            // either the uploaded file or a platform asset already on disk.
+            needs_network: false,
         });
     }
 
