@@ -21,6 +21,7 @@ use anyhow::{Context, Result, bail};
 use ato_formation::authoring::{AuthoringProvenance, BindingContext, BoundDerivation, bind};
 use ato_formation::capsule_toml::{parse_capsule_toml, read_capsule_toml};
 use ato_formation::detect::{FieldOrigins, detect};
+use ato_formation::failure::{FailureStage, FormationFailure};
 use ato_formation::intent::{
     AuthoredOverrides, EffectiveBuildPlanV1, Lane, ProgramIntentV1, compile_build_plan,
     compile_intent,
@@ -230,16 +231,16 @@ pub fn run_claimed_job(
         // in the tree: it is the one it accepted and recorded. Both go through
         // the same parser, so the two cannot come to mean different things.
         Some(text) => Some(text.to_owned()),
-        None => read_capsule_toml(&source_root).map_err(|error| anyhow::anyhow!("{error}"))?,
+        None => read_capsule_toml(&source_root).map_err(FormationFailure::from)?,
     };
     let draft = match authored_toml {
-        Some(text) => parse_capsule_toml(&text).map_err(|error| anyhow::anyhow!("{error}"))?,
+        Some(text) => parse_capsule_toml(&text).map_err(FormationFailure::from)?,
         None => {
-            let preset = select_preset(&evidence).map_err(|mismatch| {
-                // Written for the person who uploaded the source. "No lane
-                // matched" would name our dispatch instead of their problem.
-                anyhow::anyhow!("{}", mismatch.message)
-            })?;
+            // Written for the person who uploaded the source. "No lane
+            // matched" would name our dispatch instead of their problem — and
+            // carrying the mismatch as a TYPE is what gets those words all the
+            // way out, instead of them dying in a log nobody reads.
+            let preset = select_preset(&evidence).map_err(FormationFailure::from)?;
             // A Preset that installs from a registry cannot run under a job
             // whose policy denies the network. Saying so by name beats letting
             // `npm ci` fail three steps later with a DNS error the person who
@@ -269,20 +270,18 @@ pub fn run_claimed_job(
             source_closure_ref: closure_ref.as_str(),
         },
     )
-    .map_err(|error| anyhow::anyhow!("{error}"))?;
-    let contract_ref = contract
-        .contract_ref()
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    .map_err(FormationFailure::from)?;
+    let contract_ref = contract.contract_ref().map_err(FormationFailure::from)?;
     let derivation_ref = derivation
         .derivation_ref()
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
+        .map_err(FormationFailure::from)?;
 
     // ── project onto this worker's execution machinery ──────────────────────
     //
     // `ProgramIntent` and `EffectiveBuildPlan` are below this line: an
     // execution plan for running THIS Derivation on THIS worker, and never an
     // input to either digest above.
-    let projected = project(&derivation, &contract).map_err(|error| anyhow::anyhow!("{error}"))?;
+    let projected = project(&derivation, &contract).map_err(FormationFailure::from)?;
 
     let mut authored: BTreeMap<String, String> = job["authoring"]["overrides"]
         .as_object()
@@ -321,9 +320,14 @@ pub fn run_claimed_job(
 
     let mut origins = FieldOrigins::new();
     let intent = compile_intent(&evidence, &overrides, guest_root, &mut origins)
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
-    let plan = compile_build_plan(&intent, guest_root, triple)
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
+        .map_err(FormationFailure::from)?;
+    // A plan that cannot be compiled is a projection problem, not the author's
+    // grammar: it is this worker failing to turn a valid intent into steps.
+    let plan = compile_build_plan(&intent, guest_root, triple).map_err(|error| {
+        FormationFailure::new(error.code(), FailureStage::Projection, error.to_string())
+    })?;
+    // Digest failures are ours, not the author's: nothing they could change
+    // would fix one, so they stay anonymous and reach the operator log only.
     let intent_digest = intent
         .canonical_digest()
         .map_err(|error| anyhow::anyhow!("{error}"))?;

@@ -31,6 +31,7 @@
 pub mod authoring;
 pub mod capsule_toml;
 pub mod detect;
+pub mod failure;
 pub mod intent;
 pub mod preset;
 pub mod projection;
