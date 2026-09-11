@@ -264,3 +264,179 @@ fn an_explicit_override_beats_the_preset() {
     .expect("compiles");
     assert_eq!(intent.static_output_root.as_deref(), Some("site"));
 }
+
+// ── single-jsx/v1 ───────────────────────────────────────────────────────────
+//
+// The preset that exists because a Claude Artifact is one `.jsx` file and
+// nothing else: no `package.json` to satisfy `node-static/v1`, and nothing a
+// browser can open to satisfy the build-free presets. The question it answers
+// is who owns the toolchain — here Ato does, which is what lets it promise an
+// untrusted upload no network at all.
+
+const HAIKU_JSX: &str = r#"
+import React, { useState } from "react";
+export default function HaikuKai() {
+  const [draft, setDraft] = useState("");
+  return <main onClick={() => setDraft("")}>{draft}</main>;
+}
+"#;
+
+#[test]
+fn one_jsx_file_is_its_own_preset() {
+    assert_eq!(
+        preset_of(&[("HaikuKai.jsx", HAIKU_JSX)]),
+        Ok(AppPreset::SingleJsx)
+    );
+    // Tried before the HTML shapes, and narrower than all of them: a lone
+    // component file cannot be anything else.
+    assert_eq!(
+        preset_of(&[
+            ("HaikuKai.jsx", HAIKU_JSX),
+            ("README.md", "# notes"),
+            (".gitignore", "dist"),
+        ]),
+        Ok(AppPreset::SingleJsx),
+    );
+}
+
+#[test]
+fn typescript_and_several_components_are_refused_by_name() {
+    // A near miss deserves its own sentence: "no preset matched" would send
+    // somebody looking for a shape they already have.
+    assert_eq!(
+        preset_of(&[("App.tsx", "export default function A(){return null;}")])
+            .unwrap_err()
+            .code,
+        "preset_single_jsx_typescript_unsupported",
+    );
+    assert_eq!(
+        preset_of(&[("A.jsx", HAIKU_JSX), ("B.jsx", HAIKU_JSX)])
+            .unwrap_err()
+            .code,
+        "preset_single_jsx_needs_one_file",
+    );
+}
+
+#[test]
+fn a_jsx_beside_a_package_json_is_still_a_built_web_app() {
+    // `node-static/v1` keeps its own shape. A project that declares a build is
+    // a project with a build, whatever file extensions it happens to contain.
+    assert_eq!(
+        preset_of(&[
+            ("src/App.jsx", HAIKU_JSX),
+            ("package.json", PACKAGE_JSON),
+            ("package-lock.json", "{}"),
+        ]),
+        Ok(AppPreset::NodeStatic),
+    );
+}
+
+#[test]
+fn single_jsx_compiles_offline_with_a_platform_compiler() {
+    let intent = intent_for(AppPreset::SingleJsx, &[("HaikuKai.jsx", HAIKU_JSX)]);
+    assert_eq!(intent.lane, Lane::StaticWeb);
+    // Not the author's build: nobody wrote a build script, and Ato did not
+    // invent one for them.
+    assert!(intent.static_build.is_none());
+    let compile = intent.static_compile.as_ref().expect("a platform compiler");
+    assert_eq!(compile.compiler, SINGLE_JSX_COMPILER);
+    assert_eq!(compile.entry_source, "HaikuKai.jsx");
+    // Recorded, not implied: a ComputeSchema stores resolved semantics, and a
+    // different React is a different artifact.
+    assert_eq!(compile.react_version, SINGLE_JSX_REACT_VERSION);
+    assert_eq!(compile.node_version, SINGLE_JSX_NODE_VERSION);
+    assert_eq!(intent.static_output_root.as_deref(), Some("dist"));
+    assert_eq!(intent.static_entry_path.as_deref(), Some("index.html"));
+    // One component, one document: a fallback would serve the app for a
+    // typo'd asset URL.
+    assert!(!intent.static_spa_fallback);
+
+    let plan = compile_build_plan(&intent, "/app", "x86_64-unknown-linux-gnu").expect("plan");
+    let names: Vec<&str> = plan.steps.iter().map(|step| step.name.as_str()).collect();
+    // No `provision-node`: the compiler and its Node ship with the builder.
+    // A provision step would need a network, which is the one thing this
+    // preset promises an untrusted upload does not get.
+    assert_eq!(names, ["compile-single-jsx"]);
+    assert!(
+        plan.steps.iter().all(|step| !step.needs_network),
+        "single-jsx/v1 resolves nothing from anywhere",
+    );
+    let argv = plan.steps[0].argv.last().expect("a shell command");
+    assert!(
+        argv.contains("/opt/ato/assets/single-jsx/v1/compile.mjs"),
+        "{argv}"
+    );
+    assert!(argv.contains("--entry HaikuKai.jsx"), "{argv}");
+    assert!(argv.contains("--out dist"), "{argv}");
+    // A builder with no compiler provisioned says so in the failure channel
+    // the worker reads, rather than as whatever `node` prints about a missing
+    // module.
+    assert!(argv.contains("single_jsx_compiler_unavailable"), "{argv}");
+}
+
+#[test]
+fn a_compiled_site_and_an_authored_build_are_alternatives() {
+    let dir = tree(&[("HaikuKai.jsx", HAIKU_JSX)]);
+    let evidence = detect(dir.path()).expect("detect");
+    let mut origins = FieldOrigins::default();
+    let mut overrides = BTreeMap::new();
+    overrides.insert("lane".to_owned(), "static_web".to_owned());
+    overrides.insert("static.compile".to_owned(), SINGLE_JSX_COMPILER.to_owned());
+    overrides.insert("static.build".to_owned(), "required".to_owned());
+    // One says Ato owns the toolchain, the other says the package does. A
+    // source claiming both has not said which authority applies.
+    let error = compile_intent(
+        &evidence,
+        &AuthoredOverrides(overrides),
+        "/app",
+        &mut origins,
+    )
+    .expect_err("refused");
+    assert!(format!("{error}").contains("platform compiler"), "{error}");
+}
+
+#[test]
+fn an_unknown_compiler_is_refused_rather_than_ignored() {
+    let dir = tree(&[("HaikuKai.jsx", HAIKU_JSX)]);
+    let evidence = detect(dir.path()).expect("detect");
+    let mut origins = FieldOrigins::default();
+    let mut overrides = BTreeMap::new();
+    overrides.insert("lane".to_owned(), "static_web".to_owned());
+    overrides.insert("static.compile".to_owned(), "single-jsx/v99".to_owned());
+    assert!(
+        compile_intent(
+            &evidence,
+            &AuthoredOverrides(overrides),
+            "/app",
+            &mut origins
+        )
+        .is_err(),
+        "a compiler Ato does not have is never silently skipped",
+    );
+}
+
+#[test]
+fn the_preset_and_its_synthesized_derivation_agree_on_the_compiler() {
+    let draft = synthesize_authoring(AppPreset::SingleJsx);
+    assert_eq!(
+        draft.derivation.workspace_compiler.as_deref(),
+        Some(SINGLE_JSX_COMPILER),
+    );
+    assert_eq!(draft.derivation.workspace_build.as_deref(), Some("dist"));
+    // Every other preset leaves it alone, so their DerivationRefs are
+    // byte-identical to what they were before this field existed.
+    for preset in [
+        AppPreset::SingleHtml,
+        AppPreset::StaticFiles,
+        AppPreset::NodeStatic,
+    ] {
+        assert!(
+            synthesize_authoring(preset)
+                .derivation
+                .workspace_compiler
+                .is_none(),
+            "{}",
+            preset.id(),
+        );
+    }
+}

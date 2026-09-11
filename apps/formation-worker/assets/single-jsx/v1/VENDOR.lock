@@ -1,0 +1,15 @@
+# Pinned third-party bytes for single-jsx/v1.
+#
+# NOT committed: 3 MB of minified vendor JS in the repository would be reviewed
+# by nobody and diffed by everybody. What IS committed is this list and the
+# digests, so what a builder provisions can be checked against what this
+# version of the preset means.
+#
+# Exact versions, never ranges.  is a promise that a source
+# formed under it keeps meaning what it meant, and a floating dependency would
+# quietly break that promise. A different Babel or a different React is v2.
+#
+# Format: <sha256>  <filename>  <url>
+254d0fe4bd4a17bcceb0623a467de5f69e9938ee07de3bff9851dcb94adeb03d  babel.standalone.js  https://cdn.jsdelivr.net/npm/@babel/standalone@7.28.4/babel.min.js
+d949f1c3687aedadcedac85261865f29b17cd273997e7f6b2bfc53b2f9d4c4dd  react.production.min.js  https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js
+35f4f974f4b2bcd44da73963347f8952e341f83909e4498227d4e26b98f66f0d  react-dom.production.min.js  https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js
