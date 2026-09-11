@@ -40,11 +40,17 @@ function compile(source, name = "App.jsx") {
       stderr,
     };
   }
+  const html = readFileSync(join(dir, "dist/index.html"), "utf8");
+  const src = (pattern) => (html.match(pattern) || [])[0];
+  const appPath = src(/app\.[0-9a-f]+\.js/);
+  const reactPath = src(/vendor\/react\.[0-9a-f]+\.js/);
   return {
     ok: true,
-    app: readFileSync(join(dir, "dist/app.js"), "utf8"),
-    html: readFileSync(join(dir, "dist/index.html"), "utf8"),
-    react: readFileSync(join(dir, "dist/vendor/react.js"), "utf8"),
+    html,
+    appPath,
+    reactPath,
+    app: readFileSync(join(dir, "dist", appPath), "utf8"),
+    react: readFileSync(join(dir, "dist", reactPath), "utf8"),
   };
 }
 
@@ -73,6 +79,7 @@ test("compiles one component and links the pinned React", () => {
   // Mounted from the DEFAULT export, under its own name.
   assert.match(result.app, /createElement\(HaikuKai\)/);
   assert.match(result.html, /<div id="root"><\/div>/);
+  assert.ok(result.appPath, "the document references a hashed app bundle");
   assert.match(result.html, /<title>HaikuKai<\/title>/);
   assert.match(result.react, /react\.production\.min\.js|Symbol\.for/);
 });
@@ -125,6 +132,25 @@ for (const [code, source] of REFUSALS) {
     assert.doesNotMatch(result.failure.message, /node_modules|\/tmp\/|at Object\./);
   });
 }
+
+/**
+ * The app host serves instance assets `immutable` with a one-year max-age,
+ * which is correct only while a URL's bytes never change. A fixed `app.js`
+ * broke that: after an update the document is fresh (`no-store`) and points at
+ * the same `/app.js`, so a returning browser keeps running last year's code.
+ * Measured on staging — a patched source built, published and adopted, and the
+ * page still rendered the old title.
+ */
+test("a changed source produces a changed app URL", () => {
+  const first = compile(HAIKU);
+  const edited = compile(HAIKU.replace("HaikuKai", "HaikuKaiTwo"));
+  assert.notEqual(first.appPath, edited.appPath);
+  // React did not change, so its URL does not either — it stays cached across
+  // the update, which is the other half of why hashing is the right fix.
+  assert.equal(first.reactPath, edited.reactPath);
+  // Same bytes, same name: a rebuild of an unchanged source is not a new URL.
+  assert.equal(compile(HAIKU).appPath, first.appPath);
+});
 
 test("react-dom is linkable, because this compiler ships it", () => {
   const result = compile(
