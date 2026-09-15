@@ -283,14 +283,19 @@
     flushing = true;
 
     var body = JSON.stringify({ protocol: PROTOCOL, operations: operations });
-    return fetch(ENDPOINT, {
+    // WebKit rejects keepalive bodies over ~64 KiB while the server accepts up
+    // to 16 MiB of browser state, so only unload beacons may use keepalive and
+    // only when the body fits well inside the transport budget. A normal save
+    // must never use keepalive or large boards silently stop persisting.
+    var init = {
       method: "POST",
       credentials: "same-origin",
       cache: "no-store",
-      keepalive: true,
       headers: { "content-type": "application/json" },
       body: body,
-    })
+    };
+    if (!!unloading && body.length <= 60000) init.keepalive = true;
+    return fetch(ENDPOINT, init)
       .then(function (response) {
         if (!response.ok) throw new Error("save rejected: " + response.status);
         flushing = false;
