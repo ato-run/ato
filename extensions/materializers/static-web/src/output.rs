@@ -594,7 +594,9 @@ mod state_contract_tests {
         assert!(bridge.contains("if (!injected) return;"));
         // WebKit rejects keepalive bodies over ~64 KiB while the server
         // accepts up to 16 MiB: normal saves must not use keepalive.
-        assert!(bridge.contains("body.length <= 60000"));
+        assert!(bridge.contains("new TextEncoder().encode(body).byteLength"));
+        assert!(bridge.contains("bodyBytes <= 60000"));
+        assert!(!bridge.contains("body.length <= 60000"));
         assert!(bridge.contains("flushNow(false)"));
         assert!(bridge.contains("flushNow(true)"));
         assert!(!bridge.contains("keepalive: true,\n      headers"));
