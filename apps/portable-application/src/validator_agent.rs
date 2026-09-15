@@ -514,6 +514,8 @@ struct ValidationJobEnvelope {
 struct ValidationJob {
     job_id: String,
     claim_id: String,
+    #[allow(dead_code)]
+    claim_expires_at: String,
     bundle_id: String,
     transport_digest: String,
     size_bytes: u64,
@@ -610,6 +612,7 @@ mod tests {
         let job = ValidationJob {
             job_id: "bvj_test".to_owned(),
             claim_id: "claim".to_owned(),
+            claim_expires_at: "2026-09-16T00:00:00Z".to_owned(),
             bundle_id: "bnd_01TEST".to_owned(),
             transport_digest: bundle_sha256(&bytes),
             size_bytes: bytes.len() as u64,
