@@ -8,8 +8,10 @@ These invariants govern design, implementation, documentation, and review:
 
 1. **Computation is the semantic center.** It is the evolving residual
    computation, not a repository, manifest, state snapshot, or trace.
-2. **Capsule is immutable.** A Capsule is a sealed, addressable Computation
-   point—a persistent open continuation.
+2. **Capsule is immutable.** A Capsule is a sealed, addressable continuation
+   point. The computation-root v2 profile identifies it with `ComputationRef`;
+   the contract-root portable-application v3 profile identifies it with
+   `ContractRef`. Never cast one reference domain into the other.
 3. **Run is mutable.** A Run evaluates a Capsule and advances through immutable
    successor Computations. Do not use Run and Capsule interchangeably.
 4. **Record is evidence.** Records and Traces describe observed Evolution; they
@@ -29,14 +31,40 @@ These invariants govern design, implementation, documentation, and review:
 Practical consequences:
 
 - `capsule.toml` is authoring input, not Capsule identity.
-- A `.capsule` file is transport rooted at a `ComputationRef`, not the Capsule
-  itself.
+- A `.capsule` file is transport, not the Capsule itself. Wire v2 is rooted at
+  a `ComputationRef`; wire v3 profile `ato.portable-application/1` is rooted at
+  the canonical `BoundContract`'s `ContractRef`.
 - State is a purpose-specific projection of a Computation.
 - PortRef is logical and persistent; Binding owns its mapping to a physical
   Endpoint.
 - Ready State is a Contract/realization concern, not a universal primitive.
 - Prefer one extensible Adapter and Materializer model over workload-specific
   special cases, and remain safe by default at every physical boundary.
+
+### Portable application v3 invariants
+
+- Keep the v2 types, decoder, digests, fixtures, and CLI path unchanged. Dispatch
+  wire versions into explicit types such as computation v2 and portable
+  application v3; never grow v2 with optional v3 fields or fall back between
+  profiles.
+- `CapsuleId = root_contract_ref` for v3. Recompute it from the bundled canonical
+  `ato.contract/1` bytes. Treat the whole-file SHA-256 only as transport equality.
+- Validate canonical JCS, lowercase SHA-256 references, descriptor sizes,
+  payload digests, sorted uniqueness, and the exact reachable object closure
+  before realization. Unknown fields and unsupported profiles fail closed.
+- Keep seal admission and run acceptance separate. Seal may admit `Satisfied`
+  and `Deferred`; a verification receipt may set `fully_satisfied` only when
+  every original Contract observation is `Satisfied` from actual runtime
+  evidence. Never recapture or rewrite K while running.
+- CLI-local and ato.run-hosted use the same Rust-owned receipt schema and
+  Contract algorithm. TypeScript may route and display results but must not
+  independently canonicalize K or decide Contract satisfaction.
+- Hosted import reuses the capsule-bundle quarantine/validator path and connects
+  the verified artifact directly to the Static App runtime. A v3 `.capsule`
+  must never be treated as a source ZIP or sent through Formation again.
+- The first interoperability gate covers only Static HTML/JS with no external
+  Bindings, Saved Data, Instance Assets, or multiple Derivations. Both targets
+  must consume the same file bytes and finish with `fully_satisfied = true`.
 
 ## Repository Structure
 
@@ -425,4 +453,4 @@ Serena は、コードベースのシンボルレベルの読み書きを提供�
 
 ---
 
-Last updated: 2026-08-17
+Last updated: 2026-09-16

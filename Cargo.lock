@@ -257,6 +257,7 @@ dependencies = [
  "ato-compose",
  "ato-computation",
  "ato-contracts",
+ "ato-formation",
  "ato-ipc",
  "ato-kernel",
  "ato-local-execution",
@@ -266,6 +267,7 @@ dependencies = [
  "ato-materializer-vm-snapshot",
  "ato-objects",
  "ato-player",
+ "ato-portable-application",
  "ato-realization-planner",
  "ato-record-writer",
  "ato-runtime-object-graph",
@@ -617,6 +619,26 @@ dependencies = [
  "ato-adapter-api",
  "ato-computation",
  "ato-objects",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ato-portable-application"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ato-computation",
+ "ato-formation",
+ "ato-materializer-static-web",
+ "ato-objects",
+ "base64 0.22.1",
+ "clap",
+ "reqwest",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "sha2",
+ "tempfile",
  "thiserror 2.0.18",
 ]
 

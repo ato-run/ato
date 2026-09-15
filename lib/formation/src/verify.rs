@@ -35,7 +35,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+
 use crate::authoring::{BoundContract, HTTP_CONTRACT_VERIFIER, WORKSPACE_CONTRACT_VERIFIER};
+
+pub const CONTRACT_VERIFICATION_RECEIPT_SCHEMA: &str = "ato.contract-verification-receipt/1";
 
 /// What the executed Derivation actually produced, in the terms `K` observes.
 ///
@@ -57,7 +62,8 @@ pub struct CandidateObservation {
     pub runtime_readiness: Option<(String, String)>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
 pub enum ObservationOutcome {
     Satisfied,
     /// Decided later, by the named gate.
@@ -70,13 +76,15 @@ pub enum ObservationOutcome {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ObservationVerdict {
     pub id: String,
     pub outcome: ObservationOutcome,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContractVerification {
     pub verdicts: Vec<ObservationVerdict>,
 }
@@ -87,9 +95,24 @@ impl ContractVerification {
     /// Every condition is either decided satisfied here, or handed to a gate
     /// that will decide it. None is skipped.
     pub fn passed(&self) -> bool {
+        self.seal_admissible()
+    }
+
+    /// May Formation seal this candidate while naming every remaining gate?
+    pub fn seal_admissible(&self) -> bool {
         self.verdicts
             .iter()
             .all(|verdict| !matches!(verdict.outcome, ObservationOutcome::Failed { .. }))
+    }
+
+    /// Has an actual run decided every condition successfully?
+    ///
+    /// Interoperability receipts require this stronger result. A deferred
+    /// Formation verdict is deliberately not launch success.
+    pub fn fully_satisfied(&self) -> bool {
+        self.verdicts
+            .iter()
+            .all(|verdict| verdict.outcome == ObservationOutcome::Satisfied)
     }
 
     /// The first reason this candidate is not the Capsule it claims to be.
@@ -118,6 +141,224 @@ impl ContractVerification {
             .count();
         let failed = self.verdicts.len() - satisfied - deferred;
         format!("{satisfied} satisfied, {deferred} deferred, {failed} failed")
+    }
+}
+
+/// An HTTP response read from the actual running candidate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeHttpObservation {
+    pub port: String,
+    pub method: String,
+    pub path: String,
+    pub status: u16,
+    pub body_digest: String,
+}
+
+impl RuntimeHttpObservation {
+    pub fn from_response(
+        port: impl Into<String>,
+        method: impl Into<String>,
+        path: impl Into<String>,
+        status: u16,
+        body: &[u8],
+    ) -> Self {
+        Self {
+            port: port.into(),
+            method: method.into(),
+            path: path.into(),
+            status,
+            body_digest: format!("sha256:{:x}", Sha256::digest(body)),
+        }
+    }
+}
+
+/// Evidence gathered from an actual running candidate.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RuntimeObservation {
+    pub input_refs: BTreeMap<String, String>,
+    pub http: Vec<RuntimeHttpObservation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VerificationTargetKind {
+    CliLocal,
+    AtoRunHosted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerificationTarget {
+    pub kind: VerificationTargetKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReceiptOutcome {
+    Satisfied,
+    Deferred,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerificationEvidence {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiptObservation {
+    pub id: String,
+    pub outcome: ReceiptOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<VerificationEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
+}
+
+/// Shared proof emitted by both local and hosted execution paths.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContractVerificationReceipt {
+    pub schema: String,
+    pub bundle_sha256: String,
+    pub contract_ref: String,
+    pub derivation_ref: String,
+    pub target: VerificationTarget,
+    pub observations: Vec<ReceiptObservation>,
+    pub fully_satisfied: bool,
+}
+
+impl ContractVerificationReceipt {
+    pub fn new(
+        bundle_sha256: impl Into<String>,
+        contract_ref: impl Into<String>,
+        derivation_ref: impl Into<String>,
+        target: VerificationTargetKind,
+        verification: ContractVerification,
+    ) -> Self {
+        let fully_satisfied = verification.fully_satisfied();
+        let observations = verification
+            .verdicts
+            .into_iter()
+            .map(|verdict| receipt_observation(verdict, None))
+            .collect();
+        Self {
+            schema: CONTRACT_VERIFICATION_RECEIPT_SCHEMA.to_owned(),
+            bundle_sha256: bundle_sha256.into(),
+            contract_ref: contract_ref.into(),
+            derivation_ref: derivation_ref.into(),
+            target: VerificationTarget { kind: target },
+            observations,
+            fully_satisfied,
+        }
+    }
+
+    pub fn from_runtime(
+        bundle_sha256: impl Into<String>,
+        contract_ref: impl Into<String>,
+        derivation_ref: impl Into<String>,
+        target: VerificationTargetKind,
+        contract: &BoundContract,
+        runtime: &RuntimeObservation,
+        verification: ContractVerification,
+    ) -> Self {
+        let fully_satisfied = verification.fully_satisfied();
+        let observations = verification
+            .verdicts
+            .into_iter()
+            .map(|verdict| {
+                let requirement = contract
+                    .requirements
+                    .iter()
+                    .find(|requirement| requirement.id == verdict.id);
+                let evidence =
+                    requirement.and_then(|requirement| match requirement.verifier.as_str() {
+                        HTTP_CONTRACT_VERIFIER => runtime
+                            .http
+                            .iter()
+                            .find(|observation| {
+                                requirement.port.as_deref() == Some(observation.port.as_str())
+                                    && requirement.method.as_deref()
+                                        == Some(observation.method.as_str())
+                                    && requirement.path.as_deref()
+                                        == Some(observation.path.as_str())
+                            })
+                            .map(|observation| VerificationEvidence {
+                                method: Some(observation.method.clone()),
+                                path: Some(observation.path.clone()),
+                                status: Some(observation.status),
+                                body_sha256: Some(observation.body_digest.clone()),
+                                input: None,
+                                digest: None,
+                            }),
+                        WORKSPACE_CONTRACT_VERIFIER => {
+                            requirement
+                                .input
+                                .as_ref()
+                                .map(|input| VerificationEvidence {
+                                    method: None,
+                                    path: None,
+                                    status: None,
+                                    body_sha256: None,
+                                    input: Some(input.clone()),
+                                    digest: runtime.input_refs.get(input).cloned(),
+                                })
+                        }
+                        _ => None,
+                    });
+                receipt_observation(verdict, evidence)
+            })
+            .collect();
+        Self {
+            schema: CONTRACT_VERIFICATION_RECEIPT_SCHEMA.to_owned(),
+            bundle_sha256: bundle_sha256.into(),
+            contract_ref: contract_ref.into(),
+            derivation_ref: derivation_ref.into(),
+            target: VerificationTarget { kind: target },
+            observations,
+            fully_satisfied,
+        }
+    }
+
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        serde_jcs::to_vec(self)
+    }
+}
+
+fn receipt_observation(
+    verdict: ObservationVerdict,
+    evidence: Option<VerificationEvidence>,
+) -> ReceiptObservation {
+    let (outcome, deferred_by, failure) = match verdict.outcome {
+        ObservationOutcome::Satisfied => (ReceiptOutcome::Satisfied, None, None),
+        ObservationOutcome::Deferred { by } => (ReceiptOutcome::Deferred, Some(by), None),
+        ObservationOutcome::Failed { code, detail } => (
+            ReceiptOutcome::Failed,
+            None,
+            Some(format!("{code}: {detail}")),
+        ),
+    };
+    ReceiptObservation {
+        id: verdict.id,
+        outcome,
+        evidence,
+        deferred_by,
+        failure,
     }
 }
 
@@ -157,15 +398,16 @@ pub fn verify(contract: &BoundContract, candidate: &CandidateObservation) -> Con
                                  not export"
                             ),
                         }
-                    } else if requirement.body_digest.is_some() {
-                        // Would need the response. Refused at bind time when
-                        // asked for as `capture`; refused here when stated,
-                        // because nothing on this path reads a body.
-                        ObservationOutcome::Failed {
-                            code: "body_digest_unverifiable",
-                            detail: "a response body is not read by this build; the observation \
-                                 would be recorded as checked without anything checking it"
-                                .to_owned(),
+                    } else if requirement.body_digest.is_some()
+                        && (candidate.statically_served_paths.contains(path)
+                            || candidate.runtime_readiness.as_ref().is_some_and(
+                                |(gate_port, gate_path)| gate_port == port && gate_path == path,
+                            ))
+                    {
+                        // Formation can prove the exact endpoint exists, but
+                        // only the runtime verifier reads its response body.
+                        ObservationOutcome::Deferred {
+                            by: format!("runtime contract verifier {port} GET {path}"),
                         }
                     } else if requirement.status == Some(200)
                         && candidate.statically_served_paths.contains(path)
@@ -204,8 +446,98 @@ pub fn verify(contract: &BoundContract, candidate: &CandidateObservation) -> Con
     ContractVerification { verdicts }
 }
 
+/// Decide every condition against evidence read from the actual run.
+///
+/// This path has no deferred result: a missing observation fails closed.
+pub fn verify_runtime(
+    contract: &BoundContract,
+    candidate: &RuntimeObservation,
+) -> ContractVerification {
+    let verdicts = contract
+        .requirements
+        .iter()
+        .map(|requirement| {
+            let outcome = match requirement.verifier.as_str() {
+                WORKSPACE_CONTRACT_VERIFIER => {
+                    let input = requirement.input.as_deref().unwrap_or_default();
+                    let expected = requirement.digest.as_deref().unwrap_or_default();
+                    match candidate.input_refs.get(input) {
+                        Some(actual) if actual == expected => ObservationOutcome::Satisfied,
+                        Some(actual) => ObservationOutcome::Failed {
+                            code: "input_identity_mismatch",
+                            detail: format!("{input} resolved to {actual}; expected {expected}"),
+                        },
+                        None => ObservationOutcome::Failed {
+                            code: "input_not_resolved",
+                            detail: format!("the runtime resolved no input named {input}"),
+                        },
+                    }
+                }
+                HTTP_CONTRACT_VERIFIER => {
+                    let port = requirement.port.as_deref().unwrap_or_default();
+                    let method = requirement.method.as_deref().unwrap_or("GET");
+                    let path = requirement.path.as_deref().unwrap_or("/");
+                    match candidate.http.iter().find(|observation| {
+                        observation.port == port
+                            && observation.method == method
+                            && observation.path == path
+                    }) {
+                        None => ObservationOutcome::Failed {
+                            code: "runtime_observation_missing",
+                            detail: format!(
+                                "the runtime did not observe {method} {path} on {port}"
+                            ),
+                        },
+                        Some(observation)
+                            if requirement
+                                .status
+                                .is_some_and(|status| observation.status != status) =>
+                        {
+                            ObservationOutcome::Failed {
+                                code: "http_status_mismatch",
+                                detail: format!(
+                                    "{method} {path} on {port} returned {}; expected {}",
+                                    observation.status,
+                                    requirement.status.expect("checked as some")
+                                ),
+                            }
+                        }
+                        Some(observation)
+                            if requirement
+                                .body_digest
+                                .as_ref()
+                                .is_some_and(|digest| observation.body_digest != *digest) =>
+                        {
+                            ObservationOutcome::Failed {
+                                code: "http_body_digest_mismatch",
+                                detail: format!(
+                                    "{method} {path} on {port} produced {}; expected {}",
+                                    observation.body_digest,
+                                    requirement.body_digest.as_deref().expect("checked as some")
+                                ),
+                            }
+                        }
+                        Some(_) => ObservationOutcome::Satisfied,
+                    }
+                }
+                other => ObservationOutcome::Failed {
+                    code: "verifier_unknown",
+                    detail: format!("no verifier named {other} is available to decide this"),
+                },
+            };
+            ObservationVerdict {
+                id: requirement.id.clone(),
+                outcome,
+            }
+        })
+        .collect();
+    ContractVerification { verdicts }
+}
+
 #[cfg(test)]
 mod tests {
+    use sha2::Digest;
+
     use super::*;
     use crate::authoring::{BOUND_CONTRACT_SCHEMA, BoundRequirement};
 
@@ -328,9 +660,97 @@ mod tests {
             statically_served_paths: ["/".to_owned()].into(),
             ..Default::default()
         };
+        let verification = verify(&k, &candidate);
+        assert!(verification.seal_admissible(), "{verification:?}");
+        assert!(!verification.fully_satisfied());
+        assert!(matches!(
+            verification.verdicts[0].outcome,
+            ObservationOutcome::Deferred { .. }
+        ));
+    }
+
+    #[test]
+    fn runtime_body_observation_must_match_before_interop_is_fully_satisfied() {
+        let body = b"ato-k-interop-v1\n";
+        let mut requirement = http("proof", "app.http", "/proof.txt");
+        requirement.body_digest = Some(format!("sha256:{:x}", sha2::Sha256::digest(body)));
+        let k = contract(vec![requirement]);
+        let observation = RuntimeObservation {
+            http: vec![RuntimeHttpObservation::from_response(
+                "app.http",
+                "GET",
+                "/proof.txt",
+                200,
+                body,
+            )],
+            ..Default::default()
+        };
+        let verification = verify_runtime(&k, &observation);
+        assert!(verification.fully_satisfied(), "{verification:?}");
+    }
+
+    #[test]
+    fn runtime_candidate_with_the_wrong_proof_body_fails_k() {
+        let mut requirement = http("proof", "app.http", "/proof.txt");
+        requirement.body_digest = Some(format!(
+            "sha256:{:x}",
+            sha2::Sha256::digest(b"ato-k-interop-v1\n")
+        ));
+        let k = contract(vec![requirement]);
+        let observation = RuntimeObservation {
+            http: vec![RuntimeHttpObservation::from_response(
+                "app.http",
+                "GET",
+                "/proof.txt",
+                200,
+                b"different\n",
+            )],
+            ..Default::default()
+        };
+        let verification = verify_runtime(&k, &observation);
+        assert!(!verification.fully_satisfied());
         assert_eq!(
-            verify(&k, &candidate).failure().unwrap().1,
-            "body_digest_unverifiable"
+            verification.failure().unwrap().1,
+            "http_body_digest_mismatch"
         );
+    }
+
+    #[test]
+    fn deferred_formation_is_not_interop_success() {
+        let verification = ContractVerification {
+            verdicts: vec![ObservationVerdict {
+                id: "proof".to_owned(),
+                outcome: ObservationOutcome::Deferred {
+                    by: "runtime contract verifier".to_owned(),
+                },
+            }],
+        };
+        assert!(verification.seal_admissible());
+        assert!(verification.passed());
+        assert!(!verification.fully_satisfied());
+    }
+
+    #[test]
+    fn runtime_receipt_uses_the_shared_schema_and_keeps_transport_hash_separate() {
+        let verification = ContractVerification {
+            verdicts: vec![ObservationVerdict {
+                id: "proof".to_owned(),
+                outcome: ObservationOutcome::Satisfied,
+            }],
+        };
+        let receipt = ContractVerificationReceipt::new(
+            "sha256:bundle",
+            "sha256:contract",
+            "sha256:derivation",
+            VerificationTargetKind::CliLocal,
+            verification,
+        );
+        let bytes = receipt.canonical_bytes().unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["schema"], "ato.contract-verification-receipt/1");
+        assert_eq!(value["target"]["kind"], "cli-local");
+        assert_eq!(value["bundle_sha256"], "sha256:bundle");
+        assert_eq!(value["contract_ref"], "sha256:contract");
+        assert_eq!(value["fully_satisfied"], true);
     }
 }
