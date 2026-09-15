@@ -1,0 +1,38 @@
+schema = "ato.capsule/1"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[derive.step]]
+id = "site"
+use = "ato.browser@1"
+op = "serve"
+source = "workspace"
+entry = "index.html"
+spa_fallback = false
+
+[[port]]
+id = "app.http"
+use = "ato.http@1"
+from = "site"
+
+[[contract.require]]
+id = "app-proof"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/proof.txt"
+
+[contract.require.expect]
+status = 200
+body_digest = "sha256:5ec8f5a458f7f500116b8394dd550718915f2d960283905210abe03132ee986a"
+
+[[contract.require]]
+id = "source-identity"
+use = "ato.contract.workspace@1"
+input = "workspace"
+
+[contract.require.expect]
+digest = "capture"

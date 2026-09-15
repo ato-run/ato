@@ -11,6 +11,7 @@ pub mod activity_mcp;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,6 +23,11 @@ use ato_adapter_browser::{
 };
 use ato_adapter_workspace::restore_workspace;
 use ato_computation::{ComputationRef, ContentRef};
+use ato_formation::authoring::{HTTP_CONTRACT_VERIFIER, WORKSPACE_PROTOCOL};
+use ato_formation::verify::{
+    ContractVerificationReceipt, RuntimeHttpObservation, RuntimeObservation,
+    VerificationTargetKind, verify_runtime,
+};
 use ato_materializer_api::{
     ContractContext, MaterializerContext, MaterializerRegistry, accept_candidate,
 };
@@ -31,10 +37,13 @@ use ato_materializer_vm_snapshot::{
     VmSnapshotMaterializer,
 };
 use ato_objects::{
-    BranchOrigin, BundleMaterialization, CapsuleSelector, GraphMaterialization,
-    GraphRestoreCapability, LocalCapsuleRepository, RecordId, ReferenceRegistry, decode_bundle,
-    encode_bundle, export_bundle_with_materializations, export_object_graph, import_bundle,
-    resolve_computation,
+    BranchOrigin, BundleMaterialization, CapsuleBundle, CapsuleBundleDocument, CapsuleSelector,
+    GraphMaterialization, GraphRestoreCapability, LocalCapsuleRepository, RecordId,
+    ReferenceRegistry, decode_capsule_bundle_document, encode_bundle,
+    export_bundle_with_materializations, export_object_graph, import_bundle, resolve_computation,
+};
+use ato_portable_application::{
+    StaticApplicationServer, bundle_sha256, materialize_tree, validate_bundle,
 };
 use ato_realization_planner::{
     MaterializationCandidate, Placement, PlannerPolicy, RealizationPlanner, TargetEnvironment,
@@ -147,6 +156,12 @@ struct RunArgs {
     capsule: PathBuf,
     #[arg(long = "bind", value_parser = parse_binding)]
     bindings: Vec<(String, String)>,
+    /// Verify the local realization without opening a browser, then exit.
+    #[arg(long)]
+    no_open: bool,
+    /// Write the shared Contract verification receipt as canonical JSON.
+    #[arg(long)]
+    verification_receipt: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -583,6 +598,21 @@ fn run_capsule(args: RunArgs) -> Result<()> {
             "`ato run` accepts only a portable .capsule file; author repositories with `ato init`"
         );
     }
+    let bytes = fs::read(&args.capsule)?;
+    match decode_capsule_bundle_document(&bytes)? {
+        CapsuleBundleDocument::ComputationV2(bundle) => run_computation_bundle(args, bundle),
+        CapsuleBundleDocument::PortableApplicationV3(bundle) => {
+            run_portable_application(args, &bytes, bundle)
+        }
+    }
+}
+
+fn run_computation_bundle(args: RunArgs, bundle: CapsuleBundle) -> Result<()> {
+    if args.no_open || args.verification_receipt.is_some() {
+        bail!(
+            "--no-open and --verification-receipt are available only for portable application v3 bundles"
+        );
+    }
     let cache = ato_home()?.join("cache");
     fs::create_dir_all(&cache)?;
     let runtime = tempfile::Builder::new()
@@ -591,7 +621,6 @@ fn run_capsule(args: RunArgs) -> Result<()> {
     let project = runtime.path().join("workspace");
     fs::create_dir_all(&project)?;
     let repository = LocalCapsuleRepository::open(&project)?;
-    let bundle = decode_bundle(&fs::read(&args.capsule)?)?;
     let references = reference_registry()?;
     let root = import_bundle(&bundle, repository.objects(), &references)?;
     let state = load_runtime_state(&root, repository.objects())?;
@@ -692,6 +721,117 @@ fn run_capsule(args: RunArgs) -> Result<()> {
         &contract_context,
     )?;
     accepted.run().map_err(Into::into)
+}
+
+fn run_portable_application(
+    args: RunArgs,
+    bundle_bytes: &[u8],
+    bundle: ato_objects::PortableApplicationBundle,
+) -> Result<()> {
+    if !args.bindings.is_empty() {
+        bail!(
+            "portable application profile {} has no external Bindings",
+            bundle.index.profile
+        );
+    }
+    let validated = validate_bundle(&bundle)?;
+    let runtime = tempfile::Builder::new()
+        .prefix("ato-portable-run-")
+        .tempdir()?;
+    let workspace = runtime.path().join("workspace");
+    materialize_tree(&bundle, &validated, &workspace)?;
+    let server = StaticApplicationServer::start(&workspace, &validated)?;
+
+    let mut observation = RuntimeObservation::default();
+    for input in &validated.derivation.inputs {
+        if input.protocol == WORKSPACE_PROTOCOL {
+            observation
+                .input_refs
+                .insert(input.id.clone(), validated.tree_ref.to_string());
+        }
+    }
+    let client = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    for requirement in &validated.contract.requirements {
+        if requirement.verifier != HTTP_CONTRACT_VERIFIER {
+            continue;
+        }
+        let method = requirement.method.as_deref().unwrap_or("GET");
+        if method != "GET" {
+            bail!("portable local verifier does not support HTTP method {method}");
+        }
+        let path = requirement.path.as_deref().unwrap_or("/");
+        let response = client.get(format!("{}{path}", server.base_url())).send()?;
+        let status = response.status().as_u16();
+        let body = response.bytes()?;
+        observation.http.push(RuntimeHttpObservation::from_response(
+            requirement.port.as_deref().unwrap_or_default(),
+            method,
+            path,
+            status,
+            &body,
+        ));
+    }
+
+    let verification = verify_runtime(&validated.contract, &observation);
+    let receipt = ContractVerificationReceipt::from_runtime(
+        bundle_sha256(bundle_bytes),
+        validated.contract_ref.to_string(),
+        validated.derivation_ref.to_string(),
+        VerificationTargetKind::CliLocal,
+        &validated.contract,
+        &observation,
+        verification,
+    );
+    if let Some(path) = &args.verification_receipt {
+        fs::write(path, receipt.canonical_bytes()?)
+            .with_context(|| format!("write verification receipt {}", path.display()))?;
+    }
+    println!("Capsule: {}", validated.contract_ref);
+    println!("Derivation: {}", validated.derivation_ref);
+    println!("Bundle: {}", receipt.bundle_sha256);
+    println!("URL: {}", server.base_url());
+    if !receipt.fully_satisfied {
+        let failure = receipt
+            .observations
+            .iter()
+            .find(|observation| {
+                !matches!(
+                    observation.outcome,
+                    ato_formation::verify::ReceiptOutcome::Satisfied
+                )
+            })
+            .map(|observation| observation.id.as_str())
+            .unwrap_or("unknown");
+        bail!("runtime Contract verification did not fully satisfy observation {failure}");
+    }
+    if args.no_open {
+        return Ok(());
+    }
+    open_browser(&server.base_url())?;
+    println!("Press Ctrl-C to stop the local realization.");
+    loop {
+        std::thread::park();
+    }
+}
+
+fn open_browser(url: &str) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new("open");
+    #[cfg(target_os = "linux")]
+    let mut command = Command::new("xdg-open");
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", ""]);
+        command
+    };
+    command
+        .arg(url)
+        .spawn()
+        .context("open the application URL")?;
+    Ok(())
 }
 
 /// The CLI's materializer set, injected into `ato-local-execution`.
@@ -869,6 +1009,8 @@ mod tests {
         let args = RunArgs {
             capsule: PathBuf::from("."),
             bindings: Vec::new(),
+            no_open: false,
+            verification_receipt: None,
         };
         assert!(
             run_capsule(args)

@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod bundle;
+mod portable_bundle;
 mod repository;
 
 pub use bundle::{
@@ -15,6 +16,14 @@ pub use bundle::{
     ObjectGraphClosure, ObjectLink, ReferenceRegistry, bundle_root, decode_bundle, encode_bundle,
     export_bundle, export_bundle_with_materializations, export_object_graph, import_bundle,
     sign_bundle, verify_declared_object_graph,
+};
+pub use portable_bundle::{
+    CapsuleBundleDocument, CapsuleBundleDocumentError, PORTABLE_APPLICATION_BUNDLE_VERSION,
+    PORTABLE_APPLICATION_PROFILE, PortableApplicationBundle, PortableBundleError,
+    PortableBundleIndex, PortableBundleObjectDescriptor, PortableBundleObjectKind,
+    PortableBundlePayload, PortableReferenceExtractor, PortableReferenceRegistry,
+    decode_capsule_bundle_document, decode_portable_application_bundle,
+    encode_portable_application_bundle, validate_portable_application_closure,
 };
 pub use repository::{
     ActiveRun, BranchOrigin, CapsuleSelector, Direction, LocalCapsuleRepository, RecordBodyV2,

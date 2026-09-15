@@ -26,7 +26,7 @@ use ato_formation::intent::{EffectiveBuildPlanV1, Lane, ProgramIntentV1};
 #[cfg(test)]
 use ato_materializer_static_web::INSTANCE_STATE_BRIDGE_PATH;
 use ato_materializer_static_web::{
-    ProducedStaticWebBundle, StaticWebInstrumentation, StaticWebOutputPlan,
+    ProducedStaticWebBundle, StaticWebInstrumentation, StaticWebManifestV1, StaticWebOutputPlan,
     extract_static_web_output_instrumented, media_type_for, produce_static_web_bundle,
 };
 
@@ -34,6 +34,8 @@ use ato_materializer_static_web::{
 #[derive(Debug)]
 pub struct StaticFormationOutput {
     pub bundle: ProducedStaticWebBundle,
+    /// Every path backed by the produced manifest, including non-entry files.
+    pub served_paths: Vec<String>,
     /// Content address of the manifest — the artifact's identity.
     pub manifest_digest: String,
     pub entry_path: String,
@@ -179,9 +181,17 @@ pub fn materialize_static(
         .iter()
         .map(|blob| blob.size)
         .sum::<u64>();
+    let manifest: StaticWebManifestV1 = serde_json::from_slice(&bundle.manifest_bytes)
+        .context("read the static web manifest produced by the canonical materializer")?;
+    let served_paths = manifest
+        .files
+        .keys()
+        .map(|path| format!("/{path}"))
+        .collect();
 
     Ok(StaticFormationOutput {
         manifest_digest,
+        served_paths,
         entry_path: output_plan.entry_path,
         spa_fallback: output_plan.spa_fallback,
         total_bytes,
