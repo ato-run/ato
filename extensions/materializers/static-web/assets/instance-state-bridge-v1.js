@@ -294,7 +294,8 @@
       headers: { "content-type": "application/json" },
       body: body,
     };
-    if (!!unloading && body.length <= 60000) init.keepalive = true;
+    var bodyBytes = new TextEncoder().encode(body).byteLength;
+    if (!!unloading && bodyBytes <= 60000) init.keepalive = true;
     return fetch(ENDPOINT, init)
       .then(function (response) {
         if (!response.ok) throw new Error("save rejected: " + response.status);
