@@ -948,7 +948,7 @@ const controllerPolicy = readOriginPolicy(
   "ato-browser-runner-controller-origins"
 );
 const verifierPolicy = readOriginPolicy("ato-browser-runner-verifier-origins");
-if (controllerPolicy.length > 0 && verifierPolicy.length > 0) {
+if (controllerPolicy.length > 0 && verifierPolicy.length > 0 && hasAnyRunnerIdentityParams(window.location.hash)) {
   const observation = readPolicy("ato-browser-runner-state-observation") === "dom_text" ? new BrowserDomTextObservationAdapter() : null;
   window.atoBrowserBridge = createAtoBrowserBridge({
     allowedControllerOrigins: controllerPolicy,
@@ -958,6 +958,10 @@ if (controllerPolicy.length > 0 && verifierPolicy.length > 0) {
       stateProvider: () => observation.project()
     } : {}
   });
+}
+function hasAnyRunnerIdentityParams(hash) {
+  const params = new URLSearchParams(String(hash || "").replace(/^#/u, ""));
+  return params.has("parent_origin") || params.has("channel_token") || params.has("instance_id") || params.has("run_id") || params.has("seat_id");
 }
 function readOriginPolicy(name) {
   const content = readPolicy(name);
