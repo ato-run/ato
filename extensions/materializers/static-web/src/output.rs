@@ -545,7 +545,7 @@ mod state_contract_tests {
         BROWSER_MATERIALIZER_ID, BrowserLocalStorageEntryV1, BrowserStateV1, encode_state,
     };
 
-    use super::{INSTANCE_STATE_BRIDGE_JS, INSTANCE_STATE_ELEMENT_ID};
+    use super::{BROWSER_RUNNER_BRIDGE_JS, INSTANCE_STATE_BRIDGE_JS, INSTANCE_STATE_ELEMENT_ID};
 
     const FIXTURE: &str =
         include_str!("../tests/fixtures/instance-state-hydration-v1/canonical.json");
@@ -592,5 +592,25 @@ mod state_contract_tests {
         // Inert without an instance behind the request: the same artifact
         // bytes are served on the public Static Web lane.
         assert!(bridge.contains("if (!injected) return;"));
+        // WebKit rejects keepalive bodies over ~64 KiB while the server
+        // accepts up to 16 MiB: normal saves must not use keepalive.
+        assert!(bridge.contains("new TextEncoder().encode(body).byteLength"));
+        assert!(bridge.contains("bodyBytes <= 60000"));
+        assert!(!bridge.contains("body.length <= 60000"));
+        assert!(bridge.contains("flushNow(false)"));
+        assert!(bridge.contains("flushNow(true)"));
+        assert!(!bridge.contains("keepalive: true,\n      headers"));
+    }
+
+    #[test]
+    fn browser_runner_bridge_is_inert_without_runner_identity() {
+        let bridge = std::str::from_utf8(BROWSER_RUNNER_BRIDGE_JS).unwrap();
+        // A plain Personal App opened top-level carries no runner identity in
+        // the URL hash: the bridge must stay inert instead of throwing
+        // `invalid_window_identity`. A partial identity still fails closed
+        // inside `parseWindowPeerIdentity`.
+        assert!(bridge.contains("hasAnyRunnerIdentityParams(window.location.hash)"));
+        assert!(bridge.contains("params.has(\"parent_origin\")"));
+        assert!(bridge.contains("invalid_window_identity"));
     }
 }
