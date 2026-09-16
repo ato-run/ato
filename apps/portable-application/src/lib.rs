@@ -44,7 +44,10 @@ pub mod portability_export;
 pub mod portability_plan;
 pub mod validator_agent;
 
-use instance_snapshot::{INSTANCE_SNAPSHOT_SCHEMA, InstanceSnapshotV1, validate_snapshot};
+use instance_snapshot::{
+    INSTANCE_SNAPSHOT_SCHEMA, InstanceSnapshotV1, validate_snapshot,
+    validate_snapshot_resource_bytes,
+};
 
 pub const APPLICATION_SCHEMA: &str = "ato.application/1";
 pub const APPLICATION_V2_SCHEMA: &str = "ato.application/2";
@@ -475,7 +478,8 @@ fn validate_instance_snapshot_binding(
         if descriptor.kind != PortableBundleObjectKind::Blob {
             return Err(profile("snapshot resource must be an opaque blob"));
         }
-        bundle.payload_bytes(&reference)?;
+        let bytes = bundle.payload_bytes(&reference)?;
+        validate_snapshot_resource_bytes(&resource.protocol, &bytes)?;
     }
     for asset in &snapshot.assets {
         let reference = parse_ref(&asset.content_ref, "snapshot Asset")?;
@@ -2188,6 +2192,41 @@ mod tests {
                 .to_string()
                 .contains("do not match declared reference")
         );
+    }
+
+    #[test]
+    fn saved_snapshot_rejects_noncanonical_data_json() {
+        let source = cached_static_v4_bundle();
+        let (mut snapshot, mut content) = saved_instance_snapshot();
+        content.remove(&snapshot.resources[0].content_ref);
+        let bytes = br#"{"b":1,"a":2}"#.to_vec();
+        let reference = bundle_sha256(&bytes);
+        snapshot.resources[0].content_ref = reference.clone();
+        content.insert(reference, bytes);
+
+        let error = crate::instance_snapshot::attach_instance_snapshot(&source, snapshot, &content)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("JSON must be canonical"));
+    }
+
+    #[test]
+    fn saved_snapshot_rejects_unsorted_browser_state() {
+        let source = cached_static_v4_bundle();
+        let (mut snapshot, mut content) = saved_instance_snapshot();
+        content.remove(&snapshot.resources[0].content_ref);
+        let bytes =
+            br#"{"local_storage":[{"key":"z","value":"1"},{"key":"a","value":"2"}],"version":1}"#
+                .to_vec();
+        let reference = bundle_sha256(&bytes);
+        snapshot.resources[0].protocol = "ato.browser-instance-state@1".to_owned();
+        snapshot.resources[0].content_ref = reference.clone();
+        content.insert(reference, bytes);
+
+        let error = crate::instance_snapshot::attach_instance_snapshot(&source, snapshot, &content)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("sorted unique keys"));
     }
 
     #[test]
