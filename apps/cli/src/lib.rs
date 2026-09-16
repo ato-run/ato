@@ -734,7 +734,16 @@ fn export_plan(args: ExportPlanArgs) -> Result<()> {
                 plan.external_objects = 0;
                 plan.embedded_dependency_bytes += archives
                     .iter()
-                    .map(|archive| archive.bytes.len() as u64 * 3 / 4)
+                    .map(|archive| {
+                        (archive.bytes.len() / 4 * 3
+                            - archive
+                                .bytes
+                                .as_bytes()
+                                .iter()
+                                .rev()
+                                .take_while(|byte| **byte == b'=')
+                                .count()) as u64
+                    })
                     .sum::<u64>();
             }
         }
@@ -1043,10 +1052,23 @@ fn run_portable_application(
         verification,
     );
     let mut execution = runtime.execution_evidence();
-    if !dependency_fetches.is_empty() {
+    if let Some(portability) = &bundle.portability {
         receipt.schema = ato_formation::verify::CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V2.to_owned();
-        execution.dependency_fetches = dependency_fetches;
+        execution.portability_profile = Some(
+            match portability.profile {
+                PortableDependencyProfile::Thin => "thin",
+                PortableDependencyProfile::Cached => "cached",
+                PortableDependencyProfile::Offline => "offline",
+            }
+            .to_owned(),
+        );
+        if portability.profile == PortableDependencyProfile::Offline
+            && validated.realization == PortableRealizationKind::OciContainer
+        {
+            execution.embedded_oci_image_loaded = execution.image.clone();
+        }
     }
+    execution.dependency_fetches = dependency_fetches;
     receipt.execution = Some(execution);
     if let Some(path) = &args.verification_receipt {
         fs::write(path, receipt.canonical_bytes()?)
@@ -1296,6 +1318,8 @@ impl PortableLocalRuntime {
                 lease_id: None,
                 attempt_id: None,
                 dependency_fetches: Vec::new(),
+                portability_profile: None,
+                embedded_oci_image_loaded: None,
             },
             Self::Process {
                 handle,
@@ -1315,6 +1339,8 @@ impl PortableLocalRuntime {
                 lease_id: None,
                 attempt_id: None,
                 dependency_fetches: Vec::new(),
+                portability_profile: None,
+                embedded_oci_image_loaded: None,
             },
             Self::Oci { handle, base_url } => VerificationExecutionEvidence {
                 realization: "oci".to_owned(),
@@ -1329,6 +1355,8 @@ impl PortableLocalRuntime {
                 lease_id: None,
                 attempt_id: None,
                 dependency_fetches: Vec::new(),
+                portability_profile: None,
+                embedded_oci_image_loaded: None,
             },
         }
     }
