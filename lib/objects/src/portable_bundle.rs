@@ -368,12 +368,12 @@ fn validate_shape_and_payloads(
             let portability = bundle.portability.as_ref().ok_or_else(|| {
                 PortableBundleError::DescriptorMismatch("missing portability manifest".to_owned())
             })?;
-            if portability.profile == PortableDependencyProfile::Offline {
-                if let Some(first) = portability.external_objects.first() {
-                    return Err(PortableBundleError::OfflineExternalObject(
-                        first.reference.clone(),
-                    ));
-                }
+            if portability.profile == PortableDependencyProfile::Offline
+                && let Some(first) = portability.external_objects.first()
+            {
+                return Err(PortableBundleError::OfflineExternalObject(
+                    first.reference.clone(),
+                ));
             }
             let archive_images = portability
                 .oci_archives
