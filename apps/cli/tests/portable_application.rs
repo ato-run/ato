@@ -16,6 +16,10 @@ fn multi_fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/interop-multi-derivation.capsule")
 }
 
+fn datasette_fixture() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/datasette-cpu.capsule")
+}
+
 #[test]
 fn byte_identical_fixture_runs_and_emits_a_fully_satisfied_cli_receipt() {
     let output = tempfile::tempdir().unwrap();
@@ -152,4 +156,37 @@ fn a_multi_route_bundle_never_selects_a_derivation_implicitly() {
         .assert()
         .failure()
         .stderr(predicates::str::contains("is not declared"));
+}
+
+#[test]
+fn export_plan_preserves_identity_and_refuses_unproven_offline_claim() {
+    let cached = ato()
+        .arg("export-plan")
+        .arg(datasette_fixture())
+        .args(["--portability", "cached", "--json"])
+        .output()
+        .unwrap();
+    assert!(cached.status.success());
+    let cached: Value = serde_json::from_slice(&cached.stdout).unwrap();
+    assert_eq!(cached["existing_bundle_satisfies_profile"], true);
+
+    let offline = ato()
+        .arg("export-plan")
+        .arg(datasette_fixture())
+        .args(["--portability", "offline", "--json"])
+        .output()
+        .unwrap();
+    assert!(offline.status.success());
+    let offline: Value = serde_json::from_slice(&offline.stdout).unwrap();
+    assert_eq!(cached["contract_ref"], offline["contract_ref"]);
+    assert_eq!(cached["derivation_refs"], offline["derivation_refs"]);
+    assert_eq!(offline["existing_bundle_satisfies_profile"], false);
+    assert_eq!(offline["requires_network_on_clean_host"], Value::Null);
+    assert!(
+        offline["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|blocker| blocker.as_str().unwrap().contains("OCI images"))
+    );
 }
