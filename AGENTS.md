@@ -62,9 +62,16 @@ Practical consequences:
 - Hosted import reuses the capsule-bundle quarantine/validator path and connects
   the verified artifact directly to the Static App runtime. A v3 `.capsule`
   must never be treated as a source ZIP or sent through Formation again.
-- The first interoperability gate covers only Static HTML/JS with no external
-  Bindings, Saved Data, Instance Assets, or multiple Derivations. Both targets
-  must consume the same file bytes and finish with `fully_satisfied = true`.
+- A bundle may declare multiple sorted `DerivationRef` roots. Their membership,
+  order, and success do not enter `ContractRef`; adding, removing, or failing a
+  route must not rewrite K. Every runtime must select a declared D explicitly
+  when more than one exists, and the receipt must name that selected D.
+- The current multi-route interoperability gate permits exactly one Static Web
+  route and one pinned Python `ato.process@1` route over the same immutable
+  workspace tree. CLI selects the process route; ato.run import selects the
+  static route. Do not add planner/capability inference or a normal-user route
+  selector as part of this gate. Both targets consume the same file bytes and
+  finish with `fully_satisfied = true`.
 
 ## Repository Structure
 
