@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+pub mod local_instance;
 pub mod oci_archive;
 pub mod portability_export;
 pub mod portability_plan;
