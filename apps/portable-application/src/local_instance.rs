@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ato_computation::ContentRef;
+use ato_formation::authoring::STATE_FILESYSTEM_PROTOCOL;
 use ato_objects::{
     CapsuleBundleDocument, PORTABLE_APPLICATION_BUNDLE_VERSION, PortableApplicationBundle,
     PortableDependencyProfile, decode_capsule_bundle_document,
@@ -15,9 +16,10 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::instance_snapshot::{
-    BROWSER_INSTANCE_STATE_PROTOCOL, InstanceSnapshotV1, attach_instance_snapshot,
+    BROWSER_INSTANCE_STATE_PROTOCOL, INSTANCE_SNAPSHOT_SCHEMA, InstanceSnapshotResourceV1,
+    InstanceSnapshotV1, attach_instance_snapshot, capture_filesystem_state,
     capture_snapshot_resource_assets, decode_browser_state, encode_browser_state,
-    rebind_snapshot_resource_assets, validate_snapshot,
+    rebind_snapshot_resource_assets, restore_filesystem_state, validate_snapshot,
 };
 use crate::portability_export::repack_portable_dependencies;
 use crate::{bundle_sha256, validate_bundle_for_derivation};
@@ -256,9 +258,12 @@ impl LocalApplicationStore {
         let prepared = (|| {
             create_dir_all(&instance_root.join("runs"))?;
             create_dir_all(&instance_root.join("snapshots"))?;
-            if let Some(snapshot_ref) = instance.data_snapshot_ref.as_deref() {
-                self.materialize_snapshot(&instance_id, &bundle, snapshot_ref)?;
-            }
+            let restored = instance
+                .data_snapshot_ref
+                .as_deref()
+                .map(|snapshot_ref| self.materialize_snapshot(&instance_id, &bundle, snapshot_ref))
+                .transpose()?;
+            self.prepare_filesystem_state(&instance_id, &validated, restored.as_ref())?;
             create_canonical(&instance_root.join("instance.json"), &instance)
         })();
         if let Err(error) = prepared {
@@ -375,6 +380,40 @@ impl LocalApplicationStore {
         }))
     }
 
+    pub fn filesystem_state_paths(
+        &self,
+        instance_id: &str,
+    ) -> Result<BTreeMap<String, PathBuf>, LocalInstanceError> {
+        let instance = self.instance(instance_id)?;
+        let bundle_bytes = self.bundle_bytes(&instance)?;
+        let bundle = portable_bundle(&bundle_bytes)?;
+        let route = validate_bundle_for_derivation(&bundle, &instance.selected_derivation_ref)
+            .map_err(|error| LocalInstanceError::Bundle(error.to_string()))?;
+        route
+            .derivation
+            .state
+            .iter()
+            .map(|state| {
+                let path = self
+                    .instance_root(instance_id)?
+                    .join("state")
+                    .join(&state.id);
+                let metadata =
+                    fs::symlink_metadata(&path).map_err(|source| LocalInstanceError::Io {
+                        path: path.clone(),
+                        source,
+                    })?;
+                if !metadata.file_type().is_dir() {
+                    return Err(LocalInstanceError::InvalidState(format!(
+                        "filesystem state `{}` is not a directory",
+                        state.id
+                    )));
+                }
+                Ok((state.id.clone(), path))
+            })
+            .collect()
+    }
+
     pub fn save_snapshot(
         &self,
         instance_id: &str,
@@ -485,6 +524,133 @@ impl LocalApplicationStore {
             assets: source_snapshot.assets,
             asset_bindings: source_snapshot.asset_bindings,
         };
+        self.persist_snapshot(instance_id, snapshot, &content, Some(run_token))
+            .map(Some)
+    }
+
+    pub fn save_filesystem_state_for_run(
+        &self,
+        instance_id: &str,
+        run_token: &str,
+    ) -> Result<Option<LocalInstanceMetadata>, LocalInstanceError> {
+        self.ensure_snapshot_write_fence(instance_id, Some(run_token))?;
+        let instance = self.instance(instance_id)?;
+        let source_bytes = self.bundle_bytes(&instance)?;
+        let source = portable_bundle(&source_bytes)?;
+        let route = validate_bundle_for_derivation(&source, &instance.selected_derivation_ref)
+            .map_err(|error| LocalInstanceError::Bundle(error.to_string()))?;
+        let Some(state) = route.derivation.state.first() else {
+            return Ok(None);
+        };
+        let state_path = self
+            .filesystem_state_paths(instance_id)?
+            .remove(&state.id)
+            .ok_or_else(|| {
+                LocalInstanceError::InvalidState(format!(
+                    "filesystem state `{}` is missing",
+                    state.id
+                ))
+            })?;
+        let filesystem_bytes = capture_filesystem_state(&state_path)
+            .map_err(|error| LocalInstanceError::Bundle(error.to_string()))?;
+        let filesystem_ref = bundle_sha256(&filesystem_bytes);
+
+        let mut snapshot = InstanceSnapshotV1 {
+            schema: INSTANCE_SNAPSHOT_SCHEMA.to_owned(),
+            resources: Vec::new(),
+            assets: Vec::new(),
+            asset_bindings: Vec::new(),
+        };
+        let mut content = BTreeMap::from([(filesystem_ref.clone(), filesystem_bytes)]);
+        let mut replaced = false;
+        if let Some(snapshot_ref) = instance.data_snapshot_ref.as_deref() {
+            let snapshot_reference = ContentRef::parse(snapshot_ref.to_owned())
+                .map_err(|error| LocalInstanceError::InvalidState(error.to_string()))?;
+            let snapshot_bytes = source
+                .payload_bytes(&snapshot_reference)
+                .map_err(|error| LocalInstanceError::Bundle(error.to_string()))?;
+            let source_snapshot: InstanceSnapshotV1 = serde_json::from_slice(&snapshot_bytes)?;
+            validate_snapshot(&source_snapshot)
+                .map_err(|error| LocalInstanceError::Bundle(error.to_string()))?;
+            let restored = self.restored_snapshot(instance_id)?.ok_or_else(|| {
+                LocalInstanceError::InvalidState("restored snapshot is missing".into())
+            })?;
+            let root = self.snapshot_root(instance_id, snapshot_ref)?;
+            let asset_uris = restored
+                .assets
+                .iter()
+                .map(|asset| {
+                    (
+                        asset.alias.clone(),
+                        format!("ato-asset://{}", asset.asset_id),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            for resource in &source_snapshot.resources {
+                if resource.protocol == STATE_FILESYSTEM_PROTOCOL && resource.slot == state.id {
+                    let mut resource = resource.clone();
+                    resource.content_ref = filesystem_ref.clone();
+                    snapshot.resources.push(resource);
+                    replaced = true;
+                    continue;
+                }
+                let restored_resource = restored
+                    .resources
+                    .iter()
+                    .find(|candidate| candidate.slot == resource.slot)
+                    .ok_or_else(|| {
+                        LocalInstanceError::InvalidState(format!(
+                            "restored resource `{}` is missing",
+                            resource.slot
+                        ))
+                    })?;
+                let local_bytes = read(&root.join(&restored_resource.path))?;
+                let portable_bytes = capture_snapshot_resource_assets(
+                    &source_snapshot,
+                    resource,
+                    &local_bytes,
+                    &asset_uris,
+                )
+                .map_err(|error| LocalInstanceError::Bundle(error.to_string()))?;
+                let content_ref = bundle_sha256(&portable_bytes);
+                let mut resource = resource.clone();
+                resource.content_ref = content_ref.clone();
+                snapshot.resources.push(resource);
+                content.insert(content_ref, portable_bytes);
+            }
+            for asset in &source_snapshot.assets {
+                let restored_asset = restored
+                    .assets
+                    .iter()
+                    .find(|candidate| candidate.alias == asset.alias)
+                    .ok_or_else(|| {
+                        LocalInstanceError::InvalidState(format!(
+                            "restored Asset `{}` is missing",
+                            asset.alias
+                        ))
+                    })?;
+                let bytes = read(&root.join(&restored_asset.path))?;
+                if bundle_sha256(&bytes) != asset.content_ref || bytes.len() as u64 != asset.size {
+                    return Err(LocalInstanceError::InvalidState(format!(
+                        "restored Asset `{}` changed during the Run",
+                        asset.alias
+                    )));
+                }
+                content.insert(asset.content_ref.clone(), bytes);
+            }
+            snapshot.assets = source_snapshot.assets;
+            snapshot.asset_bindings = source_snapshot.asset_bindings;
+        }
+        if !replaced {
+            snapshot.resources.push(InstanceSnapshotResourceV1 {
+                slot: state.id.clone(),
+                protocol: STATE_FILESYSTEM_PROTOCOL.to_owned(),
+                content_ref: filesystem_ref,
+            });
+        }
+        snapshot
+            .resources
+            .sort_by(|left, right| left.slot.cmp(&right.slot));
         self.persist_snapshot(instance_id, snapshot, &content, Some(run_token))
             .map(Some)
     }
@@ -707,6 +873,38 @@ impl LocalApplicationStore {
             .instance_root(instance_id)?
             .join("snapshots")
             .join(digest_hex(snapshot_ref)?))
+    }
+
+    fn prepare_filesystem_state(
+        &self,
+        instance_id: &str,
+        route: &crate::ValidatedPortableApplication,
+        restored: Option<&LocalRestoredSnapshot>,
+    ) -> Result<(), LocalInstanceError> {
+        if route.derivation.state.is_empty() {
+            return Ok(());
+        }
+        let state_root = self.instance_root(instance_id)?.join("state");
+        create_dir_all(&state_root)?;
+        for state in &route.derivation.state {
+            let path = state_root.join(&state.id);
+            create_dir(&path)?;
+            let Some(restored_resource) = restored.and_then(|snapshot| {
+                snapshot.resources.iter().find(|resource| {
+                    resource.slot == state.id && resource.protocol == STATE_FILESYSTEM_PROTOCOL
+                })
+            }) else {
+                continue;
+            };
+            let snapshot = restored.ok_or_else(|| {
+                LocalInstanceError::InvalidState("restored snapshot is missing".to_owned())
+            })?;
+            let snapshot_root = self.snapshot_root(instance_id, &snapshot.snapshot_ref)?;
+            let bytes = read(&snapshot_root.join(&restored_resource.path))?;
+            restore_filesystem_state(&bytes, &path)
+                .map_err(|error| LocalInstanceError::Bundle(error.to_string()))?;
+        }
+        Ok(())
     }
 
     fn materialize_snapshot(
@@ -1066,7 +1264,13 @@ mod tests {
         DATA_JSON_PROTOCOL, INSTANCE_SNAPSHOT_SCHEMA, InstanceSnapshotAssetBindingV1,
         InstanceSnapshotAssetLocationV1, InstanceSnapshotAssetV1, InstanceSnapshotResourceV1,
     };
-    use crate::{build_multi_derivation_bundle, build_static_bundle, validate_bytes_all};
+    use crate::{
+        OCI_CPU_MILLIS_RUNTIME, OCI_IMAGE_RUNTIME, OCI_MEMORY_BYTES_RUNTIME,
+        OCI_PIDS_LIMIT_RUNTIME, OCI_PLATFORM_RUNTIME, PYTHON_RUNTIME, PortableDynamicBundleSpec,
+        PortableExecutionSpec, PortableFilesystemStateSpec, PortableHttpRequirementSpec,
+        PortableRealizationKind, build_dynamic_process_oci_bundle, build_multi_derivation_bundle,
+        build_static_bundle, validate_bytes_all,
+    };
 
     fn fixture_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/interop-static-k")
@@ -1074,6 +1278,71 @@ mod tests {
 
     fn multi_fixture_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/interop-multi-derivation")
+    }
+
+    fn stateful_fixture_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/portable-stateful-notes")
+    }
+
+    fn stateful_fixture() -> (Vec<u8>, PortableApplicationBundle, String) {
+        let environment = BTreeMap::from([
+            ("APP_DB_PATH".to_owned(), "/data/notes.sqlite".to_owned()),
+            ("PYTHONDONTWRITEBYTECODE".to_owned(), "1".to_owned()),
+        ]);
+        let spec = PortableDynamicBundleSpec {
+            title: "Portable Notes".to_owned(),
+            surface_path: "/".to_owned(),
+            guest_port: 8000,
+            process: PortableExecutionSpec {
+                runtimes: BTreeMap::from([(PYTHON_RUNTIME.to_owned(), "3.12".to_owned())]),
+                argv: vec!["python3".to_owned(), "-B".to_owned(), "app.py".to_owned()],
+                cwd: ".".to_owned(),
+                env: environment.clone(),
+            },
+            oci: PortableExecutionSpec {
+                runtimes: BTreeMap::from([
+                    (
+                        OCI_IMAGE_RUNTIME.to_owned(),
+                        "docker.io/library/python@sha256:1c44018d7eb40488f29e7c6ad4991d3200507e14dca71b94fe61011815e98155".to_owned(),
+                    ),
+                    (OCI_PLATFORM_RUNTIME.to_owned(), "linux/amd64".to_owned()),
+                    (OCI_MEMORY_BYTES_RUNTIME.to_owned(), "268435456".to_owned()),
+                    (OCI_CPU_MILLIS_RUNTIME.to_owned(), "1000".to_owned()),
+                    (OCI_PIDS_LIMIT_RUNTIME.to_owned(), "128".to_owned()),
+                ]),
+                argv: vec![
+                    "python3".to_owned(),
+                    "-B".to_owned(),
+                    "/app/app.py".to_owned(),
+                ],
+                cwd: ".".to_owned(),
+                env: environment,
+            },
+            filesystem_state: Some(PortableFilesystemStateSpec {
+                id: "data".to_owned(),
+                mount: "/data".to_owned(),
+            }),
+            requirements: vec![PortableHttpRequirementSpec {
+                id: "notes-health".to_owned(),
+                path: "/health".to_owned(),
+                status: 200,
+                body_digest: Some(
+                    "sha256:4062edaf750fb8074e7e83e0c9028c94e32468a8b6f1614774328ef045150f93"
+                        .to_owned(),
+                ),
+            }],
+        };
+        let (bytes, bundle) = build_dynamic_process_oci_bundle(&stateful_fixture_root(), &spec)
+            .expect("stateful fixture should build");
+        let process = validate_bytes_all(&bytes)
+            .expect("stateful fixture should validate")
+            .1
+            .into_iter()
+            .find(|route| route.realization == PortableRealizationKind::LocalProcess)
+            .expect("stateful fixture should contain process route")
+            .derivation_ref
+            .to_string();
+        (bytes, bundle, process)
     }
 
     fn snapshot_fixture() -> (InstanceSnapshotV1, BTreeMap<String, Vec<u8>>) {
@@ -1433,6 +1702,44 @@ mod tests {
         store
             .release_run(&instance.instance_id, &run.token)
             .unwrap();
+    }
+
+    #[test]
+    fn filesystem_state_save_roundtrips_through_an_independent_instance() {
+        let root = tempfile::tempdir().unwrap();
+        let (bytes, original, process_ref) = stateful_fixture();
+        let store = LocalApplicationStore::open(root.path()).unwrap();
+        let imported = store.import(&bytes, Some(&process_ref)).unwrap();
+        let state_path = store
+            .filesystem_state_paths(&imported.instance_id)
+            .unwrap()
+            .remove("data")
+            .unwrap();
+        fs::write(state_path.join("notes.sqlite"), b"saved database").unwrap();
+        let run = store.claim_run(&imported.instance_id).unwrap();
+
+        let saved = store
+            .save_filesystem_state_for_run(&imported.instance_id, &run.token)
+            .unwrap()
+            .unwrap();
+        store
+            .release_run(&imported.instance_id, &run.token)
+            .unwrap();
+        let exported = store.export_instance(&imported.instance_id).unwrap();
+        let reimported = store.import(&exported, Some(&process_ref)).unwrap();
+        let restored_path = store
+            .filesystem_state_paths(&reimported.instance_id)
+            .unwrap()
+            .remove("data")
+            .unwrap();
+
+        assert_ne!(saved.contract_ref, original.index.root_contract_ref);
+        assert_eq!(saved.selected_derivation_ref, process_ref);
+        assert_ne!(reimported.instance_id, imported.instance_id);
+        assert_eq!(
+            fs::read(restored_path.join("notes.sqlite")).unwrap(),
+            b"saved database"
+        );
     }
 
     #[test]
