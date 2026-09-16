@@ -1,7 +1,17 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
+use ato_objects::{
+    CapsuleBundleDocument, PortableDependencyProfile, decode_capsule_bundle_document,
+};
+use ato_portable_application::bundle_sha256;
+use ato_portable_application::instance_snapshot::{
+    DATA_JSON_PROTOCOL, INSTANCE_SNAPSHOT_SCHEMA, InstanceSnapshotAssetV1,
+    InstanceSnapshotResourceV1, InstanceSnapshotV1, attach_instance_snapshot,
+};
+use ato_portable_application::portability_export::repack_portable_dependencies;
 use serde_json::Value;
 
 fn ato() -> Command {
@@ -24,6 +34,41 @@ fn multi_fixture() -> PathBuf {
 
 fn datasette_fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/datasette-cpu.capsule")
+}
+
+fn snapshot_fixture(destination: &Path) -> Vec<u8> {
+    let source = match decode_capsule_bundle_document(&fs::read(fixture()).unwrap()).unwrap() {
+        CapsuleBundleDocument::PortableApplicationV3(bundle) => bundle,
+        _ => panic!("static fixture must remain portable v3"),
+    };
+    let (_, source) =
+        repack_portable_dependencies(&source, PortableDependencyProfile::Cached, &BTreeMap::new())
+            .unwrap();
+    let saved_data = br#"{"todos":["one","two"]}"#.to_vec();
+    let asset = b"portable-photo-bytes".to_vec();
+    let saved_data_ref = bundle_sha256(&saved_data);
+    let asset_ref = bundle_sha256(&asset);
+    let snapshot = InstanceSnapshotV1 {
+        schema: INSTANCE_SNAPSHOT_SCHEMA.to_owned(),
+        resources: vec![InstanceSnapshotResourceV1 {
+            slot: "main".to_owned(),
+            protocol: DATA_JSON_PROTOCOL.to_owned(),
+            content_ref: saved_data_ref.clone(),
+        }],
+        assets: vec![InstanceSnapshotAssetV1 {
+            alias: "asset-1".to_owned(),
+            content_ref: asset_ref.clone(),
+            filename: "photo.jpg".to_owned(),
+            content_type: "image/jpeg".to_owned(),
+            size: asset.len() as u64,
+        }],
+    };
+    let content = BTreeMap::from([(saved_data_ref, saved_data), (asset_ref, asset)]);
+    let bytes = attach_instance_snapshot(&source, snapshot, &content)
+        .unwrap()
+        .0;
+    fs::write(destination, &bytes).unwrap();
+    bytes
 }
 
 #[test]
@@ -338,4 +383,100 @@ fn imported_local_instance_can_stop_and_restart_without_reimporting() {
         .args(["app", "stop", instance_id])
         .assert()
         .success();
+}
+
+#[test]
+fn snapshot_bundle_imports_into_independent_asset_namespaces_and_reexports() {
+    let root = tempfile::tempdir().unwrap();
+    let capsule = root.path().join("saved.capsule");
+    let original = snapshot_fixture(&capsule);
+
+    let first = ato_with_home(root.path())
+        .args(["app", "import"])
+        .arg(&capsule)
+        .output()
+        .unwrap();
+    assert!(first.status.success());
+    let first: Value = serde_json::from_slice(&first.stdout).unwrap();
+    let second = ato_with_home(root.path())
+        .args(["app", "import"])
+        .arg(&capsule)
+        .output()
+        .unwrap();
+    assert!(second.status.success());
+    let second: Value = serde_json::from_slice(&second.stdout).unwrap();
+
+    let snapshot_digest = first["data_snapshot_ref"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("sha256:")
+        .unwrap();
+    let first_snapshot_path = root
+        .path()
+        .join("instances")
+        .join(first["instance_id"].as_str().unwrap())
+        .join("snapshots")
+        .join(snapshot_digest)
+        .join("snapshot.json");
+    let second_snapshot_path = root
+        .path()
+        .join("instances")
+        .join(second["instance_id"].as_str().unwrap())
+        .join("snapshots")
+        .join(snapshot_digest)
+        .join("snapshot.json");
+    let first_snapshot: Value =
+        serde_json::from_slice(&fs::read(first_snapshot_path).unwrap()).unwrap();
+    let second_snapshot: Value =
+        serde_json::from_slice(&fs::read(second_snapshot_path).unwrap()).unwrap();
+    assert_ne!(first["instance_id"], second["instance_id"]);
+    assert_ne!(
+        first_snapshot["assets"][0]["asset_id"],
+        second_snapshot["assets"][0]["asset_id"]
+    );
+    assert_eq!(
+        first_snapshot["assets"][0]["content_ref"],
+        second_snapshot["assets"][0]["content_ref"]
+    );
+
+    let exported = root.path().join("exported.capsule");
+    ato_with_home(root.path())
+        .args([
+            "app",
+            "export",
+            first["instance_id"].as_str().unwrap(),
+            "--output",
+        ])
+        .arg(&exported)
+        .assert()
+        .success();
+    assert_eq!(fs::read(exported).unwrap(), original);
+}
+
+#[test]
+fn snapshot_bundle_does_not_claim_runtime_restore_before_an_adapter_installs_it() {
+    let root = tempfile::tempdir().unwrap();
+    let capsule = root.path().join("saved.capsule");
+    snapshot_fixture(&capsule);
+    let imported = ato_with_home(root.path())
+        .args(["app", "import"])
+        .arg(&capsule)
+        .output()
+        .unwrap();
+    let instance: Value = serde_json::from_slice(&imported.stdout).unwrap();
+    let instance_id = instance["instance_id"].as_str().unwrap();
+
+    ato_with_home(root.path())
+        .args(["app", "start", instance_id, "--no-open"])
+        .assert()
+        .failure();
+
+    let runs = root.path().join("instances").join(instance_id).join("runs");
+    let log = fs::read_dir(runs)
+        .unwrap()
+        .next()
+        .map(|entry| fs::read_to_string(entry.unwrap().path().join("output.log")).unwrap())
+        .unwrap();
+    assert!(log.contains("instance-snapshot"));
+    assert!(log.contains("did not fully satisfy"));
 }
