@@ -293,6 +293,7 @@ dependencies = [
  "serde_jcs",
  "serde_json",
  "sha2",
+ "signal-hook",
  "tempfile",
  "toml",
  "windows",
