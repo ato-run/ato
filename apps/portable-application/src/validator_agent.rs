@@ -140,6 +140,7 @@ impl ValidatorAgent {
                 .map(|input| (input.id.clone(), input.content_ref.clone()))
                 .collect::<BTreeMap<_, _>>(),
             http: Vec::new(),
+            instance_snapshot_ref: None,
         };
         for requirement in &validated.contract.requirements {
             if requirement.verifier != HTTP_CONTRACT_VERIFIER {

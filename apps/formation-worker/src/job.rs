@@ -706,5 +706,6 @@ fn observe_candidate(
             .readiness
             .as_ref()
             .map(|readiness| (readiness.port_id.clone(), readiness.path.clone())),
+        instance_snapshot_ref: None,
     }
 }
