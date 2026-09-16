@@ -55,8 +55,9 @@ use ato_portable_application::portability_export::repack_portable_dependencies_w
 use ato_portable_application::portability_plan::{PortableExportProfile, plan_portable_export};
 use ato_portable_application::{
     OCI_CPU_MILLIS_RUNTIME, OCI_IMAGE_RUNTIME, OCI_MEMORY_BYTES_RUNTIME, OCI_PIDS_LIMIT_RUNTIME,
-    OCI_PLATFORM_RUNTIME, PYTHON_RUNTIME, PortableRealizationKind, StaticApplicationServer,
-    ValidatedPortableApplication, bundle_sha256, materialize_tree, validate_bundle_for_derivation,
+    OCI_PLATFORM_RUNTIME, PYTHON_RUNTIME, PortableRealizationKind, StaticApplicationAsset,
+    StaticApplicationServer, StaticApplicationState, ValidatedPortableApplication, bundle_sha256,
+    materialize_tree, validate_bundle_for_derivation,
 };
 use ato_realization_planner::{
     MaterializationCandidate, Placement, PlannerPolicy, RealizationPlanner, TargetEnvironment,
@@ -978,6 +979,31 @@ fn portable_instance_worker_claimed(
     let instance = store.instance(&claimed.instance_id)?;
     let bundle_bytes = store.bundle_bytes(&instance)?;
     let bundle = portable_export_bundle(&bundle_bytes)?;
+    let selected = validate_bundle_for_derivation(&bundle, &instance.selected_derivation_ref)?;
+    let surface_snapshot = store.local_surface_snapshot(&claimed.instance_id)?;
+    if surface_snapshot.is_some() && selected.realization != PortableRealizationKind::StaticWeb {
+        bail!("local Instance snapshot restore currently supports only a static-web Derivation");
+    }
+    let restored_snapshot_ref = surface_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.snapshot_ref.clone());
+    let static_state = surface_snapshot.map(|snapshot| {
+        let persistence_token = bundle_sha256(format!("{}\0local-state", claimed.token).as_bytes());
+        StaticApplicationState {
+            persistence_token,
+            local_storage: snapshot.local_storage,
+            assets: snapshot
+                .assets
+                .into_iter()
+                .map(|asset| StaticApplicationAsset {
+                    asset_id: asset.asset_id,
+                    filename: asset.filename,
+                    content_type: asset.content_type,
+                    bytes: asset.bytes,
+                })
+                .collect(),
+        }
+    });
     let run_root = store.run_root(&claimed.instance_id, &claimed.run_id)?;
     let mut started = start_and_verify_portable_application(
         &bundle_bytes,
@@ -985,6 +1011,8 @@ fn portable_instance_worker_claimed(
         &instance.selected_derivation_ref,
         &run_root,
         shutdown.as_deref(),
+        restored_snapshot_ref.as_deref(),
+        static_state,
     )?;
     if started.receipt.bundle_sha256 != instance.bundle_sha256
         || started.receipt.contract_ref != instance.contract_ref
@@ -1013,7 +1041,15 @@ fn portable_instance_worker_claimed(
     let ack = store.stop_ack_path(&active.instance_id, &active.run_id)?;
     loop {
         if request.exists() {
+            let local_storage = started.runtime.local_storage()?;
             drop(started.runtime);
+            if let Some(local_storage) = local_storage {
+                store.save_browser_state_for_run(
+                    &active.instance_id,
+                    &active.token,
+                    &local_storage,
+                )?;
+            }
             fs::write(&ack, b"ok")?;
             loop {
                 if shutdown
@@ -1375,6 +1411,8 @@ fn run_portable_application(
         &selected_derivation,
         runtime.path(),
         shutdown.as_deref(),
+        None,
+        None,
     )?;
     let runtime = started.runtime;
     let receipt = started.receipt;
@@ -1433,6 +1471,8 @@ fn start_and_verify_portable_application(
     selected_derivation: &str,
     runtime_root: &Path,
     shutdown: Option<&AtomicBool>,
+    restored_snapshot_ref: Option<&str>,
+    static_state: Option<StaticApplicationState>,
 ) -> Result<StartedPortableApplication> {
     let validated = validate_bundle_for_derivation(&bundle, selected_derivation)?;
     fs::create_dir_all(runtime_root)?;
@@ -1442,9 +1482,18 @@ fn start_and_verify_portable_application(
         eprintln!("dependency fetched and verified: {reference}");
     }
     materialize_tree(&hydrated, &validated, &workspace)?;
-    let mut runtime = PortableLocalRuntime::start(&workspace, runtime_root, &validated, &hydrated)?;
+    let mut runtime = PortableLocalRuntime::start(
+        &workspace,
+        runtime_root,
+        &validated,
+        &hydrated,
+        static_state,
+    )?;
 
-    let mut observation = RuntimeObservation::default();
+    let mut observation = RuntimeObservation {
+        instance_snapshot_ref: restored_snapshot_ref.map(str::to_owned),
+        ..RuntimeObservation::default()
+    };
     for input in &validated.derivation.inputs {
         if input.protocol == WORKSPACE_PROTOCOL {
             observation
@@ -1567,10 +1616,12 @@ impl PortableLocalRuntime {
         runtime_root: &std::path::Path,
         route: &ValidatedPortableApplication,
         bundle: &ato_objects::PortableApplicationBundle,
+        static_state: Option<StaticApplicationState>,
     ) -> Result<Self> {
         match route.realization {
             PortableRealizationKind::StaticWeb => {
-                let server = StaticApplicationServer::start(workspace, route)?;
+                let server =
+                    StaticApplicationServer::start_with_state(workspace, route, static_state)?;
                 Ok(Self::Static {
                     base_url: server.base_url(),
                     _server: server,
@@ -1724,6 +1775,13 @@ impl PortableLocalRuntime {
             Self::Static { base_url, .. } => base_url,
             Self::Process { base_url, .. } => base_url,
             Self::Oci { base_url, .. } => base_url,
+        }
+    }
+
+    fn local_storage(&self) -> Result<Option<BTreeMap<String, String>>> {
+        match self {
+            Self::Static { _server, .. } => Ok(_server.local_storage()?),
+            Self::Process { .. } | Self::Oci { .. } => Ok(None),
         }
     }
 

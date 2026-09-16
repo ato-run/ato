@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
 use ato_objects::{
-    CapsuleBundleDocument, PortableDependencyProfile, decode_capsule_bundle_document,
+    CapsuleBundleDocument, PortableApplicationBundle, PortableDependencyProfile,
+    decode_capsule_bundle_document,
 };
 use ato_portable_application::bundle_sha256;
 use ato_portable_application::instance_snapshot::{
@@ -41,6 +42,12 @@ fn snapshot_fixture(destination: &Path) -> Vec<u8> {
         CapsuleBundleDocument::PortableApplicationV3(bundle) => bundle,
         _ => panic!("static fixture must remain portable v3"),
     };
+    let bytes = attach_test_snapshot(source);
+    fs::write(destination, &bytes).unwrap();
+    bytes
+}
+
+fn attach_test_snapshot(source: PortableApplicationBundle) -> Vec<u8> {
     let (_, source) =
         repack_portable_dependencies(&source, PortableDependencyProfile::Cached, &BTreeMap::new())
             .unwrap();
@@ -65,11 +72,9 @@ fn snapshot_fixture(destination: &Path) -> Vec<u8> {
         asset_bindings: vec![],
     };
     let content = BTreeMap::from([(saved_data_ref, saved_data), (asset_ref, asset)]);
-    let bytes = attach_instance_snapshot(&source, snapshot, &content)
+    attach_instance_snapshot(&source, snapshot, &content)
         .unwrap()
-        .0;
-    fs::write(destination, &bytes).unwrap();
-    bytes
+        .0
 }
 
 #[test]
@@ -455,7 +460,7 @@ fn snapshot_bundle_imports_into_independent_asset_namespaces_and_reexports() {
 }
 
 #[test]
-fn snapshot_bundle_does_not_claim_runtime_restore_before_an_adapter_installs_it() {
+fn snapshot_bundle_start_records_the_installed_snapshot_in_its_receipt() {
     let root = tempfile::tempdir().unwrap();
     let capsule = root.path().join("saved.capsule");
     snapshot_fixture(&capsule);
@@ -470,14 +475,77 @@ fn snapshot_bundle_does_not_claim_runtime_restore_before_an_adapter_installs_it(
     ato_with_home(root.path())
         .args(["app", "start", instance_id, "--no-open"])
         .assert()
-        .failure();
+        .success();
 
-    let runs = root.path().join("instances").join(instance_id).join("runs");
+    let instance_root = root.path().join("instances").join(instance_id);
+    let active: Value =
+        serde_json::from_slice(&fs::read(instance_root.join("active-run.json")).unwrap()).unwrap();
+    let receipt: Value = serde_json::from_slice(
+        &fs::read(
+            instance_root
+                .join("runs")
+                .join(active["run_id"].as_str().unwrap())
+                .join(active["receipt_path"].as_str().unwrap()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(receipt["fully_satisfied"], true);
+    assert_eq!(
+        receipt["observations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|observation| observation["id"] == "instance-snapshot")
+            .unwrap()["outcome"],
+        "satisfied"
+    );
+    ato_with_home(root.path())
+        .args(["app", "stop", instance_id])
+        .assert()
+        .success();
+}
+
+#[test]
+fn process_snapshot_start_fails_before_claiming_a_restore() {
+    let root = tempfile::tempdir().unwrap();
+    let capsule = root.path().join("process-saved.capsule");
+    let source = match decode_capsule_bundle_document(&fs::read(multi_fixture()).unwrap()).unwrap()
+    {
+        CapsuleBundleDocument::PortableApplicationV3(bundle) => bundle,
+        _ => panic!("multi-route fixture must remain portable v3"),
+    };
+    fs::write(&capsule, attach_test_snapshot(source)).unwrap();
+    let process_ref = "sha256:5d1ec4660745130f196102c1bd81828993ab75d69130f0fdf2e1e2598fd9f3cc";
+    let imported = ato_with_home(root.path())
+        .args(["app", "import"])
+        .arg(&capsule)
+        .args(["--derivation", process_ref])
+        .output()
+        .unwrap();
+    assert!(imported.status.success());
+    let instance: Value = serde_json::from_slice(&imported.stdout).unwrap();
+
+    ato_with_home(root.path())
+        .args([
+            "app",
+            "start",
+            instance["instance_id"].as_str().unwrap(),
+            "--no-open",
+        ])
+        .assert()
+        .failure();
+    let runs = root
+        .path()
+        .join("instances")
+        .join(instance["instance_id"].as_str().unwrap())
+        .join("runs");
     let log = fs::read_dir(runs)
         .unwrap()
         .next()
         .map(|entry| fs::read_to_string(entry.unwrap().path().join("output.log")).unwrap())
         .unwrap();
-    assert!(log.contains("instance-snapshot"));
-    assert!(log.contains("did not fully satisfy"));
+
+    assert!(log.contains("snapshot restore currently supports only a static-web Derivation"));
 }

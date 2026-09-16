@@ -15,8 +15,9 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::instance_snapshot::{
-    InstanceSnapshotV1, attach_instance_snapshot, rebind_snapshot_resource_assets,
-    validate_snapshot,
+    BROWSER_INSTANCE_STATE_PROTOCOL, InstanceSnapshotV1, attach_instance_snapshot,
+    capture_snapshot_resource_assets, decode_browser_state, encode_browser_state,
+    rebind_snapshot_resource_assets, validate_snapshot,
 };
 use crate::portability_export::repack_portable_dependencies;
 use crate::{bundle_sha256, validate_bundle_for_derivation};
@@ -118,6 +119,21 @@ pub struct LocalRestoredAsset {
     pub content_type: String,
     pub size: u64,
     pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalSurfaceSnapshot {
+    pub snapshot_ref: String,
+    pub local_storage: BTreeMap<String, String>,
+    pub assets: Vec<LocalSurfaceAsset>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalSurfaceAsset {
+    pub asset_id: String,
+    pub filename: String,
+    pub content_type: String,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -313,18 +329,175 @@ impl LocalApplicationStore {
         Ok(Some(restored))
     }
 
+    pub fn local_surface_snapshot(
+        &self,
+        instance_id: &str,
+    ) -> Result<Option<LocalSurfaceSnapshot>, LocalInstanceError> {
+        let instance = self.instance(instance_id)?;
+        let Some(snapshot_ref) = instance.data_snapshot_ref.as_deref() else {
+            return Ok(None);
+        };
+        let restored = self.restored_snapshot(instance_id)?.ok_or_else(|| {
+            LocalInstanceError::InvalidState("restored snapshot is missing".into())
+        })?;
+        let root = self.snapshot_root(instance_id, snapshot_ref)?;
+        let browser_resources = restored
+            .resources
+            .iter()
+            .filter(|resource| resource.protocol == BROWSER_INSTANCE_STATE_PROTOCOL)
+            .collect::<Vec<_>>();
+        if browser_resources.len() > 1 {
+            return Err(LocalInstanceError::InvalidState(
+                "local v0 supports one browser-state resource".to_owned(),
+            ));
+        }
+        let local_storage = match browser_resources.first() {
+            Some(resource) => decode_browser_state(&read(&root.join(&resource.path))?)
+                .map_err(|error| LocalInstanceError::Bundle(error.to_string()))?,
+            None => BTreeMap::new(),
+        };
+        let assets = restored
+            .assets
+            .iter()
+            .map(|asset| {
+                Ok(LocalSurfaceAsset {
+                    asset_id: asset.asset_id.clone(),
+                    filename: asset.filename.clone(),
+                    content_type: asset.content_type.clone(),
+                    bytes: read(&root.join(&asset.path))?,
+                })
+            })
+            .collect::<Result<Vec<_>, LocalInstanceError>>()?;
+        Ok(Some(LocalSurfaceSnapshot {
+            snapshot_ref: snapshot_ref.to_owned(),
+            local_storage,
+            assets,
+        }))
+    }
+
     pub fn save_snapshot(
         &self,
         instance_id: &str,
         snapshot: InstanceSnapshotV1,
         content: &BTreeMap<String, Vec<u8>>,
     ) -> Result<LocalInstanceMetadata, LocalInstanceError> {
-        let mut instance = self.instance(instance_id)?;
-        if self.active_run(instance_id)?.is_some() {
-            return Err(LocalInstanceError::SnapshotRequiresStopped {
-                instance_id: instance_id.to_owned(),
-            });
+        self.persist_snapshot(instance_id, snapshot, content, None)
+    }
+
+    pub fn save_browser_state_for_run(
+        &self,
+        instance_id: &str,
+        run_token: &str,
+        local_storage: &BTreeMap<String, String>,
+    ) -> Result<Option<LocalInstanceMetadata>, LocalInstanceError> {
+        self.ensure_snapshot_write_fence(instance_id, Some(run_token))?;
+        let instance = self.instance(instance_id)?;
+        let Some(snapshot_ref) = instance.data_snapshot_ref.as_deref() else {
+            return Ok(None);
+        };
+        let source_bytes = self.bundle_bytes(&instance)?;
+        let source = portable_bundle(&source_bytes)?;
+        let snapshot_reference = ContentRef::parse(snapshot_ref.to_owned())
+            .map_err(|error| LocalInstanceError::InvalidState(error.to_string()))?;
+        let snapshot_bytes = source
+            .payload_bytes(&snapshot_reference)
+            .map_err(|error| LocalInstanceError::Bundle(error.to_string()))?;
+        let source_snapshot: InstanceSnapshotV1 = serde_json::from_slice(&snapshot_bytes)?;
+        validate_snapshot(&source_snapshot)
+            .map_err(|error| LocalInstanceError::Bundle(error.to_string()))?;
+        if !source_snapshot
+            .resources
+            .iter()
+            .any(|resource| resource.protocol == BROWSER_INSTANCE_STATE_PROTOCOL)
+        {
+            return Ok(None);
         }
+        let restored = self.restored_snapshot(instance_id)?.ok_or_else(|| {
+            LocalInstanceError::InvalidState("restored snapshot is missing".into())
+        })?;
+        let root = self.snapshot_root(instance_id, snapshot_ref)?;
+        let asset_uris = restored
+            .assets
+            .iter()
+            .map(|asset| {
+                (
+                    asset.alias.clone(),
+                    format!("ato-asset://{}", asset.asset_id),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let browser_bytes = encode_browser_state(local_storage)
+            .map_err(|error| LocalInstanceError::Bundle(error.to_string()))?;
+        let mut content = BTreeMap::new();
+        let mut resources = Vec::with_capacity(source_snapshot.resources.len());
+        for resource in &source_snapshot.resources {
+            let restored_resource = restored
+                .resources
+                .iter()
+                .find(|candidate| candidate.slot == resource.slot)
+                .ok_or_else(|| {
+                    LocalInstanceError::InvalidState(format!(
+                        "restored resource `{}` is missing",
+                        resource.slot
+                    ))
+                })?;
+            let local_bytes = if resource.protocol == BROWSER_INSTANCE_STATE_PROTOCOL {
+                browser_bytes.clone()
+            } else {
+                read(&root.join(&restored_resource.path))?
+            };
+            let portable_bytes = capture_snapshot_resource_assets(
+                &source_snapshot,
+                resource,
+                &local_bytes,
+                &asset_uris,
+            )
+            .map_err(|error| LocalInstanceError::Bundle(error.to_string()))?;
+            let content_ref = bundle_sha256(&portable_bytes);
+            let mut resource = resource.clone();
+            resource.content_ref = content_ref.clone();
+            resources.push(resource);
+            content.insert(content_ref, portable_bytes);
+        }
+        for asset in &source_snapshot.assets {
+            let restored_asset = restored
+                .assets
+                .iter()
+                .find(|candidate| candidate.alias == asset.alias)
+                .ok_or_else(|| {
+                    LocalInstanceError::InvalidState(format!(
+                        "restored Asset `{}` is missing",
+                        asset.alias
+                    ))
+                })?;
+            let bytes = read(&root.join(&restored_asset.path))?;
+            if bundle_sha256(&bytes) != asset.content_ref || bytes.len() as u64 != asset.size {
+                return Err(LocalInstanceError::InvalidState(format!(
+                    "restored Asset `{}` changed during the Run",
+                    asset.alias
+                )));
+            }
+            content.insert(asset.content_ref.clone(), bytes);
+        }
+        let snapshot = InstanceSnapshotV1 {
+            schema: source_snapshot.schema,
+            resources,
+            assets: source_snapshot.assets,
+            asset_bindings: source_snapshot.asset_bindings,
+        };
+        self.persist_snapshot(instance_id, snapshot, &content, Some(run_token))
+            .map(Some)
+    }
+
+    fn persist_snapshot(
+        &self,
+        instance_id: &str,
+        snapshot: InstanceSnapshotV1,
+        content: &BTreeMap<String, Vec<u8>>,
+        run_token: Option<&str>,
+    ) -> Result<LocalInstanceMetadata, LocalInstanceError> {
+        self.ensure_snapshot_write_fence(instance_id, run_token)?;
+        let mut instance = self.instance(instance_id)?;
         let source_bytes = self.bundle_bytes(&instance)?;
         let source = portable_bundle(&source_bytes)?;
         let source = if source.index.version == PORTABLE_APPLICATION_BUNDLE_VERSION {
@@ -367,11 +540,27 @@ impl LocalApplicationStore {
         instance.contract_ref = saved.index.root_contract_ref;
         instance.available_derivation_refs = saved.index.derivations;
         instance.data_snapshot_ref = Some(snapshot_ref);
+        self.ensure_snapshot_write_fence(instance_id, run_token)?;
         replace_canonical(
             &self.instance_root(instance_id)?.join("instance.json"),
             &instance,
         )?;
         Ok(instance)
+    }
+
+    fn ensure_snapshot_write_fence(
+        &self,
+        instance_id: &str,
+        run_token: Option<&str>,
+    ) -> Result<(), LocalInstanceError> {
+        match (run_token, self.active_run(instance_id)?) {
+            (None, None) => Ok(()),
+            (None, Some(_)) => Err(LocalInstanceError::SnapshotRequiresStopped {
+                instance_id: instance_id.to_owned(),
+            }),
+            (Some(expected), Some(active)) if active.token == expected => Ok(()),
+            (Some(_), _) => Err(LocalInstanceError::RunLeaseChanged(instance_id.to_owned())),
+        }
     }
 
     pub fn export_instance(&self, instance_id: &str) -> Result<Vec<u8>, LocalInstanceError> {
@@ -621,8 +810,18 @@ fn local_asset_id(instance_id: &str, alias: &str) -> String {
     digest.update(instance_id.as_bytes());
     digest.update([0]);
     digest.update(alias.as_bytes());
-    let digest = format!("{:x}", digest.finalize());
-    format!("ast_{}", &digest[..32])
+    let digest = digest.finalize();
+    let mut value = u128::from_be_bytes(digest[..16].try_into().expect("fixed SHA-256 prefix"));
+    const CROCKFORD_BASE32: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    let mut encoded = [b'0'; 26];
+    for character in encoded.iter_mut().rev() {
+        *character = CROCKFORD_BASE32[(value & 31) as usize];
+        value >>= 5;
+    }
+    format!(
+        "ast_{}",
+        std::str::from_utf8(&encoded).expect("Crockford alphabet is UTF-8")
+    )
 }
 
 fn read_restored_snapshot(root: &Path) -> Result<LocalRestoredSnapshot, LocalInstanceError> {
@@ -741,7 +940,7 @@ fn validate_id(value: &str) -> Result<(), LocalInstanceError> {
     if value.is_empty()
         || !value
             .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
     {
         return Err(LocalInstanceError::InvalidIdentifier(value.to_owned()));
     }
@@ -909,6 +1108,49 @@ mod tests {
         )
     }
 
+    fn browser_snapshot_fixture() -> (InstanceSnapshotV1, BTreeMap<String, Vec<u8>>) {
+        let asset = b"portable-photo-bytes".to_vec();
+        let asset_ref = bundle_sha256(&asset);
+        let state_value = serde_jcs::to_string(&serde_json::json!({
+            "photo": "ato-asset-alias://asset-1",
+            "todos": ["one", "two"]
+        }))
+        .unwrap();
+        let browser_state = encode_browser_state(&BTreeMap::from([(
+            "portable-todo-v1".to_owned(),
+            state_value,
+        )]))
+        .unwrap();
+        let browser_state_ref = bundle_sha256(&browser_state);
+        (
+            InstanceSnapshotV1 {
+                schema: INSTANCE_SNAPSHOT_SCHEMA.to_owned(),
+                resources: vec![InstanceSnapshotResourceV1 {
+                    slot: "main".to_owned(),
+                    protocol: BROWSER_INSTANCE_STATE_PROTOCOL.to_owned(),
+                    content_ref: browser_state_ref.clone(),
+                }],
+                assets: vec![InstanceSnapshotAssetV1 {
+                    alias: "asset-1".to_owned(),
+                    content_ref: asset_ref.clone(),
+                    filename: "photo.jpg".to_owned(),
+                    content_type: "image/jpeg".to_owned(),
+                    size: asset.len() as u64,
+                }],
+                asset_bindings: vec![InstanceSnapshotAssetBindingV1 {
+                    alias: "asset-1".to_owned(),
+                    resource_slot: "main".to_owned(),
+                    location: InstanceSnapshotAssetLocationV1::BrowserLocalStorage {
+                        key: "portable-todo-v1".to_owned(),
+                        pointer: "/photo".to_owned(),
+                        json_encoded: true,
+                    },
+                }],
+            },
+            BTreeMap::from([(browser_state_ref, browser_state), (asset_ref, asset)]),
+        )
+    }
+
     fn bundle_with_snapshot() -> (Vec<u8>, PortableApplicationBundle) {
         let (_, source) = build_static_bundle(&fixture_root(), "fixture").unwrap();
         let (_, source) = repack_portable_dependencies(
@@ -918,6 +1160,18 @@ mod tests {
         )
         .unwrap();
         let (snapshot, content) = snapshot_fixture();
+        attach_instance_snapshot(&source, snapshot, &content).unwrap()
+    }
+
+    fn bundle_with_browser_snapshot() -> (Vec<u8>, PortableApplicationBundle) {
+        let (_, source) = build_static_bundle(&fixture_root(), "fixture").unwrap();
+        let (_, source) = repack_portable_dependencies(
+            &source,
+            PortableDependencyProfile::Cached,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let (snapshot, content) = browser_snapshot_fixture();
         attach_instance_snapshot(&source, snapshot, &content).unwrap()
     }
 
@@ -1066,6 +1320,119 @@ mod tests {
                     second_snapshot.assets[0].asset_id
                 ))
         );
+    }
+
+    #[test]
+    fn browser_snapshot_exposes_rebound_state_and_asset_bytes_to_the_local_surface() {
+        let root = tempfile::tempdir().unwrap();
+        let (bytes, _) = bundle_with_browser_snapshot();
+        let store = LocalApplicationStore::open(root.path()).unwrap();
+        let instance = store.import(&bytes, None).unwrap();
+
+        let surface = store
+            .local_surface_snapshot(&instance.instance_id)
+            .unwrap()
+            .unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(surface.local_storage.get("portable-todo-v1").unwrap()).unwrap();
+
+        assert_eq!(surface.assets[0].bytes, b"portable-photo-bytes");
+        assert_eq!(surface.assets[0].asset_id.len(), 30);
+        assert_eq!(
+            value["photo"],
+            format!("ato-asset://{}", surface.assets[0].asset_id)
+        );
+    }
+
+    #[test]
+    fn run_state_save_mints_new_k_without_changing_d_and_reimports_independently() {
+        let root = tempfile::tempdir().unwrap();
+        let (bytes, original) = bundle_with_browser_snapshot();
+        let original_derivations = original.index.derivations;
+        let store = LocalApplicationStore::open(root.path()).unwrap();
+        let imported = store.import(&bytes, None).unwrap();
+        let original_surface = store
+            .local_surface_snapshot(&imported.instance_id)
+            .unwrap()
+            .unwrap();
+        let run = store.claim_run(&imported.instance_id).unwrap();
+        let mut local_storage = original_surface.local_storage.clone();
+        let mut state: serde_json::Value =
+            serde_json::from_str(local_storage.get("portable-todo-v1").unwrap()).unwrap();
+        state["todos"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::Value::String("three".to_owned()));
+        local_storage.insert(
+            "portable-todo-v1".to_owned(),
+            serde_jcs::to_string(&state).unwrap(),
+        );
+
+        let saved = store
+            .save_browser_state_for_run(&imported.instance_id, &run.token, &local_storage)
+            .unwrap()
+            .unwrap();
+        store
+            .release_run(&imported.instance_id, &run.token)
+            .unwrap();
+        let exported = store.export_instance(&imported.instance_id).unwrap();
+        let (exported_bundle, routes) = validate_bytes_all(&exported).unwrap();
+        let reimported = store.import(&exported, None).unwrap();
+        let reimported_surface = store
+            .local_surface_snapshot(&reimported.instance_id)
+            .unwrap()
+            .unwrap();
+        let reimported_state: serde_json::Value = serde_json::from_str(
+            reimported_surface
+                .local_storage
+                .get("portable-todo-v1")
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_ne!(saved.contract_ref, imported.contract_ref);
+        assert_eq!(saved.available_derivation_refs, original_derivations);
+        assert_eq!(exported_bundle.index.root_contract_ref, saved.contract_ref);
+        assert!(routes.iter().all(|route| {
+            route.contract_ref.to_string() == saved.contract_ref
+                && route.derivation_ref.to_string() == saved.selected_derivation_ref
+        }));
+        assert_ne!(reimported.instance_id, imported.instance_id);
+        assert_ne!(
+            reimported_surface.assets[0].asset_id,
+            original_surface.assets[0].asset_id
+        );
+        assert_eq!(
+            reimported_surface.assets[0].content_type,
+            original_surface.assets[0].content_type
+        );
+        assert_eq!(reimported_state["todos"][2], "three");
+    }
+
+    #[test]
+    fn browser_state_save_rejects_a_stale_run_token() {
+        let root = tempfile::tempdir().unwrap();
+        let (bytes, _) = bundle_with_browser_snapshot();
+        let store = LocalApplicationStore::open(root.path()).unwrap();
+        let instance = store.import(&bytes, None).unwrap();
+        let surface = store
+            .local_surface_snapshot(&instance.instance_id)
+            .unwrap()
+            .unwrap();
+        let run = store.claim_run(&instance.instance_id).unwrap();
+
+        let error = store
+            .save_browser_state_for_run(
+                &instance.instance_id,
+                "stale-token",
+                &surface.local_storage,
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, LocalInstanceError::RunLeaseChanged(_)));
+        store
+            .release_run(&instance.instance_id, &run.token)
+            .unwrap();
     }
 
     #[test]
