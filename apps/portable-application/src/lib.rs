@@ -20,8 +20,9 @@ use ato_formation::authoring::{
     AuthoringDraft, AuthoringProvenance, BOUND_CONTRACT_SCHEMA, BOUND_DERIVATION_SCHEMA,
     BROWSER_PROTOCOL, BindingContext, BoundContract, BoundDerivation, BoundInput, BoundPort,
     BoundRequirement, BoundStep, DerivationDraft, EffectClass, HTTP_CONTRACT_VERIFIER,
-    HTTP_PROTOCOL, INSTANCE_SNAPSHOT_CONTRACT_VERIFIER, PROCESS_PROTOCOL, PortDraft, StepDraft,
-    WORKSPACE_CONTRACT_VERIFIER, WORKSPACE_PROTOCOL, bind,
+    HTTP_PROTOCOL, INSTANCE_SNAPSHOT_CONTRACT_VERIFIER, PROCESS_PROTOCOL, PortDraft,
+    STATE_FILESYSTEM_PROTOCOL, StateAccess, StepDraft, WORKSPACE_CONTRACT_VERIFIER,
+    WORKSPACE_PROTOCOL, bind,
 };
 use ato_formation::capsule_toml::{CAPSULE_FILE_NAME, parse_capsule_toml};
 use ato_materializer_static_web::{media_type_for, validate_relative_path};
@@ -1064,13 +1065,13 @@ fn validate_initial_route(
             "the initial profile requires one surface, input, serving step, and port",
         ));
     }
-    if !derivation.state.is_empty()
+    if derivation.state.len() > 1
         || derivation.workspace_build.is_some()
         || derivation.workspace_compiler.is_some()
         || derivation.effects != EffectClass::Pure
     {
         return Err(profile(
-            "the initial profile forbids state, builds, and non-pure effects",
+            "the initial profile permits at most one state and forbids builds and non-pure effects",
         ));
     }
     let input = &derivation.inputs[0];
@@ -1205,6 +1206,24 @@ fn validate_initial_route(
         }
     };
 
+    if let Some(state) = derivation.state.first() {
+        if realization == PortableRealizationKind::StaticWeb {
+            return Err(profile(
+                "static-web derivations cannot declare filesystem state",
+            ));
+        }
+        if state.protocol != STATE_FILESYSTEM_PROTOCOL
+            || state.access != StateAccess::ReadWrite
+            || !valid_state_key(&state.id)
+            || !valid_guest_mount(&state.mount)
+            || state.mount == "/app"
+        {
+            return Err(profile(
+                "portable filesystem state must be one read-write ato.state.filesystem@1 slot at an absolute guest path other than /app",
+            ));
+        }
+    }
+
     let requirement_ids = contract
         .requirements
         .iter()
@@ -1272,6 +1291,23 @@ fn validate_initial_route(
         }
     }
     Ok(realization)
+}
+
+fn valid_guest_mount(target: &str) -> bool {
+    target.starts_with('/')
+        && target != "/"
+        && !target.contains(['\0', '\\'])
+        && target
+            .split('/')
+            .skip(1)
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+}
+
+fn valid_state_key(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    matches!(bytes.next(), Some(b'a'..=b'z'))
+        && value.len() <= 64
+        && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 fn validate_dynamic_surface(
@@ -2853,6 +2889,60 @@ mod tests {
         assert!(routes[0].contract.requirements.iter().any(|requirement| {
             requirement.path.as_deref() == Some("/catalog/items.json?_shape=array&_sort=id")
         }));
+    }
+
+    #[test]
+    fn dynamic_routes_accept_one_declared_writable_filesystem_state() {
+        let (_, mut bundle) =
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &datasette_spec()).unwrap();
+        let process_ref = route_ref(&bundle, PortableRealizationKind::LocalProcess);
+        let stateful_ref = replace_derivation(&mut bundle, &process_ref, |derivation| {
+            derivation.state.push(ato_formation::authoring::BoundState {
+                id: "data".to_owned(),
+                protocol: STATE_FILESYSTEM_PROTOCOL.to_owned(),
+                mount: "/data".to_owned(),
+                access: StateAccess::ReadWrite,
+            });
+        });
+        let route = validate_bundle_for_derivation(&bundle, &stateful_ref).unwrap();
+        assert_eq!(route.derivation.state.len(), 1);
+        assert_eq!(route.derivation.state[0].mount, "/data");
+
+        let invalid_ref = replace_derivation(&mut bundle, &stateful_ref, |derivation| {
+            derivation.state[0].mount = "/app".to_owned();
+        });
+        assert!(validate_bundle_for_derivation(&bundle, &invalid_ref).is_err());
+    }
+
+    #[test]
+    fn dynamic_routes_reject_multiple_or_read_only_filesystem_states() {
+        let (_, original) =
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &datasette_spec()).unwrap();
+        let process_ref = route_ref(&original, PortableRealizationKind::LocalProcess);
+
+        let mut read_only = original.clone();
+        let read_only_ref = replace_derivation(&mut read_only, &process_ref, |derivation| {
+            derivation.state.push(ato_formation::authoring::BoundState {
+                id: "data".to_owned(),
+                protocol: STATE_FILESYSTEM_PROTOCOL.to_owned(),
+                mount: "/data".to_owned(),
+                access: StateAccess::ReadOnly,
+            });
+        });
+        assert!(validate_bundle_for_derivation(&read_only, &read_only_ref).is_err());
+
+        let mut multiple = original;
+        let multiple_ref = replace_derivation(&mut multiple, &process_ref, |derivation| {
+            for (id, mount) in [("data", "/data"), ("cache", "/cache")] {
+                derivation.state.push(ato_formation::authoring::BoundState {
+                    id: id.to_owned(),
+                    protocol: STATE_FILESYSTEM_PROTOCOL.to_owned(),
+                    mount: mount.to_owned(),
+                    access: StateAccess::ReadWrite,
+                });
+            }
+        });
+        assert!(validate_bundle_for_derivation(&multiple, &multiple_ref).is_err());
     }
 
     #[test]

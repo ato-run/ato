@@ -24,7 +24,9 @@ use ato_adapter_api::AdapterContext;
 use ato_adapter_browser::{
     BROWSER_CLICK_OPERATION, BROWSER_KEYBOARD_OPERATION, BROWSER_PROTOCOL_ID,
 };
-use ato_adapter_oci::{DockerOciAdapter, OciEndpoint, OciHandle, OciResourceLimits, OciSpec};
+use ato_adapter_oci::{
+    DockerOciAdapter, OciEndpoint, OciHandle, OciMount, OciResourceLimits, OciSpec,
+};
 use ato_adapter_process::{ProcessAdapter, ProcessHandle, ProcessSpec};
 use ato_adapter_workspace::restore_workspace;
 use ato_computation::{ComputationRef, ContentRef};
@@ -1628,6 +1630,11 @@ impl PortableLocalRuntime {
                 })
             }
             PortableRealizationKind::LocalProcess => {
+                if !route.derivation.state.is_empty() {
+                    bail!(
+                        "local process runtime admission failed: declared filesystem state requires a mount-capable process sandbox"
+                    );
+                }
                 let step = &route.derivation.steps[0];
                 let guest_port = route.derivation.ports[0]
                     .guest_port
@@ -1719,6 +1726,24 @@ impl PortableLocalRuntime {
                 let host_port = listener.local_addr()?.port();
                 drop(listener);
                 let runtime = &route.derivation.runtimes;
+                let mut environment = step.env.clone();
+                let mounts = route
+                    .derivation
+                    .state
+                    .iter()
+                    .map(|state| {
+                        let host_path = runtime_root.join("state").join(&state.id);
+                        fs::create_dir_all(&host_path).with_context(|| {
+                            format!("create portable OCI state {}", host_path.display())
+                        })?;
+                        environment.insert(state_path_env_name(&state.id), state.mount.clone());
+                        Ok(OciMount {
+                            host_path,
+                            guest_path: state.mount.clone(),
+                            writable: true,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
                 let spec = OciSpec {
                     id: route.derivation_ref.to_string(),
                     image: runtime
@@ -1731,11 +1756,12 @@ impl PortableLocalRuntime {
                         .clone(),
                     argv: step.argv.clone(),
                     working_dir: "/app".to_owned(),
-                    environment: step.env.clone(),
+                    environment,
                     endpoints: vec![OciEndpoint {
                         host_port,
                         guest_port,
                     }],
+                    mounts,
                     limits: OciResourceLimits {
                         memory_bytes: parse_runtime_limit(runtime, OCI_MEMORY_BYTES_RUNTIME)?,
                         cpu_limit_millis: parse_runtime_limit(runtime, OCI_CPU_MILLIS_RUNTIME)?,
@@ -2027,6 +2053,20 @@ fn endpoint_port_env_name(port_id: &str) -> String {
     format!(
         "ATO_ENDPOINT_{}_PORT",
         port_id
+            .chars()
+            .map(|character| if character.is_ascii_alphanumeric() {
+                character.to_ascii_uppercase()
+            } else {
+                '_'
+            })
+            .collect::<String>()
+    )
+}
+
+fn state_path_env_name(state_id: &str) -> String {
+    format!(
+        "ATO_STATE_PATH_{}",
+        state_id
             .chars()
             .map(|character| if character.is_ascii_alphanumeric() {
                 character.to_ascii_uppercase()

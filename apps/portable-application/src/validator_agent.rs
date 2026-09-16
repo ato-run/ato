@@ -5,7 +5,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use ato_formation::authoring::HTTP_CONTRACT_VERIFIER;
+use ato_formation::authoring::{HTTP_CONTRACT_VERIFIER, StateAccess};
 use ato_formation::verify::{
     ContractVerificationReceipt, RuntimeHttpObservation, RuntimeObservation,
     VerificationExecutionEvidence, VerificationTargetKind, verify_runtime,
@@ -357,6 +357,17 @@ pub struct PortableRouteReport {
     pub env: BTreeMap<String, String>,
     pub port: String,
     pub guest_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<PortableStateReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortableStateReport {
+    pub state_key: String,
+    pub protocol: String,
+    pub mount_target: String,
+    pub access: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -621,6 +632,19 @@ fn validated_routes(
                 env: step.env.clone(),
                 port: port.id.clone(),
                 guest_port: port.guest_port,
+                state: route
+                    .derivation
+                    .state
+                    .first()
+                    .map(|state| PortableStateReport {
+                        state_key: state.id.clone(),
+                        protocol: state.protocol.clone(),
+                        mount_target: state.mount.clone(),
+                        access: match state.access {
+                            StateAccess::ReadOnly => "read_only",
+                            StateAccess::ReadWrite => "read_write",
+                        },
+                    }),
             })
         })
         .collect()
@@ -1179,13 +1203,41 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::build_static_bundle;
     use crate::instance_snapshot::{
         DATA_JSON_PROTOCOL, INSTANCE_SNAPSHOT_SCHEMA, InstanceSnapshotAssetV1,
         InstanceSnapshotResourceV1, attach_instance_snapshot,
     };
     use crate::portability_export::repack_portable_dependencies;
+    use crate::{PortableRealizationKind, build_multi_derivation_bundle, build_static_bundle};
     use ato_objects::PortableDependencyProfile;
+
+    #[test]
+    fn route_report_carries_validated_filesystem_state_without_host_paths() {
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/interop-multi-derivation");
+        let (_, bundle) = build_multi_derivation_bundle(&source, "State report").unwrap();
+        let mut route =
+            validate_bytes_all(&ato_objects::encode_portable_application_bundle(&bundle).unwrap())
+                .unwrap()
+                .1
+                .into_iter()
+                .find(|route| route.realization == PortableRealizationKind::LocalProcess)
+                .unwrap();
+        route
+            .derivation
+            .state
+            .push(ato_formation::authoring::BoundState {
+                id: "data".to_owned(),
+                protocol: ato_formation::authoring::STATE_FILESYSTEM_PROTOCOL.to_owned(),
+                mount: "/data".to_owned(),
+                access: StateAccess::ReadWrite,
+            });
+        let report = validated_routes(&[route]).unwrap().remove(0);
+        assert_eq!(report.state.as_ref().unwrap().state_key, "data");
+        assert_eq!(report.state.as_ref().unwrap().mount_target, "/data");
+        assert_eq!(report.state.as_ref().unwrap().access, "read_write");
+        assert!(!serde_json::to_string(&report).unwrap().contains("/.ato/"));
+    }
 
     #[test]
     fn report_contains_portable_identity_and_static_artifact() {

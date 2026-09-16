@@ -35,6 +35,13 @@ pub struct OciResourceLimits {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OciMount {
+    pub host_path: PathBuf,
+    pub guest_path: String,
+    pub writable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OciSpec {
     pub id: String,
     pub image: String,
@@ -43,6 +50,7 @@ pub struct OciSpec {
     pub working_dir: String,
     pub environment: BTreeMap<String, String>,
     pub endpoints: Vec<OciEndpoint>,
+    pub mounts: Vec<OciMount>,
     pub limits: OciResourceLimits,
     pub stop_timeout_seconds: u64,
 }
@@ -594,6 +602,29 @@ fn validate_spec(spec: &OciSpec) -> Result<()> {
             "OCI host Port is declared more than once"
         );
     }
+    let mut guest_mounts = BTreeSet::new();
+    for mount in &spec.mounts {
+        ensure!(
+            mount.host_path.is_dir(),
+            "OCI mount source is not a directory"
+        );
+        ensure!(
+            mount.guest_path.starts_with('/')
+                && mount.guest_path != "/"
+                && mount.guest_path != "/app"
+                && !mount.guest_path.contains(['\0', '\\', ','])
+                && mount
+                    .guest_path
+                    .split('/')
+                    .skip(1)
+                    .all(|segment| !segment.is_empty() && segment != "." && segment != ".."),
+            "OCI mount target is invalid"
+        );
+        ensure!(
+            guest_mounts.insert(mount.guest_path.as_str()),
+            "OCI mount target is declared more than once"
+        );
+    }
     Ok(())
 }
 
@@ -643,6 +674,27 @@ fn docker_run_arguments(
         "--label".to_owned(),
         format!("run.ato.dev/id={}", spec.id),
     ];
+    for mount in &spec.mounts {
+        let source = mount
+            .host_path
+            .canonicalize()
+            .context("canonicalize OCI mount source")?;
+        let source = source
+            .to_str()
+            .context("OCI mount source is not valid UTF-8")?;
+        ensure!(
+            !source.contains([',', '\0']),
+            "OCI mount source cannot be represented safely"
+        );
+        argv.extend([
+            "--mount".to_owned(),
+            format!(
+                "type=bind,src={source},dst={}{}",
+                mount.guest_path,
+                if mount.writable { "" } else { ",readonly" }
+            ),
+        ]);
+    }
     argv.push(image_reference.to_owned());
     argv.extend(spec.argv.iter().cloned());
     Ok(argv)
@@ -725,6 +777,7 @@ mod tests {
                 host_port: 49152,
                 guest_port: 8000,
             }],
+            mounts: vec![],
             limits: OciResourceLimits {
                 memory_bytes: 256 * 1024 * 1024,
                 cpu_limit_millis: 1000,
@@ -858,6 +911,42 @@ mod tests {
         assert!(!rendered.contains("--privileged"));
         assert!(!rendered.contains("--publish"));
         assert_eq!(args[args.len() - 2], "sha256:verified-local-id");
+    }
+
+    #[test]
+    fn run_arguments_mount_declared_state_with_requested_access() {
+        let workspace = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let writable = tempfile::tempdir().unwrap();
+        let read_only = tempfile::tempdir().unwrap();
+        let env_file = runtime.path().join("environment.list");
+        fs::write(&env_file, "").unwrap();
+        let mut value = spec();
+        value.mounts = vec![
+            OciMount {
+                host_path: writable.path().to_path_buf(),
+                guest_path: "/data".to_owned(),
+                writable: true,
+            },
+            OciMount {
+                host_path: read_only.path().to_path_buf(),
+                guest_path: "/seed".to_owned(),
+                writable: false,
+            },
+        ];
+        let rendered = docker_run_arguments(
+            &value,
+            workspace.path(),
+            &env_file,
+            "ato-test",
+            "ato-test-net",
+            "sha256:verified-local-id",
+        )
+        .unwrap()
+        .join(" ");
+        assert!(rendered.contains("dst=/data"));
+        assert!(!rendered.contains("dst=/data,readonly"));
+        assert!(rendered.contains("dst=/seed,readonly"));
     }
 
     #[test]
