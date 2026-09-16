@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Portable Todo</title>
+<style>
+  :root { color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; }
+  body { margin: 0 auto; max-width: 42rem; padding: 2rem 1rem 4rem; }
+  form, .asset-controls { display: flex; gap: .5rem; margin: 1rem 0; }
+  input[type="text"] { flex: 1; min-width: 0; }
+  button, input { font: inherit; }
+  li { margin: .4rem 0; }
+  #photo { display: block; margin-top: 1rem; max-height: 16rem; max-width: 100%; }
+  #status { min-height: 1.5rem; }
+</style>
+<main>
+  <h1>Portable Todo</h1>
+  <form id="todo-form">
+    <input id="todo-text" type="text" autocomplete="off" aria-label="Todo" required>
+    <button type="submit">Add</button>
+  </form>
+  <ul id="todos" aria-label="Todos"></ul>
+
+  <h2>Image</h2>
+  <div class="asset-controls">
+    <input id="photo-file" type="file" accept="image/png,image/jpeg,image/webp">
+    <button id="upload-photo" type="button">Save image</button>
+  </div>
+  <p id="status" role="status"></p>
+  <img id="photo" alt="Saved asset" hidden>
+</main>
+<script type="module">
+const STATE_KEY = 'portable-todo-v1';
+const emptyState = () => ({ todos: [], photo: null });
+
+function loadState() {
+  try {
+    const value = JSON.parse(localStorage.getItem(STATE_KEY) || 'null');
+    if (!value || !Array.isArray(value.todos)) return emptyState();
+    return {
+      todos: value.todos.filter((todo) => typeof todo === 'string'),
+      photo: typeof value.photo === 'string' ? value.photo : null,
+    };
+  } catch {
+    return emptyState();
+  }
+}
+
+let state = loadState();
+const list = document.querySelector('#todos');
+const photo = document.querySelector('#photo');
+const status = document.querySelector('#status');
+
+function assetId(reference) {
+  const match = /^ato-asset:\/\/(ast_[0-9A-HJKMNP-TV-Z]{26})$/.exec(reference || '');
+  return match ? match[1] : null;
+}
+
+function render() {
+  list.replaceChildren(...state.todos.map((todo) => {
+    const item = document.createElement('li');
+    item.textContent = todo;
+    return item;
+  }));
+  const id = assetId(state.photo);
+  if (id) {
+    photo.src = `/__ato/assets/${id}`;
+    photo.hidden = false;
+  } else {
+    photo.removeAttribute('src');
+    photo.hidden = true;
+  }
+}
+
+function saveState() {
+  localStorage.setItem(STATE_KEY, JSON.stringify(state));
+  render();
+}
+
+document.querySelector('#todo-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const input = document.querySelector('#todo-text');
+  const value = input.value.trim();
+  if (!value) return;
+  state.todos.push(value);
+  input.value = '';
+  saveState();
+});
+
+async function sha256(bytes) {
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+  return `sha256:${Array.from(digest, (value) => value.toString(16).padStart(2, '0')).join('')}`;
+}
+
+document.querySelector('#upload-photo').addEventListener('click', async () => {
+  const input = document.querySelector('#photo-file');
+  const file = input.files?.[0];
+  if (!file) {
+    status.textContent = 'Choose an image first.';
+    return;
+  }
+  status.textContent = 'Saving image…';
+  try {
+    const bytes = await file.arrayBuffer();
+    const reservationResponse = await fetch('/__ato/assets/uploads', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        filename: file.name,
+        content_type: file.type || 'application/octet-stream',
+        byte_size: file.size,
+        checksum_sha256: await sha256(bytes),
+      }),
+    });
+    if (!reservationResponse.ok) throw new Error(`reserve ${reservationResponse.status}`);
+    const reservation = await reservationResponse.json();
+    const uploadResponse = await fetch(reservation.upload.url, {
+      method: reservation.upload.method,
+      headers: reservation.upload.headers,
+      body: file,
+    });
+    if (!uploadResponse.ok) throw new Error(`upload ${uploadResponse.status}`);
+    const completionResponse = await fetch(
+      `/__ato/assets/${reservation.asset.asset_id}/complete`,
+      { method: 'POST' },
+    );
+    if (!completionResponse.ok) throw new Error(`complete ${completionResponse.status}`);
+    const completion = await completionResponse.json();
+    state.photo = completion.asset.asset_ref;
+    saveState();
+    status.textContent = 'Image saved.';
+  } catch (error) {
+    status.textContent = `Image failed: ${error instanceof Error ? error.message : String(error)}`;
+  }
+});
+
+render();
+</script>
+</html>
