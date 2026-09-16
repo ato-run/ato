@@ -330,6 +330,7 @@ fn the_same_route_executed_twice_lands_on_the_same_identity() {
         exported_ports: ["app.http".to_owned()].into(),
         statically_served_paths: ["/".to_owned()].into(),
         runtime_readiness: None,
+        instance_snapshot_ref: None,
     };
     for _ in 0..2 {
         let verification = verify(&contract, &candidate);
@@ -385,6 +386,7 @@ fn the_committed_fixture_is_a_contract_and_a_route_this_build_can_run() {
             exported_ports: ["app.http".to_owned()].into(),
             statically_served_paths: Default::default(),
             runtime_readiness: Some((readiness.port_id, readiness.path)),
+            instance_snapshot_ref: None,
         },
     );
     assert!(verification.passed(), "{verification:?}");
@@ -415,6 +417,7 @@ fn a_candidate_that_does_not_satisfy_the_contract_is_not_this_capsule() {
             exported_ports: ["app.http".to_owned()].into(),
             statically_served_paths: ["/".to_owned()].into(),
             runtime_readiness: None,
+            instance_snapshot_ref: None,
         },
     );
     assert!(!verification.passed());

@@ -20,8 +20,8 @@ use ato_formation::authoring::{
     AuthoringDraft, AuthoringProvenance, BOUND_CONTRACT_SCHEMA, BOUND_DERIVATION_SCHEMA,
     BROWSER_PROTOCOL, BindingContext, BoundContract, BoundDerivation, BoundInput, BoundPort,
     BoundRequirement, BoundStep, DerivationDraft, EffectClass, HTTP_CONTRACT_VERIFIER,
-    HTTP_PROTOCOL, PROCESS_PROTOCOL, PortDraft, StepDraft, WORKSPACE_CONTRACT_VERIFIER,
-    WORKSPACE_PROTOCOL, bind,
+    HTTP_PROTOCOL, INSTANCE_SNAPSHOT_CONTRACT_VERIFIER, PROCESS_PROTOCOL, PortDraft, StepDraft,
+    WORKSPACE_CONTRACT_VERIFIER, WORKSPACE_PROTOCOL, bind,
 };
 use ato_formation::capsule_toml::{CAPSULE_FILE_NAME, parse_capsule_toml};
 use ato_materializer_static_web::{media_type_for, validate_relative_path};
@@ -37,11 +37,17 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+pub mod instance_snapshot;
 pub mod local_instance;
 pub mod oci_archive;
 pub mod portability_export;
 pub mod portability_plan;
 pub mod validator_agent;
+
+use instance_snapshot::{
+    INSTANCE_SNAPSHOT_SCHEMA, InstanceSnapshotV1, validate_snapshot,
+    validate_snapshot_resource_bytes,
+};
 
 pub const APPLICATION_SCHEMA: &str = "ato.application/1";
 pub const APPLICATION_V2_SCHEMA: &str = "ato.application/2";
@@ -157,6 +163,7 @@ pub struct ValidatedPortableApplication {
     pub contract_ref: ContentRef,
     pub application_ref: ContentRef,
     pub derivation_ref: ContentRef,
+    pub instance_snapshot_ref: Option<ContentRef>,
     pub contract: BoundContract,
     pub application: ValidatedApplication,
     pub derivation: BoundDerivation,
@@ -372,6 +379,7 @@ fn validate_bundle_closure(
 ) -> Result<(), PortableApplicationError> {
     let registry = portable_reference_registry()?;
     validate_portable_application_closure(bundle, &registry)?;
+    validate_instance_snapshot_binding(bundle)?;
     if let Some(portability) = bundle.portability.as_ref() {
         let mut oci_dependencies = BTreeMap::new();
         for value in &bundle.index.derivations {
@@ -417,6 +425,75 @@ fn validate_bundle_closure(
     Ok(())
 }
 
+fn validate_instance_snapshot_binding(
+    bundle: &PortableApplicationBundle,
+) -> Result<(), PortableApplicationError> {
+    let contract_ref = parse_ref(&bundle.index.root_contract_ref, "root_contract_ref")?;
+    let contract: BoundContract = structured(bundle, &contract_ref, BOUND_CONTRACT_SCHEMA)?;
+    let requirements = contract
+        .requirements
+        .iter()
+        .filter(|requirement| requirement.verifier == INSTANCE_SNAPSHOT_CONTRACT_VERIFIER)
+        .collect::<Vec<_>>();
+    let Some(reference) = bundle.index.instance_snapshot_ref.as_deref() else {
+        if requirements.is_empty() {
+            return Ok(());
+        }
+        return Err(profile(
+            "Contract observes an Instance snapshot but the v4 index names none",
+        ));
+    };
+    if bundle.index.version != ato_objects::PORTABLE_APPLICATION_BUNDLE_VERSION_V4 {
+        return Err(profile("Instance snapshots require portable bundle v4"));
+    }
+    let [requirement] = requirements.as_slice() else {
+        return Err(profile(
+            "snapshot-bearing Contract must contain exactly one Instance snapshot requirement",
+        ));
+    };
+    if requirement.digest.as_deref() != Some(reference)
+        || requirement.id.is_empty()
+        || requirement.port.is_some()
+        || requirement.method.is_some()
+        || requirement.path.is_some()
+        || requirement.status.is_some()
+        || requirement.body_digest.is_some()
+        || requirement.input.is_some()
+    {
+        return Err(profile(
+            "Instance snapshot Contract requirement does not bind the indexed snapshot",
+        ));
+    }
+    let snapshot_ref = parse_ref(reference, "instance_snapshot_ref")?;
+    let snapshot: InstanceSnapshotV1 = structured(bundle, &snapshot_ref, INSTANCE_SNAPSHOT_SCHEMA)?;
+    if snapshot.resources.is_empty() && snapshot.assets.is_empty() {
+        return Err(profile("Instance snapshot is empty"));
+    }
+    validate_snapshot(&snapshot)?;
+    for resource in &snapshot.resources {
+        let reference = parse_ref(&resource.content_ref, "snapshot resource")?;
+        let descriptor = bundle
+            .descriptor(&reference)
+            .ok_or_else(|| profile("snapshot resource is absent from the bundle"))?;
+        if descriptor.kind != PortableBundleObjectKind::Blob {
+            return Err(profile("snapshot resource must be an opaque blob"));
+        }
+        let bytes = bundle.payload_bytes(&reference)?;
+        validate_snapshot_resource_bytes(&resource.protocol, &bytes)?;
+    }
+    for asset in &snapshot.assets {
+        let reference = parse_ref(&asset.content_ref, "snapshot Asset")?;
+        let descriptor = bundle
+            .descriptor(&reference)
+            .ok_or_else(|| profile("snapshot Asset is absent from the bundle"))?;
+        if descriptor.kind != PortableBundleObjectKind::Blob || descriptor.size != asset.size {
+            return Err(profile("snapshot Asset size or object kind is invalid"));
+        }
+        bundle.payload_bytes(&reference)?;
+    }
+    Ok(())
+}
+
 fn validate_selected_derivation(
     bundle: &PortableApplicationBundle,
     selected_derivation_ref: &str,
@@ -424,6 +501,12 @@ fn validate_selected_derivation(
     let contract_ref = parse_ref(&bundle.index.root_contract_ref, "root_contract_ref")?;
     let application_ref = parse_ref(&bundle.index.application_ref, "application_ref")?;
     let derivation_ref = parse_ref(selected_derivation_ref, "derivation")?;
+    let instance_snapshot_ref = bundle
+        .index
+        .instance_snapshot_ref
+        .as_deref()
+        .map(|reference| parse_ref(reference, "instance_snapshot_ref"))
+        .transpose()?;
     let contract: BoundContract = structured(bundle, &contract_ref, BOUND_CONTRACT_SCHEMA)?;
     let application = validated_application(bundle, &application_ref)?;
     let derivation: BoundDerivation = structured(bundle, &derivation_ref, BOUND_DERIVATION_SCHEMA)?;
@@ -477,6 +560,7 @@ fn validate_selected_derivation(
         contract_ref,
         application_ref,
         derivation_ref,
+        instance_snapshot_ref,
         contract,
         application,
         derivation,
@@ -1091,6 +1175,24 @@ fn validate_initial_route(
                     parse_ref(digest, "HTTP body_digest")?;
                 }
             }
+            INSTANCE_SNAPSHOT_CONTRACT_VERIFIER => {
+                let digest = requirement
+                    .digest
+                    .as_deref()
+                    .ok_or_else(|| profile("Instance snapshot requirement omitted its digest"))?;
+                parse_ref(digest, "Instance snapshot digest")?;
+                if requirement.port.is_some()
+                    || requirement.method.is_some()
+                    || requirement.path.is_some()
+                    || requirement.status.is_some()
+                    || requirement.body_digest.is_some()
+                    || requirement.input.is_some()
+                {
+                    return Err(profile(
+                        "Instance snapshot requirement contains unrelated observation fields",
+                    ));
+                }
+            }
             verifier => {
                 return Err(profile(format!(
                     "unsupported required verifier `{verifier}`"
@@ -1338,6 +1440,7 @@ fn portable_reference_registry() -> Result<PortableReferenceRegistry, PortableAp
     registry.register(Arc::new(DerivationReferences))?;
     registry.register(Arc::new(TreeReferences))?;
     registry.register(Arc::new(TreeV2References))?;
+    registry.register(Arc::new(InstanceSnapshotReferences))?;
     Ok(registry)
 }
 
@@ -1349,8 +1452,22 @@ impl PortableReferenceExtractor for ContractReferences {
     }
 
     fn outgoing(&self, bytes: &[u8]) -> Result<Vec<ContentRef>, PortableBundleError> {
-        parse_for_extraction::<BoundContract>(BOUND_CONTRACT_SCHEMA, bytes)?;
-        Ok(Vec::new())
+        let contract = parse_for_extraction::<BoundContract>(BOUND_CONTRACT_SCHEMA, bytes)?;
+        contract
+            .requirements
+            .into_iter()
+            .filter(|requirement| requirement.verifier == INSTANCE_SNAPSHOT_CONTRACT_VERIFIER)
+            .map(|requirement| {
+                let digest =
+                    requirement
+                        .digest
+                        .ok_or_else(|| PortableBundleError::ReferenceExtraction {
+                            schema: BOUND_CONTRACT_SCHEMA.to_owned(),
+                            reason: "Instance snapshot requirement omitted digest".to_owned(),
+                        })?;
+                parse_for_extraction_ref(BOUND_CONTRACT_SCHEMA, &digest)
+            })
+            .collect()
     }
 }
 
@@ -1418,6 +1535,22 @@ impl PortableReferenceExtractor for TreeReferences {
 }
 
 struct TreeV2References;
+
+struct InstanceSnapshotReferences;
+
+impl PortableReferenceExtractor for InstanceSnapshotReferences {
+    fn schema(&self) -> &str {
+        INSTANCE_SNAPSHOT_SCHEMA
+    }
+
+    fn outgoing(&self, bytes: &[u8]) -> Result<Vec<ContentRef>, PortableBundleError> {
+        let snapshot = parse_for_extraction::<InstanceSnapshotV1>(INSTANCE_SNAPSHOT_SCHEMA, bytes)?;
+        validate_snapshot(&snapshot).map_err(|error| PortableBundleError::ReferenceExtraction {
+            schema: INSTANCE_SNAPSHOT_SCHEMA.to_owned(),
+            reason: error.to_string(),
+        })
+    }
+}
 
 impl PortableReferenceExtractor for TreeV2References {
     fn schema(&self) -> &str {
@@ -1531,6 +1664,7 @@ fn finish_bundle(
             profile: PORTABLE_APPLICATION_PROFILE.to_owned(),
             root_contract_ref,
             application_ref,
+            instance_snapshot_ref: None,
             derivations,
             objects: descriptors,
         },
@@ -1916,6 +2050,220 @@ mod tests {
 
     fn fixture_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/interop-static-k")
+    }
+
+    fn cached_static_v4_bundle() -> PortableApplicationBundle {
+        let (_, bundle) = build_static_bundle(&fixture_root(), "Ato portability proof").unwrap();
+        crate::portability_export::repack_portable_dependencies(
+            &bundle,
+            ato_objects::PortableDependencyProfile::Cached,
+            &BTreeMap::new(),
+        )
+        .unwrap()
+        .1
+    }
+
+    fn saved_instance_snapshot() -> (
+        crate::instance_snapshot::InstanceSnapshotV1,
+        BTreeMap<String, Vec<u8>>,
+    ) {
+        let saved_data = br#"{"todos":["one","two"]}"#.to_vec();
+        let asset = b"portable-photo-bytes".to_vec();
+        let saved_data_ref = bundle_sha256(&saved_data);
+        let asset_ref = bundle_sha256(&asset);
+        (
+            crate::instance_snapshot::InstanceSnapshotV1 {
+                schema: crate::instance_snapshot::INSTANCE_SNAPSHOT_SCHEMA.to_owned(),
+                resources: vec![crate::instance_snapshot::InstanceSnapshotResourceV1 {
+                    slot: "main".to_owned(),
+                    protocol: "ato.data.json@1".to_owned(),
+                    content_ref: saved_data_ref.clone(),
+                }],
+                assets: vec![crate::instance_snapshot::InstanceSnapshotAssetV1 {
+                    alias: "asset-1".to_owned(),
+                    content_ref: asset_ref.clone(),
+                    filename: "photo.jpg".to_owned(),
+                    content_type: "image/jpeg".to_owned(),
+                    size: asset.len() as u64,
+                }],
+            },
+            BTreeMap::from([(saved_data_ref, saved_data), (asset_ref, asset)]),
+        )
+    }
+
+    #[test]
+    fn saved_snapshot_changes_k_without_changing_the_derivation() {
+        let source = cached_static_v4_bundle();
+        let original_contract = source.index.root_contract_ref.clone();
+        let original_derivations = source.index.derivations.clone();
+        let (snapshot, content) = saved_instance_snapshot();
+
+        let (bytes, saved) =
+            crate::instance_snapshot::attach_instance_snapshot(&source, snapshot, &content)
+                .unwrap();
+        let (_, validated) = validate_bytes_all(&bytes).unwrap();
+
+        assert_ne!(saved.index.root_contract_ref, original_contract);
+        assert_eq!(saved.index.derivations, original_derivations);
+        assert!(validated.iter().all(|route| {
+            route
+                .instance_snapshot_ref
+                .as_ref()
+                .map(ToString::to_string)
+                == saved.index.instance_snapshot_ref
+        }));
+    }
+
+    #[test]
+    fn saved_snapshot_export_is_deterministic() {
+        let source = cached_static_v4_bundle();
+        let (snapshot, content) = saved_instance_snapshot();
+
+        let first =
+            crate::instance_snapshot::attach_instance_snapshot(&source, snapshot.clone(), &content)
+                .unwrap()
+                .0;
+        let second =
+            crate::instance_snapshot::attach_instance_snapshot(&source, snapshot, &content)
+                .unwrap()
+                .0;
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn replacing_saved_snapshot_mints_new_k_and_prunes_old_state() {
+        let source = cached_static_v4_bundle();
+        let (first_snapshot, first_content) = saved_instance_snapshot();
+        let old_resource_ref = first_snapshot.resources[0].content_ref.clone();
+        let (_, first) = crate::instance_snapshot::attach_instance_snapshot(
+            &source,
+            first_snapshot,
+            &first_content,
+        )
+        .unwrap();
+        let old_snapshot_ref = first.index.instance_snapshot_ref.clone().unwrap();
+
+        let (mut next_snapshot, mut next_content) = saved_instance_snapshot();
+        next_content.remove(&old_resource_ref);
+        let next_saved_data = br#"{"todos":["one","two","three"]}"#.to_vec();
+        let next_saved_data_ref = bundle_sha256(&next_saved_data);
+        next_snapshot.resources[0].content_ref = next_saved_data_ref.clone();
+        next_content.insert(next_saved_data_ref, next_saved_data);
+
+        let (_, next) = crate::instance_snapshot::attach_instance_snapshot(
+            &first,
+            next_snapshot,
+            &next_content,
+        )
+        .unwrap();
+
+        assert_ne!(next.index.root_contract_ref, first.index.root_contract_ref);
+        assert_eq!(next.index.derivations, first.index.derivations);
+        assert!(!next.index.objects.iter().any(|object| {
+            object.reference == old_snapshot_ref || object.reference == old_resource_ref
+        }));
+    }
+
+    #[test]
+    fn saved_snapshot_rejects_missing_declared_content() {
+        let source = cached_static_v4_bundle();
+        let (snapshot, mut content) = saved_instance_snapshot();
+        content.pop_first();
+
+        let error = crate::instance_snapshot::attach_instance_snapshot(&source, snapshot, &content)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("content map must equal"));
+    }
+
+    #[test]
+    fn saved_snapshot_rejects_content_with_the_wrong_digest() {
+        let source = cached_static_v4_bundle();
+        let (snapshot, mut content) = saved_instance_snapshot();
+        let bytes = content.values_mut().next().unwrap();
+        bytes.push(b'!');
+
+        let error = crate::instance_snapshot::attach_instance_snapshot(&source, snapshot, &content)
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("do not match declared reference")
+        );
+    }
+
+    #[test]
+    fn saved_snapshot_rejects_noncanonical_data_json() {
+        let source = cached_static_v4_bundle();
+        let (mut snapshot, mut content) = saved_instance_snapshot();
+        content.remove(&snapshot.resources[0].content_ref);
+        let bytes = br#"{"b":1,"a":2}"#.to_vec();
+        let reference = bundle_sha256(&bytes);
+        snapshot.resources[0].content_ref = reference.clone();
+        content.insert(reference, bytes);
+
+        let error = crate::instance_snapshot::attach_instance_snapshot(&source, snapshot, &content)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("JSON must be canonical"));
+    }
+
+    #[test]
+    fn saved_snapshot_rejects_unsorted_browser_state() {
+        let source = cached_static_v4_bundle();
+        let (mut snapshot, mut content) = saved_instance_snapshot();
+        content.remove(&snapshot.resources[0].content_ref);
+        let bytes =
+            br#"{"local_storage":[{"key":"z","value":"1"},{"key":"a","value":"2"}],"version":1}"#
+                .to_vec();
+        let reference = bundle_sha256(&bytes);
+        snapshot.resources[0].protocol = "ato.browser-instance-state@1".to_owned();
+        snapshot.resources[0].content_ref = reference.clone();
+        content.insert(reference, bytes);
+
+        let error = crate::instance_snapshot::attach_instance_snapshot(&source, snapshot, &content)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("sorted unique keys"));
+    }
+
+    #[test]
+    fn saved_snapshot_requires_v4_transport() {
+        let (_, source) = build_static_bundle(&fixture_root(), "Ato portability proof").unwrap();
+        let (snapshot, content) = saved_instance_snapshot();
+
+        let error = crate::instance_snapshot::attach_instance_snapshot(&source, snapshot, &content)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("require portable bundle v4"));
+    }
+
+    #[test]
+    fn dependency_repack_keeps_saved_snapshot_k_and_derivation() {
+        let source = cached_static_v4_bundle();
+        let (snapshot, content) = saved_instance_snapshot();
+        let (_, saved) =
+            crate::instance_snapshot::attach_instance_snapshot(&source, snapshot, &content)
+                .unwrap();
+
+        let (_, offline) = crate::portability_export::repack_portable_dependencies(
+            &saved,
+            ato_objects::PortableDependencyProfile::Offline,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            offline.index.root_contract_ref,
+            saved.index.root_contract_ref
+        );
+        assert_eq!(offline.index.derivations, saved.index.derivations);
+        assert_eq!(
+            offline.index.instance_snapshot_ref,
+            saved.index.instance_snapshot_ref
+        );
     }
 
     fn multi_fixture_root() -> PathBuf {

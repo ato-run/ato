@@ -39,6 +39,7 @@ ato app import <file.capsule> [--derivation <sha256:...>]
 ato app start <instance-id> [--no-open] [--verification-receipt <path>]
 ato app inspect <instance-id>
 ato app stop <instance-id>
+ato app export <instance-id> [--output <file.capsule>]
 ```
 
 `ato run` keeps its existing ephemeral meaning. Import never starts a Run.
@@ -91,10 +92,15 @@ group before signalling the owned tree. PID alone is never authority. The
 worker drops the Static/Process/OCI runtime and acknowledges cleanup before the
 CLI terminates the supervisor and clears the token-fenced active record.
 
-The current increment preserves immutable inputs only. `data_snapshot_ref` and
-`bindings` exist in Instance metadata as empty values, but capture, filesystem
-state, Assets, secret binding, and `export_instance` are later increments.
-Their absence must not be described as saved-data portability.
+Portable v4 snapshot bundles are materialized into Instance-owned resource and
+Asset namespaces, and `ato app export` writes the bundle currently selected by
+the Instance. Library callers can seal JSON/browser-state resources and Assets
+into a new K while preserving D. The exact object and verification rules are in
+`PORTABLE_INSTANCE_SNAPSHOT.md`.
+
+Browser flush/capture, runtime injection, Hosted restore, filesystem state,
+and secret Binding remain later increments. Local unpacking alone must not be
+described as a successful runtime restore.
 
 ## Testing strategy
 
@@ -110,8 +116,9 @@ Their absence must not be described as saved-data portability.
 
 ## Deferred work
 
-This draft does not define saved-data capture, Asset alias rebinding,
-filesystem state mounts, portable Bindings, User Runner placement, automatic
-planning, Instance deletion, or production deployment. Snapshot-bearing
-export must create the separately specified saved-state Contract; this local
-lifecycle does not silently reuse K after user data changes.
+This draft does not define browser-driven saved-data capture, field-aware Asset
+alias resolution in opaque state, filesystem state mounts, portable Bindings,
+User Runner placement, automatic planning, Instance deletion, or production
+deployment. Snapshot-bearing export creates the separately specified
+saved-state Contract; this local lifecycle never silently reuses K after user
+data changes.

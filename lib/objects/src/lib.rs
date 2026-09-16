@@ -25,7 +25,8 @@ pub use portable_bundle::{
     PortableBundlePayload, PortableDependencyProfile, PortableDependencyTransport,
     PortableExternalObject, PortableOciArchive, PortableReferenceExtractor,
     PortableReferenceRegistry, decode_capsule_bundle_document, decode_portable_application_bundle,
-    encode_portable_application_bundle, validate_portable_application_closure,
+    encode_portable_application_bundle, reachable_portable_application_objects,
+    validate_portable_application_closure,
 };
 pub use repository::{
     ActiveRun, BranchOrigin, CapsuleSelector, Direction, LocalCapsuleRepository, RecordBodyV2,
