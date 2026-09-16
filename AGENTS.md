@@ -66,12 +66,14 @@ Practical consequences:
   order, and success do not enter `ContractRef`; adding, removing, or failing a
   route must not rewrite K. Every runtime must select a declared D explicitly
   when more than one exists, and the receipt must name that selected D.
-- The current multi-route interoperability gate permits exactly one Static Web
-  route and one pinned Python `ato.process@1` route over the same immutable
-  workspace tree. CLI selects the process route; ato.run import selects the
-  static route. Do not add planner/capability inference or a normal-user route
-  selector as part of this gate. Both targets consume the same file bytes and
-  finish with `fully_satisfied = true`.
+- The current interoperability gate admits declared Static Web, pinned Python
+  `ato.process@1`, and pinned OCI routes over immutable workspace trees. The
+  Datasette acceptance uses one Python route and one OCI route for the same K.
+  CLI and the ato.run development import UI select a declared DerivationRef
+  explicitly; neither may infer, replace, or silently fall back to another D.
+  Do not add planner/capability inference or complex runtime controls to the
+  normal-user surface as part of this gate. Every acceptance target consumes
+  the same file bytes and finishes with `fully_satisfied = true`.
 
 ## Repository Structure
 
