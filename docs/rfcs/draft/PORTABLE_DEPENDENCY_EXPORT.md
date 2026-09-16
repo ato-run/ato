@@ -81,6 +81,12 @@ the registry manifest. Docker Engine 29's OCI-layout save archive for the
 Datasette image contains that manifest and all referenced blobs. The exporter
 checks the exact raw manifest hash against D, all config/layer hashes and
 sizes, the platform, and the Docker load manifest before accepting the tar.
+The Runner loads only the declared platform, inspects the loaded local image
+by the verified manifest or config digest, and runs that local ID with
+`--pull=never`. A tagless archive need not create a `repository@digest` alias
+in Docker's image store; the absence of that alias must never trigger a
+registry pull or permit an unrelated local image. The receipt continues to
+name D's pinned registry digest, not the physical local load ID.
 The archive hash itself is not D identity. OCI archive/chunk bytes
 belong to the transport and are bounded; the exporter must not increase the
 hosted upload limit or rely on an untracked side channel to claim acceptance.

@@ -69,6 +69,24 @@ image, so this is **not** image-absent acceptance. Proxy variables alone are
 also not a daemon-wide registry block; the no-network guarantee is still
 untested in an isolated target.
 
+A separate macOS Docker Desktop 29.1.3 (Linux/arm64 daemon) began with no
+Datasette image. It exposed a loader defect: the verified archive loads an
+untagged image ID but does not install the pinned `repository@digest` alias;
+inspecting that alias failed. The OCI Adapter now loads the selected platform,
+validates the local manifest/config image ID and platform, then runs that
+local ID with `--pull=never`. A second image-absent run reached a running
+`linux/amd64` container without a registry pull. It could not reach the
+container's private Docker bridge IP from macOS, so its HTTP observations
+did **not** pass; this is not offline acceptance. Ctrl-C while waiting for
+readiness then returned in under one second, with no receipt, container, or
+per-Run network left. The exact test image was removed afterward; the
+interrupted test's temporary workspace was moved to Trash for recovery.
+
+After this fix, a Linux/amd64 run under a new source build is still needed to
+confirm the local-ID launch path satisfies K. A dedicated image-absent Linux
+Docker store with outbound blocking remains necessary for full acceptance;
+the shared staging daemon's existing image must not be deleted to simulate it.
+
 The v3 Static and Process interop `.capsule` fixtures both passed their CLI
 HTTP observations after the v4 changes. A separate OCI run held open behind
 a loopback Caddy reverse proxy served `/` with status 200 and 1,549 body
