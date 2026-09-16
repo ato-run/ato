@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::thread;
@@ -19,6 +19,7 @@ use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::header::HeaderValue;
 use serde::{Deserialize, Serialize};
 
+use crate::instance_snapshot::{InstanceSnapshotV1, validated_snapshot};
 use crate::{
     PortableRealizationKind, ValidatedPortableApplication, bundle_sha256, validate_bytes_all,
     validate_bytes_for_derivation,
@@ -99,6 +100,16 @@ impl ValidatorAgent {
                     )?;
                 }
             }
+            if let Some((_, snapshot)) = validated_snapshot(&bundle)? {
+                for reference in snapshot_content_refs(&snapshot).collect::<BTreeSet<_>>() {
+                    let reference = ato_computation::ContentRef::parse(reference)?;
+                    self.api.upload_snapshot_blob(
+                        &job,
+                        reference.as_str(),
+                        &bundle.payload_bytes(&reference)?,
+                    )?;
+                }
+            }
             report(&job, &bundle, &validated, bytes.len() as u64)
         })();
         match result {
@@ -140,7 +151,7 @@ impl ValidatorAgent {
                 .map(|input| (input.id.clone(), input.content_ref.clone()))
                 .collect::<BTreeMap<_, _>>(),
             http: Vec::new(),
-            instance_snapshot_ref: None,
+            instance_snapshot_ref: job.instance_snapshot_ref.clone(),
         };
         for requirement in &validated.contract.requirements {
             if requirement.verifier != HTTP_CONTRACT_VERIFIER {
@@ -227,6 +238,8 @@ pub struct PortableBundleVerificationReport {
     pub surface: PortableSurfaceReport,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact: Option<PortableStaticArtifactReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_snapshot: Option<PortableInstanceSnapshotReport>,
     pub routes: Vec<PortableRouteReport>,
     pub workspace: PortableWorkspaceReport,
     pub object_count: usize,
@@ -288,6 +301,33 @@ pub struct PortableStaticFileReport {
     pub digest: String,
     pub size: u64,
     pub media_type: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortableInstanceSnapshotReport {
+    pub snapshot_ref: String,
+    pub resources: Vec<PortableInstanceSnapshotResourceReport>,
+    pub assets: Vec<PortableInstanceSnapshotAssetReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortableInstanceSnapshotResourceReport {
+    pub slot: String,
+    pub protocol: String,
+    pub content_ref: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortableInstanceSnapshotAssetReport {
+    pub alias: String,
+    pub content_ref: String,
+    pub filename: String,
+    pub content_type: String,
+    pub size: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -371,6 +411,7 @@ fn report(
     };
     let workspace_bytes = pack_workspace(bundle, validated)?;
     let routes = validated_routes(all_routes)?;
+    let instance_snapshot = snapshot_report(bundle)?;
     Ok(PortableBundleVerificationReport {
         format_version: bundle.index.version,
         bundle_sha256: job.transport_digest.clone(),
@@ -395,6 +436,7 @@ fn report(
             spa_fallback: surface.spa_fallback,
         },
         artifact,
+        instance_snapshot,
         routes,
         workspace: PortableWorkspaceReport {
             tree_ref: validated.tree_ref.to_string(),
@@ -407,6 +449,59 @@ fn report(
         decoded_size,
         validation: ValidationStatus { status: "valid" },
     })
+}
+
+fn snapshot_content_refs(snapshot: &InstanceSnapshotV1) -> impl Iterator<Item = &str> {
+    snapshot
+        .resources
+        .iter()
+        .map(|resource| resource.content_ref.as_str())
+        .chain(
+            snapshot
+                .assets
+                .iter()
+                .map(|asset| asset.content_ref.as_str()),
+        )
+}
+
+fn snapshot_report(
+    bundle: &ato_objects::PortableApplicationBundle,
+) -> Result<Option<PortableInstanceSnapshotReport>> {
+    let Some((snapshot_ref, snapshot)) = validated_snapshot(bundle)? else {
+        return Ok(None);
+    };
+    let resources = snapshot
+        .resources
+        .into_iter()
+        .map(|resource| {
+            let reference = ato_computation::ContentRef::parse(&resource.content_ref)?;
+            let descriptor = bundle
+                .descriptor(&reference)
+                .context("snapshot resource descriptor missing after validation")?;
+            Ok(PortableInstanceSnapshotResourceReport {
+                slot: resource.slot,
+                protocol: resource.protocol,
+                content_ref: resource.content_ref,
+                size: descriptor.size,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let assets = snapshot
+        .assets
+        .into_iter()
+        .map(|asset| PortableInstanceSnapshotAssetReport {
+            alias: asset.alias,
+            content_ref: asset.content_ref,
+            filename: asset.filename,
+            content_type: asset.content_type,
+            size: asset.size,
+        })
+        .collect();
+    Ok(Some(PortableInstanceSnapshotReport {
+        snapshot_ref,
+        resources,
+        assets,
+    }))
 }
 
 fn validated_routes(
@@ -580,9 +675,23 @@ impl HttpValidatorApi {
     }
 
     fn upload_blob(&self, job: &ValidationJob, digest: &str, bytes: &[u8]) -> Result<()> {
+        self.upload_validation_blob(job, "blobs", digest, bytes)
+    }
+
+    fn upload_snapshot_blob(&self, job: &ValidationJob, digest: &str, bytes: &[u8]) -> Result<()> {
+        self.upload_validation_blob(job, "snapshot-blobs", digest, bytes)
+    }
+
+    fn upload_validation_blob(
+        &self,
+        job: &ValidationJob,
+        lane: &str,
+        digest: &str,
+        bytes: &[u8],
+    ) -> Result<()> {
         let path = format!(
-            "/v1/capsule-bundles/validation-jobs/{}/blobs/{}",
-            job.job_id, digest
+            "/v1/capsule-bundles/validation-jobs/{}/{lane}/{}",
+            job.job_id, digest,
         );
         let response = self
             .claimed(
@@ -735,6 +844,8 @@ struct ValidationJob {
     endpoint: Option<String>,
     #[serde(default)]
     execution_evidence: Option<VerificationExecutionEvidence>,
+    #[serde(default)]
+    instance_snapshot_ref: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -814,6 +925,10 @@ mod tests {
 
     use super::*;
     use crate::build_static_bundle;
+    use crate::instance_snapshot::{
+        DATA_JSON_PROTOCOL, INSTANCE_SNAPSHOT_SCHEMA, InstanceSnapshotAssetV1,
+        InstanceSnapshotResourceV1, attach_instance_snapshot,
+    };
     use crate::portability_export::repack_portable_dependencies;
     use ato_objects::PortableDependencyProfile;
 
@@ -840,6 +955,7 @@ mod tests {
             realization: None,
             endpoint: None,
             execution_evidence: None,
+            instance_snapshot_ref: None,
         };
         let report = report(&job, &bundle, &validated, bytes.len() as u64).unwrap();
         assert_eq!(report.format_version, 3);
@@ -878,11 +994,84 @@ mod tests {
             realization: None,
             endpoint: None,
             execution_evidence: None,
+            instance_snapshot_ref: None,
         };
         let report = report(&job, &bundle, &validated, bytes.len() as u64).unwrap();
         assert_eq!(report.format_version, 4);
         assert_eq!(report.profile, "ato.portable-application/2");
         assert_eq!(report.root_contract_ref, original.index.root_contract_ref);
         assert_eq!(report.derivation_refs, original.index.derivations);
+        assert!(report.instance_snapshot.is_none());
+    }
+
+    #[test]
+    fn v4_report_authenticates_snapshot_content_for_hosted_restore() {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/interop-static-k");
+        let (_, original) = build_static_bundle(&source, "Ato portability proof").unwrap();
+        let (_, original) = repack_portable_dependencies(
+            &original,
+            PortableDependencyProfile::Cached,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let resource = br#"{"todos":["one","two"]}"#.to_vec();
+        let asset = b"portable-photo-bytes".to_vec();
+        let resource_size = resource.len() as u64;
+        let asset_size = asset.len() as u64;
+        let resource_ref = bundle_sha256(&resource);
+        let asset_ref = bundle_sha256(&asset);
+        let snapshot = InstanceSnapshotV1 {
+            schema: INSTANCE_SNAPSHOT_SCHEMA.to_owned(),
+            resources: vec![InstanceSnapshotResourceV1 {
+                slot: "main".to_owned(),
+                protocol: DATA_JSON_PROTOCOL.to_owned(),
+                content_ref: resource_ref.clone(),
+            }],
+            assets: vec![InstanceSnapshotAssetV1 {
+                alias: "asset-1".to_owned(),
+                content_ref: asset_ref.clone(),
+                filename: "photo.jpg".to_owned(),
+                content_type: "image/jpeg".to_owned(),
+                size: asset_size,
+            }],
+        };
+        let (bytes, bundle) = attach_instance_snapshot(
+            &original,
+            snapshot,
+            &BTreeMap::from([(resource_ref.clone(), resource), (asset_ref.clone(), asset)]),
+        )
+        .unwrap();
+        let (_, validated) = validate_bytes_all(&bytes).unwrap();
+        let job = ValidationJob {
+            job_id: "bvj_snapshot".to_owned(),
+            claim_id: "claim".to_owned(),
+            claim_expires_at: "2026-09-17T00:00:00Z".to_owned(),
+            bundle_id: "bnd_01SNAPSHOT".to_owned(),
+            transport_digest: bundle_sha256(&bytes),
+            size_bytes: bytes.len() as u64,
+            claimed_parent_root: None,
+            download_url: "/bundle".to_owned(),
+            observe_url: None,
+            selected_derivation_ref: None,
+            run_id: None,
+            lease_id: None,
+            attempt_id: None,
+            execution_id: None,
+            realization: None,
+            endpoint: None,
+            execution_evidence: None,
+            instance_snapshot_ref: None,
+        };
+
+        let report = report(&job, &bundle, &validated, bytes.len() as u64).unwrap();
+        let restored = report.instance_snapshot.unwrap();
+        assert_eq!(
+            Some(restored.snapshot_ref.as_str()),
+            bundle.index.instance_snapshot_ref.as_deref()
+        );
+        assert_eq!(restored.resources[0].content_ref, resource_ref);
+        assert_eq!(restored.resources[0].size, resource_size);
+        assert_eq!(restored.assets[0].content_ref, asset_ref);
+        assert_eq!(restored.assets[0].size, asset_size);
     }
 }
