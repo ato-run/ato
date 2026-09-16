@@ -20,11 +20,14 @@ acceptance. Production was not changed.
   `e23f5ed24504ca8d953df12b1390c77825a6a785ce00f87c135f694baac3deeb`.
   It embeds the 30 wheel objects but retains the external OCI image. Neither
   export changed ContractRef or either DerivationRef.
-- `offline`: **not produced**. The fixed Docker image's seven compressed layers
-  total 85,165,556 bytes, before config/manifest and Base64. The current
-  32 MiB Hosted upload limit cannot carry this image. More importantly, the
-  v4 exporter does not yet embed and validate the registry manifest/config/
-  layer graph or load it offline. It rejects an OCI offline claim.
+- `offline`: `.tmp/datasette-evidence/datasette-offline.capsule`, 120,583,935
+  bytes, SHA-256
+  `f439923321bfa748af3a8993ab4c7c495f8f0d81ae5f9504c8add92b539591a2`.
+  It embeds the Python wheels and a Docker 29 OCI-layout archive. The archive
+  contains the pinned manifest, config, and seven layer blobs; each digest,
+  declared byte size, and platform was verified before export. The seven
+  compressed layers total 85,165,556 bytes. The current 32 MiB Hosted upload
+  limit cannot carry this file. The CLI OCI loading path needs real acceptance.
 
 The OCI image is
 `docker.io/datasetteproject/datasette@sha256:0f57db16cf4eb6cca57f1cedaa0a696bca1c65a1d75b8f7ee372c2dd909a32a0`
@@ -51,6 +54,13 @@ Running `thin` with the same blocked proxy failed explicitly with
 `dependency unavailable: sha256:03ac140115f39d4295288a9adf74fdc6ae607f6ef44abee8466520458207242b`.
 Unit tests reject embedded wheel tamper/omission, sparse-object omission,
 false offline metadata, and fetched bytes with the wrong size or SHA-256.
+The new archive parser also rejects a modified OCI layer before Docker load.
+
+`ato run <offline> --derivation <Python D> --no-open` satisfied all three
+observations under the same proxy-block condition. Its receipt is
+`.tmp/datasette-evidence/cli-python-offline-blocked-proxy-receipt.json`.
+This has not yet established the OCI route's offline behavior, and proxy
+variables alone are not a full outbound-block evidence source.
 
 Reproduce:
 
@@ -58,6 +68,7 @@ Reproduce:
 cargo run -q -p ato-cli --bin ato -- export-plan samples/datasette-cpu.capsule --portability thin --json
 cargo run -q -p ato-cli --bin ato -- export samples/datasette-cpu.capsule --portability thin --output .tmp/datasette-evidence/datasette-thin.capsule
 cargo run -q -p ato-cli --bin ato -- export samples/datasette-cpu.capsule --portability cached --output .tmp/datasette-evidence/datasette-cached.capsule
+cargo run -q -p ato-cli --bin ato -- export samples/datasette-cpu.capsule --portability offline --oci-archive .tmp/datasette-evidence/datasette-image.tar --output .tmp/datasette-evidence/datasette-offline.capsule
 cargo run -q -p ato-cli --bin ato -- run .tmp/datasette-evidence/datasette-thin.capsule --derivation sha256:94ab606ee88d41da3af332e72d5da151fd0920a3aadc9c8c94aefaa80518b21f --no-open --verification-receipt .tmp/datasette-evidence/cli-python-thin-v2-receipt.json
 ```
 
@@ -82,7 +93,7 @@ No fix, browser acceptance, or OCI receipt for a new Run is claimed.
 Wire v4 is currently CLI-local; Hosted import and Surface paths still accept
 v3. The remaining requirements are: trace a fresh OCI Run through Cloudflare
 to the same logical Surface, open and operate Datasette in an authorized
-browser, implement verified OCI image closure and offline loading, run a real
-outbound-blocked offline acceptance, and rerun all four routes with the exact
-same supported bundle representation. No fallback, upload-limit expansion,
-or production deployment was used to conceal these gaps.
+browser, test the offline OCI loader against an image-absent Docker store,
+run a real outbound-blocked offline acceptance, and rerun all four routes with
+the exact same supported bundle representation. No fallback, upload-limit
+expansion, or production deployment was used to conceal these gaps.

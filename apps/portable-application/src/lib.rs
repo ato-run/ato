@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+pub mod oci_archive;
 pub mod portability_export;
 pub mod portability_plan;
 pub mod validator_agent;
@@ -370,9 +371,8 @@ fn validate_bundle_closure(
 ) -> Result<(), PortableApplicationError> {
     let registry = portable_reference_registry()?;
     validate_portable_application_closure(bundle, &registry)?;
-    if bundle.portability.as_ref().is_some_and(|portability| {
-        portability.profile == ato_objects::PortableDependencyProfile::Offline
-    }) {
+    if let Some(portability) = bundle.portability.as_ref() {
+        let mut oci_dependencies = BTreeMap::new();
         for value in &bundle.index.derivations {
             let reference = parse_ref(value, "derivation")?;
             let derivation: BoundDerivation =
@@ -382,10 +382,35 @@ fn validate_bundle_closure(
                 .iter()
                 .any(|step| step.protocol == OCI_PROTOCOL)
             {
+                let image = derivation
+                    .runtimes
+                    .get(OCI_IMAGE_RUNTIME)
+                    .ok_or_else(|| profile("OCI derivation has no image"))?;
+                let platform = derivation
+                    .runtimes
+                    .get(OCI_PLATFORM_RUNTIME)
+                    .ok_or_else(|| profile("OCI derivation has no platform"))?;
+                oci_dependencies.insert(image.clone(), platform.clone());
+            }
+        }
+        let mut supplied = BTreeSet::new();
+        for archive in &portability.oci_archives {
+            if oci_dependencies.get(&archive.image) != Some(&archive.platform)
+                || !supplied.insert(&archive.image)
+            {
                 return Err(profile(
-                    "offline OCI bundle lacks a verified embedded image manifest/layer graph",
+                    "OCI archive is duplicate or not declared by a Derivation",
                 ));
             }
+            oci_archive::verify_oci_archive(archive)
+                .map_err(|error| profile(format!("OCI archive verification failed: {error:#}")))?;
+        }
+        if portability.profile == ato_objects::PortableDependencyProfile::Offline
+            && supplied.len() != oci_dependencies.len()
+        {
+            return Err(profile(
+                "offline OCI bundle lacks a verified embedded image manifest/layer graph",
+            ));
         }
     }
     Ok(())

@@ -50,9 +50,11 @@ The first v4 exporter handles PyPI wheel payloads. It confirms an exact
 filename plus SHA-256 against the PyPI release metadata and subsequently
 fetches only from the HTTPS PyPI file host, without following redirects.
 `cached` currently embeds all wheel payloads; the v4 decoder and repacker
-also support an explicit mixed set of embedded and external blobs. Neither
-profile currently embeds an OCI image: OCI still needs a registry on a clean
-host. An `offline` export with an OCI D is rejected rather than mislabelled.
+also support an explicit mixed set of embedded and external blobs. Thin and
+cached OCI still need a registry on a clean host. An offline OCI export must
+include an OCI-layout archive whose manifest, config, and every layer match
+the fixed D image digest and declared platform. An absent or invalid archive
+is rejected rather than mislabelled.
 The current Datasette v4 bundles are CLI-local artifacts; API/PWA import of
 wire v4 is not yet an accepted hosted path.
 
@@ -73,10 +75,12 @@ wire v4 is not yet an accepted hosted path.
 
 An OCI offline payload must preserve and verify the registry manifest and
 layer/config blob digests that justify D's pinned image digest and platform.
-A `docker save` tar alone is not sufficient evidence of the original registry
-manifest digest: it may omit that manifest and carries a different archive
-hash. Such a tar may be used as a Docker loading optimization only after the
-semantic OCI content graph is independently verified. OCI archive/chunk bytes
+An arbitrary `docker save` tar is not sufficient evidence: some formats omit
+the registry manifest. Docker Engine 29's OCI-layout save archive for the
+Datasette image contains that manifest and all referenced blobs. The exporter
+checks the exact raw manifest hash against D, all config/layer hashes and
+sizes, the platform, and the Docker load manifest before accepting the tar.
+The archive hash itself is not D identity. OCI archive/chunk bytes
 belong to the transport and are bounded; the exporter must not increase the
 hosted upload limit or rely on an untracked side channel to claim acceptance.
 

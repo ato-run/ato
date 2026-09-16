@@ -68,12 +68,23 @@ pub struct PortableExternalObject {
     pub sources: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortableOciArchive {
+    pub image: String,
+    pub platform: String,
+    /// Bounded Docker/OCI layout tar, verified before Docker sees it.
+    pub bytes: String,
+}
+
 /// Transport/cache information only. This object is not referenced by K or D.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PortableDependencyTransport {
     pub profile: PortableDependencyProfile,
     pub external_objects: Vec<PortableExternalObject>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub oci_archives: Vec<PortableOciArchive>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -363,6 +374,22 @@ fn validate_shape_and_payloads(
                         first.reference.clone(),
                     ));
                 }
+            }
+            let archive_images = portability
+                .oci_archives
+                .iter()
+                .map(|archive| archive.image.as_str())
+                .collect::<Vec<_>>();
+            if portability.oci_archives.len() > 8
+                || !is_strictly_sorted(&archive_images)
+                || portability
+                    .oci_archives
+                    .iter()
+                    .any(|archive| archive.bytes.len() > 180 * 1024 * 1024)
+            {
+                return Err(PortableBundleError::DescriptorMismatch(
+                    "OCI archive transport bounds/order".to_owned(),
+                ));
             }
             portability.external_objects.as_slice()
         }
