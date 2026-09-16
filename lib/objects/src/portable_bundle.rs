@@ -42,6 +42,8 @@ pub struct PortableBundleIndex {
     pub profile: String,
     pub root_contract_ref: String,
     pub application_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_snapshot_ref: Option<String>,
     pub derivations: Vec<String>,
     pub objects: Vec<PortableBundleObjectDescriptor>,
 }
@@ -261,6 +263,25 @@ pub fn validate_portable_application_closure(
     bundle: &PortableApplicationBundle,
     registry: &PortableReferenceRegistry,
 ) -> Result<(), PortableBundleError> {
+    let reachable = reachable_portable_application_objects(bundle, registry)?;
+    for descriptor in &bundle.index.objects {
+        let reference = parse_sha256(&descriptor.reference)?;
+        if !reachable.contains(&reference) {
+            return Err(PortableBundleError::UnreachableObject(reference));
+        }
+    }
+    Ok(())
+}
+
+/// Returns the verified object closure reachable from the bundle roots.
+///
+/// Unlike [`validate_portable_application_closure`], this function permits
+/// extra descriptors. Exporters use the result to discard objects made
+/// unreachable when a root object is intentionally replaced.
+pub fn reachable_portable_application_objects(
+    bundle: &PortableApplicationBundle,
+    registry: &PortableReferenceRegistry,
+) -> Result<BTreeSet<ContentRef>, PortableBundleError> {
     validate_shape_and_payloads(bundle)?;
     let descriptors = bundle
         .index
@@ -279,6 +300,7 @@ pub fn validate_portable_application_closure(
     for value in std::iter::once(&bundle.index.root_contract_ref)
         .chain(std::iter::once(&bundle.index.application_ref))
         .chain(bundle.index.derivations.iter())
+        .chain(bundle.index.instance_snapshot_ref.iter())
     {
         let reference = parse_sha256(value)?;
         if !roots.insert(reference.clone()) {
@@ -319,13 +341,7 @@ pub fn validate_portable_application_closure(
         }
     }
 
-    if let Some(reference) = descriptors
-        .keys()
-        .find(|reference| !reachable.contains(*reference))
-    {
-        return Err(PortableBundleError::UnreachableObject(reference.clone()));
-    }
-    Ok(())
+    Ok(reachable)
 }
 
 impl PortableApplicationBundle {
@@ -351,7 +367,9 @@ fn validate_shape_and_payloads(
 ) -> Result<(), PortableBundleError> {
     let external = match bundle.index.version {
         PORTABLE_APPLICATION_BUNDLE_VERSION => {
-            if bundle.index.profile != PORTABLE_APPLICATION_PROFILE || bundle.portability.is_some()
+            if bundle.index.profile != PORTABLE_APPLICATION_PROFILE
+                || bundle.portability.is_some()
+                || bundle.index.instance_snapshot_ref.is_some()
             {
                 return Err(PortableBundleError::UnsupportedProfile(
                     bundle.index.profile.clone(),
@@ -364,6 +382,9 @@ fn validate_shape_and_payloads(
                 return Err(PortableBundleError::UnsupportedProfile(
                     bundle.index.profile.clone(),
                 ));
+            }
+            if let Some(reference) = &bundle.index.instance_snapshot_ref {
+                parse_sha256(reference)?;
             }
             let portability = bundle.portability.as_ref().ok_or_else(|| {
                 PortableBundleError::DescriptorMismatch("missing portability manifest".to_owned())
@@ -675,6 +696,7 @@ mod tests {
                 profile: PORTABLE_APPLICATION_PROFILE.to_owned(),
                 root_contract_ref: contract,
                 application_ref: application,
+                instance_snapshot_ref: None,
                 derivations: vec![derivation],
                 objects: pairs.iter().map(|pair| pair.0.clone()).collect(),
             },
@@ -724,6 +746,17 @@ mod tests {
         assert!(matches!(
             decode_capsule_bundle_document(&bytes),
             Err(CapsuleBundleDocumentError::PortableV3(_))
+        ));
+    }
+
+    #[test]
+    fn v3_rejects_instance_snapshot_extension_without_profile_upgrade() {
+        let mut bundle = fixture();
+        bundle.index.instance_snapshot_ref = Some(bundle.index.application_ref.clone());
+
+        assert!(matches!(
+            encode_portable_application_bundle(&bundle),
+            Err(PortableBundleError::UnsupportedProfile(_))
         ));
     }
 
