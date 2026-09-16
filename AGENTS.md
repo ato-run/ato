@@ -373,6 +373,9 @@ try {
   fenceし、停止時はPIDだけでなくboot sessionとprocess start timeを照合する。
 - `data_snapshot_ref`やBindingsの空fieldを、Saved Data/Asset/Secretのportability完成と扱わない。
   保存データを含むexportは別のsnapshot Contractを作り、単なるpacking変更と区別する。
+- v4のportable Instance snapshotは保存内容のdigestをKへ結合するが、元/受取先のInstance ID、
+  Asset ID、保存path、grant、signed URLをK/Dへ入れない。bundle validation・local materialization・
+  runtime restore evidenceを分離し、indexにrefがあるだけでrestore成功と報告しない。
 
 ### Semantic classification
 
