@@ -54,6 +54,7 @@ fn main() -> Result<()> {
             cwd: ".".to_owned(),
             env: BTreeMap::new(),
         },
+        filesystem_state: None,
         requirements: vec![
             PortableHttpRequirementSpec {
                 id: "datasette-entry".to_owned(),
