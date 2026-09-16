@@ -40,7 +40,7 @@ cargo test -p ato-objects -p ato-formation -p ato-portable-application \
   -p ato-cli --lib --tests
 
 ato-cli unit                         27 passed
-ato-cli portable integration         8 passed
+ato-cli portable integration        10 passed
 ato-formation unit                  64 passed
 ato-formation integration           66 passed
 ato-objects                         30 passed
@@ -73,6 +73,10 @@ was not suppressed.
 - An active Run cannot seal a new snapshot.
 - Replacing saved data changes K, preserves D, and removes the old unreachable
   snapshot/resource objects.
+- CLI integration imports one snapshot bundle twice, observes distinct local
+  Asset IDs with equal body digests, and re-exports the original bytes.
+- CLI integration confirms a snapshot-bearing Run fails until an Adapter emits
+  exact restore evidence.
 
 ## Not complete
 
