@@ -138,14 +138,64 @@ npm run build
 
 ## Not complete
 
-This is the object/K/local-storage boundary, not the complete saved-data
-roundtrip acceptance.
+The first implementation was the object/K/local-storage boundary rather than
+complete saved-data roundtrip acceptance. The stacked Hosted export checkpoint
+below closes its browser flush, PWA export, and field-aware Asset-alias gaps.
+Filesystem state, general declared bindings, staging deployment, and browser
+roundtrip acceptance remain incomplete.
 
-- No browser-state flush/capture from a live Hosted Instance is connected.
-- No PWA export UI is connected; PWA import and restored-data status are
-  connected.
-- No field-aware `ato-asset://` alias resolution is connected.
-- JSON Data Resources and Assets are restored and rebound, but Applications do
-  not yet have a general declared Port/binding that consumes those aliases.
-- No filesystem state snapshot is included in this increment.
-- No staging deployment or browser roundtrip acceptance was performed.
+## Hosted export implementation checkpoint
+
+The stacked `feat/portable-hosted-export` increment adds the missing live
+Hosted capture and `.capsule` download path. Implementation commits:
+
+- `c5743dff` (`ato`) — Rust-authoritative Hosted repack/snapshot builder,
+  dependency hydration shared with the CLI, exact Asset alias bindings, and
+  validator-agent export jobs;
+- `d0077e7f` (`ato-api`) — migration 0272, capture/job fencing, browser flush
+  control, field-aware Asset rebinding, normal bundle validation, and
+  authenticated download;
+- `5631719` (`ato-pwa`) — separate **Export Ato App…** action with App-only or
+  saved-data inclusion, thin/Standard/offline profiles, progress, cancellation,
+  and verified download.
+
+The PWA flush ACK carries only revision/generation. Its bridge accepts an exact
+parent origin rendered from the app proxy's `frame-ancestors` configuration;
+the intentionally absent referrer is not used. Capture rechecks browser state,
+Data heads, Asset metadata, and each Asset body's SHA-256. Origin Instance,
+Resource, and Asset IDs are excluded from K. JSON/localStorage locations are
+explicit bindings, including a flag that distinguishes a plain string from a
+JSON-encoded root string; no regex replacement of opaque data is used.
+
+An idempotency reservation now has a bounded capture lease, so concurrent
+retries do not write the same temporary object keys and an expired capture can
+be reclaimed. Validator claims remain fenced. The produced output is placed
+into the existing Capsule quarantine and becomes downloadable only after the
+normal Rust validator succeeds. The output-to-validation transition and
+export `validating` state are one D1 batch. Temporary capture objects are
+removed on capture failure and terminal bundle validation.
+
+Local verification passed:
+
+```text
+ato portable unit tests                         42 passed
+ato CLI portable integration                    10 passed
+ato portable/CLI clippy (-D warnings)           passed
+ato-api typecheck                               passed
+ato-api focused export/snapshot/import tests    49 passed
+ato-pwa typecheck                               passed
+ato-pwa focused export tests                     4 passed
+ato-pwa production build                        passed
+```
+
+Negative coverage includes an unbound alias, wrong capture object set/size,
+same-size Asset-body tamper with temporary-object cleanup, stale state fence,
+live/expired capture lease behavior, output digest mismatch, claim expiry,
+idempotency conflict, unresolved Asset binding, and user cancellation.
+
+This remains a local implementation checkpoint. Migration 0272 was not applied
+to staging, no service or PWA was deployed, and no browser export/import
+roundtrip is claimed. Hosted offline export can use an already embedded,
+verified OCI archive but does not synthesize a missing archive from a remote
+registry. Filesystem state, portable Bindings, User Runner placement, and
+authoring integration remain later increments.
