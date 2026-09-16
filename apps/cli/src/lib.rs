@@ -158,6 +158,8 @@ enum AppCommands {
     Stop { instance: String },
     /// Print Instance metadata and its active Run, if any.
     Inspect { instance: String },
+    /// Export the immutable Application and this Instance's saved snapshot.
+    Export(AppExportArgs),
 }
 
 #[derive(Subcommand)]
@@ -226,6 +228,13 @@ struct AppStartArgs {
     /// Copy the Run-scoped canonical verification receipt to this path.
     #[arg(long)]
     verification_receipt: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct AppExportArgs {
+    instance: String,
+    #[arg(short, long, default_value = "application.capsule")]
+    output: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -353,6 +362,7 @@ pub fn run() -> Result<()> {
             AppCommands::Start(args) => start_local_instance(args),
             AppCommands::Stop { instance } => stop_local_instance(&instance),
             AppCommands::Inspect { instance } => inspect_local_instance(&instance),
+            AppCommands::Export(args) => export_local_instance(args),
         },
         Commands::ExportPlan(args) => export_plan(args),
         Commands::Export(args) => export_portable(args),
@@ -870,6 +880,22 @@ fn inspect_local_instance(instance_id: &str) -> Result<()> {
             "active_run": active,
         }))?
     );
+    Ok(())
+}
+
+fn export_local_instance(args: AppExportArgs) -> Result<()> {
+    let store = local_application_store()?;
+    let instance = store.instance(&args.instance)?;
+    let bytes = store.export_instance(&args.instance)?;
+    ato_local_execution::atomic_write(&args.output, &bytes)
+        .with_context(|| format!("write portable Instance export {}", args.output.display()))?;
+    println!("Exported: {}", args.output.display());
+    println!("Bundle: {}", instance.bundle_sha256);
+    println!("Capsule: {}", instance.contract_ref);
+    println!("Route: {}", instance.selected_derivation_ref);
+    if let Some(snapshot_ref) = instance.data_snapshot_ref {
+        println!("Snapshot: {snapshot_ref}");
+    }
     Ok(())
 }
 
@@ -2147,6 +2173,21 @@ mod tests {
         for public in ["init", "resume", "stop", "encap", "run"] {
             assert!(help.contains(public));
         }
+    }
+
+    #[test]
+    fn durable_instance_export_is_a_separate_app_operation() {
+        assert!(
+            Cli::try_parse_from([
+                "ato",
+                "app",
+                "export",
+                "linst_example",
+                "--output",
+                "saved.capsule",
+            ])
+            .is_ok()
+        );
     }
 
     #[test]
