@@ -126,7 +126,7 @@ pub fn guest_mounts(context: &ResolvedRuntimeLaunchContext) -> Result<Vec<GuestM
 /// Expressed in GUEST paths, because that is the namespace the shim runs in.
 /// Sensitive host paths are filtered out of the allow-lists by the shared
 /// crate rather than by a list maintained here.
-pub fn landlock_policy(mounts: &[GuestMount]) -> SandboxPolicy {
+pub fn landlock_policy(mounts: &[GuestMount], bind_tcp_ports: &[u16]) -> SandboxPolicy {
     let (read_write, _) = filter_sensitive_paths(
         &mounts
             .iter()
@@ -159,7 +159,8 @@ pub fn landlock_policy(mounts: &[GuestMount]) -> SandboxPolicy {
     SandboxPolicy::new()
         .allow_read_write(read_write)
         .allow_read_only(read_only)
-        .with_network(true)
+        .with_network(false)
+        .allow_tcp_bind(bind_tcp_ports.iter().copied())
 }
 
 /// Build the bwrap argv that runs `argv` under containment.
@@ -263,7 +264,14 @@ pub fn sandboxed_command(
 
     Ok(SandboxedCommand {
         argv,
-        policy: landlock_policy(&mounts),
+        policy: landlock_policy(
+            &mounts,
+            &context
+                .endpoints()
+                .iter()
+                .map(|endpoint| endpoint.host_port)
+                .collect::<Vec<_>>(),
+        ),
     })
 }
 

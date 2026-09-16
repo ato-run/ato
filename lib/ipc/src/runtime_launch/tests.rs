@@ -69,6 +69,9 @@ fn an_oci_reference_must_be_content_addressed() {
         let mut spec = RuntimeLaunchSpecV1::parse(OCI_FIXTURE).unwrap();
         spec.realization = LaunchRealizationV1::Oci(OciRealizationV1 {
             image_digest_ref: reference.to_owned(),
+            image_reference: None,
+            platform: None,
+            resource_limits: None,
             argv: None,
             working_dir: None,
         });
@@ -213,7 +216,10 @@ fn an_unsupported_protocol_is_refused_rather_than_guessed() {
 #[test]
 fn empty_argv_is_refused() {
     let mut spec = process_spec();
-    spec.realization = LaunchRealizationV1::Process(ProcessRealizationV1 { argv: vec![] });
+    spec.realization = LaunchRealizationV1::Process(ProcessRealizationV1 {
+        argv: vec![],
+        executable: None,
+    });
     assert_eq!(
         spec.validate().unwrap_err().code(),
         "ATO_ERR_RUNTIME_LAUNCH_SPEC_EMPTY_ARGV"

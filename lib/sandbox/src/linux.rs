@@ -15,8 +15,8 @@
 use super::{SandboxPolicy, SandboxResult};
 use anyhow::{Context, Result};
 use landlock::{
-    ABI, Access, AccessFs, Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetStatus,
-    path_beneath_rules,
+    ABI, Access, AccessFs, AccessNet, NetPort, Ruleset, RulesetAttr, RulesetCreatedAttr,
+    RulesetStatus, path_beneath_rules,
 };
 use std::path::Path;
 use tracing::{debug, info, warn};
@@ -41,16 +41,26 @@ pub fn is_landlock_supported() -> bool {
 /// * `Ok(SandboxResult)` - Sandbox applied (fully or partially)
 /// * `Err` - Failed to apply sandbox
 pub fn apply_landlock_sandbox(policy: &SandboxPolicy) -> Result<SandboxResult> {
-    // Use ABI V3 for best compatibility with modern kernels
-    // Falls back gracefully on older kernels
-    let abi = ABI::V3;
+    // Network port rules were added in ABI V4. A restricted-network policy
+    // requests that ABI so lack of kernel support is observable as partial
+    // enforcement instead of silently leaving egress open.
+    let abi = if policy.allow_network {
+        ABI::V3
+    } else {
+        ABI::V4
+    };
 
     debug!("Applying Landlock sandbox with ABI {:?}", abi);
 
     // Create ruleset handling all file system access rights
-    let ruleset = Ruleset::default()
+    let mut ruleset = Ruleset::default()
         .handle_access(AccessFs::from_all(abi))
         .context("Failed to create Landlock ruleset")?;
+    if !policy.allow_network {
+        ruleset = ruleset
+            .handle_access(AccessNet::from_all(abi))
+            .context("Failed to request Landlock TCP restrictions")?;
+    }
 
     // Create the ruleset
     let mut created_ruleset = ruleset
@@ -93,6 +103,19 @@ pub fn apply_landlock_sandbox(policy: &SandboxPolicy) -> Result<SandboxResult> {
                 .with_context(|| format!("Failed to add IPC socket rule for {:?}", path))?;
         } else {
             debug!("Skipping non-existent IPC socket path: {:?}", path);
+        }
+    }
+
+    if !policy.allow_network {
+        for port in &policy.allowed_bind_tcp_ports {
+            created_ruleset = created_ruleset
+                .add_rule(NetPort::new(*port, AccessNet::BindTcp))
+                .with_context(|| format!("Failed to allow TCP bind port {port}"))?;
+        }
+        for port in &policy.allowed_connect_tcp_ports {
+            created_ruleset = created_ruleset
+                .add_rule(NetPort::new(*port, AccessNet::ConnectTcp))
+                .with_context(|| format!("Failed to allow TCP connect port {port}"))?;
         }
     }
 

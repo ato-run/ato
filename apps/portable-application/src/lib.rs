@@ -18,9 +18,10 @@ use std::time::Duration;
 use ato_computation::ContentRef;
 use ato_formation::authoring::{
     AuthoringDraft, AuthoringProvenance, BOUND_CONTRACT_SCHEMA, BOUND_DERIVATION_SCHEMA,
-    BROWSER_PROTOCOL, BindingContext, BoundContract, BoundDerivation, DerivationDraft, EffectClass,
-    HTTP_CONTRACT_VERIFIER, HTTP_PROTOCOL, PROCESS_PROTOCOL, PortDraft, StepDraft,
-    WORKSPACE_CONTRACT_VERIFIER, WORKSPACE_PROTOCOL, bind,
+    BROWSER_PROTOCOL, BindingContext, BoundContract, BoundDerivation, BoundInput, BoundPort,
+    BoundRequirement, BoundStep, DerivationDraft, EffectClass, HTTP_CONTRACT_VERIFIER,
+    HTTP_PROTOCOL, PROCESS_PROTOCOL, PortDraft, StepDraft, WORKSPACE_CONTRACT_VERIFIER,
+    WORKSPACE_PROTOCOL, bind,
 };
 use ato_formation::capsule_toml::{CAPSULE_FILE_NAME, parse_capsule_toml};
 use ato_materializer_static_web::{media_type_for, validate_relative_path};
@@ -39,7 +40,17 @@ use thiserror::Error;
 pub mod validator_agent;
 
 pub const APPLICATION_SCHEMA: &str = "ato.application/1";
+pub const APPLICATION_V2_SCHEMA: &str = "ato.application/2";
 pub const PORTABLE_TREE_SCHEMA: &str = "ato.portable-tree/1";
+pub const PORTABLE_TREE_V2_SCHEMA: &str = "ato.portable-tree/2";
+pub const OCI_PROTOCOL: &str = "ato.oci@1";
+
+pub const PYTHON_RUNTIME: &str = "python";
+pub const OCI_IMAGE_RUNTIME: &str = "oci.image";
+pub const OCI_PLATFORM_RUNTIME: &str = "oci.platform";
+pub const OCI_MEMORY_BYTES_RUNTIME: &str = "oci.memory_bytes";
+pub const OCI_CPU_MILLIS_RUNTIME: &str = "oci.cpu_limit_millis";
+pub const OCI_PIDS_LIMIT_RUNTIME: &str = "oci.pids_limit";
 
 #[derive(Debug, Error)]
 pub enum PortableApplicationError {
@@ -78,6 +89,49 @@ pub struct ApplicationSurfaceV1 {
     pub spa_fallback: bool,
 }
 
+/// A logical application surface. Unlike v1 it does not claim that an HTTP
+/// endpoint is a file in a static artifact: a process or container publishes
+/// this Port only after the Runner has established it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApplicationV2 {
+    pub schema: String,
+    pub title: String,
+    pub surfaces: Vec<ApplicationSurfaceV2>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApplicationSurfaceV2 {
+    pub id: String,
+    pub port: String,
+    #[serde(default = "default_surface_path")]
+    pub path: String,
+}
+
+fn default_surface_path() -> String {
+    "/".to_owned()
+}
+
+/// The normalized application view used after schema-specific format
+/// validation. Optional static fields are absent for a dynamic Surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedApplication {
+    pub schema: String,
+    pub title: String,
+    pub surfaces: Vec<ValidatedApplicationSurface>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedApplicationSurface {
+    pub id: String,
+    pub port: String,
+    pub path: String,
+    pub artifact_ref: Option<String>,
+    pub entry: Option<String>,
+    pub spa_fallback: Option<bool>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PortableTreeV1 {
@@ -100,10 +154,11 @@ pub struct ValidatedPortableApplication {
     pub application_ref: ContentRef,
     pub derivation_ref: ContentRef,
     pub contract: BoundContract,
-    pub application: ApplicationV1,
+    pub application: ValidatedApplication,
     pub derivation: BoundDerivation,
     pub tree_ref: ContentRef,
     pub tree: PortableTreeV1,
+    pub tree_schema: String,
     pub realization: PortableRealizationKind,
 }
 
@@ -111,6 +166,7 @@ pub struct ValidatedPortableApplication {
 pub enum PortableRealizationKind {
     StaticWeb,
     LocalProcess,
+    OciContainer,
 }
 
 impl PortableRealizationKind {
@@ -118,8 +174,35 @@ impl PortableRealizationKind {
         match self {
             Self::StaticWeb => "Static Web",
             Self::LocalProcess => "Local Process",
+            Self::OciContainer => "OCI Container",
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct PortableHttpRequirementSpec {
+    pub id: String,
+    pub path: String,
+    pub status: u16,
+    pub body_digest: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PortableExecutionSpec {
+    pub runtimes: BTreeMap<String, String>,
+    pub argv: Vec<String>,
+    pub cwd: String,
+    pub env: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PortableDynamicBundleSpec {
+    pub title: String,
+    pub surface_path: String,
+    pub guest_port: u16,
+    pub process: PortableExecutionSpec,
+    pub oci: PortableExecutionSpec,
+    pub requirements: Vec<PortableHttpRequirementSpec>,
 }
 
 /// Loopback-only static realization used by `ato run`.
@@ -160,8 +243,13 @@ impl StaticApplicationServer {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let entry_route = format!("/{}", validated.application.surfaces[0].entry);
-        let spa_fallback = validated.application.surfaces[0].spa_fallback;
+        let surface = &validated.application.surfaces[0];
+        let entry = surface
+            .entry
+            .as_deref()
+            .ok_or_else(|| profile("static surface omitted its entry"))?;
+        let entry_route = format!("/{entry}");
+        let spa_fallback = surface.spa_fallback.unwrap_or(false);
         let running = Arc::new(AtomicBool::new(true));
         let thread_running = Arc::clone(&running);
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
@@ -291,7 +379,7 @@ fn validate_selected_derivation(
     let application_ref = parse_ref(&bundle.index.application_ref, "application_ref")?;
     let derivation_ref = parse_ref(selected_derivation_ref, "derivation")?;
     let contract: BoundContract = structured(bundle, &contract_ref, BOUND_CONTRACT_SCHEMA)?;
-    let application: ApplicationV1 = structured(bundle, &application_ref, APPLICATION_SCHEMA)?;
+    let application = validated_application(bundle, &application_ref)?;
     let derivation: BoundDerivation = structured(bundle, &derivation_ref, BOUND_DERIVATION_SCHEMA)?;
 
     if contract
@@ -313,10 +401,31 @@ fn validate_selected_derivation(
     let realization = validate_initial_route(&contract, &application, &derivation)?;
 
     let surface = &application.surfaces[0];
-    let tree_ref = parse_ref(&surface.artifact_ref, "surface.artifact_ref")?;
-    let tree: PortableTreeV1 = structured(bundle, &tree_ref, PORTABLE_TREE_SCHEMA)?;
-    validate_tree(bundle, &tree)?;
-    validate_http_paths(&contract, &application, &tree)?;
+    let tree_reference = surface
+        .artifact_ref
+        .as_deref()
+        .or_else(|| {
+            derivation
+                .inputs
+                .first()
+                .map(|input| input.content_ref.as_str())
+        })
+        .ok_or_else(|| profile("portable derivation omitted its workspace input"))?;
+    let tree_ref = parse_ref(tree_reference, "workspace tree reference")?;
+    let tree_schema = bundle
+        .descriptor(&tree_ref)
+        .and_then(|descriptor| descriptor.schema.clone())
+        .ok_or_else(|| profile("workspace input must name a structured portable tree"))?;
+    if tree_schema != PORTABLE_TREE_SCHEMA && tree_schema != PORTABLE_TREE_V2_SCHEMA {
+        return Err(profile(format!(
+            "workspace input uses unsupported tree schema `{tree_schema}`"
+        )));
+    }
+    let tree: PortableTreeV1 = structured(bundle, &tree_ref, &tree_schema)?;
+    validate_tree(bundle, &tree, &tree_schema)?;
+    if realization == PortableRealizationKind::StaticWeb {
+        validate_static_http_paths(&contract, &application, &tree)?;
+    }
 
     Ok(ValidatedPortableApplication {
         contract_ref,
@@ -327,8 +436,62 @@ fn validate_selected_derivation(
         derivation,
         tree_ref,
         tree,
+        tree_schema,
         realization,
     })
+}
+
+fn validated_application(
+    bundle: &PortableApplicationBundle,
+    application_ref: &ContentRef,
+) -> Result<ValidatedApplication, PortableApplicationError> {
+    let schema = bundle
+        .descriptor(application_ref)
+        .and_then(|descriptor| descriptor.schema.as_deref())
+        .ok_or_else(|| profile("application_ref must name a structured Application"))?;
+    match schema {
+        APPLICATION_SCHEMA => {
+            let application: ApplicationV1 = structured(bundle, application_ref, schema)?;
+            Ok(ValidatedApplication {
+                schema: application.schema,
+                title: application.title,
+                surfaces: application
+                    .surfaces
+                    .into_iter()
+                    .map(|surface| ValidatedApplicationSurface {
+                        id: surface.id,
+                        port: surface.port,
+                        path: "/".to_owned(),
+                        artifact_ref: Some(surface.artifact_ref),
+                        entry: Some(surface.entry),
+                        spa_fallback: Some(surface.spa_fallback),
+                    })
+                    .collect(),
+            })
+        }
+        APPLICATION_V2_SCHEMA => {
+            let application: ApplicationV2 = structured(bundle, application_ref, schema)?;
+            Ok(ValidatedApplication {
+                schema: application.schema,
+                title: application.title,
+                surfaces: application
+                    .surfaces
+                    .into_iter()
+                    .map(|surface| ValidatedApplicationSurface {
+                        id: surface.id,
+                        port: surface.port,
+                        path: surface.path,
+                        artifact_ref: None,
+                        entry: None,
+                        spa_fallback: None,
+                    })
+                    .collect(),
+            })
+        }
+        other => Err(profile(format!(
+            "application_ref uses unsupported schema `{other}`"
+        ))),
+    }
 }
 
 /// Deterministically forms a portable static application from the existing
@@ -498,6 +661,124 @@ pub fn build_multi_derivation_bundle(
     Ok((bytes, bundle))
 }
 
+/// Build one application with two explicit execution routes over one logical
+/// HTTP Contract. The builder knows no OSS name: Datasette is a sample of this
+/// generic process/OCI profile, not a Core special case.
+pub fn build_dynamic_process_oci_bundle(
+    source_root: &Path,
+    spec: &PortableDynamicBundleSpec,
+) -> Result<(Vec<u8>, PortableApplicationBundle), PortableApplicationError> {
+    if spec.title.trim().is_empty() || spec.requirements.is_empty() {
+        return Err(profile(
+            "dynamic application requires a title and at least one HTTP observation",
+        ));
+    }
+    let (mut objects, tree_ref) =
+        build_portable_tree_with_schema(source_root, PORTABLE_TREE_V2_SCHEMA)?;
+    let input = BoundInput {
+        id: "workspace".to_owned(),
+        protocol: WORKSPACE_PROTOCOL.to_owned(),
+        content_ref: tree_ref,
+    };
+    let port = BoundPort {
+        id: "app.http".to_owned(),
+        protocol: HTTP_PROTOCOL.to_owned(),
+        from: "serve".to_owned(),
+        guest_port: Some(spec.guest_port),
+    };
+    let derivation = |protocol: &str, execution: &PortableExecutionSpec| BoundDerivation {
+        schema: BOUND_DERIVATION_SCHEMA.to_owned(),
+        inputs: vec![input.clone()],
+        runtimes: execution.runtimes.clone(),
+        steps: vec![BoundStep {
+            id: "serve".to_owned(),
+            protocol: protocol.to_owned(),
+            op: "serve".to_owned(),
+            argv: execution.argv.clone(),
+            cwd: execution.cwd.clone(),
+            env: execution.env.clone(),
+            source: None,
+            root: None,
+            entry: None,
+            spa_fallback: None,
+        }],
+        ports: vec![port.clone()],
+        state: Vec::new(),
+        workspace_build: None,
+        workspace_compiler: None,
+        effects: EffectClass::Pure,
+    };
+    let process_derivation = derivation(PROCESS_PROTOCOL, &spec.process);
+    let oci_derivation = derivation(OCI_PROTOCOL, &spec.oci);
+    let mut requirements = spec
+        .requirements
+        .iter()
+        .map(|requirement| BoundRequirement {
+            id: requirement.id.clone(),
+            verifier: HTTP_CONTRACT_VERIFIER.to_owned(),
+            port: Some(port.id.clone()),
+            method: Some("GET".to_owned()),
+            path: Some(requirement.path.clone()),
+            status: Some(requirement.status),
+            body_digest: requirement.body_digest.clone(),
+            input: None,
+            digest: None,
+        })
+        .collect::<Vec<_>>();
+    requirements.sort_by(|left, right| left.id.cmp(&right.id));
+    if requirements.windows(2).any(|pair| pair[0].id == pair[1].id) {
+        return Err(profile(
+            "dynamic Contract contains duplicate observation ids",
+        ));
+    }
+    let contract = BoundContract {
+        schema: BOUND_CONTRACT_SCHEMA.to_owned(),
+        requirements,
+    };
+    let application = ApplicationV2 {
+        schema: APPLICATION_V2_SCHEMA.to_owned(),
+        title: spec.title.clone(),
+        surfaces: vec![ApplicationSurfaceV2 {
+            id: "main".to_owned(),
+            port: port.id,
+            path: spec.surface_path.clone(),
+        }],
+    };
+
+    let contract_ref = add_structured(&mut objects, &contract, BOUND_CONTRACT_SCHEMA)?;
+    let process_ref = add_structured(&mut objects, &process_derivation, BOUND_DERIVATION_SCHEMA)?;
+    let oci_ref = add_structured(&mut objects, &oci_derivation, BOUND_DERIVATION_SCHEMA)?;
+    if process_ref == oci_ref {
+        return Err(profile("process and OCI routes have the same identity"));
+    }
+    let application_ref = add_structured(&mut objects, &application, APPLICATION_V2_SCHEMA)?;
+    let bundle = finish_bundle(
+        objects,
+        contract_ref,
+        application_ref,
+        vec![process_ref, oci_ref],
+    );
+    let validated = validate_all_derivations(&bundle)?;
+    let kinds = validated
+        .iter()
+        .map(|route| route.realization)
+        .collect::<BTreeSet<_>>();
+    if kinds
+        != [
+            PortableRealizationKind::LocalProcess,
+            PortableRealizationKind::OciContainer,
+        ]
+        .into_iter()
+        .collect()
+    {
+        return Err(profile(
+            "dynamic bundle must contain one process and one OCI route",
+        ));
+    }
+    let bytes = encode_portable_application_bundle(&bundle)?;
+    Ok((bytes, bundle))
+}
+
 /// Materialize the validated tree into a new directory and re-read every byte
 /// to prove the local workspace still has the declared identity.
 pub fn materialize_tree(
@@ -563,11 +844,15 @@ pub fn verify_materialized_tree(
 
 fn validate_initial_route(
     contract: &BoundContract,
-    application: &ApplicationV1,
+    application: &ValidatedApplication,
     derivation: &BoundDerivation,
 ) -> Result<PortableRealizationKind, PortableApplicationError> {
-    if application.schema != APPLICATION_SCHEMA || application.title.trim().is_empty() {
-        return Err(profile("invalid ato.application/1 object"));
+    if !matches!(
+        application.schema.as_str(),
+        APPLICATION_SCHEMA | APPLICATION_V2_SCHEMA
+    ) || application.title.trim().is_empty()
+    {
+        return Err(profile("invalid portable Application object"));
     }
     if application.surfaces.len() != 1
         || derivation.inputs.len() != 1
@@ -595,7 +880,10 @@ fn validate_initial_route(
         || port.protocol != HTTP_PROTOCOL
         || port.from != step.id
         || surface.port != port.id
-        || surface.artifact_ref != input.content_ref
+        || surface
+            .artifact_ref
+            .as_ref()
+            .is_some_and(|reference| reference != &input.content_ref)
     {
         return Err(profile(
             "application surface and derivation do not name one workspace-backed HTTP route",
@@ -603,6 +891,11 @@ fn validate_initial_route(
     }
     let realization = match step.protocol.as_str() {
         BROWSER_PROTOCOL => {
+            if application.schema != APPLICATION_SCHEMA {
+                return Err(profile(
+                    "static-web derivations require an ato.application/1 surface",
+                ));
+            }
             if !derivation.runtimes.is_empty()
                 || step.op != "serve"
                 || step.source.as_deref() != Some(input.id.as_str())
@@ -611,8 +904,8 @@ fn validate_initial_route(
                 || !step.env.is_empty()
                 || step.root.is_some()
                 || port.guest_port.is_some()
-                || surface.entry != step.entry.as_deref().unwrap_or_default()
-                || surface.spa_fallback != step.spa_fallback.unwrap_or(false)
+                || surface.entry.as_deref() != step.entry.as_deref()
+                || surface.spa_fallback != Some(step.spa_fallback.unwrap_or(false))
             {
                 return Err(profile(
                     "static-web derivation does not match its application surface",
@@ -621,36 +914,88 @@ fn validate_initial_route(
             PortableRealizationKind::StaticWeb
         }
         PROCESS_PROTOCOL => {
-            let expected_runtime = derivation.runtimes.get("python").map(String::as_str);
-            let expected_argv = [
-                "python3",
-                "-m",
-                "http.server",
-                "8000",
-                "--bind",
-                "0.0.0.0",
-                "--directory",
-                ".",
-            ];
-            if derivation.runtimes.len() != 1
-                || expected_runtime != Some("3.12")
+            if application.schema == APPLICATION_V2_SCHEMA {
+                validate_dynamic_surface(surface)?;
+            }
+            if derivation.runtimes.is_empty()
+                || derivation
+                    .runtimes
+                    .values()
+                    .any(|value| value.trim().is_empty())
                 || step.op != "serve"
-                || step.argv.iter().map(String::as_str).ne(expected_argv)
-                || step.cwd != "."
-                || !step.env.is_empty()
+                || step.argv.is_empty()
+                || step.argv[0].trim().is_empty()
+                || !valid_workspace_relative(&step.cwd)
+                || step.argv.iter().any(|value| value.contains('\0'))
+                || step.env.iter().any(|(name, value)| {
+                    name.is_empty() || name.contains('=') || value.contains('\0')
+                })
                 || step.source.is_some()
                 || step.root.is_some()
                 || step.entry.is_some()
                 || step.spa_fallback.is_some()
-                || port.guest_port != Some(8000)
-                || surface.entry != "index.html"
-                || surface.spa_fallback
+                || port.guest_port.is_none()
             {
                 return Err(profile(
-                    "process derivation is outside the pinned Python HTTP profile",
+                    "process derivation is outside the declared process HTTP profile",
                 ));
             }
             PortableRealizationKind::LocalProcess
+        }
+        OCI_PROTOCOL => {
+            if application.schema != APPLICATION_V2_SCHEMA {
+                return Err(profile(
+                    "OCI derivations require a logical ato.application/2 surface",
+                ));
+            }
+            validate_dynamic_surface(surface)?;
+            let image = derivation
+                .runtimes
+                .get(OCI_IMAGE_RUNTIME)
+                .ok_or_else(|| profile("OCI derivation omitted oci.image"))?;
+            let platform = derivation
+                .runtimes
+                .get(OCI_PLATFORM_RUNTIME)
+                .ok_or_else(|| profile("OCI derivation omitted oci.platform"))?;
+            validate_immutable_oci_image(image)?;
+            validate_oci_platform(platform)?;
+            for key in [
+                OCI_MEMORY_BYTES_RUNTIME,
+                OCI_CPU_MILLIS_RUNTIME,
+                OCI_PIDS_LIMIT_RUNTIME,
+            ] {
+                let value = derivation
+                    .runtimes
+                    .get(key)
+                    .ok_or_else(|| profile(format!("OCI derivation omitted {key}")))?;
+                let parsed = value
+                    .parse::<u64>()
+                    .map_err(|_| profile(format!("OCI runtime value `{key}` is not an integer")))?;
+                if parsed == 0 {
+                    return Err(profile(format!(
+                        "OCI runtime value `{key}` must be positive"
+                    )));
+                }
+            }
+            if derivation.runtimes.len() != 5
+                || step.op != "serve"
+                || step.argv.is_empty()
+                || step.argv.iter().any(|value| value.contains('\0'))
+                || !valid_workspace_relative(&step.cwd)
+                || step.env.iter().any(|(name, value)| {
+                    name.is_empty() || name.contains('=') || value.contains('\0')
+                })
+                || step.source.is_some()
+                || step.root.is_some()
+                || step.entry.is_some()
+                || step.spa_fallback.is_some()
+                || port.guest_port.is_none()
+            {
+                return Err(profile(
+                    "OCI derivation is outside the declared container HTTP profile",
+                ));
+            }
+            PortableRealizationKind::OciContainer
         }
         protocol => {
             return Err(profile(format!(
@@ -683,7 +1028,17 @@ fn validate_initial_route(
                     || requirement.method.as_deref() != Some("GET")
                 {
                     return Err(profile(
-                        "HTTP requirement does not target the static surface",
+                        "HTTP requirement does not target the declared application surface",
+                    ));
+                }
+                let path = requirement.path.as_deref().unwrap_or("/");
+                if !path.starts_with('/')
+                    || path.starts_with("//")
+                    || path.contains('\0')
+                    || path.contains("#")
+                {
+                    return Err(profile(
+                        "HTTP requirement path is not an origin-relative target",
                     ));
                 }
                 if let Some(digest) = &requirement.body_digest {
@@ -700,12 +1055,71 @@ fn validate_initial_route(
     Ok(realization)
 }
 
-fn validate_http_paths(
+fn validate_dynamic_surface(
+    surface: &ValidatedApplicationSurface,
+) -> Result<(), PortableApplicationError> {
+    if surface.artifact_ref.is_some()
+        || surface.entry.is_some()
+        || surface.spa_fallback.is_some()
+        || !surface.path.starts_with('/')
+        || surface.path.starts_with("//")
+        || surface.path.contains(['\0', '?', '#'])
+    {
+        return Err(profile("dynamic application surface is invalid"));
+    }
+    Ok(())
+}
+
+fn valid_workspace_relative(value: &str) -> bool {
+    if value.is_empty() || value == "." {
+        return true;
+    }
+    if value.starts_with('/') || value.starts_with('\\') || value.contains('\0') {
+        return false;
+    }
+    value
+        .split(['/', '\\'])
+        .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+}
+
+fn validate_immutable_oci_image(value: &str) -> Result<(), PortableApplicationError> {
+    let Some((repository, digest)) = value.rsplit_once("@sha256:") else {
+        return Err(profile(
+            "OCI image must be a repository reference pinned with @sha256:<digest>",
+        ));
+    };
+    if repository.is_empty()
+        || repository.contains(char::is_whitespace)
+        || digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(profile("OCI image reference is not immutable"));
+    }
+    Ok(())
+}
+
+fn validate_oci_platform(value: &str) -> Result<(), PortableApplicationError> {
+    let Some((os, architecture)) = value.split_once('/') else {
+        return Err(profile("OCI platform must be declared as os/architecture"));
+    };
+    if os != "linux" || !matches!(architecture, "amd64" | "arm64") {
+        return Err(profile(format!("unsupported OCI platform `{value}`")));
+    }
+    Ok(())
+}
+
+fn validate_static_http_paths(
     contract: &BoundContract,
-    application: &ApplicationV1,
+    application: &ValidatedApplication,
     tree: &PortableTreeV1,
 ) -> Result<(), PortableApplicationError> {
     let surface = &application.surfaces[0];
+    let entry = surface
+        .entry
+        .as_deref()
+        .ok_or_else(|| profile("static surface omitted its entry"))?;
     for requirement in &contract.requirements {
         if requirement.verifier != HTTP_CONTRACT_VERIFIER {
             continue;
@@ -713,7 +1127,7 @@ fn validate_http_paths(
         let path = requirement.path.as_deref().unwrap_or("/");
         let artifact_path = path.strip_prefix('/').unwrap_or(path);
         let artifact_path = if artifact_path.is_empty() {
-            surface.entry.as_str()
+            entry
         } else {
             artifact_path
         };
@@ -722,7 +1136,7 @@ fn validate_http_paths(
                 "HTTP requirement does not name a file in the portable tree",
             ));
         }
-        if requirement.body_digest.is_some() && artifact_path == surface.entry {
+        if requirement.body_digest.is_some() && artifact_path == entry {
             return Err(profile(
                 "the initial hosted profile cannot preserve an entry-document body digest",
             ));
@@ -803,8 +1217,9 @@ fn write_response(
 fn validate_tree(
     bundle: &PortableApplicationBundle,
     tree: &PortableTreeV1,
+    expected_schema: &str,
 ) -> Result<(), PortableApplicationError> {
-    if tree.schema != PORTABLE_TREE_SCHEMA || tree.entries.is_empty() {
+    if tree.schema != expected_schema || tree.entries.is_empty() {
         return Err(profile("portable tree must contain at least one file"));
     }
     let mut previous: Option<&str> = None;
@@ -816,8 +1231,7 @@ fn validate_tree(
             ));
         }
         previous = Some(&entry.path);
-        let expected_media_type = media_type_for(&entry.path)
-            .ok_or_else(|| profile(format!("unsupported media type for `{}`", entry.path)))?;
+        let expected_media_type = portable_media_type(&entry.path, expected_schema)?;
         if entry.media_type != expected_media_type {
             return Err(profile(format!("media type mismatch for `{}`", entry.path)));
         }
@@ -836,6 +1250,19 @@ fn validate_tree(
         }
     }
     Ok(())
+}
+
+fn portable_media_type(
+    path: &str,
+    tree_schema: &str,
+) -> Result<&'static str, PortableApplicationError> {
+    if let Some(media_type) = media_type_for(path) {
+        return Ok(media_type);
+    }
+    if tree_schema == PORTABLE_TREE_V2_SCHEMA {
+        return Ok("application/octet-stream");
+    }
+    Err(profile(format!("unsupported media type for `{path}`")))
 }
 
 fn structured<T: DeserializeOwned>(
@@ -861,8 +1288,10 @@ fn portable_reference_registry() -> Result<PortableReferenceRegistry, PortableAp
     let mut registry = PortableReferenceRegistry::default();
     registry.register(Arc::new(ContractReferences))?;
     registry.register(Arc::new(ApplicationReferences))?;
+    registry.register(Arc::new(ApplicationV2References))?;
     registry.register(Arc::new(DerivationReferences))?;
     registry.register(Arc::new(TreeReferences))?;
+    registry.register(Arc::new(TreeV2References))?;
     Ok(registry)
 }
 
@@ -898,6 +1327,19 @@ impl PortableReferenceExtractor for ApplicationReferences {
 
 struct DerivationReferences;
 
+struct ApplicationV2References;
+
+impl PortableReferenceExtractor for ApplicationV2References {
+    fn schema(&self) -> &str {
+        APPLICATION_V2_SCHEMA
+    }
+
+    fn outgoing(&self, bytes: &[u8]) -> Result<Vec<ContentRef>, PortableBundleError> {
+        parse_for_extraction::<ApplicationV2>(APPLICATION_V2_SCHEMA, bytes)?;
+        Ok(Vec::new())
+    }
+}
+
 impl PortableReferenceExtractor for DerivationReferences {
     fn schema(&self) -> &str {
         BOUND_DERIVATION_SCHEMA
@@ -925,6 +1367,22 @@ impl PortableReferenceExtractor for TreeReferences {
         tree.entries
             .into_iter()
             .map(|entry| parse_for_extraction_ref(PORTABLE_TREE_SCHEMA, &entry.content_ref))
+            .collect()
+    }
+}
+
+struct TreeV2References;
+
+impl PortableReferenceExtractor for TreeV2References {
+    fn schema(&self) -> &str {
+        PORTABLE_TREE_V2_SCHEMA
+    }
+
+    fn outgoing(&self, bytes: &[u8]) -> Result<Vec<ContentRef>, PortableBundleError> {
+        let tree = parse_for_extraction::<PortableTreeV1>(PORTABLE_TREE_V2_SCHEMA, bytes)?;
+        tree.entries
+            .into_iter()
+            .map(|entry| parse_for_extraction_ref(PORTABLE_TREE_V2_SCHEMA, &entry.content_ref))
             .collect()
     }
 }
@@ -962,7 +1420,14 @@ fn read_authoring_draft(source_root: &Path) -> Result<AuthoringDraft, PortableAp
 fn build_portable_tree(
     source_root: &Path,
 ) -> Result<(BTreeMap<String, ObjectToEncode>, String), PortableApplicationError> {
-    let files = collect_static_files(source_root)?;
+    build_portable_tree_with_schema(source_root, PORTABLE_TREE_SCHEMA)
+}
+
+fn build_portable_tree_with_schema(
+    source_root: &Path,
+    tree_schema: &str,
+) -> Result<(BTreeMap<String, ObjectToEncode>, String), PortableApplicationError> {
+    let files = collect_portable_files(source_root, tree_schema)?;
     let mut objects = BTreeMap::<String, ObjectToEncode>::new();
     let mut entries = Vec::with_capacity(files.len());
     for (relative, path, media_type) in files {
@@ -980,10 +1445,10 @@ fn build_portable_tree(
     }
     entries.sort_by(|left, right| left.path.cmp(&right.path));
     let tree = PortableTreeV1 {
-        schema: PORTABLE_TREE_SCHEMA.to_owned(),
+        schema: tree_schema.to_owned(),
         entries,
     };
-    let tree_ref = add_structured(&mut objects, &tree, PORTABLE_TREE_SCHEMA)?;
+    let tree_ref = add_structured(&mut objects, &tree, tree_schema)?;
     Ok((objects, tree_ref))
 }
 
@@ -1045,12 +1510,14 @@ fn add_structured<T: Serialize>(
     Ok(reference)
 }
 
-fn collect_static_files(
+fn collect_portable_files(
     root: &Path,
+    tree_schema: &str,
 ) -> Result<Vec<(String, PathBuf, String)>, PortableApplicationError> {
     fn visit(
         root: &Path,
         current: &Path,
+        tree_schema: &str,
         output: &mut Vec<(String, PathBuf, String)>,
     ) -> Result<(), PortableApplicationError> {
         let mut entries = fs::read_dir(current)
@@ -1079,7 +1546,7 @@ fn collect_static_files(
                 )));
             }
             if file_type.is_dir() {
-                visit(root, &path, output)?;
+                visit(root, &path, tree_schema, output)?;
                 continue;
             }
             if !file_type.is_file() {
@@ -1098,15 +1565,14 @@ fn collect_static_files(
                 continue;
             }
             validate_relative_path(&relative).map_err(|error| profile(error.to_string()))?;
-            let media_type = media_type_for(&relative)
-                .ok_or_else(|| profile(format!("unsupported static file `{relative}`")))?;
+            let media_type = portable_media_type(&relative, tree_schema)?;
             output.push((relative, path, media_type.to_owned()));
         }
         Ok(())
     }
 
     let mut output = Vec::new();
-    visit(root, root, &mut output)?;
+    visit(root, root, tree_schema, &mut output)?;
     output.sort_by(|left, right| left.0.cmp(&right.0));
     if output.is_empty() {
         return Err(profile("portable application contains no static files"));
@@ -1250,6 +1716,53 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/interop-multi-derivation")
     }
 
+    fn datasette_fixture_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/interop-datasette")
+    }
+
+    fn datasette_spec() -> PortableDynamicBundleSpec {
+        PortableDynamicBundleSpec {
+            title: "Datasette catalog".to_owned(),
+            surface_path: "/".to_owned(),
+            guest_port: 8000,
+            process: PortableExecutionSpec {
+                runtimes: BTreeMap::from([(PYTHON_RUNTIME.to_owned(), "3.12".to_owned())]),
+                argv: vec!["python3".to_owned(), "bootstrap.py".to_owned()],
+                cwd: ".".to_owned(),
+                env: BTreeMap::new(),
+            },
+            oci: PortableExecutionSpec {
+                runtimes: BTreeMap::from([
+                    (
+                        OCI_IMAGE_RUNTIME.to_owned(),
+                        format!("docker.io/example/datasette@sha256:{}", "ab".repeat(32)),
+                    ),
+                    (OCI_PLATFORM_RUNTIME.to_owned(), "linux/amd64".to_owned()),
+                    (OCI_MEMORY_BYTES_RUNTIME.to_owned(), "268435456".to_owned()),
+                    (OCI_CPU_MILLIS_RUNTIME.to_owned(), "1000".to_owned()),
+                    (OCI_PIDS_LIMIT_RUNTIME.to_owned(), "128".to_owned()),
+                ]),
+                argv: vec!["datasette".to_owned(), "/app/catalog.db".to_owned()],
+                cwd: ".".to_owned(),
+                env: BTreeMap::new(),
+            },
+            requirements: vec![
+                PortableHttpRequirementSpec {
+                    id: "entry".to_owned(),
+                    path: "/".to_owned(),
+                    status: 200,
+                    body_digest: None,
+                },
+                PortableHttpRequirementSpec {
+                    id: "rows".to_owned(),
+                    path: "/catalog/items.json?_shape=array&_sort=id".to_owned(),
+                    status: 200,
+                    body_digest: Some(format!("sha256:{}", "cd".repeat(32))),
+                },
+            ],
+        }
+    }
+
     #[test]
     fn fixture_build_is_deterministic_and_fully_validated() {
         let (left, _) = build_static_bundle(&fixture_root(), "Ato portability proof").unwrap();
@@ -1338,6 +1851,129 @@ mod tests {
     }
 
     #[test]
+    fn datasette_uses_one_contract_with_process_and_oci_routes() {
+        let (_, bundle) =
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &datasette_spec()).unwrap();
+        let routes = validate_all_derivations(&bundle).unwrap();
+        assert_eq!(routes.len(), 2);
+        assert_eq!(
+            routes
+                .iter()
+                .map(|route| route.contract_ref.as_str())
+                .collect::<BTreeSet<_>>(),
+            [bundle.index.root_contract_ref.as_str()]
+                .into_iter()
+                .collect()
+        );
+        assert_eq!(
+            routes
+                .iter()
+                .map(|route| route.realization)
+                .collect::<BTreeSet<_>>(),
+            [
+                PortableRealizationKind::LocalProcess,
+                PortableRealizationKind::OciContainer,
+            ]
+            .into_iter()
+            .collect()
+        );
+        let paths = routes[0]
+            .tree
+            .entries
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(!paths.contains("catalog/items.json"));
+        assert!(routes[0].contract.requirements.iter().any(|requirement| {
+            requirement.path.as_deref() == Some("/catalog/items.json?_shape=array&_sort=id")
+        }));
+    }
+
+    #[test]
+    fn missing_or_tampered_dynamic_inputs_fail_closure_before_route_selection() {
+        let (_, original) =
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &datasette_spec()).unwrap();
+        let route = validate_all_derivations(&original).unwrap().remove(0);
+        let wheel_path = route
+            .tree
+            .entries
+            .iter()
+            .find(|entry| entry.path.starts_with("wheels/") && entry.path.ends_with(".whl"))
+            .unwrap()
+            .path
+            .clone();
+
+        for path in ["catalog.db", wheel_path.as_str()] {
+            let mut missing = original.clone();
+            let content_ref = route
+                .tree
+                .entries
+                .iter()
+                .find(|entry| entry.path == path)
+                .unwrap()
+                .content_ref
+                .clone();
+            missing
+                .index
+                .objects
+                .retain(|object| object.reference != content_ref);
+            missing
+                .payloads
+                .retain(|payload| payload.reference != content_ref);
+            assert!(
+                validate_all_derivations(&missing).is_err(),
+                "missing {path}"
+            );
+        }
+
+        let mut tampered = original.clone();
+        let database_ref = route
+            .tree
+            .entries
+            .iter()
+            .find(|entry| entry.path == "catalog.db")
+            .unwrap()
+            .content_ref
+            .clone();
+        tampered
+            .payloads
+            .iter_mut()
+            .find(|payload| payload.reference == database_ref)
+            .unwrap()
+            .bytes = base64::engine::general_purpose::STANDARD.encode(b"tampered database");
+        assert!(validate_all_derivations(&tampered).is_err());
+    }
+
+    #[test]
+    fn a_rehashed_broken_dynamic_route_does_not_poison_the_other_route() {
+        let (_, original) =
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &datasette_spec()).unwrap();
+        let contract_ref = original.index.root_contract_ref.clone();
+        let process_ref = route_ref(&original, PortableRealizationKind::LocalProcess);
+        let oci_ref = route_ref(&original, PortableRealizationKind::OciContainer);
+
+        let mut broken_process = original.clone();
+        let broken_process_ref =
+            replace_derivation(&mut broken_process, &process_ref, |derivation| {
+                derivation.steps[0].argv.clear();
+            });
+        assert_eq!(broken_process.index.root_contract_ref, contract_ref);
+        validate_bundle_for_derivation(&broken_process, &oci_ref).unwrap();
+        assert!(validate_bundle_for_derivation(&broken_process, &broken_process_ref).is_err());
+
+        let mut broken_oci = original.clone();
+        let broken_oci_ref = replace_derivation(&mut broken_oci, &oci_ref, |derivation| {
+            derivation.runtimes.insert(
+                OCI_IMAGE_RUNTIME.to_owned(),
+                "docker.io/example/datasette:latest".to_owned(),
+            );
+        });
+        assert_eq!(broken_oci.index.root_contract_ref, contract_ref);
+        validate_bundle_for_derivation(&broken_oci, &process_ref).unwrap();
+        assert!(validate_bundle_for_derivation(&broken_oci, &broken_oci_ref).is_err());
+    }
+
+    #[test]
     fn multiple_derivations_require_explicit_selection() {
         let (_, bundle) =
             build_multi_derivation_bundle(&multi_fixture_root(), "Ato multi-route proof").unwrap();
@@ -1374,7 +2010,7 @@ mod tests {
         let mut broken_process = original.clone();
         let broken_process_ref =
             replace_derivation(&mut broken_process, &process_ref, |derivation| {
-                derivation.steps[0].argv[0] = "missing-python".to_owned();
+                derivation.steps[0].argv.clear();
             });
         assert_eq!(broken_process.index.root_contract_ref, contract_ref);
         validate_bundle_for_derivation(&broken_process, &static_ref).unwrap();

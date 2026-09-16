@@ -22,13 +22,14 @@ use ato_adapter_api::AdapterContext;
 use ato_adapter_browser::{
     BROWSER_CLICK_OPERATION, BROWSER_KEYBOARD_OPERATION, BROWSER_PROTOCOL_ID,
 };
+use ato_adapter_oci::{DockerOciAdapter, OciEndpoint, OciHandle, OciResourceLimits, OciSpec};
 use ato_adapter_process::{ProcessAdapter, ProcessHandle, ProcessSpec};
 use ato_adapter_workspace::restore_workspace;
 use ato_computation::{ComputationRef, ContentRef};
 use ato_formation::authoring::{HTTP_CONTRACT_VERIFIER, WORKSPACE_PROTOCOL};
 use ato_formation::verify::{
     ContractVerificationReceipt, RuntimeHttpObservation, RuntimeObservation,
-    VerificationTargetKind, verify_runtime,
+    VerificationExecutionEvidence, VerificationTargetKind, verify_runtime,
 };
 use ato_materializer_api::{
     ContractContext, MaterializerContext, MaterializerRegistry, accept_candidate,
@@ -45,8 +46,9 @@ use ato_objects::{
     export_bundle_with_materializations, export_object_graph, import_bundle, resolve_computation,
 };
 use ato_portable_application::{
-    PortableRealizationKind, StaticApplicationServer, ValidatedPortableApplication, bundle_sha256,
-    materialize_tree, validate_bundle_for_derivation,
+    OCI_CPU_MILLIS_RUNTIME, OCI_IMAGE_RUNTIME, OCI_MEMORY_BYTES_RUNTIME, OCI_PIDS_LIMIT_RUNTIME,
+    OCI_PLATFORM_RUNTIME, PYTHON_RUNTIME, PortableRealizationKind, StaticApplicationServer,
+    ValidatedPortableApplication, bundle_sha256, materialize_tree, validate_bundle_for_derivation,
 };
 use ato_realization_planner::{
     MaterializationCandidate, Placement, PlannerPolicy, RealizationPlanner, TargetEnvironment,
@@ -56,6 +58,7 @@ use ato_record_writer::{
     CaptureBarrier, PausedCapture, load_frontier, records_for_frontier, verify_frontier_object,
 };
 use ato_runtime_object_graph::standard_reference_registry;
+use ato_sandbox::{SandboxPolicy, apply_sandbox};
 use clap::{Args, Parser, Subcommand};
 
 pub use crate::object_transport::{
@@ -119,6 +122,8 @@ enum Commands {
         #[command(subcommand)]
         command: DesktopCommands,
     },
+    #[command(name = "__portable-sandbox-exec", hide = true)]
+    PortableSandboxExec(PortableSandboxExecArgs),
 }
 
 #[derive(Subcommand)]
@@ -168,6 +173,14 @@ struct RunArgs {
     /// Write the shared Contract verification receipt as canonical JSON.
     #[arg(long)]
     verification_receipt: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct PortableSandboxExecArgs {
+    #[arg(long)]
+    policy: PathBuf,
+    #[arg(last = true, required = true)]
+    command: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -269,6 +282,36 @@ pub fn run() -> Result<()> {
         Commands::Desktop { command } => match command {
             DesktopCommands::Inspect { project } => desktop_inspect(&project),
         },
+        Commands::PortableSandboxExec(args) => portable_sandbox_exec(args),
+    }
+}
+
+fn portable_sandbox_exec(args: PortableSandboxExecArgs) -> Result<()> {
+    let bytes = fs::read(&args.policy)
+        .with_context(|| format!("read portable sandbox policy {}", args.policy.display()))?;
+    let policy: SandboxPolicy =
+        serde_json::from_slice(&bytes).context("portable sandbox policy is malformed")?;
+    let applied = apply_sandbox(&policy).context("apply portable process sandbox")?;
+    if !applied.fully_enforced {
+        bail!(
+            "portable process sandbox admission failed: {}",
+            applied.message
+        );
+    }
+    let (program, arguments) = args
+        .command
+        .split_first()
+        .context("portable sandbox command is empty")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let error = Command::new(program).args(arguments).exec();
+        Err(error).with_context(|| format!("execute sandboxed workload {program}"))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (program, arguments);
+        bail!("portable process sandbox is unavailable on this platform")
     }
 }
 
@@ -749,12 +792,14 @@ fn run_portable_application(
         ),
     };
     let validated = validate_bundle_for_derivation(&bundle, selected_derivation)?;
+    let cache = ato_home()?.join("cache");
+    fs::create_dir_all(&cache)?;
     let runtime = tempfile::Builder::new()
         .prefix("ato-portable-run-")
-        .tempdir()?;
+        .tempdir_in(cache)?;
     let workspace = runtime.path().join("workspace");
     materialize_tree(&bundle, &validated, &workspace)?;
-    let mut runtime = PortableLocalRuntime::start(&workspace, &validated)?;
+    let mut runtime = PortableLocalRuntime::start(&workspace, runtime.path(), &validated)?;
 
     let mut observation = RuntimeObservation::default();
     for input in &validated.derivation.inputs {
@@ -786,7 +831,11 @@ fn run_portable_application(
                     if let Some(status) = runtime.try_wait()? {
                         bail!("selected process derivation exited before verification: {status}");
                     }
-                    if attempts >= 100 {
+                    // Dependency-backed processes may need to construct a clean
+                    // environment before the declared Port becomes ready. Keep
+                    // the timeout bounded, but do not impose the old static
+                    // fixture's five-second startup assumption.
+                    if attempts >= 1_200 {
                         return Err(error).context(format!(
                             "selected derivation did not become reachable at {request_url}"
                         ));
@@ -808,7 +857,7 @@ fn run_portable_application(
     }
 
     let verification = verify_runtime(&validated.contract, &observation);
-    let receipt = ContractVerificationReceipt::from_runtime(
+    let mut receipt = ContractVerificationReceipt::from_runtime(
         bundle_sha256(bundle_bytes),
         validated.contract_ref.to_string(),
         validated.derivation_ref.to_string(),
@@ -817,6 +866,7 @@ fn run_portable_application(
         &observation,
         verification,
     );
+    receipt.execution = Some(runtime.execution_evidence());
     if let Some(path) = &args.verification_receipt {
         fs::write(path, receipt.canonical_bytes()?)
             .with_context(|| format!("write verification receipt {}", path.display()))?;
@@ -858,11 +908,21 @@ enum PortableLocalRuntime {
     Process {
         handle: ProcessHandle,
         base_url: String,
+        executable: String,
+        version: String,
+    },
+    Oci {
+        handle: OciHandle,
+        base_url: String,
     },
 }
 
 impl PortableLocalRuntime {
-    fn start(workspace: &std::path::Path, route: &ValidatedPortableApplication) -> Result<Self> {
+    fn start(
+        workspace: &std::path::Path,
+        runtime_root: &std::path::Path,
+        route: &ValidatedPortableApplication,
+    ) -> Result<Self> {
         match route.realization {
             PortableRealizationKind::StaticWeb => {
                 let server = StaticApplicationServer::start(workspace, route)?;
@@ -876,18 +936,25 @@ impl PortableLocalRuntime {
                 let guest_port = route.derivation.ports[0]
                     .guest_port
                     .context("process derivation omitted guest_port")?;
-                let python_version = route
-                    .derivation
-                    .runtimes
-                    .get("python")
-                    .context("process derivation omitted its Python runtime")?;
                 let listener = TcpListener::bind("127.0.0.1:0")?;
                 let host_port = listener.local_addr()?.port();
                 drop(listener);
                 let guest_port = guest_port.to_string();
                 let host_port = host_port.to_string();
                 let mut command = step.argv.clone();
-                command[0] = resolve_pinned_python(python_version)?;
+                let (executable, version) = if let Some(python_version) =
+                    route.derivation.runtimes.get(PYTHON_RUNTIME)
+                {
+                    if !matches!(command[0].as_str(), "python" | "python3") {
+                        bail!(
+                            "Python process derivation must use a logical python executable in argv[0]"
+                        );
+                    }
+                    resolve_pinned_python(python_version)?
+                } else {
+                    (command[0].clone(), "unconstrained".to_owned())
+                };
+                command[0] = executable.clone();
                 let mut replaced = 0;
                 for argument in &mut command {
                     if argument == &guest_port {
@@ -895,20 +962,93 @@ impl PortableLocalRuntime {
                         replaced += 1;
                     }
                 }
-                if replaced != 1 {
+                if replaced > 1 {
                     bail!(
-                        "process derivation must name its declared guest port exactly once in argv"
+                        "process derivation names its declared guest port more than once in argv"
                     );
                 }
+                let endpoint_name = endpoint_port_env_name(&route.derivation.ports[0].id);
+                let mut environment = step.env.clone();
+                environment.insert(endpoint_name, host_port.clone());
+                let process_runtime = runtime_root.join("process");
+                fs::create_dir_all(&process_runtime).with_context(|| {
+                    format!(
+                        "create portable process runtime {}",
+                        process_runtime.display()
+                    )
+                })?;
+                let process_tmp = process_runtime.join("tmp");
+                let process_home = process_runtime.join("home");
+                fs::create_dir_all(&process_tmp)?;
+                fs::create_dir_all(&process_home)?;
+                environment.insert(
+                    "ATO_RUNTIME_DIR".to_owned(),
+                    process_runtime.display().to_string(),
+                );
+                for name in ["TMPDIR", "TMP", "TEMP"] {
+                    environment.insert(name.to_owned(), process_tmp.display().to_string());
+                }
+                environment.insert("HOME".to_owned(), process_home.display().to_string());
+                environment.insert(
+                    "XDG_CACHE_HOME".to_owned(),
+                    process_home.join(".cache").display().to_string(),
+                );
+                command = portable_process_sandbox_command(
+                    workspace,
+                    &process_runtime,
+                    &executable,
+                    &command,
+                    host_port.parse()?,
+                )?;
                 let adapter = ProcessAdapter::new(ProcessSpec {
                     id: step.id.clone(),
                     command,
                     cwd: PathBuf::from(&step.cwd),
-                    environment: step.env.clone(),
+                    environment,
                     isolated_group: true,
                 })?;
                 let handle = adapter.spawn(workspace)?;
                 Ok(Self::Process {
+                    handle,
+                    base_url: format!("http://127.0.0.1:{host_port}"),
+                    executable,
+                    version,
+                })
+            }
+            PortableRealizationKind::OciContainer => {
+                let step = &route.derivation.steps[0];
+                let port = &route.derivation.ports[0];
+                let guest_port = port.guest_port.context("OCI route omitted guest_port")?;
+                let listener = TcpListener::bind("127.0.0.1:0")?;
+                let host_port = listener.local_addr()?.port();
+                drop(listener);
+                let runtime = &route.derivation.runtimes;
+                let adapter = DockerOciAdapter::new(OciSpec {
+                    id: route.derivation_ref.to_string(),
+                    image: runtime
+                        .get(OCI_IMAGE_RUNTIME)
+                        .context("OCI route omitted image")?
+                        .clone(),
+                    platform: runtime
+                        .get(OCI_PLATFORM_RUNTIME)
+                        .context("OCI route omitted platform")?
+                        .clone(),
+                    argv: step.argv.clone(),
+                    working_dir: "/app".to_owned(),
+                    environment: step.env.clone(),
+                    endpoints: vec![OciEndpoint {
+                        host_port,
+                        guest_port,
+                    }],
+                    limits: OciResourceLimits {
+                        memory_bytes: parse_runtime_limit(runtime, OCI_MEMORY_BYTES_RUNTIME)?,
+                        cpu_limit_millis: parse_runtime_limit(runtime, OCI_CPU_MILLIS_RUNTIME)?,
+                        pids_limit: parse_runtime_limit(runtime, OCI_PIDS_LIMIT_RUNTIME)?,
+                    },
+                    stop_timeout_seconds: 5,
+                })?;
+                let handle = adapter.spawn(workspace, &runtime_root.join("oci"))?;
+                Ok(Self::Oci {
                     handle,
                     base_url: format!("http://127.0.0.1:{host_port}"),
                 })
@@ -920,6 +1060,7 @@ impl PortableLocalRuntime {
         match self {
             Self::Static { base_url, .. } => base_url,
             Self::Process { base_url, .. } => base_url,
+            Self::Oci { base_url, .. } => base_url,
         }
     }
 
@@ -927,6 +1068,56 @@ impl PortableLocalRuntime {
         match self {
             Self::Static { .. } => "static web",
             Self::Process { .. } => "local process",
+            Self::Oci { .. } => "OCI container",
+        }
+    }
+
+    fn execution_evidence(&self) -> VerificationExecutionEvidence {
+        match self {
+            Self::Static { base_url, .. } => VerificationExecutionEvidence {
+                realization: "static_web".to_owned(),
+                runtime_executable: None,
+                runtime_version: None,
+                pid: None,
+                container_id: None,
+                image: None,
+                platform: None,
+                endpoint: Some(base_url.clone()),
+                run_id: None,
+                lease_id: None,
+                attempt_id: None,
+            },
+            Self::Process {
+                handle,
+                base_url,
+                executable,
+                version,
+            } => VerificationExecutionEvidence {
+                realization: "process".to_owned(),
+                runtime_executable: Some(executable.clone()),
+                runtime_version: Some(version.clone()),
+                pid: Some(handle.pid()),
+                container_id: None,
+                image: None,
+                platform: None,
+                endpoint: Some(base_url.clone()),
+                run_id: None,
+                lease_id: None,
+                attempt_id: None,
+            },
+            Self::Oci { handle, base_url } => VerificationExecutionEvidence {
+                realization: "oci".to_owned(),
+                runtime_executable: Some("docker".to_owned()),
+                runtime_version: None,
+                pid: None,
+                container_id: Some(handle.container_id().to_owned()),
+                image: Some(handle.image().to_owned()),
+                platform: Some(handle.platform().to_owned()),
+                endpoint: Some(base_url.clone()),
+                run_id: None,
+                lease_id: None,
+                attempt_id: None,
+            },
         }
     }
 
@@ -934,20 +1125,43 @@ impl PortableLocalRuntime {
         match self {
             Self::Static { .. } => Ok(None),
             Self::Process { handle, .. } => Ok(handle.try_wait()?),
+            Self::Oci { handle, .. } => match handle.exit_code()? {
+                Some(code) => bail!("selected OCI derivation exited before verification: {code}"),
+                None => Ok(None),
+            },
         }
     }
 }
 
-fn resolve_pinned_python(version: &str) -> Result<String> {
+fn resolve_pinned_python(version: &str) -> Result<(String, String)> {
     if let Ok(output) = Command::new("uv")
-        .args(["python", "find", "--python", version])
+        .args(["python", "find", version])
         .env("UV_PYTHON_DOWNLOADS", "never")
         .output()
         && output.status.success()
     {
         let path = String::from_utf8(output.stdout)?.trim().to_owned();
         if !path.is_empty() {
-            return Ok(path);
+            let executable = executable_path(&path).unwrap_or_else(|| PathBuf::from(&path));
+            return verified_python(&executable.display().to_string(), version);
+        }
+    }
+    let provisioned_root = PathBuf::from("/opt/ato/toolchains/python");
+    if let Ok(entries) = std::fs::read_dir(&provisioned_root) {
+        let mut candidates = entries
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter(|candidate| {
+                candidate == version || candidate.starts_with(&format!("{version}."))
+            })
+            .collect::<Vec<_>>();
+        candidates.sort();
+        for candidate in candidates.into_iter().rev() {
+            let executable = provisioned_root.join(candidate).join("bin").join("python3");
+            if executable.is_file() {
+                return verified_python(&executable.display().to_string(), version);
+            }
         }
     }
     for executable in ["python3", "python"] {
@@ -960,12 +1174,145 @@ fn resolve_pinned_python(version: &str) -> Result<String> {
             String::from_utf8_lossy(&output.stderr)
         );
         if output.status.success() && reported.trim().starts_with(&format!("Python {version}.")) {
-            return Ok(executable.to_owned());
+            let selected = executable_path(executable)
+                .unwrap_or_else(|| PathBuf::from(executable))
+                .display()
+                .to_string();
+            return verified_python(&selected, version);
         }
     }
     bail!(
         "selected derivation requires Python {version}; install that runtime with `uv python install {version}`"
     )
+}
+
+fn executable_path(executable: &str) -> Option<PathBuf> {
+    let candidate = PathBuf::from(executable);
+    if candidate.components().count() > 1 && candidate.is_file() {
+        return Some(candidate);
+    }
+    std::env::var_os("PATH").and_then(|search| {
+        std::env::split_paths(&search)
+            .map(|directory| directory.join(executable))
+            .find(|path| path.is_file())
+    })
+}
+
+fn verified_python(executable: &str, version: &str) -> Result<(String, String)> {
+    let output = Command::new(executable)
+        .arg("--version")
+        .output()
+        .with_context(|| format!("inspect selected Python executable {executable}"))?;
+    let reported = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if !output.status.success() || !reported.trim().starts_with(&format!("Python {version}.")) {
+        bail!(
+            "selected Python executable {executable} does not satisfy {version}: {}",
+            reported.trim()
+        );
+    }
+    let identity = Command::new(executable)
+        .args([
+            "-c",
+            "import os,sys; print(os.path.realpath(sys.executable))",
+        ])
+        .output()
+        .with_context(|| format!("resolve selected Python executable {executable}"))?;
+    let resolved = String::from_utf8(identity.stdout)?.trim().to_owned();
+    if !identity.status.success() || resolved.is_empty() || !PathBuf::from(&resolved).is_file() {
+        bail!("selected Python executable {executable} did not resolve to a file");
+    }
+    Ok((resolved, reported.trim().to_owned()))
+}
+
+fn portable_process_sandbox_command(
+    workspace: &std::path::Path,
+    runtime_root: &std::path::Path,
+    executable: &str,
+    workload: &[String],
+    host_port: u16,
+) -> Result<Vec<String>> {
+    let workspace = workspace
+        .canonicalize()
+        .context("canonicalize portable workspace")?;
+    let runtime_root = runtime_root
+        .canonicalize()
+        .context("canonicalize portable runtime directory")?;
+    let executable = PathBuf::from(executable)
+        .canonicalize()
+        .with_context(|| format!("canonicalize portable runtime {executable}"))?;
+    let interpreter_root = executable
+        .parent()
+        .and_then(std::path::Path::parent)
+        .context("portable runtime has no readable installation root")?
+        .to_path_buf();
+    let system_roots = [
+        "/usr",
+        "/bin",
+        "/sbin",
+        "/lib",
+        "/lib64",
+        "/etc",
+        "/dev",
+        "/proc",
+        "/System",
+        "/Library",
+        "/private/var/db",
+        "/opt",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .filter(|path| path.exists());
+    let policy = SandboxPolicy::new()
+        .allow_read_write([runtime_root.clone()])
+        .allow_read_only(
+            [workspace, interpreter_root]
+                .into_iter()
+                .chain(system_roots),
+        )
+        .with_network(false)
+        .allow_tcp_bind([host_port]);
+    let policy_path = runtime_root.join("sandbox-policy.json");
+    fs::write(&policy_path, serde_json::to_vec_pretty(&policy)?)
+        .with_context(|| format!("write portable sandbox policy {}", policy_path.display()))?;
+    let shim = std::env::current_exe()
+        .context("locate ato sandbox shim")?
+        .canonicalize()
+        .context("canonicalize ato sandbox shim")?;
+    let mut command = vec![
+        shim.display().to_string(),
+        "__portable-sandbox-exec".to_owned(),
+        "--policy".to_owned(),
+        policy_path.display().to_string(),
+        "--".to_owned(),
+    ];
+    command.extend(workload.iter().cloned());
+    Ok(command)
+}
+
+fn endpoint_port_env_name(port_id: &str) -> String {
+    format!(
+        "ATO_ENDPOINT_{}_PORT",
+        port_id
+            .chars()
+            .map(|character| if character.is_ascii_alphanumeric() {
+                character.to_ascii_uppercase()
+            } else {
+                '_'
+            })
+            .collect::<String>()
+    )
+}
+
+fn parse_runtime_limit(runtimes: &BTreeMap<String, String>, key: &str) -> Result<u64> {
+    runtimes
+        .get(key)
+        .with_context(|| format!("OCI route omitted {key}"))?
+        .parse()
+        .with_context(|| format!("OCI route has invalid {key}"))
 }
 
 fn open_browser(url: &str) -> Result<()> {

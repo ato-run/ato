@@ -26,7 +26,10 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
-use ato_ipc::runtime_launch::{RuntimeLaunchSpecV1, StateAccessV1};
+use ato_adapter_oci::{DockerOciAdapter, OciEndpoint, OciHandle, OciResourceLimits, OciSpec};
+use ato_ipc::runtime_launch::{
+    LaunchRealizationV1, ReadinessV1, RuntimeLaunchSpecV1, StateAccessV1,
+};
 
 use super::process_executor::{ReadinessProbe, state_working_copy};
 use super::resolved::{ResolvedRuntimeLaunchContext, ResolvedStateAttachment, allocate_endpoint};
@@ -196,18 +199,68 @@ pub fn resolve_run(
 }
 
 /// A Run that is up and serving.
+pub enum ActiveWorkload {
+    Process(super::process_executor::LaunchedProcess),
+    Oci(OciHandle),
+}
+
 pub struct ActiveRun {
-    pub launched: super::process_executor::LaunchedProcess,
+    pub launched: ActiveWorkload,
     pub resolved: ResolvedRun,
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct RuntimeExecutionEvidence {
+    pub realization: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_executable: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+}
+
 impl ActiveRun {
-    pub fn pid(&self) -> u32 {
-        self.launched.pid()
+    pub fn execution_subject(&self) -> String {
+        match &self.launched {
+            ActiveWorkload::Process(process) => format!("pid={}", process.pid()),
+            ActiveWorkload::Oci(container) => {
+                format!("container_id={}", container.container_id())
+            }
+        }
     }
 
     pub fn endpoint_port(&self, name: &str) -> Option<u16> {
         self.resolved.endpoint_ports.get(name).copied()
+    }
+
+    pub fn execution_evidence(&self) -> RuntimeExecutionEvidence {
+        match &self.launched {
+            ActiveWorkload::Process(process) => RuntimeExecutionEvidence {
+                realization: "process",
+                runtime_executable: Some(process.runtime_executable().to_owned()),
+                runtime_version: process.runtime_version().map(str::to_owned),
+                pid: Some(process.pid()),
+                container_id: None,
+                image: None,
+                platform: None,
+            },
+            ActiveWorkload::Oci(container) => RuntimeExecutionEvidence {
+                realization: "oci",
+                runtime_executable: Some("docker".to_owned()),
+                runtime_version: None,
+                pid: None,
+                container_id: Some(container.container_id().to_owned()),
+                image: Some(container.image().to_owned()),
+                platform: Some(container.platform().to_owned()),
+            },
+        }
     }
 }
 
@@ -218,21 +271,135 @@ pub fn start(
     state: &dyn StateArtifactTransport,
     probe: &dyn ReadinessProbe,
 ) -> Result<ActiveRun> {
-    let mut launched = match super::process_executor::launch_process(spec, &resolved.context) {
-        Ok(launched) => launched,
-        Err(error) => {
-            abort_run(state, &resolved.prepared);
-            return Err(error);
+    let launched = match &spec.realization {
+        LaunchRealizationV1::Process(_) => {
+            let mut launched =
+                match super::process_executor::launch_process(spec, &resolved.context) {
+                    Ok(launched) => launched,
+                    Err(error) => {
+                        abort_run(state, &resolved.prepared);
+                        return Err(error);
+                    }
+                };
+            if let Err(error) = super::process_executor::wait_until_ready(
+                spec,
+                &resolved.context,
+                &mut launched,
+                probe,
+            ) {
+                let _ = launched.stop(&spec.lifecycle);
+                abort_run(state, &resolved.prepared);
+                return Err(error);
+            }
+            ActiveWorkload::Process(launched)
+        }
+        LaunchRealizationV1::Oci(oci) => {
+            let image = oci
+                .image_reference
+                .clone()
+                .context("OCI execution requires a pullable image_reference")?;
+            let platform = oci
+                .platform
+                .clone()
+                .context("OCI execution requires a platform")?;
+            let limits = oci
+                .resource_limits
+                .clone()
+                .context("OCI execution requires resource_limits")?;
+            let endpoints = resolved
+                .context
+                .endpoints()
+                .iter()
+                .map(|endpoint| {
+                    Ok(OciEndpoint {
+                        host_port: endpoint.host_port,
+                        guest_port: endpoint.guest_port.context(
+                            "OCI endpoint requires a guest port for container port mapping",
+                        )?,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let adapter = DockerOciAdapter::new(OciSpec {
+                id: spec.context.run_id.clone(),
+                image,
+                platform,
+                argv: oci.argv.clone().unwrap_or_default(),
+                working_dir: oci.working_dir.clone().unwrap_or_else(|| "/app".to_owned()),
+                environment: resolved.context.environment_for_spawn(),
+                endpoints,
+                limits: OciResourceLimits {
+                    memory_bytes: limits.memory_bytes,
+                    cpu_limit_millis: limits.cpu_limit_millis,
+                    pids_limit: limits.pids_limit,
+                },
+                stop_timeout_seconds: spec.lifecycle.graceful_shutdown_ms.div_ceil(1000).max(1),
+            })?;
+            let runtime_root = resolved
+                .context
+                .workspace_root()
+                .parent()
+                .context("workspace has no lease root")?
+                .join("oci-runtime");
+            let mut launched = match adapter.spawn(resolved.context.workspace_root(), &runtime_root)
+            {
+                Ok(launched) => launched,
+                Err(error) => {
+                    abort_run(state, &resolved.prepared);
+                    return Err(error);
+                }
+            };
+            if let Err(error) = wait_until_oci_ready(spec, &resolved.context, &mut launched, probe)
+            {
+                let _ = launched.stop();
+                abort_run(state, &resolved.prepared);
+                return Err(error);
+            }
+            ActiveWorkload::Oci(launched)
         }
     };
-    if let Err(error) =
-        super::process_executor::wait_until_ready(spec, &resolved.context, &mut launched, probe)
-    {
-        let _ = launched.stop(&spec.lifecycle);
-        abort_run(state, &resolved.prepared);
-        return Err(error);
-    }
     Ok(ActiveRun { launched, resolved })
+}
+
+fn wait_until_oci_ready(
+    spec: &RuntimeLaunchSpecV1,
+    context: &ResolvedRuntimeLaunchContext,
+    launched: &mut OciHandle,
+    probe: &dyn ReadinessProbe,
+) -> Result<()> {
+    let (timeout_ms, target) = match &spec.readiness {
+        ReadinessV1::Http {
+            endpoint_name,
+            path,
+            timeout_ms,
+        } => (*timeout_ms, Some((endpoint_name, path.as_str()))),
+        ReadinessV1::Tcp {
+            endpoint_name,
+            timeout_ms,
+        } => (*timeout_ms, Some((endpoint_name, ""))),
+        ReadinessV1::Process { timeout_ms } => (*timeout_ms, None),
+    };
+    let Some((endpoint_name, path)) = target else {
+        return Ok(());
+    };
+    let host_port = context
+        .endpoints()
+        .iter()
+        .find(|endpoint| endpoint.name == *endpoint_name)
+        .map(|endpoint| endpoint.host_port)
+        .with_context(|| format!("readiness names missing endpoint `{endpoint_name}`"))?;
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        if let Some(code) = launched.exit_code()? {
+            bail!("OCI container exited before readiness with code {code}");
+        }
+        match probe.probe(host_port, path) {
+            Ok(()) => return Ok(()),
+            Err(error) if Instant::now() >= deadline => {
+                bail!("OCI container did not become ready within {timeout_ms}ms: {error}")
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
 }
 
 /// Hold the Run ACTIVE until the control plane asks it to stop.
@@ -265,7 +432,11 @@ pub fn finish(
     commit_request_id: &str,
 ) -> Result<Vec<RunStateOutcome>> {
     let ActiveRun { launched, resolved } = active;
-    if let Err(error) = launched.stop(&spec.lifecycle) {
+    let stopped = match launched {
+        ActiveWorkload::Process(process) => process.stop(&spec.lifecycle).map(|_| ()),
+        ActiveWorkload::Oci(container) => container.stop(),
+    };
+    if let Err(error) = stopped {
         abort_run(state, &resolved.prepared);
         return Err(error);
     }
