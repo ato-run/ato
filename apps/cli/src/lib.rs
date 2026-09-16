@@ -982,30 +982,32 @@ fn portable_instance_worker_claimed(
     let bundle_bytes = store.bundle_bytes(&instance)?;
     let bundle = portable_export_bundle(&bundle_bytes)?;
     let selected = validate_bundle_for_derivation(&bundle, &instance.selected_derivation_ref)?;
-    let surface_snapshot = store.local_surface_snapshot(&claimed.instance_id)?;
-    if surface_snapshot.is_some() && selected.realization != PortableRealizationKind::StaticWeb {
-        bail!("local Instance snapshot restore currently supports only a static-web Derivation");
-    }
-    let restored_snapshot_ref = surface_snapshot
-        .as_ref()
-        .map(|snapshot| snapshot.snapshot_ref.clone());
-    let static_state = surface_snapshot.map(|snapshot| {
-        let persistence_token = bundle_sha256(format!("{}\0local-state", claimed.token).as_bytes());
-        StaticApplicationState {
-            persistence_token,
-            local_storage: snapshot.local_storage,
-            assets: snapshot
-                .assets
-                .into_iter()
-                .map(|asset| StaticApplicationAsset {
-                    asset_id: asset.asset_id,
-                    filename: asset.filename,
-                    content_type: asset.content_type,
-                    bytes: asset.bytes,
-                })
-                .collect(),
-        }
-    });
+    let restored_snapshot_ref = instance.data_snapshot_ref.clone();
+    let static_state = if selected.realization == PortableRealizationKind::StaticWeb {
+        store
+            .local_surface_snapshot(&claimed.instance_id)?
+            .map(|snapshot| {
+                let persistence_token =
+                    bundle_sha256(format!("{}\0local-state", claimed.token).as_bytes());
+                StaticApplicationState {
+                    persistence_token,
+                    local_storage: snapshot.local_storage,
+                    assets: snapshot
+                        .assets
+                        .into_iter()
+                        .map(|asset| StaticApplicationAsset {
+                            asset_id: asset.asset_id,
+                            filename: asset.filename,
+                            content_type: asset.content_type,
+                            bytes: asset.bytes,
+                        })
+                        .collect(),
+                }
+            })
+    } else {
+        None
+    };
+    let filesystem_state = store.filesystem_state_paths(&claimed.instance_id)?;
     let run_root = store.run_root(&claimed.instance_id, &claimed.run_id)?;
     let mut started = start_and_verify_portable_application(
         &bundle_bytes,
@@ -1015,6 +1017,7 @@ fn portable_instance_worker_claimed(
         shutdown.as_deref(),
         restored_snapshot_ref.as_deref(),
         static_state,
+        Some(&filesystem_state),
     )?;
     if started.receipt.bundle_sha256 != instance.bundle_sha256
         || started.receipt.contract_ref != instance.contract_ref
@@ -1052,6 +1055,7 @@ fn portable_instance_worker_claimed(
                     &local_storage,
                 )?;
             }
+            store.save_filesystem_state_for_run(&active.instance_id, &active.token)?;
             fs::write(&ack, b"ok")?;
             loop {
                 if shutdown
@@ -1067,7 +1071,16 @@ fn portable_instance_worker_claimed(
             .as_deref()
             .is_some_and(|flag| flag.load(Ordering::Relaxed))
         {
+            let local_storage = started.runtime.local_storage()?;
             drop(started.runtime);
+            if let Some(local_storage) = local_storage {
+                store.save_browser_state_for_run(
+                    &active.instance_id,
+                    &active.token,
+                    &local_storage,
+                )?;
+            }
+            store.save_filesystem_state_for_run(&active.instance_id, &active.token)?;
             store.release_run(&active.instance_id, &active.token)?;
             return Ok(());
         }
@@ -1415,6 +1428,7 @@ fn run_portable_application(
         shutdown.as_deref(),
         None,
         None,
+        None,
     )?;
     let runtime = started.runtime;
     let receipt = started.receipt;
@@ -1467,6 +1481,13 @@ struct StartedPortableApplication {
     receipt: ContractVerificationReceipt,
 }
 
+#[derive(Debug, Clone)]
+struct PortableStateMount {
+    id: String,
+    host_path: PathBuf,
+    guest_path: String,
+}
+
 fn start_and_verify_portable_application(
     bundle_bytes: &[u8],
     bundle: ato_objects::PortableApplicationBundle,
@@ -1475,6 +1496,7 @@ fn start_and_verify_portable_application(
     shutdown: Option<&AtomicBool>,
     restored_snapshot_ref: Option<&str>,
     static_state: Option<StaticApplicationState>,
+    filesystem_state: Option<&BTreeMap<String, PathBuf>>,
 ) -> Result<StartedPortableApplication> {
     let validated = validate_bundle_for_derivation(&bundle, selected_derivation)?;
     fs::create_dir_all(runtime_root)?;
@@ -1490,6 +1512,7 @@ fn start_and_verify_portable_application(
         &validated,
         &hydrated,
         static_state,
+        filesystem_state,
     )?;
 
     let mut observation = RuntimeObservation {
@@ -1619,7 +1642,9 @@ impl PortableLocalRuntime {
         route: &ValidatedPortableApplication,
         bundle: &ato_objects::PortableApplicationBundle,
         static_state: Option<StaticApplicationState>,
+        filesystem_state: Option<&BTreeMap<String, PathBuf>>,
     ) -> Result<Self> {
+        let state_mounts = resolve_portable_state_mounts(route, runtime_root, filesystem_state)?;
         match route.realization {
             PortableRealizationKind::StaticWeb => {
                 let server =
@@ -1630,11 +1655,6 @@ impl PortableLocalRuntime {
                 })
             }
             PortableRealizationKind::LocalProcess => {
-                if !route.derivation.state.is_empty() {
-                    bail!(
-                        "local process runtime admission failed: declared filesystem state requires a mount-capable process sandbox"
-                    );
-                }
                 let step = &route.derivation.steps[0];
                 let guest_port = route.derivation.ports[0]
                     .guest_port
@@ -1673,6 +1693,9 @@ impl PortableLocalRuntime {
                 let endpoint_name = endpoint_port_env_name(&route.derivation.ports[0].id);
                 let mut environment = step.env.clone();
                 environment.insert(endpoint_name, host_port.clone());
+                for state in &state_mounts {
+                    environment.insert(state_path_env_name(&state.id), state.guest_path.clone());
+                }
                 let process_runtime = runtime_root.join("process");
                 fs::create_dir_all(&process_runtime).with_context(|| {
                     format!(
@@ -1684,24 +1707,33 @@ impl PortableLocalRuntime {
                 let process_home = process_runtime.join("home");
                 fs::create_dir_all(&process_tmp)?;
                 fs::create_dir_all(&process_home)?;
-                environment.insert(
-                    "ATO_RUNTIME_DIR".to_owned(),
-                    process_runtime.display().to_string(),
-                );
-                for name in ["TMPDIR", "TMP", "TEMP"] {
-                    environment.insert(name.to_owned(), process_tmp.display().to_string());
+                if state_mounts.is_empty() {
+                    environment.insert(
+                        "ATO_RUNTIME_DIR".to_owned(),
+                        process_runtime.display().to_string(),
+                    );
+                    for name in ["TMPDIR", "TMP", "TEMP"] {
+                        environment.insert(name.to_owned(), process_tmp.display().to_string());
+                    }
+                    environment.insert("HOME".to_owned(), process_home.display().to_string());
+                    environment.insert(
+                        "XDG_CACHE_HOME".to_owned(),
+                        process_home.join(".cache").display().to_string(),
+                    );
+                } else {
+                    for name in ["ATO_RUNTIME_DIR", "TMPDIR", "TMP", "TEMP", "HOME"] {
+                        environment.insert(name.to_owned(), "/tmp".to_owned());
+                    }
+                    environment.insert("XDG_CACHE_HOME".to_owned(), "/tmp/.cache".to_owned());
                 }
-                environment.insert("HOME".to_owned(), process_home.display().to_string());
-                environment.insert(
-                    "XDG_CACHE_HOME".to_owned(),
-                    process_home.join(".cache").display().to_string(),
-                );
                 command = portable_process_sandbox_command(
                     workspace,
                     &process_runtime,
                     &executable,
                     &command,
                     host_port.parse()?,
+                    &step.cwd,
+                    &state_mounts,
                 )?;
                 let adapter = ProcessAdapter::new(ProcessSpec {
                     id: step.id.clone(),
@@ -1727,19 +1759,14 @@ impl PortableLocalRuntime {
                 drop(listener);
                 let runtime = &route.derivation.runtimes;
                 let mut environment = step.env.clone();
-                let mounts = route
-                    .derivation
-                    .state
+                let mounts = state_mounts
                     .iter()
                     .map(|state| {
-                        let host_path = runtime_root.join("state").join(&state.id);
-                        fs::create_dir_all(&host_path).with_context(|| {
-                            format!("create portable OCI state {}", host_path.display())
-                        })?;
-                        environment.insert(state_path_env_name(&state.id), state.mount.clone());
+                        environment
+                            .insert(state_path_env_name(&state.id), state.guest_path.clone());
                         Ok(OciMount {
-                            host_path,
-                            guest_path: state.mount.clone(),
+                            host_path: state.host_path.clone(),
+                            guest_path: state.guest_path.clone(),
                             writable: true,
                         })
                     })
@@ -1984,13 +2011,65 @@ fn verified_python(executable: &str, version: &str) -> Result<(String, String)> 
     Ok((resolved, reported.trim().to_owned()))
 }
 
+fn resolve_portable_state_mounts(
+    route: &ValidatedPortableApplication,
+    runtime_root: &Path,
+    persistent: Option<&BTreeMap<String, PathBuf>>,
+) -> Result<Vec<PortableStateMount>> {
+    if let Some(persistent) = persistent
+        && persistent.len() != route.derivation.state.len()
+    {
+        bail!("local Instance filesystem state does not match the selected Derivation");
+    }
+    route
+        .derivation
+        .state
+        .iter()
+        .map(|state| {
+            let host_path = match persistent {
+                Some(paths) => paths.get(&state.id).cloned().with_context(|| {
+                    format!("local Instance filesystem state `{}` is missing", state.id)
+                })?,
+                None => {
+                    let path = runtime_root.join("state").join(&state.id);
+                    fs::create_dir_all(&path).with_context(|| {
+                        format!("create portable filesystem state {}", path.display())
+                    })?;
+                    path
+                }
+            };
+            let host_path = host_path.canonicalize().with_context(|| {
+                format!(
+                    "canonicalize portable filesystem state {}",
+                    host_path.display()
+                )
+            })?;
+            if !host_path.is_dir() {
+                bail!(
+                    "portable filesystem state `{}` is not a directory",
+                    state.id
+                );
+            }
+            Ok(PortableStateMount {
+                id: state.id.clone(),
+                host_path,
+                guest_path: state.mount.clone(),
+            })
+        })
+        .collect()
+}
+
 fn portable_process_sandbox_command(
     workspace: &std::path::Path,
     runtime_root: &std::path::Path,
     executable: &str,
     workload: &[String],
     host_port: u16,
+    working_dir: &str,
+    state_mounts: &[PortableStateMount],
 ) -> Result<Vec<String>> {
+    #[cfg(not(target_os = "linux"))]
+    let _ = working_dir;
     let workspace = workspace
         .canonicalize()
         .context("canonicalize portable workspace")?;
@@ -2005,6 +2084,26 @@ fn portable_process_sandbox_command(
         .and_then(std::path::Path::parent)
         .context("portable runtime has no readable installation root")?
         .to_path_buf();
+    if !state_mounts.is_empty() {
+        #[cfg(target_os = "linux")]
+        {
+            return portable_process_bwrap_command(
+                &workspace,
+                &runtime_root,
+                &interpreter_root,
+                workload,
+                host_port,
+                working_dir,
+                state_mounts,
+            );
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            bail!(
+                "local process runtime admission failed: declared filesystem state requires a Linux bubblewrap sandbox"
+            );
+        }
+    }
     let system_roots = [
         "/usr",
         "/bin",
@@ -2045,6 +2144,130 @@ fn portable_process_sandbox_command(
         policy_path.display().to_string(),
         "--".to_owned(),
     ];
+    command.extend(workload.iter().cloned());
+    Ok(command)
+}
+
+#[cfg(target_os = "linux")]
+fn portable_process_bwrap_command(
+    workspace: &Path,
+    runtime_root: &Path,
+    interpreter_root: &Path,
+    workload: &[String],
+    host_port: u16,
+    working_dir: &str,
+    state_mounts: &[PortableStateMount],
+) -> Result<Vec<String>> {
+    let bwrap = executable_path("bwrap")
+        .context("local process runtime admission failed: `bwrap` is not on PATH")?;
+    let shim = std::env::current_exe()
+        .context("locate ato sandbox shim")?
+        .canonicalize()
+        .context("canonicalize ato sandbox shim")?;
+    let guest_working_dir = if working_dir == "." {
+        "/app".to_owned()
+    } else {
+        format!("/app/{working_dir}")
+    };
+    let policy = SandboxPolicy::new()
+        .allow_read_write(
+            state_mounts
+                .iter()
+                .map(|state| PathBuf::from(&state.guest_path))
+                .chain([PathBuf::from("/tmp")]),
+        )
+        .allow_read_only(
+            [
+                PathBuf::from("/app"),
+                PathBuf::from("/.ato"),
+                interpreter_root.to_path_buf(),
+                PathBuf::from("/usr"),
+                PathBuf::from("/bin"),
+                PathBuf::from("/sbin"),
+                PathBuf::from("/lib"),
+                PathBuf::from("/lib64"),
+                PathBuf::from("/etc"),
+                PathBuf::from("/dev"),
+                PathBuf::from("/proc"),
+            ]
+            .into_iter(),
+        )
+        .with_network(false)
+        .allow_tcp_bind([host_port]);
+    let policy_path = runtime_root.join("sandbox-policy.json");
+    fs::write(&policy_path, serde_json::to_vec_pretty(&policy)?)
+        .with_context(|| format!("write portable sandbox policy {}", policy_path.display()))?;
+
+    let mut command = vec![
+        bwrap.display().to_string(),
+        "--unshare-all".to_owned(),
+        "--share-net".to_owned(),
+        "--die-with-parent".to_owned(),
+        "--new-session".to_owned(),
+        "--proc".to_owned(),
+        "/proc".to_owned(),
+        "--dev".to_owned(),
+        "/dev".to_owned(),
+        "--tmpfs".to_owned(),
+        "/tmp".to_owned(),
+    ];
+    for (source, target, required) in [
+        ("/bin", "/bin", false),
+        ("/sbin", "/sbin", false),
+        ("/lib", "/lib", false),
+        ("/lib64", "/lib64", false),
+        ("/usr", "/usr", true),
+        ("/etc/resolv.conf", "/etc/resolv.conf", false),
+        ("/etc/hosts", "/etc/hosts", false),
+        ("/etc/ssl", "/etc/ssl", false),
+    ] {
+        command.extend([
+            if required {
+                "--ro-bind"
+            } else {
+                "--ro-bind-try"
+            }
+            .to_owned(),
+            source.to_owned(),
+            target.to_owned(),
+        ]);
+    }
+    if !interpreter_root.starts_with("/usr") {
+        command.extend([
+            "--ro-bind".to_owned(),
+            interpreter_root.display().to_string(),
+            interpreter_root.display().to_string(),
+        ]);
+    }
+    command.extend([
+        "--ro-bind".to_owned(),
+        workspace.display().to_string(),
+        "/app".to_owned(),
+    ]);
+    for state in state_mounts {
+        command.extend([
+            "--bind".to_owned(),
+            state.host_path.display().to_string(),
+            state.guest_path.clone(),
+        ]);
+    }
+    command.extend([
+        "--dir".to_owned(),
+        "/.ato".to_owned(),
+        "--ro-bind".to_owned(),
+        shim.display().to_string(),
+        "/.ato/ato".to_owned(),
+        "--ro-bind".to_owned(),
+        policy_path.display().to_string(),
+        "/.ato/sandbox-policy.json".to_owned(),
+        "--chdir".to_owned(),
+        guest_working_dir,
+        "/.ato/ato".to_owned(),
+        "__portable-sandbox-exec".to_owned(),
+        "--policy".to_owned(),
+        "/.ato/sandbox-policy.json".to_owned(),
+        "--".to_owned(),
+    ]);
     command.extend(workload.iter().cloned());
     Ok(command)
 }
