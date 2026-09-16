@@ -27,7 +27,7 @@ acceptance. Production was not changed.
   contains the pinned manifest, config, and seven layer blobs; each digest,
   declared byte size, and platform was verified before export. The seven
   compressed layers total 85,165,556 bytes. The current 32 MiB Hosted upload
-  limit cannot carry this file. The CLI OCI loading path needs real acceptance.
+  limit cannot carry this file.
 
 The OCI image is
 `docker.io/datasetteproject/datasette@sha256:0f57db16cf4eb6cca57f1cedaa0a696bca1c65a1d75b8f7ee372c2dd909a32a0`
@@ -59,8 +59,29 @@ The new archive parser also rejects a modified OCI layer before Docker load.
 `ato run <offline> --derivation <Python D> --no-open` satisfied all three
 observations under the same proxy-block condition. Its receipt is
 `.tmp/datasette-evidence/cli-python-offline-blocked-proxy-receipt.json`.
-This has not yet established the OCI route's offline behavior, and proxy
-variables alone are not a full outbound-block evidence source.
+The byte-identical offline bundle was copied to the Linux/amd64 validation
+host and its SHA-256 was rechecked there. `ato run <offline> --derivation
+<OCI D> --no-open` loaded the embedded image archive through the Runner-owned
+Docker Adapter and satisfied all three observations. The receipt is
+`/home/ekohsuke/.ato-staging/.tmp/portable-datasette/export-policy/cli-oci-offline-blocked-proxy-receipt.json`.
+The host has Docker Engine 29.1.3. The Docker store already contained this
+image, so this is **not** image-absent acceptance. Proxy variables alone are
+also not a daemon-wide registry block; the no-network guarantee is still
+untested in an isolated target.
+
+The v3 Static and Process interop `.capsule` fixtures both passed their CLI
+HTTP observations after the v4 changes. A separate OCI run held open behind
+a loopback Caddy reverse proxy served `/` with status 200 and 1,549 body
+bytes using the `s0-rstg002.ato.run` Host header. This rules out a generic
+Caddy-to-PortForwarder failure in that local configuration, not the Hosted
+Cloudflare path. A timed SIGTERM then returned cleanly and left no container
+or per-Run Docker network. Before the signal-handler fix, termination had
+left a test container; that exact test container/network were removed.
+
+A diagnostic Caddy invocation briefly installed a local CA in the validation
+host's trust store. The exact certificate, symlinks, autosaved user config,
+and temporary Caddy key material were removed, and the trust store was
+rebuilt. No diagnostic listener remains.
 
 Reproduce:
 
@@ -74,9 +95,8 @@ cargo run -q -p ato-cli --bin ato -- run .tmp/datasette-evidence/datasette-thin.
 
 `ato export` refuses to overwrite an existing output; choose a fresh filename
 when rerunning. `cargo test -p ato-cli --lib`, `cargo test -p
-ato-portable-application --lib`, and the portable-bundle and verification
-receipt tests passed. Static/Process fixture compatibility still needs a new
-end-to-end pass after v4 changes.
+ato-portable-application --lib`, `cargo test -p ato-adapter-oci --lib`, and the
+portable-bundle and verification receipt tests passed.
 
 ## Hosted OCI Surface and remaining acceptance
 
