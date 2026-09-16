@@ -5,16 +5,23 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ato_objects::{CapsuleBundleDocument, decode_capsule_bundle_document};
+use ato_computation::ContentRef;
+use ato_objects::{
+    CapsuleBundleDocument, PORTABLE_APPLICATION_BUNDLE_VERSION, PortableApplicationBundle,
+    PortableDependencyProfile, decode_capsule_bundle_document,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::instance_snapshot::{InstanceSnapshotV1, attach_instance_snapshot, validate_snapshot};
+use crate::portability_export::repack_portable_dependencies;
 use crate::{bundle_sha256, validate_bundle_for_derivation};
 
 pub const LOCAL_APPLICATION_SCHEMA: &str = "ato.local-application/1";
 pub const LOCAL_INSTANCE_SCHEMA: &str = "ato.local-instance/1";
 pub const LOCAL_INSTANCE_RUN_SCHEMA: &str = "ato.local-instance-run/1";
+pub const LOCAL_RESTORED_SNAPSHOT_SCHEMA: &str = "ato.local-restored-instance-snapshot/1";
 
 static LOCAL_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -42,6 +49,8 @@ pub enum LocalInstanceError {
     RunLeaseChanged(String),
     #[error("local instance data is invalid: {0}")]
     InvalidState(String),
+    #[error("local instance `{instance_id}` must be stopped before saving portable data")]
+    SnapshotRequiresStopped { instance_id: String },
     #[error("local instance JSON failed: {0}")]
     Json(#[from] serde_json::Error),
     #[error("local instance I/O failed at {path}: {source}")]
@@ -74,6 +83,36 @@ pub struct LocalInstanceMetadata {
     pub created_at: String,
     pub data_snapshot_ref: Option<String>,
     pub bindings: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalRestoredSnapshot {
+    pub schema: String,
+    pub snapshot_ref: String,
+    pub resources: Vec<LocalRestoredResource>,
+    pub assets: Vec<LocalRestoredAsset>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalRestoredResource {
+    pub slot: String,
+    pub protocol: String,
+    pub content_ref: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalRestoredAsset {
+    pub alias: String,
+    pub asset_id: String,
+    pub content_ref: String,
+    pub filename: String,
+    pub content_type: String,
+    pub size: u64,
+    pub path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,16 +221,29 @@ impl LocalApplicationStore {
             contract_ref: validated.contract_ref.to_string(),
             application_ref: validated.application_ref.to_string(),
             application_id,
-            available_derivation_refs: bundle.index.derivations,
+            available_derivation_refs: bundle.index.derivations.clone(),
             selected_derivation_ref: validated.derivation_ref.to_string(),
             created_at,
-            data_snapshot_ref: None,
+            data_snapshot_ref: validated
+                .instance_snapshot_ref
+                .as_ref()
+                .map(ToString::to_string),
             bindings: BTreeMap::new(),
         };
         let instance_root = self.instance_root(&instance_id)?;
         create_dir(&instance_root)?;
-        create_dir_all(&instance_root.join("runs"))?;
-        create_canonical(&instance_root.join("instance.json"), &instance)?;
+        let prepared = (|| {
+            create_dir_all(&instance_root.join("runs"))?;
+            create_dir_all(&instance_root.join("snapshots"))?;
+            if let Some(snapshot_ref) = instance.data_snapshot_ref.as_deref() {
+                self.materialize_snapshot(&instance_id, &bundle, snapshot_ref)?;
+            }
+            create_canonical(&instance_root.join("instance.json"), &instance)
+        })();
+        if let Err(error) = prepared {
+            let _ = fs::remove_dir_all(&instance_root);
+            return Err(error);
+        }
         Ok(instance)
     }
 
@@ -235,6 +287,91 @@ impl LocalApplicationStore {
             )));
         }
         Ok(bytes)
+    }
+
+    pub fn restored_snapshot(
+        &self,
+        instance_id: &str,
+    ) -> Result<Option<LocalRestoredSnapshot>, LocalInstanceError> {
+        let instance = self.instance(instance_id)?;
+        let Some(reference) = instance.data_snapshot_ref.as_deref() else {
+            return Ok(None);
+        };
+        let root = self.snapshot_root(instance_id, reference)?;
+        let restored = read_restored_snapshot(&root)?;
+        if restored.snapshot_ref != reference {
+            return Err(LocalInstanceError::InvalidState(format!(
+                "restored snapshot does not match Instance `{instance_id}`"
+            )));
+        }
+        verify_restored_snapshot(&root, &restored)?;
+        Ok(Some(restored))
+    }
+
+    pub fn save_snapshot(
+        &self,
+        instance_id: &str,
+        snapshot: InstanceSnapshotV1,
+        content: &BTreeMap<String, Vec<u8>>,
+    ) -> Result<LocalInstanceMetadata, LocalInstanceError> {
+        let mut instance = self.instance(instance_id)?;
+        if self.active_run(instance_id)?.is_some() {
+            return Err(LocalInstanceError::SnapshotRequiresStopped {
+                instance_id: instance_id.to_owned(),
+            });
+        }
+        let source_bytes = self.bundle_bytes(&instance)?;
+        let source = portable_bundle(&source_bytes)?;
+        let source = if source.index.version == PORTABLE_APPLICATION_BUNDLE_VERSION {
+            repack_portable_dependencies(
+                &source,
+                PortableDependencyProfile::Cached,
+                &BTreeMap::new(),
+            )
+            .map_err(|error| LocalInstanceError::Bundle(error.to_string()))?
+            .1
+        } else {
+            source
+        };
+        let (bytes, saved) = attach_instance_snapshot(&source, snapshot, content)
+            .map_err(|error| LocalInstanceError::Bundle(error.to_string()))?;
+        if !saved
+            .index
+            .derivations
+            .contains(&instance.selected_derivation_ref)
+        {
+            return Err(LocalInstanceError::InvalidState(
+                "snapshot export changed the selected DerivationRef".to_owned(),
+            ));
+        }
+        let snapshot_ref = saved.index.instance_snapshot_ref.clone().ok_or_else(|| {
+            LocalInstanceError::InvalidState(
+                "snapshot export omitted instance_snapshot_ref".to_owned(),
+            )
+        })?;
+        self.materialize_snapshot(instance_id, &saved, &snapshot_ref)?;
+
+        let transport_sha256 = bundle_sha256(&bytes);
+        let bundle_path = self
+            .application_root(&instance.application_id)?
+            .join("bundles")
+            .join(format!("{}.capsule", digest_hex(&transport_sha256)?));
+        create_or_verify(&bundle_path, &bytes)?;
+
+        instance.bundle_sha256 = transport_sha256;
+        instance.contract_ref = saved.index.root_contract_ref;
+        instance.available_derivation_refs = saved.index.derivations;
+        instance.data_snapshot_ref = Some(snapshot_ref);
+        replace_canonical(
+            &self.instance_root(instance_id)?.join("instance.json"),
+            &instance,
+        )?;
+        Ok(instance)
+    }
+
+    pub fn export_instance(&self, instance_id: &str) -> Result<Vec<u8>, LocalInstanceError> {
+        let instance = self.instance(instance_id)?;
+        self.bundle_bytes(&instance)
     }
 
     pub fn claim_run(&self, instance_id: &str) -> Result<LocalInstanceRun, LocalInstanceError> {
@@ -366,6 +503,186 @@ impl LocalApplicationStore {
     fn active_run_path(&self, instance_id: &str) -> Result<PathBuf, LocalInstanceError> {
         Ok(self.instance_root(instance_id)?.join("active-run.json"))
     }
+
+    fn snapshot_root(
+        &self,
+        instance_id: &str,
+        snapshot_ref: &str,
+    ) -> Result<PathBuf, LocalInstanceError> {
+        Ok(self
+            .instance_root(instance_id)?
+            .join("snapshots")
+            .join(digest_hex(snapshot_ref)?))
+    }
+
+    fn materialize_snapshot(
+        &self,
+        instance_id: &str,
+        bundle: &PortableApplicationBundle,
+        snapshot_ref: &str,
+    ) -> Result<LocalRestoredSnapshot, LocalInstanceError> {
+        let snapshot_ref = ContentRef::parse(snapshot_ref.to_owned())
+            .map_err(|error| LocalInstanceError::InvalidState(error.to_string()))?;
+        let snapshot_bytes = bundle
+            .payload_bytes(&snapshot_ref)
+            .map_err(|error| LocalInstanceError::Bundle(error.to_string()))?;
+        let snapshot: InstanceSnapshotV1 = serde_json::from_slice(&snapshot_bytes)?;
+        validate_snapshot(&snapshot)
+            .map_err(|error| LocalInstanceError::Bundle(error.to_string()))?;
+        let root = self.snapshot_root(instance_id, snapshot_ref.as_str())?;
+        create_dir_all(&root.join("resources"))?;
+        create_dir_all(&root.join("assets"))?;
+
+        let mut resources = Vec::with_capacity(snapshot.resources.len());
+        for (index, resource) in snapshot.resources.iter().enumerate() {
+            let bytes = snapshot_content(bundle, &resource.content_ref)?;
+            let path = format!("resources/{index:06}.bin");
+            create_or_verify(&root.join(&path), &bytes)?;
+            resources.push(LocalRestoredResource {
+                slot: resource.slot.clone(),
+                protocol: resource.protocol.clone(),
+                content_ref: resource.content_ref.clone(),
+                path,
+            });
+        }
+
+        let mut assets = Vec::with_capacity(snapshot.assets.len());
+        for asset in &snapshot.assets {
+            let bytes = snapshot_content(bundle, &asset.content_ref)?;
+            if bytes.len() as u64 != asset.size {
+                return Err(LocalInstanceError::InvalidState(format!(
+                    "portable Asset `{}` size does not match its metadata",
+                    asset.alias
+                )));
+            }
+            let asset_id = local_asset_id(instance_id, &asset.alias);
+            let path = format!("assets/{asset_id}/body");
+            create_dir_all(&root.join("assets").join(&asset_id))?;
+            create_or_verify(&root.join(&path), &bytes)?;
+            assets.push(LocalRestoredAsset {
+                alias: asset.alias.clone(),
+                asset_id,
+                content_ref: asset.content_ref.clone(),
+                filename: asset.filename.clone(),
+                content_type: asset.content_type.clone(),
+                size: asset.size,
+                path,
+            });
+        }
+        let restored = LocalRestoredSnapshot {
+            schema: LOCAL_RESTORED_SNAPSHOT_SCHEMA.to_owned(),
+            snapshot_ref: snapshot_ref.to_string(),
+            resources,
+            assets,
+        };
+        create_or_verify(&root.join("snapshot.json"), &serde_jcs::to_vec(&restored)?)?;
+        verify_restored_snapshot(&root, &restored)?;
+        Ok(restored)
+    }
+}
+
+fn portable_bundle(bytes: &[u8]) -> Result<PortableApplicationBundle, LocalInstanceError> {
+    match decode_capsule_bundle_document(bytes)
+        .map_err(|error| LocalInstanceError::Bundle(error.to_string()))?
+    {
+        CapsuleBundleDocument::PortableApplicationV3(bundle)
+        | CapsuleBundleDocument::PortableApplicationV4(bundle) => Ok(bundle),
+        CapsuleBundleDocument::ComputationV2(_) => Err(LocalInstanceError::NotPortableApplication),
+    }
+}
+
+fn snapshot_content(
+    bundle: &PortableApplicationBundle,
+    reference: &str,
+) -> Result<Vec<u8>, LocalInstanceError> {
+    let reference = ContentRef::parse(reference.to_owned())
+        .map_err(|error| LocalInstanceError::InvalidState(error.to_string()))?;
+    bundle
+        .payload_bytes(&reference)
+        .map_err(|error| LocalInstanceError::Bundle(error.to_string()))
+}
+
+fn local_asset_id(instance_id: &str, alias: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(instance_id.as_bytes());
+    digest.update([0]);
+    digest.update(alias.as_bytes());
+    let digest = format!("{:x}", digest.finalize());
+    format!("ast_{}", &digest[..32])
+}
+
+fn read_restored_snapshot(root: &Path) -> Result<LocalRestoredSnapshot, LocalInstanceError> {
+    let path = root.join("snapshot.json");
+    let bytes = read(&path)?;
+    let restored: LocalRestoredSnapshot = serde_json::from_slice(&bytes)?;
+    if restored.schema != LOCAL_RESTORED_SNAPSHOT_SCHEMA || serde_jcs::to_vec(&restored)? != bytes {
+        return Err(LocalInstanceError::InvalidState(format!(
+            "restored snapshot metadata is invalid at {}",
+            path.display()
+        )));
+    }
+    Ok(restored)
+}
+
+fn verify_restored_snapshot(
+    root: &Path,
+    restored: &LocalRestoredSnapshot,
+) -> Result<(), LocalInstanceError> {
+    let mut paths = BTreeMap::new();
+    for resource in &restored.resources {
+        verify_restored_content(root, &resource.path, &resource.content_ref, None)?;
+        if resource.slot.is_empty()
+            || resource.protocol.is_empty()
+            || paths
+                .insert(resource.path.as_str(), resource.slot.as_str())
+                .is_some()
+        {
+            return Err(LocalInstanceError::InvalidState(
+                "restored resource metadata is invalid".to_owned(),
+            ));
+        }
+    }
+    for asset in &restored.assets {
+        validate_id(&asset.asset_id)?;
+        verify_restored_content(root, &asset.path, &asset.content_ref, Some(asset.size))?;
+        if asset.alias.is_empty()
+            || paths
+                .insert(asset.path.as_str(), asset.alias.as_str())
+                .is_some()
+        {
+            return Err(LocalInstanceError::InvalidState(
+                "restored Asset metadata is invalid".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn verify_restored_content(
+    root: &Path,
+    relative: &str,
+    expected_ref: &str,
+    expected_size: Option<u64>,
+) -> Result<(), LocalInstanceError> {
+    let path = Path::new(relative);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(LocalInstanceError::InvalidState(format!(
+            "restored snapshot path is unsafe: `{relative}`"
+        )));
+    }
+    let bytes = read(&root.join(path))?;
+    if expected_size.is_some_and(|size| size != bytes.len() as u64)
+        || bundle_sha256(&bytes) != expected_ref
+    {
+        return Err(LocalInstanceError::InvalidState(format!(
+            "restored snapshot content does not match `{expected_ref}`"
+        )));
+    }
+    Ok(())
 }
 
 fn application_id(reference: &str) -> Result<String, LocalInstanceError> {
@@ -532,7 +849,11 @@ fn replace_canonical<T: Serialize>(path: &Path, value: &T) -> Result<(), LocalIn
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{build_multi_derivation_bundle, build_static_bundle};
+    use crate::instance_snapshot::{
+        DATA_JSON_PROTOCOL, INSTANCE_SNAPSHOT_SCHEMA, InstanceSnapshotAssetV1,
+        InstanceSnapshotResourceV1,
+    };
+    use crate::{build_multi_derivation_bundle, build_static_bundle, validate_bytes_all};
 
     fn fixture_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/interop-static-k")
@@ -540,6 +861,43 @@ mod tests {
 
     fn multi_fixture_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/interop-multi-derivation")
+    }
+
+    fn snapshot_fixture() -> (InstanceSnapshotV1, BTreeMap<String, Vec<u8>>) {
+        let saved_data = br#"{"todos":["one","two"]}"#.to_vec();
+        let asset = b"portable-photo-bytes".to_vec();
+        let saved_data_ref = bundle_sha256(&saved_data);
+        let asset_ref = bundle_sha256(&asset);
+        (
+            InstanceSnapshotV1 {
+                schema: INSTANCE_SNAPSHOT_SCHEMA.to_owned(),
+                resources: vec![InstanceSnapshotResourceV1 {
+                    slot: "main".to_owned(),
+                    protocol: DATA_JSON_PROTOCOL.to_owned(),
+                    content_ref: saved_data_ref.clone(),
+                }],
+                assets: vec![InstanceSnapshotAssetV1 {
+                    alias: "asset-1".to_owned(),
+                    content_ref: asset_ref.clone(),
+                    filename: "photo.jpg".to_owned(),
+                    content_type: "image/jpeg".to_owned(),
+                    size: asset.len() as u64,
+                }],
+            },
+            BTreeMap::from([(saved_data_ref, saved_data), (asset_ref, asset)]),
+        )
+    }
+
+    fn bundle_with_snapshot() -> (Vec<u8>, PortableApplicationBundle) {
+        let (_, source) = build_static_bundle(&fixture_root(), "fixture").unwrap();
+        let (_, source) = repack_portable_dependencies(
+            &source,
+            PortableDependencyProfile::Cached,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let (snapshot, content) = snapshot_fixture();
+        attach_instance_snapshot(&source, snapshot, &content).unwrap()
     }
 
     #[test]
@@ -622,5 +980,104 @@ mod tests {
                 .to_string()
                 .contains("stored bundle digest mismatch")
         );
+    }
+
+    #[test]
+    fn snapshot_import_restores_content_into_independent_asset_namespaces() {
+        let root = tempfile::tempdir().unwrap();
+        let (bytes, _) = bundle_with_snapshot();
+        let store = LocalApplicationStore::open(root.path()).unwrap();
+
+        let first = store.import(&bytes, None).unwrap();
+        let second = store.import(&bytes, None).unwrap();
+        let first_snapshot = store
+            .restored_snapshot(&first.instance_id)
+            .unwrap()
+            .unwrap();
+        let second_snapshot = store
+            .restored_snapshot(&second.instance_id)
+            .unwrap()
+            .unwrap();
+
+        assert_ne!(first.instance_id, second.instance_id);
+        assert_eq!(first.data_snapshot_ref, second.data_snapshot_ref);
+        assert_ne!(
+            first_snapshot.assets[0].asset_id,
+            second_snapshot.assets[0].asset_id
+        );
+        assert_eq!(
+            first_snapshot.assets[0].content_ref,
+            second_snapshot.assets[0].content_ref
+        );
+    }
+
+    #[test]
+    fn saving_snapshot_mints_new_k_and_exports_the_updated_bundle() {
+        let root = tempfile::tempdir().unwrap();
+        let (bytes, original) = build_static_bundle(&fixture_root(), "fixture").unwrap();
+        let original_derivations = original.index.derivations;
+        let store = LocalApplicationStore::open(root.path()).unwrap();
+        let imported = store.import(&bytes, None).unwrap();
+        let (snapshot, content) = snapshot_fixture();
+
+        let saved = store
+            .save_snapshot(&imported.instance_id, snapshot, &content)
+            .unwrap();
+        let exported = store.export_instance(&imported.instance_id).unwrap();
+        let (exported_bundle, validated) = validate_bytes_all(&exported).unwrap();
+
+        assert_ne!(saved.contract_ref, imported.contract_ref);
+        assert_eq!(saved.available_derivation_refs, original_derivations);
+        assert_eq!(
+            saved.data_snapshot_ref,
+            exported_bundle.index.instance_snapshot_ref
+        );
+        assert!(validated.iter().all(|route| {
+            route.contract_ref.to_string() == saved.contract_ref
+                && route.derivation_ref.to_string() == saved.selected_derivation_ref
+        }));
+    }
+
+    #[test]
+    fn active_run_blocks_snapshot_save() {
+        let root = tempfile::tempdir().unwrap();
+        let (bytes, _) = build_static_bundle(&fixture_root(), "fixture").unwrap();
+        let store = LocalApplicationStore::open(root.path()).unwrap();
+        let instance = store.import(&bytes, None).unwrap();
+        let run = store.claim_run(&instance.instance_id).unwrap();
+        let (snapshot, content) = snapshot_fixture();
+
+        let result = store.save_snapshot(&instance.instance_id, snapshot, &content);
+
+        assert!(matches!(
+            result,
+            Err(LocalInstanceError::SnapshotRequiresStopped { .. })
+        ));
+        store
+            .release_run(&instance.instance_id, &run.token)
+            .unwrap();
+    }
+
+    #[test]
+    fn restored_asset_tamper_is_detected_before_use() {
+        let root = tempfile::tempdir().unwrap();
+        let (bytes, _) = bundle_with_snapshot();
+        let store = LocalApplicationStore::open(root.path()).unwrap();
+        let instance = store.import(&bytes, None).unwrap();
+        let snapshot = store
+            .restored_snapshot(&instance.instance_id)
+            .unwrap()
+            .unwrap();
+        let snapshot_root = store
+            .snapshot_root(
+                &instance.instance_id,
+                instance.data_snapshot_ref.as_deref().unwrap(),
+            )
+            .unwrap();
+        fs::write(snapshot_root.join(&snapshot.assets[0].path), b"tampered").unwrap();
+
+        let error = store.restored_snapshot(&instance.instance_id).unwrap_err();
+
+        assert!(error.to_string().contains("does not match"));
     }
 }
