@@ -17,8 +17,9 @@ use std::time::Duration;
 
 use ato_computation::ContentRef;
 use ato_formation::authoring::{
-    BOUND_CONTRACT_SCHEMA, BOUND_DERIVATION_SCHEMA, BROWSER_PROTOCOL, BindingContext,
-    BoundContract, BoundDerivation, EffectClass, HTTP_CONTRACT_VERIFIER, HTTP_PROTOCOL,
+    AuthoringDraft, AuthoringProvenance, BOUND_CONTRACT_SCHEMA, BOUND_DERIVATION_SCHEMA,
+    BROWSER_PROTOCOL, BindingContext, BoundContract, BoundDerivation, DerivationDraft, EffectClass,
+    HTTP_CONTRACT_VERIFIER, HTTP_PROTOCOL, PROCESS_PROTOCOL, PortDraft, StepDraft,
     WORKSPACE_CONTRACT_VERIFIER, WORKSPACE_PROTOCOL, bind,
 };
 use ato_formation::capsule_toml::{CAPSULE_FILE_NAME, parse_capsule_toml};
@@ -103,6 +104,22 @@ pub struct ValidatedPortableApplication {
     pub derivation: BoundDerivation,
     pub tree_ref: ContentRef,
     pub tree: PortableTreeV1,
+    pub realization: PortableRealizationKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PortableRealizationKind {
+    StaticWeb,
+    LocalProcess,
+}
+
+impl PortableRealizationKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::StaticWeb => "Static Web",
+            Self::LocalProcess => "Local Process",
+        }
+    }
 }
 
 /// Loopback-only static realization used by `ato run`.
@@ -117,6 +134,9 @@ impl StaticApplicationServer {
         root: &Path,
         validated: &ValidatedPortableApplication,
     ) -> Result<Self, PortableApplicationError> {
+        if validated.realization != PortableRealizationKind::StaticWeb {
+            return Err(profile("static server requires a static-web derivation"));
+        }
         verify_materialized_tree(validated, root)?;
         let listener =
             TcpListener::bind("127.0.0.1:0").map_err(|source| PortableApplicationError::Io {
@@ -196,20 +216,80 @@ pub fn validate_bytes(
     Ok((bundle, validated))
 }
 
+pub fn validate_bytes_all(
+    bytes: &[u8],
+) -> Result<(PortableApplicationBundle, Vec<ValidatedPortableApplication>), PortableApplicationError>
+{
+    let bundle = decode_portable_application_bundle(bytes)?;
+    let validated = validate_all_derivations(&bundle)?;
+    Ok((bundle, validated))
+}
+
+pub fn validate_bytes_for_derivation(
+    bytes: &[u8],
+    derivation_ref: &str,
+) -> Result<(PortableApplicationBundle, ValidatedPortableApplication), PortableApplicationError> {
+    let bundle = decode_portable_application_bundle(bytes)?;
+    let validated = validate_bundle_for_derivation(&bundle, derivation_ref)?;
+    Ok((bundle, validated))
+}
+
 pub fn validate_bundle(
     bundle: &PortableApplicationBundle,
 ) -> Result<ValidatedPortableApplication, PortableApplicationError> {
-    let registry = portable_reference_registry()?;
-    validate_portable_application_closure(bundle, &registry)?;
-
-    let contract_ref = parse_ref(&bundle.index.root_contract_ref, "root_contract_ref")?;
-    let application_ref = parse_ref(&bundle.index.application_ref, "application_ref")?;
     if bundle.index.derivations.len() != 1 {
         return Err(profile(
-            "the initial profile requires exactly one derivation",
+            "bundle has multiple derivations; select one explicitly",
         ));
     }
-    let derivation_ref = parse_ref(&bundle.index.derivations[0], "derivation")?;
+    validate_bundle_for_derivation(bundle, &bundle.index.derivations[0])
+}
+
+pub fn validate_all_derivations(
+    bundle: &PortableApplicationBundle,
+) -> Result<Vec<ValidatedPortableApplication>, PortableApplicationError> {
+    validate_bundle_closure(bundle)?;
+    bundle
+        .index
+        .derivations
+        .iter()
+        .map(|reference| validate_selected_derivation(bundle, reference))
+        .collect()
+}
+
+pub fn validate_bundle_for_derivation(
+    bundle: &PortableApplicationBundle,
+    derivation_ref: &str,
+) -> Result<ValidatedPortableApplication, PortableApplicationError> {
+    validate_bundle_closure(bundle)?;
+    if !bundle
+        .index
+        .derivations
+        .iter()
+        .any(|candidate| candidate == derivation_ref)
+    {
+        return Err(profile(format!(
+            "selected derivation `{derivation_ref}` is not declared by this bundle"
+        )));
+    }
+    validate_selected_derivation(bundle, derivation_ref)
+}
+
+fn validate_bundle_closure(
+    bundle: &PortableApplicationBundle,
+) -> Result<(), PortableApplicationError> {
+    let registry = portable_reference_registry()?;
+    validate_portable_application_closure(bundle, &registry)?;
+    Ok(())
+}
+
+fn validate_selected_derivation(
+    bundle: &PortableApplicationBundle,
+    selected_derivation_ref: &str,
+) -> Result<ValidatedPortableApplication, PortableApplicationError> {
+    let contract_ref = parse_ref(&bundle.index.root_contract_ref, "root_contract_ref")?;
+    let application_ref = parse_ref(&bundle.index.application_ref, "application_ref")?;
+    let derivation_ref = parse_ref(selected_derivation_ref, "derivation")?;
     let contract: BoundContract = structured(bundle, &contract_ref, BOUND_CONTRACT_SCHEMA)?;
     let application: ApplicationV1 = structured(bundle, &application_ref, APPLICATION_SCHEMA)?;
     let derivation: BoundDerivation = structured(bundle, &derivation_ref, BOUND_DERIVATION_SCHEMA)?;
@@ -230,7 +310,7 @@ pub fn validate_bundle(
     {
         return Err(profile("derivation reference is not its canonical digest"));
     }
-    validate_initial_route(&contract, &application, &derivation)?;
+    let realization = validate_initial_route(&contract, &application, &derivation)?;
 
     let surface = &application.surfaces[0];
     let tree_ref = parse_ref(&surface.artifact_ref, "surface.artifact_ref")?;
@@ -247,6 +327,7 @@ pub fn validate_bundle(
         derivation,
         tree_ref,
         tree,
+        realization,
     })
 }
 
@@ -260,34 +341,8 @@ pub fn build_static_bundle(
     if title.trim().is_empty() {
         return Err(profile("application title must not be empty"));
     }
-    let capsule_toml = read(source_root.join(CAPSULE_FILE_NAME))?;
-    let capsule_toml = std::str::from_utf8(&capsule_toml)
-        .map_err(|error| profile(format!("capsule.toml is not UTF-8: {error}")))?;
-    let draft = parse_capsule_toml(capsule_toml)
-        .map_err(|error| PortableApplicationError::CapsuleToml(error.to_string()))?;
-
-    let files = collect_static_files(source_root)?;
-    let mut objects = BTreeMap::<String, ObjectToEncode>::new();
-    let mut entries = Vec::with_capacity(files.len());
-    for (relative, path, media_type) in files {
-        let bytes = read(path)?;
-        let reference = bundle_sha256(&bytes);
-        entries.push(PortableTreeEntryV1 {
-            path: relative,
-            content_ref: reference.clone(),
-            size: bytes.len() as u64,
-            media_type,
-        });
-        objects
-            .entry(reference)
-            .or_insert(ObjectToEncode::Blob(bytes));
-    }
-    entries.sort_by(|left, right| left.path.cmp(&right.path));
-    let tree = PortableTreeV1 {
-        schema: PORTABLE_TREE_SCHEMA.to_owned(),
-        entries,
-    };
-    let tree_ref = add_structured(&mut objects, &tree, PORTABLE_TREE_SCHEMA)?;
+    let draft = read_authoring_draft(source_root)?;
+    let (mut objects, tree_ref) = build_portable_tree(source_root)?;
     let (contract, derivation) = bind(
         &draft,
         &BindingContext {
@@ -318,39 +373,127 @@ pub fn build_static_bundle(
     let derivation_ref = add_structured(&mut objects, &derivation, BOUND_DERIVATION_SCHEMA)?;
     let application_ref = add_structured(&mut objects, &application, APPLICATION_SCHEMA)?;
 
-    let mut descriptors = Vec::with_capacity(objects.len());
-    let mut payloads = Vec::with_capacity(objects.len());
-    for (reference, object) in objects {
-        let (kind, schema, bytes) = match object {
-            ObjectToEncode::Structured { schema, bytes } => {
-                (PortableBundleObjectKind::Structured, Some(schema), bytes)
-            }
-            ObjectToEncode::Blob(bytes) => (PortableBundleObjectKind::Blob, None, bytes),
-        };
-        descriptors.push(PortableBundleObjectDescriptor {
-            reference: reference.clone(),
-            kind,
-            schema,
-            size: bytes.len() as u64,
-        });
-        payloads.push(PortableBundlePayload {
-            reference,
-            bytes: base64::engine::general_purpose::STANDARD.encode(bytes),
-        });
-    }
-    let bundle = PortableApplicationBundle {
-        index: PortableBundleIndex {
-            version: PORTABLE_APPLICATION_BUNDLE_VERSION,
-            profile: PORTABLE_APPLICATION_PROFILE.to_owned(),
-            root_contract_ref: contract_ref,
-            application_ref,
-            derivations: vec![derivation_ref],
-            objects: descriptors,
-        },
-        payloads,
-        signatures: Vec::new(),
-    };
+    let bundle = finish_bundle(objects, contract_ref, application_ref, vec![derivation_ref]);
     validate_bundle(&bundle)?;
+    let bytes = encode_portable_application_bundle(&bundle)?;
+    Ok((bytes, bundle))
+}
+
+/// Build one canonical bundle containing two explicitly selectable routes for
+/// the same Contract: browser/static delivery and a pinned Python process.
+pub fn build_multi_derivation_bundle(
+    source_root: &Path,
+    title: &str,
+) -> Result<(Vec<u8>, PortableApplicationBundle), PortableApplicationError> {
+    if title.trim().is_empty() {
+        return Err(profile("application title must not be empty"));
+    }
+    let process_draft = read_authoring_draft(source_root)?;
+    let (mut objects, tree_ref) = build_portable_tree(source_root)?;
+    let (contract, process_derivation) = bind(
+        &process_draft,
+        &BindingContext {
+            source_closure_ref: &tree_ref,
+        },
+    )
+    .map_err(|error| PortableApplicationError::Binding(error.to_string()))?;
+
+    let input = process_draft
+        .derivation
+        .inputs
+        .first()
+        .cloned()
+        .ok_or_else(|| profile("multi-derivation fixture requires one workspace input"))?;
+    let process_port = process_draft
+        .derivation
+        .ports
+        .first()
+        .cloned()
+        .ok_or_else(|| profile("multi-derivation fixture requires one HTTP port"))?;
+    let static_step_id = "static-site".to_owned();
+    let static_draft = AuthoringDraft {
+        contract: process_draft.contract.clone(),
+        derivation: DerivationDraft {
+            inputs: vec![input.clone()],
+            runtimes: Vec::new(),
+            steps: vec![StepDraft {
+                id: static_step_id.clone(),
+                protocol: BROWSER_PROTOCOL.to_owned(),
+                op: "serve".to_owned(),
+                argv: Vec::new(),
+                cwd: String::new(),
+                env: BTreeMap::new(),
+                source: Some(input.id.clone()),
+                root: None,
+                entry: Some("index.html".to_owned()),
+                spa_fallback: Some(false),
+            }],
+            ports: vec![PortDraft {
+                id: process_port.id.clone(),
+                protocol: process_port.protocol.clone(),
+                from: static_step_id,
+                guest_port: None,
+            }],
+            state: Vec::new(),
+            workspace_build: None,
+            workspace_compiler: None,
+            effects: EffectClass::Pure,
+        },
+        provenance: AuthoringProvenance::Authored,
+    };
+    let (static_contract, static_derivation) = bind(
+        &static_draft,
+        &BindingContext {
+            source_closure_ref: &tree_ref,
+        },
+    )
+    .map_err(|error| PortableApplicationError::Binding(error.to_string()))?;
+    if contract != static_contract {
+        return Err(profile(
+            "static and process derivations did not bind to the same Contract",
+        ));
+    }
+
+    let application = ApplicationV1 {
+        schema: APPLICATION_SCHEMA.to_owned(),
+        title: title.to_owned(),
+        surfaces: vec![ApplicationSurfaceV1 {
+            id: "main".to_owned(),
+            port: process_port.id,
+            artifact_ref: tree_ref,
+            entry: "index.html".to_owned(),
+            spa_fallback: false,
+        }],
+    };
+    let contract_ref = add_structured(&mut objects, &contract, BOUND_CONTRACT_SCHEMA)?;
+    let static_ref = add_structured(&mut objects, &static_derivation, BOUND_DERIVATION_SCHEMA)?;
+    let process_ref = add_structured(&mut objects, &process_derivation, BOUND_DERIVATION_SCHEMA)?;
+    if static_ref == process_ref {
+        return Err(profile("the two derivations have the same identity"));
+    }
+    let application_ref = add_structured(&mut objects, &application, APPLICATION_SCHEMA)?;
+    let bundle = finish_bundle(
+        objects,
+        contract_ref,
+        application_ref,
+        vec![static_ref, process_ref],
+    );
+    let validated = validate_all_derivations(&bundle)?;
+    if validated
+        .iter()
+        .map(|route| route.realization)
+        .collect::<BTreeSet<_>>()
+        != [
+            PortableRealizationKind::StaticWeb,
+            PortableRealizationKind::LocalProcess,
+        ]
+        .into_iter()
+        .collect()
+    {
+        return Err(profile(
+            "multi-derivation bundle must contain one static and one process route",
+        ));
+    }
     let bytes = encode_portable_application_bundle(&bundle)?;
     Ok((bytes, bundle))
 }
@@ -422,7 +565,7 @@ fn validate_initial_route(
     contract: &BoundContract,
     application: &ApplicationV1,
     derivation: &BoundDerivation,
-) -> Result<(), PortableApplicationError> {
+) -> Result<PortableRealizationKind, PortableApplicationError> {
     if application.schema != APPLICATION_SCHEMA || application.title.trim().is_empty() {
         return Err(profile("invalid ato.application/1 object"));
     }
@@ -432,17 +575,16 @@ fn validate_initial_route(
         || derivation.ports.len() != 1
     {
         return Err(profile(
-            "the initial profile requires one surface, input, browser step, and port",
+            "the initial profile requires one surface, input, serving step, and port",
         ));
     }
-    if !derivation.runtimes.is_empty()
-        || !derivation.state.is_empty()
+    if !derivation.state.is_empty()
         || derivation.workspace_build.is_some()
         || derivation.workspace_compiler.is_some()
         || derivation.effects != EffectClass::Pure
     {
         return Err(profile(
-            "the initial profile forbids runtimes, state, builds, and non-pure effects",
+            "the initial profile forbids state, builds, and non-pure effects",
         ));
     }
     let input = &derivation.inputs[0];
@@ -450,25 +592,72 @@ fn validate_initial_route(
     let port = &derivation.ports[0];
     let surface = &application.surfaces[0];
     if input.protocol != WORKSPACE_PROTOCOL
-        || step.protocol != BROWSER_PROTOCOL
-        || step.op != "serve"
-        || step.source.as_deref() != Some(input.id.as_str())
-        || !step.argv.is_empty()
-        || !step.cwd.is_empty()
-        || !step.env.is_empty()
-        || step.root.is_some()
         || port.protocol != HTTP_PROTOCOL
         || port.from != step.id
-        || port.guest_port.is_some()
         || surface.port != port.id
         || surface.artifact_ref != input.content_ref
-        || surface.entry != step.entry.as_deref().unwrap_or_default()
-        || surface.spa_fallback != step.spa_fallback.unwrap_or(false)
     {
         return Err(profile(
-            "application surface and derivation do not name one static route",
+            "application surface and derivation do not name one workspace-backed HTTP route",
         ));
     }
+    let realization = match step.protocol.as_str() {
+        BROWSER_PROTOCOL => {
+            if !derivation.runtimes.is_empty()
+                || step.op != "serve"
+                || step.source.as_deref() != Some(input.id.as_str())
+                || !step.argv.is_empty()
+                || !step.cwd.is_empty()
+                || !step.env.is_empty()
+                || step.root.is_some()
+                || port.guest_port.is_some()
+                || surface.entry != step.entry.as_deref().unwrap_or_default()
+                || surface.spa_fallback != step.spa_fallback.unwrap_or(false)
+            {
+                return Err(profile(
+                    "static-web derivation does not match its application surface",
+                ));
+            }
+            PortableRealizationKind::StaticWeb
+        }
+        PROCESS_PROTOCOL => {
+            let expected_runtime = derivation.runtimes.get("python").map(String::as_str);
+            let expected_argv = [
+                "python3",
+                "-m",
+                "http.server",
+                "8000",
+                "--bind",
+                "0.0.0.0",
+                "--directory",
+                ".",
+            ];
+            if derivation.runtimes.len() != 1
+                || expected_runtime != Some("3.12")
+                || step.op != "serve"
+                || step.argv.iter().map(String::as_str).ne(expected_argv)
+                || step.cwd != "."
+                || !step.env.is_empty()
+                || step.source.is_some()
+                || step.root.is_some()
+                || step.entry.is_some()
+                || step.spa_fallback.is_some()
+                || port.guest_port != Some(8000)
+                || surface.entry != "index.html"
+                || surface.spa_fallback
+            {
+                return Err(profile(
+                    "process derivation is outside the pinned Python HTTP profile",
+                ));
+            }
+            PortableRealizationKind::LocalProcess
+        }
+        protocol => {
+            return Err(profile(format!(
+                "unsupported portable serving protocol `{protocol}`"
+            )));
+        }
+    };
 
     let requirement_ids = contract
         .requirements
@@ -508,7 +697,7 @@ fn validate_initial_route(
             }
         }
     }
-    Ok(())
+    Ok(realization)
 }
 
 fn validate_http_paths(
@@ -762,6 +951,83 @@ enum ObjectToEncode {
     Blob(Vec<u8>),
 }
 
+fn read_authoring_draft(source_root: &Path) -> Result<AuthoringDraft, PortableApplicationError> {
+    let capsule_toml = read(source_root.join(CAPSULE_FILE_NAME))?;
+    let capsule_toml = std::str::from_utf8(&capsule_toml)
+        .map_err(|error| profile(format!("capsule.toml is not UTF-8: {error}")))?;
+    parse_capsule_toml(capsule_toml)
+        .map_err(|error| PortableApplicationError::CapsuleToml(error.to_string()))
+}
+
+fn build_portable_tree(
+    source_root: &Path,
+) -> Result<(BTreeMap<String, ObjectToEncode>, String), PortableApplicationError> {
+    let files = collect_static_files(source_root)?;
+    let mut objects = BTreeMap::<String, ObjectToEncode>::new();
+    let mut entries = Vec::with_capacity(files.len());
+    for (relative, path, media_type) in files {
+        let bytes = read(path)?;
+        let reference = bundle_sha256(&bytes);
+        entries.push(PortableTreeEntryV1 {
+            path: relative,
+            content_ref: reference.clone(),
+            size: bytes.len() as u64,
+            media_type,
+        });
+        objects
+            .entry(reference)
+            .or_insert(ObjectToEncode::Blob(bytes));
+    }
+    entries.sort_by(|left, right| left.path.cmp(&right.path));
+    let tree = PortableTreeV1 {
+        schema: PORTABLE_TREE_SCHEMA.to_owned(),
+        entries,
+    };
+    let tree_ref = add_structured(&mut objects, &tree, PORTABLE_TREE_SCHEMA)?;
+    Ok((objects, tree_ref))
+}
+
+fn finish_bundle(
+    objects: BTreeMap<String, ObjectToEncode>,
+    root_contract_ref: String,
+    application_ref: String,
+    mut derivations: Vec<String>,
+) -> PortableApplicationBundle {
+    let mut descriptors = Vec::with_capacity(objects.len());
+    let mut payloads = Vec::with_capacity(objects.len());
+    for (reference, object) in objects {
+        let (kind, schema, bytes) = match object {
+            ObjectToEncode::Structured { schema, bytes } => {
+                (PortableBundleObjectKind::Structured, Some(schema), bytes)
+            }
+            ObjectToEncode::Blob(bytes) => (PortableBundleObjectKind::Blob, None, bytes),
+        };
+        descriptors.push(PortableBundleObjectDescriptor {
+            reference: reference.clone(),
+            kind,
+            schema,
+            size: bytes.len() as u64,
+        });
+        payloads.push(PortableBundlePayload {
+            reference,
+            bytes: base64::engine::general_purpose::STANDARD.encode(bytes),
+        });
+    }
+    derivations.sort();
+    PortableApplicationBundle {
+        index: PortableBundleIndex {
+            version: PORTABLE_APPLICATION_BUNDLE_VERSION,
+            profile: PORTABLE_APPLICATION_PROFILE.to_owned(),
+            root_contract_ref,
+            application_ref,
+            derivations,
+            objects: descriptors,
+        },
+        payloads,
+        signatures: Vec::new(),
+    }
+}
+
 fn add_structured<T: Serialize>(
     objects: &mut BTreeMap<String, ObjectToEncode>,
     value: &T,
@@ -913,8 +1179,75 @@ fn profile(message: impl Into<String>) -> PortableApplicationError {
 mod tests {
     use super::*;
 
+    fn route_ref(bundle: &PortableApplicationBundle, kind: PortableRealizationKind) -> String {
+        validate_all_derivations(bundle)
+            .unwrap()
+            .into_iter()
+            .find(|route| route.realization == kind)
+            .unwrap()
+            .derivation_ref
+            .to_string()
+    }
+
+    fn derivation(bundle: &PortableApplicationBundle, reference: &str) -> BoundDerivation {
+        let reference = ContentRef::parse(reference).unwrap();
+        serde_json::from_slice(&bundle.payload_bytes(&reference).unwrap()).unwrap()
+    }
+
+    fn add_derivation(
+        bundle: &mut PortableApplicationBundle,
+        derivation: &BoundDerivation,
+    ) -> String {
+        let bytes = serde_jcs::to_vec(derivation).unwrap();
+        let reference = bundle_sha256(&bytes);
+        bundle.index.objects.push(PortableBundleObjectDescriptor {
+            reference: reference.clone(),
+            kind: PortableBundleObjectKind::Structured,
+            schema: Some(BOUND_DERIVATION_SCHEMA.to_owned()),
+            size: bytes.len() as u64,
+        });
+        bundle
+            .index
+            .objects
+            .sort_by(|left, right| left.reference.cmp(&right.reference));
+        bundle.payloads.push(PortableBundlePayload {
+            reference: reference.clone(),
+            bytes: base64::engine::general_purpose::STANDARD.encode(bytes),
+        });
+        bundle
+            .payloads
+            .sort_by(|left, right| left.reference.cmp(&right.reference));
+        bundle.index.derivations.push(reference.clone());
+        bundle.index.derivations.sort();
+        reference
+    }
+
+    fn remove_derivation(bundle: &mut PortableApplicationBundle, reference: &str) {
+        bundle.index.derivations.retain(|value| value != reference);
+        bundle
+            .index
+            .objects
+            .retain(|value| value.reference != reference);
+        bundle.payloads.retain(|value| value.reference != reference);
+    }
+
+    fn replace_derivation(
+        bundle: &mut PortableApplicationBundle,
+        reference: &str,
+        mutate: impl FnOnce(&mut BoundDerivation),
+    ) -> String {
+        let mut value = derivation(bundle, reference);
+        mutate(&mut value);
+        remove_derivation(bundle, reference);
+        add_derivation(bundle, &value)
+    }
+
     fn fixture_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/interop-static-k")
+    }
+
+    fn multi_fixture_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/interop-multi-derivation")
     }
 
     #[test]
@@ -972,5 +1305,124 @@ mod tests {
         stream.read_to_end(&mut response).unwrap();
         assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
         assert!(response.ends_with(b"ato-k-interop-v1\n"));
+    }
+
+    #[test]
+    fn one_contract_has_distinct_static_and_process_derivations() {
+        let (left, bundle) =
+            build_multi_derivation_bundle(&multi_fixture_root(), "Ato multi-route proof").unwrap();
+        let (right, _) =
+            build_multi_derivation_bundle(&multi_fixture_root(), "Ato multi-route proof").unwrap();
+        assert_eq!(left, right);
+        assert_eq!(bundle.index.derivations.len(), 2);
+        assert_ne!(bundle.index.derivations[0], bundle.index.derivations[1]);
+
+        let validated = validate_all_derivations(&bundle).unwrap();
+        assert_eq!(validated.len(), 2);
+        assert!(validated.iter().all(|route| {
+            route.contract_ref.as_str() == bundle.index.root_contract_ref
+                && route.contract.contract_ref().unwrap() == bundle.index.root_contract_ref
+        }));
+        assert_eq!(
+            validated
+                .iter()
+                .map(|route| route.realization)
+                .collect::<BTreeSet<_>>(),
+            [
+                PortableRealizationKind::StaticWeb,
+                PortableRealizationKind::LocalProcess,
+            ]
+            .into_iter()
+            .collect()
+        );
+    }
+
+    #[test]
+    fn multiple_derivations_require_explicit_selection() {
+        let (_, bundle) =
+            build_multi_derivation_bundle(&multi_fixture_root(), "Ato multi-route proof").unwrap();
+        assert!(
+            validate_bundle(&bundle)
+                .unwrap_err()
+                .to_string()
+                .contains("select one explicitly")
+        );
+        assert!(
+            validate_bundle_for_derivation(&bundle, &format!("sha256:{}", "0".repeat(64)))
+                .unwrap_err()
+                .to_string()
+                .contains("is not declared")
+        );
+    }
+
+    #[test]
+    fn each_derivation_can_fail_without_changing_k_or_the_other_route() {
+        let (_, original) =
+            build_multi_derivation_bundle(&multi_fixture_root(), "Ato multi-route proof").unwrap();
+        let contract_ref = original.index.root_contract_ref.clone();
+        let static_ref = route_ref(&original, PortableRealizationKind::StaticWeb);
+        let process_ref = route_ref(&original, PortableRealizationKind::LocalProcess);
+
+        let mut broken_static = original.clone();
+        let broken_static_ref = replace_derivation(&mut broken_static, &static_ref, |derivation| {
+            derivation.steps[0].entry = Some("missing.html".to_owned());
+        });
+        assert_eq!(broken_static.index.root_contract_ref, contract_ref);
+        validate_bundle_for_derivation(&broken_static, &process_ref).unwrap();
+        assert!(validate_bundle_for_derivation(&broken_static, &broken_static_ref).is_err());
+
+        let mut broken_process = original.clone();
+        let broken_process_ref =
+            replace_derivation(&mut broken_process, &process_ref, |derivation| {
+                derivation.steps[0].argv[0] = "missing-python".to_owned();
+            });
+        assert_eq!(broken_process.index.root_contract_ref, contract_ref);
+        validate_bundle_for_derivation(&broken_process, &static_ref).unwrap();
+        assert!(validate_bundle_for_derivation(&broken_process, &broken_process_ref).is_err());
+    }
+
+    #[test]
+    fn derivation_membership_and_order_never_enter_contract_identity() {
+        let (canonical_bytes, original) =
+            build_multi_derivation_bundle(&multi_fixture_root(), "Ato multi-route proof").unwrap();
+        let contract_ref = original.index.root_contract_ref.clone();
+        let process_ref = route_ref(&original, PortableRealizationKind::LocalProcess);
+
+        let mut reordered = original.clone();
+        reordered.index.derivations.reverse();
+        assert_eq!(reordered.index.root_contract_ref, contract_ref);
+        assert!(encode_portable_application_bundle(&reordered).is_err());
+        reordered.index.derivations.sort();
+        assert_eq!(
+            encode_portable_application_bundle(&reordered).unwrap(),
+            canonical_bytes
+        );
+
+        let mut removed = original.clone();
+        remove_derivation(&mut removed, &process_ref);
+        assert_eq!(removed.index.root_contract_ref, contract_ref);
+        validate_all_derivations(&removed).unwrap();
+
+        let mut added = original.clone();
+        let mut alternate = derivation(&added, &process_ref);
+        alternate.steps[0].id = "process-site-alternate".to_owned();
+        alternate.ports[0].from = "process-site-alternate".to_owned();
+        add_derivation(&mut added, &alternate);
+        assert_eq!(added.index.root_contract_ref, contract_ref);
+        assert_eq!(validate_all_derivations(&added).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn rewritten_derivation_reference_fails_closure_validation() {
+        let (_, mut bundle) =
+            build_multi_derivation_bundle(&multi_fixture_root(), "Ato multi-route proof").unwrap();
+        bundle.index.derivations[0] = format!("sha256:{}", "0".repeat(64));
+        bundle.index.derivations.sort();
+        assert!(
+            validate_all_derivations(&bundle)
+                .unwrap_err()
+                .to_string()
+                .contains("closure is incomplete")
+        );
     }
 }

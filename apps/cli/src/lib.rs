@@ -10,6 +10,7 @@ pub mod activity_mcp;
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
@@ -21,6 +22,7 @@ use ato_adapter_api::AdapterContext;
 use ato_adapter_browser::{
     BROWSER_CLICK_OPERATION, BROWSER_KEYBOARD_OPERATION, BROWSER_PROTOCOL_ID,
 };
+use ato_adapter_process::{ProcessAdapter, ProcessHandle, ProcessSpec};
 use ato_adapter_workspace::restore_workspace;
 use ato_computation::{ComputationRef, ContentRef};
 use ato_formation::authoring::{HTTP_CONTRACT_VERIFIER, WORKSPACE_PROTOCOL};
@@ -43,7 +45,8 @@ use ato_objects::{
     export_bundle_with_materializations, export_object_graph, import_bundle, resolve_computation,
 };
 use ato_portable_application::{
-    StaticApplicationServer, bundle_sha256, materialize_tree, validate_bundle,
+    PortableRealizationKind, StaticApplicationServer, ValidatedPortableApplication, bundle_sha256,
+    materialize_tree, validate_bundle_for_derivation,
 };
 use ato_realization_planner::{
     MaterializationCandidate, Placement, PlannerPolicy, RealizationPlanner, TargetEnvironment,
@@ -154,6 +157,9 @@ struct EncapArgs {
 #[derive(Debug, Args)]
 struct RunArgs {
     capsule: PathBuf,
+    /// Select one declared DerivationRef. Required when the bundle has more than one route.
+    #[arg(long)]
+    derivation: Option<String>,
     #[arg(long = "bind", value_parser = parse_binding)]
     bindings: Vec<(String, String)>,
     /// Verify the local realization without opening a browser, then exit.
@@ -734,13 +740,21 @@ fn run_portable_application(
             bundle.index.profile
         );
     }
-    let validated = validate_bundle(&bundle)?;
+    let selected_derivation = match args.derivation.as_deref() {
+        Some(reference) => reference,
+        None if bundle.index.derivations.len() == 1 => &bundle.index.derivations[0],
+        None => bail!(
+            "portable Capsule declares {} derivations; select one with --derivation <sha256:...>",
+            bundle.index.derivations.len()
+        ),
+    };
+    let validated = validate_bundle_for_derivation(&bundle, selected_derivation)?;
     let runtime = tempfile::Builder::new()
         .prefix("ato-portable-run-")
         .tempdir()?;
     let workspace = runtime.path().join("workspace");
     materialize_tree(&bundle, &validated, &workspace)?;
-    let server = StaticApplicationServer::start(&workspace, &validated)?;
+    let mut runtime = PortableLocalRuntime::start(&workspace, &validated)?;
 
     let mut observation = RuntimeObservation::default();
     for input in &validated.derivation.inputs {
@@ -752,6 +766,7 @@ fn run_portable_application(
     }
     let client = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_millis(500))
         .build()?;
     for requirement in &validated.contract.requirements {
         if requirement.verifier != HTTP_CONTRACT_VERIFIER {
@@ -762,7 +777,25 @@ fn run_portable_application(
             bail!("portable local verifier does not support HTTP method {method}");
         }
         let path = requirement.path.as_deref().unwrap_or("/");
-        let response = client.get(format!("{}{path}", server.base_url())).send()?;
+        let request_url = format!("{}{path}", runtime.base_url());
+        let mut attempts = 0;
+        let response = loop {
+            match client.get(&request_url).send() {
+                Ok(response) => break response,
+                Err(error) => {
+                    if let Some(status) = runtime.try_wait()? {
+                        bail!("selected process derivation exited before verification: {status}");
+                    }
+                    if attempts >= 100 {
+                        return Err(error).context(format!(
+                            "selected derivation did not become reachable at {request_url}"
+                        ));
+                    }
+                    attempts += 1;
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        };
         let status = response.status().as_u16();
         let body = response.bytes()?;
         observation.http.push(RuntimeHttpObservation::from_response(
@@ -789,9 +822,10 @@ fn run_portable_application(
             .with_context(|| format!("write verification receipt {}", path.display()))?;
     }
     println!("Capsule: {}", validated.contract_ref);
-    println!("Derivation: {}", validated.derivation_ref);
+    println!("Route: {}", validated.derivation_ref);
+    println!("Runtime: {}", runtime.label());
     println!("Bundle: {}", receipt.bundle_sha256);
-    println!("URL: {}", server.base_url());
+    println!("URL: {}", runtime.base_url());
     if !receipt.fully_satisfied {
         let failure = receipt
             .observations
@@ -809,11 +843,129 @@ fn run_portable_application(
     if args.no_open {
         return Ok(());
     }
-    open_browser(&server.base_url())?;
+    open_browser(runtime.base_url())?;
     println!("Press Ctrl-C to stop the local realization.");
     loop {
         std::thread::park();
     }
+}
+
+enum PortableLocalRuntime {
+    Static {
+        _server: StaticApplicationServer,
+        base_url: String,
+    },
+    Process {
+        handle: ProcessHandle,
+        base_url: String,
+    },
+}
+
+impl PortableLocalRuntime {
+    fn start(workspace: &std::path::Path, route: &ValidatedPortableApplication) -> Result<Self> {
+        match route.realization {
+            PortableRealizationKind::StaticWeb => {
+                let server = StaticApplicationServer::start(workspace, route)?;
+                Ok(Self::Static {
+                    base_url: server.base_url(),
+                    _server: server,
+                })
+            }
+            PortableRealizationKind::LocalProcess => {
+                let step = &route.derivation.steps[0];
+                let guest_port = route.derivation.ports[0]
+                    .guest_port
+                    .context("process derivation omitted guest_port")?;
+                let python_version = route
+                    .derivation
+                    .runtimes
+                    .get("python")
+                    .context("process derivation omitted its Python runtime")?;
+                let listener = TcpListener::bind("127.0.0.1:0")?;
+                let host_port = listener.local_addr()?.port();
+                drop(listener);
+                let guest_port = guest_port.to_string();
+                let host_port = host_port.to_string();
+                let mut command = step.argv.clone();
+                command[0] = resolve_pinned_python(python_version)?;
+                let mut replaced = 0;
+                for argument in &mut command {
+                    if argument == &guest_port {
+                        *argument = host_port.clone();
+                        replaced += 1;
+                    }
+                }
+                if replaced != 1 {
+                    bail!(
+                        "process derivation must name its declared guest port exactly once in argv"
+                    );
+                }
+                let adapter = ProcessAdapter::new(ProcessSpec {
+                    id: step.id.clone(),
+                    command,
+                    cwd: PathBuf::from(&step.cwd),
+                    environment: step.env.clone(),
+                    isolated_group: true,
+                })?;
+                let handle = adapter.spawn(workspace)?;
+                Ok(Self::Process {
+                    handle,
+                    base_url: format!("http://127.0.0.1:{host_port}"),
+                })
+            }
+        }
+    }
+
+    fn base_url(&self) -> &str {
+        match self {
+            Self::Static { base_url, .. } => base_url,
+            Self::Process { base_url, .. } => base_url,
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Static { .. } => "static web",
+            Self::Process { .. } => "local process",
+        }
+    }
+
+    fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>> {
+        match self {
+            Self::Static { .. } => Ok(None),
+            Self::Process { handle, .. } => Ok(handle.try_wait()?),
+        }
+    }
+}
+
+fn resolve_pinned_python(version: &str) -> Result<String> {
+    if let Ok(output) = Command::new("uv")
+        .args(["python", "find", "--python", version])
+        .env("UV_PYTHON_DOWNLOADS", "never")
+        .output()
+        && output.status.success()
+    {
+        let path = String::from_utf8(output.stdout)?.trim().to_owned();
+        if !path.is_empty() {
+            return Ok(path);
+        }
+    }
+    for executable in ["python3", "python"] {
+        let Ok(output) = Command::new(executable).arg("--version").output() else {
+            continue;
+        };
+        let reported = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if output.status.success() && reported.trim().starts_with(&format!("Python {version}.")) {
+            return Ok(executable.to_owned());
+        }
+    }
+    bail!(
+        "selected derivation requires Python {version}; install that runtime with `uv python install {version}`"
+    )
 }
 
 fn open_browser(url: &str) -> Result<()> {
@@ -1008,6 +1160,7 @@ mod tests {
     fn run_rejects_repository_shaped_inputs_before_execution() {
         let args = RunArgs {
             capsule: PathBuf::from("."),
+            derivation: None,
             bindings: Vec::new(),
             no_open: false,
             verification_receipt: None,

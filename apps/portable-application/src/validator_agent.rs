@@ -18,7 +18,10 @@ use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::header::HeaderValue;
 use serde::{Deserialize, Serialize};
 
-use crate::{ValidatedPortableApplication, bundle_sha256, validate_bytes};
+use crate::{
+    PortableRealizationKind, ValidatedPortableApplication, bundle_sha256, validate_bytes_all,
+    validate_bytes_for_derivation,
+};
 
 #[derive(Debug, Clone)]
 pub struct ValidatorAgentConfig {
@@ -84,8 +87,9 @@ impl ValidatorAgent {
             if digest != job.transport_digest {
                 bail!("bundle transport digest mismatch");
             }
-            let (bundle, validated) = validate_bytes(&bytes)?;
-            for entry in &validated.tree.entries {
+            let (bundle, validated) = validate_bytes_all(&bytes)?;
+            let static_route = unique_static_route(&validated)?;
+            for entry in &static_route.tree.entries {
                 let reference = ato_computation::ContentRef::parse(&entry.content_ref)?;
                 self.api.upload_blob(
                     &job,
@@ -121,7 +125,14 @@ impl ValidatorAgent {
         if bundle_sha256(&bytes) != job.transport_digest {
             bail!("bundle transport digest mismatch");
         }
-        let (_, validated) = validate_bytes(&bytes)?;
+        let selected_derivation_ref = job
+            .selected_derivation_ref
+            .as_deref()
+            .context("runtime job omitted selected_derivation_ref")?;
+        let (_, validated) = validate_bytes_for_derivation(&bytes, selected_derivation_ref)?;
+        if validated.realization != PortableRealizationKind::StaticWeb {
+            bail!("hosted runtime supports only an explicitly selected static-web derivation");
+        }
         let mut runtime = RuntimeObservation {
             input_refs: validated
                 .derivation
@@ -182,6 +193,7 @@ pub struct PortableBundleVerificationReport {
     pub root_contract_ref: String,
     pub application_ref: String,
     pub derivation_refs: Vec<String>,
+    pub static_derivation_ref: String,
     pub title: String,
     pub surface: PortableSurfaceReport,
     pub artifact: PortableStaticArtifactReport,
@@ -228,9 +240,10 @@ pub struct ValidationStatus {
 fn report(
     job: &ValidationJob,
     bundle: &ato_objects::PortableApplicationBundle,
-    validated: &ValidatedPortableApplication,
+    validated: &[ValidatedPortableApplication],
     decoded_size: u64,
 ) -> Result<PortableBundleVerificationReport> {
+    let validated = unique_static_route(validated)?;
     let materialization_id = format!("portable_{}", job.bundle_id);
     let surface = &validated.application.surfaces[0];
     let files = validated
@@ -277,7 +290,8 @@ fn report(
         profile: bundle.index.profile.clone(),
         root_contract_ref: validated.contract_ref.to_string(),
         application_ref: validated.application_ref.to_string(),
-        derivation_refs: vec![validated.derivation_ref.to_string()],
+        derivation_refs: bundle.index.derivations.clone(),
+        static_derivation_ref: validated.derivation_ref.to_string(),
         title: validated.application.title.clone(),
         surface: PortableSurfaceReport {
             id: surface.id.clone(),
@@ -297,6 +311,22 @@ fn report(
         decoded_size,
         validation: ValidationStatus { status: "valid" },
     })
+}
+
+fn unique_static_route(
+    validated: &[ValidatedPortableApplication],
+) -> Result<&ValidatedPortableApplication> {
+    let routes = validated
+        .iter()
+        .filter(|route| route.realization == PortableRealizationKind::StaticWeb)
+        .collect::<Vec<_>>();
+    let [route] = routes.as_slice() else {
+        bail!(
+            "portable hosted profile requires exactly one static-web derivation; found {}",
+            routes.len()
+        );
+    };
+    Ok(*route)
 }
 
 struct HttpValidatorApi {
@@ -525,6 +555,8 @@ struct ValidationJob {
     download_url: String,
     #[serde(default)]
     observe_url: Option<String>,
+    #[serde(default)]
+    selected_derivation_ref: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -608,7 +640,7 @@ mod tests {
     fn report_contains_portable_identity_and_static_artifact() {
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/interop-static-k");
         let (bytes, bundle) = build_static_bundle(&source, "Ato portability proof").unwrap();
-        let (_, validated) = validate_bytes(&bytes).unwrap();
+        let (_, validated) = validate_bytes_all(&bytes).unwrap();
         let job = ValidationJob {
             job_id: "bvj_test".to_owned(),
             claim_id: "claim".to_owned(),
@@ -619,6 +651,7 @@ mod tests {
             claimed_parent_root: None,
             download_url: "/bundle".to_owned(),
             observe_url: None,
+            selected_derivation_ref: None,
         };
         let report = report(&job, &bundle, &validated, bytes.len() as u64).unwrap();
         assert_eq!(report.profile, "ato.portable-application/1");
