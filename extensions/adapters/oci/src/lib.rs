@@ -642,6 +642,7 @@ fn docker_run_arguments(
     let env_file = env_file
         .canonicalize()
         .context("canonicalize OCI environment file")?;
+    let writable_mount_user = writable_mount_user(spec)?;
     let mut argv = vec![
         "run".to_owned(),
         "--detach".to_owned(),
@@ -674,6 +675,9 @@ fn docker_run_arguments(
         "--label".to_owned(),
         format!("run.ato.dev/id={}", spec.id),
     ];
+    if let Some(user) = writable_mount_user {
+        argv.extend(["--user".to_owned(), user]);
+    }
     for mount in &spec.mounts {
         let source = mount
             .host_path
@@ -698,6 +702,35 @@ fn docker_run_arguments(
     argv.push(image_reference.to_owned());
     argv.extend(spec.argv.iter().cloned());
     Ok(argv)
+}
+
+#[cfg(unix)]
+fn writable_mount_user(spec: &OciSpec) -> Result<Option<String>> {
+    use std::os::unix::fs::MetadataExt;
+
+    let mut owners = BTreeSet::new();
+    for mount in spec.mounts.iter().filter(|mount| mount.writable) {
+        let metadata = fs::metadata(&mount.host_path)
+            .with_context(|| format!("inspect OCI mount source {}", mount.host_path.display()))?;
+        owners.insert((metadata.uid(), metadata.gid()));
+    }
+    ensure!(
+        owners.len() <= 1,
+        "writable OCI mount sources must have one host owner"
+    );
+    Ok(owners
+        .into_iter()
+        .next()
+        .map(|(uid, gid)| format!("{uid}:{gid}")))
+}
+
+#[cfg(not(unix))]
+fn writable_mount_user(spec: &OciSpec) -> Result<Option<String>> {
+    ensure!(
+        !spec.mounts.iter().any(|mount| mount.writable),
+        "writable OCI mounts require a Unix host"
+    );
+    Ok(None)
 }
 
 fn remove_network(docker: &Path, network: &str) -> Result<()> {
@@ -913,8 +946,11 @@ mod tests {
         assert_eq!(args[args.len() - 2], "sha256:verified-local-id");
     }
 
+    #[cfg(unix)]
     #[test]
     fn run_arguments_mount_declared_state_with_requested_access() {
+        use std::os::unix::fs::MetadataExt;
+
         let workspace = tempfile::tempdir().unwrap();
         let runtime = tempfile::tempdir().unwrap();
         let writable = tempfile::tempdir().unwrap();
@@ -934,7 +970,7 @@ mod tests {
                 writable: false,
             },
         ];
-        let rendered = docker_run_arguments(
+        let args = docker_run_arguments(
             &value,
             workspace.path(),
             &env_file,
@@ -942,11 +978,18 @@ mod tests {
             "ato-test-net",
             "sha256:verified-local-id",
         )
-        .unwrap()
-        .join(" ");
+        .unwrap();
+        let rendered = args.join(" ");
         assert!(rendered.contains("dst=/data"));
         assert!(!rendered.contains("dst=/data,readonly"));
         assert!(rendered.contains("dst=/seed,readonly"));
+        let user = args
+            .iter()
+            .position(|value| value == "--user")
+            .map(|index| args[index + 1].as_str());
+        let metadata = fs::metadata(writable.path()).unwrap();
+        let expected_user = format!("{}:{}", metadata.uid(), metadata.gid());
+        assert_eq!(user, Some(expected_user.as_str()));
     }
 
     #[test]
