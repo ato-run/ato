@@ -45,6 +45,7 @@ use ato_objects::{
     ReferenceRegistry, decode_capsule_bundle_document, encode_bundle,
     export_bundle_with_materializations, export_object_graph, import_bundle, resolve_computation,
 };
+use ato_portable_application::portability_plan::{PortableExportProfile, plan_portable_export};
 use ato_portable_application::{
     OCI_CPU_MILLIS_RUNTIME, OCI_IMAGE_RUNTIME, OCI_MEMORY_BYTES_RUNTIME, OCI_PIDS_LIMIT_RUNTIME,
     OCI_PLATFORM_RUNTIME, PYTHON_RUNTIME, PortableRealizationKind, StaticApplicationServer,
@@ -97,6 +98,8 @@ enum Commands {
     Encap(EncapArgs),
     /// Consume a portable .capsule ephemerally.
     Run(RunArgs),
+    /// Preview dependency size and guarantees before a portable export.
+    ExportPlan(ExportPlanArgs),
     /// Upload a content-addressed Capsule object graph.
     Upload(UploadArgs),
     /// Report this binary's build identity (version, commit, profile).
@@ -173,6 +176,15 @@ struct RunArgs {
     /// Write the shared Contract verification receipt as canonical JSON.
     #[arg(long)]
     verification_receipt: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct ExportPlanArgs {
+    capsule: PathBuf,
+    #[arg(long, value_enum, default_value_t = PortableExportProfile::Cached)]
+    portability: PortableExportProfile,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -264,6 +276,7 @@ pub fn run() -> Result<()> {
         Commands::Stop { capsule } => stop(&capsule),
         Commands::Encap(args) => encap(args),
         Commands::Run(args) => run_capsule(args),
+        Commands::ExportPlan(args) => export_plan(args),
         Commands::Upload(args) => upload(args),
         Commands::Worker {
             project,
@@ -654,6 +667,41 @@ fn run_capsule(args: RunArgs) -> Result<()> {
             run_portable_application(args, &bytes, bundle)
         }
     }
+}
+
+fn export_plan(args: ExportPlanArgs) -> Result<()> {
+    let bytes =
+        fs::read(&args.capsule).with_context(|| format!("read {}", args.capsule.display()))?;
+    let CapsuleBundleDocument::PortableApplicationV3(bundle) =
+        decode_capsule_bundle_document(&bytes)?
+    else {
+        bail!("export planning currently requires a portable application v3 bundle");
+    };
+    let plan = plan_portable_export(&bundle, bytes.len(), args.portability)?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&plan)?);
+    } else {
+        println!("Contract: {}", plan.contract_ref);
+        println!("Application input: {} bytes", plan.application_input_bytes);
+        println!("Python wheels: {} bytes", plan.python_wheel_bytes);
+        println!("OCI images: {}", plan.oci_images.len());
+        match plan.estimated_export_bytes {
+            Some(size) => println!("Estimated export: {size} bytes"),
+            None => println!("Estimated export: unavailable until dependencies are resolved"),
+        }
+        println!(
+            "Host capabilities: {}",
+            plan.required_host_capabilities.join(", ")
+        );
+        println!(
+            "Requires network on a clean host: {:?}",
+            plan.requires_network_on_clean_host
+        );
+        for blocker in &plan.blockers {
+            println!("Blocked: {blocker}");
+        }
+    }
+    Ok(())
 }
 
 fn run_computation_bundle(args: RunArgs, bundle: CapsuleBundle) -> Result<()> {

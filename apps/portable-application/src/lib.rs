@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+pub mod portability_plan;
 pub mod validator_agent;
 
 pub const APPLICATION_SCHEMA: &str = "ato.application/1";
