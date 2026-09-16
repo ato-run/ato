@@ -57,7 +57,12 @@ pub struct OciAdmission {
 pub struct DockerOciAdapter {
     docker: PathBuf,
     spec: OciSpec,
-    offline_archive: Option<Vec<u8>>,
+    offline_image: Option<OfflineImage>,
+}
+
+struct OfflineImage {
+    archive: Vec<u8>,
+    config_reference: String,
 }
 
 impl DockerOciAdapter {
@@ -69,7 +74,7 @@ impl DockerOciAdapter {
         Ok(Self {
             docker,
             spec,
-            offline_archive: None,
+            offline_image: None,
         })
     }
 
@@ -87,63 +92,76 @@ impl DockerOciAdapter {
             "offline OCI config reference is invalid"
         );
         let mut adapter = Self::new(spec)?;
-        adapter.offline_archive = Some(archive);
+        adapter.offline_image = Some(OfflineImage {
+            archive,
+            config_reference,
+        });
         Ok(adapter)
     }
 
     /// Admit the route and acquire its immutable image. Pulling is explicit:
     /// callers can report that this materialization is network-dependent.
     pub fn admit(&self) -> Result<OciAdmission> {
+        self.admit_image().map(|(admission, _)| admission)
+    }
+
+    fn admit_image(&self) -> Result<(OciAdmission, String)> {
         let version = run_checked(
             &self.docker,
             ["version", "--format", "{{.Server.Version}}"],
             "query Docker Engine version",
         )?;
-        if self.offline_archive.is_some() {
-            // The verified archive supplied the pinned manifest and all blobs.
-            // Docker 29's containerd store identifies the loaded image by the
-            // manifest digest, not the config digest. Never pull on this path.
+        let image_for_run = if let Some(offline) = &self.offline_image {
+            // A tagless `docker image load` does not necessarily install a
+            // repository@digest alias. The archive's verified manifest and
+            // config hashes are the only local image IDs we may launch.
+            self.inspect_loaded_image(&offline.config_reference)?
+        } else {
+            if self.inspect_image().is_err() {
+                run_checked(
+                    &self.docker,
+                    [
+                        "pull",
+                        "--platform",
+                        self.spec.platform.as_str(),
+                        self.spec.image.as_str(),
+                    ],
+                    "pull immutable OCI image",
+                )?;
+            }
             self.inspect_image()?;
-        } else if self.inspect_image().is_err() {
-            run_checked(
-                &self.docker,
-                [
-                    "pull",
-                    "--platform",
-                    self.spec.platform.as_str(),
-                    self.spec.image.as_str(),
-                ],
-                "pull immutable OCI image",
-            )?;
-        }
-        if self.offline_archive.is_none() {
-            self.inspect_image()?;
-        }
-        Ok(OciAdmission {
-            docker_version: version.trim().to_owned(),
-            image: self.spec.image.clone(),
-            platform: self.spec.platform.clone(),
-        })
+            self.spec.image.clone()
+        };
+        Ok((
+            OciAdmission {
+                docker_version: version.trim().to_owned(),
+                image: self.spec.image.clone(),
+                platform: self.spec.platform.clone(),
+            },
+            image_for_run,
+        ))
     }
 
     pub fn spawn(&self, workspace: &Path, runtime_root: &Path) -> Result<OciHandle> {
         ensure!(workspace.is_dir(), "OCI workspace does not exist");
         fs::create_dir_all(runtime_root).context("create OCI runtime directory")?;
-        if let Some(archive) = &self.offline_archive {
+        if let Some(offline) = &self.offline_image {
             let path = runtime_root.join("verified-oci-image.tar");
-            fs::write(&path, archive).context("write verified OCI archive")?;
+            fs::write(&path, &offline.archive).context("write verified OCI archive")?;
             run_checked(
                 &self.docker,
                 [
                     "image",
                     "load",
+                    "--platform",
+                    self.spec.platform.as_str(),
                     "--input",
                     path.to_str().context("OCI archive path is not UTF-8")?,
                 ],
                 "load verified offline OCI image",
             )?;
         }
-        self.admit()?;
+        let (_, image_for_run) = self.admit_image()?;
 
         let suffix = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let stem = safe_name(&self.spec.id);
@@ -177,6 +195,7 @@ impl DockerOciAdapter {
             &env_file,
             &container_name,
             &network_name,
+            &image_for_run,
         )?;
         let launched = Command::new(&self.docker)
             .args(&argv)
@@ -250,6 +269,34 @@ impl DockerOciAdapter {
             String::from_utf8(output.stdout).context("invalid Docker inspect output")?;
         validate_inspected_image(&self.spec, inspected.trim())
     }
+
+    fn inspect_loaded_image(&self, config_reference: &str) -> Result<String> {
+        let manifest_reference = self
+            .spec
+            .image
+            .rsplit_once('@')
+            .map(|(_, reference)| reference)
+            .context("validated OCI image omitted manifest digest")?;
+        for reference in [manifest_reference, config_reference] {
+            let output = Command::new(&self.docker)
+                .args([
+                    "image",
+                    "inspect",
+                    "--format",
+                    "{{.Id}}|{{.Os}}/{{.Architecture}}",
+                    reference,
+                ])
+                .output()
+                .context("inspect loaded offline OCI image")?;
+            if output.status.success() {
+                let inspected = String::from_utf8(output.stdout)
+                    .context("invalid Docker offline image inspect output")?;
+                validate_loaded_image(&self.spec, reference, inspected.trim(), config_reference)?;
+                return Ok(reference.to_owned());
+            }
+        }
+        bail!("verified offline OCI image was not available after archive load")
+    }
 }
 
 fn validate_inspected_image(spec: &OciSpec, inspected: &str) -> Result<()> {
@@ -264,6 +311,36 @@ fn validate_inspected_image(spec: &OciSpec, inspected: &str) -> Result<()> {
     ensure!(
         digests.contains(expected_digest),
         "local OCI image does not carry declared digest {expected_digest}"
+    );
+    ensure!(
+        platform == spec.platform,
+        "OCI platform mismatch: route requires {}, image is {platform}",
+        spec.platform
+    );
+    Ok(())
+}
+
+fn validate_loaded_image(
+    spec: &OciSpec,
+    reference: &str,
+    inspected: &str,
+    config_reference: &str,
+) -> Result<()> {
+    let manifest_reference = spec
+        .image
+        .rsplit_once('@')
+        .map(|(_, digest)| digest)
+        .context("validated OCI image omitted manifest digest")?;
+    ensure!(
+        reference == manifest_reference || reference == config_reference,
+        "offline OCI image is not the verified manifest or config"
+    );
+    let (image_id, platform) = inspected
+        .split_once('|')
+        .context("Docker inspect omitted offline image platform")?;
+    ensure!(
+        image_id == reference,
+        "loaded OCI image ID differs from the verified archive"
     );
     ensure!(
         platform == spec.platform,
@@ -492,6 +569,7 @@ fn docker_run_arguments(
     env_file: &Path,
     container_name: &str,
     network_name: &str,
+    image_reference: &str,
 ) -> Result<Vec<String>> {
     let workspace = workspace
         .canonicalize()
@@ -502,6 +580,7 @@ fn docker_run_arguments(
     let mut argv = vec![
         "run".to_owned(),
         "--detach".to_owned(),
+        "--pull=never".to_owned(),
         "--name".to_owned(),
         container_name.to_owned(),
         "--platform".to_owned(),
@@ -530,7 +609,7 @@ fn docker_run_arguments(
         "--label".to_owned(),
         format!("run.ato.dev/id={}", spec.id),
     ];
-    argv.push(spec.image.clone());
+    argv.push(image_reference.to_owned());
     argv.extend(spec.argv.iter().cloned());
     Ok(argv)
 }
@@ -660,6 +739,49 @@ mod tests {
     }
 
     #[test]
+    fn offline_image_can_use_only_the_verified_local_manifest_or_config() {
+        let valid = spec();
+        let manifest = valid.image.rsplit_once('@').unwrap().1;
+        let config = format!("sha256:{}", "b".repeat(64));
+        assert!(
+            validate_loaded_image(
+                &valid,
+                manifest,
+                &format!("{manifest}|linux/amd64"),
+                &config
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_loaded_image(&valid, &config, &format!("{config}|linux/amd64"), &config)
+                .is_ok()
+        );
+        assert!(
+            validate_loaded_image(&valid, manifest, &format!("{config}|linux/amd64"), &config)
+                .is_err()
+        );
+        assert!(
+            validate_loaded_image(
+                &valid,
+                manifest,
+                &format!("{manifest}|linux/arm64"),
+                &config
+            )
+            .is_err()
+        );
+        let unrelated = format!("sha256:{}", "c".repeat(64));
+        assert!(
+            validate_loaded_image(
+                &valid,
+                &unrelated,
+                &format!("{unrelated}|linux/amd64"),
+                &config
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn run_arguments_enforce_isolation_and_limits() {
         let workspace = tempfile::tempdir().unwrap();
         let runtime = tempfile::tempdir().unwrap();
@@ -671,6 +793,7 @@ mod tests {
             &env_file,
             "ato-test",
             "ato-test-net",
+            "sha256:verified-local-id",
         )
         .unwrap();
         let rendered = args.join(" ");
@@ -681,6 +804,7 @@ mod tests {
             "--pids-limit 128",
             "--memory 268435456",
             "--network ato-test-net",
+            "--pull=never",
             "dst=/app,readonly",
         ] {
             assert!(
@@ -691,5 +815,6 @@ mod tests {
         assert!(!rendered.contains("docker.sock"));
         assert!(!rendered.contains("--privileged"));
         assert!(!rendered.contains("--publish"));
+        assert_eq!(args[args.len() - 2], "sha256:verified-local-id");
     }
 }

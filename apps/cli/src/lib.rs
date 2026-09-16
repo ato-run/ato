@@ -1010,6 +1010,10 @@ fn run_portable_application(
         let request_url = format!("{}{path}", runtime.base_url());
         let mut attempts = 0;
         let response = loop {
+            #[cfg(unix)]
+            if shutdown.load(Ordering::Relaxed) {
+                bail!("portable run interrupted before Contract verification completed");
+            }
             match client.get(&request_url).send() {
                 Ok(response) => break response,
                 Err(error) => {
