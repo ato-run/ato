@@ -26,12 +26,14 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
-use ato_adapter_oci::{DockerOciAdapter, OciEndpoint, OciHandle, OciResourceLimits, OciSpec};
+use ato_adapter_oci::{
+    DockerOciAdapter, OciEndpoint, OciHandle, OciMount, OciResourceLimits, OciSpec,
+};
 use ato_ipc::runtime_launch::{
     LaunchRealizationV1, ReadinessV1, RuntimeLaunchSpecV1, StateAccessV1,
 };
 
-use super::process_executor::{ReadinessProbe, state_working_copy};
+use super::process_executor::{ReadinessProbe, state_path_env_name, state_working_copy};
 use super::resolved::{ResolvedRuntimeLaunchContext, ResolvedStateAttachment, allocate_endpoint};
 use super::session::{PreparedRun, RunStateOutcome, abort_run, commit_run};
 use super::state_artifact::StateArtifactTransport;
@@ -319,14 +321,32 @@ pub fn start(
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
+            let mounts = resolved
+                .context
+                .state_attachments()
+                .iter()
+                .map(|attachment| OciMount {
+                    host_path: attachment.working_copy_for_mount().to_path_buf(),
+                    guest_path: attachment.guest_target().to_owned(),
+                    writable: attachment.access() == StateAccessV1::ReadWrite,
+                })
+                .collect();
+            let mut environment = resolved.context.environment_for_spawn();
+            for attachment in resolved.context.state_attachments() {
+                environment.insert(
+                    state_path_env_name(attachment.state_key()),
+                    attachment.guest_target().to_owned(),
+                );
+            }
             let adapter = DockerOciAdapter::new(OciSpec {
                 id: spec.context.run_id.clone(),
                 image,
                 platform,
                 argv: oci.argv.clone().unwrap_or_default(),
                 working_dir: oci.working_dir.clone().unwrap_or_else(|| "/app".to_owned()),
-                environment: resolved.context.environment_for_spawn(),
+                environment,
                 endpoints,
+                mounts,
                 limits: OciResourceLimits {
                     memory_bytes: limits.memory_bytes,
                     cpu_limit_millis: limits.cpu_limit_millis,
