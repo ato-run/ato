@@ -26,8 +26,9 @@ acceptance. Production was not changed.
   It embeds the Python wheels and a Docker 29 OCI-layout archive. The archive
   contains the pinned manifest, config, and seven layer blobs; each digest,
   declared byte size, and platform was verified before export. The seven
-  compressed layers total 85,165,556 bytes. The current 32 MiB Hosted upload
-  limit cannot carry this file.
+  compressed layers total 85,165,556 bytes. At this checkpoint, the 32 MiB
+  Hosted upload limit could not carry this file; the later v4 transport
+  acceptance records the bounded replacement.
 
 The OCI image is
 `docker.io/datasetteproject/datasette@sha256:0f57db16cf4eb6cca57f1cedaa0a696bca1c65a1d75b8f7ee372c2dd909a32a0`
@@ -241,3 +242,83 @@ This completes the Hosted OCI Surface acceptance item. It does not complete
 Portable v0: image-absent outbound-blocked offline acceptance, Hosted/PWA v4
 transport, durable Instances, saved-data/Asset round-trip, Bindings, User
 Runner placement, and authoring integration remain separate work.
+
+## Portable v4 Hosted transport staging acceptance (completed)
+
+The next stacked change used these revisions:
+
+- ato `e877f064`
+- ato-api `31f12a0f`
+- ato-pwa `3f3cf89`
+
+The API and PWA accept the explicit version/profile pairs v3 /
+`ato.portable-application/1` and v4 / `ato.portable-application/2`. The
+transport limit is 256 MiB while the Worker request-body lane remains bounded
+at 32 MiB. Larger files must use the existing presigned R2 PUT path; the API
+does not buffer or proxy their body. Migration
+`0269_portable_application_v4_transport.sql` was applied to staging only.
+Staging API Worker version `b1d215d8-a43e-4302-a27f-44234ad4b364` and PWA
+version `63cf061a-f877-46ff-aaef-a979e056a043` served the acceptance build.
+Production was not changed.
+
+The first browser attempt reached `prepare` but the presigned PUT failed
+before validation because `ato-store-artifacts-stg` had no browser CORS rule.
+The committed staging configuration permits only
+`https://stg-app.ato.run`, only `PUT`, and only the `Content-Type` request
+header; it exposes `ETag` and does not make the bucket public. After applying
+that configuration, the same browser flow advanced through Checking,
+Uploading, Verifying, Hosted Run, and Surface readiness.
+
+The accepted file was the existing byte-identical offline v4 bundle:
+
+- bundle ID: `bnd_01M2NHGRB165RP8H9W6EDWH04W`
+- size: 120,583,935 bytes
+- bundle SHA-256:
+  `sha256:f439923321bfa748af3a8993ab4c7c495f8f0d81ae5f9504c8add92b539591a2`
+- ContractRef:
+  `sha256:d4bb7e9ae1be0f6b884d0d58561d7f974092de447da3eea9e2ffe5279b004a19`
+- OCI DerivationRef:
+  `sha256:d3e7428a6c75e7d5726319ca61f06631e1811a698b2dd16b531029038dfd701f`
+- Instance: `cinst_01M2NHSEYJK5YZ6YGZG24T7KVR`
+- Run: `run_01M2NHSF2D0EFZZ2YVQ7WQGJNF`
+- lease: `01M2NHSF6NJESM41JCG4NGZKJW`
+- verification attempt: `pav_01M2NHSFKC6YG8NZXH67G3EC7R`
+- container:
+  `95dc304649a6c833c8c3e2b30f08c5a2165b69d098865784178c742c3edebad3`
+- runtime route: `rrt_01M2NHSFGD4W4AS9ZQJPT9A6ZJ`, generation 1,
+  status `ready`, Runner `01KX0SWDPP2GA41NEXQXNDCC0D`
+
+The persisted hosted receipt is `ato.contract-verification-receipt/1`, carries
+that exact bundle SHA, K, OCI D, Run, lease, attempt, pinned image digest, and
+container ID, and reports the three original observations as `satisfied` with
+`fully_satisfied: true`. The PWA separately displayed `Contract: Verified`
+and `Surface: Ready`. In the newly created public Surface, the real browser
+opened Datasette, showed `A / 2` and `B / 5`, and used Datasette's SQL editor
+to execute `select sum(quantity) as total from items`; the returned total was
+`7`.
+
+The exact `e877f064` CLI also ran the same file through both local
+Derivations. Python on macOS satisfied all three observations. OCI was run on
+the compatible Linux/amd64 validation host with Docker Engine 29.1.3 and also
+satisfied all three; its local receipt records `embedded_oci_image_loaded`.
+The macOS Docker Desktop attempt was interrupted after its documented private
+bridge-IP reachability failure and was not counted as a PASS. Re-exporting the
+offline v4 input as offline produced byte-identical bytes and the same SHA,
+while v4 planning/export tests assert that packing policy changes do not
+change K or either D.
+
+Focused validation passed:
+
+- `cargo fmt --all -- --check`
+- `cargo test -q -p ato-portable-application` (19 tests)
+- `cargo test -q -p ato-cli --test portable_application` (7 tests)
+- API `pnpm typecheck` and the v4 transport tests
+- PWA `npm run typecheck`, four portable client tests, and `npm run build`
+
+Three failures in the broader API capsule-network route suite reproduced
+unchanged on its parent branch under the same command: unavailable public
+Runner capacity, the newer `managed_pool_unavailable` error code versus the
+old assertion, and a live-continuation 409 versus 202. They are not counted as
+new v4 regressions. Portable v4 Hosted transport is accepted, but full v0
+still requires the isolated image-absent outbound-blocked offline trial and
+the durable Instance / saved-data round trip.
