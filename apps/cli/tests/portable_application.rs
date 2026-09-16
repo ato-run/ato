@@ -547,5 +547,7 @@ fn process_snapshot_start_fails_before_claiming_a_restore() {
         .map(|entry| fs::read_to_string(entry.unwrap().path().join("output.log")).unwrap())
         .unwrap();
 
-    assert!(log.contains("snapshot restore currently supports only a static-web Derivation"));
+    assert!(log.contains(
+        "local dynamic Instance snapshot restore supports only its declared filesystem state"
+    ));
 }
