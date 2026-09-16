@@ -1,8 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Cursor;
+use std::path::{Component, Path};
 
 use ato_computation::ContentRef;
 use ato_formation::authoring::{
     BOUND_CONTRACT_SCHEMA, BoundContract, BoundRequirement, INSTANCE_SNAPSHOT_CONTRACT_VERIFIER,
+    STATE_FILESYSTEM_PROTOCOL,
 };
 use ato_objects::{
     PORTABLE_APPLICATION_BUNDLE_VERSION_V4, PortableApplicationBundle,
@@ -24,6 +27,7 @@ pub const ASSET_ALIAS_URI_PREFIX: &str = "ato-asset-alias://";
 const MAX_DATA_JSON_BYTES: usize = 1024 * 1024;
 const MAX_BROWSER_STATE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_BROWSER_STATE_ITEMS: usize = 4096;
+pub const MAX_FILESYSTEM_STATE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ASSET_BYTES: u64 = 50 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,7 +108,7 @@ pub(crate) fn validate_snapshot(
         if !valid_slot(&resource.slot)
             || !matches!(
                 resource.protocol.as_str(),
-                BROWSER_INSTANCE_STATE_PROTOCOL | DATA_JSON_PROTOCOL
+                BROWSER_INSTANCE_STATE_PROTOCOL | DATA_JSON_PROTOCOL | STATE_FILESYSTEM_PROTOCOL
             )
             || previous_slot.is_some_and(|previous: &str| previous >= resource.slot.as_str())
         {
@@ -231,6 +235,7 @@ pub(crate) fn validate_snapshot_resource_bytes(
     let limit = match protocol {
         DATA_JSON_PROTOCOL => MAX_DATA_JSON_BYTES,
         BROWSER_INSTANCE_STATE_PROTOCOL => MAX_BROWSER_STATE_BYTES,
+        STATE_FILESYSTEM_PROTOCOL => MAX_FILESYSTEM_STATE_BYTES,
         _ => {
             return Err(profile(format!(
                 "unsupported snapshot protocol `{protocol}`"
@@ -241,6 +246,9 @@ pub(crate) fn validate_snapshot_resource_bytes(
         return Err(profile(format!(
             "snapshot resource for `{protocol}` exceeds its byte limit"
         )));
+    }
+    if protocol == STATE_FILESYSTEM_PROTOCOL {
+        return validate_filesystem_state(bytes);
     }
     if protocol == DATA_JSON_PROTOCOL {
         let value: serde_json::Value = serde_json::from_slice(bytes)?;
@@ -266,6 +274,116 @@ pub(crate) fn validate_snapshot_resource_bytes(
         ));
     }
     Ok(())
+}
+
+fn validate_filesystem_state(bytes: &[u8]) -> Result<(), PortableApplicationError> {
+    if bytes.len() < 1024
+        || bytes.len() % 512 != 0
+        || !bytes[bytes.len() - 1024..].iter().all(|byte| *byte == 0)
+    {
+        return Err(profile(
+            "snapshot filesystem state must be an uncompressed canonical tar archive",
+        ));
+    }
+    let mut archive = tar::Archive::new(Cursor::new(bytes));
+    let mut directories = BTreeSet::new();
+    let mut files = BTreeSet::new();
+    let mut previous_directory: Option<String> = None;
+    let mut previous_file: Option<String> = None;
+    let mut saw_file = false;
+    let mut expanded = 0u64;
+    for entry in archive
+        .entries()
+        .map_err(|_| profile("snapshot filesystem state archive is unreadable"))?
+    {
+        let mut entry =
+            entry.map_err(|_| profile("snapshot filesystem state entry is unreadable"))?;
+        let header = entry.header();
+        let entry_type = header.entry_type();
+        if !entry_type.is_dir() && !entry_type.is_file() {
+            return Err(profile(
+                "snapshot filesystem state contains a non-regular entry",
+            ));
+        }
+        if header.mtime().ok() != Some(0)
+            || header.uid().ok() != Some(0)
+            || header.gid().ok() != Some(0)
+        {
+            return Err(profile(
+                "snapshot filesystem state contains non-canonical ownership or time metadata",
+            ));
+        }
+        let path = entry
+            .path()
+            .map_err(|_| profile("snapshot filesystem state path is invalid"))?;
+        let normalized = canonical_state_path(path.as_ref())?;
+        if entry_type.is_dir() {
+            if saw_file
+                || previous_directory
+                    .as_deref()
+                    .is_some_and(|previous| previous >= normalized.as_str())
+                || !directories.insert(normalized.clone())
+                || header.mode().ok() != Some(0o755)
+                || header.size().ok() != Some(0)
+            {
+                return Err(profile(
+                    "snapshot filesystem state directory entries are not canonical",
+                ));
+            }
+            previous_directory = Some(normalized);
+        } else {
+            saw_file = true;
+            if previous_file
+                .as_deref()
+                .is_some_and(|previous| previous >= normalized.as_str())
+                || directories.contains(&normalized)
+                || !files.insert(normalized.clone())
+                || !matches!(header.mode().ok(), Some(0o644 | 0o755))
+            {
+                return Err(profile(
+                    "snapshot filesystem state file entries are not canonical",
+                ));
+            }
+            let size = header
+                .size()
+                .map_err(|_| profile("snapshot filesystem state file size is invalid"))?;
+            expanded = expanded.saturating_add(size);
+            if expanded > MAX_FILESYSTEM_STATE_BYTES as u64 {
+                return Err(profile(
+                    "snapshot filesystem state expands past its byte limit",
+                ));
+            }
+            previous_file = Some(normalized);
+        }
+        std::io::copy(&mut entry, &mut std::io::sink())
+            .map_err(|_| profile("snapshot filesystem state entry is truncated"))?;
+    }
+    Ok(())
+}
+
+fn canonical_state_path(path: &Path) -> Result<String, PortableApplicationError> {
+    let mut normalized = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(value) => normalized.push(
+                value
+                    .to_str()
+                    .ok_or_else(|| profile("snapshot filesystem state path is not UTF-8"))?,
+            ),
+            Component::CurDir
+            | Component::ParentDir
+            | Component::RootDir
+            | Component::Prefix(_) => {
+                return Err(profile(
+                    "snapshot filesystem state path escapes or is not canonical",
+                ));
+            }
+        }
+    }
+    if normalized.is_empty() {
+        return Err(profile("snapshot filesystem state path is empty"));
+    }
+    Ok(normalized.join("/"))
 }
 
 pub fn decode_browser_state(
@@ -353,7 +471,7 @@ pub(crate) fn validate_asset_bindings(
         if resource.protocol == DATA_JSON_PROTOCOL {
             let value: serde_json::Value = serde_json::from_slice(bytes)?;
             found_aliases += count_alias_values(&value)?;
-        } else {
+        } else if resource.protocol == BROWSER_INSTANCE_STATE_PROTOCOL {
             let state: BrowserStateV1 = serde_json::from_slice(bytes)?;
             for entry in state.local_storage {
                 if entry.value.starts_with(ASSET_ALIAS_URI_PREFIX) {
@@ -428,6 +546,50 @@ pub(crate) fn validate_asset_bindings(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn filesystem_archive(path: &str, entry_type: tar::EntryType) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut archive = tar::Builder::new(&mut bytes);
+            let mut header = tar::Header::new_ustar();
+            let contents = if entry_type.is_file() {
+                b"saved".as_slice()
+            } else {
+                &[]
+            };
+            header.set_size(contents.len() as u64);
+            header.set_mode(if entry_type.is_dir() { 0o755 } else { 0o644 });
+            header.set_mtime(0);
+            header.set_uid(0);
+            header.set_gid(0);
+            header.set_entry_type(entry_type);
+            header.set_path_absolute(path).unwrap();
+            header.set_cksum();
+            archive.append(&header, Cursor::new(contents)).unwrap();
+            archive.finish().unwrap();
+        }
+        bytes
+    }
+
+    #[test]
+    fn filesystem_state_accepts_a_canonical_regular_tree() {
+        let bytes = filesystem_archive("data.sqlite", tar::EntryType::Regular);
+        validate_snapshot_resource_bytes(STATE_FILESYSTEM_PROTOCOL, &bytes).unwrap();
+    }
+
+    #[test]
+    fn filesystem_state_rejects_links_and_path_traversal() {
+        let link = filesystem_archive("link", tar::EntryType::Symlink);
+        assert!(validate_snapshot_resource_bytes(STATE_FILESYSTEM_PROTOCOL, &link).is_err());
+
+        let traversal = filesystem_archive("/escape", tar::EntryType::Regular);
+        assert!(validate_snapshot_resource_bytes(STATE_FILESYSTEM_PROTOCOL, &traversal).is_err());
+    }
 }
 
 pub(crate) fn rebind_snapshot_resource_assets(
