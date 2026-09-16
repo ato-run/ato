@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Cursor;
-use std::path::{Component, Path};
+use std::fs::{self, OpenOptions};
+use std::io::{Cursor, Write};
+use std::path::{Component, Path, PathBuf};
 
 use ato_computation::ContentRef;
 use ato_formation::authoring::{
@@ -361,6 +362,259 @@ fn validate_filesystem_state(bytes: &[u8]) -> Result<(), PortableApplicationErro
     Ok(())
 }
 
+pub(crate) fn capture_filesystem_state(root: &Path) -> Result<Vec<u8>, PortableApplicationError> {
+    let metadata = fs::symlink_metadata(root).map_err(|source| PortableApplicationError::Io {
+        path: root.to_path_buf(),
+        source,
+    })?;
+    if !metadata.file_type().is_dir() {
+        return Err(profile("filesystem state working copy is not a directory"));
+    }
+
+    let mut directories = Vec::new();
+    let mut files = Vec::new();
+    collect_filesystem_state(root, root, &mut directories, &mut files)?;
+    directories.sort_by(|left, right| left.0.cmp(&right.0));
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut bytes = Vec::new();
+    {
+        let mut archive = tar::Builder::new(&mut bytes);
+        for (path, _) in &directories {
+            let header = canonical_tar_header(path, 0, 0o755, tar::EntryType::Directory)?;
+            archive.append(&header, Cursor::new([])).map_err(|source| {
+                PortableApplicationError::Io {
+                    path: root.to_path_buf(),
+                    source,
+                }
+            })?;
+        }
+        let mut expanded = 0u64;
+        for (path, source_path) in &files {
+            let mut file =
+                fs::File::open(source_path).map_err(|source| PortableApplicationError::Io {
+                    path: source_path.clone(),
+                    source,
+                })?;
+            let metadata = file
+                .metadata()
+                .map_err(|source| PortableApplicationError::Io {
+                    path: source_path.clone(),
+                    source,
+                })?;
+            if !metadata.file_type().is_file() {
+                return Err(profile(
+                    "filesystem state changed to a non-regular entry during capture",
+                ));
+            }
+            expanded = expanded.saturating_add(metadata.len());
+            if expanded > MAX_FILESYSTEM_STATE_BYTES as u64 {
+                return Err(profile("filesystem state expands past its byte limit"));
+            }
+            let header = canonical_tar_header(
+                path,
+                metadata.len(),
+                canonical_file_mode(&metadata),
+                tar::EntryType::Regular,
+            )?;
+            archive
+                .append(&header, &mut file)
+                .map_err(|source| PortableApplicationError::Io {
+                    path: source_path.clone(),
+                    source,
+                })?;
+        }
+        archive
+            .finish()
+            .map_err(|source| PortableApplicationError::Io {
+                path: root.to_path_buf(),
+                source,
+            })?;
+    }
+    validate_snapshot_resource_bytes(STATE_FILESYSTEM_PROTOCOL, &bytes)?;
+    Ok(bytes)
+}
+
+pub(crate) fn restore_filesystem_state(
+    bytes: &[u8],
+    destination: &Path,
+) -> Result<(), PortableApplicationError> {
+    validate_snapshot_resource_bytes(STATE_FILESYSTEM_PROTOCOL, bytes)?;
+    fs::create_dir_all(destination).map_err(|source| PortableApplicationError::Io {
+        path: destination.to_path_buf(),
+        source,
+    })?;
+    let mut existing =
+        fs::read_dir(destination).map_err(|source| PortableApplicationError::Io {
+            path: destination.to_path_buf(),
+            source,
+        })?;
+    if existing
+        .next()
+        .transpose()
+        .map_err(|source| PortableApplicationError::Io {
+            path: destination.to_path_buf(),
+            source,
+        })?
+        .is_some()
+    {
+        return Err(profile(
+            "filesystem state restore destination must be empty",
+        ));
+    }
+
+    let mut archive = tar::Archive::new(Cursor::new(bytes));
+    for entry in archive
+        .entries()
+        .map_err(|_| profile("snapshot filesystem state archive is unreadable"))?
+    {
+        let mut entry =
+            entry.map_err(|_| profile("snapshot filesystem state entry is unreadable"))?;
+        let relative = entry
+            .path()
+            .map_err(|_| profile("snapshot filesystem state path is invalid"))?;
+        let relative = canonical_state_path(relative.as_ref())?;
+        let target = destination.join(&relative);
+        let mode = entry
+            .header()
+            .mode()
+            .map_err(|_| profile("snapshot filesystem state mode is invalid"))?;
+        if entry.header().entry_type().is_dir() {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(|source| PortableApplicationError::Io {
+                    path: parent.to_path_buf(),
+                    source,
+                })?;
+            }
+            fs::create_dir(&target).map_err(|source| PortableApplicationError::Io {
+                path: target.clone(),
+                source,
+            })?;
+        } else {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(|source| PortableApplicationError::Io {
+                    path: parent.to_path_buf(),
+                    source,
+                })?;
+            }
+            let mut output = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&target)
+                .map_err(|source| PortableApplicationError::Io {
+                    path: target.clone(),
+                    source,
+                })?;
+            std::io::copy(&mut entry, &mut output).map_err(|source| {
+                PortableApplicationError::Io {
+                    path: target.clone(),
+                    source,
+                }
+            })?;
+            output
+                .flush()
+                .map_err(|source| PortableApplicationError::Io {
+                    path: target.clone(),
+                    source,
+                })?;
+        }
+        set_portable_mode(&target, mode)?;
+    }
+    Ok(())
+}
+
+fn collect_filesystem_state(
+    root: &Path,
+    directory: &Path,
+    directories: &mut Vec<(String, PathBuf)>,
+    files: &mut Vec<(String, PathBuf)>,
+) -> Result<(), PortableApplicationError> {
+    let entries = fs::read_dir(directory).map_err(|source| PortableApplicationError::Io {
+        path: directory.to_path_buf(),
+        source,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| PortableApplicationError::Io {
+            path: directory.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+        let metadata =
+            fs::symlink_metadata(&path).map_err(|source| PortableApplicationError::Io {
+                path: path.clone(),
+                source,
+            })?;
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| profile("filesystem state path escapes its working copy"))?;
+        let normalized = canonical_state_path(relative)?;
+        if metadata.file_type().is_dir() {
+            directories.push((normalized, path.clone()));
+            collect_filesystem_state(root, &path, directories, files)?;
+        } else if metadata.file_type().is_file() {
+            files.push((normalized, path));
+        } else {
+            return Err(profile(
+                "filesystem state contains a symlink or non-regular entry",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn canonical_tar_header(
+    path: &str,
+    size: u64,
+    mode: u32,
+    entry_type: tar::EntryType,
+) -> Result<tar::Header, PortableApplicationError> {
+    let mut header = tar::Header::new_ustar();
+    header.set_size(size);
+    header.set_mode(mode);
+    header.set_mtime(0);
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_entry_type(entry_type);
+    header
+        .set_path(path)
+        .map_err(|_| profile("filesystem state path cannot be represented in ustar"))?;
+    header.set_cksum();
+    Ok(header)
+}
+
+#[cfg(unix)]
+fn canonical_file_mode(metadata: &fs::Metadata) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+
+    if metadata.permissions().mode() & 0o111 == 0 {
+        0o644
+    } else {
+        0o755
+    }
+}
+
+#[cfg(not(unix))]
+fn canonical_file_mode(_metadata: &fs::Metadata) -> u32 {
+    0o644
+}
+
+#[cfg(unix)]
+fn set_portable_mode(path: &Path, mode: u32) -> Result<(), PortableApplicationError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(|source| {
+        PortableApplicationError::Io {
+            path: path.to_path_buf(),
+            source,
+        }
+    })
+}
+
+#[cfg(not(unix))]
+fn set_portable_mode(_path: &Path, _mode: u32) -> Result<(), PortableApplicationError> {
+    Ok(())
+}
+
 fn canonical_state_path(path: &Path) -> Result<String, PortableApplicationError> {
     let mut normalized = Vec::new();
     for component in path.components() {
@@ -589,6 +843,43 @@ mod tests {
 
         let traversal = filesystem_archive("/escape", tar::EntryType::Regular);
         assert!(validate_snapshot_resource_bytes(STATE_FILESYSTEM_PROTOCOL, &traversal).is_err());
+    }
+
+    #[test]
+    fn filesystem_state_capture_is_deterministic_and_restorable() {
+        let source = tempfile::tempdir().unwrap();
+        fs::create_dir(source.path().join("nested")).unwrap();
+        fs::write(source.path().join("notes.sqlite"), b"database").unwrap();
+        fs::write(source.path().join("nested/value.txt"), b"saved").unwrap();
+
+        let first = capture_filesystem_state(source.path()).unwrap();
+        let second = capture_filesystem_state(source.path()).unwrap();
+        let restored = tempfile::tempdir().unwrap();
+        restore_filesystem_state(&first, restored.path()).unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(
+            fs::read(restored.path().join("notes.sqlite")).unwrap(),
+            b"database"
+        );
+        assert_eq!(
+            fs::read(restored.path().join("nested/value.txt")).unwrap(),
+            b"saved"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filesystem_state_capture_rejects_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("target"), b"saved").unwrap();
+        symlink("target", source.path().join("link")).unwrap();
+
+        let error = capture_filesystem_state(source.path()).unwrap_err();
+
+        assert!(error.to_string().contains("symlink or non-regular"));
     }
 }
 
