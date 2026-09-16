@@ -240,10 +240,12 @@ impl DockerOciAdapter {
         Ok(OciHandle {
             docker: self.docker.clone(),
             container_id,
+            container_address,
             container_name,
             network_name,
             image: self.spec.image.clone(),
             platform: self.spec.platform.clone(),
+            endpoints: self.spec.endpoints.clone(),
             forwarders,
             stopped: false,
         })
@@ -353,10 +355,12 @@ fn validate_loaded_image(
 pub struct OciHandle {
     docker: PathBuf,
     container_id: String,
+    container_address: IpAddr,
     container_name: String,
     network_name: String,
     image: String,
     platform: String,
+    endpoints: Vec<OciEndpoint>,
     forwarders: Vec<PortForwarder>,
     stopped: bool,
 }
@@ -364,6 +368,12 @@ pub struct OciHandle {
 impl OciHandle {
     pub fn container_id(&self) -> &str {
         &self.container_id
+    }
+
+    /// The bridge address and exact Port mapping used by this Run's forwarder.
+    /// Diagnostic only: neither value participates in Derivation identity.
+    pub fn port_mapping(&self) -> (IpAddr, &[OciEndpoint]) {
+        (self.container_address, &self.endpoints)
     }
 
     pub fn container_name(&self) -> &str {

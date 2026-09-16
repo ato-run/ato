@@ -1085,6 +1085,17 @@ impl ConnectedWorker {
             format!("the launch declared no `{endpoint_name}` endpoint to report")
         })?;
         let execution_evidence = active.execution_evidence();
+        let oci_port_mapping = match &active.launched {
+            runtime_launch::lease::ActiveWorkload::Oci(container) => {
+                let (container_ip, mappings) = container.port_mapping();
+                mappings.first().map(|mapping| OciPortMappingReport {
+                    container_ip: container_ip.to_string(),
+                    guest_port: mapping.guest_port,
+                    runner_forward_port: mapping.host_port,
+                })
+            }
+            runtime_launch::lease::ActiveWorkload::Process(_) => None,
+        };
         // The ready_url is the ingress slot's public hostname, and the process
         // is listening on the loopback port that slot forwards to. Before P4
         // this reported no URL at all, honestly: a process realization was
@@ -1102,7 +1113,25 @@ impl ConnectedWorker {
             Some(port),
             Some(&execution_evidence),
             None,
+            oci_port_mapping.as_ref(),
         )?;
+        if let runtime_launch::lease::ActiveWorkload::Oci(container) = &active.launched {
+            let (container_ip, mappings) = container.port_mapping();
+            for mapping in mappings {
+                eprintln!(
+                    "[runtime-launch-surface] {}",
+                    serde_json::json!({
+                        "run_id": lease.run_id,
+                        "lease_id": lease.id,
+                        "container_id": container.container_id(),
+                        "container_ip": container_ip.to_string(),
+                        "guest_port": mapping.guest_port,
+                        "runner_forward_port": mapping.host_port,
+                        "public_host": self.config.public_base_url,
+                    })
+                );
+            }
+        }
         eprintln!(
             "[runtime-launch] run={} ready {} endpoint=127.0.0.1:{port} public={}",
             lease.run_id,
@@ -1227,6 +1256,7 @@ impl ConnectedWorker {
             Some(ready_local_port(&self.config)),
             None,
             browser.as_ref().map(|runtime| runtime.control_capability()),
+            None,
         )?;
         let mut last_control = Instant::now() - Duration::from_secs(1);
         let mut last_frame = Instant::now();
@@ -2858,6 +2888,13 @@ struct BrowserControlReport<'a> {
 }
 
 #[derive(Serialize)]
+struct OciPortMappingReport {
+    container_ip: String,
+    guest_port: u16,
+    runner_forward_port: u16,
+}
+
+#[derive(Serialize)]
 struct ReadyReport<'a> {
     execution_id: &'a str,
     /// Omitted when the realization has no externally reachable URL.
@@ -2874,6 +2911,8 @@ struct ReadyReport<'a> {
     local_port: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     execution: Option<&'a runtime_launch::lease::RuntimeExecutionEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    port_mapping: Option<&'a OciPortMappingReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     control: Option<BrowserControlReport<'a>>,
 }
@@ -2997,6 +3036,7 @@ impl HttpRunnerApi {
         local_port: Option<u16>,
         execution: Option<&runtime_launch::lease::RuntimeExecutionEvidence>,
         control: Option<BrowserControlCapability>,
+        port_mapping: Option<&OciPortMappingReport>,
     ) -> Result<()> {
         self.authorized(
             self.client
@@ -3007,6 +3047,7 @@ impl HttpRunnerApi {
             ready_url,
             local_port,
             execution,
+            port_mapping,
             control: control.as_ref().map(|capability| BrowserControlReport {
                 protocol: &capability.protocol,
                 port: &capability.port,
