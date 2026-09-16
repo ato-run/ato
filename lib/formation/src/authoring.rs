@@ -61,6 +61,8 @@ pub const STATE_FILESYSTEM_PROTOCOL: &str = "ato.state.filesystem@1";
 pub const HTTP_CONTRACT_VERIFIER: &str = "ato.contract.http@1";
 /// The workspace-content acceptance verifier. `extensions/contracts`.
 pub const WORKSPACE_CONTRACT_VERIFIER: &str = "ato.contract.workspace@1";
+/// The exact portable saved-data/Asset snapshot restored for an Instance.
+pub const INSTANCE_SNAPSHOT_CONTRACT_VERIFIER: &str = "ato.contract.instance-snapshot@1";
 
 pub const BOUND_CONTRACT_SCHEMA: &str = "ato.contract/1";
 pub const BOUND_DERIVATION_SCHEMA: &str = "ato.derivation/1";

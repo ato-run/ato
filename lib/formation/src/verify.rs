@@ -38,7 +38,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::authoring::{BoundContract, HTTP_CONTRACT_VERIFIER, WORKSPACE_CONTRACT_VERIFIER};
+use crate::authoring::{
+    BoundContract, HTTP_CONTRACT_VERIFIER, INSTANCE_SNAPSHOT_CONTRACT_VERIFIER,
+    WORKSPACE_CONTRACT_VERIFIER,
+};
 
 pub const CONTRACT_VERIFICATION_RECEIPT_SCHEMA: &str = "ato.contract-verification-receipt/1";
 pub const CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V2: &str = "ato.contract-verification-receipt/2";
@@ -61,6 +64,8 @@ pub struct CandidateObservation {
     /// `(port id, request path)`. An HTTP observation matching it is deferred
     /// to that gate; one that does not match is checked by nothing.
     pub runtime_readiness: Option<(String, String)>,
+    /// Portable Instance snapshot installed before the candidate starts.
+    pub instance_snapshot_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -178,6 +183,7 @@ impl RuntimeHttpObservation {
 pub struct RuntimeObservation {
     pub input_refs: BTreeMap<String, String>,
     pub http: Vec<RuntimeHttpObservation>,
+    pub instance_snapshot_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -359,6 +365,17 @@ impl ContractVerificationReceipt {
                                     digest: runtime.input_refs.get(input).cloned(),
                                 })
                         }
+                        INSTANCE_SNAPSHOT_CONTRACT_VERIFIER => runtime
+                            .instance_snapshot_ref
+                            .as_ref()
+                            .map(|digest| VerificationEvidence {
+                                method: None,
+                                path: None,
+                                status: None,
+                                body_sha256: None,
+                                input: None,
+                                digest: Some(digest.clone()),
+                            }),
                         _ => None,
                     });
                 receipt_observation(verdict, evidence)
@@ -473,6 +490,21 @@ pub fn verify(contract: &BoundContract, candidate: &CandidateObservation) -> Con
                         }
                     }
                 }
+                INSTANCE_SNAPSHOT_CONTRACT_VERIFIER => {
+                    let expected = requirement.digest.as_deref().unwrap_or_default();
+                    match candidate.instance_snapshot_ref.as_deref() {
+                        Some(actual) if actual == expected => ObservationOutcome::Satisfied,
+                        Some(actual) => ObservationOutcome::Failed {
+                            code: "instance_snapshot_mismatch",
+                            detail: format!("restored {actual}; expected {expected}"),
+                        },
+                        None => ObservationOutcome::Failed {
+                            code: "instance_snapshot_missing",
+                            detail: "the candidate installed no portable Instance snapshot"
+                                .to_owned(),
+                        },
+                    }
+                }
                 other => ObservationOutcome::Failed {
                     code: "verifier_unknown",
                     detail: format!("no verifier named {other} is available to decide this"),
@@ -561,6 +593,20 @@ pub fn verify_runtime(
                         Some(_) => ObservationOutcome::Satisfied,
                     }
                 }
+                INSTANCE_SNAPSHOT_CONTRACT_VERIFIER => {
+                    let expected = requirement.digest.as_deref().unwrap_or_default();
+                    match candidate.instance_snapshot_ref.as_deref() {
+                        Some(actual) if actual == expected => ObservationOutcome::Satisfied,
+                        Some(actual) => ObservationOutcome::Failed {
+                            code: "instance_snapshot_mismatch",
+                            detail: format!("restored {actual}; expected {expected}"),
+                        },
+                        None => ObservationOutcome::Failed {
+                            code: "instance_snapshot_missing",
+                            detail: "the runtime restored no portable Instance snapshot".to_owned(),
+                        },
+                    }
+                }
                 other => ObservationOutcome::Failed {
                     code: "verifier_unknown",
                     detail: format!("no verifier named {other} is available to decide this"),
@@ -610,6 +656,20 @@ mod tests {
         }
     }
 
+    fn instance_snapshot(id: &str, digest: &str) -> BoundRequirement {
+        BoundRequirement {
+            id: id.to_owned(),
+            verifier: INSTANCE_SNAPSHOT_CONTRACT_VERIFIER.to_owned(),
+            port: None,
+            method: None,
+            path: None,
+            status: None,
+            body_digest: None,
+            input: None,
+            digest: Some(digest.to_owned()),
+        }
+    }
+
     fn contract(requirements: Vec<BoundRequirement>) -> BoundContract {
         BoundContract {
             schema: BOUND_CONTRACT_SCHEMA.to_owned(),
@@ -628,6 +688,7 @@ mod tests {
             exported_ports: ["app.http".to_owned()].into(),
             statically_served_paths: ["/".to_owned()].into(),
             runtime_readiness: None,
+            instance_snapshot_ref: None,
         };
         let verification = verify(&k, &candidate);
         assert!(verification.passed(), "{verification:?}");
@@ -753,6 +814,31 @@ mod tests {
         assert_eq!(
             verification.failure().unwrap().1,
             "http_body_digest_mismatch"
+        );
+    }
+
+    #[test]
+    fn runtime_satisfies_snapshot_requirement_when_exact_snapshot_was_restored() {
+        let digest = format!("sha256:{}", "ab".repeat(32));
+        let k = contract(vec![instance_snapshot("saved-state", &digest)]);
+        let verification = verify_runtime(
+            &k,
+            &RuntimeObservation {
+                instance_snapshot_ref: Some(digest),
+                ..Default::default()
+            },
+        );
+        assert!(verification.fully_satisfied());
+    }
+
+    #[test]
+    fn runtime_rejects_snapshot_requirement_when_no_snapshot_was_restored() {
+        let digest = format!("sha256:{}", "ab".repeat(32));
+        let k = contract(vec![instance_snapshot("saved-state", &digest)]);
+        let verification = verify_runtime(&k, &RuntimeObservation::default());
+        assert_eq!(
+            verification.failure().unwrap().1,
+            "instance_snapshot_missing"
         );
     }
 
