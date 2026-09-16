@@ -21,6 +21,16 @@ fn process_and_oci_fixtures_parse_and_validate() {
 }
 
 #[test]
+fn hosted_datasette_oci_spec_parses_and_digests() {
+    let raw = r#"{"protocol":"ato.runtime-launch-spec.v1","context":{"run_id":"run_01M2MEX5VPDXJ1A2JDA1GDR080","compute_id":"cmp_01M2MEX5JAX8VWCWQHJQZ8PW4B","compute_schema_id":"csch_01M2MEX5N37GN60AGTZ4EPVS8D","compute_instance_id":"cinst_01M2MEX5Q8TX4VP45Q2QN32CXM"},"workspace":{"materialization_ref":"sha256:069d07bc4486336a54a9dc8f5949c48a4f28ae73535d0d5f783f8f667121fab4","cwd_relative":""},"realization":{"kind":"oci","image_digest_ref":"sha256:0f57db16cf4eb6cca57f1cedaa0a696bca1c65a1d75b8f7ee372c2dd909a32a0","image_reference":"docker.io/datasetteproject/datasette@sha256:0f57db16cf4eb6cca57f1cedaa0a696bca1c65a1d75b8f7ee372c2dd909a32a0","platform":"linux/amd64","resource_limits":{"memory_bytes":268435456,"cpu_limit_millis":1000,"pids_limit":128},"argv":["datasette","--immutable","/app/catalog.db","--host","0.0.0.0","--port","8000"],"working_dir":"/app"},"public_env":[],"secret_grants":[],"state_attachments":[],"endpoints":[{"name":"app.http","protocol":"http","guest_port":8000,"allocation":"automatic"}],"readiness":{"kind":"http","endpoint_name":"app.http","path":"/","timeout_ms":60000},"lifecycle":{"graceful_shutdown_ms":10000,"force_kill_after_ms":15000}}"#;
+    let spec = RuntimeLaunchSpecV1::parse(raw).expect("hosted OCI spec is valid");
+    assert_eq!(
+        spec.canonical_digest().unwrap(),
+        "sha256:d4ca1c27571efe7e769f2ff5cff4ec1b72c8d5445bdb3279b1714e3b39c99b81"
+    );
+}
+
+#[test]
 fn the_two_realizations_differ_only_in_the_realization_arm() {
     // The contract's central claim. If anything else drifts, Process and OCI
     // have begun to mean different things and P5 cannot reuse P3's model.
