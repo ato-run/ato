@@ -4,9 +4,9 @@
 
 Repositories and branches:
 
-- `ato-run/ato` — `feat/portable-hosted-export` at `8ea240be`
-- `ato-run/ato-api` — `feat/portable-hosted-export` at `cce1994c`
-- `ato-run/ato-pwa` — `feat/portable-hosted-export` at `5631719`
+- `ato-run/ato` — `feat/portable-hosted-export` at `d9617096`
+- `ato-run/ato-api` — `feat/portable-hosted-export` at `614cba90`
+- `ato-run/ato-pwa` — `feat/portable-hosted-export` at `ae08f46`
 
 Implementation commits:
 
@@ -25,6 +25,19 @@ Implementation commits:
   verified Derivation and workspace instead of the generic cold-wake path
 - `8ea240be` (`ato`) — restore browser state and Assets into a durable local
   static Surface, capture edits on fenced stop, and emit the next saved K
+- `f4e8a92e` (`ato`) — validate bounded canonical filesystem snapshot tar
+  objects and bind them to the declared state slot in K
+- `3ceffe4f` (`ato`) — add the write-capable Portable Notes Process/OCI fixture
+- `f4988ee0` (`ato`) — run writable OCI mounts as the owning host user
+- `be92745a`, `b598c481`, `614cba90` (`ato-api`) — dispatch declared Hosted
+  filesystem state, restore/capture revisions, and permit server-side dynamic
+  capture without a browser-state bridge
+- `ae08f46` (`ato-pwa`) — try server-side state capture before requiring a
+  browser flush
+- `cfad15d8` (`ato`) — restore, mount, capture, restart, and export one durable
+  local filesystem state for Process and OCI Derivations
+- `d9617096` (`ato`) — reject browser/JSON/Asset snapshots on dynamic routes
+  instead of claiming that filesystem restore satisfied unrelated state
 
 Draft pull requests:
 
@@ -56,9 +69,17 @@ production deployment or production flag change was performed.
   token. Missing-token cross-origin style POSTs cannot mutate captured state.
 - Stopping a local Run captures the exact browser state behind the active Run
   token, converts only declared Asset binding fields back to portable aliases,
-  preserves immutable Asset bytes, and installs a new K. Process/OCI snapshot
-  restore remains fail-closed until a state Adapter exists; it is not reported
-  as restored merely because bytes were materialized.
+  preserves immutable Asset bytes, and installs a new K.
+- A declared `ato.state.filesystem@1` slot now has an Instance-owned working
+  copy. Import safely extracts only canonical directories and regular files;
+  symlinks, traversal, special files, non-canonical metadata, and over-limit
+  archives fail closed. Stop creates a deterministic tar after the workload is
+  quiesced and installs the next K without changing either D.
+- Durable local Process uses a Linux bubblewrap mount namespace so the same
+  host working copy appears at the declared guest path. Durable local OCI uses
+  the same working copy as a Runner-managed writable bind mount. macOS Process
+  and Docker Desktop OCI remain explicit admission failures rather than
+  weakening mount or network isolation.
 - Local Asset IDs now use the same `ast_<Crockford Base32>` lexical shape as
   Hosted Assets while remaining independently minted per Instance.
 - `ato app export <instance-id>` exports the current immutable bundle.
@@ -82,7 +103,7 @@ Passed:
 
 ```text
 cargo test -p ato-portable-application
-ato-portable-application            49 passed
+ato-portable-application            58 passed
 
 cargo test -p ato-cli
 ato-cli unit                         25 passed
@@ -90,17 +111,20 @@ ato-cli integration/doc             30 passed
   of which portable integration     11 passed
 ```
 
-Passed:
+Passed on the feature head:
 
 ```text
 cargo clippy -p ato-portable-application -p ato-cli \
-  --all-targets --no-deps -- -D warnings
+  --all-targets --no-deps -- -D warnings  # with the parent warnings below excluded
 ```
 
-The combined dependency-inclusive CLI clippy command still stops on the
-unchanged parent warning at `lib/sandbox/src/macos.rs:213`
-(`clippy::redundant_closure`). The warning is present before these commits and
-was not suppressed.
+With Rust/Clippy 1.96, the unfiltered command stops on unchanged parent code:
+`apps/portable-application/src/instance_snapshot.rs:281`
+(`manual_is_multiple_of`), the pre-existing mid-file test module in that file
+(`items_after_test_module`), and the dependency-inclusive command additionally
+stops at `lib/sandbox/src/macos.rs:213` (`redundant_closure`). All three
+locations are present at exact parent `f4988ee0`; none was suppressed or used
+to hide a new warning in the changed functions.
 
 API verification passed:
 
@@ -145,18 +169,18 @@ npm run build
 - CLI integration imports one snapshot bundle twice, observes distinct local
   Asset IDs with equal body digests, and re-exports the original bytes.
 - CLI integration confirms a restored static Run emits exact snapshot
-  evidence, while a snapshot-bearing Process Derivation fails before it can
-  claim restoration.
+  evidence. Dynamic filesystem state is covered by deterministic
+  capture/restore unit tests and native Linux Process/OCI acceptance below.
 - A stale local Run token cannot seal a new snapshot; a state POST without the
   derived active-Run token receives HTTP 403 and leaves state unchanged.
+- Filesystem capture rejects symlinks and non-regular entries. Restore requires
+  an empty Instance-owned destination and never extracts traversal paths.
 
 ## Not complete
 
-Browser state and Instance Assets now complete one full Hosted → local → Hosted
-roundtrip. The remaining v0 work is deliberately narrower and still open:
+Browser state, Instance Assets, and one declared filesystem state now complete
+Hosted → local → Hosted roundtrips. The remaining v0 work is still open:
 
-- one declared filesystem state mount for Process/OCI, including quiesce,
-  content-addressed capture, restore, and lifecycle cleanup;
 - portable Binding declarations and receive-side manual rebinding without
   credential transport;
 - explicit User Runner placement for portable Runs without Managed fallback;
@@ -166,8 +190,9 @@ roundtrip. The remaining v0 work is deliberately narrower and still open:
 - large v4 direct-upload acceptance for the approximately 120 MiB offline
   Datasette bundle.
 
-The local static bridge intentionally does not make Process/OCI snapshot
-claims. Dynamic filesystem state remains a separate Adapter increment.
+The filesystem increment deliberately supports one declared writable state
+slot. It does not infer arbitrary directories, capture process memory, or
+claim persistence for undeclared paths.
 
 ## Hosted export implementation checkpoint
 
@@ -325,3 +350,110 @@ All three Asset IDs differ. Staging D1 records both Hosted Assets as available,
 318,723-byte objects with the same SHA-256; the local body also hashes to the
 same value. The three Instance IDs differ, saved-data changes changed K, and D
 remained constant. No credential or signed URL was transported.
+
+## Dynamic filesystem-state roundtrip acceptance
+
+The write-capable fixture is `samples/portable-stateful-notes`. It is one HTTP
+application backed by SQLite in the declared `data` state slot mounted at
+`/data`, with both a Python Process D and an OCI D:
+
+```text
+base bundle SHA  sha256:029cb5ebde4a3c03320243c0dfab88b21f49ccf9d1fbc9804b3560ed59384f32
+base K           sha256:470ac469c9af31c7af25fefb2111ca80ca08a6435071c2cbdb6ef788d377885d
+Python D         sha256:f8331b5349758a209b3c0419c860236db6dd1a60094c6ba158a709a91eb9555d
+OCI D            sha256:03965b697def12fe8dec54dd23a8ce9f11a10573b70cc655c558f7e3b0c02c08
+OCI image        docker.io/library/python@sha256:1c44018d7eb40488f29e7c6ad4991d3200507e14dca71b94fe61011815e98155
+platform         linux/amd64
+```
+
+Staging ran API `614cba90` as Worker version
+`4a6726c3-c36f-415d-b51d-1485b821bdf3`, PWA `ae08f46` as Worker version
+`229f6d51-22fe-4a0a-b4f7-a110b4ab83b1`, and both Runner slots with the
+`f4988ee0` worker binary whose SHA-256 was
+`54b0dc09de7c9ead84a0a54956b1c0f1c56bd8b3af3c693b654ec066880d23b5`.
+No production deployment was performed.
+
+The first Hosted Python Instance was
+`cinst_01M2P762S2RKJ3W1C6BYWD6P6K`. The real Surface accepted the note
+`saved on Hosted Python`. PWA **App + saved data** quiesced
+`run_01M2P762VZY5181CG3SVRB3HXV`, released its writer, and committed revision
+`isrev_01M2P82Y0TZNK3RSFTSTEB3ZQH`. Its revision digest equals the embedded
+filesystem resource digest:
+
+```text
+file          /Users/egamikohsuke/Downloads/Portable-Notes.capsule
+size          48,895 bytes
+bundle SHA    sha256:0753c059f5261980d92806dec91400fba2553e130ca0d3b34d84ff33c9cfadcc
+K_saved       sha256:dadd3184057263016063eb9a13acd81e97dc3b63e8a5596f2a410216a31ab9b7
+snapshot      sha256:03872a47a1e963f11eb78d05a12bfa9135d3549d6eaab810595d1941204f8703
+state digest  sha256:794e811842ccb7e4840e49f996eb605fad7305fd3be98e91d262686d6c567f22
+```
+
+The exact file was imported as Hosted OCI Instance
+`cinst_01M2P8AZYJTYQCHJWQCKRVEMXY`. Its persisted receipt selected the OCI D,
+bound Run `run_01M2P8B0N3CSQK9693HV0MMMQE` and lease
+`01M2P8B0TQTZQ2VB2SNT86GAHW`, and reported both the snapshot and HTTP
+observations satisfied with `fully_satisfied=true`. PWA showed Saved data
+Restored and Surface Ready, and the real Surface displayed the Python note.
+After adding `continued on Hosted OCI`, a second PWA export produced:
+
+```text
+file          /Users/egamikohsuke/Downloads/Portable-Notes (1).capsule
+size          48,895 bytes
+bundle SHA    sha256:26db31ca98c5ec8635ba47e5d5cbedfa945581bda22c45d86ff3fd5822ed6f18
+K_saved       sha256:110959e7227bcb5e102d36c962e70aa78a9e8f42dde0c89fadfc2c6d3aac8dc2
+snapshot      sha256:a066f03adf1757b75208e774bdc83cb71bd4da48117605d6b55647ab74fbeca9
+state digest  sha256:4cffee49fc67903a478d6ecc51e6e5344c47e72a20c3238949dc76e415fcbbda
+```
+
+Native Linux host `ubuntu-sugamo` then imported that exact file into durable
+Process Instance
+`linst_c43e675e1d3fd04536e51d0093da664bf16f46d914c741804a76f41b3e28faf8`.
+Run `lrun_8a6c7c121b2f891ab063aecbbb89b3b2e15f9d9bc9b03676e7ed90e234d0935f`
+restored both notes under bubblewrap, and the receipt recorded Python 3.12.7,
+the Process D, exact input SHA/K, snapshot evidence, and
+`fully_satisfied=true`. After adding `continued on local Process`, stop minted
+the next K. Run
+`lrun_9016228e4120c720257eb053bb09e65fb726ddb4a677302986bb69f4d175425c`
+restarted the same Instance and displayed all three notes. Export produced:
+
+```text
+bundle SHA  sha256:e8ef701f148ba8f3bf83210168ed132d74daf93fe41910ad121f4d534ae75053
+K_saved     sha256:3ecd117e87bf251cc35ddf10c7d5dbe838624d87b80325b8a6ddfae4e128a480
+snapshot    sha256:38f5350eb44e202175d49165f8746c589606810d98b17c1bb95695776bcb4ba7
+Python D    unchanged
+OCI D       unchanged
+```
+
+That file was imported independently into durable OCI Instance
+`linst_677ef2619566f7c4a1c466e053bec1a6fa8bc7f7d8a9bcda70b6c224365b755d`.
+Run `lrun_d724e6e9b116eb24a7989f26ce6c9418d5cbacb267fbdbbe3288844b83d1dde3`
+restored all three notes with the OCI D and a fully satisfied receipt. After
+adding `continued on local OCI`, stopping and starting Run
+`lrun_f417d1bae5dcc6ac3116eab3165c8f442fa184c6b022c824ee5ced5c7498f329`
+displayed all four notes. Final local export:
+
+```text
+file          /Users/egamikohsuke/Downloads/Portable-Notes-roundtrip.capsule
+size          48,895 bytes
+bundle SHA    sha256:e30c17a3ae0be9ef8e791c8ff01a8dd2ac8bf2f5699c217dcfad6fc612fa4816
+K_saved       sha256:83f109f3dae428885fc50cee19cdf75e98159abd90a14281a97b53cf7cd29bd2
+snapshot      sha256:1f9aac6d984886d9c2bb05935c382e453468072aff73e7d73d7cf22f9145ca4b
+Python D      unchanged
+OCI D         unchanged
+```
+
+Finally that file returned to staging as independent Hosted Python Instance
+`cinst_01M2P98TEM2CSWSF3WV1X4K0ZW`, Run
+`run_01M2P98VHJWNTHDT2V7WHBTK03`, lease
+`01M2P98VP281E2N3BGKV7YYC68`. The persisted receipt exactly matched the final
+bundle SHA, K, Python D, and snapshot, with all observations satisfied. PWA
+showed Contract Verified, Saved data Restored, and Surface Ready. The real
+Surface displayed all four notes in order.
+
+The four dynamic Instance IDs are distinct. Each edit changed the snapshot,
+K, and transport SHA, while the two declared DerivationRefs and ApplicationRef
+remained unchanged. macOS restored the same state bytes during import, but
+Process admission failed because bubblewrap is Linux-only and OCI admission
+failed because Docker Desktop keeps the isolated bridge inside its VM; neither
+case silently selected the other D or weakened isolation.
