@@ -169,3 +169,75 @@ failed 13 tests because its test D1 lacks tables such as `runtime_routes` and
 `c545b2fa` under the same command. No staging or production deployment was
 performed at this checkpoint. Staging PWA was signed out when checked, so no
 new browser receipt or screenshot is claimed.
+
+## Hosted OCI Surface staging acceptance (completed)
+
+The fresh browser run on 2026-09-16 used these revisions:
+
+- ato `0aaeab98`
+- ato-api `02f01c07`
+- ato-pwa `17e1257`
+
+Staging API Worker version
+`1a2f59a3-1619-4c91-8711-1b4ac67ca97f` served the API change at 100% after
+the safe deploy preflight and postflight both found 41 secrets; `/health`
+returned 200. The PWA remained at version
+`cdc3f0e4-584a-4fa3-ac57-cf132b7372f7`. Runner slot s0 used
+`/usr/local/bin/ato-connected-realization-worker-0aaeab98`, whose SHA-256 is
+`781c32934729e218864820778670d5cc09135b24ce06f4c63c00fa94bdf5f8a7`.
+Production was not changed.
+
+The reproduced 524 was not a Contract or container failure. The OCI
+PortForwarder copied the upstream response, but when the upstream closed it
+waited for the client-to-upstream copy thread without half-closing the client.
+Caddy could retain and reuse that apparently live connection; requests such as
+`/catalog` then reached the ingress but never received response bytes. The
+forwarder now propagates EOF in both directions with `Shutdown`, and a unit
+test keeps the downstream side open while asserting that an upstream close
+still reaches it. The OCI Adapter's five tests and all 83 Connected Worker
+tests passed.
+
+The first restart also exposed a separate lifecycle bug: re-import returned a
+successful receipt from a lease whose expiry had passed but whose database
+status remained `ready`. Hosted import now treats a missing, terminal, or
+expired lease as requiring a new Run and verification attempt. Its focused API
+test asserts that the new response is pending with no retained receipt while
+the completed old job remains immutable. The focused test and API typecheck
+passed.
+
+The final fresh attempt consumed the same v3 file bytes:
+
+- bundle SHA-256:
+  `sha256:88e4fd8d7ec46db05347bd4b03cfb3ceb7598e31fadd233d2bb68bb55df860e6`
+- ContractRef:
+  `sha256:d4bb7e9ae1be0f6b884d0d58561d7f974092de447da3eea9e2ffe5279b004a19`
+- OCI DerivationRef:
+  `sha256:d3e7428a6c75e7d5726319ca61f06631e1811a698b2dd16b531029038dfd701f`
+- Run: `run_01M2NDDWA1EY6SM1XYNDE440N9`
+- lease: `01M2NDDWFAAG1YD5ZHJKJV9EDY`
+- verification attempt: `pav_01M2NDDWRTYP7D9SC8SPR9XM6A`
+- container:
+  `2afcb28a6f6bd814261246fd41462aa358b90439b5d411a3f448c7b11aa2e182`
+- runtime route: `rrt_01M2NDDWPDCV46Q5D4GK610W82`, generation 5,
+  upstream `https://s0-rstg002.ato.run`
+
+The receipt is `ato.contract-verification-receipt/1`, carries those exact
+bundle, K, D, Run, lease, attempt, image digest, and container values, and has
+three satisfied observations with `fully_satisfied: true`. The PWA separately
+reported `Contract: Verified` and `Surface: Ready`. In the real browser the
+Datasette 0.65.2 top page loaded, the `items` table showed `A / 2` and `B / 5`,
+the SQL editor executed `select sum(quantity) as total from items`, and the
+result was `7`. Consecutive root, table, and SQL navigations no longer returned
+524.
+
+Screenshots are retained outside Git under:
+
+- `.tmp/datasette-evidence/screenshots/pwa-oci-ready-fixed.png`
+  (`sha256:881ffc2510582428cab0226b1d0084f5a1f6d782133ea891d5184803393e4955`)
+- `.tmp/datasette-evidence/screenshots/pwa-oci-datasette-sum-fixed.png`
+  (`sha256:dd1a4b537cda9a63dd8649a23845fa365058a5f80cf91e7b53160fd0bca0e858`)
+
+This completes the Hosted OCI Surface acceptance item. It does not complete
+Portable v0: image-absent outbound-blocked offline acceptance, Hosted/PWA v4
+transport, durable Instances, saved-data/Asset round-trip, Bindings, User
+Runner placement, and authoring integration remain separate work.
