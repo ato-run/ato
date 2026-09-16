@@ -600,6 +600,32 @@ fn validate_selected_derivation(
         return Err(profile("derivation reference is not its canonical digest"));
     }
     let realization = validate_initial_route(&contract, &application, &derivation)?;
+    if let Some(snapshot_ref) = instance_snapshot_ref.as_ref() {
+        let snapshot: InstanceSnapshotV1 =
+            structured(bundle, snapshot_ref, INSTANCE_SNAPSHOT_SCHEMA)?;
+        let filesystem = snapshot
+            .resources
+            .iter()
+            .filter(|resource| resource.protocol == STATE_FILESYSTEM_PROTOCOL)
+            .collect::<Vec<_>>();
+        match filesystem.as_slice() {
+            [] => {}
+            [resource]
+                if derivation.state.len() == 1
+                    && derivation.state[0].id == resource.slot
+                    && derivation.state[0].protocol == resource.protocol => {}
+            [_] => {
+                return Err(profile(
+                    "filesystem snapshot resource must match the selected Derivation state slot",
+                ));
+            }
+            _ => {
+                return Err(profile(
+                    "the initial profile permits at most one filesystem snapshot resource",
+                ));
+            }
+        }
+    }
 
     let surface = &application.surfaces[0];
     let tree_reference = surface
@@ -2389,6 +2415,41 @@ mod tests {
         )
     }
 
+    fn filesystem_state_snapshot() -> (
+        crate::instance_snapshot::InstanceSnapshotV1,
+        BTreeMap<String, Vec<u8>>,
+    ) {
+        let mut archive = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut archive);
+            let mut header = tar::Header::new_ustar();
+            header.set_size(5);
+            header.set_mode(0o644);
+            header.set_mtime(0);
+            header.set_uid(0);
+            header.set_gid(0);
+            header.set_entry_type(tar::EntryType::Regular);
+            builder
+                .append_data(&mut header, "saved.txt", std::io::Cursor::new(b"saved"))
+                .unwrap();
+            builder.finish().unwrap();
+        }
+        let reference = bundle_sha256(&archive);
+        (
+            crate::instance_snapshot::InstanceSnapshotV1 {
+                schema: crate::instance_snapshot::INSTANCE_SNAPSHOT_SCHEMA.to_owned(),
+                resources: vec![crate::instance_snapshot::InstanceSnapshotResourceV1 {
+                    slot: "data".to_owned(),
+                    protocol: STATE_FILESYSTEM_PROTOCOL.to_owned(),
+                    content_ref: reference.clone(),
+                }],
+                assets: vec![],
+                asset_bindings: vec![],
+            },
+            BTreeMap::from([(reference, archive)]),
+        )
+    }
+
     #[test]
     fn saved_snapshot_changes_k_without_changing_the_derivation() {
         let source = cached_static_v4_bundle();
@@ -2943,6 +3004,47 @@ mod tests {
             }
         });
         assert!(validate_bundle_for_derivation(&multiple, &multiple_ref).is_err());
+    }
+
+    #[test]
+    fn filesystem_snapshot_requires_the_same_state_slot_on_every_derivation() {
+        let (_, mut source) =
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &datasette_spec()).unwrap();
+        let process_ref = route_ref(&source, PortableRealizationKind::LocalProcess);
+        let oci_ref = route_ref(&source, PortableRealizationKind::OciContainer);
+        for reference in [process_ref, oci_ref] {
+            replace_derivation(&mut source, &reference, |derivation| {
+                derivation.state.push(ato_formation::authoring::BoundState {
+                    id: "data".to_owned(),
+                    protocol: STATE_FILESYSTEM_PROTOCOL.to_owned(),
+                    mount: "/data".to_owned(),
+                    access: StateAccess::ReadWrite,
+                });
+            });
+        }
+        let (_, source) = crate::portability_export::repack_portable_dependencies(
+            &source,
+            ato_objects::PortableDependencyProfile::Cached,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let derivations = source.index.derivations.clone();
+        let (snapshot, content) = filesystem_state_snapshot();
+        let (_, saved) =
+            crate::instance_snapshot::attach_instance_snapshot(&source, snapshot.clone(), &content)
+                .unwrap();
+        assert_eq!(saved.index.derivations, derivations);
+        validate_all_derivations(&saved).unwrap();
+
+        let mut mismatched = source;
+        let first = mismatched.index.derivations[0].clone();
+        replace_derivation(&mut mismatched, &first, |derivation| {
+            derivation.state.clear();
+        });
+        let error =
+            crate::instance_snapshot::attach_instance_snapshot(&mismatched, snapshot, &content)
+                .unwrap_err();
+        assert!(error.to_string().contains("must match"));
     }
 
     #[test]
