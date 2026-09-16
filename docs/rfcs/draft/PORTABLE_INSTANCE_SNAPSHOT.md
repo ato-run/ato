@@ -83,11 +83,21 @@ canonical bytes, object digests, exact closure, supported resource protocols,
 Asset sizes, and embedded content. It does not claim that a runtime restored
 the data.
 
-`ato.contract.instance-snapshot@1` is satisfied only when an Adapter reports
-the exact snapshot digest it installed for the current Run. Merely validating,
-importing, or unpacking the bundle is not runtime evidence. A runtime without a
-snapshot restore path must fail with `instance_snapshot_missing`; it must not
-copy the index value into its observation.
+`ato.contract.instance-snapshot@1` is satisfied only when the runtime launch
+path reports the exact snapshot digest it installed into the receiving
+Instance for the current Run. Merely validating or unpacking the bundle is not
+runtime evidence. A runtime without a successful snapshot restore must fail
+with `instance_snapshot_missing`; it must not copy the index value into its
+observation.
+
+For Hosted import, the Rust validator authenticates the snapshot descriptor and
+each content object's digest before the API can restore anything. The API
+creates fresh receiving-side Resource and Asset identities, persists the exact
+restored snapshot digest with the published import, and only creates a runtime
+verification job from that persisted evidence. A publication failure after a
+dynamic launch requests that lease to stop. Runtime verification receives the
+persisted restore evidence, not a client assertion or an unauthenticated
+bundle-index value.
 
 ## Local Instance materialization
 
@@ -129,15 +139,18 @@ Instance metadata only after snapshot materialization succeeds.
 
 ## Current implementation boundary
 
-This increment implements the v4 wire object, K binding, closure validation,
-replacement/pruning, durable local materialization, independent Asset IDs,
-local saved-snapshot sealing, and current-Instance export.
+This increment implements the v4 wire object, K binding, semantic and closure
+validation, replacement/pruning, durable local materialization, independent
+Asset IDs, local saved-snapshot sealing, current-Instance export, and Hosted
+restore of browser state, JSON Data Resources, and Assets before launch. The
+PWA requires the exact restored snapshot observation before a snapshot-bearing
+import can become Ready and displays the saved-data restore result separately.
 
-It does not yet implement browser-state flush, Hosted Data Resource/Asset
-restore, PWA export UI, field-aware Asset alias resolution inside saved JSON,
-or Adapter-side state injection. Until an Adapter performs that injection, a
-snapshot-bearing Run correctly fails the snapshot Contract instead of being
-reported as fully satisfied.
+It does not yet implement browser-state flush/capture from a live Hosted
+Instance, PWA export UI, field-aware Asset alias resolution inside saved JSON,
+or Process/OCI filesystem-state injection. No staging acceptance has yet
+proved the Hosted roundtrip; the current Hosted implementation is covered by
+the validator/API/PWA integration tests described in the progress record.
 
 ## Acceptance properties
 
@@ -149,3 +162,5 @@ reported as fully satisfied.
 - Altered materialized content fails before use.
 - An active Run cannot seal a new snapshot.
 - Runtime acceptance requires an exact restore observation.
+- Hosted import restores before launch and never reuses origin Instance,
+  Resource, or Asset IDs.
