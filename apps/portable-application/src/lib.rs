@@ -37,6 +37,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+pub mod dependency_transport;
+pub mod hosted_export;
 pub mod instance_snapshot;
 pub mod local_instance;
 pub mod oci_archive;
@@ -45,7 +47,7 @@ pub mod portability_plan;
 pub mod validator_agent;
 
 use instance_snapshot::{
-    INSTANCE_SNAPSHOT_SCHEMA, InstanceSnapshotV1, validate_snapshot,
+    INSTANCE_SNAPSHOT_SCHEMA, InstanceSnapshotV1, validate_asset_bindings, validate_snapshot,
     validate_snapshot_resource_bytes,
 };
 
@@ -470,6 +472,7 @@ fn validate_instance_snapshot_binding(
         return Err(profile("Instance snapshot is empty"));
     }
     validate_snapshot(&snapshot)?;
+    let mut snapshot_content = BTreeMap::new();
     for resource in &snapshot.resources {
         let reference = parse_ref(&resource.content_ref, "snapshot resource")?;
         let descriptor = bundle
@@ -480,6 +483,7 @@ fn validate_instance_snapshot_binding(
         }
         let bytes = bundle.payload_bytes(&reference)?;
         validate_snapshot_resource_bytes(&resource.protocol, &bytes)?;
+        snapshot_content.insert(resource.content_ref.clone(), bytes);
     }
     for asset in &snapshot.assets {
         let reference = parse_ref(&asset.content_ref, "snapshot Asset")?;
@@ -491,6 +495,7 @@ fn validate_instance_snapshot_binding(
         }
         bundle.payload_bytes(&reference)?;
     }
+    validate_asset_bindings(&snapshot, &snapshot_content)?;
     Ok(())
 }
 
@@ -2086,6 +2091,7 @@ mod tests {
                     content_type: "image/jpeg".to_owned(),
                     size: asset.len() as u64,
                 }],
+                asset_bindings: vec![],
             },
             BTreeMap::from([(saved_data_ref, saved_data), (asset_ref, asset)]),
         )
