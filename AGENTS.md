@@ -361,6 +361,19 @@ try {
 - receiptのPID、container ID、runtime、image、endpoint、Run/lease/attemptは観測証跡であり、
   ContractRefやDerivationRefへ実測値として混入させない。
 
+### Durable local portable Instances
+
+- `ato run <file.capsule>`はephemeralのまま維持する。durable import/start/stopは別の
+  Application Instance lifecycleとして実装し、author repositoryの`init/resume/stop`へ
+  Contract-root bundleを読み替えない。
+- Local Application/Instance ID、保存path、active worker、PID、process group、endpoint、
+  Run IDはlocal orchestrationであり、ContractRef/DerivationRefへ入れない。元bundle bytesは
+  immutable inputとしてdigest確認し、各startは新しいRunとreceiptを生成する。
+- 同じbundleの別importは独立Instanceにできること。active Runのpublish/releaseはtokenで
+  fenceし、停止時はPIDだけでなくboot sessionとprocess start timeを照合する。
+- `data_snapshot_ref`やBindingsの空fieldを、Saved Data/Asset/Secretのportability完成と扱わない。
+  保存データを含むexportは別のsnapshot Contractを作り、単なるpacking変更と区別する。
+
 ### Semantic classification
 
 Every public concept must be classified as a property of the current
