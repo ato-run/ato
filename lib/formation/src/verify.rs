@@ -41,6 +41,7 @@ use sha2::{Digest, Sha256};
 use crate::authoring::{BoundContract, HTTP_CONTRACT_VERIFIER, WORKSPACE_CONTRACT_VERIFIER};
 
 pub const CONTRACT_VERIFICATION_RECEIPT_SCHEMA: &str = "ato.contract-verification-receipt/1";
+pub const CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V2: &str = "ato.contract-verification-receipt/2";
 
 /// What the executed Derivation actually produced, in the terms `K` observes.
 ///
@@ -256,6 +257,10 @@ pub struct VerificationExecutionEvidence {
     pub lease_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt_id: Option<String>,
+    /// Immutable objects fetched from outside the bundle for this attempt.
+    /// Only emitted with receipt schema /2; never part of K or D identity.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependency_fetches: Vec<String>,
 }
 
 /// Shared proof emitted by both local and hosted execution paths.

@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+pub mod portability_export;
 pub mod portability_plan;
 pub mod validator_agent;
 
@@ -369,6 +370,24 @@ fn validate_bundle_closure(
 ) -> Result<(), PortableApplicationError> {
     let registry = portable_reference_registry()?;
     validate_portable_application_closure(bundle, &registry)?;
+    if bundle.portability.as_ref().is_some_and(|portability| {
+        portability.profile == ato_objects::PortableDependencyProfile::Offline
+    }) {
+        for value in &bundle.index.derivations {
+            let reference = parse_ref(value, "derivation")?;
+            let derivation: BoundDerivation =
+                structured(bundle, &reference, BOUND_DERIVATION_SCHEMA)?;
+            if derivation
+                .steps
+                .iter()
+                .any(|step| step.protocol == OCI_PROTOCOL)
+            {
+                return Err(profile(
+                    "offline OCI bundle lacks a verified embedded image manifest/layer graph",
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1490,6 +1509,7 @@ fn finish_bundle(
             objects: descriptors,
         },
         payloads,
+        portability: None,
         signatures: Vec::new(),
     }
 }
@@ -1645,6 +1665,142 @@ fn profile(message: impl Into<String>) -> PortableApplicationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sparse_v4_transport_keeps_datasette_contract_and_derivations() {
+        let (_, bundle) =
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &datasette_spec()).unwrap();
+        let original = validate_all_derivations(&bundle).unwrap();
+        let wheel = original[0]
+            .tree
+            .entries
+            .iter()
+            .find(|entry| entry.path.ends_with(".whl"))
+            .unwrap();
+        let wheel_ref = wheel.content_ref.clone();
+        let (bytes, _) = crate::portability_export::repack_portable_dependencies(
+            &bundle,
+            ato_objects::PortableDependencyProfile::Thin,
+            &BTreeMap::from([(
+                wheel_ref.clone(),
+                vec!["https://files.pythonhosted.org/fixed.whl".to_owned()],
+            )]),
+        )
+        .unwrap();
+        let decoded = decode_portable_application_bundle(&bytes).unwrap();
+        let sparse = validate_all_derivations(&decoded).unwrap();
+        assert_eq!(original[0].contract_ref, sparse[0].contract_ref);
+        assert_eq!(
+            original
+                .iter()
+                .map(|route| &route.derivation_ref)
+                .collect::<Vec<_>>(),
+            sparse
+                .iter()
+                .map(|route| &route.derivation_ref)
+                .collect::<Vec<_>>()
+        );
+
+        let mut missing = decoded.clone();
+        missing
+            .portability
+            .as_mut()
+            .unwrap()
+            .external_objects
+            .clear();
+        assert!(encode_portable_application_bundle(&missing).is_err());
+
+        let mut false_offline = decoded;
+        false_offline.portability.as_mut().unwrap().profile =
+            ato_objects::PortableDependencyProfile::Offline;
+        assert!(matches!(
+            encode_portable_application_bundle(&false_offline),
+            Err(PortableBundleError::OfflineExternalObject(_))
+        ));
+    }
+
+    #[test]
+    fn repacking_order_and_profile_do_not_change_semantic_refs() {
+        let (_, bundle) =
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &datasette_spec()).unwrap();
+        let route = validate_all_derivations(&bundle).unwrap();
+        let wheel = route[0]
+            .tree
+            .entries
+            .iter()
+            .find(|entry| entry.path.ends_with(".whl"))
+            .unwrap();
+        let sources = BTreeMap::from([(
+            wheel.content_ref.clone(),
+            vec!["https://files.pythonhosted.org/fixed.whl".to_owned()],
+        )]);
+        let (_, thin) = crate::portability_export::repack_portable_dependencies(
+            &bundle,
+            ato_objects::PortableDependencyProfile::Thin,
+            &sources,
+        )
+        .unwrap();
+        let (_, cached) = crate::portability_export::repack_portable_dependencies(
+            &bundle,
+            ato_objects::PortableDependencyProfile::Cached,
+            &sources,
+        )
+        .unwrap();
+        assert_eq!(thin.index.root_contract_ref, cached.index.root_contract_ref);
+        assert_eq!(thin.index.derivations, cached.index.derivations);
+
+        let differently_ordered_sources = BTreeMap::from([(
+            wheel.content_ref.clone(),
+            vec![
+                "https://files.pythonhosted.org/second.whl".to_owned(),
+                "https://files.pythonhosted.org/first.whl".to_owned(),
+            ],
+        )]);
+        let (_, reordered) = crate::portability_export::repack_portable_dependencies(
+            &bundle,
+            ato_objects::PortableDependencyProfile::Thin,
+            &differently_ordered_sources,
+        )
+        .unwrap();
+        assert_eq!(
+            thin.index.root_contract_ref,
+            reordered.index.root_contract_ref
+        );
+        assert_eq!(thin.index.derivations, reordered.index.derivations);
+    }
+
+    #[test]
+    fn embedded_wheel_tamper_and_omission_fail_before_route_selection() {
+        let (_, bundle) =
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &datasette_spec()).unwrap();
+        let (_, cached) = crate::portability_export::repack_portable_dependencies(
+            &bundle,
+            ato_objects::PortableDependencyProfile::Cached,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let route = validate_all_derivations(&cached).unwrap();
+        let wheel = route[0]
+            .tree
+            .entries
+            .iter()
+            .find(|entry| entry.path.ends_with(".whl"))
+            .unwrap();
+        let mut tampered = cached.clone();
+        let payload = tampered
+            .payloads
+            .iter_mut()
+            .find(|payload| payload.reference == wheel.content_ref)
+            .unwrap();
+        payload.bytes = base64::engine::general_purpose::STANDARD.encode(b"wrong wheel");
+        assert!(encode_portable_application_bundle(&tampered).is_err());
+
+        let mut missing = cached;
+        missing
+            .payloads
+            .retain(|payload| payload.reference != wheel.content_ref);
+        assert!(encode_portable_application_bundle(&missing).is_err());
+    }
 
     fn route_ref(bundle: &PortableApplicationBundle, kind: PortableRealizationKind) -> String {
         validate_all_derivations(bundle)

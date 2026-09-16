@@ -1,5 +1,5 @@
-//! Read-only export planning. This module does not repack a v3 bundle or
-//! promise that an external dependency is available without checking it.
+//! Read-only export planning. It does not promise that an external dependency
+//! is available without checking its immutable bytes.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -29,6 +29,10 @@ pub struct PortableExportPlan {
     pub estimated_export_bytes: Option<usize>,
     pub application_input_bytes: u64,
     pub python_wheel_bytes: u64,
+    pub embedded_objects: usize,
+    pub external_objects: usize,
+    pub embedded_dependency_bytes: u64,
+    pub external_dependency_bytes: u64,
     pub oci_images: Vec<String>,
     pub required_host_capabilities: Vec<String>,
     pub requires_network_on_clean_host: Option<bool>,
@@ -81,12 +85,30 @@ pub fn plan_portable_export(
     }
 
     let mut blockers = Vec::new();
+    let external_wheels = if profile == PortableExportProfile::Thin {
+        wheel_refs.len()
+    } else {
+        0
+    };
+    let embedded_objects = bundle.index.objects.len() - external_wheels;
+    // An OCI image is outside the wire-v3 object graph and is counted as one
+    // external dependency until a verified registry closure is attached.
+    let external_objects = external_wheels + oci_images.len();
+    let embedded_dependency_bytes = if external_wheels == 0 {
+        python_wheel_bytes
+    } else {
+        0
+    };
+    let external_dependency_bytes = if external_wheels == 0 {
+        0
+    } else {
+        python_wheel_bytes
+    };
     let (estimated_export_bytes, requires_network_on_clean_host) = match profile {
         PortableExportProfile::Thin => {
-            blockers.push("thin export needs a versioned sparse transport envelope".to_owned());
             if !wheel_refs.is_empty() {
                 blockers.push(format!(
-                    "{} wheel objects have no immutable external retrieval descriptors in wire v3",
+                    "{} wheel sources must be discovered and matched by SHA-256 before thin export",
                     wheel_refs.len()
                 ));
             }
@@ -94,14 +116,17 @@ pub fn plan_portable_export(
         }
         PortableExportProfile::Cached => (Some(current_bundle_bytes), Some(!oci_images.is_empty())),
         PortableExportProfile::Offline => {
-            blockers.push("offline export needs a versioned transport guarantee".to_owned());
             if !oci_images.is_empty() {
                 blockers.push(format!(
-                    "{} OCI images lack verified embedded manifest/layer closure in wire v3",
+                    "{} OCI images lack verified embedded manifest/layer closure",
                     oci_images.len()
                 ));
             }
-            (None, None)
+            if blockers.is_empty() {
+                (Some(current_bundle_bytes), Some(false))
+            } else {
+                (None, None)
+            }
         }
     };
     Ok(PortableExportPlan {
@@ -115,6 +140,10 @@ pub fn plan_portable_export(
         estimated_export_bytes,
         application_input_bytes,
         python_wheel_bytes,
+        embedded_objects,
+        external_objects,
+        embedded_dependency_bytes,
+        external_dependency_bytes,
         oci_images: oci_images.into_iter().collect(),
         required_host_capabilities: capabilities.into_iter().collect(),
         requires_network_on_clean_host,
@@ -181,7 +210,7 @@ mod tests {
         assert_eq!(cached.derivation_refs, thin.derivation_refs);
         assert_eq!(cached.derivation_refs, offline.derivation_refs);
         assert!(cached.existing_bundle_satisfies_profile);
-        assert!(!thin.existing_bundle_satisfies_profile);
+        assert!(thin.existing_bundle_satisfies_profile);
         assert!(!offline.existing_bundle_satisfies_profile);
         assert_eq!(offline.requires_network_on_clean_host, None);
     }

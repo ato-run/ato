@@ -19,9 +19,11 @@ pub use bundle::{
 };
 pub use portable_bundle::{
     CapsuleBundleDocument, CapsuleBundleDocumentError, PORTABLE_APPLICATION_BUNDLE_VERSION,
-    PORTABLE_APPLICATION_PROFILE, PortableApplicationBundle, PortableBundleError,
+    PORTABLE_APPLICATION_BUNDLE_VERSION_V4, PORTABLE_APPLICATION_PROFILE,
+    PORTABLE_APPLICATION_PROFILE_V2, PortableApplicationBundle, PortableBundleError,
     PortableBundleIndex, PortableBundleObjectDescriptor, PortableBundleObjectKind,
-    PortableBundlePayload, PortableReferenceExtractor, PortableReferenceRegistry,
+    PortableBundlePayload, PortableDependencyProfile, PortableDependencyTransport,
+    PortableExternalObject, PortableReferenceExtractor, PortableReferenceRegistry,
     decode_capsule_bundle_document, decode_portable_application_bundle,
     encode_portable_application_bundle, validate_portable_application_closure,
 };

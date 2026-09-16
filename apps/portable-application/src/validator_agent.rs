@@ -185,6 +185,7 @@ impl ValidatorAgent {
                     run_id: None,
                     lease_id: None,
                     attempt_id: None,
+                    dependency_fetches: Vec::new(),
                 });
         execution.endpoint = job.endpoint.clone();
         execution.run_id = job.run_id.clone();

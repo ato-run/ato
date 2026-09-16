@@ -14,11 +14,14 @@ and digest-pinned image manifest); a source URL is only a retrieval hint.
 
 `ato.portable-application/1` wire v3 continues to mean a completely embedded
 declared object closure. Its schema, decoder, digests, and existing fixtures
-must not be reinterpreted as a sparse bundle. A new versioned transport
-envelope is required for externalized object payloads. Semantic structured
-objects, including K, Application, D, and tree descriptors, remain embedded
-so that a validator can prove their references before any network request.
-Only explicitly described immutable dependency blobs may be external.
+are not reinterpreted as a sparse bundle. Wire v4 uses
+`ato.portable-application/2` and a separate `portability` transport manifest.
+The manifest names the profile and the exact set of external blob references
+with retrieval hints. Semantic structured objects, including K, Application,
+D, and tree descriptors, remain embedded so that a validator can prove their
+references before any network request. An offline v4 bundle cannot list an
+external object. The source hint is not its identity; fetched bytes must match
+the descriptor's size and SHA-256.
 
 ## Profiles
 
@@ -35,12 +38,23 @@ claim when a required portable object is unavailable or its digest cannot be
 validated. It must never silently downgrade to `cached` or use an installed
 host package/image as if it were part of the bundle.
 
-The transport metadata reports the profile, embedded/external counts and
-bytes, required host capabilities, and estimated encoded size. These values
-are derived from the validated transport descriptor; a caller-provided
+The export planner derives embedded/external counts and bytes, required host
+capabilities, and estimated encoded size. A caller-provided
 `network_required: false` is not accepted as evidence. The selected profile
-and sources are excluded from K and D. The runtime receipt records which
-objects came from the bundle, a local verified cache, or a network source.
+and sources are excluded from K and D. A CLI receipt with actual external
+fetches uses `ato.contract-verification-receipt/2` and records each fetched
+digest in `execution.dependency_fetches`; receipts without fetches retain v1.
+Cache-hit provenance and OCI image acquisition provenance remain to be added.
+
+The first v4 exporter handles PyPI wheel payloads. It confirms an exact
+filename plus SHA-256 against the PyPI release metadata and subsequently
+fetches only from the HTTPS PyPI file host, without following redirects.
+`cached` currently embeds all wheel payloads; the v4 decoder and repacker
+also support an explicit mixed set of embedded and external blobs. Neither
+profile currently embeds an OCI image: OCI still needs a registry on a clean
+host. An `offline` export with an OCI D is rejected rather than mislabelled.
+The current Datasette v4 bundles are CLI-local artifacts; API/PWA import of
+wire v4 is not yet an accepted hosted path.
 
 ## Validation and execution boundary
 
