@@ -20,6 +20,10 @@ use crate::{
 pub const INSTANCE_SNAPSHOT_SCHEMA: &str = "ato.portable-instance-snapshot/1";
 pub const BROWSER_INSTANCE_STATE_PROTOCOL: &str = "ato.browser-instance-state@1";
 pub const DATA_JSON_PROTOCOL: &str = "ato.data.json@1";
+const MAX_DATA_JSON_BYTES: usize = 1024 * 1024;
+const MAX_BROWSER_STATE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_BROWSER_STATE_ITEMS: usize = 4096;
+const MAX_ASSET_BYTES: u64 = 50 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -47,6 +51,20 @@ pub struct InstanceSnapshotAssetV1 {
     pub size: u64,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BrowserStateV1 {
+    version: u32,
+    local_storage: Vec<BrowserStateEntryV1>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BrowserStateEntryV1 {
+    key: String,
+    value: String,
+}
+
 pub(crate) fn validate_snapshot(
     snapshot: &InstanceSnapshotV1,
 ) -> Result<Vec<ContentRef>, PortableApplicationError> {
@@ -59,7 +77,7 @@ pub(crate) fn validate_snapshot(
     let mut references = Vec::with_capacity(snapshot.resources.len() + snapshot.assets.len());
     let mut previous_slot = None;
     for resource in &snapshot.resources {
-        if resource.slot.is_empty()
+        if !valid_slot(&resource.slot)
             || !matches!(
                 resource.protocol.as_str(),
                 BROWSER_INSTANCE_STATE_PROTOCOL | DATA_JSON_PROTOCOL
@@ -76,11 +94,15 @@ pub(crate) fn validate_snapshot(
     let mut previous_alias = None;
     for asset in &snapshot.assets {
         if asset.alias.is_empty()
+            || asset.alias.len() > 128
             || asset.filename.is_empty()
+            || asset.filename.len() > 255
             || asset.filename.contains('/')
             || asset.filename.contains('\\')
             || asset.filename.contains('\0')
             || asset.content_type.is_empty()
+            || asset.content_type.len() > 255
+            || asset.size > MAX_ASSET_BYTES
             || previous_alias.is_some_and(|previous: &str| previous >= asset.alias.as_str())
         {
             return Err(profile(
@@ -91,6 +113,73 @@ pub(crate) fn validate_snapshot(
         references.push(snapshot_ref(&asset.content_ref)?);
     }
     Ok(references)
+}
+
+fn valid_slot(value: &str) -> bool {
+    let mut characters = value.chars();
+    characters
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic())
+        && value.len() <= 128
+        && characters.all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-')
+        })
+}
+
+pub(crate) fn validate_snapshot_resource_bytes(
+    protocol: &str,
+    bytes: &[u8],
+) -> Result<(), PortableApplicationError> {
+    let limit = match protocol {
+        DATA_JSON_PROTOCOL => MAX_DATA_JSON_BYTES,
+        BROWSER_INSTANCE_STATE_PROTOCOL => MAX_BROWSER_STATE_BYTES,
+        _ => {
+            return Err(profile(format!(
+                "unsupported snapshot protocol `{protocol}`"
+            )));
+        }
+    };
+    if bytes.len() > limit {
+        return Err(profile(format!(
+            "snapshot resource for `{protocol}` exceeds its byte limit"
+        )));
+    }
+    if protocol == DATA_JSON_PROTOCOL {
+        let value: serde_json::Value = serde_json::from_slice(bytes)?;
+        if serde_jcs::to_vec(&value)? != bytes {
+            return Err(profile("snapshot Data Resource JSON must be canonical"));
+        }
+        return Ok(());
+    }
+    let state: BrowserStateV1 = serde_json::from_slice(bytes)?;
+    if state.version != 1 || state.local_storage.len() > MAX_BROWSER_STATE_ITEMS {
+        return Err(profile(
+            "snapshot browser state version or item count is invalid",
+        ));
+    }
+    if state
+        .local_storage
+        .windows(2)
+        .any(|entries| entries[0].key >= entries[1].key)
+        || serde_jcs::to_vec(&state)? != bytes
+    {
+        return Err(profile(
+            "snapshot browser state must be canonical with sorted unique keys",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validated_snapshot(
+    bundle: &PortableApplicationBundle,
+) -> Result<Option<(String, InstanceSnapshotV1)>, PortableApplicationError> {
+    let Some(reference) = bundle.index.instance_snapshot_ref.as_deref() else {
+        return Ok(None);
+    };
+    let reference = snapshot_ref(reference)?;
+    let snapshot: InstanceSnapshotV1 = structured(bundle, &reference, INSTANCE_SNAPSHOT_SCHEMA)?;
+    validate_snapshot(&snapshot)?;
+    Ok(Some((reference.to_string(), snapshot)))
 }
 
 fn snapshot_ref(value: &str) -> Result<ContentRef, PortableApplicationError> {
