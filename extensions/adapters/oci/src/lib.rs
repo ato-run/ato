@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -240,10 +240,12 @@ impl DockerOciAdapter {
         Ok(OciHandle {
             docker: self.docker.clone(),
             container_id,
+            container_address,
             container_name,
             network_name,
             image: self.spec.image.clone(),
             platform: self.spec.platform.clone(),
+            endpoints: self.spec.endpoints.clone(),
             forwarders,
             stopped: false,
         })
@@ -353,10 +355,12 @@ fn validate_loaded_image(
 pub struct OciHandle {
     docker: PathBuf,
     container_id: String,
+    container_address: IpAddr,
     container_name: String,
     network_name: String,
     image: String,
     platform: String,
+    endpoints: Vec<OciEndpoint>,
     forwarders: Vec<PortForwarder>,
     stopped: bool,
 }
@@ -364,6 +368,12 @@ pub struct OciHandle {
 impl OciHandle {
     pub fn container_id(&self) -> &str {
         &self.container_id
+    }
+
+    /// The bridge address and exact Port mapping used by this Run's forwarder.
+    /// Diagnostic only: neither value participates in Derivation identity.
+    pub fn port_mapping(&self) -> (IpAddr, &[OciEndpoint]) {
+        (self.container_address, &self.endpoints)
     }
 
     pub fn container_name(&self) -> &str {
@@ -492,10 +502,19 @@ fn forward_connection(client: TcpStream, target: SocketAddr) {
     let Ok(mut upstream_write) = upstream.try_clone() else {
         return;
     };
-    let upload = thread::spawn(move || io::copy(&mut client_read, &mut upstream_write));
+    let upload = thread::spawn(move || {
+        let _ = io::copy(&mut client_read, &mut upstream_write);
+        let _ = upstream_write.shutdown(Shutdown::Write);
+    });
     let mut upstream_read = upstream;
     let mut client_write = client;
     let _ = io::copy(&mut upstream_read, &mut client_write);
+    // An HTTP server may close an idle keep-alive connection while the proxy
+    // keeps its read half open. Forward that EOF immediately: waiting for the
+    // upload thread first leaves an apparently live socket in the proxy pool,
+    // where the next request hangs until the public ingress times out.
+    let _ = client_write.shutdown(Shutdown::Write);
+    let _ = client_write.shutdown(Shutdown::Read);
     let _ = upload.join();
 }
 
@@ -677,6 +696,7 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
 
     fn spec() -> OciSpec {
         OciSpec {
@@ -816,5 +836,39 @@ mod tests {
         assert!(!rendered.contains("--privileged"));
         assert!(!rendered.contains("--publish"));
         assert_eq!(args[args.len() - 2], "sha256:verified-local-id");
+    }
+
+    #[test]
+    fn upstream_close_reaches_a_keepalive_client_without_waiting_for_its_close() {
+        let upstream = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let target = upstream.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = upstream.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = [0; 4];
+            stream.read_exact(&mut request).unwrap();
+            assert_eq!(&request, b"ping");
+            stream.write_all(b"pong").unwrap();
+        });
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let proxy_address = listener.local_addr().unwrap();
+        let proxy = thread::spawn(move || {
+            let (client, _) = listener.accept().unwrap();
+            forward_connection(client, target);
+        });
+
+        let mut client = TcpStream::connect(proxy_address).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        client.write_all(b"ping").unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+        assert_eq!(response, b"pong");
+        server.join().unwrap();
+        proxy.join().unwrap();
     }
 }
