@@ -10,14 +10,13 @@ pub mod activity_client;
 pub mod activity_mcp;
 
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::net::TcpListener;
-use std::path::PathBuf;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
-#[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use ato_adapter_api::AdapterContext;
@@ -49,6 +48,9 @@ use ato_objects::{
     ReferenceRegistry, decode_capsule_bundle_document, encode_bundle,
     export_bundle_with_materializations, export_object_graph, import_bundle, resolve_computation,
 };
+use ato_portable_application::local_instance::{
+    LocalApplicationStore, LocalInstanceRun, LocalInstanceRunStatus, LocalRunActivation,
+};
 use ato_portable_application::portability_export::repack_portable_dependencies_with_archives;
 use ato_portable_application::portability_plan::{PortableExportProfile, plan_portable_export};
 use ato_portable_application::{
@@ -79,6 +81,9 @@ use ato_local_execution::registry::{adapter_registry, contract_verifier_registry
 use ato_local_execution::supervisor::{
     LocalRealizationDriver, preflight_actuator_provider_registry, start_durable,
 };
+use ato_local_execution::{
+    OwnedProcessIdentity, configure_detached_process, terminate_owned_process,
+};
 
 #[derive(Parser)]
 #[command(
@@ -103,6 +108,11 @@ enum Commands {
     Encap(EncapArgs),
     /// Consume a portable .capsule ephemerally.
     Run(RunArgs),
+    /// Import and operate a durable local portable Application Instance.
+    App {
+        #[command(subcommand)]
+        command: AppCommands,
+    },
     /// Preview dependency size and guarantees before a portable export.
     ExportPlan(ExportPlanArgs),
     /// Repack an existing portable application without changing K or D.
@@ -134,6 +144,20 @@ enum Commands {
     },
     #[command(name = "__portable-sandbox-exec", hide = true)]
     PortableSandboxExec(PortableSandboxExecArgs),
+    #[command(name = "__portable-instance-worker", hide = true)]
+    PortableInstanceWorker(PortableInstanceWorkerArgs),
+}
+
+#[derive(Subcommand)]
+enum AppCommands {
+    /// Import an immutable portable bundle as a new independent Instance.
+    Import(AppImportArgs),
+    /// Start a new durable Run for an imported Instance.
+    Start(AppStartArgs),
+    /// Stop the active Run without deleting the Instance.
+    Stop { instance: String },
+    /// Print Instance metadata and its active Run, if any.
+    Inspect { instance: String },
 }
 
 #[derive(Subcommand)]
@@ -183,6 +207,32 @@ struct RunArgs {
     /// Write the shared Contract verification receipt as canonical JSON.
     #[arg(long)]
     verification_receipt: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct AppImportArgs {
+    capsule: PathBuf,
+    /// Select one declared DerivationRef. Required when the bundle has more than one route.
+    #[arg(long)]
+    derivation: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct AppStartArgs {
+    instance: String,
+    /// Leave the durable Run active without opening its Surface.
+    #[arg(long)]
+    no_open: bool,
+    /// Copy the Run-scoped canonical verification receipt to this path.
+    #[arg(long)]
+    verification_receipt: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct PortableInstanceWorkerArgs {
+    instance: String,
+    run_id: String,
+    token: String,
 }
 
 #[derive(Debug, Args)]
@@ -298,6 +348,12 @@ pub fn run() -> Result<()> {
         Commands::Stop { capsule } => stop(&capsule),
         Commands::Encap(args) => encap(args),
         Commands::Run(args) => run_capsule(args),
+        Commands::App { command } => match command {
+            AppCommands::Import(args) => import_local_application(args),
+            AppCommands::Start(args) => start_local_instance(args),
+            AppCommands::Stop { instance } => stop_local_instance(&instance),
+            AppCommands::Inspect { instance } => inspect_local_instance(&instance),
+        },
         Commands::ExportPlan(args) => export_plan(args),
         Commands::Export(args) => export_portable(args),
         Commands::Upload(args) => upload(args),
@@ -319,6 +375,7 @@ pub fn run() -> Result<()> {
             DesktopCommands::Inspect { project } => desktop_inspect(&project),
         },
         Commands::PortableSandboxExec(args) => portable_sandbox_exec(args),
+        Commands::PortableInstanceWorker(args) => portable_instance_worker(args),
     }
 }
 
@@ -695,6 +752,282 @@ fn run_capsule(args: RunArgs) -> Result<()> {
     }
 }
 
+fn local_application_store() -> Result<LocalApplicationStore> {
+    LocalApplicationStore::open(ato_home()?).map_err(Into::into)
+}
+
+fn import_local_application(args: AppImportArgs) -> Result<()> {
+    if args.capsule.extension().and_then(|value| value.to_str()) != Some("capsule")
+        || !args.capsule.is_file()
+    {
+        bail!("`ato app import` accepts only a portable .capsule file");
+    }
+    let bytes =
+        fs::read(&args.capsule).with_context(|| format!("read {}", args.capsule.display()))?;
+    let instance = local_application_store()?.import(&bytes, args.derivation.as_deref())?;
+    println!("{}", serde_json::to_string_pretty(&instance)?);
+    Ok(())
+}
+
+fn start_local_instance(args: AppStartArgs) -> Result<()> {
+    let store = local_application_store()?;
+    let instance = store.instance(&args.instance)?;
+    let starting = store.claim_run(&instance.instance_id)?;
+    let run_root = store.run_root(&instance.instance_id, &starting.run_id)?;
+    let log_path = run_root.join("output.log");
+    let stdout = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("open local Instance log {}", log_path.display()))?;
+    let mut command = Command::new(std::env::current_exe()?);
+    command
+        .arg("__portable-instance-worker")
+        .arg(&instance.instance_id)
+        .arg(&starting.run_id)
+        .arg(&starting.token)
+        .env("ATO_HOME", ato_home()?)
+        .stdin(Stdio::null())
+        .stdout(stdout.try_clone()?)
+        .stderr(stdout);
+    configure_detached_process(&mut command);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = store.release_run(&instance.instance_id, &starting.token);
+            return Err(error).context("start durable local Instance worker");
+        }
+    };
+    let wait_started = Instant::now();
+    let active = loop {
+        if let Some(active) = store.active_run(&instance.instance_id)?
+            && active.token == starting.token
+            && active.status == LocalInstanceRunStatus::Active
+        {
+            break active;
+        }
+        if child.try_wait()?.is_some() {
+            let _ = store.release_run(&instance.instance_id, &starting.token);
+            bail!(
+                "local Instance worker exited before becoming active; see {}",
+                log_path.display()
+            );
+        }
+        if wait_started.elapsed() > Duration::from_secs(60) {
+            let _ = store.release_run(&instance.instance_id, &starting.token);
+            bail!(
+                "local Instance worker did not become active within 60 seconds; see {}",
+                log_path.display()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let receipt_name = active
+        .receipt_path
+        .as_deref()
+        .context("active local Instance Run omitted its receipt")?;
+    let receipt_path = run_root.join(receipt_name);
+    if let Some(output) = args.verification_receipt {
+        let receipt = fs::read(&receipt_path)
+            .with_context(|| format!("read local Instance receipt {}", receipt_path.display()))?;
+        ato_local_execution::atomic_write(&output, &receipt)
+            .with_context(|| format!("write verification receipt {}", output.display()))?;
+    }
+    let url = active
+        .url
+        .as_deref()
+        .context("active local Instance Run omitted its Surface URL")?;
+    println!("Instance: {}", instance.instance_id);
+    println!("Run: {}", active.run_id);
+    println!("Capsule: {}", instance.contract_ref);
+    println!("Route: {}", instance.selected_derivation_ref);
+    println!("URL: {url}");
+    if !args.no_open {
+        open_browser(url)?;
+    }
+    Ok(())
+}
+
+fn inspect_local_instance(instance_id: &str) -> Result<()> {
+    let store = local_application_store()?;
+    let instance = store.instance(instance_id)?;
+    let active = store.active_run(instance_id)?.map(|run| {
+        serde_json::json!({
+            "schema": run.schema,
+            "run_id": run.run_id,
+            "instance_id": run.instance_id,
+            "status": run.status,
+            "pid": run.pid,
+            "url": run.url,
+            "receipt_path": run.receipt_path,
+            "created_at": run.created_at,
+        })
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "instance": instance,
+            "active_run": active,
+        }))?
+    );
+    Ok(())
+}
+
+fn stop_local_instance(instance_id: &str) -> Result<()> {
+    let store = local_application_store()?;
+    let active = store
+        .active_run(instance_id)?
+        .context("local Instance has no active Run")?;
+    if active.status != LocalInstanceRunStatus::Active {
+        bail!("local Instance Run is still preparing and cannot be stopped");
+    }
+    let identity = local_run_process_identity(&active)?;
+    if !identity.matches_live_process()? {
+        bail!(
+            "local Instance Run process identity no longer matches; refusing to stop PID {}",
+            identity.pid
+        );
+    }
+    let request = store.stop_request_path(instance_id, &active.run_id)?;
+    let ack = store.stop_ack_path(instance_id, &active.run_id)?;
+    if ack.exists() {
+        fs::remove_file(&ack)?;
+    }
+    fs::write(&request, b"stop")?;
+    let mut acknowledged = None;
+    for _ in 0..250 {
+        if let Ok(value) = fs::read_to_string(&ack) {
+            acknowledged = Some(value);
+            break;
+        }
+        if !identity.matches_live_process()? {
+            bail!("local Instance Run exited before cleanup acknowledgement");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let acknowledged = acknowledged.context("timed out waiting for local Instance cleanup")?;
+    if let Some(error) = acknowledged.strip_prefix("error:") {
+        bail!("local Instance cleanup failed: {error}");
+    }
+    terminate_owned_process(&identity)?;
+    store.release_run(instance_id, &active.token)?;
+    let _ = fs::remove_file(request);
+    let _ = fs::remove_file(ack);
+    println!("Stopped Run {} for Instance {instance_id}", active.run_id);
+    Ok(())
+}
+
+fn portable_instance_worker(args: PortableInstanceWorkerArgs) -> Result<()> {
+    let store = local_application_store()?;
+    let claimed = store
+        .active_run(&args.instance)?
+        .context("local Instance Run claim is missing")?;
+    if claimed.run_id != args.run_id
+        || claimed.token != args.token
+        || claimed.status != LocalInstanceRunStatus::Starting
+    {
+        bail!("local Instance Run claim does not match this worker");
+    }
+    let result = portable_instance_worker_claimed(&store, &claimed);
+    if result.is_err() {
+        let _ = store.release_run(&claimed.instance_id, &claimed.token);
+    }
+    result
+}
+
+fn portable_instance_worker_claimed(
+    store: &LocalApplicationStore,
+    claimed: &LocalInstanceRun,
+) -> Result<()> {
+    #[cfg(unix)]
+    let shutdown = Some({
+        let flag = Arc::new(AtomicBool::new(false));
+        signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&flag))?;
+        signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&flag))?;
+        flag
+    });
+    #[cfg(not(unix))]
+    let shutdown: Option<Arc<AtomicBool>> = None;
+
+    let instance = store.instance(&claimed.instance_id)?;
+    let bundle_bytes = store.bundle_bytes(&instance)?;
+    let bundle = portable_export_bundle(&bundle_bytes)?;
+    let run_root = store.run_root(&claimed.instance_id, &claimed.run_id)?;
+    let mut started = start_and_verify_portable_application(
+        &bundle_bytes,
+        bundle,
+        &instance.selected_derivation_ref,
+        &run_root,
+        shutdown.as_deref(),
+    )?;
+    if started.receipt.bundle_sha256 != instance.bundle_sha256
+        || started.receipt.contract_ref != instance.contract_ref
+        || started.receipt.derivation_ref != instance.selected_derivation_ref
+    {
+        bail!("local Instance verification receipt does not match imported metadata");
+    }
+    if let Some(execution) = &mut started.receipt.execution {
+        execution.run_id = Some(claimed.run_id.clone());
+        execution.attempt_id = Some(claimed.run_id.clone());
+    }
+    let receipt = started.receipt.canonical_bytes()?;
+    let process = OwnedProcessIdentity::current()?;
+    let active = store.activate_run(
+        claimed,
+        LocalRunActivation {
+            pid: process.pid,
+            process_start_time: process.process_start_time,
+            process_group: process.process_group,
+            boot_session: process.boot_session,
+            url: started.runtime.base_url().to_owned(),
+            receipt: &receipt,
+        },
+    )?;
+    let request = store.stop_request_path(&active.instance_id, &active.run_id)?;
+    let ack = store.stop_ack_path(&active.instance_id, &active.run_id)?;
+    loop {
+        if request.exists() {
+            drop(started.runtime);
+            fs::write(&ack, b"ok")?;
+            loop {
+                if shutdown
+                    .as_deref()
+                    .is_some_and(|flag| flag.load(Ordering::Relaxed))
+                {
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        if shutdown
+            .as_deref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+        {
+            drop(started.runtime);
+            store.release_run(&active.instance_id, &active.token)?;
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn local_run_process_identity(run: &LocalInstanceRun) -> Result<OwnedProcessIdentity> {
+    Ok(OwnedProcessIdentity {
+        pid: run.pid.context("active local Instance Run omitted pid")?,
+        process_start_time: run
+            .process_start_time
+            .clone()
+            .context("active local Instance Run omitted process start time")?,
+        process_group: run
+            .process_group
+            .context("active local Instance Run omitted process group")?,
+        boot_session: run
+            .boot_session
+            .clone()
+            .context("active local Instance Run omitted boot session")?,
+    })
+}
+
 fn export_plan(args: ExportPlanArgs) -> Result<()> {
     let bytes =
         fs::read(&args.capsule).with_context(|| format!("read {}", args.capsule.display()))?;
@@ -983,12 +1316,14 @@ fn run_portable_application(
     bundle: ato_objects::PortableApplicationBundle,
 ) -> Result<()> {
     #[cfg(unix)]
-    let shutdown = {
+    let shutdown = Some({
         let flag = Arc::new(AtomicBool::new(false));
         signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&flag))?;
         signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&flag))?;
         flag
-    };
+    });
+    #[cfg(not(unix))]
+    let shutdown: Option<Arc<AtomicBool>> = None;
     if !args.bindings.is_empty() {
         bail!(
             "portable application profile {} has no external Bindings",
@@ -996,27 +1331,92 @@ fn run_portable_application(
         );
     }
     let selected_derivation = match args.derivation.as_deref() {
-        Some(reference) => reference,
-        None if bundle.index.derivations.len() == 1 => &bundle.index.derivations[0],
+        Some(reference) => reference.to_owned(),
+        None if bundle.index.derivations.len() == 1 => bundle.index.derivations[0].clone(),
         None => bail!(
             "portable Capsule declares {} derivations; select one with --derivation <sha256:...>",
             bundle.index.derivations.len()
         ),
     };
-    let validated = validate_bundle_for_derivation(&bundle, selected_derivation)?;
     let cache = ato_home()?.join("cache");
     fs::create_dir_all(&cache)?;
     let runtime = tempfile::Builder::new()
         .prefix("ato-portable-run-")
         .tempdir_in(cache)?;
-    let workspace = runtime.path().join("workspace");
+    let started = start_and_verify_portable_application(
+        bundle_bytes,
+        bundle,
+        &selected_derivation,
+        runtime.path(),
+        shutdown.as_deref(),
+    )?;
+    let runtime = started.runtime;
+    let receipt = started.receipt;
+    if let Some(path) = &args.verification_receipt {
+        fs::write(path, receipt.canonical_bytes()?)
+            .with_context(|| format!("write verification receipt {}", path.display()))?;
+    }
+    println!("Capsule: {}", receipt.contract_ref);
+    println!("Route: {}", receipt.derivation_ref);
+    println!("Runtime: {}", runtime.label());
+    println!("Bundle: {}", receipt.bundle_sha256);
+    println!("URL: {}", runtime.base_url());
+    if !receipt.fully_satisfied {
+        let failure = receipt
+            .observations
+            .iter()
+            .find(|observation| {
+                !matches!(
+                    observation.outcome,
+                    ato_formation::verify::ReceiptOutcome::Satisfied
+                )
+            })
+            .map(|observation| observation.id.as_str())
+            .unwrap_or("unknown");
+        bail!("runtime Contract verification did not fully satisfy observation {failure}");
+    }
+    if args.no_open {
+        return Ok(());
+    }
+    open_browser(runtime.base_url())?;
+    println!("Press Ctrl-C to stop the local realization.");
+    loop {
+        if shutdown
+            .as_deref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+        {
+            break;
+        }
+        #[cfg(not(unix))]
+        std::thread::park();
+        #[cfg(unix)]
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    #[allow(unreachable_code)]
+    Ok(())
+}
+
+struct StartedPortableApplication {
+    runtime: PortableLocalRuntime,
+    receipt: ContractVerificationReceipt,
+}
+
+fn start_and_verify_portable_application(
+    bundle_bytes: &[u8],
+    bundle: ato_objects::PortableApplicationBundle,
+    selected_derivation: &str,
+    runtime_root: &Path,
+    shutdown: Option<&AtomicBool>,
+) -> Result<StartedPortableApplication> {
+    let validated = validate_bundle_for_derivation(&bundle, selected_derivation)?;
+    fs::create_dir_all(runtime_root)?;
+    let workspace = runtime_root.join("workspace");
     let (hydrated, dependency_fetches) = portable_dependency::hydrate_external_objects(&bundle)?;
     for reference in &dependency_fetches {
         eprintln!("dependency fetched and verified: {reference}");
     }
     materialize_tree(&hydrated, &validated, &workspace)?;
-    let mut runtime =
-        PortableLocalRuntime::start(&workspace, runtime.path(), &validated, &hydrated)?;
+    let mut runtime = PortableLocalRuntime::start(&workspace, runtime_root, &validated, &hydrated)?;
 
     let mut observation = RuntimeObservation::default();
     for input in &validated.derivation.inputs {
@@ -1042,8 +1442,7 @@ fn run_portable_application(
         let request_url = format!("{}{path}", runtime.base_url());
         let mut attempts = 0;
         let response = loop {
-            #[cfg(unix)]
-            if shutdown.load(Ordering::Relaxed) {
+            if shutdown.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
                 bail!("portable run interrupted before Contract verification completed");
             }
             match client.get(&request_url).send() {
@@ -1052,10 +1451,6 @@ fn run_portable_application(
                     if let Some(status) = runtime.try_wait()? {
                         bail!("selected process derivation exited before verification: {status}");
                     }
-                    // Dependency-backed processes may need to construct a clean
-                    // environment before the declared Port becomes ready. Keep
-                    // the timeout bounded, but do not impose the old static
-                    // fixture's five-second startup assumption.
                     if attempts >= 1_200 {
                         return Err(error).context(format!(
                             "selected derivation did not become reachable at {request_url}"
@@ -1106,15 +1501,6 @@ fn run_portable_application(
     }
     execution.dependency_fetches = dependency_fetches;
     receipt.execution = Some(execution);
-    if let Some(path) = &args.verification_receipt {
-        fs::write(path, receipt.canonical_bytes()?)
-            .with_context(|| format!("write verification receipt {}", path.display()))?;
-    }
-    println!("Capsule: {}", validated.contract_ref);
-    println!("Route: {}", validated.derivation_ref);
-    println!("Runtime: {}", runtime.label());
-    println!("Bundle: {}", receipt.bundle_sha256);
-    println!("URL: {}", runtime.base_url());
     if !receipt.fully_satisfied {
         let failure = receipt
             .observations
@@ -1129,23 +1515,7 @@ fn run_portable_application(
             .unwrap_or("unknown");
         bail!("runtime Contract verification did not fully satisfy observation {failure}");
     }
-    if args.no_open {
-        return Ok(());
-    }
-    open_browser(runtime.base_url())?;
-    println!("Press Ctrl-C to stop the local realization.");
-    loop {
-        #[cfg(unix)]
-        if shutdown.load(Ordering::Relaxed) {
-            break;
-        }
-        #[cfg(not(unix))]
-        std::thread::park();
-        #[cfg(unix)]
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    #[allow(unreachable_code)]
-    Ok(())
+    Ok(StartedPortableApplication { runtime, receipt })
 }
 
 enum PortableLocalRuntime {
