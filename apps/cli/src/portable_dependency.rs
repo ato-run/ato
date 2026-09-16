@@ -88,7 +88,18 @@ pub fn discover_wheel_sources(
     let routes = validate_all_derivations(bundle)?;
     let client = dependency_client()?;
     let mut releases = BTreeMap::<(String, String), serde_json::Value>::new();
-    let mut sources = BTreeMap::new();
+    let mut sources = bundle
+        .portability
+        .as_ref()
+        .into_iter()
+        .flat_map(|portability| &portability.external_objects)
+        .map(|external| {
+            for source in &external.sources {
+                official_wheel_url(source)?;
+            }
+            Ok((external.reference.clone(), external.sources.clone()))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
     for entry in &routes[0].tree.entries {
         if !entry.path.ends_with(".whl") || sources.contains_key(&entry.content_ref) {
             continue;
