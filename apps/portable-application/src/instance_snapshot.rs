@@ -20,6 +20,7 @@ use crate::{
 pub const INSTANCE_SNAPSHOT_SCHEMA: &str = "ato.portable-instance-snapshot/1";
 pub const BROWSER_INSTANCE_STATE_PROTOCOL: &str = "ato.browser-instance-state@1";
 pub const DATA_JSON_PROTOCOL: &str = "ato.data.json@1";
+pub const ASSET_ALIAS_URI_PREFIX: &str = "ato-asset-alias://";
 const MAX_DATA_JSON_BYTES: usize = 1024 * 1024;
 const MAX_BROWSER_STATE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_BROWSER_STATE_ITEMS: usize = 4096;
@@ -31,6 +32,8 @@ pub struct InstanceSnapshotV1 {
     pub schema: String,
     pub resources: Vec<InstanceSnapshotResourceV1>,
     pub assets: Vec<InstanceSnapshotAssetV1>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub asset_bindings: Vec<InstanceSnapshotAssetBindingV1>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,14 +54,35 @@ pub struct InstanceSnapshotAssetV1 {
     pub size: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstanceSnapshotAssetBindingV1 {
+    pub alias: String,
+    pub resource_slot: String,
+    pub location: InstanceSnapshotAssetLocationV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum InstanceSnapshotAssetLocationV1 {
+    DataJson {
+        pointer: String,
+    },
+    BrowserLocalStorage {
+        key: String,
+        pointer: String,
+        json_encoded: bool,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BrowserStateV1 {
     version: u32,
     local_storage: Vec<BrowserStateEntryV1>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BrowserStateEntryV1 {
     key: String,
@@ -112,7 +136,81 @@ pub(crate) fn validate_snapshot(
         previous_alias = Some(asset.alias.as_str());
         references.push(snapshot_ref(&asset.content_ref)?);
     }
+    let aliases = snapshot
+        .assets
+        .iter()
+        .map(|asset| asset.alias.as_str())
+        .collect::<BTreeSet<_>>();
+    let resources = snapshot
+        .resources
+        .iter()
+        .map(|resource| (resource.slot.as_str(), resource.protocol.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    if snapshot
+        .asset_bindings
+        .windows(2)
+        .any(|bindings| bindings[0] >= bindings[1])
+    {
+        return Err(profile(
+            "Instance snapshot Asset bindings must be sorted and unique",
+        ));
+    }
+    for binding in &snapshot.asset_bindings {
+        if !aliases.contains(binding.alias.as_str()) {
+            return Err(profile(format!(
+                "Instance snapshot Asset binding references unknown alias `{}`",
+                binding.alias
+            )));
+        }
+        let expected_protocol = match &binding.location {
+            InstanceSnapshotAssetLocationV1::DataJson { pointer } => {
+                validate_json_pointer(pointer)?;
+                DATA_JSON_PROTOCOL
+            }
+            InstanceSnapshotAssetLocationV1::BrowserLocalStorage {
+                key,
+                pointer,
+                json_encoded,
+            } => {
+                if key.is_empty() || key.len() > 16 * 1024 {
+                    return Err(profile(
+                        "Instance snapshot browser Asset binding key is invalid",
+                    ));
+                }
+                validate_json_pointer(pointer)?;
+                if !json_encoded && !pointer.is_empty() {
+                    return Err(profile(
+                        "plain browser Asset binding cannot contain a JSON pointer",
+                    ));
+                }
+                BROWSER_INSTANCE_STATE_PROTOCOL
+            }
+        };
+        if resources.get(binding.resource_slot.as_str()).copied() != Some(expected_protocol) {
+            return Err(profile(format!(
+                "Instance snapshot Asset binding references incompatible resource `{}`",
+                binding.resource_slot
+            )));
+        }
+    }
     Ok(references)
+}
+
+fn validate_json_pointer(pointer: &str) -> Result<(), PortableApplicationError> {
+    if pointer.len() > 4096 || (!pointer.is_empty() && !pointer.starts_with('/')) {
+        return Err(profile(
+            "Instance snapshot Asset binding JSON pointer is invalid",
+        ));
+    }
+    let mut characters = pointer.chars();
+    while let Some(character) = characters.next() {
+        if character == '~' && !matches!(characters.next(), Some('0' | '1')) {
+            return Err(profile(
+                "Instance snapshot Asset binding JSON pointer is invalid",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn valid_slot(value: &str) -> bool {
@@ -170,6 +268,214 @@ pub(crate) fn validate_snapshot_resource_bytes(
     Ok(())
 }
 
+fn alias_uri(alias: &str) -> String {
+    format!("{ASSET_ALIAS_URI_PREFIX}{alias}")
+}
+
+fn count_alias_values(value: &serde_json::Value) -> Result<usize, PortableApplicationError> {
+    match value {
+        serde_json::Value::String(value) => {
+            if value.starts_with(ASSET_ALIAS_URI_PREFIX) {
+                if value.len() == ASSET_ALIAS_URI_PREFIX.len() {
+                    return Err(profile(
+                        "Instance snapshot contains an empty Asset alias URI",
+                    ));
+                }
+                Ok(1)
+            } else if value.contains(ASSET_ALIAS_URI_PREFIX) {
+                Err(profile(
+                    "Instance snapshot Asset alias URI must occupy a complete JSON string",
+                ))
+            } else {
+                Ok(0)
+            }
+        }
+        serde_json::Value::Array(values) => {
+            values.iter().try_fold(
+                0usize,
+                |count, value| Ok(count + count_alias_values(value)?),
+            )
+        }
+        serde_json::Value::Object(values) => {
+            values.values().try_fold(
+                0usize,
+                |count, value| Ok(count + count_alias_values(value)?),
+            )
+        }
+        _ => Ok(0),
+    }
+}
+
+pub(crate) fn validate_asset_bindings(
+    snapshot: &InstanceSnapshotV1,
+    content: &BTreeMap<String, Vec<u8>>,
+) -> Result<(), PortableApplicationError> {
+    let resources = snapshot
+        .resources
+        .iter()
+        .map(|resource| (resource.slot.as_str(), resource))
+        .collect::<BTreeMap<_, _>>();
+    let mut found_aliases = 0usize;
+    for resource in &snapshot.resources {
+        let bytes = content
+            .get(&resource.content_ref)
+            .ok_or_else(|| profile("snapshot resource content is missing"))?;
+        if resource.protocol == DATA_JSON_PROTOCOL {
+            let value: serde_json::Value = serde_json::from_slice(bytes)?;
+            found_aliases += count_alias_values(&value)?;
+        } else {
+            let state: BrowserStateV1 = serde_json::from_slice(bytes)?;
+            for entry in state.local_storage {
+                if entry.value.starts_with(ASSET_ALIAS_URI_PREFIX) {
+                    if entry.value.len() == ASSET_ALIAS_URI_PREFIX.len() {
+                        return Err(profile(
+                            "Instance snapshot contains an empty Asset alias URI",
+                        ));
+                    }
+                    found_aliases += 1;
+                } else if let Ok(value) = serde_json::from_str::<serde_json::Value>(&entry.value) {
+                    found_aliases += count_alias_values(&value)?;
+                } else if entry.value.contains(ASSET_ALIAS_URI_PREFIX) {
+                    return Err(profile(
+                        "Instance snapshot Asset alias URI must occupy a complete value",
+                    ));
+                }
+            }
+        }
+    }
+    for binding in &snapshot.asset_bindings {
+        let resource = resources
+            .get(binding.resource_slot.as_str())
+            .ok_or_else(|| profile("snapshot Asset binding resource is missing"))?;
+        let bytes = content
+            .get(&resource.content_ref)
+            .ok_or_else(|| profile("snapshot Asset binding content is missing"))?;
+        let expected = alias_uri(&binding.alias);
+        let actual = match &binding.location {
+            InstanceSnapshotAssetLocationV1::DataJson { pointer } => {
+                let value: serde_json::Value = serde_json::from_slice(bytes)?;
+                value
+                    .pointer(pointer)
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            }
+            InstanceSnapshotAssetLocationV1::BrowserLocalStorage {
+                key,
+                pointer,
+                json_encoded,
+            } => {
+                let state: BrowserStateV1 = serde_json::from_slice(bytes)?;
+                let value = state
+                    .local_storage
+                    .into_iter()
+                    .find(|entry| entry.key == *key)
+                    .map(|entry| entry.value)
+                    .ok_or_else(|| profile("snapshot browser Asset binding key is missing"))?;
+                if !json_encoded {
+                    Some(value)
+                } else {
+                    serde_json::from_str::<serde_json::Value>(&value)
+                        .ok()
+                        .and_then(|value| {
+                            value
+                                .pointer(pointer)
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_owned)
+                        })
+                }
+            }
+        };
+        if actual.as_deref() != Some(expected.as_str()) {
+            return Err(profile(format!(
+                "Instance snapshot Asset binding for `{}` does not resolve to its alias URI",
+                binding.alias
+            )));
+        }
+    }
+    if found_aliases != snapshot.asset_bindings.len() {
+        return Err(profile(
+            "Instance snapshot contains an undeclared or multiply bound Asset alias URI",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn rebind_snapshot_resource_assets(
+    snapshot: &InstanceSnapshotV1,
+    resource: &InstanceSnapshotResourceV1,
+    bytes: &[u8],
+    asset_uris: &BTreeMap<String, String>,
+) -> Result<Vec<u8>, PortableApplicationError> {
+    let bindings = snapshot
+        .asset_bindings
+        .iter()
+        .filter(|binding| binding.resource_slot == resource.slot)
+        .collect::<Vec<_>>();
+    if bindings.is_empty() {
+        return Ok(bytes.to_vec());
+    }
+    if resource.protocol == DATA_JSON_PROTOCOL {
+        let mut value: serde_json::Value = serde_json::from_slice(bytes)?;
+        for binding in bindings {
+            let InstanceSnapshotAssetLocationV1::DataJson { pointer } = &binding.location else {
+                return Err(profile("snapshot Asset binding protocol mismatch"));
+            };
+            let target = value
+                .pointer_mut(pointer)
+                .ok_or_else(|| profile("snapshot Asset binding JSON pointer is missing"))?;
+            let expected = alias_uri(&binding.alias);
+            if target.as_str() != Some(expected.as_str()) {
+                return Err(profile("snapshot Asset binding value changed"));
+            }
+            *target = serde_json::Value::String(
+                asset_uris
+                    .get(&binding.alias)
+                    .ok_or_else(|| profile("snapshot Asset alias was not materialized"))?
+                    .clone(),
+            );
+        }
+        return Ok(serde_jcs::to_vec(&value)?);
+    }
+
+    let mut state: BrowserStateV1 = serde_json::from_slice(bytes)?;
+    for binding in bindings {
+        let InstanceSnapshotAssetLocationV1::BrowserLocalStorage {
+            key,
+            pointer,
+            json_encoded,
+        } = &binding.location
+        else {
+            return Err(profile("snapshot Asset binding protocol mismatch"));
+        };
+        let entry = state
+            .local_storage
+            .iter_mut()
+            .find(|entry| entry.key == *key)
+            .ok_or_else(|| profile("snapshot browser Asset binding key is missing"))?;
+        let expected = alias_uri(&binding.alias);
+        let replacement = asset_uris
+            .get(&binding.alias)
+            .ok_or_else(|| profile("snapshot Asset alias was not materialized"))?;
+        if !json_encoded {
+            if entry.value != expected {
+                return Err(profile("snapshot browser Asset binding value changed"));
+            }
+            entry.value = replacement.clone();
+        } else {
+            let mut value: serde_json::Value = serde_json::from_str(&entry.value)?;
+            let target = value
+                .pointer_mut(pointer)
+                .ok_or_else(|| profile("snapshot browser Asset binding JSON pointer is missing"))?;
+            if target.as_str() != Some(expected.as_str()) {
+                return Err(profile("snapshot browser Asset binding value changed"));
+            }
+            *target = serde_json::Value::String(replacement.clone());
+            entry.value = serde_jcs::to_string(&value)?;
+        }
+    }
+    Ok(serde_jcs::to_vec(&state)?)
+}
+
 pub(crate) fn validated_snapshot(
     bundle: &PortableApplicationBundle,
 ) -> Result<Option<(String, InstanceSnapshotV1)>, PortableApplicationError> {
@@ -218,6 +524,15 @@ pub fn attach_instance_snapshot(
             "snapshot content map must equal the declared resource/Asset closure",
         ));
     }
+    for resource in &snapshot.resources {
+        validate_snapshot_resource_bytes(
+            &resource.protocol,
+            content
+                .get(&resource.content_ref)
+                .ok_or_else(|| profile("snapshot resource content is missing"))?,
+        )?;
+    }
+    validate_asset_bindings(&snapshot, content)?;
 
     let old_contract_ref = parse_ref(&source.index.root_contract_ref, "root_contract_ref")?;
     let mut contract: BoundContract = structured(source, &old_contract_ref, BOUND_CONTRACT_SCHEMA)?;
