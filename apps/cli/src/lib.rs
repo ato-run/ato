@@ -47,7 +47,7 @@ use ato_objects::{
     encode_bundle, export_bundle_with_materializations, export_object_graph, import_bundle,
     resolve_computation,
 };
-use ato_portable_application::portability_export::repack_portable_dependencies;
+use ato_portable_application::portability_export::repack_portable_dependencies_with_archives;
 use ato_portable_application::portability_plan::{PortableExportProfile, plan_portable_export};
 use ato_portable_application::{
     OCI_CPU_MILLIS_RUNTIME, OCI_IMAGE_RUNTIME, OCI_MEMORY_BYTES_RUNTIME, OCI_PIDS_LIMIT_RUNTIME,
@@ -190,6 +190,9 @@ struct ExportPlanArgs {
     portability: PortableExportProfile,
     #[arg(long)]
     json: bool,
+    /// Verified Docker 29 OCI-layout archive for an offline image.
+    #[arg(long)]
+    oci_archive: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -199,6 +202,9 @@ struct ExportArgs {
     portability: PortableExportProfile,
     #[arg(short, long)]
     output: PathBuf,
+    /// Verified Docker 29 OCI-layout archive for an offline image.
+    #[arg(long)]
+    oci_archive: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -696,6 +702,13 @@ fn export_plan(args: ExportPlanArgs) -> Result<()> {
         bail!("export planning currently requires a portable application v3 bundle");
     };
     let mut plan = plan_portable_export(&bundle, bytes.len(), args.portability)?;
+    if args.oci_archive.is_some() && args.portability != PortableExportProfile::Offline {
+        bail!("--oci-archive is currently supported only for offline export");
+    }
+    let archives = match args.oci_archive.as_deref() {
+        Some(path) => portable_dependency::oci_archive_from_file(&bundle, path)?,
+        None => Vec::new(),
+    };
     let resolved_sources = match args.portability {
         PortableExportProfile::Thin => portable_dependency::discover_wheel_sources(&bundle),
         PortableExportProfile::Cached | PortableExportProfile::Offline => Ok(BTreeMap::new()),
@@ -706,13 +719,22 @@ fn export_plan(args: ExportPlanArgs) -> Result<()> {
             PortableExportProfile::Cached => PortableDependencyProfile::Cached,
             PortableExportProfile::Offline => PortableDependencyProfile::Offline,
         };
-        repack_portable_dependencies(&bundle, profile, &sources)
+        repack_portable_dependencies_with_archives(&bundle, profile, &sources, &archives)
             .map(|(output, _)| output.len())
             .map_err(Into::into)
     }) {
         Ok(size) => {
             plan.estimated_export_bytes = Some(size);
             plan.blockers.clear();
+            if args.portability == PortableExportProfile::Offline {
+                plan.requires_network_on_clean_host = Some(false);
+                plan.embedded_objects += archives.len();
+                plan.external_objects = 0;
+                plan.embedded_dependency_bytes += archives
+                    .iter()
+                    .map(|archive| archive.bytes.len() as u64 * 3 / 4)
+                    .sum::<u64>();
+            }
         }
         Err(error) => {
             plan.estimated_export_bytes = None;
@@ -768,6 +790,13 @@ fn export_portable(args: ExportArgs) -> Result<()> {
     if args.output.exists() {
         bail!("export output already exists: {}", args.output.display());
     }
+    if args.oci_archive.is_some() && args.portability != PortableExportProfile::Offline {
+        bail!("--oci-archive is currently supported only for offline export");
+    }
+    let archives = match args.oci_archive.as_deref() {
+        Some(path) => portable_dependency::oci_archive_from_file(&bundle, path)?,
+        None => Vec::new(),
+    };
     let (profile, sources) = match args.portability {
         PortableExportProfile::Thin => (
             PortableDependencyProfile::Thin,
@@ -776,7 +805,8 @@ fn export_portable(args: ExportArgs) -> Result<()> {
         PortableExportProfile::Cached => (PortableDependencyProfile::Cached, BTreeMap::new()),
         PortableExportProfile::Offline => (PortableDependencyProfile::Offline, BTreeMap::new()),
     };
-    let (output, repacked) = repack_portable_dependencies(&bundle, profile, &sources)?;
+    let (output, repacked) =
+        repack_portable_dependencies_with_archives(&bundle, profile, &sources, &archives)?;
     ato_local_execution::atomic_write(&args.output, &output)?;
     println!("file={}", args.output.display());
     println!("bundle_sha256={}", bundle_sha256(&output));
@@ -935,7 +965,8 @@ fn run_portable_application(
         eprintln!("dependency fetched and verified: {reference}");
     }
     materialize_tree(&hydrated, &validated, &workspace)?;
-    let mut runtime = PortableLocalRuntime::start(&workspace, runtime.path(), &validated)?;
+    let mut runtime =
+        PortableLocalRuntime::start(&workspace, runtime.path(), &validated, &hydrated)?;
 
     let mut observation = RuntimeObservation::default();
     for input in &validated.derivation.inputs {
@@ -1063,6 +1094,7 @@ impl PortableLocalRuntime {
         workspace: &std::path::Path,
         runtime_root: &std::path::Path,
         route: &ValidatedPortableApplication,
+        bundle: &ato_objects::PortableApplicationBundle,
     ) -> Result<Self> {
         match route.realization {
             PortableRealizationKind::StaticWeb => {
@@ -1164,7 +1196,7 @@ impl PortableLocalRuntime {
                 let host_port = listener.local_addr()?.port();
                 drop(listener);
                 let runtime = &route.derivation.runtimes;
-                let adapter = DockerOciAdapter::new(OciSpec {
+                let spec = OciSpec {
                     id: route.derivation_ref.to_string(),
                     image: runtime
                         .get(OCI_IMAGE_RUNTIME)
@@ -1187,7 +1219,25 @@ impl PortableLocalRuntime {
                         pids_limit: parse_runtime_limit(runtime, OCI_PIDS_LIMIT_RUNTIME)?,
                     },
                     stop_timeout_seconds: 5,
-                })?;
+                };
+                let adapter = if bundle.portability.as_ref().is_some_and(|portability| {
+                    portability.profile == PortableDependencyProfile::Offline
+                }) {
+                    let archive = bundle
+                        .portability
+                        .as_ref()
+                        .and_then(|portability| {
+                            portability.oci_archives.iter().find(|archive| {
+                                archive.image == spec.image && archive.platform == spec.platform
+                            })
+                        })
+                        .context("offline OCI image archive is missing")?;
+                    let verified =
+                        ato_portable_application::oci_archive::verify_oci_archive(archive)?;
+                    DockerOciAdapter::new_offline(spec, verified.bytes, verified.config_reference)?
+                } else {
+                    DockerOciAdapter::new(spec)?
+                };
                 let handle = adapter.spawn(workspace, &runtime_root.join("oci"))?;
                 Ok(Self::Oci {
                     handle,

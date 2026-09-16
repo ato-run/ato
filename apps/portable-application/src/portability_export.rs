@@ -6,7 +6,7 @@ use ato_objects::{
     PORTABLE_APPLICATION_BUNDLE_VERSION, PORTABLE_APPLICATION_BUNDLE_VERSION_V4,
     PORTABLE_APPLICATION_PROFILE_V2, PortableApplicationBundle, PortableBundleObjectKind,
     PortableDependencyProfile, PortableDependencyTransport, PortableExternalObject,
-    encode_portable_application_bundle,
+    PortableOciArchive, encode_portable_application_bundle,
 };
 
 use crate::{PortableApplicationError, PortableRealizationKind, profile, validate_all_derivations};
@@ -15,6 +15,15 @@ pub fn repack_portable_dependencies(
     original: &PortableApplicationBundle,
     policy: PortableDependencyProfile,
     external_sources: &BTreeMap<String, Vec<String>>,
+) -> Result<(Vec<u8>, PortableApplicationBundle), PortableApplicationError> {
+    repack_portable_dependencies_with_archives(original, policy, external_sources, &[])
+}
+
+pub fn repack_portable_dependencies_with_archives(
+    original: &PortableApplicationBundle,
+    policy: PortableDependencyProfile,
+    external_sources: &BTreeMap<String, Vec<String>>,
+    oci_archives: &[PortableOciArchive],
 ) -> Result<(Vec<u8>, PortableApplicationBundle), PortableApplicationError> {
     if original.index.version != PORTABLE_APPLICATION_BUNDLE_VERSION
         || original.portability.is_some()
@@ -27,7 +36,14 @@ pub fn repack_portable_dependencies(
     if policy == PortableDependencyProfile::Offline
         && before
             .iter()
-            .any(|route| route.realization == PortableRealizationKind::OciContainer)
+            .filter(|route| route.realization == PortableRealizationKind::OciContainer)
+            .any(|route| {
+                !oci_archives.iter().any(|archive| {
+                    route.derivation.runtimes.get(crate::OCI_IMAGE_RUNTIME) == Some(&archive.image)
+                        && route.derivation.runtimes.get(crate::OCI_PLATFORM_RUNTIME)
+                            == Some(&archive.platform)
+                })
+            })
     {
         return Err(profile(
             "offline OCI export requires a verified embedded registry manifest and layer closure",
@@ -67,6 +83,7 @@ pub fn repack_portable_dependencies(
                 sources: sources.clone(),
             })
             .collect(),
+        oci_archives: oci_archives.to_vec(),
     });
     let bytes = encode_portable_application_bundle(&repacked)?;
     let after = validate_all_derivations(&repacked)?;

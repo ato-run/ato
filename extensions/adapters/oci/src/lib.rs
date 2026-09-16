@@ -57,6 +57,7 @@ pub struct OciAdmission {
 pub struct DockerOciAdapter {
     docker: PathBuf,
     spec: OciSpec,
+    offline_archive: Option<(Vec<u8>, String)>,
 }
 
 impl DockerOciAdapter {
@@ -65,7 +66,29 @@ impl DockerOciAdapter {
         let docker = find_on_path("docker").context(
             "OCI runtime admission failed: Docker CLI is not installed or is not on PATH",
         )?;
-        Ok(Self { docker, spec })
+        Ok(Self {
+            docker,
+            spec,
+            offline_archive: None,
+        })
+    }
+
+    /// The caller has already verified the archive's registry manifest,
+    /// config, layers, platform, and pinned image digest. Docker may load it,
+    /// but must not resolve an absent image through the network.
+    pub fn new_offline(spec: OciSpec, archive: Vec<u8>, config_reference: String) -> Result<Self> {
+        ensure!(
+            config_reference
+                .strip_prefix("sha256:")
+                .is_some_and(|digest| digest.len() == 64
+                    && digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())),
+            "offline OCI config reference is invalid"
+        );
+        let mut adapter = Self::new(spec)?;
+        adapter.offline_archive = Some((archive, config_reference));
+        Ok(adapter)
     }
 
     /// Admit the route and acquire its immutable image. Pulling is explicit:
@@ -76,7 +99,9 @@ impl DockerOciAdapter {
             ["version", "--format", "{{.Server.Version}}"],
             "query Docker Engine version",
         )?;
-        if self.inspect_image().is_err() {
+        if let Some((_, config_reference)) = &self.offline_archive {
+            self.inspect_offline_image(config_reference)?;
+        } else if self.inspect_image().is_err() {
             run_checked(
                 &self.docker,
                 [
@@ -88,7 +113,9 @@ impl DockerOciAdapter {
                 "pull immutable OCI image",
             )?;
         }
-        self.inspect_image()?;
+        if self.offline_archive.is_none() {
+            self.inspect_image()?;
+        }
         Ok(OciAdmission {
             docker_version: version.trim().to_owned(),
             image: self.spec.image.clone(),
@@ -99,6 +126,20 @@ impl DockerOciAdapter {
     pub fn spawn(&self, workspace: &Path, runtime_root: &Path) -> Result<OciHandle> {
         ensure!(workspace.is_dir(), "OCI workspace does not exist");
         fs::create_dir_all(runtime_root).context("create OCI runtime directory")?;
+        if let Some((archive, _)) = &self.offline_archive {
+            let path = runtime_root.join("verified-oci-image.tar");
+            fs::write(&path, archive).context("write verified OCI archive")?;
+            run_checked(
+                &self.docker,
+                [
+                    "image",
+                    "load",
+                    "--input",
+                    path.to_str().context("OCI archive path is not UTF-8")?,
+                ],
+                "load verified offline OCI image",
+            )?;
+        }
         self.admit()?;
 
         let suffix = NEXT_ID.fetch_add(1, Ordering::Relaxed);
@@ -127,8 +168,12 @@ impl DockerOciAdapter {
             .collect::<String>();
         fs::write(&env_file, environment).context("write OCI environment file")?;
 
+        let mut run_spec = self.spec.clone();
+        if let Some((_, config_reference)) = &self.offline_archive {
+            run_spec.image = config_reference.clone();
+        }
         let argv = docker_run_arguments(
-            &self.spec,
+            &run_spec,
             workspace,
             &env_file,
             &container_name,
@@ -205,6 +250,29 @@ impl DockerOciAdapter {
         let inspected =
             String::from_utf8(output.stdout).context("invalid Docker inspect output")?;
         validate_inspected_image(&self.spec, inspected.trim())
+    }
+
+    fn inspect_offline_image(&self, config_reference: &str) -> Result<()> {
+        let value = run_checked(
+            &self.docker,
+            [
+                "image",
+                "inspect",
+                "--format",
+                "{{.Id}}|{{.Os}}/{{.Architecture}}",
+                config_reference,
+            ],
+            "inspect loaded offline OCI image",
+        )?;
+        let (image_id, platform) = value
+            .trim()
+            .rsplit_once('|')
+            .context("loaded OCI image metadata is incomplete")?;
+        ensure!(
+            image_id == config_reference && platform == self.spec.platform,
+            "loaded offline OCI image identity/platform mismatch"
+        );
+        Ok(())
     }
 }
 
