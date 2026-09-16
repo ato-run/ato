@@ -245,6 +245,7 @@ mod tests {
                 cwd: ".".to_owned(),
                 env: BTreeMap::new(),
             },
+            filesystem_state: None,
             requirements: vec![PortableHttpRequirementSpec {
                 id: "entry".to_owned(),
                 path: "/".to_owned(),
