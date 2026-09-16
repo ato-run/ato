@@ -23,8 +23,8 @@ pub use portable_bundle::{
     PORTABLE_APPLICATION_PROFILE_V2, PortableApplicationBundle, PortableBundleError,
     PortableBundleIndex, PortableBundleObjectDescriptor, PortableBundleObjectKind,
     PortableBundlePayload, PortableDependencyProfile, PortableDependencyTransport,
-    PortableExternalObject, PortableReferenceExtractor, PortableReferenceRegistry,
-    decode_capsule_bundle_document, decode_portable_application_bundle,
+    PortableExternalObject, PortableOciArchive, PortableReferenceExtractor,
+    PortableReferenceRegistry, decode_capsule_bundle_document, decode_portable_application_bundle,
     encode_portable_application_bundle, validate_portable_application_closure,
 };
 pub use repository::{
