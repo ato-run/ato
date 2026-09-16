@@ -14,7 +14,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::instance_snapshot::{InstanceSnapshotV1, attach_instance_snapshot, validate_snapshot};
+use crate::instance_snapshot::{
+    InstanceSnapshotV1, attach_instance_snapshot, rebind_snapshot_resource_assets,
+    validate_snapshot,
+};
 use crate::portability_export::repack_portable_dependencies;
 use crate::{bundle_sha256, validate_bundle_for_derivation};
 
@@ -100,6 +103,8 @@ pub struct LocalRestoredResource {
     pub slot: String,
     pub protocol: String,
     pub content_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_content_ref: Option<String>,
     pub path: String,
 }
 
@@ -533,20 +538,8 @@ impl LocalApplicationStore {
         create_dir_all(&root.join("resources"))?;
         create_dir_all(&root.join("assets"))?;
 
-        let mut resources = Vec::with_capacity(snapshot.resources.len());
-        for (index, resource) in snapshot.resources.iter().enumerate() {
-            let bytes = snapshot_content(bundle, &resource.content_ref)?;
-            let path = format!("resources/{index:06}.bin");
-            create_or_verify(&root.join(&path), &bytes)?;
-            resources.push(LocalRestoredResource {
-                slot: resource.slot.clone(),
-                protocol: resource.protocol.clone(),
-                content_ref: resource.content_ref.clone(),
-                path,
-            });
-        }
-
         let mut assets = Vec::with_capacity(snapshot.assets.len());
+        let mut asset_uris = BTreeMap::new();
         for asset in &snapshot.assets {
             let bytes = snapshot_content(bundle, &asset.content_ref)?;
             if bytes.len() as u64 != asset.size {
@@ -556,6 +549,7 @@ impl LocalApplicationStore {
                 )));
             }
             let asset_id = local_asset_id(instance_id, &asset.alias);
+            asset_uris.insert(asset.alias.clone(), format!("ato-asset://{asset_id}"));
             let path = format!("assets/{asset_id}/body");
             create_dir_all(&root.join("assets").join(&asset_id))?;
             create_or_verify(&root.join(&path), &bytes)?;
@@ -566,6 +560,26 @@ impl LocalApplicationStore {
                 filename: asset.filename.clone(),
                 content_type: asset.content_type.clone(),
                 size: asset.size,
+                path,
+            });
+        }
+
+        let mut resources = Vec::with_capacity(snapshot.resources.len());
+        for (index, resource) in snapshot.resources.iter().enumerate() {
+            let source_bytes = snapshot_content(bundle, &resource.content_ref)?;
+            let bytes =
+                rebind_snapshot_resource_assets(&snapshot, resource, &source_bytes, &asset_uris)
+                    .map_err(|error| LocalInstanceError::Bundle(error.to_string()))?;
+            let content_ref = bundle_sha256(&bytes);
+            let source_content_ref =
+                (content_ref != resource.content_ref).then(|| resource.content_ref.clone());
+            let path = format!("resources/{index:06}.bin");
+            create_or_verify(&root.join(&path), &bytes)?;
+            resources.push(LocalRestoredResource {
+                slot: resource.slot.clone(),
+                protocol: resource.protocol.clone(),
+                content_ref,
+                source_content_ref,
                 path,
             });
         }
@@ -850,8 +864,8 @@ fn replace_canonical<T: Serialize>(path: &Path, value: &T) -> Result<(), LocalIn
 mod tests {
     use super::*;
     use crate::instance_snapshot::{
-        DATA_JSON_PROTOCOL, INSTANCE_SNAPSHOT_SCHEMA, InstanceSnapshotAssetV1,
-        InstanceSnapshotResourceV1,
+        DATA_JSON_PROTOCOL, INSTANCE_SNAPSHOT_SCHEMA, InstanceSnapshotAssetBindingV1,
+        InstanceSnapshotAssetLocationV1, InstanceSnapshotAssetV1, InstanceSnapshotResourceV1,
     };
     use crate::{build_multi_derivation_bundle, build_static_bundle, validate_bytes_all};
 
@@ -864,7 +878,7 @@ mod tests {
     }
 
     fn snapshot_fixture() -> (InstanceSnapshotV1, BTreeMap<String, Vec<u8>>) {
-        let saved_data = br#"{"todos":["one","two"]}"#.to_vec();
+        let saved_data = br#"{"photo":"ato-asset-alias://asset-1","todos":["one","two"]}"#.to_vec();
         let asset = b"portable-photo-bytes".to_vec();
         let saved_data_ref = bundle_sha256(&saved_data);
         let asset_ref = bundle_sha256(&asset);
@@ -882,6 +896,13 @@ mod tests {
                     filename: "photo.jpg".to_owned(),
                     content_type: "image/jpeg".to_owned(),
                     size: asset.len() as u64,
+                }],
+                asset_bindings: vec![InstanceSnapshotAssetBindingV1 {
+                    alias: "asset-1".to_owned(),
+                    resource_slot: "main".to_owned(),
+                    location: InstanceSnapshotAssetLocationV1::DataJson {
+                        pointer: "/photo".to_owned(),
+                    },
                 }],
             },
             BTreeMap::from([(saved_data_ref, saved_data), (asset_ref, asset)]),
@@ -1008,6 +1029,42 @@ mod tests {
         assert_eq!(
             first_snapshot.assets[0].content_ref,
             second_snapshot.assets[0].content_ref
+        );
+        let first_resource = fs::read(
+            store
+                .snapshot_root(
+                    &first.instance_id,
+                    first.data_snapshot_ref.as_deref().unwrap(),
+                )
+                .unwrap()
+                .join(&first_snapshot.resources[0].path),
+        )
+        .unwrap();
+        let second_resource = fs::read(
+            store
+                .snapshot_root(
+                    &second.instance_id,
+                    second.data_snapshot_ref.as_deref().unwrap(),
+                )
+                .unwrap()
+                .join(&second_snapshot.resources[0].path),
+        )
+        .unwrap();
+        assert!(
+            String::from_utf8(first_resource)
+                .unwrap()
+                .contains(&format!(
+                    "ato-asset://{}",
+                    first_snapshot.assets[0].asset_id
+                ))
+        );
+        assert!(
+            String::from_utf8(second_resource)
+                .unwrap()
+                .contains(&format!(
+                    "ato-asset://{}",
+                    second_snapshot.assets[0].asset_id
+                ))
         );
     }
 

@@ -62,6 +62,7 @@ fn snapshot_fixture(destination: &Path) -> Vec<u8> {
             content_type: "image/jpeg".to_owned(),
             size: asset.len() as u64,
         }],
+        asset_bindings: vec![],
     };
     let content = BTreeMap::from([(saved_data_ref, saved_data), (asset_ref, asset)]);
     let bytes = attach_instance_snapshot(&source, snapshot, &content)
