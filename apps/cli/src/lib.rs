@@ -15,6 +15,8 @@ use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
+#[cfg(unix)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -939,6 +941,13 @@ fn run_portable_application(
     bundle_bytes: &[u8],
     bundle: ato_objects::PortableApplicationBundle,
 ) -> Result<()> {
+    #[cfg(unix)]
+    let shutdown = {
+        let flag = Arc::new(AtomicBool::new(false));
+        signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&flag))?;
+        signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&flag))?;
+        flag
+    };
     if !args.bindings.is_empty() {
         bail!(
             "portable application profile {} has no external Bindings",
@@ -1068,8 +1077,17 @@ fn run_portable_application(
     open_browser(runtime.base_url())?;
     println!("Press Ctrl-C to stop the local realization.");
     loop {
+        #[cfg(unix)]
+        if shutdown.load(Ordering::Relaxed) {
+            break;
+        }
+        #[cfg(not(unix))]
         std::thread::park();
+        #[cfg(unix)]
+        std::thread::sleep(Duration::from_millis(100));
     }
+    #[allow(unreachable_code)]
+    Ok(())
 }
 
 enum PortableLocalRuntime {
