@@ -25,12 +25,14 @@ pub fn repack_portable_dependencies_with_archives(
     external_sources: &BTreeMap<String, Vec<String>>,
     oci_archives: &[PortableOciArchive],
 ) -> Result<(Vec<u8>, PortableApplicationBundle), PortableApplicationError> {
-    if original.index.version != PORTABLE_APPLICATION_BUNDLE_VERSION
-        || original.portability.is_some()
-    {
-        return Err(profile(
-            "dependency repack requires a complete v3 source bundle",
-        ));
+    match original.index.version {
+        PORTABLE_APPLICATION_BUNDLE_VERSION if original.portability.is_none() => {}
+        PORTABLE_APPLICATION_BUNDLE_VERSION_V4 if original.portability.is_some() => {}
+        _ => {
+            return Err(profile(
+                "dependency repack requires a validated portable application v3 or v4 bundle",
+            ));
+        }
     }
     let before = validate_all_derivations(original)?;
     if policy == PortableDependencyProfile::Offline
@@ -74,6 +76,8 @@ pub fn repack_portable_dependencies_with_archives(
     repacked
         .payloads
         .retain(|payload| !external_sources.contains_key(&payload.reference));
+    let mut oci_archives = oci_archives.to_vec();
+    oci_archives.sort_by(|left, right| left.image.cmp(&right.image));
     repacked.portability = Some(PortableDependencyTransport {
         profile: policy,
         external_objects: external_sources
@@ -83,7 +87,7 @@ pub fn repack_portable_dependencies_with_archives(
                 sources: sources.clone(),
             })
             .collect(),
-        oci_archives: oci_archives.to_vec(),
+        oci_archives,
     });
     let bytes = encode_portable_application_bundle(&repacked)?;
     let after = validate_all_derivations(&repacked)?;

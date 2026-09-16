@@ -85,15 +85,34 @@ pub fn plan_portable_export(
     }
 
     let mut blockers = Vec::new();
+    let current_external_refs = bundle
+        .portability
+        .as_ref()
+        .into_iter()
+        .flat_map(|portability| &portability.external_objects)
+        .map(|external| external.reference.as_str())
+        .collect::<BTreeSet<_>>();
+    let embedded_oci_images = bundle
+        .portability
+        .as_ref()
+        .into_iter()
+        .flat_map(|portability| &portability.oci_archives)
+        .map(|archive| archive.image.as_str())
+        .collect::<BTreeSet<_>>();
     let external_wheels = if profile == PortableExportProfile::Thin {
         wheel_refs.len()
     } else {
         0
     };
     let embedded_objects = bundle.index.objects.len() - external_wheels;
-    // An OCI image is outside the wire-v3 object graph and is counted as one
-    // external dependency until a verified registry closure is attached.
-    let external_objects = external_wheels + oci_images.len();
+    // An OCI image is outside the semantic object graph. Only offline requires
+    // a verified embedded archive for every declared OCI image.
+    let external_objects = external_wheels
+        + if profile == PortableExportProfile::Offline {
+            0
+        } else {
+            oci_images.len()
+        };
     let embedded_dependency_bytes = if external_wheels == 0 {
         python_wheel_bytes
     } else {
@@ -106,20 +125,54 @@ pub fn plan_portable_export(
     };
     let (estimated_export_bytes, requires_network_on_clean_host) = match profile {
         PortableExportProfile::Thin => {
-            if !wheel_refs.is_empty() {
+            let unresolved_wheels = wheel_refs
+                .iter()
+                .filter(|reference| !current_external_refs.contains(reference.as_str()))
+                .count();
+            if unresolved_wheels > 0 {
                 blockers.push(format!(
                     "{} wheel sources must be discovered and matched by SHA-256 before thin export",
-                    wheel_refs.len()
+                    unresolved_wheels
                 ));
             }
-            (None, Some(true))
+            (
+                blockers.is_empty().then_some(current_bundle_bytes),
+                Some(!wheel_refs.is_empty() || !oci_images.is_empty()),
+            )
         }
-        PortableExportProfile::Cached => (Some(current_bundle_bytes), Some(!oci_images.is_empty())),
+        PortableExportProfile::Cached => {
+            let external_wheels = wheel_refs
+                .iter()
+                .filter(|reference| current_external_refs.contains(reference.as_str()))
+                .count();
+            if external_wheels > 0 {
+                blockers.push(format!(
+                    "{external_wheels} external wheel objects must be fetched and verified before cached export"
+                ));
+            }
+            (
+                blockers.is_empty().then_some(current_bundle_bytes),
+                Some(!oci_images.is_empty()),
+            )
+        }
         PortableExportProfile::Offline => {
-            if !oci_images.is_empty() {
+            let external_wheels = wheel_refs
+                .iter()
+                .filter(|reference| current_external_refs.contains(reference.as_str()))
+                .count();
+            if external_wheels > 0 {
+                blockers.push(format!(
+                    "{external_wheels} external wheel objects must be fetched and verified before offline export"
+                ));
+            }
+            let missing_oci_images = oci_images
+                .iter()
+                .filter(|image| !embedded_oci_images.contains(image.as_str()))
+                .count();
+            if missing_oci_images > 0 {
                 blockers.push(format!(
                     "{} OCI images lack verified embedded manifest/layer closure",
-                    oci_images.len()
+                    missing_oci_images
                 ));
             }
             if blockers.is_empty() {

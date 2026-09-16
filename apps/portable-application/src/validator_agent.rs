@@ -371,7 +371,7 @@ fn report(
     let workspace_bytes = pack_workspace(bundle, validated)?;
     let routes = validated_routes(all_routes)?;
     Ok(PortableBundleVerificationReport {
-        format_version: 3,
+        format_version: bundle.index.version,
         bundle_sha256: job.transport_digest.clone(),
         profile: bundle.index.profile.clone(),
         root_contract_ref: validated.contract_ref.to_string(),
@@ -527,22 +527,30 @@ impl HttpValidatorApi {
     }
 
     fn claim(&self) -> Result<Option<ValidationJob>> {
-        let response = self
-            .authenticated(
-                self.client
-                    .post(self.url("/v1/capsule-bundles/validation-jobs/claim"))
-                    .json(&serde_json::json!({
-                        "agent_id": self.agent_id.to_str().expect("validated agent id"),
-                        "format_version": 3
-                    })),
-            )
-            .send()?;
-        if response.status().as_u16() == 204 {
-            return Ok(None);
+        // Keep wire v3 claimable while the v4 queue is introduced. Version is
+        // explicit so an older validator cannot accidentally claim v4 bytes.
+        for version in [
+            ato_objects::PORTABLE_APPLICATION_BUNDLE_VERSION_V4,
+            ato_objects::PORTABLE_APPLICATION_BUNDLE_VERSION,
+        ] {
+            let response = self
+                .authenticated(
+                    self.client
+                        .post(self.url("/v1/capsule-bundles/validation-jobs/claim"))
+                        .json(&serde_json::json!({
+                            "agent_id": self.agent_id.to_str().expect("validated agent id"),
+                            "format_version": version
+                        })),
+                )
+                .send()?;
+            if response.status().as_u16() == 204 {
+                continue;
+            }
+            return Ok(Some(
+                decode_json::<ValidationJobEnvelope>(response, "validator claim")?.job,
+            ));
         }
-        Ok(Some(
-            decode_json::<ValidationJobEnvelope>(response, "validator claim")?.job,
-        ))
+        Ok(None)
     }
 
     fn claim_runtime(&self) -> Result<Option<ValidationJob>> {
@@ -800,10 +808,13 @@ fn classify_rejection(error: &anyhow::Error) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::path::Path;
 
     use super::*;
     use crate::build_static_bundle;
+    use crate::portability_export::repack_portable_dependencies;
+    use ato_objects::PortableDependencyProfile;
 
     #[test]
     fn report_contains_portable_identity_and_static_artifact() {
@@ -830,9 +841,47 @@ mod tests {
             execution_evidence: None,
         };
         let report = report(&job, &bundle, &validated, bytes.len() as u64).unwrap();
+        assert_eq!(report.format_version, 3);
         assert_eq!(report.profile, "ato.portable-application/1");
         assert_eq!(report.root_contract_ref, bundle.index.root_contract_ref);
         assert_eq!(report.derivation_refs, bundle.index.derivations);
         assert_eq!(report.artifact.as_ref().unwrap().files.len(), 2);
+    }
+
+    #[test]
+    fn v4_report_preserves_contract_and_derivation_refs() {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/interop-static-k");
+        let (_, original) = build_static_bundle(&source, "Ato portability proof").unwrap();
+        let (bytes, bundle) = repack_portable_dependencies(
+            &original,
+            PortableDependencyProfile::Cached,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let (_, validated) = validate_bytes_all(&bytes).unwrap();
+        let job = ValidationJob {
+            job_id: "bvj_v4".to_owned(),
+            claim_id: "claim".to_owned(),
+            claim_expires_at: "2026-09-16T00:00:00Z".to_owned(),
+            bundle_id: "bnd_01V4".to_owned(),
+            transport_digest: bundle_sha256(&bytes),
+            size_bytes: bytes.len() as u64,
+            claimed_parent_root: None,
+            download_url: "/bundle".to_owned(),
+            observe_url: None,
+            selected_derivation_ref: None,
+            run_id: None,
+            lease_id: None,
+            attempt_id: None,
+            execution_id: None,
+            realization: None,
+            endpoint: None,
+            execution_evidence: None,
+        };
+        let report = report(&job, &bundle, &validated, bytes.len() as u64).unwrap();
+        assert_eq!(report.format_version, 4);
+        assert_eq!(report.profile, "ato.portable-application/2");
+        assert_eq!(report.root_contract_ref, original.index.root_contract_ref);
+        assert_eq!(report.derivation_refs, original.index.derivations);
     }
 }
