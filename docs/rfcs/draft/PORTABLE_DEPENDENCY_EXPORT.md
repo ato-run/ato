@@ -41,9 +41,10 @@ host package/image as if it were part of the bundle.
 The export planner derives embedded/external counts and bytes, required host
 capabilities, and estimated encoded size. A caller-provided
 `network_required: false` is not accepted as evidence. The selected profile
-and sources are excluded from K and D. A CLI receipt with actual external
-fetches uses `ato.contract-verification-receipt/2` and records each fetched
-digest in `execution.dependency_fetches`; receipts without fetches retain v1.
+and sources are excluded from K and D. A CLI receipt for wire v4 uses
+`ato.contract-verification-receipt/2`, identifies its portability profile,
+records each actual external fetch in `execution.dependency_fetches`, and
+records an embedded OCI image load when one occurred. Wire-v3 receipts retain v1.
 Cache-hit provenance and OCI image acquisition provenance remain to be added.
 
 The first v4 exporter handles PyPI wheel payloads. It confirms an exact

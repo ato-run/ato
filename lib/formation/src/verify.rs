@@ -261,6 +261,10 @@ pub struct VerificationExecutionEvidence {
     /// Only emitted with receipt schema /2; never part of K or D identity.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependency_fetches: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portability_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedded_oci_image_loaded: Option<String>,
 }
 
 /// Shared proof emitted by both local and hosted execution paths.
