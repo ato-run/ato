@@ -8,6 +8,12 @@ fn ato() -> Command {
     Command::cargo_bin("ato").expect("the ato binary is built for integration tests")
 }
 
+fn ato_with_home(home: &Path) -> Command {
+    let mut command = ato();
+    command.env("ATO_HOME", home);
+    command
+}
+
 fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/interop-static.capsule")
 }
@@ -236,4 +242,100 @@ fn v4_bundle_can_be_planned_and_reexported_without_changing_identity() {
         second["index"]["derivations"]
     );
     assert_eq!(second["portability"]["profile"], "cached");
+}
+
+#[test]
+fn imported_local_instance_can_stop_and_restart_without_reimporting() {
+    let root = tempfile::tempdir().unwrap();
+    let imported = ato_with_home(root.path())
+        .args(["app", "import"])
+        .arg(fixture())
+        .output()
+        .unwrap();
+    assert!(
+        imported.status.success(),
+        "import failed: {}",
+        String::from_utf8_lossy(&imported.stderr)
+    );
+    let instance: Value = serde_json::from_slice(&imported.stdout).unwrap();
+    let instance_id = instance["instance_id"].as_str().unwrap();
+    assert_eq!(
+        instance["bundle_sha256"],
+        "sha256:95b837f4e8ed3c3354a4560e56820030cdb2ba34ba2a7c65aa6d26e139bdd813"
+    );
+    assert_eq!(
+        instance["contract_ref"],
+        "sha256:b565e9d771c53ba03548b1a151c0ebbc2b884c1d6ec532f72596ce33a4b741db"
+    );
+    assert!(
+        root.path()
+            .join("instances")
+            .join(instance_id)
+            .join("instance.json")
+            .is_file()
+    );
+
+    let first_receipt = root.path().join("first-receipt.json");
+    ato_with_home(root.path())
+        .args(["app", "start", instance_id, "--no-open"])
+        .arg("--verification-receipt")
+        .arg(&first_receipt)
+        .assert()
+        .success();
+    let first_status = ato_with_home(root.path())
+        .args(["app", "inspect", instance_id])
+        .output()
+        .unwrap();
+    assert!(first_status.status.success());
+    let first_status: Value = serde_json::from_slice(&first_status.stdout).unwrap();
+    assert_eq!(first_status["instance"]["instance_id"], instance_id);
+    assert_eq!(first_status["active_run"]["status"], "active");
+    let first_run = first_status["active_run"]["run_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let first_receipt: Value = serde_json::from_slice(&fs::read(first_receipt).unwrap()).unwrap();
+    assert_eq!(first_receipt["fully_satisfied"], true);
+
+    ato_with_home(root.path())
+        .args(["app", "stop", instance_id])
+        .assert()
+        .success();
+    let stopped = ato_with_home(root.path())
+        .args(["app", "inspect", instance_id])
+        .output()
+        .unwrap();
+    let stopped: Value = serde_json::from_slice(&stopped.stdout).unwrap();
+    assert!(stopped["active_run"].is_null());
+
+    let second_receipt = root.path().join("second-receipt.json");
+    ato_with_home(root.path())
+        .args(["app", "start", instance_id, "--no-open"])
+        .arg("--verification-receipt")
+        .arg(&second_receipt)
+        .assert()
+        .success();
+    let second_status = ato_with_home(root.path())
+        .args(["app", "inspect", instance_id])
+        .output()
+        .unwrap();
+    let second_status: Value = serde_json::from_slice(&second_status.stdout).unwrap();
+    assert_eq!(second_status["instance"], instance);
+    assert_eq!(second_status["active_run"]["status"], "active");
+    assert_ne!(second_status["active_run"]["run_id"], first_run);
+    let second_receipt: Value = serde_json::from_slice(&fs::read(second_receipt).unwrap()).unwrap();
+    assert_eq!(
+        second_receipt["contract_ref"],
+        first_receipt["contract_ref"]
+    );
+    assert_eq!(
+        second_receipt["derivation_ref"],
+        first_receipt["derivation_ref"]
+    );
+    assert_eq!(second_receipt["fully_satisfied"], true);
+
+    ato_with_home(root.path())
+        .args(["app", "stop", instance_id])
+        .assert()
+        .success();
 }
