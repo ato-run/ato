@@ -210,12 +210,19 @@ pub struct PortableExecutionSpec {
 }
 
 #[derive(Debug, Clone)]
+pub struct PortableFilesystemStateSpec {
+    pub id: String,
+    pub mount: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct PortableDynamicBundleSpec {
     pub title: String,
     pub surface_path: String,
     pub guest_port: u16,
     pub process: PortableExecutionSpec,
     pub oci: PortableExecutionSpec,
+    pub filesystem_state: Option<PortableFilesystemStateSpec>,
     pub requirements: Vec<PortableHttpRequirementSpec>,
 }
 
@@ -931,7 +938,17 @@ pub fn build_dynamic_process_oci_bundle(
             spa_fallback: None,
         }],
         ports: vec![port.clone()],
-        state: Vec::new(),
+        state: spec
+            .filesystem_state
+            .as_ref()
+            .map(|state| ato_formation::authoring::BoundState {
+                id: state.id.clone(),
+                protocol: STATE_FILESYSTEM_PROTOCOL.to_owned(),
+                mount: state.mount.clone(),
+                access: StateAccess::ReadWrite,
+            })
+            .into_iter()
+            .collect(),
         workspace_build: None,
         workspace_compiler: None,
         effects: EffectClass::Pure,
@@ -2663,6 +2680,7 @@ mod tests {
                 cwd: ".".to_owned(),
                 env: BTreeMap::new(),
             },
+            filesystem_state: None,
             requirements: vec![
                 PortableHttpRequirementSpec {
                     id: "entry".to_owned(),
@@ -2954,21 +2972,19 @@ mod tests {
 
     #[test]
     fn dynamic_routes_accept_one_declared_writable_filesystem_state() {
-        let (_, mut bundle) =
-            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &datasette_spec()).unwrap();
-        let process_ref = route_ref(&bundle, PortableRealizationKind::LocalProcess);
-        let stateful_ref = replace_derivation(&mut bundle, &process_ref, |derivation| {
-            derivation.state.push(ato_formation::authoring::BoundState {
-                id: "data".to_owned(),
-                protocol: STATE_FILESYSTEM_PROTOCOL.to_owned(),
-                mount: "/data".to_owned(),
-                access: StateAccess::ReadWrite,
-            });
+        let mut spec = datasette_spec();
+        spec.filesystem_state = Some(PortableFilesystemStateSpec {
+            id: "data".to_owned(),
+            mount: "/data".to_owned(),
         });
-        let route = validate_bundle_for_derivation(&bundle, &stateful_ref).unwrap();
-        assert_eq!(route.derivation.state.len(), 1);
-        assert_eq!(route.derivation.state[0].mount, "/data");
+        let (_, mut bundle) =
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &spec).unwrap();
+        let routes = validate_all_derivations(&bundle).unwrap();
+        assert!(routes.iter().all(|route| {
+            route.derivation.state.len() == 1 && route.derivation.state[0].mount == "/data"
+        }));
 
+        let stateful_ref = route_ref(&bundle, PortableRealizationKind::LocalProcess);
         let invalid_ref = replace_derivation(&mut bundle, &stateful_ref, |derivation| {
             derivation.state[0].mount = "/app".to_owned();
         });
