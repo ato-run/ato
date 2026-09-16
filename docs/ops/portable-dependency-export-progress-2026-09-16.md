@@ -82,10 +82,16 @@ readiness then returned in under one second, with no receipt, container, or
 per-Run network left. The exact test image was removed afterward; the
 interrupted test's temporary workspace was moved to Trash for recovery.
 
-After this fix, a Linux/amd64 run under a new source build is still needed to
-confirm the local-ID launch path satisfies K. A dedicated image-absent Linux
-Docker store with outbound blocking remains necessary for full acceptance;
-the shared staging daemon's existing image must not be deleted to simulate it.
+The fix was then built at ato `91c81f03` in the isolated Linux/amd64 source
+checkout, without replacing any staging service. The same offline file (SHA
+above) satisfied all three original observations through the local-ID launch
+path. Receipt:
+`/home/ekohsuke/.ato-staging/.tmp/portable-datasette/export-policy/cli-oci-offline-local-id-receipt.json`.
+It uses receipt schema v2, records the original K and OCI D, and names the
+embedded image load. This Linux daemon still had the image beforehand. A
+dedicated image-absent Linux Docker store with outbound blocking remains
+necessary for full acceptance; the shared staging daemon's existing image
+must not be deleted to simulate it.
 
 The v3 Static and Process interop `.capsule` fixtures both passed their CLI
 HTTP observations after the v4 changes. A separate OCI run held open behind
