@@ -6,7 +6,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -68,6 +68,10 @@ struct OfflineImage {
 impl DockerOciAdapter {
     pub fn new(spec: OciSpec) -> Result<Self> {
         validate_spec(&spec)?;
+        ensure!(
+            cfg!(target_os = "linux") || spec.endpoints.is_empty(),
+            "OCI runtime admission failed: isolated HTTP endpoints currently require a native Linux host; Docker Desktop keeps the internal bridge inside its VM"
+        );
         let docker = find_on_path("docker").context(
             "OCI runtime admission failed: Docker CLI is not installed or is not on PATH",
         )?;
@@ -579,6 +583,17 @@ fn validate_spec(spec: &OciSpec) -> Result<()> {
             "OCI environment is invalid"
         );
     }
+    let mut host_ports = BTreeSet::new();
+    for endpoint in &spec.endpoints {
+        ensure!(
+            endpoint.host_port > 0 && endpoint.guest_port > 0,
+            "OCI endpoint Port must be non-zero"
+        );
+        ensure!(
+            host_ports.insert(endpoint.host_port),
+            "OCI host Port is declared more than once"
+        );
+    }
     Ok(())
 }
 
@@ -726,6 +741,13 @@ mod tests {
         assert!(validate_spec(&invalid).is_err());
     }
 
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn vm_backed_docker_cannot_admit_an_isolated_http_endpoint() {
+        let error = DockerOciAdapter::new(spec()).err().unwrap();
+        assert!(error.to_string().contains("native Linux host"));
+    }
+
     #[test]
     fn inspected_image_must_match_both_digest_and_platform() {
         let valid = spec();
@@ -870,5 +892,41 @@ mod tests {
         assert_eq!(response, b"pong");
         server.join().unwrap();
         proxy.join().unwrap();
+    }
+
+    #[test]
+    fn endpoint_ports_must_be_non_zero() {
+        let mut invalid_host = spec();
+        invalid_host.endpoints[0].host_port = 0;
+        assert!(
+            validate_spec(&invalid_host)
+                .unwrap_err()
+                .to_string()
+                .contains("non-zero")
+        );
+
+        let mut invalid_guest = spec();
+        invalid_guest.endpoints[0].guest_port = 0;
+        assert!(
+            validate_spec(&invalid_guest)
+                .unwrap_err()
+                .to_string()
+                .contains("non-zero")
+        );
+    }
+
+    #[test]
+    fn host_port_may_be_published_only_once() {
+        let mut invalid = spec();
+        invalid.endpoints.push(OciEndpoint {
+            host_port: invalid.endpoints[0].host_port,
+            guest_port: 8001,
+        });
+        assert!(
+            validate_spec(&invalid)
+                .unwrap_err()
+                .to_string()
+                .contains("more than once")
+        );
     }
 }
