@@ -30,7 +30,9 @@ use ato_adapter_oci::{
 use ato_adapter_process::{ProcessAdapter, ProcessHandle, ProcessSpec};
 use ato_adapter_workspace::restore_workspace;
 use ato_computation::{ComputationRef, ContentRef};
-use ato_formation::authoring::{HTTP_CONTRACT_VERIFIER, WORKSPACE_PROTOCOL};
+use ato_formation::authoring::{
+    HTTP_CONTRACT_VERIFIER, STATE_FILESYSTEM_PROTOCOL, WORKSPACE_PROTOCOL,
+};
 use ato_formation::verify::{
     ContractVerificationReceipt, RuntimeHttpObservation, RuntimeObservation,
     VerificationExecutionEvidence, VerificationTargetKind, verify_runtime,
@@ -982,6 +984,24 @@ fn portable_instance_worker_claimed(
     let bundle_bytes = store.bundle_bytes(&instance)?;
     let bundle = portable_export_bundle(&bundle_bytes)?;
     let selected = validate_bundle_for_derivation(&bundle, &instance.selected_derivation_ref)?;
+    let restored_snapshot = store.restored_snapshot(&claimed.instance_id)?;
+    if selected.realization != PortableRealizationKind::StaticWeb
+        && restored_snapshot.as_ref().is_some_and(|snapshot| {
+            !snapshot.assets.is_empty()
+                || snapshot.resources.iter().any(|resource| {
+                    resource.protocol != STATE_FILESYSTEM_PROTOCOL
+                        || !selected
+                            .derivation
+                            .state
+                            .iter()
+                            .any(|state| state.id == resource.slot)
+                })
+        })
+    {
+        bail!(
+            "local dynamic Instance snapshot restore supports only its declared filesystem state"
+        );
+    }
     let restored_snapshot_ref = instance.data_snapshot_ref.clone();
     let static_state = if selected.realization == PortableRealizationKind::StaticWeb {
         store
@@ -1015,9 +1035,11 @@ fn portable_instance_worker_claimed(
         &instance.selected_derivation_ref,
         &run_root,
         shutdown.as_deref(),
-        restored_snapshot_ref.as_deref(),
-        static_state,
-        Some(&filesystem_state),
+        PortableRuntimeState {
+            restored_snapshot_ref: restored_snapshot_ref.as_deref(),
+            static_state,
+            filesystem_state: Some(&filesystem_state),
+        },
     )?;
     if started.receipt.bundle_sha256 != instance.bundle_sha256
         || started.receipt.contract_ref != instance.contract_ref
@@ -1426,9 +1448,7 @@ fn run_portable_application(
         &selected_derivation,
         runtime.path(),
         shutdown.as_deref(),
-        None,
-        None,
-        None,
+        PortableRuntimeState::default(),
     )?;
     let runtime = started.runtime;
     let receipt = started.receipt;
@@ -1488,15 +1508,20 @@ struct PortableStateMount {
     guest_path: String,
 }
 
+#[derive(Default)]
+struct PortableRuntimeState<'a> {
+    restored_snapshot_ref: Option<&'a str>,
+    static_state: Option<StaticApplicationState>,
+    filesystem_state: Option<&'a BTreeMap<String, PathBuf>>,
+}
+
 fn start_and_verify_portable_application(
     bundle_bytes: &[u8],
     bundle: ato_objects::PortableApplicationBundle,
     selected_derivation: &str,
     runtime_root: &Path,
     shutdown: Option<&AtomicBool>,
-    restored_snapshot_ref: Option<&str>,
-    static_state: Option<StaticApplicationState>,
-    filesystem_state: Option<&BTreeMap<String, PathBuf>>,
+    runtime_state: PortableRuntimeState<'_>,
 ) -> Result<StartedPortableApplication> {
     let validated = validate_bundle_for_derivation(&bundle, selected_derivation)?;
     fs::create_dir_all(runtime_root)?;
@@ -1511,12 +1536,12 @@ fn start_and_verify_portable_application(
         runtime_root,
         &validated,
         &hydrated,
-        static_state,
-        filesystem_state,
+        runtime_state.static_state,
+        runtime_state.filesystem_state,
     )?;
 
     let mut observation = RuntimeObservation {
-        instance_snapshot_ref: restored_snapshot_ref.map(str::to_owned),
+        instance_snapshot_ref: runtime_state.restored_snapshot_ref.map(str::to_owned),
         ..RuntimeObservation::default()
     };
     for input in &validated.derivation.inputs {
