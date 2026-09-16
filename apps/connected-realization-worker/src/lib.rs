@@ -1060,8 +1060,13 @@ impl ConnectedWorker {
         // forwards from. Both are existing Runner configuration — the control
         // plane never picks a host port, because only the Runner knows what is
         // free and the stable URL must not depend on it.
+        ensure!(
+            spec.endpoints.len() == 1,
+            "runtime-launch ingress currently supports exactly one declared endpoint"
+        );
+        let endpoint_name = spec.endpoints[0].name.clone();
         let mut assigned_ports = std::collections::BTreeMap::new();
-        assigned_ports.insert("http".to_owned(), self.config.surface_listen.port());
+        assigned_ports.insert(endpoint_name.clone(), self.config.surface_listen.port());
         let resolved = runtime_launch::lease::resolve_run(
             &spec,
             lease_root,
@@ -1076,9 +1081,10 @@ impl ConnectedWorker {
         let execution_id = spec
             .canonical_digest()
             .map_err(|error| anyhow::anyhow!("cannot digest the launch spec: {error}"))?;
-        let port = active
-            .endpoint_port("http")
-            .context("the launch declared no `http` endpoint to report")?;
+        let port = active.endpoint_port(&endpoint_name).with_context(|| {
+            format!("the launch declared no `{endpoint_name}` endpoint to report")
+        })?;
+        let execution_evidence = active.execution_evidence();
         // The ready_url is the ingress slot's public hostname, and the process
         // is listening on the loopback port that slot forwards to. Before P4
         // this reported no URL at all, honestly: a process realization was
@@ -1094,12 +1100,13 @@ impl ConnectedWorker {
             &execution_id,
             Some(&self.config.public_base_url),
             Some(port),
+            Some(&execution_evidence),
             None,
         )?;
         eprintln!(
-            "[runtime-launch] run={} ready pid={} endpoint=127.0.0.1:{port} public={}",
+            "[runtime-launch] run={} ready {} endpoint=127.0.0.1:{port} public={}",
             lease.run_id,
-            active.pid(),
+            active.execution_subject(),
             self.config.public_base_url
         );
 
@@ -1218,6 +1225,7 @@ impl ConnectedWorker {
             &execution_id,
             Some(&self.config.public_base_url),
             Some(ready_local_port(&self.config)),
+            None,
             browser.as_ref().map(|runtime| runtime.control_capability()),
         )?;
         let mut last_control = Instant::now() - Duration::from_secs(1);
@@ -2865,6 +2873,8 @@ struct ReadyReport<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     local_port: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    execution: Option<&'a runtime_launch::lease::RuntimeExecutionEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     control: Option<BrowserControlReport<'a>>,
 }
 
@@ -2985,6 +2995,7 @@ impl HttpRunnerApi {
         execution_id: &str,
         ready_url: Option<&str>,
         local_port: Option<u16>,
+        execution: Option<&runtime_launch::lease::RuntimeExecutionEvidence>,
         control: Option<BrowserControlCapability>,
     ) -> Result<()> {
         self.authorized(
@@ -2995,6 +3006,7 @@ impl HttpRunnerApi {
             execution_id,
             ready_url,
             local_port,
+            execution,
             control: control.as_ref().map(|capability| BrowserControlReport {
                 protocol: &capability.protocol,
                 port: &capability.port,

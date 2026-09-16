@@ -435,6 +435,7 @@ while True:
                     note.to_owned(),
                     port.to_string(),
                 ],
+                executable: None,
             }),
             public_env: Vec::new(),
             secret_grants: Vec::new(),
@@ -618,6 +619,7 @@ while True:
         let mut spec = spec_for("run_noop", Some(2), "unused", 39_105);
         spec.realization = LaunchRealizationV1::Process(ProcessRealizationV1 {
             argv: vec!["/bin/sh".to_owned(), "-c".to_owned(), "true".to_owned()],
+            executable: None,
         });
         // Nothing to serve, so readiness is the weakest form.
         spec.readiness = ReadinessV1::Process { timeout_ms: 5_000 };
@@ -675,6 +677,7 @@ while True:
         let mut spec = spec_for("run_nonexistent", Some(1), "unused", 39_106);
         spec.realization = LaunchRealizationV1::Process(ProcessRealizationV1 {
             argv: vec!["/nonexistent/program".to_owned()],
+            executable: None,
         });
         assert!(start_run(&spec, &context, &plane, &AlwaysReady).is_err());
 
@@ -691,6 +694,7 @@ while True:
         let mut spec = spec_for("run_doomed", Some(1), "unused", 39_107);
         spec.realization = LaunchRealizationV1::Process(ProcessRealizationV1 {
             argv: vec!["/nonexistent/program".to_owned()],
+            executable: None,
         });
         assert!(start_run(&spec, &context, &plane, &AlwaysReady).is_err());
 

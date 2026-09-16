@@ -35,7 +35,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::authoring::{BoundContract, HTTP_CONTRACT_VERIFIER, WORKSPACE_CONTRACT_VERIFIER};
@@ -230,6 +230,34 @@ pub struct ReceiptObservation {
     pub failure: Option<String>,
 }
 
+/// Receipt-safe facts about the concrete realization selected for this Run.
+/// These fields are evidence, never Contract identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerificationExecutionEvidence {
+    pub realization: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_executable: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
+}
+
 /// Shared proof emitted by both local and hosted execution paths.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -239,6 +267,8 @@ pub struct ContractVerificationReceipt {
     pub contract_ref: String,
     pub derivation_ref: String,
     pub target: VerificationTarget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<VerificationExecutionEvidence>,
     pub observations: Vec<ReceiptObservation>,
     pub fully_satisfied: bool,
 }
@@ -263,6 +293,7 @@ impl ContractVerificationReceipt {
             contract_ref: contract_ref.into(),
             derivation_ref: derivation_ref.into(),
             target: VerificationTarget { kind: target },
+            execution: None,
             observations,
             fully_satisfied,
         }
@@ -330,6 +361,7 @@ impl ContractVerificationReceipt {
             contract_ref: contract_ref.into(),
             derivation_ref: derivation_ref.into(),
             target: VerificationTarget { kind: target },
+            execution: None,
             observations,
             fully_satisfied,
         }

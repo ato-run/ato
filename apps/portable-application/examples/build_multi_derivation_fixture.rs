@@ -24,6 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let name = match route.realization {
             PortableRealizationKind::StaticWeb => "static_derivation_ref",
             PortableRealizationKind::LocalProcess => "process_derivation_ref",
+            PortableRealizationKind::OciContainer => "oci_derivation_ref",
         };
         println!("{name}={}", route.derivation_ref);
     }

@@ -343,6 +343,22 @@ try {
 
 ## Architecture Principles
 
+### Portable application execution boundaries
+
+- `ato.portable-application/1` のPython processとOCI containerはAdapter routeであり、
+  Kernel/Coreへapplication種別やdomain-specific actionを追加しない。
+- validatorは全declared Derivationのschema、digest、closureを検証するが、runtime能力判定は
+  明示選択された1つのDにだけ行う。format invalid、admission failure、execution failure、
+  Contract failureを同じエラーへ畳み込まない。
+- dynamic HTTP pathをworkspace file pathとして検証しない。Static Webだけがartifact/fileを
+  必須とし、process/OCIはlogical Portと実行時endpointを通して観測する。
+- OCI AdapterはRunnerが所有し、digest固定image、platform、readonly workspace、internal network、
+  resource limit、停止回収を強制する。Docker socket、privileged、host全体mountをworkloadへ渡さない。
+- Python processはOS sandboxでread-only workspace、Run専用write領域、宣言portだけのbindを強制し、
+  TCP egressを既定拒否する。network制約を完全適用できないHosted Runnerはadmissionで拒否する。
+- receiptのPID、container ID、runtime、image、endpoint、Run/lease/attemptは観測証跡であり、
+  ContractRefやDerivationRefへ実測値として混入させない。
+
 ### Semantic classification
 
 Every public concept must be classified as a property of the current

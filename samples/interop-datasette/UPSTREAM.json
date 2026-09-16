@@ -1,0 +1,12 @@
+{
+  "application": "Datasette",
+  "release": "0.65.2",
+  "source_commit": "6a141467f9f8b05c84bc00c10e157962e3e43960",
+  "source_url": "https://github.com/simonw/datasette",
+  "license": "Apache-2.0",
+  "python_requirement": "3.12",
+  "python_wheel_sha256": "d4f342a5c86d073bbb1880a9df792354cae4f951e427b57586713eff1896507f",
+  "oci_image": "docker.io/datasetteproject/datasette@sha256:0f57db16cf4eb6cca57f1cedaa0a696bca1c65a1d75b8f7ee372c2dd909a32a0",
+  "oci_platform": "linux/amd64",
+  "oci_transport": "network-dependent immutable digest pull; the compressed image exceeds the 32 MiB bundle upload limit"
+}

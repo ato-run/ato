@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::io::Cursor;
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
@@ -7,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use ato_formation::authoring::HTTP_CONTRACT_VERIFIER;
 use ato_formation::verify::{
     ContractVerificationReceipt, RuntimeHttpObservation, RuntimeObservation,
-    VerificationTargetKind, verify_runtime,
+    VerificationExecutionEvidence, VerificationTargetKind, verify_runtime,
 };
 use ato_materializer_static_web::{
     STATIC_WEB_MANIFEST_V1_SCHEMA, StaticWebFileV1, StaticWebManifestV1, StaticWebRoutingV1,
@@ -88,14 +89,15 @@ impl ValidatorAgent {
                 bail!("bundle transport digest mismatch");
             }
             let (bundle, validated) = validate_bytes_all(&bytes)?;
-            let static_route = unique_static_route(&validated)?;
-            for entry in &static_route.tree.entries {
-                let reference = ato_computation::ContentRef::parse(&entry.content_ref)?;
-                self.api.upload_blob(
-                    &job,
-                    &entry.content_ref,
-                    &bundle.payload_bytes(&reference)?,
-                )?;
+            if let Some(static_route) = optional_static_route(&validated)? {
+                for entry in &static_route.tree.entries {
+                    let reference = ato_computation::ContentRef::parse(&entry.content_ref)?;
+                    self.api.upload_blob(
+                        &job,
+                        &entry.content_ref,
+                        &bundle.payload_bytes(&reference)?,
+                    )?;
+                }
             }
             report(&job, &bundle, &validated, bytes.len() as u64)
         })();
@@ -130,9 +132,6 @@ impl ValidatorAgent {
             .as_deref()
             .context("runtime job omitted selected_derivation_ref")?;
         let (_, validated) = validate_bytes_for_derivation(&bytes, selected_derivation_ref)?;
-        if validated.realization != PortableRealizationKind::StaticWeb {
-            bail!("hosted runtime supports only an explicitly selected static-web derivation");
-        }
         let mut runtime = RuntimeObservation {
             input_refs: validated
                 .derivation
@@ -159,7 +158,7 @@ impl ValidatorAgent {
             ));
         }
         let verification = verify_runtime(&validated.contract, &runtime);
-        let receipt = ContractVerificationReceipt::from_runtime(
+        let mut receipt = ContractVerificationReceipt::from_runtime(
             &job.transport_digest,
             validated.contract_ref.to_string(),
             validated.derivation_ref.to_string(),
@@ -168,6 +167,30 @@ impl ValidatorAgent {
             &runtime,
             verification,
         );
+        let mut execution =
+            job.execution_evidence
+                .clone()
+                .unwrap_or(VerificationExecutionEvidence {
+                    realization: job
+                        .realization
+                        .clone()
+                        .unwrap_or_else(|| "static_web".to_owned()),
+                    runtime_executable: None,
+                    runtime_version: None,
+                    pid: None,
+                    container_id: None,
+                    image: None,
+                    platform: None,
+                    endpoint: None,
+                    run_id: None,
+                    lease_id: None,
+                    attempt_id: None,
+                });
+        execution.endpoint = job.endpoint.clone();
+        execution.run_id = job.run_id.clone();
+        execution.lease_id = job.lease_id.clone();
+        execution.attempt_id = job.attempt_id.clone();
+        receipt.execution = Some(execution);
         self.api.ack_runtime(&job, &receipt)?;
         Ok(ValidatorRunOutcome::HostedVerified {
             bundle_id: job.bundle_id,
@@ -193,10 +216,15 @@ pub struct PortableBundleVerificationReport {
     pub root_contract_ref: String,
     pub application_ref: String,
     pub derivation_refs: Vec<String>,
-    pub static_derivation_ref: String,
+    pub requirement_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_derivation_ref: Option<String>,
     pub title: String,
     pub surface: PortableSurfaceReport,
-    pub artifact: PortableStaticArtifactReport,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<PortableStaticArtifactReport>,
+    pub routes: Vec<PortableRouteReport>,
+    pub workspace: PortableWorkspaceReport,
     pub object_count: usize,
     pub decoded_size: u64,
     pub validation: ValidationStatus,
@@ -207,9 +235,36 @@ pub struct PortableBundleVerificationReport {
 pub struct PortableSurfaceReport {
     pub id: String,
     pub port: String,
-    pub artifact_ref: String,
-    pub entry: String,
-    pub spa_fallback: bool,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spa_fallback: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortableRouteReport {
+    pub derivation_ref: String,
+    pub realization: &'static str,
+    pub runtimes: BTreeMap<String, String>,
+    pub argv: Vec<String>,
+    pub cwd: String,
+    pub env: BTreeMap<String, String>,
+    pub port: String,
+    pub guest_port: Option<u16>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortableWorkspaceReport {
+    pub tree_ref: String,
+    pub artifact_digest: String,
+    pub artifact_base64: String,
+    pub file_count: usize,
+    pub total_size: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -243,47 +298,75 @@ fn report(
     validated: &[ValidatedPortableApplication],
     decoded_size: u64,
 ) -> Result<PortableBundleVerificationReport> {
-    let validated = unique_static_route(validated)?;
+    let all_routes = validated;
+    let first = validated
+        .first()
+        .context("bundle declares no derivations")?;
+    if validated
+        .iter()
+        .any(|route| route.tree_ref != first.tree_ref)
+    {
+        bail!("portable hosted profile requires one shared workspace tree");
+    }
+    let static_route = optional_static_route(validated)?;
+    let validated = static_route.unwrap_or(first);
     let materialization_id = format!("portable_{}", job.bundle_id);
     let surface = &validated.application.surfaces[0];
-    let files = validated
-        .tree
-        .entries
-        .iter()
-        .map(|entry| {
-            (
-                entry.path.clone(),
-                StaticWebFileV1 {
-                    blob: entry.content_ref.clone(),
-                    size: entry.size,
-                    media_type: entry.media_type.clone(),
-                },
-            )
+    let artifact = if static_route.is_some() {
+        let entry = surface
+            .entry
+            .as_deref()
+            .context("static surface omitted entry")?;
+        let spa_fallback = surface
+            .spa_fallback
+            .context("static surface omitted spa_fallback")?;
+        let files = validated
+            .tree
+            .entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.path.clone(),
+                    StaticWebFileV1 {
+                        blob: entry.content_ref.clone(),
+                        size: entry.size,
+                        media_type: entry.media_type.clone(),
+                    },
+                )
+            })
+            .collect();
+        let manifest = StaticWebManifestV1 {
+            schema: STATIC_WEB_MANIFEST_V1_SCHEMA.to_owned(),
+            materialization_id,
+            entry_path: entry.to_owned(),
+            routing: StaticWebRoutingV1 { spa_fallback },
+            files,
+            security: StaticWebSecurityV1::producer_policy(Vec::new())?,
+        };
+        let manifest_bytes = manifest.canonical_bytes()?;
+        let artifact_files = validated
+            .tree
+            .entries
+            .iter()
+            .map(|entry| PortableStaticFileReport {
+                path: entry.path.clone(),
+                digest: entry.content_ref.clone(),
+                size: entry.size,
+                media_type: entry.media_type.clone(),
+            })
+            .collect::<Vec<_>>();
+        Some(PortableStaticArtifactReport {
+            manifest_digest: bundle_sha256(&manifest_bytes),
+            manifest_base64: base64::engine::general_purpose::STANDARD.encode(manifest_bytes),
+            file_count: artifact_files.len(),
+            total_size: artifact_files.iter().map(|file| file.size).sum(),
+            files: artifact_files,
         })
-        .collect();
-    let manifest = StaticWebManifestV1 {
-        schema: STATIC_WEB_MANIFEST_V1_SCHEMA.to_owned(),
-        materialization_id,
-        entry_path: surface.entry.clone(),
-        routing: StaticWebRoutingV1 {
-            spa_fallback: surface.spa_fallback,
-        },
-        files,
-        security: StaticWebSecurityV1::producer_policy(Vec::new())?,
+    } else {
+        None
     };
-    let manifest_bytes = manifest.canonical_bytes()?;
-    let manifest_digest = bundle_sha256(&manifest_bytes);
-    let artifact_files = validated
-        .tree
-        .entries
-        .iter()
-        .map(|entry| PortableStaticFileReport {
-            path: entry.path.clone(),
-            digest: entry.content_ref.clone(),
-            size: entry.size,
-            media_type: entry.media_type.clone(),
-        })
-        .collect::<Vec<_>>();
+    let workspace_bytes = pack_workspace(bundle, validated)?;
+    let routes = validated_routes(all_routes)?;
     Ok(PortableBundleVerificationReport {
         format_version: 3,
         bundle_sha256: job.transport_digest.clone(),
@@ -291,21 +374,30 @@ fn report(
         root_contract_ref: validated.contract_ref.to_string(),
         application_ref: validated.application_ref.to_string(),
         derivation_refs: bundle.index.derivations.clone(),
-        static_derivation_ref: validated.derivation_ref.to_string(),
+        requirement_ids: validated
+            .contract
+            .requirements
+            .iter()
+            .map(|requirement| requirement.id.clone())
+            .collect(),
+        static_derivation_ref: static_route.map(|route| route.derivation_ref.to_string()),
         title: validated.application.title.clone(),
         surface: PortableSurfaceReport {
             id: surface.id.clone(),
             port: surface.port.clone(),
+            path: surface.path.clone(),
             artifact_ref: surface.artifact_ref.clone(),
             entry: surface.entry.clone(),
             spa_fallback: surface.spa_fallback,
         },
-        artifact: PortableStaticArtifactReport {
-            manifest_digest,
-            manifest_base64: base64::engine::general_purpose::STANDARD.encode(manifest_bytes),
-            file_count: artifact_files.len(),
-            total_size: artifact_files.iter().map(|file| file.size).sum(),
-            files: artifact_files,
+        artifact,
+        routes,
+        workspace: PortableWorkspaceReport {
+            tree_ref: validated.tree_ref.to_string(),
+            artifact_digest: bundle_sha256(&workspace_bytes),
+            artifact_base64: base64::engine::general_purpose::STANDARD.encode(&workspace_bytes),
+            file_count: validated.tree.entries.len(),
+            total_size: validated.tree.entries.iter().map(|entry| entry.size).sum(),
         },
         object_count: bundle.index.objects.len(),
         decoded_size,
@@ -313,20 +405,79 @@ fn report(
     })
 }
 
-fn unique_static_route(
+fn validated_routes(
     validated: &[ValidatedPortableApplication],
-) -> Result<&ValidatedPortableApplication> {
+) -> Result<Vec<PortableRouteReport>> {
+    validated
+        .iter()
+        .map(|route| {
+            let step = route
+                .derivation
+                .steps
+                .first()
+                .context("route omitted step")?;
+            let port = route
+                .derivation
+                .ports
+                .first()
+                .context("route omitted port")?;
+            Ok(PortableRouteReport {
+                derivation_ref: route.derivation_ref.to_string(),
+                realization: match route.realization {
+                    PortableRealizationKind::StaticWeb => "static_web",
+                    PortableRealizationKind::LocalProcess => "process",
+                    PortableRealizationKind::OciContainer => "oci",
+                },
+                runtimes: route.derivation.runtimes.clone(),
+                argv: step.argv.clone(),
+                cwd: step.cwd.clone(),
+                env: step.env.clone(),
+                port: port.id.clone(),
+                guest_port: port.guest_port,
+            })
+        })
+        .collect()
+}
+
+fn pack_workspace(
+    bundle: &ato_objects::PortableApplicationBundle,
+    route: &ValidatedPortableApplication,
+) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    {
+        let mut archive = tar::Builder::new(&mut bytes);
+        for entry in &route.tree.entries {
+            let reference = ato_computation::ContentRef::parse(&entry.content_ref)?;
+            let contents = bundle.payload_bytes(&reference)?;
+            let mut header = tar::Header::new_ustar();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o644);
+            header.set_mtime(0);
+            header.set_uid(0);
+            header.set_gid(0);
+            header.set_entry_type(tar::EntryType::Regular);
+            archive.append_data(&mut header, &entry.path, Cursor::new(contents))?;
+        }
+        archive.finish()?;
+    }
+    Ok(bytes)
+}
+
+fn optional_static_route(
+    validated: &[ValidatedPortableApplication],
+) -> Result<Option<&ValidatedPortableApplication>> {
     let routes = validated
         .iter()
         .filter(|route| route.realization == PortableRealizationKind::StaticWeb)
         .collect::<Vec<_>>();
-    let [route] = routes.as_slice() else {
-        bail!(
-            "portable hosted profile requires exactly one static-web derivation; found {}",
+    match routes.as_slice() {
+        [] => Ok(None),
+        [route] => Ok(Some(*route)),
+        _ => bail!(
+            "portable hosted profile permits at most one static-web derivation; found {}",
             routes.len()
-        );
-    };
-    Ok(*route)
+        ),
+    }
 }
 
 struct HttpValidatorApi {
@@ -557,6 +708,21 @@ struct ValidationJob {
     observe_url: Option<String>,
     #[serde(default)]
     selected_derivation_ref: Option<String>,
+    #[serde(default)]
+    run_id: Option<String>,
+    #[serde(default)]
+    lease_id: Option<String>,
+    #[serde(default)]
+    attempt_id: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    execution_id: Option<String>,
+    #[serde(default)]
+    realization: Option<String>,
+    #[serde(default)]
+    endpoint: Option<String>,
+    #[serde(default)]
+    execution_evidence: Option<VerificationExecutionEvidence>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -652,11 +818,18 @@ mod tests {
             download_url: "/bundle".to_owned(),
             observe_url: None,
             selected_derivation_ref: None,
+            run_id: None,
+            lease_id: None,
+            attempt_id: None,
+            execution_id: None,
+            realization: None,
+            endpoint: None,
+            execution_evidence: None,
         };
         let report = report(&job, &bundle, &validated, bytes.len() as u64).unwrap();
         assert_eq!(report.profile, "ato.portable-application/1");
         assert_eq!(report.root_contract_ref, bundle.index.root_contract_ref);
         assert_eq!(report.derivation_refs, bundle.index.derivations);
-        assert_eq!(report.artifact.files.len(), 2);
+        assert_eq!(report.artifact.as_ref().unwrap().files.len(), 2);
     }
 }

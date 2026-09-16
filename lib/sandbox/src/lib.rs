@@ -197,6 +197,14 @@ pub struct SandboxPolicy {
     pub read_only_paths: Vec<PathBuf>,
     /// Whether to enable network access (default: true for now)
     pub allow_network: bool,
+    /// TCP ports the workload may bind when unrestricted network access is
+    /// disabled. An empty list means it may not bind TCP sockets.
+    #[serde(default)]
+    pub allowed_bind_tcp_ports: Vec<u16>,
+    /// TCP destination ports the workload may connect to when unrestricted
+    /// network access is disabled. An empty list denies TCP egress.
+    #[serde(default)]
+    pub allowed_connect_tcp_ports: Vec<u16>,
     /// Whether this sandbox is in "development mode" (more permissive)
     pub development_mode: bool,
     /// IPC socket paths that must be allowed through the Sandbox.
@@ -212,6 +220,8 @@ impl SandboxPolicy {
             read_write_paths: Vec::new(),
             read_only_paths: Vec::new(),
             allow_network: true,
+            allowed_bind_tcp_ports: Vec::new(),
+            allowed_connect_tcp_ports: Vec::new(),
             development_mode: false,
             ipc_socket_paths: Vec::new(),
         }
@@ -237,6 +247,20 @@ impl SandboxPolicy {
     /// Enable/disable network access
     pub fn with_network(mut self, enabled: bool) -> Self {
         self.allow_network = enabled;
+        self
+    }
+
+    /// Allow the workload to bind selected TCP ports without enabling
+    /// arbitrary TCP egress.
+    pub fn allow_tcp_bind(mut self, ports: impl IntoIterator<Item = u16>) -> Self {
+        self.allowed_bind_tcp_ports.extend(ports);
+        self
+    }
+
+    /// Allow the workload to connect to selected TCP destination ports while
+    /// the rest of TCP egress remains denied.
+    pub fn allow_tcp_connect(mut self, ports: impl IntoIterator<Item = u16>) -> Self {
+        self.allowed_connect_tcp_ports.extend(ports);
         self
     }
 
