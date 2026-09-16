@@ -175,6 +175,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ato-adapter-oci"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "ato-adapter-process"
 version = "0.1.0"
 dependencies = [
@@ -250,6 +259,7 @@ dependencies = [
  "ato-adapter-binding",
  "ato-adapter-browser",
  "ato-adapter-http",
+ "ato-adapter-oci",
  "ato-adapter-process",
  "ato-adapter-pty",
  "ato-adapter-workspace",
@@ -271,6 +281,7 @@ dependencies = [
  "ato-realization-planner",
  "ato-record-writer",
  "ato-runtime-object-graph",
+ "ato-sandbox",
  "base64 0.22.1",
  "blake3",
  "clap",
@@ -321,6 +332,7 @@ dependencies = [
  "anyhow",
  "ato-adapter-api",
  "ato-adapter-browser",
+ "ato-adapter-oci",
  "ato-adapter-process",
  "ato-adapter-workspace",
  "ato-browser-host",
@@ -638,6 +650,7 @@ dependencies = [
  "serde_jcs",
  "serde_json",
  "sha2",
+ "tar",
  "tempfile",
  "thiserror 2.0.18",
 ]

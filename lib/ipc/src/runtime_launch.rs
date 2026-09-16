@@ -135,6 +135,17 @@ pub enum LaunchRealizationV1 {
 #[serde(deny_unknown_fields)]
 pub struct ProcessRealizationV1 {
     pub argv: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<ExecutableRequirementV1>,
+}
+
+/// A logical executable requirement. Resolution to a host path is admission
+/// evidence owned by the Runner and is deliberately absent here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutableRequirementV1 {
+    pub name: String,
+    pub version: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,10 +158,26 @@ pub struct OciRealizationV1 {
     /// would name something that is not reproducible. The control plane
     /// resolves the tag before building the spec, and this is validated.
     pub image_digest_ref: String,
+    /// Pullable repository@digest. Optional only for older stored v1 specs;
+    /// the Docker executor requires it and never guesses a registry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_reference: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_limits: Option<OciResourceLimitsV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub argv: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OciResourceLimitsV1 {
+    pub memory_bytes: u64,
+    pub cpu_limit_millis: u64,
+    pub pids_limit: u64,
 }
 
 /// A non-secret environment variable, carried by value.
@@ -340,6 +367,11 @@ impl RuntimeLaunchSpecV1 {
                 if process.argv.is_empty() || process.argv[0].is_empty() {
                     return Err(RuntimeLaunchSpecError::EmptyArgv);
                 }
+                if let Some(executable) = &process.executable
+                    && (executable.name.is_empty() || executable.version.is_empty())
+                {
+                    return Err(RuntimeLaunchSpecError::EmptyArgv);
+                }
             }
             LaunchRealizationV1::Oci(oci) => {
                 if !is_content_addressed_digest(&oci.image_digest_ref) {
@@ -351,6 +383,30 @@ impl RuntimeLaunchSpecV1 {
                     && (argv.is_empty() || argv[0].is_empty())
                 {
                     return Err(RuntimeLaunchSpecError::EmptyArgv);
+                }
+                if let Some(reference) = &oci.image_reference {
+                    let expected = format!("@{}", oci.image_digest_ref);
+                    if !reference.ends_with(&expected) || reference.starts_with('@') {
+                        return Err(RuntimeLaunchSpecError::InvalidImageDigest {
+                            reference: reference.clone(),
+                        });
+                    }
+                }
+                if let Some(platform) = &oci.platform
+                    && !matches!(platform.as_str(), "linux/amd64" | "linux/arm64")
+                {
+                    return Err(RuntimeLaunchSpecError::InvalidImageDigest {
+                        reference: platform.clone(),
+                    });
+                }
+                if let Some(limits) = &oci.resource_limits
+                    && (limits.memory_bytes == 0
+                        || limits.cpu_limit_millis == 0
+                        || limits.pids_limit == 0)
+                {
+                    return Err(RuntimeLaunchSpecError::InvalidLifecycle {
+                        field: "realization.resource_limits".to_owned(),
+                    });
                 }
             }
         }

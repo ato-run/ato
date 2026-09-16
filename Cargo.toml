@@ -16,6 +16,7 @@ members = [
     "lib/sandbox",
     "extensions/adapters/api",
     "extensions/adapters/process",
+    "extensions/adapters/oci",
     "extensions/adapters/pty",
     "extensions/adapters/workspace",
     "extensions/adapters/binding",

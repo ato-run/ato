@@ -367,6 +367,7 @@ pub enum ProcessError {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn host_environment_does_not_cross_the_process_boundary() {
@@ -428,5 +429,36 @@ mod tests {
                 .unwrap()
                 .success()
         );
+    }
+
+    #[test]
+    fn stopping_one_of_two_isolated_runs_does_not_stop_the_other() {
+        let adapter = |id: &str| {
+            ProcessAdapter::new(ProcessSpec {
+                id: id.to_owned(),
+                command: vec!["/bin/sh".to_owned(), "-c".to_owned(), "sleep 30".to_owned()],
+                cwd: PathBuf::from("."),
+                environment: BTreeMap::new(),
+                isolated_group: true,
+            })
+            .unwrap()
+        };
+        let first = adapter("run-a").spawn(Path::new(".")).unwrap();
+        let second = adapter("run-b").spawn(Path::new(".")).unwrap();
+        let second_pid = second.pid();
+
+        drop(first);
+
+        assert!(
+            Command::new("kill")
+                .args(["-0", &second_pid.to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success(),
+            "stopping run-a affected run-b"
+        );
+        drop(second);
     }
 }
