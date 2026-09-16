@@ -141,3 +141,31 @@ browser, test the offline OCI loader against an image-absent Docker store,
 run a real outbound-blocked offline acceptance, and rerun all four routes with
 the exact same supported bundle representation. No fallback, upload-limit
 expansion, or production deployment was used to conceal these gaps.
+
+## v0 PR 1 local implementation checkpoint (not staging acceptance)
+
+The subsequent `feat/portable-v0-oci-surface` work starts from ato
+`4a92cecd`, API `c545b2fa`, and PWA `f503d773`. It adds a Run-scoped OCI
+port-mapping diagnostic (container IP and guest Port → Runner forward Port),
+correlated in the API with the selected DerivationRef, Run, lease, runtime
+route, and public Runner host. The app proxy logs the root navigation's dial,
+headers, and complete HTML body separately. Logs omit credentials and query
+strings; none of these observed host values enter K or D identity.
+
+Hosted import now reports Surface status separately from the Contract receipt.
+For a dynamic route, the API requires the selected Run/lease's ready route and
+probes the public Runner origin at the declared initial path, consuming the
+response body with a size and time bound. The PWA waits for both Verified and
+Surface Ready before offering Open App; a failed public probe does not rewrite
+or invalidate K. This is a gate and diagnostic, **not yet a demonstrated 524
+repair**. The cinst app-proxy hostname and actual browser operation still need
+fresh staging acceptance.
+
+Local checks: `cargo check` for the OCI Adapter and Connected Worker; their
+87 tests; API typecheck, 7 new Surface tests, and 31 existing Surface/App proxy tests;
+PWA typecheck, AppReady DOM test, and build passed. A broader API route suite
+failed 13 tests because its test D1 lacks tables such as `runtime_routes` and
+`telemetry_client_events`; the same 13 failures reproduced from untouched API
+`c545b2fa` under the same command. No staging or production deployment was
+performed at this checkpoint. Staging PWA was signed out when checked, so no
+new browser receipt or screenshot is claimed.
