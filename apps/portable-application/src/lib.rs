@@ -11,7 +11,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -222,13 +222,43 @@ pub struct PortableDynamicBundleSpec {
 pub struct StaticApplicationServer {
     address: SocketAddr,
     running: Arc<AtomicBool>,
+    local_storage: Option<Arc<Mutex<BTreeMap<String, String>>>>,
     thread: Option<JoinHandle<()>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaticApplicationState {
+    pub persistence_token: String,
+    pub local_storage: BTreeMap<String, String>,
+    pub assets: Vec<StaticApplicationAsset>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaticApplicationAsset {
+    pub asset_id: String,
+    pub filename: String,
+    pub content_type: String,
+    pub bytes: Vec<u8>,
+}
+
+struct StaticApplicationRuntimeState {
+    persistence_token: String,
+    local_storage: Arc<Mutex<BTreeMap<String, String>>>,
+    assets: BTreeMap<String, StaticApplicationAsset>,
 }
 
 impl StaticApplicationServer {
     pub fn start(
         root: &Path,
         validated: &ValidatedPortableApplication,
+    ) -> Result<Self, PortableApplicationError> {
+        Self::start_with_state(root, validated, None)
+    }
+
+    pub fn start_with_state(
+        root: &Path,
+        validated: &ValidatedPortableApplication,
+        state: Option<StaticApplicationState>,
     ) -> Result<Self, PortableApplicationError> {
         if validated.realization != PortableRealizationKind::StaticWeb {
             return Err(profile("static server requires a static-web derivation"));
@@ -263,8 +293,23 @@ impl StaticApplicationServer {
             .ok_or_else(|| profile("static surface omitted its entry"))?;
         let entry_route = format!("/{entry}");
         let spa_fallback = surface.spa_fallback.unwrap_or(false);
+        let state = state.map(|state| {
+            let local_storage = Arc::new(Mutex::new(state.local_storage));
+            let assets = state
+                .assets
+                .into_iter()
+                .map(|asset| (asset.asset_id.clone(), asset))
+                .collect();
+            Arc::new(StaticApplicationRuntimeState {
+                persistence_token: state.persistence_token,
+                local_storage,
+                assets,
+            })
+        });
+        let local_storage = state.as_ref().map(|state| Arc::clone(&state.local_storage));
         let running = Arc::new(AtomicBool::new(true));
         let thread_running = Arc::clone(&running);
+        let thread_state = state;
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let thread = thread::spawn(move || {
             let _ = ready_tx.send(());
@@ -275,7 +320,13 @@ impl StaticApplicationServer {
                 if !thread_running.load(Ordering::Acquire) {
                     break;
                 }
-                let _ = serve_request(stream, &routes, &entry_route, spa_fallback);
+                let _ = serve_request(
+                    stream,
+                    &routes,
+                    &entry_route,
+                    spa_fallback,
+                    thread_state.as_deref(),
+                );
             }
         });
         ready_rx
@@ -284,12 +335,27 @@ impl StaticApplicationServer {
         Ok(Self {
             address,
             running,
+            local_storage,
             thread: Some(thread),
         })
     }
 
     pub fn base_url(&self) -> String {
         format!("http://{}", self.address)
+    }
+
+    pub fn local_storage(
+        &self,
+    ) -> Result<Option<BTreeMap<String, String>>, PortableApplicationError> {
+        self.local_storage
+            .as_ref()
+            .map(|state| {
+                state
+                    .lock()
+                    .map(|state| state.clone())
+                    .map_err(|_| profile("static application state lock was poisoned"))
+            })
+            .transpose()
     }
 }
 
@@ -1303,17 +1369,20 @@ fn serve_request(
     routes: &BTreeMap<String, (PathBuf, String)>,
     entry_route: &str,
     spa_fallback: bool,
+    state: Option<&StaticApplicationRuntimeState>,
 ) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let mut reader = BufReader::new(stream.try_clone()?);
     let mut request_line = String::new();
-    BufReader::new(stream.try_clone()?)
+    reader
+        .by_ref()
         .take(8 * 1024)
         .read_line(&mut request_line)?;
     let mut fields = request_line.split_whitespace();
     let method = fields.next().unwrap_or_default();
     let raw_path = fields.next().unwrap_or_default();
     let request_path = raw_path.split('?').next().unwrap_or_default();
-    if !matches!(method, "GET" | "HEAD") || !request_path.starts_with('/') {
+    if !request_path.starts_with('/') {
         return write_response(
             &mut stream,
             400,
@@ -1321,6 +1390,124 @@ fn serve_request(
             b"Bad Request\n",
             method,
         );
+    }
+    let mut content_length = None;
+    let mut content_type = None;
+    let mut persistence_token = None;
+    let mut header_bytes = request_line.len();
+    loop {
+        let mut line = String::new();
+        let read = reader.by_ref().take(8 * 1024).read_line(&mut line)?;
+        if read == 0 || line == "\r\n" || line == "\n" {
+            break;
+        }
+        header_bytes += read;
+        if header_bytes > 32 * 1024 {
+            return write_response(
+                &mut stream,
+                400,
+                "text/plain; charset=utf-8",
+                b"Bad Request\n",
+                method,
+            );
+        }
+        if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case("content-length")
+        {
+            content_length = value.trim().parse::<usize>().ok();
+        } else if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case("content-type")
+        {
+            content_type = Some(value.trim().to_owned());
+        } else if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case("x-ato-state-token")
+        {
+            persistence_token = Some(value.trim().to_owned());
+        }
+    }
+    if method == "POST" && request_path == "/__ato/instance-state/local-storage" {
+        let Some(state) = state else {
+            return write_response(
+                &mut stream,
+                404,
+                "application/json",
+                br#"{"error":"not_found"}"#,
+                method,
+            );
+        };
+        if persistence_token.as_deref() != Some(state.persistence_token.as_str()) {
+            return write_response(
+                &mut stream,
+                403,
+                "application/json",
+                br#"{"error":"forbidden"}"#,
+                method,
+            );
+        }
+        if content_type.as_deref() != Some("application/json") {
+            return write_response(
+                &mut stream,
+                400,
+                "application/json",
+                br#"{"error":"invalid_state"}"#,
+                method,
+            );
+        }
+        let Some(content_length) = content_length.filter(|length| *length <= 16 * 1024 * 1024)
+        else {
+            return write_response(
+                &mut stream,
+                400,
+                "application/json",
+                br#"{"error":"invalid_state"}"#,
+                method,
+            );
+        };
+        let mut body = vec![0; content_length];
+        reader.read_exact(&mut body)?;
+        let update = serde_json::from_slice::<StaticStateUpdate>(&body).ok();
+        let Some(update) = update.filter(|update| update.local_storage.len() <= 4096) else {
+            return write_response(
+                &mut stream,
+                400,
+                "application/json",
+                br#"{"error":"invalid_state"}"#,
+                method,
+            );
+        };
+        let Ok(mut current) = state.local_storage.lock() else {
+            return write_response(
+                &mut stream,
+                500,
+                "application/json",
+                br#"{"error":"state_unavailable"}"#,
+                method,
+            );
+        };
+        *current = update.local_storage;
+        return write_response(&mut stream, 200, "application/json", b"{}", method);
+    }
+    if !matches!(method, "GET" | "HEAD") {
+        return write_response(
+            &mut stream,
+            400,
+            "text/plain; charset=utf-8",
+            b"Bad Request\n",
+            method,
+        );
+    }
+    if let Some(asset_id) = request_path.strip_prefix("/__ato/assets/") {
+        let selected = state.and_then(|state| state.assets.get(asset_id));
+        let Some(asset) = selected else {
+            return write_response(
+                &mut stream,
+                404,
+                "text/plain; charset=utf-8",
+                b"Not Found\n",
+                method,
+            );
+        };
+        return write_response(&mut stream, 200, &asset.content_type, &asset.bytes, method);
     }
     let route = if request_path == "/" {
         entry_route
@@ -1339,8 +1526,75 @@ fn serve_request(
             method,
         );
     };
-    let body = fs::read(path)?;
+    let mut body = fs::read(path)?;
+    if route == entry_route
+        && media_type.starts_with("text/html")
+        && let Some(state) = state
+    {
+        body = inject_static_application_state(&body, state)?;
+    }
     write_response(&mut stream, 200, media_type, &body, method)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StaticStateUpdate {
+    local_storage: BTreeMap<String, String>,
+}
+
+fn inject_static_application_state(
+    body: &[u8],
+    state: &StaticApplicationRuntimeState,
+) -> std::io::Result<Vec<u8>> {
+    let local_storage = state
+        .local_storage
+        .lock()
+        .map_err(|_| std::io::Error::other("static application state lock was poisoned"))?
+        .clone();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(
+        serde_json::to_vec(&local_storage)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
+    );
+    let persistence_token = &state.persistence_token;
+    let bridge = format!(
+        r#"<script>(()=>{{
+const storage=window.localStorage;
+const bytes=Uint8Array.from(atob('{encoded}'),value=>value.charCodeAt(0));
+const initial=JSON.parse(new TextDecoder().decode(bytes));
+const rawSet=Storage.prototype.setItem;
+const rawRemove=Storage.prototype.removeItem;
+const rawClear=Storage.prototype.clear;
+rawClear.call(storage);
+for(const [key,value] of Object.entries(initial)) rawSet.call(storage,key,value);
+let queue=Promise.resolve();
+function current(){{
+  const values={{}};
+  for(const key of Object.keys(storage).sort()) values[key]=storage.getItem(key);
+  return values;
+}}
+function persist(){{
+  const body=JSON.stringify({{local_storage:current()}});
+  queue=queue.then(()=>fetch('/__ato/instance-state/local-storage',{{
+    method:'POST',credentials:'same-origin',keepalive:true,
+    headers:{{'content-type':'application/json','x-ato-state-token':'{persistence_token}'}},body
+  }})).catch(()=>{{}});
+  return queue;
+}}
+Storage.prototype.setItem=function(key,value){{rawSet.call(this,key,value);if(this===storage)persist();}};
+Storage.prototype.removeItem=function(key){{rawRemove.call(this,key);if(this===storage)persist();}};
+Storage.prototype.clear=function(){{rawClear.call(this);if(this===storage)persist();}};
+window.__atoLocalStateFlush=persist;
+}})();</script>"#
+    );
+    let mut html = String::from_utf8(body.to_vec())
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let lowercase = html.to_ascii_lowercase();
+    let position = lowercase
+        .find("<script")
+        .or_else(|| lowercase.find("</head>"))
+        .unwrap_or(0);
+    html.insert_str(position, &bridge);
+    Ok(html.into_bytes())
 }
 
 fn write_response(
@@ -1353,7 +1607,9 @@ fn write_response(
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
+        403 => "Forbidden",
         404 => "Not Found",
+        500 => "Internal Server Error",
         _ => "Error",
     };
     write!(
@@ -2280,6 +2536,10 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/interop-datasette")
     }
 
+    fn portable_todo_fixture_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/portable-todo-assets")
+    }
+
     fn datasette_spec() -> PortableDynamicBundleSpec {
         PortableDynamicBundleSpec {
             title: "Datasette catalog".to_owned(),
@@ -2347,6 +2607,18 @@ mod tests {
     }
 
     #[test]
+    fn portable_todo_fixture_is_deterministic_and_fully_validated() {
+        let (left, bundle) =
+            build_static_bundle(&portable_todo_fixture_root(), "Portable Todo").unwrap();
+        let (right, _) =
+            build_static_bundle(&portable_todo_fixture_root(), "Portable Todo").unwrap();
+        assert_eq!(left, right);
+        let validated = validate_bundle(&bundle).unwrap();
+        assert_eq!(validated.application.title, "Portable Todo");
+        assert_eq!(validated.realization, PortableRealizationKind::StaticWeb);
+    }
+
+    #[test]
     fn materialization_recomputes_every_file_identity() {
         let (bytes, _) = build_static_bundle(&fixture_root(), "Ato portability proof").unwrap();
         let (bundle, validated) = validate_bytes(&bytes).unwrap();
@@ -2378,6 +2650,140 @@ mod tests {
         stream.read_to_end(&mut response).unwrap();
         assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
         assert!(response.ends_with(b"ato-k-interop-v1\n"));
+    }
+
+    #[test]
+    fn local_static_server_restores_and_tracks_browser_state() {
+        let (bytes, _) =
+            build_static_bundle(&portable_todo_fixture_root(), "Portable Todo").unwrap();
+        let (bundle, validated) = validate_bytes(&bytes).unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let destination = parent.path().join("app");
+        materialize_tree(&bundle, &validated, &destination).unwrap();
+        let server = StaticApplicationServer::start_with_state(
+            &destination,
+            &validated,
+            Some(StaticApplicationState {
+                persistence_token: "test-token".to_owned(),
+                local_storage: BTreeMap::from([(
+                    "portable-todo-v1".to_owned(),
+                    r#"{"todos":["one"],"photo":null}"#.to_owned(),
+                )]),
+                assets: Vec::new(),
+            }),
+        )
+        .unwrap();
+        let mut entry_stream = TcpStream::connect(server.address).unwrap();
+        entry_stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut entry_response = Vec::new();
+        entry_stream.read_to_end(&mut entry_response).unwrap();
+        let update = serde_json::json!({
+            "local_storage": {
+                "portable-todo-v1": r#"{"todos":["one","two"],"photo":null}"#
+            }
+        });
+        let update = serde_json::to_vec(&update).unwrap();
+        let mut update_stream = TcpStream::connect(server.address).unwrap();
+        write!(
+            update_stream,
+            "POST /__ato/instance-state/local-storage HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nX-Ato-State-Token: test-token\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            update.len()
+        )
+        .unwrap();
+        update_stream.write_all(&update).unwrap();
+        let mut update_response = Vec::new();
+        update_stream.read_to_end(&mut update_response).unwrap();
+
+        assert!(
+            String::from_utf8(entry_response)
+                .unwrap()
+                .contains("window.__atoLocalStateFlush=persist")
+        );
+        assert!(update_response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+        assert_eq!(
+            server.local_storage().unwrap().unwrap(),
+            BTreeMap::from([(
+                "portable-todo-v1".to_owned(),
+                r#"{"todos":["one","two"],"photo":null}"#.to_owned()
+            )])
+        );
+    }
+
+    #[test]
+    fn local_static_server_rejects_browser_state_without_the_run_token() {
+        let (bytes, _) =
+            build_static_bundle(&portable_todo_fixture_root(), "Portable Todo").unwrap();
+        let (bundle, validated) = validate_bytes(&bytes).unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let destination = parent.path().join("app");
+        materialize_tree(&bundle, &validated, &destination).unwrap();
+        let initial = BTreeMap::from([("portable-todo-v1".to_owned(), "original".to_owned())]);
+        let server = StaticApplicationServer::start_with_state(
+            &destination,
+            &validated,
+            Some(StaticApplicationState {
+                persistence_token: "test-token".to_owned(),
+                local_storage: initial.clone(),
+                assets: Vec::new(),
+            }),
+        )
+        .unwrap();
+        let update = serde_json::to_vec(&serde_json::json!({
+            "local_storage": {"portable-todo-v1": "changed"}
+        }))
+        .unwrap();
+        let mut stream = TcpStream::connect(server.address).unwrap();
+        write!(
+            stream,
+            "POST /__ato/instance-state/local-storage HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            update.len()
+        )
+        .unwrap();
+        stream.write_all(&update).unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).unwrap();
+
+        assert!(response.starts_with(b"HTTP/1.1 403 Forbidden\r\n"));
+        assert_eq!(server.local_storage().unwrap().unwrap(), initial);
+    }
+
+    #[test]
+    fn local_static_server_serves_restored_asset_bytes() {
+        let (bytes, _) =
+            build_static_bundle(&portable_todo_fixture_root(), "Portable Todo").unwrap();
+        let (bundle, validated) = validate_bytes(&bytes).unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let destination = parent.path().join("app");
+        materialize_tree(&bundle, &validated, &destination).unwrap();
+        let asset_id = "ast_01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let server = StaticApplicationServer::start_with_state(
+            &destination,
+            &validated,
+            Some(StaticApplicationState {
+                persistence_token: "test-token".to_owned(),
+                local_storage: BTreeMap::new(),
+                assets: vec![StaticApplicationAsset {
+                    asset_id: asset_id.to_owned(),
+                    filename: "photo.png".to_owned(),
+                    content_type: "image/png".to_owned(),
+                    bytes: b"restored-image".to_vec(),
+                }],
+            }),
+        )
+        .unwrap();
+        let mut stream = TcpStream::connect(server.address).unwrap();
+        write!(
+            stream,
+            "GET /__ato/assets/{asset_id} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).unwrap();
+
+        assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+        assert!(response.ends_with(b"restored-image"));
     }
 
     #[test]

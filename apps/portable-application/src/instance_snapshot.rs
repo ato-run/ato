@@ -268,6 +268,36 @@ pub(crate) fn validate_snapshot_resource_bytes(
     Ok(())
 }
 
+pub fn decode_browser_state(
+    bytes: &[u8],
+) -> Result<BTreeMap<String, String>, PortableApplicationError> {
+    validate_snapshot_resource_bytes(BROWSER_INSTANCE_STATE_PROTOCOL, bytes)?;
+    let state: BrowserStateV1 = serde_json::from_slice(bytes)?;
+    Ok(state
+        .local_storage
+        .into_iter()
+        .map(|entry| (entry.key, entry.value))
+        .collect())
+}
+
+pub fn encode_browser_state(
+    local_storage: &BTreeMap<String, String>,
+) -> Result<Vec<u8>, PortableApplicationError> {
+    let state = BrowserStateV1 {
+        version: 1,
+        local_storage: local_storage
+            .iter()
+            .map(|(key, value)| BrowserStateEntryV1 {
+                key: key.clone(),
+                value: value.clone(),
+            })
+            .collect(),
+    };
+    let bytes = serde_jcs::to_vec(&state)?;
+    validate_snapshot_resource_bytes(BROWSER_INSTANCE_STATE_PROTOCOL, &bytes)?;
+    Ok(bytes)
+}
+
 fn alias_uri(alias: &str) -> String {
     format!("{ASSET_ALIAS_URI_PREFIX}{alias}")
 }
@@ -474,6 +504,88 @@ pub(crate) fn rebind_snapshot_resource_assets(
         }
     }
     Ok(serde_jcs::to_vec(&state)?)
+}
+
+pub(crate) fn capture_snapshot_resource_assets(
+    snapshot: &InstanceSnapshotV1,
+    resource: &InstanceSnapshotResourceV1,
+    bytes: &[u8],
+    asset_uris: &BTreeMap<String, String>,
+) -> Result<Vec<u8>, PortableApplicationError> {
+    let bindings = snapshot
+        .asset_bindings
+        .iter()
+        .filter(|binding| binding.resource_slot == resource.slot)
+        .collect::<Vec<_>>();
+    if bindings.is_empty() {
+        validate_snapshot_resource_bytes(&resource.protocol, bytes)?;
+        return Ok(bytes.to_vec());
+    }
+    if resource.protocol == DATA_JSON_PROTOCOL {
+        let mut value: serde_json::Value = serde_json::from_slice(bytes)?;
+        for binding in bindings {
+            let InstanceSnapshotAssetLocationV1::DataJson { pointer } = &binding.location else {
+                return Err(profile("snapshot Asset binding protocol mismatch"));
+            };
+            let target = value
+                .pointer_mut(pointer)
+                .ok_or_else(|| profile("snapshot Asset binding JSON pointer is missing"))?;
+            let local_uri = asset_uris
+                .get(&binding.alias)
+                .ok_or_else(|| profile("snapshot Asset alias was not materialized"))?;
+            if target.as_str() != Some(local_uri.as_str()) {
+                return Err(profile("local snapshot Asset binding value changed"));
+            }
+            *target = serde_json::Value::String(alias_uri(&binding.alias));
+        }
+        let bytes = serde_jcs::to_vec(&value)?;
+        validate_snapshot_resource_bytes(&resource.protocol, &bytes)?;
+        return Ok(bytes);
+    }
+
+    let mut state: BrowserStateV1 = serde_json::from_slice(bytes)?;
+    for binding in bindings {
+        let InstanceSnapshotAssetLocationV1::BrowserLocalStorage {
+            key,
+            pointer,
+            json_encoded,
+        } = &binding.location
+        else {
+            return Err(profile("snapshot Asset binding protocol mismatch"));
+        };
+        let entry = state
+            .local_storage
+            .iter_mut()
+            .find(|entry| entry.key == *key)
+            .ok_or_else(|| profile("snapshot browser Asset binding key is missing"))?;
+        let local_uri = asset_uris
+            .get(&binding.alias)
+            .ok_or_else(|| profile("snapshot Asset alias was not materialized"))?;
+        let alias_uri = alias_uri(&binding.alias);
+        if !json_encoded {
+            if entry.value != *local_uri {
+                return Err(profile(
+                    "local snapshot browser Asset binding value changed",
+                ));
+            }
+            entry.value = alias_uri;
+        } else {
+            let mut value: serde_json::Value = serde_json::from_str(&entry.value)?;
+            let target = value
+                .pointer_mut(pointer)
+                .ok_or_else(|| profile("snapshot browser Asset binding JSON pointer is missing"))?;
+            if target.as_str() != Some(local_uri.as_str()) {
+                return Err(profile(
+                    "local snapshot browser Asset binding value changed",
+                ));
+            }
+            *target = serde_json::Value::String(alias_uri);
+            entry.value = serde_jcs::to_string(&value)?;
+        }
+    }
+    let bytes = serde_jcs::to_vec(&state)?;
+    validate_snapshot_resource_bytes(&resource.protocol, &bytes)?;
+    Ok(bytes)
 }
 
 pub(crate) fn validated_snapshot(
