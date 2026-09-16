@@ -4,6 +4,7 @@
 
 mod desktop_control;
 mod object_transport;
+mod portable_dependency;
 
 pub mod activity_client;
 pub mod activity_mcp;
@@ -41,10 +42,12 @@ use ato_materializer_vm_snapshot::{
 };
 use ato_objects::{
     BranchOrigin, BundleMaterialization, CapsuleBundle, CapsuleBundleDocument, CapsuleSelector,
-    GraphMaterialization, GraphRestoreCapability, LocalCapsuleRepository, RecordId,
-    ReferenceRegistry, decode_capsule_bundle_document, encode_bundle,
-    export_bundle_with_materializations, export_object_graph, import_bundle, resolve_computation,
+    GraphMaterialization, GraphRestoreCapability, LocalCapsuleRepository,
+    PortableDependencyProfile, RecordId, ReferenceRegistry, decode_capsule_bundle_document,
+    encode_bundle, export_bundle_with_materializations, export_object_graph, import_bundle,
+    resolve_computation,
 };
+use ato_portable_application::portability_export::repack_portable_dependencies;
 use ato_portable_application::portability_plan::{PortableExportProfile, plan_portable_export};
 use ato_portable_application::{
     OCI_CPU_MILLIS_RUNTIME, OCI_IMAGE_RUNTIME, OCI_MEMORY_BYTES_RUNTIME, OCI_PIDS_LIMIT_RUNTIME,
@@ -100,6 +103,8 @@ enum Commands {
     Run(RunArgs),
     /// Preview dependency size and guarantees before a portable export.
     ExportPlan(ExportPlanArgs),
+    /// Repack an existing portable application without changing K or D.
+    Export(ExportArgs),
     /// Upload a content-addressed Capsule object graph.
     Upload(UploadArgs),
     /// Report this binary's build identity (version, commit, profile).
@@ -185,6 +190,15 @@ struct ExportPlanArgs {
     portability: PortableExportProfile,
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ExportArgs {
+    capsule: PathBuf,
+    #[arg(long, value_enum)]
+    portability: PortableExportProfile,
+    #[arg(short, long)]
+    output: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -277,6 +291,7 @@ pub fn run() -> Result<()> {
         Commands::Encap(args) => encap(args),
         Commands::Run(args) => run_capsule(args),
         Commands::ExportPlan(args) => export_plan(args),
+        Commands::Export(args) => export_portable(args),
         Commands::Upload(args) => upload(args),
         Commands::Worker {
             project,
@@ -666,6 +681,9 @@ fn run_capsule(args: RunArgs) -> Result<()> {
         CapsuleBundleDocument::PortableApplicationV3(bundle) => {
             run_portable_application(args, &bytes, bundle)
         }
+        CapsuleBundleDocument::PortableApplicationV4(bundle) => {
+            run_portable_application(args, &bytes, bundle)
+        }
     }
 }
 
@@ -677,7 +695,32 @@ fn export_plan(args: ExportPlanArgs) -> Result<()> {
     else {
         bail!("export planning currently requires a portable application v3 bundle");
     };
-    let plan = plan_portable_export(&bundle, bytes.len(), args.portability)?;
+    let mut plan = plan_portable_export(&bundle, bytes.len(), args.portability)?;
+    let resolved_sources = match args.portability {
+        PortableExportProfile::Thin => portable_dependency::discover_wheel_sources(&bundle),
+        PortableExportProfile::Cached | PortableExportProfile::Offline => Ok(BTreeMap::new()),
+    };
+    match resolved_sources.and_then(|sources| {
+        let profile = match args.portability {
+            PortableExportProfile::Thin => PortableDependencyProfile::Thin,
+            PortableExportProfile::Cached => PortableDependencyProfile::Cached,
+            PortableExportProfile::Offline => PortableDependencyProfile::Offline,
+        };
+        repack_portable_dependencies(&bundle, profile, &sources)
+            .map(|(output, _)| output.len())
+            .map_err(Into::into)
+    }) {
+        Ok(size) => {
+            plan.estimated_export_bytes = Some(size);
+            plan.blockers.clear();
+        }
+        Err(error) => {
+            plan.estimated_export_bytes = None;
+            if plan.blockers.is_empty() {
+                plan.blockers.push(error.to_string());
+            }
+        }
+    }
     if args.json {
         println!("{}", serde_json::to_string_pretty(&plan)?);
     } else {
@@ -685,6 +728,16 @@ fn export_plan(args: ExportPlanArgs) -> Result<()> {
         println!("Application input: {} bytes", plan.application_input_bytes);
         println!("Python wheels: {} bytes", plan.python_wheel_bytes);
         println!("OCI images: {}", plan.oci_images.len());
+        println!("Embedded objects: {}", plan.embedded_objects);
+        println!("External objects: {}", plan.external_objects);
+        println!(
+            "Embedded dependency bytes: {}",
+            plan.embedded_dependency_bytes
+        );
+        println!(
+            "Known external dependency bytes: {}",
+            plan.external_dependency_bytes
+        );
         match plan.estimated_export_bytes {
             Some(size) => println!("Estimated export: {size} bytes"),
             None => println!("Estimated export: unavailable until dependencies are resolved"),
@@ -701,6 +754,37 @@ fn export_plan(args: ExportPlanArgs) -> Result<()> {
             println!("Blocked: {blocker}");
         }
     }
+    Ok(())
+}
+
+fn export_portable(args: ExportArgs) -> Result<()> {
+    let bytes =
+        fs::read(&args.capsule).with_context(|| format!("read {}", args.capsule.display()))?;
+    let CapsuleBundleDocument::PortableApplicationV3(bundle) =
+        decode_capsule_bundle_document(&bytes)?
+    else {
+        bail!("dependency export currently requires a complete portable application v3 bundle");
+    };
+    if args.output.exists() {
+        bail!("export output already exists: {}", args.output.display());
+    }
+    let (profile, sources) = match args.portability {
+        PortableExportProfile::Thin => (
+            PortableDependencyProfile::Thin,
+            portable_dependency::discover_wheel_sources(&bundle)?,
+        ),
+        PortableExportProfile::Cached => (PortableDependencyProfile::Cached, BTreeMap::new()),
+        PortableExportProfile::Offline => (PortableDependencyProfile::Offline, BTreeMap::new()),
+    };
+    let (output, repacked) = repack_portable_dependencies(&bundle, profile, &sources)?;
+    ato_local_execution::atomic_write(&args.output, &output)?;
+    println!("file={}", args.output.display());
+    println!("bundle_sha256={}", bundle_sha256(&output));
+    println!("contract_ref={}", repacked.index.root_contract_ref);
+    for reference in &repacked.index.derivations {
+        println!("derivation_ref={reference}");
+    }
+    println!("bytes={}", output.len());
     Ok(())
 }
 
@@ -846,7 +930,11 @@ fn run_portable_application(
         .prefix("ato-portable-run-")
         .tempdir_in(cache)?;
     let workspace = runtime.path().join("workspace");
-    materialize_tree(&bundle, &validated, &workspace)?;
+    let (hydrated, dependency_fetches) = portable_dependency::hydrate_external_objects(&bundle)?;
+    for reference in &dependency_fetches {
+        eprintln!("dependency fetched and verified: {reference}");
+    }
+    materialize_tree(&hydrated, &validated, &workspace)?;
     let mut runtime = PortableLocalRuntime::start(&workspace, runtime.path(), &validated)?;
 
     let mut observation = RuntimeObservation::default();
@@ -914,7 +1002,12 @@ fn run_portable_application(
         &observation,
         verification,
     );
-    receipt.execution = Some(runtime.execution_evidence());
+    let mut execution = runtime.execution_evidence();
+    if !dependency_fetches.is_empty() {
+        receipt.schema = ato_formation::verify::CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V2.to_owned();
+        execution.dependency_fetches = dependency_fetches;
+    }
+    receipt.execution = Some(execution);
     if let Some(path) = &args.verification_receipt {
         fs::write(path, receipt.canonical_bytes()?)
             .with_context(|| format!("write verification receipt {}", path.display()))?;
@@ -1134,6 +1227,7 @@ impl PortableLocalRuntime {
                 run_id: None,
                 lease_id: None,
                 attempt_id: None,
+                dependency_fetches: Vec::new(),
             },
             Self::Process {
                 handle,
@@ -1152,6 +1246,7 @@ impl PortableLocalRuntime {
                 run_id: None,
                 lease_id: None,
                 attempt_id: None,
+                dependency_fetches: Vec::new(),
             },
             Self::Oci { handle, base_url } => VerificationExecutionEvidence {
                 realization: "oci".to_owned(),
@@ -1165,6 +1260,7 @@ impl PortableLocalRuntime {
                 run_id: None,
                 lease_id: None,
                 attempt_id: None,
+                dependency_fetches: Vec::new(),
             },
         }
     }

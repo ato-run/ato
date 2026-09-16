@@ -11,6 +11,8 @@ use crate::{BundleError, CapsuleBundle, decode_bundle};
 
 pub const PORTABLE_APPLICATION_BUNDLE_VERSION: u32 = 3;
 pub const PORTABLE_APPLICATION_PROFILE: &str = "ato.portable-application/1";
+pub const PORTABLE_APPLICATION_BUNDLE_VERSION_V4: u32 = 4;
+pub const PORTABLE_APPLICATION_PROFILE_V2: &str = "ato.portable-application/2";
 const MAX_BUNDLE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_BUNDLE_OBJECTS: usize = 10_000;
 const MAX_BUNDLE_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
@@ -51,11 +53,36 @@ pub struct PortableBundlePayload {
     pub bytes: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PortableDependencyProfile {
+    Thin,
+    Cached,
+    Offline,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortableExternalObject {
+    pub reference: String,
+    pub sources: Vec<String>,
+}
+
+/// Transport/cache information only. This object is not referenced by K or D.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortableDependencyTransport {
+    pub profile: PortableDependencyProfile,
+    pub external_objects: Vec<PortableExternalObject>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PortableApplicationBundle {
     pub index: PortableBundleIndex,
     pub payloads: Vec<PortableBundlePayload>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portability: Option<PortableDependencyTransport>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub signatures: Vec<serde_json::Value>,
 }
@@ -64,6 +91,7 @@ pub struct PortableApplicationBundle {
 pub enum CapsuleBundleDocument {
     ComputationV2(CapsuleBundle),
     PortableApplicationV3(PortableApplicationBundle),
+    PortableApplicationV4(PortableApplicationBundle),
 }
 
 #[derive(Debug, Error)]
@@ -102,6 +130,10 @@ pub enum PortableBundleError {
     DuplicateObject(String),
     #[error("bundle descriptor/payload mismatch for `{0}`")]
     DescriptorMismatch(String),
+    #[error("external object `{0}` is invalid or not a declared blob")]
+    InvalidExternalObject(String),
+    #[error("offline bundle declares external object `{0}`")]
+    OfflineExternalObject(String),
     #[error("object `{reference}` has declared size {size}; maximum is {maximum}")]
     OversizedObject {
         reference: String,
@@ -207,6 +239,9 @@ pub fn decode_capsule_bundle_document(
         PORTABLE_APPLICATION_BUNDLE_VERSION => Ok(CapsuleBundleDocument::PortableApplicationV3(
             decode_portable_application_bundle(bytes)?,
         )),
+        PORTABLE_APPLICATION_BUNDLE_VERSION_V4 => Ok(CapsuleBundleDocument::PortableApplicationV4(
+            decode_portable_application_bundle(bytes)?,
+        )),
         version => Err(CapsuleBundleDocumentError::UnsupportedVersion(version)),
     }
 }
@@ -249,12 +284,12 @@ pub fn validate_portable_application_closure(
         let descriptor = descriptors
             .get(&reference)
             .ok_or_else(|| PortableBundleError::IncompleteClosure(reference.clone()))?;
-        let payload = payloads
-            .get(&reference)
-            .expect("shape validation pairs every descriptor and payload");
         if descriptor.kind == PortableBundleObjectKind::Blob {
             continue;
         }
+        let payload = payloads
+            .get(&reference)
+            .expect("shape validation embeds every structured object");
         let schema = descriptor
             .schema
             .as_deref()
@@ -303,22 +338,42 @@ impl PortableApplicationBundle {
 fn validate_shape_and_payloads(
     bundle: &PortableApplicationBundle,
 ) -> Result<(), PortableBundleError> {
-    if bundle.index.version != PORTABLE_APPLICATION_BUNDLE_VERSION {
-        return Err(PortableBundleError::UnsupportedVersion(
-            bundle.index.version,
-        ));
-    }
-    if bundle.index.profile != PORTABLE_APPLICATION_PROFILE {
-        return Err(PortableBundleError::UnsupportedProfile(
-            bundle.index.profile.clone(),
-        ));
-    }
+    let external = match bundle.index.version {
+        PORTABLE_APPLICATION_BUNDLE_VERSION => {
+            if bundle.index.profile != PORTABLE_APPLICATION_PROFILE || bundle.portability.is_some()
+            {
+                return Err(PortableBundleError::UnsupportedProfile(
+                    bundle.index.profile.clone(),
+                ));
+            }
+            &[][..]
+        }
+        PORTABLE_APPLICATION_BUNDLE_VERSION_V4 => {
+            if bundle.index.profile != PORTABLE_APPLICATION_PROFILE_V2 {
+                return Err(PortableBundleError::UnsupportedProfile(
+                    bundle.index.profile.clone(),
+                ));
+            }
+            let portability = bundle.portability.as_ref().ok_or_else(|| {
+                PortableBundleError::DescriptorMismatch("missing portability manifest".to_owned())
+            })?;
+            if portability.profile == PortableDependencyProfile::Offline {
+                if let Some(first) = portability.external_objects.first() {
+                    return Err(PortableBundleError::OfflineExternalObject(
+                        first.reference.clone(),
+                    ));
+                }
+            }
+            portability.external_objects.as_slice()
+        }
+        version => return Err(PortableBundleError::UnsupportedVersion(version)),
+    };
     if bundle.index.objects.len() > MAX_BUNDLE_OBJECTS {
         return Err(PortableBundleError::TooManyObjects(
             bundle.index.objects.len(),
         ));
     }
-    if bundle.index.objects.len() != bundle.payloads.len() {
+    if bundle.index.objects.len() != bundle.payloads.len() + external.len() {
         return Err(PortableBundleError::DescriptorMismatch(
             "object count".to_owned(),
         ));
@@ -344,7 +399,14 @@ fn validate_shape_and_payloads(
         .iter()
         .map(|payload| payload.reference.as_str())
         .collect::<Vec<_>>();
-    if !is_strictly_sorted(&descriptor_refs) || !is_strictly_sorted(&payload_refs) {
+    let external_refs = external
+        .iter()
+        .map(|object| object.reference.as_str())
+        .collect::<Vec<_>>();
+    if !is_strictly_sorted(&descriptor_refs)
+        || !is_strictly_sorted(&payload_refs)
+        || !is_strictly_sorted(&external_refs)
+    {
         return Err(PortableBundleError::NonCanonicalOrder);
     }
     for value in std::iter::once(&bundle.index.root_contract_ref)
@@ -361,13 +423,8 @@ fn validate_shape_and_payloads(
     }
 
     let mut decoded_total = 0_u64;
-    for (descriptor, payload) in bundle.index.objects.iter().zip(&bundle.payloads) {
+    for descriptor in &bundle.index.objects {
         let reference = parse_sha256(&descriptor.reference)?;
-        if payload.reference != descriptor.reference {
-            return Err(PortableBundleError::DescriptorMismatch(
-                descriptor.reference.clone(),
-            ));
-        }
         if descriptor.size > MAX_BUNDLE_OBJECT_BYTES {
             return Err(PortableBundleError::OversizedObject {
                 reference: descriptor.reference.clone(),
@@ -390,6 +447,36 @@ fn validate_shape_and_payloads(
                     descriptor.reference.clone(),
                 ));
             }
+        }
+        let payload = payload_refs
+            .binary_search(&descriptor.reference.as_str())
+            .ok()
+            .map(|index| &bundle.payloads[index]);
+        let source = external_refs
+            .binary_search(&descriptor.reference.as_str())
+            .ok()
+            .map(|index| &external[index]);
+        let Some(payload) = payload else {
+            let source = source.ok_or_else(|| {
+                PortableBundleError::DescriptorMismatch(descriptor.reference.clone())
+            })?;
+            if descriptor.kind != PortableBundleObjectKind::Blob
+                || source.sources.is_empty()
+                || source
+                    .sources
+                    .iter()
+                    .any(|url| !url.starts_with("https://") || url.contains('#'))
+            {
+                return Err(PortableBundleError::InvalidExternalObject(
+                    descriptor.reference.clone(),
+                ));
+            }
+            continue;
+        };
+        if source.is_some() {
+            return Err(PortableBundleError::DescriptorMismatch(
+                descriptor.reference.clone(),
+            ));
         }
         let bytes = decode_payload(payload)?;
         if bytes.len() as u64 != descriptor.size {
@@ -565,6 +652,7 @@ mod tests {
                 objects: pairs.iter().map(|pair| pair.0.clone()).collect(),
             },
             payloads: pairs.into_iter().map(|pair| pair.1).collect(),
+            portability: None,
             signatures: Vec::new(),
         }
     }
