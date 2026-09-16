@@ -57,7 +57,7 @@ pub struct OciAdmission {
 pub struct DockerOciAdapter {
     docker: PathBuf,
     spec: OciSpec,
-    offline_archive: Option<(Vec<u8>, String)>,
+    offline_archive: Option<Vec<u8>>,
 }
 
 impl DockerOciAdapter {
@@ -87,7 +87,7 @@ impl DockerOciAdapter {
             "offline OCI config reference is invalid"
         );
         let mut adapter = Self::new(spec)?;
-        adapter.offline_archive = Some((archive, config_reference));
+        adapter.offline_archive = Some(archive);
         Ok(adapter)
     }
 
@@ -99,8 +99,11 @@ impl DockerOciAdapter {
             ["version", "--format", "{{.Server.Version}}"],
             "query Docker Engine version",
         )?;
-        if let Some((_, config_reference)) = &self.offline_archive {
-            self.inspect_offline_image(config_reference)?;
+        if self.offline_archive.is_some() {
+            // The verified archive supplied the pinned manifest and all blobs.
+            // Docker 29's containerd store identifies the loaded image by the
+            // manifest digest, not the config digest. Never pull on this path.
+            self.inspect_image()?;
         } else if self.inspect_image().is_err() {
             run_checked(
                 &self.docker,
@@ -126,7 +129,7 @@ impl DockerOciAdapter {
     pub fn spawn(&self, workspace: &Path, runtime_root: &Path) -> Result<OciHandle> {
         ensure!(workspace.is_dir(), "OCI workspace does not exist");
         fs::create_dir_all(runtime_root).context("create OCI runtime directory")?;
-        if let Some((archive, _)) = &self.offline_archive {
+        if let Some(archive) = &self.offline_archive {
             let path = runtime_root.join("verified-oci-image.tar");
             fs::write(&path, archive).context("write verified OCI archive")?;
             run_checked(
@@ -168,12 +171,8 @@ impl DockerOciAdapter {
             .collect::<String>();
         fs::write(&env_file, environment).context("write OCI environment file")?;
 
-        let mut run_spec = self.spec.clone();
-        if let Some((_, config_reference)) = &self.offline_archive {
-            run_spec.image = config_reference.clone();
-        }
         let argv = docker_run_arguments(
-            &run_spec,
+            &self.spec,
             workspace,
             &env_file,
             &container_name,
@@ -250,29 +249,6 @@ impl DockerOciAdapter {
         let inspected =
             String::from_utf8(output.stdout).context("invalid Docker inspect output")?;
         validate_inspected_image(&self.spec, inspected.trim())
-    }
-
-    fn inspect_offline_image(&self, config_reference: &str) -> Result<()> {
-        let value = run_checked(
-            &self.docker,
-            [
-                "image",
-                "inspect",
-                "--format",
-                "{{.Id}}|{{.Os}}/{{.Architecture}}",
-                config_reference,
-            ],
-            "inspect loaded offline OCI image",
-        )?;
-        let (image_id, platform) = value
-            .trim()
-            .rsplit_once('|')
-            .context("loaded OCI image metadata is incomplete")?;
-        ensure!(
-            image_id == config_reference && platform == self.spec.platform,
-            "loaded offline OCI image identity/platform mismatch"
-        );
-        Ok(())
     }
 }
 
