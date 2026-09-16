@@ -1774,6 +1774,29 @@ mod tests {
         assert_eq!(thin.index.root_contract_ref, cached.index.root_contract_ref);
         assert_eq!(thin.index.derivations, cached.index.derivations);
 
+        let (_, thin_again) = crate::portability_export::repack_portable_dependencies(
+            &thin,
+            ato_objects::PortableDependencyProfile::Thin,
+            &sources,
+        )
+        .unwrap();
+        let (_, cached_again) = crate::portability_export::repack_portable_dependencies(
+            &cached,
+            ato_objects::PortableDependencyProfile::Cached,
+            &sources,
+        )
+        .unwrap();
+        assert_eq!(
+            thin.index.root_contract_ref,
+            thin_again.index.root_contract_ref
+        );
+        assert_eq!(thin.index.derivations, thin_again.index.derivations);
+        assert_eq!(
+            cached.index.root_contract_ref,
+            cached_again.index.root_contract_ref
+        );
+        assert_eq!(cached.index.derivations, cached_again.index.derivations);
+
         let differently_ordered_sources = BTreeMap::from([(
             wheel.content_ref.clone(),
             vec![

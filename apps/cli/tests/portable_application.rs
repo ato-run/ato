@@ -190,3 +190,50 @@ fn export_plan_preserves_identity_and_refuses_unproven_offline_claim() {
             .any(|blocker| blocker.as_str().unwrap().contains("OCI images"))
     );
 }
+
+#[test]
+fn v4_bundle_can_be_planned_and_reexported_without_changing_identity() {
+    let output = tempfile::tempdir().unwrap();
+    let first = output.path().join("datasette-cached-v4.capsule");
+    let second = output.path().join("datasette-cached-v4-reexport.capsule");
+
+    ato()
+        .arg("export")
+        .arg(datasette_fixture())
+        .args(["--portability", "cached", "--output"])
+        .arg(&first)
+        .assert()
+        .success();
+
+    let plan = ato()
+        .arg("export-plan")
+        .arg(&first)
+        .args(["--portability", "cached", "--json"])
+        .output()
+        .unwrap();
+    assert!(plan.status.success());
+    let plan: Value = serde_json::from_slice(&plan.stdout).unwrap();
+
+    ato()
+        .arg("export")
+        .arg(&first)
+        .args(["--portability", "cached", "--output"])
+        .arg(&second)
+        .assert()
+        .success();
+
+    let first: Value = serde_json::from_slice(&fs::read(first).unwrap()).unwrap();
+    let second: Value = serde_json::from_slice(&fs::read(second).unwrap()).unwrap();
+    assert_eq!(first["index"]["version"], 4);
+    assert_eq!(second["index"]["version"], 4);
+    assert_eq!(first["index"]["root_contract_ref"], plan["contract_ref"]);
+    assert_eq!(
+        first["index"]["root_contract_ref"],
+        second["index"]["root_contract_ref"]
+    );
+    assert_eq!(
+        first["index"]["derivations"],
+        second["index"]["derivations"]
+    );
+    assert_eq!(second["portability"]["profile"], "cached");
+}

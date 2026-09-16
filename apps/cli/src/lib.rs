@@ -45,9 +45,9 @@ use ato_materializer_vm_snapshot::{
 use ato_objects::{
     BranchOrigin, BundleMaterialization, CapsuleBundle, CapsuleBundleDocument, CapsuleSelector,
     GraphMaterialization, GraphRestoreCapability, LocalCapsuleRepository,
-    PortableDependencyProfile, RecordId, ReferenceRegistry, decode_capsule_bundle_document,
-    encode_bundle, export_bundle_with_materializations, export_object_graph, import_bundle,
-    resolve_computation,
+    PortableApplicationBundle, PortableDependencyProfile, PortableOciArchive, RecordId,
+    ReferenceRegistry, decode_capsule_bundle_document, encode_bundle,
+    export_bundle_with_materializations, export_object_graph, import_bundle, resolve_computation,
 };
 use ato_portable_application::portability_export::repack_portable_dependencies_with_archives;
 use ato_portable_application::portability_plan::{PortableExportProfile, plan_portable_export};
@@ -698,33 +698,30 @@ fn run_capsule(args: RunArgs) -> Result<()> {
 fn export_plan(args: ExportPlanArgs) -> Result<()> {
     let bytes =
         fs::read(&args.capsule).with_context(|| format!("read {}", args.capsule.display()))?;
-    let CapsuleBundleDocument::PortableApplicationV3(bundle) =
-        decode_capsule_bundle_document(&bytes)?
-    else {
-        bail!("export planning currently requires a portable application v3 bundle");
-    };
+    let bundle = portable_export_bundle(&bytes)?;
     let mut plan = plan_portable_export(&bundle, bytes.len(), args.portability)?;
     if args.oci_archive.is_some() && args.portability != PortableExportProfile::Offline {
         bail!("--oci-archive is currently supported only for offline export");
     }
-    let archives = match args.oci_archive.as_deref() {
-        Some(path) => portable_dependency::oci_archive_from_file(&bundle, path)?,
-        None => Vec::new(),
-    };
+    let archives =
+        portable_export_archives(&bundle, args.portability, args.oci_archive.as_deref())?;
+    let source = portable_export_source(&bundle, args.portability);
     let resolved_sources = match args.portability {
         PortableExportProfile::Thin => portable_dependency::discover_wheel_sources(&bundle),
         PortableExportProfile::Cached | PortableExportProfile::Offline => Ok(BTreeMap::new()),
     };
-    match resolved_sources.and_then(|sources| {
-        let profile = match args.portability {
-            PortableExportProfile::Thin => PortableDependencyProfile::Thin,
-            PortableExportProfile::Cached => PortableDependencyProfile::Cached,
-            PortableExportProfile::Offline => PortableDependencyProfile::Offline,
-        };
-        repack_portable_dependencies_with_archives(&bundle, profile, &sources, &archives)
-            .map(|(output, _)| output.len())
-            .map_err(Into::into)
-    }) {
+    match source
+        .and_then(|source| resolved_sources.map(|sources| (source, sources)))
+        .and_then(|(source, sources)| {
+            let profile = match args.portability {
+                PortableExportProfile::Thin => PortableDependencyProfile::Thin,
+                PortableExportProfile::Cached => PortableDependencyProfile::Cached,
+                PortableExportProfile::Offline => PortableDependencyProfile::Offline,
+            };
+            repack_portable_dependencies_with_archives(&source, profile, &sources, &archives)
+                .map(|(output, _)| output.len())
+                .map_err(Into::into)
+        }) {
         Ok(size) => {
             plan.estimated_export_bytes = Some(size);
             plan.blockers.clear();
@@ -793,21 +790,16 @@ fn export_plan(args: ExportPlanArgs) -> Result<()> {
 fn export_portable(args: ExportArgs) -> Result<()> {
     let bytes =
         fs::read(&args.capsule).with_context(|| format!("read {}", args.capsule.display()))?;
-    let CapsuleBundleDocument::PortableApplicationV3(bundle) =
-        decode_capsule_bundle_document(&bytes)?
-    else {
-        bail!("dependency export currently requires a complete portable application v3 bundle");
-    };
+    let bundle = portable_export_bundle(&bytes)?;
     if args.output.exists() {
         bail!("export output already exists: {}", args.output.display());
     }
     if args.oci_archive.is_some() && args.portability != PortableExportProfile::Offline {
         bail!("--oci-archive is currently supported only for offline export");
     }
-    let archives = match args.oci_archive.as_deref() {
-        Some(path) => portable_dependency::oci_archive_from_file(&bundle, path)?,
-        None => Vec::new(),
-    };
+    let archives =
+        portable_export_archives(&bundle, args.portability, args.oci_archive.as_deref())?;
+    let source = portable_export_source(&bundle, args.portability)?;
     let (profile, sources) = match args.portability {
         PortableExportProfile::Thin => (
             PortableDependencyProfile::Thin,
@@ -817,7 +809,7 @@ fn export_portable(args: ExportArgs) -> Result<()> {
         PortableExportProfile::Offline => (PortableDependencyProfile::Offline, BTreeMap::new()),
     };
     let (output, repacked) =
-        repack_portable_dependencies_with_archives(&bundle, profile, &sources, &archives)?;
+        repack_portable_dependencies_with_archives(&source, profile, &sources, &archives)?;
     ato_local_execution::atomic_write(&args.output, &output)?;
     println!("file={}", args.output.display());
     println!("bundle_sha256={}", bundle_sha256(&output));
@@ -827,6 +819,46 @@ fn export_portable(args: ExportArgs) -> Result<()> {
     }
     println!("bytes={}", output.len());
     Ok(())
+}
+
+fn portable_export_bundle(bytes: &[u8]) -> Result<PortableApplicationBundle> {
+    match decode_capsule_bundle_document(bytes)? {
+        CapsuleBundleDocument::PortableApplicationV3(bundle)
+        | CapsuleBundleDocument::PortableApplicationV4(bundle) => Ok(bundle),
+        CapsuleBundleDocument::ComputationV2(_) => {
+            bail!("dependency export requires a portable application v3 or v4 bundle")
+        }
+    }
+}
+
+fn portable_export_source(
+    bundle: &PortableApplicationBundle,
+    profile: PortableExportProfile,
+) -> Result<PortableApplicationBundle> {
+    match profile {
+        PortableExportProfile::Thin => Ok(bundle.clone()),
+        PortableExportProfile::Cached | PortableExportProfile::Offline => {
+            portable_dependency::hydrate_external_objects(bundle).map(|(hydrated, _)| hydrated)
+        }
+    }
+}
+
+fn portable_export_archives(
+    bundle: &PortableApplicationBundle,
+    profile: PortableExportProfile,
+    archive_path: Option<&std::path::Path>,
+) -> Result<Vec<PortableOciArchive>> {
+    if profile != PortableExportProfile::Offline {
+        return Ok(Vec::new());
+    }
+    match archive_path {
+        Some(path) => portable_dependency::oci_archive_from_file(bundle, path),
+        None => Ok(bundle
+            .portability
+            .as_ref()
+            .map(|portability| portability.oci_archives.clone())
+            .unwrap_or_default()),
+    }
 }
 
 fn run_computation_bundle(args: RunArgs, bundle: CapsuleBundle) -> Result<()> {
