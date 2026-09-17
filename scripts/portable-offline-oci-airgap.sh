@@ -73,7 +73,10 @@ if [[ "${ATO_AIRGAP_INSIDE:-0}" != "1" ]]; then
     printf 'refusing to reuse work root: %s\n' "$WORK_ROOT" >&2
     exit 73
   fi
-  exec unshare --net --mount-proc \
+  # Keep the host mount namespace shared with containerd/runc. Only the
+  # network namespace is part of this acceptance boundary; isolating mounts
+  # here would hide Docker's overlay rootfs from the host container runtime.
+  exec unshare --net \
     env ATO_AIRGAP_INSIDE=1 "$0" \
       --ato "$ATO_BIN" \
       --bundle "$BUNDLE" \
@@ -87,7 +90,6 @@ RUN_HOME="$(getent passwd "$RUN_USER" | cut -d: -f6)"
 SOCKET="$WORK_ROOT/docker.sock"
 RECEIPT="$WORK_ROOT/receipt.json"
 DOCKER_LOG="$WORK_ROOT/dockerd.log"
-CONTAINERD_NAMESPACE="ato-airgap-$(basename "$WORK_ROOT")"
 
 install -d -m 0750 -o "$RUN_USER" -g "$RUN_GROUP" "$WORK_ROOT"
 install -d -m 0710 "$WORK_ROOT/docker-data" "$WORK_ROOT/docker-exec"
@@ -117,14 +119,17 @@ dockerd \
   --data-root "$WORK_ROOT/docker-data" \
   --exec-root "$WORK_ROOT/docker-exec" \
   --pidfile "$WORK_ROOT/dockerd.pid" \
-  --containerd-namespace "$CONTAINERD_NAMESPACE" \
-  --containerd-plugins-namespace "${CONTAINERD_NAMESPACE}-plugins" \
+  --feature containerd-snapshotter=false \
   --group "$RUN_GROUP" \
   --log-level info >"$DOCKER_LOG" 2>&1 &
 DOCKERD_PID=$!
 
 stop_dockerd() {
   if kill -0 "$DOCKERD_PID" 2>/dev/null; then
+    mapfile -t leftover_containers < <(docker --host "unix://$SOCKET" ps -aq 2>/dev/null || true)
+    if [[ ${#leftover_containers[@]} -gt 0 ]]; then
+      docker --host "unix://$SOCKET" rm --force "${leftover_containers[@]}" >/dev/null 2>&1 || true
+    fi
     kill -TERM "$DOCKERD_PID" 2>/dev/null || true
     wait "$DOCKERD_PID" 2>/dev/null || true
   fi
@@ -163,6 +168,7 @@ fi
   ip route show
 } >"$WORK_ROOT/namespace-ready.txt"
 
+set +e
 runuser -u "$RUN_USER" -- env \
   -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
   -u http_proxy -u https_proxy -u all_proxy \
@@ -172,6 +178,26 @@ runuser -u "$RUN_USER" -- env \
     --derivation "$DERIVATION" \
     --no-open \
     --verification-receipt "$RECEIPT"
+RUN_STATUS=$?
+set -e
+
+if [[ $RUN_STATUS -ne 0 ]]; then
+  docker --host "unix://$SOCKET" image ls --all --digests --no-trunc \
+    >"$WORK_ROOT/failure-images.txt" 2>&1 || true
+  mapfile -t image_ids < <(docker --host "unix://$SOCKET" image ls -q --no-trunc 2>/dev/null | sort -u)
+  if [[ ${#image_ids[@]} -gt 0 ]]; then
+    docker --host "unix://$SOCKET" image inspect "${image_ids[@]}" \
+      >"$WORK_ROOT/failure-image-inspect.json" 2>&1 || true
+  fi
+  docker --host "unix://$SOCKET" ps --all --no-trunc \
+    >"$WORK_ROOT/failure-containers.txt" 2>&1 || true
+  mapfile -t failed_containers < <(docker --host "unix://$SOCKET" ps -aq 2>/dev/null)
+  if [[ ${#failed_containers[@]} -gt 0 ]]; then
+    docker --host "unix://$SOCKET" inspect "${failed_containers[@]}" \
+      >"$WORK_ROOT/failure-container-inspect.json" 2>&1 || true
+  fi
+  exit "$RUN_STATUS"
+fi
 
 jq -e \
   --arg derivation "$DERIVATION" \
