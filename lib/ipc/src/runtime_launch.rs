@@ -166,6 +166,10 @@ pub struct OciRealizationV1 {
     pub platform: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_limits: Option<OciResourceLimitsV1>,
+    /// Absolute executable path inside the verified image. Absent preserves
+    /// the image's configured ENTRYPOINT.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entrypoint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub argv: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -383,6 +387,18 @@ impl RuntimeLaunchSpecV1 {
                     && (argv.is_empty() || argv[0].is_empty())
                 {
                     return Err(RuntimeLaunchSpecError::EmptyArgv);
+                }
+                if let Some(entrypoint) = &oci.entrypoint
+                    && (!entrypoint.starts_with('/')
+                        || entrypoint.contains(['\0', '\\', ','])
+                        || entrypoint
+                            .split('/')
+                            .skip(1)
+                            .any(|segment| segment.is_empty() || matches!(segment, "." | "..")))
+                {
+                    return Err(RuntimeLaunchSpecError::ForbiddenField {
+                        field: "realization.entrypoint".to_owned(),
+                    });
                 }
                 if let Some(reference) = &oci.image_reference {
                     let expected = format!("@{}", oci.image_digest_ref);

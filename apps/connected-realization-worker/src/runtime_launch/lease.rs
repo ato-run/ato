@@ -351,6 +351,7 @@ pub fn start(
                 id: spec.context.run_id.clone(),
                 image,
                 platform,
+                entrypoint: oci.entrypoint.clone(),
                 argv: oci.argv.clone().unwrap_or_default(),
                 working_dir: oci.working_dir.clone().unwrap_or_else(|| "/app".to_owned()),
                 environment,
