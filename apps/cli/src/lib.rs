@@ -14,7 +14,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -28,7 +28,7 @@ use ato_adapter_browser::{
 use ato_adapter_oci::{
     DockerOciAdapter, OciEndpoint, OciHandle, OciMount, OciResourceLimits, OciSpec,
 };
-use ato_adapter_process::{ProcessAdapter, ProcessHandle, ProcessSpec};
+use ato_adapter_process::{ProcessAdapter, ProcessHandle, ProcessSpec, terminate_process_tree};
 use ato_adapter_workspace::restore_workspace;
 use ato_computation::{ComputationRef, ContentRef};
 use ato_formation::authoring::{
@@ -846,6 +846,7 @@ fn start_local_instance(args: AppStartArgs) -> Result<()> {
         .stdout(stdout.try_clone()?)
         .stderr(stdout);
     configure_detached_process(&mut command);
+    prevent_worker_from_inheriting_parent_stdio()?;
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
@@ -856,7 +857,7 @@ fn start_local_instance(args: AppStartArgs) -> Result<()> {
     if let Some(mut stdin) = child.stdin.take()
         && let Err(error) = stdin.write_all(&binding_payload)
     {
-        let _ = child.kill();
+        terminate_unactivated_worker(&mut child);
         let _ = store.release_run(&instance.instance_id, &starting.token);
         return Err(error).context("deliver runtime Bindings to local Instance worker");
     }
@@ -876,6 +877,7 @@ fn start_local_instance(args: AppStartArgs) -> Result<()> {
             );
         }
         if wait_started.elapsed() > Duration::from_secs(60) {
+            terminate_unactivated_worker(&mut child);
             let _ = store.release_run(&instance.instance_id, &starting.token);
             bail!(
                 "local Instance worker did not become active within 60 seconds; see {}",
@@ -907,6 +909,47 @@ fn start_local_instance(args: AppStartArgs) -> Result<()> {
     if !args.no_open {
         open_browser(url)?;
     }
+    Ok(())
+}
+
+fn terminate_unactivated_worker(child: &mut Child) {
+    let pid = child.id();
+    if terminate_process_tree(pid, pid).is_err() {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+}
+
+#[cfg(windows)]
+fn prevent_worker_from_inheriting_parent_stdio() -> Result<()> {
+    use windows::Win32::Foundation::{HANDLE_FLAG_INHERIT, HANDLE_FLAGS, SetHandleInformation};
+    use windows::Win32::System::Console::{
+        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
+
+    for (name, kind) in [
+        ("stdin", STD_INPUT_HANDLE),
+        ("stdout", STD_OUTPUT_HANDLE),
+        ("stderr", STD_ERROR_HANDLE),
+    ] {
+        // SAFETY: GetStdHandle returns a borrowed process handle. We neither
+        // close it nor change its access; we only clear the inheritance bit
+        // before spawning a detached worker with explicitly configured stdio.
+        let handle =
+            unsafe { GetStdHandle(kind) }.with_context(|| format!("read Windows {name} handle"))?;
+        if handle.0.is_null() {
+            continue;
+        }
+        // SAFETY: `handle` is the live standard handle returned above, and
+        // both flag arguments are defined by SetHandleInformation.
+        unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0)) }
+            .with_context(|| format!("make Windows {name} handle non-inheritable"))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn prevent_worker_from_inheriting_parent_stdio() -> Result<()> {
     Ok(())
 }
 
