@@ -37,6 +37,10 @@ fn datasette_fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/datasette-cpu.capsule")
 }
 
+fn authored_multi_process_fixture() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/portable-multi-process-authored")
+}
+
 fn snapshot_fixture(destination: &Path) -> Vec<u8> {
     let source = match decode_capsule_bundle_document(&fs::read(fixture()).unwrap()).unwrap() {
         CapsuleBundleDocument::PortableApplicationV3(bundle) => bundle,
@@ -213,6 +217,45 @@ fn a_multi_route_bundle_never_selects_a_derivation_implicitly() {
         .assert()
         .failure()
         .stderr(predicates::str::contains("is not declared"));
+}
+
+#[test]
+fn pack_compiles_v2_authoring_and_both_explicit_routes_satisfy_one_contract() {
+    let output = tempfile::tempdir().unwrap();
+    let bundle_path = output.path().join("authored.capsule");
+    ato()
+        .arg("pack")
+        .arg(authored_multi_process_fixture())
+        .arg("--output")
+        .arg(&bundle_path)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("contract_ref=sha256:"))
+        .stdout(predicates::str::contains("derivation_ref=sha256:"));
+
+    let bundle = match decode_capsule_bundle_document(&fs::read(&bundle_path).unwrap()).unwrap() {
+        CapsuleBundleDocument::PortableApplicationV3(bundle) => bundle,
+        other => panic!("pack must emit a portable Application, got {other:?}"),
+    };
+    assert_eq!(bundle.index.derivations.len(), 2);
+
+    for (index, derivation_ref) in bundle.index.derivations.iter().enumerate() {
+        let receipt_path = output.path().join(format!("receipt-{index}.json"));
+        ato()
+            .arg("run")
+            .arg(&bundle_path)
+            .arg("--derivation")
+            .arg(derivation_ref)
+            .arg("--no-open")
+            .arg("--verification-receipt")
+            .arg(&receipt_path)
+            .assert()
+            .success();
+        let receipt: Value = serde_json::from_slice(&fs::read(receipt_path).unwrap()).unwrap();
+        assert_eq!(receipt["contract_ref"], bundle.index.root_contract_ref);
+        assert_eq!(receipt["derivation_ref"], *derivation_ref);
+        assert_eq!(receipt["fully_satisfied"], true);
+    }
 }
 
 #[test]
