@@ -1,0 +1,43 @@
+schema = "ato.capsule/2"
+
+[application]
+title = "Authored multi-process application"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "root"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/"
+status = 200
+body_digest = "sha256:ef1f781ce1776a53a072bcaf7630be1affca3326a980a03af3942217fd273d30"
+
+[[derivation]]
+id = "python-a"
+use = "ato.process@1"
+argv = ["python3", "app.py"]
+cwd = "."
+guest_port = 8000
+runtimes = { python = "3.12" }
+env = { ROUTE_VARIANT = "a" }
+
+[[derivation]]
+id = "python-b"
+use = "ato.process@1"
+argv = ["python3", "app.py"]
+cwd = "."
+guest_port = 8000
+runtimes = { python = "3.12" }
+env = { ROUTE_VARIANT = "b" }
+
+[effects]
+default = "pure"

@@ -61,8 +61,9 @@ use ato_portable_application::portability_plan::{PortableExportProfile, plan_por
 use ato_portable_application::{
     OCI_CPU_MILLIS_RUNTIME, OCI_IMAGE_RUNTIME, OCI_MEMORY_BYTES_RUNTIME, OCI_PIDS_LIMIT_RUNTIME,
     OCI_PLATFORM_RUNTIME, PYTHON_RUNTIME, PortableRealizationKind, StaticApplicationAsset,
-    StaticApplicationServer, StaticApplicationState, ValidatedPortableApplication, bundle_sha256,
-    materialize_tree, resolve_application_bindings, validate_bundle_for_derivation,
+    StaticApplicationServer, StaticApplicationState, ValidatedPortableApplication,
+    build_authored_bundle_v2, bundle_sha256, materialize_tree, resolve_application_bindings,
+    validate_bundle_for_derivation,
 };
 use ato_realization_planner::{
     MaterializationCandidate, Placement, PlannerPolicy, RealizationPlanner, TargetEnvironment,
@@ -112,6 +113,8 @@ enum Commands {
     Stop { capsule: String },
     /// Materialize one selected point into a portable .capsule bundle.
     Encap(EncapArgs),
+    /// Compile an ato.capsule/2 source directory into a portable Application.
+    Pack(PackArgs),
     /// Consume a portable .capsule ephemerally.
     Run(RunArgs),
     /// Import and operate a durable local portable Application Instance.
@@ -198,6 +201,14 @@ struct EncapArgs {
     #[arg(long = "materialize")]
     materializers: Vec<String>,
     #[arg(short, long, default_value = "computation.capsule")]
+    output: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct PackArgs {
+    #[arg(default_value = ".")]
+    source: PathBuf,
+    #[arg(short, long, default_value = "application.capsule")]
     output: PathBuf,
 }
 
@@ -365,6 +376,7 @@ pub fn run() -> Result<()> {
         Commands::Resume(args) => resume(args),
         Commands::Stop { capsule } => stop(&capsule),
         Commands::Encap(args) => encap(args),
+        Commands::Pack(args) => pack(args),
         Commands::Run(args) => run_capsule(args),
         Commands::App { command } => match command {
             AppCommands::Import(args) => import_local_application(args),
@@ -396,6 +408,24 @@ pub fn run() -> Result<()> {
         Commands::PortableSandboxExec(args) => portable_sandbox_exec(args),
         Commands::PortableInstanceWorker(args) => portable_instance_worker(args),
     }
+}
+
+fn pack(args: PackArgs) -> Result<()> {
+    let (bytes, bundle) = build_authored_bundle_v2(&args.source).with_context(|| {
+        format!(
+            "compile portable Application from {}",
+            args.source.display()
+        )
+    })?;
+    fs::write(&args.output, &bytes)
+        .with_context(|| format!("write portable Application {}", args.output.display()))?;
+    println!("Packed: {}", args.output.display());
+    println!("bundle_sha256={}", bundle_sha256(&bytes));
+    println!("contract_ref={}", bundle.index.root_contract_ref);
+    for derivation in &bundle.index.derivations {
+        println!("derivation_ref={derivation}");
+    }
+    Ok(())
 }
 
 fn portable_sandbox_exec(args: PortableSandboxExecArgs) -> Result<()> {

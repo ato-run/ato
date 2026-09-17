@@ -25,6 +25,7 @@ use ato_formation::authoring::{
     WORKSPACE_PROTOCOL, bind,
 };
 use ato_formation::capsule_toml::{CAPSULE_FILE_NAME, parse_capsule_toml};
+use ato_formation::capsule_toml_v2::{PortableDerivationKindV2, parse_capsule_toml_v2};
 use ato_materializer_static_web::{media_type_for, validate_relative_path};
 use ato_objects::{
     PORTABLE_APPLICATION_BUNDLE_VERSION, PORTABLE_APPLICATION_PROFILE, PortableApplicationBundle,
@@ -235,6 +236,23 @@ pub struct PortableDynamicBundleSpec {
     pub guest_port: u16,
     pub process: PortableExecutionSpec,
     pub oci: PortableExecutionSpec,
+    pub filesystem_state: Option<PortableFilesystemStateSpec>,
+    pub bindings: Vec<ApplicationBindingV1>,
+    pub requirements: Vec<PortableHttpRequirementSpec>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PortableDynamicRouteSpec {
+    pub realization: PortableRealizationKind,
+    pub execution: PortableExecutionSpec,
+    pub guest_port: u16,
+}
+
+#[derive(Debug, Clone)]
+pub struct PortableAuthoredBundleSpec {
+    pub title: String,
+    pub surface_path: String,
+    pub routes: Vec<PortableDynamicRouteSpec>,
     pub filesystem_state: Option<PortableFilesystemStateSpec>,
     pub bindings: Vec<ApplicationBindingV1>,
     pub requirements: Vec<PortableHttpRequirementSpec>,
@@ -1009,9 +1027,106 @@ pub fn build_dynamic_process_oci_bundle(
     source_root: &Path,
     spec: &PortableDynamicBundleSpec,
 ) -> Result<(Vec<u8>, PortableApplicationBundle), PortableApplicationError> {
+    build_dynamic_routes_bundle(
+        source_root,
+        &PortableAuthoredBundleSpec {
+            title: spec.title.clone(),
+            surface_path: spec.surface_path.clone(),
+            routes: vec![
+                PortableDynamicRouteSpec {
+                    realization: PortableRealizationKind::LocalProcess,
+                    execution: spec.process.clone(),
+                    guest_port: spec.guest_port,
+                },
+                PortableDynamicRouteSpec {
+                    realization: PortableRealizationKind::OciContainer,
+                    execution: spec.oci.clone(),
+                    guest_port: spec.guest_port,
+                },
+            ],
+            filesystem_state: spec.filesystem_state.clone(),
+            bindings: spec.bindings.clone(),
+            requirements: spec.requirements.clone(),
+        },
+    )
+}
+
+/// Compile the supported `ato.capsule/2` v0 subset into the same canonical
+/// Contract/Application/Derivation objects used by fixture builders. The TOML
+/// bytes and author-facing route labels are deliberately not bundled or
+/// digested.
+pub fn build_authored_bundle_v2(
+    source_root: &Path,
+) -> Result<(Vec<u8>, PortableApplicationBundle), PortableApplicationError> {
+    let text = read(source_root.join(CAPSULE_FILE_NAME))?;
+    let text = std::str::from_utf8(&text)
+        .map_err(|error| profile(format!("capsule.toml is not UTF-8: {error}")))?;
+    let draft = parse_capsule_toml_v2(text)
+        .map_err(|error| PortableApplicationError::CapsuleToml(error.to_string()))?;
+    let routes = draft
+        .derivations
+        .into_iter()
+        .map(|derivation| PortableDynamicRouteSpec {
+            realization: match derivation.kind {
+                PortableDerivationKindV2::Process => PortableRealizationKind::LocalProcess,
+                PortableDerivationKindV2::Oci => PortableRealizationKind::OciContainer,
+            },
+            execution: PortableExecutionSpec {
+                runtimes: derivation.runtimes,
+                argv: derivation.argv,
+                cwd: derivation.cwd,
+                env: derivation.env,
+            },
+            guest_port: derivation.guest_port,
+        })
+        .collect();
+    build_dynamic_routes_bundle(
+        source_root,
+        &PortableAuthoredBundleSpec {
+            title: draft.title,
+            surface_path: draft.surface_path,
+            routes,
+            filesystem_state: draft.state.into_iter().next().map(|state| {
+                PortableFilesystemStateSpec {
+                    id: state.id,
+                    mount: state.mount,
+                }
+            }),
+            bindings: draft
+                .bindings
+                .into_iter()
+                .map(|binding| ApplicationBindingV1 {
+                    id: binding.id,
+                    protocol: binding.protocol,
+                    required: binding.required,
+                })
+                .collect(),
+            requirements: draft
+                .observations
+                .into_iter()
+                .map(|observation| PortableHttpRequirementSpec {
+                    id: observation.id,
+                    path: observation.path,
+                    status: observation.status,
+                    body_digest: observation.body_digest,
+                })
+                .collect(),
+        },
+    )
+}
+
+pub fn build_dynamic_routes_bundle(
+    source_root: &Path,
+    spec: &PortableAuthoredBundleSpec,
+) -> Result<(Vec<u8>, PortableApplicationBundle), PortableApplicationError> {
     if spec.title.trim().is_empty() || spec.requirements.is_empty() {
         return Err(profile(
             "dynamic application requires a title and at least one HTTP observation",
+        ));
+    }
+    if spec.routes.is_empty() || spec.routes.len() > 16 {
+        return Err(profile(
+            "dynamic application requires between one and sixteen routes",
         ));
     }
     let (mut objects, tree_ref) =
@@ -1021,29 +1136,32 @@ pub fn build_dynamic_process_oci_bundle(
         protocol: WORKSPACE_PROTOCOL.to_owned(),
         content_ref: tree_ref,
     };
-    let port = BoundPort {
-        id: "app.http".to_owned(),
-        protocol: HTTP_PROTOCOL.to_owned(),
-        from: "serve".to_owned(),
-        guest_port: Some(spec.guest_port),
-    };
-    let derivation = |protocol: &str, execution: &PortableExecutionSpec| BoundDerivation {
+    let derivation = |route: &PortableDynamicRouteSpec| BoundDerivation {
         schema: BOUND_DERIVATION_SCHEMA.to_owned(),
         inputs: vec![input.clone()],
-        runtimes: execution.runtimes.clone(),
+        runtimes: route.execution.runtimes.clone(),
         steps: vec![BoundStep {
             id: "serve".to_owned(),
-            protocol: protocol.to_owned(),
+            protocol: match route.realization {
+                PortableRealizationKind::LocalProcess => PROCESS_PROTOCOL.to_owned(),
+                PortableRealizationKind::OciContainer => OCI_PROTOCOL.to_owned(),
+                PortableRealizationKind::StaticWeb => BROWSER_PROTOCOL.to_owned(),
+            },
             op: "serve".to_owned(),
-            argv: execution.argv.clone(),
-            cwd: execution.cwd.clone(),
-            env: execution.env.clone(),
+            argv: route.execution.argv.clone(),
+            cwd: route.execution.cwd.clone(),
+            env: route.execution.env.clone(),
             source: None,
             root: None,
             entry: None,
             spa_fallback: None,
         }],
-        ports: vec![port.clone()],
+        ports: vec![BoundPort {
+            id: "app.http".to_owned(),
+            protocol: HTTP_PROTOCOL.to_owned(),
+            from: "serve".to_owned(),
+            guest_port: Some(route.guest_port),
+        }],
         state: spec
             .filesystem_state
             .as_ref()
@@ -1059,15 +1177,13 @@ pub fn build_dynamic_process_oci_bundle(
         workspace_compiler: None,
         effects: EffectClass::Pure,
     };
-    let process_derivation = derivation(PROCESS_PROTOCOL, &spec.process);
-    let oci_derivation = derivation(OCI_PROTOCOL, &spec.oci);
     let mut requirements = spec
         .requirements
         .iter()
         .map(|requirement| BoundRequirement {
             id: requirement.id.clone(),
             verifier: HTTP_CONTRACT_VERIFIER.to_owned(),
-            port: Some(port.id.clone()),
+            port: Some("app.http".to_owned()),
             method: Some("GET".to_owned()),
             path: Some(requirement.path.clone()),
             status: Some(requirement.status),
@@ -1092,40 +1208,32 @@ pub fn build_dynamic_process_oci_bundle(
         title: spec.title.clone(),
         surfaces: vec![ApplicationSurfaceV2 {
             id: "main".to_owned(),
-            port: port.id,
+            port: "app.http".to_owned(),
             path: spec.surface_path.clone(),
         }],
         bindings: spec.bindings.clone(),
     };
 
     let contract_ref = add_structured(&mut objects, &contract, BOUND_CONTRACT_SCHEMA)?;
-    let process_ref = add_structured(&mut objects, &process_derivation, BOUND_DERIVATION_SCHEMA)?;
-    let oci_ref = add_structured(&mut objects, &oci_derivation, BOUND_DERIVATION_SCHEMA)?;
-    if process_ref == oci_ref {
-        return Err(profile("process and OCI routes have the same identity"));
+    let mut derivation_refs = Vec::with_capacity(spec.routes.len());
+    for route in &spec.routes {
+        derivation_refs.push(add_structured(
+            &mut objects,
+            &derivation(route),
+            BOUND_DERIVATION_SCHEMA,
+        )?);
+    }
+    if derivation_refs.iter().collect::<BTreeSet<_>>().len() != derivation_refs.len() {
+        return Err(profile(
+            "authored routes have duplicate Derivation identity",
+        ));
     }
     let application_ref = add_structured(&mut objects, &application, APPLICATION_V2_SCHEMA)?;
-    let bundle = finish_bundle(
-        objects,
-        contract_ref,
-        application_ref,
-        vec![process_ref, oci_ref],
-    );
+    let bundle = finish_bundle(objects, contract_ref, application_ref, derivation_refs);
     let validated = validate_all_derivations(&bundle)?;
-    let kinds = validated
-        .iter()
-        .map(|route| route.realization)
-        .collect::<BTreeSet<_>>();
-    if kinds
-        != [
-            PortableRealizationKind::LocalProcess,
-            PortableRealizationKind::OciContainer,
-        ]
-        .into_iter()
-        .collect()
-    {
+    if validated.len() != spec.routes.len() {
         return Err(profile(
-            "dynamic bundle must contain one process and one OCI route",
+            "validated route count does not equal the authored route count",
         ));
     }
     let bytes = encode_portable_application_bundle(&bundle)?;
@@ -2768,12 +2876,55 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/interop-multi-derivation")
     }
 
+    fn authored_multi_process_fixture_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/portable-multi-process-authored")
+    }
+
     fn datasette_fixture_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/interop-datasette")
     }
 
     fn portable_todo_fixture_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/portable-todo-assets")
+    }
+
+    #[test]
+    fn v2_authoring_compiles_multiple_process_routes_without_label_identity() {
+        let source = authored_multi_process_fixture_root();
+        let (bytes, bundle) = build_authored_bundle_v2(&source).unwrap();
+        let routes = validate_all_derivations(&bundle).unwrap();
+        assert_eq!(routes.len(), 2);
+        assert!(
+            routes
+                .iter()
+                .all(|route| route.realization == PortableRealizationKind::LocalProcess)
+        );
+        assert_ne!(routes[0].derivation_ref, routes[1].derivation_ref);
+        assert!(
+            routes
+                .iter()
+                .all(|route| route.contract_ref.as_str() == bundle.index.root_contract_ref)
+        );
+
+        let renamed = tempfile::tempdir().unwrap();
+        fs::write(
+            renamed.path().join("app.py"),
+            fs::read(source.join("app.py")).unwrap(),
+        )
+        .unwrap();
+        let manifest = fs::read_to_string(source.join(CAPSULE_FILE_NAME))
+            .unwrap()
+            .replace("python-a", "route-one")
+            .replace("python-b", "route-two");
+        fs::write(renamed.path().join(CAPSULE_FILE_NAME), manifest).unwrap();
+        let (renamed_bytes, renamed_bundle) = build_authored_bundle_v2(renamed.path()).unwrap();
+
+        assert_eq!(renamed_bytes, bytes);
+        assert_eq!(
+            renamed_bundle.index.root_contract_ref,
+            bundle.index.root_contract_ref
+        );
+        assert_eq!(renamed_bundle.index.derivations, bundle.index.derivations);
     }
 
     fn datasette_spec() -> PortableDynamicBundleSpec {
