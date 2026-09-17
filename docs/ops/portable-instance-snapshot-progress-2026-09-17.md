@@ -588,3 +588,83 @@ Runner binary SHA      919c94e3a80483c2b967d0832cc94601c8e97719f5a499c1ae605386e
 
 Migration `0273_portable_user_runner_placement.sql` was applied only to
 staging. No production migration or deployment was performed.
+
+## Formal authoring and exact same-kind Derivation selection
+
+`ato.capsule/2` is now a separate strict grammar from `ato.capsule/1`. The new
+`ato pack` path compiles its bounded portable v0 shape into the existing Rust
+canonical Contract/Application/Derivation objects. The authoring manifest and
+route labels are not runtime workspace content or identity inputs. Renaming
+only the labels produced byte-identical output in the automated test.
+
+The committed `samples/portable-multi-process-authored` fixture declares two
+Python 3.12 Process routes with different environment values and one common
+HTTP Contract. Packing it once produced:
+
+```text
+file        .tmp/authoring-acceptance/portable-multi-process-authored.capsule
+bundle SHA  sha256:5cc3419d68b2d2a4ae9002670ccb08f8140762eafd3eef5d2dbc7f09fe821033
+K           sha256:294c2312a3a6e90dab2030edcf1debce5fe7372f6ffe6220662d5c0f8523ef7c
+Process D A sha256:4ddf1df9cd1d324603df3e8834eb4e796b373a908890bfab028f5fea984f0359
+Process D B sha256:8d1fee1f81a107d8734a0fc2774633422ac0df44cee64ba7b315449095e15363
+```
+
+CLI ran those exact bytes once per D. Both receipts used target `cli-local`,
+the same bundle SHA and K, the explicitly selected D, one `satisfied`
+observation, and `fully_satisfied=true`.
+
+API `a283adba` exposed validator-owned runtime labels for every candidate.
+PWA `fc2f531` stopped using the first route of a realization kind: one
+candidate is selected automatically, while two or more require the person to
+select a concrete DerivationRef. Staging deployed them as API Worker version
+`41274372-5c62-4455-95db-849a7b21a3b5` and PWA Worker version
+`a71e54d6-ed8b-4dbf-888d-9b3bce1abb3a`. API health returned 200. No migration,
+production deployment, or feature-flag change was performed.
+
+The PWA showed two initially unselected choices:
+
+```text
+Python 3.12 sha256:4ddf1df9…
+Python 3.12 sha256:8d1fee1f…
+```
+
+The second candidate was selected. The resulting acceptance evidence was:
+
+```text
+Instance        cinst_01M2PK30S274TQWWK561R68XYX
+Import          pai_01M2PK30V6XQ1RXRQYANFSESHP
+Bundle          bnd_01M2PK21S4CPVMND02D0BAWY6E
+Run             run_01M2PK30X61VG5T78WZHQXF0W8
+Lease           01M2PK30X6XZYYEWN3QR084E2J
+Runtime route   rrt_01M2PK31E82MBAX02RGJ749M9R
+selected D      sha256:8d1fee1f81a107d8734a0fc2774633422ac0df44cee64ba7b315449095e15363
+runtime         /opt/ato/toolchains/python/3.12.7/bin/python3
+version         Python 3.12.7
+receipt         root=satisfied, fully_satisfied=true
+Surface         https://cinst-vmsfmrmimao2pd26.stg-app.ato.run/ (Ready)
+```
+
+The persisted receipt matched the local bundle SHA and K exactly and observed
+body SHA-256
+`ef1f781ce1776a53a072bcaf7630be1affca3326a980a03af3942217fd273d30`.
+PWA displayed Contract **Verified**, the exact second D, and Surface **Ready**.
+The in-app automation browser refused direct navigation to the wildcard app
+host with `ERR_BLOCKED_BY_CLIENT`; therefore that attempt is not recorded as a
+successful browser body check. The Hosted verifier did read the real Run HTTP
+body, and the runtime route was independently `ready`. Existing earlier
+Datasette/Binding/Stateful Notes acceptance remains the browser-level Surface
+evidence.
+
+After capture, a scoped stop signal was sent only to this Run/lease. The Runner
+acknowledged within two seconds: Run and lease became `stopped`, and the
+runtime route became `detached`.
+
+Executed source revision for the authoring slice:
+
+```text
+Ato 872abc91
+```
+
+Regression evidence: Formation 67 tests, portable Application 61 tests, and
+the CLI test suite passed. A new CLI integration test packs the v2 fixture and
+runs both explicit D references to full Contract satisfaction.
