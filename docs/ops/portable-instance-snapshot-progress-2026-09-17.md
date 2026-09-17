@@ -124,7 +124,8 @@ Rust/Clippy 1.96's `manual_is_multiple_of`, `items_after_test_module`, and
 suppressed. Cross-platform CLI integration now accepts exactly two outcomes:
 a compatible host runs the selected Python 3.12 D and fully satisfies K; a host
 without that pinned capability must return the explicit admission error and
-must not emit a receipt. This is implemented in ato `28d8718b`.
+must not emit a receipt. This is implemented in ato `28d8718b`; the remaining
+Rust 1.96 `useless_conversion` finding is corrected by `ad752888`.
 
 API verification passed:
 
