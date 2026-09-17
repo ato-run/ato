@@ -25,7 +25,10 @@ fn main() -> Result<()> {
         runtimes: BTreeMap::from([(PYTHON_RUNTIME.to_owned(), "3.12".to_owned())]),
         argv: vec!["python3".to_owned(), "app.py".to_owned()],
         cwd: ".".to_owned(),
-        env: BTreeMap::from([("PYTHONDONTWRITEBYTECODE".to_owned(), "1".to_owned())]),
+        env: BTreeMap::from([
+            ("APP_LISTEN_HOST".to_owned(), "127.0.0.1".to_owned()),
+            ("PYTHONDONTWRITEBYTECODE".to_owned(), "1".to_owned()),
+        ]),
     };
     let spec = PortableDynamicBundleSpec {
         title: "Portable Binding Echo".to_owned(),
@@ -42,7 +45,10 @@ fn main() -> Result<()> {
             ]),
             argv: vec!["python3".to_owned(), "/app/app.py".to_owned()],
             cwd: ".".to_owned(),
-            env: BTreeMap::from([("PYTHONDONTWRITEBYTECODE".to_owned(), "1".to_owned())]),
+            env: BTreeMap::from([
+                ("APP_LISTEN_HOST".to_owned(), "0.0.0.0".to_owned()),
+                ("PYTHONDONTWRITEBYTECODE".to_owned(), "1".to_owned()),
+            ]),
         },
         filesystem_state: None,
         bindings: vec![ApplicationBindingV1 {
