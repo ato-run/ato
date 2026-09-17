@@ -10,7 +10,7 @@
 mod activity_controller;
 pub mod runtime_launch;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -1052,6 +1052,9 @@ impl ConnectedWorker {
             lease.id.clone(),
             self.api.token.clone(),
         );
+        let secrets = self
+            .api
+            .redeem_runtime_bindings(&lease.id, &spec.secret_grants)?;
 
         // P4-A: publish the process on this Runner's ingress slot.
         //
@@ -1072,6 +1075,7 @@ impl ConnectedWorker {
             lease_root,
             &workspace,
             &state,
+            secrets,
             &assigned_ports,
         )?;
         let probe =
@@ -2868,6 +2872,12 @@ struct ControlResponse {
     stop_requested: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeBindingsResponse {
+    bindings: BTreeMap<String, String>,
+}
+
 #[derive(Serialize)]
 struct StatusReport<'a> {
     status: &'a str,
@@ -2984,6 +2994,37 @@ impl HttpRunnerApi {
         .send()?
         .error_for_status()?;
         Ok(())
+    }
+
+    fn redeem_runtime_bindings(
+        &self,
+        lease_id: &str,
+        grants: &[ato_ipc::runtime_launch::SecretGrantV1],
+    ) -> Result<Vec<runtime_launch::resolved::ResolvedSecret>> {
+        if grants.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut response = self
+            .authorized(self.client.get(format!(
+                "{}/v1/runner-leases/{lease_id}/runtime-bindings",
+                self.base
+            )))
+            .send()?
+            .error_for_status()?
+            .json::<RuntimeBindingsResponse>()?;
+        if response.bindings.len() != grants.len() {
+            bail!("runtime Binding grant did not match the launch spec");
+        }
+        grants
+            .iter()
+            .map(|grant| {
+                response
+                    .bindings
+                    .remove(&grant.name)
+                    .map(|value| runtime_launch::resolved::ResolvedSecret::new(&grant.name, value))
+                    .context("runtime Binding grant omitted a declared name")
+            })
+            .collect()
     }
 
     fn report_activity_ready(&self, lease_id: &str, execution_id: &str) -> Result<()> {
