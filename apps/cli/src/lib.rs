@@ -2268,22 +2268,19 @@ fn portable_process_bwrap_command(
                 .map(|state| PathBuf::from(&state.guest_path))
                 .chain([PathBuf::from("/tmp")]),
         )
-        .allow_read_only(
-            [
-                PathBuf::from("/app"),
-                PathBuf::from("/.ato"),
-                interpreter_root.to_path_buf(),
-                PathBuf::from("/usr"),
-                PathBuf::from("/bin"),
-                PathBuf::from("/sbin"),
-                PathBuf::from("/lib"),
-                PathBuf::from("/lib64"),
-                PathBuf::from("/etc"),
-                PathBuf::from("/dev"),
-                PathBuf::from("/proc"),
-            ]
-            .into_iter(),
-        )
+        .allow_read_only([
+            PathBuf::from("/app"),
+            PathBuf::from("/.ato"),
+            interpreter_root.to_path_buf(),
+            PathBuf::from("/usr"),
+            PathBuf::from("/bin"),
+            PathBuf::from("/sbin"),
+            PathBuf::from("/lib"),
+            PathBuf::from("/lib64"),
+            PathBuf::from("/etc"),
+            PathBuf::from("/dev"),
+            PathBuf::from("/proc"),
+        ])
         .with_network(false)
         .allow_tcp_bind([host_port]);
     let policy_path = runtime_root.join("sandbox-policy.json");
