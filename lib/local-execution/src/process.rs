@@ -59,7 +59,15 @@ pub fn terminate_owned_process(identity: &OwnedProcessIdentity) -> Result<()> {
             identity.pid
         );
     }
-    terminate_process_tree(identity.pid, identity.process_group)?;
+    if let Err(error) = terminate_process_tree(identity.pid, identity.process_group) {
+        // The worker may finish voluntarily between the identity check and
+        // the signal. That is the requested cleanup outcome; only propagate
+        // the signal failure while the same owned process is still alive.
+        if !identity.matches_live_process()? {
+            return Ok(());
+        }
+        return Err(error.into());
+    }
     for _ in 0..100 {
         if process_start_time(identity.pid).is_none() {
             return Ok(());
