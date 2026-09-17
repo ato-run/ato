@@ -210,7 +210,7 @@ pub(crate) fn generate_sbpl_profile(policy: &SandboxPolicy) -> String {
             path.ancestors()
                 .skip(1)
                 .filter(|ancestor| ancestor.parent().is_some())
-                .filter_map(|ancestor| escape_path_for_sbpl(ancestor))
+                .filter_map(escape_path_for_sbpl)
                 .collect::<Vec<_>>()
         })
         .collect::<BTreeSet<_>>();

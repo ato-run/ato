@@ -279,7 +279,7 @@ pub(crate) fn validate_snapshot_resource_bytes(
 
 fn validate_filesystem_state(bytes: &[u8]) -> Result<(), PortableApplicationError> {
     if bytes.len() < 1024
-        || bytes.len() % 512 != 0
+        || !bytes.len().is_multiple_of(512)
         || !bytes[bytes.len() - 1024..].iter().all(|byte| *byte == 0)
     {
         return Err(profile(
@@ -802,87 +802,6 @@ pub(crate) fn validate_asset_bindings(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn filesystem_archive(path: &str, entry_type: tar::EntryType) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        {
-            let mut archive = tar::Builder::new(&mut bytes);
-            let mut header = tar::Header::new_ustar();
-            let contents = if entry_type.is_file() {
-                b"saved".as_slice()
-            } else {
-                &[]
-            };
-            header.set_size(contents.len() as u64);
-            header.set_mode(if entry_type.is_dir() { 0o755 } else { 0o644 });
-            header.set_mtime(0);
-            header.set_uid(0);
-            header.set_gid(0);
-            header.set_entry_type(entry_type);
-            header.set_path_absolute(path).unwrap();
-            header.set_cksum();
-            archive.append(&header, Cursor::new(contents)).unwrap();
-            archive.finish().unwrap();
-        }
-        bytes
-    }
-
-    #[test]
-    fn filesystem_state_accepts_a_canonical_regular_tree() {
-        let bytes = filesystem_archive("data.sqlite", tar::EntryType::Regular);
-        validate_snapshot_resource_bytes(STATE_FILESYSTEM_PROTOCOL, &bytes).unwrap();
-    }
-
-    #[test]
-    fn filesystem_state_rejects_links_and_path_traversal() {
-        let link = filesystem_archive("link", tar::EntryType::Symlink);
-        assert!(validate_snapshot_resource_bytes(STATE_FILESYSTEM_PROTOCOL, &link).is_err());
-
-        let traversal = filesystem_archive("/escape", tar::EntryType::Regular);
-        assert!(validate_snapshot_resource_bytes(STATE_FILESYSTEM_PROTOCOL, &traversal).is_err());
-    }
-
-    #[test]
-    fn filesystem_state_capture_is_deterministic_and_restorable() {
-        let source = tempfile::tempdir().unwrap();
-        fs::create_dir(source.path().join("nested")).unwrap();
-        fs::write(source.path().join("notes.sqlite"), b"database").unwrap();
-        fs::write(source.path().join("nested/value.txt"), b"saved").unwrap();
-
-        let first = capture_filesystem_state(source.path()).unwrap();
-        let second = capture_filesystem_state(source.path()).unwrap();
-        let restored = tempfile::tempdir().unwrap();
-        restore_filesystem_state(&first, restored.path()).unwrap();
-
-        assert_eq!(first, second);
-        assert_eq!(
-            fs::read(restored.path().join("notes.sqlite")).unwrap(),
-            b"database"
-        );
-        assert_eq!(
-            fs::read(restored.path().join("nested/value.txt")).unwrap(),
-            b"saved"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn filesystem_state_capture_rejects_symlinks() {
-        use std::os::unix::fs::symlink;
-
-        let source = tempfile::tempdir().unwrap();
-        fs::write(source.path().join("target"), b"saved").unwrap();
-        symlink("target", source.path().join("link")).unwrap();
-
-        let error = capture_filesystem_state(source.path()).unwrap_err();
-
-        assert!(error.to_string().contains("symlink or non-regular"));
-    }
-}
-
 pub(crate) fn rebind_snapshot_resource_assets(
     snapshot: &InstanceSnapshotV1,
     resource: &InstanceSnapshotResourceV1,
@@ -1273,4 +1192,85 @@ fn remove_object(bundle: &mut PortableApplicationBundle, reference: &str) {
     bundle
         .payloads
         .retain(|payload| payload.reference != reference);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn filesystem_archive(path: &str, entry_type: tar::EntryType) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut archive = tar::Builder::new(&mut bytes);
+            let mut header = tar::Header::new_ustar();
+            let contents = if entry_type.is_file() {
+                b"saved".as_slice()
+            } else {
+                &[]
+            };
+            header.set_size(contents.len() as u64);
+            header.set_mode(if entry_type.is_dir() { 0o755 } else { 0o644 });
+            header.set_mtime(0);
+            header.set_uid(0);
+            header.set_gid(0);
+            header.set_entry_type(entry_type);
+            header.set_path_absolute(path).unwrap();
+            header.set_cksum();
+            archive.append(&header, Cursor::new(contents)).unwrap();
+            archive.finish().unwrap();
+        }
+        bytes
+    }
+
+    #[test]
+    fn filesystem_state_accepts_a_canonical_regular_tree() {
+        let bytes = filesystem_archive("data.sqlite", tar::EntryType::Regular);
+        validate_snapshot_resource_bytes(STATE_FILESYSTEM_PROTOCOL, &bytes).unwrap();
+    }
+
+    #[test]
+    fn filesystem_state_rejects_links_and_path_traversal() {
+        let link = filesystem_archive("link", tar::EntryType::Symlink);
+        assert!(validate_snapshot_resource_bytes(STATE_FILESYSTEM_PROTOCOL, &link).is_err());
+
+        let traversal = filesystem_archive("/escape", tar::EntryType::Regular);
+        assert!(validate_snapshot_resource_bytes(STATE_FILESYSTEM_PROTOCOL, &traversal).is_err());
+    }
+
+    #[test]
+    fn filesystem_state_capture_is_deterministic_and_restorable() {
+        let source = tempfile::tempdir().unwrap();
+        fs::create_dir(source.path().join("nested")).unwrap();
+        fs::write(source.path().join("notes.sqlite"), b"database").unwrap();
+        fs::write(source.path().join("nested/value.txt"), b"saved").unwrap();
+
+        let first = capture_filesystem_state(source.path()).unwrap();
+        let second = capture_filesystem_state(source.path()).unwrap();
+        let restored = tempfile::tempdir().unwrap();
+        restore_filesystem_state(&first, restored.path()).unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(
+            fs::read(restored.path().join("notes.sqlite")).unwrap(),
+            b"database"
+        );
+        assert_eq!(
+            fs::read(restored.path().join("nested/value.txt")).unwrap(),
+            b"saved"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filesystem_state_capture_rejects_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("target"), b"saved").unwrap();
+        symlink("target", source.path().join("link")).unwrap();
+
+        let error = capture_filesystem_state(source.path()).unwrap_err();
+
+        assert!(error.to_string().contains("symlink or non-regular"));
+    }
 }
