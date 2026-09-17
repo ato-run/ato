@@ -1,0 +1,40 @@
+schema = "ato.capsule/2"
+
+[application]
+title = "Tasks"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[state]]
+id = "data"
+use = "ato.state.filesystem@1"
+mount = "/db"
+access = "read-write"
+
+[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "app-ready"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/"
+status = 200
+body_digest = "sha256:230ab980f3db5ddba44c5ff8167a42bfa8f979542c50f2ef90c4bf2a6b83c23f"
+
+[[derivation]]
+id = "oci-linux-amd64"
+use = "ato.oci@1"
+argv = ["web"]
+cwd = "."
+guest_port = 3456
+env = { VIKUNJA_SERVICE_INTERFACE = ":3456", VIKUNJA_DATABASE_TYPE = "sqlite", VIKUNJA_DATABASE_PATH = "/db/vikunja.db", VIKUNJA_FILES_BASEPATH = "/db/files", VIKUNJA_CORS_ENABLE = "false" }
+runtimes = { "oci.image" = "docker.io/vikunja/vikunja@sha256:b63e4d5d300dbd63003c045afa1ebb98a16ff2a527ef09550cc8df2db57706e2", "oci.platform" = "linux/amd64", "oci.entrypoint" = "/app/vikunja/vikunja", "oci.memory_bytes" = "536870912", "oci.cpu_limit_millis" = "1000", "oci.pids_limit" = "256" }
+
+[effects]
+default = "pure"
