@@ -109,7 +109,9 @@ fn runner_capabilities(oci_available: bool) -> Vec<&'static str> {
 const ACTIVE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const ACTIVITY_FRAME_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 const ACTIVITY_FRAME_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+#[cfg(unix)]
 const GUEST_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+#[cfg(unix)]
 const GUEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const TERMINAL_REPORT_RETRY_DELAYS: [Duration; 3] = [
     Duration::ZERO,
@@ -3586,6 +3588,7 @@ pub fn run_netns_surface_relay(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn connect_tcp_until(target: SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
     let started = Instant::now();
     loop {

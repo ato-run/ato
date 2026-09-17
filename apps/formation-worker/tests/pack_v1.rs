@@ -44,6 +44,7 @@ fn different_content_is_a_different_artifact() {
     assert_ne!(d(&one), d(&moved), "path must matter");
 }
 
+#[cfg(unix)]
 #[test]
 fn an_executable_keeps_its_bit_and_a_data_file_does_not_gain_one() {
     use std::os::unix::fs::PermissionsExt as _;
@@ -79,6 +80,7 @@ fn an_empty_directory_is_part_of_the_artifact() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_symlink_fails_the_build_where_it_is() {
     let dir = tree(&[("real.py", "1")]);
