@@ -1120,12 +1120,14 @@ impl ConnectedWorker {
         // than believed.
         self.api.report_ready(
             &lease.id,
-            &execution_id,
-            Some(&self.config.public_base_url),
-            Some(port),
-            Some(&execution_evidence),
-            None,
-            oci_port_mapping.as_ref(),
+            ReadyReport {
+                execution_id: &execution_id,
+                ready_url: Some(&self.config.public_base_url),
+                local_port: Some(port),
+                execution: Some(&execution_evidence),
+                port_mapping: oci_port_mapping.as_ref(),
+                control: None,
+            },
         )?;
         if let runtime_launch::lease::ActiveWorkload::Oci(container) = &active.launched {
             let (container_ip, mappings) = container.port_mapping();
@@ -1261,14 +1263,20 @@ impl ConnectedWorker {
             evolution.current_head().head.as_str() == command.expected_root_computation_ref,
             "hosted evolution authority root changed before the first operation"
         );
+        let control = browser.as_ref().map(|runtime| runtime.control_capability());
         self.api.report_ready(
             &lease.id,
-            &execution_id,
-            Some(&self.config.public_base_url),
-            Some(ready_local_port(&self.config)),
-            None,
-            browser.as_ref().map(|runtime| runtime.control_capability()),
-            None,
+            ReadyReport {
+                execution_id: &execution_id,
+                ready_url: Some(&self.config.public_base_url),
+                local_port: Some(ready_local_port(&self.config)),
+                execution: None,
+                port_mapping: None,
+                control: control.as_ref().map(|capability| BrowserControlReport {
+                    protocol: &capability.protocol,
+                    port: &capability.port,
+                }),
+            },
         )?;
         let mut last_control = Instant::now() - Duration::from_secs(1);
         let mut last_frame = Instant::now();
@@ -3079,31 +3087,12 @@ impl HttpRunnerApi {
             .into())
     }
 
-    fn report_ready(
-        &self,
-        lease_id: &str,
-        execution_id: &str,
-        ready_url: Option<&str>,
-        local_port: Option<u16>,
-        execution: Option<&runtime_launch::lease::RuntimeExecutionEvidence>,
-        control: Option<BrowserControlCapability>,
-        port_mapping: Option<&OciPortMappingReport>,
-    ) -> Result<()> {
+    fn report_ready(&self, lease_id: &str, report: ReadyReport<'_>) -> Result<()> {
         self.authorized(
             self.client
                 .post(format!("{}/v1/runner-leases/{lease_id}/ready", self.base)),
         )
-        .json(&ReadyReport {
-            execution_id,
-            ready_url,
-            local_port,
-            execution,
-            port_mapping,
-            control: control.as_ref().map(|capability| BrowserControlReport {
-                protocol: &capability.protocol,
-                port: &capability.port,
-            }),
-        })
+        .json(&report)
         .send()?
         .error_for_status()?;
         Ok(())
