@@ -22,4 +22,5 @@ class Handler(BaseHTTPRequestHandler):
 
 
 port = int(os.environ.get("ATO_ENDPOINT_APP_HTTP", "8000"))
-ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
+host = os.environ.get("APP_LISTEN_HOST", "127.0.0.1")
+ThreadingHTTPServer((host, port), Handler).serve_forever()
