@@ -111,20 +111,20 @@ ato-cli integration/doc             30 passed
   of which portable integration     11 passed
 ```
 
-Passed on the feature head:
+Passed on the final feature head:
 
 ```text
 cargo clippy -p ato-portable-application -p ato-cli \
-  --all-targets --no-deps -- -D warnings  # with the parent warnings below excluded
+  --all-targets --no-deps -- -D warnings
+cargo clippy -p ato-cli --all-targets -- -D warnings
 ```
 
-With Rust/Clippy 1.96, the unfiltered command stops on unchanged parent code:
-`apps/portable-application/src/instance_snapshot.rs:281`
-(`manual_is_multiple_of`), the pre-existing mid-file test module in that file
-(`items_after_test_module`), and the dependency-inclusive command additionally
-stops at `lib/sandbox/src/macos.rs:213` (`redundant_closure`). All three
-locations are present at exact parent `f4988ee0`; none was suppressed or used
-to hide a new warning in the changed functions.
+Rust/Clippy 1.96's `manual_is_multiple_of`, `items_after_test_module`, and
+`redundant_closure` findings were corrected idiomatically rather than
+suppressed. Cross-platform CLI integration now accepts exactly two outcomes:
+a compatible host runs the selected Python 3.12 D and fully satisfies K; a host
+without that pinned capability must return the explicit admission error and
+must not emit a receipt. This is implemented in ato `28d8718b`.
 
 API verification passed:
 
