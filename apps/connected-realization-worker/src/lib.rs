@@ -91,13 +91,21 @@ use activity_controller::{
 
 const PORTABLE_CAPSULE_LEASE_KIND: &str = "portable_capsule_v2";
 const ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND: &str = "activity_browser_executor_v0";
-const RUNNER_CAPABILITIES: &[&str] = &[
+const BASE_RUNNER_CAPABILITIES: &[&str] = &[
     "execution_abi=process",
     runtime_launch::lease::RUNTIME_LAUNCH_LEASE_KIND,
     "isolation=untrusted-v1",
     "materializer=ato.materialize.vm.snapshot@1",
     "backend=firecracker",
 ];
+
+fn runner_capabilities(oci_available: bool) -> Vec<&'static str> {
+    let mut capabilities = BASE_RUNNER_CAPABILITIES.to_vec();
+    if oci_available {
+        capabilities.push("execution_abi=oci");
+    }
+    capabilities
+}
 const ACTIVE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 /// A Run that is never stopped is still not immortal. The cap exists so a lost
 /// control plane cannot leave a workload and its state slot held forever.
@@ -2955,7 +2963,9 @@ impl HttpRunnerApi {
             self.base, self.runner_id
         )))
         .json(&serde_json::json!({
-            "capabilities": RUNNER_CAPABILITIES,
+            "capabilities": runner_capabilities(
+                ato_adapter_oci::docker_runtime_available()
+            ),
             "supported_lease_kinds": supported_lease_kinds(config),
             "supported_session_surfaces": [{
                 "kind": "web",
@@ -4544,10 +4554,13 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
 
     #[test]
     fn heartbeat_advertises_dispatch_and_vm_requirements() {
-        assert!(RUNNER_CAPABILITIES.contains(&"execution_abi=process"));
-        assert!(RUNNER_CAPABILITIES.contains(&"isolation=untrusted-v1"));
-        assert!(RUNNER_CAPABILITIES.contains(&"materializer=ato.materialize.vm.snapshot@1"));
-        assert!(RUNNER_CAPABILITIES.contains(&"backend=firecracker"));
+        let process_only = runner_capabilities(false);
+        assert!(process_only.contains(&"execution_abi=process"));
+        assert!(!process_only.contains(&"execution_abi=oci"));
+        assert!(process_only.contains(&"isolation=untrusted-v1"));
+        assert!(process_only.contains(&"materializer=ato.materialize.vm.snapshot@1"));
+        assert!(process_only.contains(&"backend=firecracker"));
+        assert!(runner_capabilities(true).contains(&"execution_abi=oci"));
     }
 
     #[test]

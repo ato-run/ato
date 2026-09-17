@@ -332,6 +332,25 @@ impl DockerOciAdapter {
     }
 }
 
+/// Report whether this host can honestly accept an OCI HTTP workload now.
+///
+/// Finding a Docker client is insufficient: a stopped or unreachable daemon
+/// would make the scheduler issue a lease that can only fail. The Connected
+/// Runner uses this probe for its heartbeat capability advertisement; launch
+/// admission still repeats the check and validates the pinned platform/image.
+pub fn docker_runtime_available() -> bool {
+    if !cfg!(target_os = "linux") {
+        return false;
+    }
+    let Some(docker) = find_on_path("docker") else {
+        return false;
+    };
+    Command::new(docker)
+        .args(["version", "--format", "{{.Server.Version}}"])
+        .output()
+        .is_ok_and(|output| output.status.success() && !output.stdout.is_empty())
+}
+
 fn validate_inspected_image(spec: &OciSpec, inspected: &str) -> Result<()> {
     let (digests, platform) = inspected
         .rsplit_once('|')
