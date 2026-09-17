@@ -406,16 +406,15 @@ fn encode_path_segment(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write as _;
-
-    use tempfile::NamedTempFile;
-
     use super::*;
 
     #[cfg(unix)]
     #[test]
     fn connection_file_requires_private_permissions_and_redacts_debug() {
+        use std::io::Write as _;
         use std::os::unix::fs::PermissionsExt as _;
+
+        use tempfile::NamedTempFile;
 
         let mut file = NamedTempFile::new().expect("temporary connection file");
         let key = format!("atoc_{}", "x".repeat(43));
