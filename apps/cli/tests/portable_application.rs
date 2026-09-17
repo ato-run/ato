@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Output;
 
 use assert_cmd::Command;
 use ato_objects::{
@@ -39,6 +40,22 @@ fn datasette_fixture() -> PathBuf {
 
 fn authored_multi_process_fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/portable-multi-process-authored")
+}
+
+fn succeeded_or_rejected_for_missing_python(output: &Output, receipt: &Path) -> bool {
+    if output.status.success() {
+        return true;
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("selected derivation requires Python 3.12"),
+        "portable process failed for an unexpected reason: {stderr}"
+    );
+    assert!(
+        !receipt.exists(),
+        "runtime admission failure must not emit a verification receipt"
+    );
+    false
 }
 
 fn snapshot_fixture(destination: &Path) -> Vec<u8> {
@@ -156,7 +173,7 @@ fn explicitly_selected_process_route_satisfies_the_same_contract_at_runtime() {
     let output = tempfile::tempdir().unwrap();
     let receipt_path = output.path().join("process-receipt.json");
     let process_ref = "sha256:5d1ec4660745130f196102c1bd81828993ab75d69130f0fdf2e1e2598fd9f3cc";
-    ato()
+    let run = ato()
         .arg("run")
         .arg(multi_fixture())
         .arg("--derivation")
@@ -164,10 +181,14 @@ fn explicitly_selected_process_route_satisfies_the_same_contract_at_runtime() {
         .arg("--no-open")
         .arg("--verification-receipt")
         .arg(&receipt_path)
-        .assert()
-        .success()
-        .stdout(predicates::str::contains(format!("Route: {process_ref}")))
-        .stdout(predicates::str::contains("Runtime: local process"));
+        .output()
+        .unwrap();
+    if !succeeded_or_rejected_for_missing_python(&run, &receipt_path) {
+        return;
+    }
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(stdout.contains(&format!("Route: {process_ref}")));
+    assert!(stdout.contains("Runtime: local process"));
 
     let receipt: Value = serde_json::from_slice(&fs::read(receipt_path).unwrap()).unwrap();
     assert_eq!(
@@ -239,9 +260,10 @@ fn pack_compiles_v2_authoring_and_both_explicit_routes_satisfy_one_contract() {
     };
     assert_eq!(bundle.index.derivations.len(), 2);
 
+    let mut runtime_missing = false;
     for (index, derivation_ref) in bundle.index.derivations.iter().enumerate() {
         let receipt_path = output.path().join(format!("receipt-{index}.json"));
-        ato()
+        let run = ato()
             .arg("run")
             .arg(&bundle_path)
             .arg("--derivation")
@@ -249,8 +271,16 @@ fn pack_compiles_v2_authoring_and_both_explicit_routes_satisfy_one_contract() {
             .arg("--no-open")
             .arg("--verification-receipt")
             .arg(&receipt_path)
-            .assert()
-            .success();
+            .output()
+            .unwrap();
+        if !succeeded_or_rejected_for_missing_python(&run, &receipt_path) {
+            runtime_missing = true;
+            continue;
+        }
+        assert!(
+            !runtime_missing,
+            "one route admitted the shared Python runtime after another rejected it"
+        );
         let receipt: Value = serde_json::from_slice(&fs::read(receipt_path).unwrap()).unwrap();
         assert_eq!(receipt["contract_ref"], bundle.index.root_contract_ref);
         assert_eq!(receipt["derivation_ref"], *derivation_ref);
