@@ -39,9 +39,10 @@ jobs:
         run: cargo check --workspace --all-targets --locked
       - name: Check host workspace (Windows)
         if: runner.os == 'Windows'
-        # guest-agent is built into the Linux snapshot guest rootfs and has no
-        # Windows host target. Every host-side package remains in this check.
-        run: cargo check --workspace --exclude guest-agent --all-targets --locked
+        # guest-agent and its Firecracker guest-image builder target the Linux
+        # guest rootfs, not the Windows host. Exclude both so the latter cannot
+        # pull guest-agent back into the dependency graph.
+        run: cargo check --workspace --exclude guest-agent --exclude ato-firecracker-guest-image --all-targets --locked
       - name: Test workspace
         if: runner.os != 'Windows'
         run: cargo test --workspace --no-fail-fast
@@ -54,5 +55,5 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Clippy host workspace (Windows)
         if: runner.os == 'Windows'
-        run: cargo clippy --workspace --exclude guest-agent --all-targets --all-features --locked -- -D warnings
+        run: cargo clippy --workspace --exclude guest-agent --exclude ato-firecracker-guest-image --all-targets --all-features --locked -- -D warnings
       - run: cargo run --locked -p arch-check
