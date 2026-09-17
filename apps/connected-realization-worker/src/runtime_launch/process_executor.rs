@@ -376,7 +376,7 @@ fn resolve_python_from_root(
     requirement: &ato_ipc::runtime_launch::ExecutableRequirementV1,
     root: &Path,
 ) -> Result<(String, String)> {
-    let mut versions = std::fs::read_dir(&root)
+    let mut versions = std::fs::read_dir(root)
         .with_context(|| format!("Python toolchain root {} is unavailable", root.display()))?
         .filter_map(|entry| entry.ok())
         .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
