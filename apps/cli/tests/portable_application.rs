@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Output;
+use std::time::Duration;
 
 use assert_cmd::Command;
 use ato_objects::{
@@ -17,7 +18,10 @@ use ato_portable_application::portability_export::repack_portable_dependencies;
 use serde_json::Value;
 
 fn ato() -> Command {
-    Command::cargo_bin("ato").expect("the ato binary is built for integration tests")
+    let mut command =
+        Command::cargo_bin("ato").expect("the ato binary is built for integration tests");
+    command.timeout(Duration::from_secs(30));
+    command
 }
 
 fn ato_with_home(home: &Path) -> Command {
@@ -372,6 +376,7 @@ fn v4_bundle_can_be_planned_and_reexported_without_changing_identity() {
 #[test]
 fn imported_local_instance_can_stop_and_restart_without_reimporting() {
     let root = tempfile::tempdir().unwrap();
+    eprintln!("durable lifecycle: import");
     let imported = ato_with_home(root.path())
         .args(["app", "import"])
         .arg(fixture())
@@ -401,12 +406,14 @@ fn imported_local_instance_can_stop_and_restart_without_reimporting() {
     );
 
     let first_receipt = root.path().join("first-receipt.json");
+    eprintln!("durable lifecycle: first start");
     ato_with_home(root.path())
         .args(["app", "start", instance_id, "--no-open"])
         .arg("--verification-receipt")
         .arg(&first_receipt)
         .assert()
         .success();
+    eprintln!("durable lifecycle: inspect first run");
     let first_status = ato_with_home(root.path())
         .args(["app", "inspect", instance_id])
         .output()
@@ -422,10 +429,12 @@ fn imported_local_instance_can_stop_and_restart_without_reimporting() {
     let first_receipt: Value = serde_json::from_slice(&fs::read(first_receipt).unwrap()).unwrap();
     assert_eq!(first_receipt["fully_satisfied"], true);
 
+    eprintln!("durable lifecycle: stop first run");
     ato_with_home(root.path())
         .args(["app", "stop", instance_id])
         .assert()
         .success();
+    eprintln!("durable lifecycle: inspect stopped instance");
     let stopped = ato_with_home(root.path())
         .args(["app", "inspect", instance_id])
         .output()
@@ -434,12 +443,14 @@ fn imported_local_instance_can_stop_and_restart_without_reimporting() {
     assert!(stopped["active_run"].is_null());
 
     let second_receipt = root.path().join("second-receipt.json");
+    eprintln!("durable lifecycle: second start");
     ato_with_home(root.path())
         .args(["app", "start", instance_id, "--no-open"])
         .arg("--verification-receipt")
         .arg(&second_receipt)
         .assert()
         .success();
+    eprintln!("durable lifecycle: inspect second run");
     let second_status = ato_with_home(root.path())
         .args(["app", "inspect", instance_id])
         .output()
@@ -459,6 +470,7 @@ fn imported_local_instance_can_stop_and_restart_without_reimporting() {
     );
     assert_eq!(second_receipt["fully_satisfied"], true);
 
+    eprintln!("durable lifecycle: stop second run");
     ato_with_home(root.path())
         .args(["app", "stop", instance_id])
         .assert()
