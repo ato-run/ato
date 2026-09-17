@@ -107,9 +107,6 @@ fn runner_capabilities(oci_available: bool) -> Vec<&'static str> {
     capabilities
 }
 const ACTIVE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
-/// A Run that is never stopped is still not immortal. The cap exists so a lost
-/// control plane cannot leave a workload and its state slot held forever.
-const RUNTIME_LAUNCH_MAX_LIFETIME: Duration = Duration::from_secs(60 * 60);
 const ACTIVITY_FRAME_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 const ACTIVITY_FRAME_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const GUEST_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
@@ -1047,6 +1044,9 @@ impl ConnectedWorker {
         // not the one the control plane digested onto the Run, the Runner
         // would execute something the receipt does not describe.
         let spec = runtime_launch::lease::verified_spec(command)?;
+        // Arm this before materialization/startup. A public preview's cap owns
+        // the whole allocation, not only the time after readiness.
+        let hard_deadline = Instant::now() + runtime_launch::lease::maximum_lifetime(command);
 
         let workspace = runtime_launch::workspace::LeaseWorkspaceTransport::new(
             self.api.client.clone(),
@@ -1156,7 +1156,7 @@ impl ConnectedWorker {
         let outcome = runtime_launch::lease::wait_for_stop(
             &stop,
             Duration::from_millis(500),
-            Some(Instant::now() + RUNTIME_LAUNCH_MAX_LIFETIME),
+            Some(hard_deadline),
         );
 
         // Whether the stop was requested or the lifetime ran out, the Run is

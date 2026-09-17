@@ -48,6 +48,10 @@ use super::workspace::{WorkspaceTransport, materialize_workspace};
 /// pins the two together, because a silent mismatch does not fail loudly — it
 /// looks like "no runner available" forever.
 pub const RUNTIME_LAUNCH_LEASE_KIND: &str = "runtime_launch";
+/// Absolute upper bound accepted from the control plane for one workload.
+/// Public previews may request a shorter lease-owned deadline; omitting the
+/// field preserves the ordinary one-hour safety cap.
+pub const RUNTIME_LAUNCH_MAX_DURATION_SECS: u64 = 60 * 60;
 
 /// Whether this Runner may take `runtime_launch` leases at all.
 ///
@@ -72,6 +76,11 @@ pub struct RuntimeLaunchLeaseCommand {
     /// this handler; declared so the envelope still parses.
     #[serde(default)]
     pub runtime_cpu_request: Option<serde_json::Value>,
+    /// Runtime orchestration policy, outside the digested launch spec/K/D.
+    /// Used by bounded public previews so cleanup does not depend on a browser
+    /// request or a coarse control-plane cron sweep.
+    #[serde(default)]
+    pub max_duration_secs: Option<u64>,
 }
 
 /// Parse the command's spec and prove it is the one that was dispatched.
@@ -81,6 +90,12 @@ pub struct RuntimeLaunchLeaseCommand {
 /// control plane digested onto the Run, the Runner would execute something the
 /// receipt does not describe.
 pub fn verified_spec(command: &RuntimeLaunchLeaseCommand) -> Result<RuntimeLaunchSpecV1> {
+    if let Some(seconds) = command.max_duration_secs {
+        ensure!(
+            (1..=RUNTIME_LAUNCH_MAX_DURATION_SECS).contains(&seconds),
+            "runtime launch max_duration_secs must be between 1 and {RUNTIME_LAUNCH_MAX_DURATION_SECS}"
+        );
+    }
     let encoded = serde_json::to_string(&command.launch_spec)
         .context("lease command launch_spec is not encodable")?;
     let spec = RuntimeLaunchSpecV1::parse(&encoded)
@@ -99,6 +114,14 @@ pub fn verified_spec(command: &RuntimeLaunchLeaseCommand) -> Result<RuntimeLaunc
         "launch spec identity does not match its lease command"
     );
     Ok(spec)
+}
+
+pub fn maximum_lifetime(command: &RuntimeLaunchLeaseCommand) -> Duration {
+    Duration::from_secs(
+        command
+            .max_duration_secs
+            .unwrap_or(RUNTIME_LAUNCH_MAX_DURATION_SECS),
+    )
 }
 
 /// Bind an ephemeral port and keep it only long enough to learn its number.
@@ -502,6 +525,7 @@ mod tests {
             launch_spec_digest: digest.to_owned(),
             launch_spec: serde_json::to_value(spec).expect("spec encodes"),
             runtime_cpu_request: None,
+            max_duration_secs: None,
         }
     }
 
@@ -531,6 +555,26 @@ mod tests {
         let digest = spec.canonical_digest().expect("digests");
         let verified = verified_spec(&command_for(&spec, &digest)).expect("accepted");
         assert_eq!(verified.context.run_id, spec.context.run_id);
+    }
+
+    #[test]
+    fn a_bounded_preview_uses_its_shorter_runner_deadline() {
+        let spec = RuntimeLaunchSpecV1::parse(PROCESS_FIXTURE).expect("fixture");
+        let digest = spec.canonical_digest().expect("digests");
+        let mut command = command_for(&spec, &digest);
+        command.max_duration_secs = Some(180);
+        verified_spec(&command).expect("bounded command accepted");
+        assert_eq!(maximum_lifetime(&command), Duration::from_secs(180));
+    }
+
+    #[test]
+    fn an_unbounded_control_plane_override_is_refused() {
+        let spec = RuntimeLaunchSpecV1::parse(PROCESS_FIXTURE).expect("fixture");
+        let digest = spec.canonical_digest().expect("digests");
+        let mut command = command_for(&spec, &digest);
+        command.max_duration_secs = Some(RUNTIME_LAUNCH_MAX_DURATION_SECS + 1);
+        let error = verified_spec(&command).unwrap_err();
+        assert!(error.to_string().contains("max_duration_secs"), "{error}");
     }
 
     #[test]
