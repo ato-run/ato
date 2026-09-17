@@ -1923,6 +1923,9 @@ impl PortableLocalRuntime {
                         .get(OCI_PLATFORM_RUNTIME)
                         .context("OCI route omitted platform")?
                         .clone(),
+                    entrypoint: runtime
+                        .get(ato_portable_application::OCI_ENTRYPOINT_RUNTIME)
+                        .cloned(),
                     argv: step.argv.clone(),
                     working_dir: "/app".to_owned(),
                     environment,

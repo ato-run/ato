@@ -65,6 +65,10 @@ pub const OCI_PLATFORM_RUNTIME: &str = "oci.platform";
 pub const OCI_MEMORY_BYTES_RUNTIME: &str = "oci.memory_bytes";
 pub const OCI_CPU_MILLIS_RUNTIME: &str = "oci.cpu_limit_millis";
 pub const OCI_PIDS_LIMIT_RUNTIME: &str = "oci.pids_limit";
+/// Optional immutable executable override for OCI images whose configured
+/// ENTRYPOINT is relative to the image working directory. The Runner owns the
+/// override; workloads still receive no Docker control surface.
+pub const OCI_ENTRYPOINT_RUNTIME: &str = "oci.entrypoint";
 
 #[derive(Debug, Error)]
 pub enum PortableApplicationError {
@@ -1452,7 +1456,20 @@ fn validate_initial_route(
                     )));
                 }
             }
-            if derivation.runtimes.len() != 5
+            if let Some(entrypoint) = derivation.runtimes.get(OCI_ENTRYPOINT_RUNTIME)
+                && (!entrypoint.starts_with('/')
+                    || entrypoint.contains(['\0', '\\', ','])
+                    || entrypoint
+                        .split('/')
+                        .skip(1)
+                        .any(|segment| segment.is_empty() || matches!(segment, "." | "..")))
+            {
+                return Err(profile(
+                    "OCI entrypoint must be an absolute traversal-free guest path",
+                ));
+            }
+            if derivation.runtimes.len()
+                != 5 + usize::from(derivation.runtimes.contains_key(OCI_ENTRYPOINT_RUNTIME))
                 || step.op != "serve"
                 || step.argv.is_empty()
                 || step.argv.iter().any(|value| value.contains('\0'))
@@ -3499,6 +3516,27 @@ mod tests {
         assert_eq!(broken_oci.index.root_contract_ref, contract_ref);
         validate_bundle_for_derivation(&broken_oci, &process_ref).unwrap();
         assert!(validate_bundle_for_derivation(&broken_oci, &broken_oci_ref).is_err());
+    }
+
+    #[test]
+    fn oci_entrypoint_is_part_of_d_and_must_be_an_absolute_guest_path() {
+        let mut with_entrypoint = datasette_spec();
+        with_entrypoint.oci.runtimes.insert(
+            OCI_ENTRYPOINT_RUNTIME.to_owned(),
+            "/usr/local/bin/datasette".to_owned(),
+        );
+        let (_, bundle) =
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &with_entrypoint).unwrap();
+        let oci_ref = route_ref(&bundle, PortableRealizationKind::OciContainer);
+        validate_bundle_for_derivation(&bundle, &oci_ref).unwrap();
+
+        with_entrypoint
+            .oci
+            .runtimes
+            .insert(OCI_ENTRYPOINT_RUNTIME.to_owned(), "../datasette".to_owned());
+        assert!(
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &with_entrypoint).is_err()
+        );
     }
 
     #[test]

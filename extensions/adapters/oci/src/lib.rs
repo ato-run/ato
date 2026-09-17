@@ -46,6 +46,7 @@ pub struct OciSpec {
     pub id: String,
     pub image: String,
     pub platform: String,
+    pub entrypoint: Option<String>,
     pub argv: Vec<String>,
     pub working_dir: String,
     pub environment: BTreeMap<String, String>,
@@ -630,6 +631,17 @@ fn validate_spec(spec: &OciSpec) -> Result<()> {
         "OCI argv contains NUL"
     );
     ensure!(
+        spec.entrypoint.as_ref().is_none_or(|entrypoint| {
+            entrypoint.starts_with('/')
+                && !entrypoint.contains(['\0', '\\', ','])
+                && entrypoint
+                    .split('/')
+                    .skip(1)
+                    .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+        }),
+        "OCI entrypoint is invalid"
+    );
+    ensure!(
         spec.working_dir == "/app",
         "OCI working directory must be /app"
     );
@@ -731,6 +743,9 @@ fn docker_run_arguments(
     ];
     if let Some(user) = writable_mount_user {
         argv.extend(["--user".to_owned(), user]);
+    }
+    if let Some(entrypoint) = &spec.entrypoint {
+        argv.extend(["--entrypoint".to_owned(), entrypoint.clone()]);
     }
     for mount in &spec.mounts {
         let source = mount
@@ -857,6 +872,7 @@ mod tests {
             id: "run_1".to_owned(),
             image: format!("docker.io/example/app@sha256:{}", "a".repeat(64)),
             platform: "linux/amd64".to_owned(),
+            entrypoint: None,
             argv: vec!["--serve".to_owned()],
             working_dir: "/app".to_owned(),
             environment: BTreeMap::new(),
@@ -1010,6 +1026,31 @@ mod tests {
         assert!(!rendered.contains("--privileged"));
         assert!(!rendered.contains("--publish"));
         assert_eq!(args[args.len() - 2], "sha256:verified-local-id");
+    }
+
+    #[test]
+    fn run_arguments_apply_a_declared_guest_entrypoint() {
+        let workspace = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let env_file = runtime.path().join("environment.list");
+        fs::write(&env_file, "").unwrap();
+        let mut declared = spec();
+        declared.entrypoint = Some("/usr/local/bin/app".to_owned());
+        let args = docker_run_arguments(
+            &declared,
+            workspace.path(),
+            &env_file,
+            "ato-test",
+            "ato-test-net",
+            "sha256:verified-local-id",
+        )
+        .unwrap();
+        let entrypoint = args
+            .iter()
+            .position(|argument| argument == "--entrypoint")
+            .unwrap();
+        assert_eq!(args[entrypoint + 1], "/usr/local/bin/app");
+        assert!(entrypoint < args.len() - 2);
     }
 
     #[cfg(unix)]

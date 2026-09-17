@@ -82,6 +82,7 @@ fn an_oci_reference_must_be_content_addressed() {
             image_reference: None,
             platform: None,
             resource_limits: None,
+            entrypoint: None,
             argv: None,
             working_dir: None,
         });
@@ -91,6 +92,24 @@ fn an_oci_reference_must_be_content_addressed() {
             "reference {reference:?} should be refused"
         );
     }
+}
+
+#[test]
+fn an_oci_entrypoint_is_an_absolute_guest_path() {
+    for entrypoint in ["bin/app", "../app", "/usr/../bin/app", "/usr//app", ""] {
+        let mut spec = RuntimeLaunchSpecV1::parse(OCI_FIXTURE).unwrap();
+        let LaunchRealizationV1::Oci(realization) = &mut spec.realization else {
+            unreachable!()
+        };
+        realization.entrypoint = Some(entrypoint.to_owned());
+        assert!(spec.validate().is_err(), "entrypoint {entrypoint:?}");
+    }
+    let mut spec = RuntimeLaunchSpecV1::parse(OCI_FIXTURE).unwrap();
+    let LaunchRealizationV1::Oci(realization) = &mut spec.realization else {
+        unreachable!()
+    };
+    realization.entrypoint = Some("/usr/local/bin/app".to_owned());
+    spec.validate().unwrap();
 }
 
 #[test]

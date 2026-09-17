@@ -837,6 +837,7 @@ mod tests {
             image_reference: None,
             platform: None,
             resource_limits: None,
+            entrypoint: None,
             argv: None,
             working_dir: None,
         });
