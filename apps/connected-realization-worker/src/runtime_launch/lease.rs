@@ -377,6 +377,10 @@ pub fn start(
                 entrypoint: oci.entrypoint.clone(),
                 argv: oci.argv.clone().unwrap_or_default(),
                 working_dir: oci.working_dir.clone().unwrap_or_else(|| "/app".to_owned()),
+                workspace_mount_path: oci
+                    .workspace_mount_path
+                    .clone()
+                    .unwrap_or_else(|| "/app".to_owned()),
                 environment,
                 endpoints,
                 mounts,

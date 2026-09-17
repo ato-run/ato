@@ -840,6 +840,7 @@ mod tests {
             entrypoint: None,
             argv: None,
             working_dir: None,
+            workspace_mount_path: None,
         });
         assert!(launch_process(&spec, &fixture.context).is_err());
     }

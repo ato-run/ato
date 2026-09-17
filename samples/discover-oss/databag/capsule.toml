@@ -33,7 +33,7 @@ use = "ato.oci@1"
 argv = ["run"]
 cwd = "."
 guest_port = 7000
-runtimes = { "oci.image" = "docker.io/balzack/databag@sha256:0657cf266b16d3ec725ca41adb2b91db25c7d0a6cdd476aba21a4e850cdfa56f", "oci.platform" = "linux/amd64", "oci.entrypoint" = "/app/entrypoint.sh", "oci.memory_bytes" = "536870912", "oci.cpu_limit_millis" = "1000", "oci.pids_limit" = "256" }
+runtimes = { "oci.image" = "docker.io/balzack/databag@sha256:0657cf266b16d3ec725ca41adb2b91db25c7d0a6cdd476aba21a4e850cdfa56f", "oci.platform" = "linux/amd64", "oci.entrypoint" = "/app/entrypoint.sh", "oci.workspace_mount" = "/ato/workspace", "oci.memory_bytes" = "536870912", "oci.cpu_limit_millis" = "1000", "oci.pids_limit" = "256" }
 
 [effects]
 default = "pure"
