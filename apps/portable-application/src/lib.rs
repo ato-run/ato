@@ -111,6 +111,18 @@ pub struct ApplicationV2 {
     pub schema: String,
     pub title: String,
     pub surfaces: Vec<ApplicationSurfaceV2>,
+    /// Logical connections the recipient must rebind for this Application.
+    /// Values are runtime inputs and are never part of this object.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bindings: Vec<ApplicationBindingV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApplicationBindingV1 {
+    pub id: String,
+    pub protocol: String,
+    pub required: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,6 +145,7 @@ pub struct ValidatedApplication {
     pub schema: String,
     pub title: String,
     pub surfaces: Vec<ValidatedApplicationSurface>,
+    pub bindings: Vec<ApplicationBindingV1>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -223,7 +236,56 @@ pub struct PortableDynamicBundleSpec {
     pub process: PortableExecutionSpec,
     pub oci: PortableExecutionSpec,
     pub filesystem_state: Option<PortableFilesystemStateSpec>,
+    pub bindings: Vec<ApplicationBindingV1>,
     pub requirements: Vec<PortableHttpRequirementSpec>,
+}
+
+/// Stable process/OCI projection for a logical Binding id. The declaration is
+/// public; only the value placed in this environment variable is secret.
+pub fn binding_environment_name(id: &str) -> String {
+    format!("ATO_BINDING_{}", id.to_ascii_uppercase())
+}
+
+pub fn resolve_application_bindings(
+    application: &ValidatedApplication,
+    supplied: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, PortableApplicationError> {
+    let declared = application
+        .bindings
+        .iter()
+        .map(|binding| binding.id.as_str())
+        .collect::<BTreeSet<_>>();
+    if let Some(unknown) = supplied.keys().find(|id| !declared.contains(id.as_str())) {
+        return Err(profile(format!(
+            "runtime supplied undeclared Binding `{unknown}`"
+        )));
+    }
+    let missing = application
+        .bindings
+        .iter()
+        .filter(|binding| binding.required && !supplied.contains_key(&binding.id))
+        .map(|binding| binding.id.as_str())
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(profile(format!(
+            "portable Application requires Bindings: {}",
+            missing.join(", ")
+        )));
+    }
+    let mut environment = BTreeMap::new();
+    for binding in &application.bindings {
+        let Some(value) = supplied.get(&binding.id) else {
+            continue;
+        };
+        if value.is_empty() || value.len() > 64 * 1024 || value.contains('\0') {
+            return Err(profile(format!(
+                "runtime Binding `{}` has an invalid value",
+                binding.id
+            )));
+        }
+        environment.insert(binding_environment_name(&binding.id), value.clone());
+    }
+    Ok(environment)
 }
 
 /// Loopback-only static realization used by `ato run`.
@@ -690,6 +752,7 @@ fn validated_application(
             Ok(ValidatedApplication {
                 schema: application.schema,
                 title: application.title,
+                bindings: Vec::new(),
                 surfaces: application
                     .surfaces
                     .into_iter()
@@ -706,9 +769,11 @@ fn validated_application(
         }
         APPLICATION_V2_SCHEMA => {
             let application: ApplicationV2 = structured(bundle, application_ref, schema)?;
+            validate_application_bindings(&application.bindings)?;
             Ok(ValidatedApplication {
                 schema: application.schema,
                 title: application.title,
+                bindings: application.bindings,
                 surfaces: application
                     .surfaces
                     .into_iter()
@@ -727,6 +792,47 @@ fn validated_application(
             "application_ref uses unsupported schema `{other}`"
         ))),
     }
+}
+
+fn validate_application_bindings(
+    bindings: &[ApplicationBindingV1],
+) -> Result<(), PortableApplicationError> {
+    let mut ids = BTreeSet::new();
+    for binding in bindings {
+        let valid_id = !binding.id.is_empty()
+            && binding.id.len() <= 64
+            && binding
+                .id
+                .bytes()
+                .enumerate()
+                .all(|(index, byte)| match byte {
+                    b'a'..=b'z' => true,
+                    b'0'..=b'9' | b'_' => index > 0,
+                    _ => false,
+                });
+        if !valid_id {
+            return Err(profile(format!(
+                "application Binding id `{}` must match [a-z][a-z0-9_]{{0,63}}",
+                binding.id
+            )));
+        }
+        if binding.protocol.trim().is_empty()
+            || binding.protocol.len() > 160
+            || binding.protocol.contains('\0')
+        {
+            return Err(profile(format!(
+                "application Binding `{}` has an invalid protocol",
+                binding.id
+            )));
+        }
+        if !ids.insert(binding.id.as_str()) {
+            return Err(profile(format!(
+                "application declares duplicate Binding `{}`",
+                binding.id
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Deterministically forms a portable static application from the existing
@@ -980,6 +1086,7 @@ pub fn build_dynamic_process_oci_bundle(
         schema: BOUND_CONTRACT_SCHEMA.to_owned(),
         requirements,
     };
+    validate_application_bindings(&spec.bindings)?;
     let application = ApplicationV2 {
         schema: APPLICATION_V2_SCHEMA.to_owned(),
         title: spec.title.clone(),
@@ -988,6 +1095,7 @@ pub fn build_dynamic_process_oci_bundle(
             port: port.id,
             path: spec.surface_path.clone(),
         }],
+        bindings: spec.bindings.clone(),
     };
 
     let contract_ref = add_structured(&mut objects, &contract, BOUND_CONTRACT_SCHEMA)?;
@@ -1134,8 +1242,22 @@ fn validate_initial_route(
             "application surface and derivation do not name one workspace-backed HTTP route",
         ));
     }
+    if let Some(binding) = application.bindings.iter().find(|binding| {
+        step.env
+            .contains_key(&binding_environment_name(&binding.id))
+    }) {
+        return Err(profile(format!(
+            "Binding `{}` conflicts with an authored environment value",
+            binding.id
+        )));
+    }
     let realization = match step.protocol.as_str() {
         BROWSER_PROTOCOL => {
+            if !application.bindings.is_empty() {
+                return Err(profile(
+                    "static-web derivations do not support runtime Bindings",
+                ));
+            }
             if application.schema != APPLICATION_SCHEMA {
                 return Err(profile(
                     "static-web derivations require an ato.application/1 surface",
@@ -2681,6 +2803,7 @@ mod tests {
                 env: BTreeMap::new(),
             },
             filesystem_state: None,
+            bindings: Vec::new(),
             requirements: vec![
                 PortableHttpRequirementSpec {
                     id: "entry".to_owned(),
@@ -2968,6 +3091,86 @@ mod tests {
         assert!(routes[0].contract.requirements.iter().any(|requirement| {
             requirement.path.as_deref() == Some("/catalog/items.json?_shape=array&_sort=id")
         }));
+    }
+
+    #[test]
+    fn runtime_binding_declaration_preserves_k_and_d_and_values_stay_external() {
+        let (_, without_binding) =
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &datasette_spec()).unwrap();
+        let mut spec = datasette_spec();
+        spec.bindings = vec![ApplicationBindingV1 {
+            id: "openai".to_owned(),
+            protocol: "ato.http-api@1".to_owned(),
+            required: true,
+        }];
+        let (bytes, with_binding) =
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &spec).unwrap();
+
+        assert_eq!(
+            without_binding.index.root_contract_ref,
+            with_binding.index.root_contract_ref
+        );
+        assert_eq!(
+            without_binding.index.derivations,
+            with_binding.index.derivations
+        );
+        assert_ne!(
+            without_binding.index.application_ref,
+            with_binding.index.application_ref
+        );
+
+        let route = validate_all_derivations(&with_binding).unwrap().remove(0);
+        let missing =
+            resolve_application_bindings(&route.application, &BTreeMap::new()).unwrap_err();
+        assert!(missing.to_string().contains("requires Bindings: openai"));
+        let secret = "recipient-only-secret";
+        let resolved = resolve_application_bindings(
+            &route.application,
+            &BTreeMap::from([("openai".to_owned(), secret.to_owned())]),
+        )
+        .unwrap();
+        assert_eq!(
+            resolved.get("ATO_BINDING_OPENAI").map(String::as_str),
+            Some(secret)
+        );
+        assert!(
+            !bytes
+                .windows(secret.len())
+                .any(|window| window == secret.as_bytes())
+        );
+    }
+
+    #[test]
+    fn runtime_binding_refuses_unknown_names_and_authored_env_conflicts() {
+        let mut spec = datasette_spec();
+        spec.bindings = vec![ApplicationBindingV1 {
+            id: "service".to_owned(),
+            protocol: "ato.http-api@1".to_owned(),
+            required: false,
+        }];
+        let (_, bundle) =
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &spec).unwrap();
+        let route = validate_all_derivations(&bundle).unwrap().remove(0);
+        assert!(
+            resolve_application_bindings(
+                &route.application,
+                &BTreeMap::from([("other".to_owned(), "secret".to_owned())]),
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("undeclared Binding `other`")
+        );
+
+        spec.process.env.insert(
+            "ATO_BINDING_SERVICE".to_owned(),
+            "authored-value".to_owned(),
+        );
+        assert!(
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &spec)
+                .unwrap_err()
+                .to_string()
+                .contains("conflicts with an authored environment value")
+        );
     }
 
     #[test]

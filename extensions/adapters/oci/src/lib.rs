@@ -209,10 +209,29 @@ impl DockerOciAdapter {
             &network_name,
             &image_for_run,
         )?;
-        let launched = Command::new(&self.docker)
-            .args(&argv)
-            .output()
-            .context("start OCI container")?;
+        let launched = Command::new(&self.docker).args(&argv).output();
+        // Docker has consumed the file once `docker run` returns. It may hold
+        // runtime Binding values, so it must not become part of a durable Run
+        // directory or survive a failed launch.
+        let removed_environment = fs::remove_file(&env_file);
+        let launched = match launched {
+            Ok(launched) => launched,
+            Err(error) => {
+                let _ = remove_network(&self.docker, &network_name);
+                return Err(error).context("start OCI container");
+            }
+        };
+        if let Err(error) = removed_environment {
+            if launched.status.success()
+                && let Ok(container_id) = String::from_utf8(launched.stdout.clone())
+            {
+                let _ = Command::new(&self.docker)
+                    .args(["rm", "--force", container_id.trim()])
+                    .output();
+            }
+            let _ = remove_network(&self.docker, &network_name);
+            return Err(error).context("remove OCI environment file after launch");
+        }
         if !launched.status.success() {
             let _ = remove_network(&self.docker, &network_name);
             bail!("start OCI container failed: {}", bounded_stderr(&launched));

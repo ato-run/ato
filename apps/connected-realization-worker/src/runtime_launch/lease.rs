@@ -20,7 +20,7 @@
 //! There is no fallback for an unrecognized command. A Runner that guessed
 //! would run a workload under a contract nobody agreed to.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::TcpListener;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -34,7 +34,9 @@ use ato_ipc::runtime_launch::{
 };
 
 use super::process_executor::{ReadinessProbe, state_path_env_name, state_working_copy};
-use super::resolved::{ResolvedRuntimeLaunchContext, ResolvedStateAttachment, allocate_endpoint};
+use super::resolved::{
+    ResolvedRuntimeLaunchContext, ResolvedSecret, ResolvedStateAttachment, allocate_endpoint,
+};
 use super::session::{PreparedRun, RunStateOutcome, abort_run, commit_run};
 use super::state_artifact::StateArtifactTransport;
 use super::workspace::{WorkspaceTransport, materialize_workspace};
@@ -136,6 +138,7 @@ pub fn resolve_run(
     lease_root: &Path,
     workspace: &dyn WorkspaceTransport,
     state: &dyn StateArtifactTransport,
+    secrets: Vec<ResolvedSecret>,
     assigned_ports: &BTreeMap<String, u16>,
 ) -> Result<ResolvedRun> {
     let workspace_root =
@@ -170,6 +173,21 @@ pub fn resolve_run(
         })
         .collect::<Vec<_>>();
 
+    let expected_secret_names = spec
+        .secret_grants
+        .iter()
+        .map(|grant| grant.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let resolved_secret_names = secrets
+        .iter()
+        .map(ResolvedSecret::name)
+        .collect::<BTreeSet<_>>();
+    ensure!(
+        expected_secret_names == resolved_secret_names
+            && resolved_secret_names.len() == secrets.len(),
+        "redeemed runtime Bindings do not match the launch spec"
+    );
+
     let context = ResolvedRuntimeLaunchContext::new(
         workspace_root,
         &spec.workspace.cwd_relative,
@@ -177,20 +195,11 @@ pub fn resolve_run(
             .iter()
             .map(|entry| (entry.name.clone(), entry.value.clone()))
             .collect(),
-        // Secret grants are references. Redeeming them is a separate concern
-        // and this handler holds none, so a spec that asks for one is refused
-        // rather than launched without it.
-        Vec::new(),
+        secrets,
         attachments,
         endpoints,
     )
     .map_err(|error| anyhow::anyhow!("cannot resolve the launch: {error}"))?;
-
-    ensure!(
-        spec.secret_grants.is_empty(),
-        "this Runner cannot redeem secret grants; refusing to launch a workload without the \
-         secrets its spec requires"
-    );
 
     let prepared = super::session::prepare_run(spec, &context, state)?;
     Ok(ResolvedRun {

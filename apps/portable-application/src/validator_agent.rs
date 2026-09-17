@@ -28,8 +28,8 @@ use crate::instance_snapshot::{
     InstanceSnapshotAssetBindingV1, InstanceSnapshotV1, validated_snapshot,
 };
 use crate::{
-    PortableRealizationKind, ValidatedPortableApplication, bundle_sha256, validate_bytes_all,
-    validate_bytes_for_derivation,
+    PortableRealizationKind, ValidatedPortableApplication, binding_environment_name, bundle_sha256,
+    validate_bytes_all, validate_bytes_for_derivation,
 };
 
 #[derive(Debug, Clone)]
@@ -317,6 +317,7 @@ pub struct PortableBundleVerificationReport {
     pub application_ref: String,
     pub derivation_refs: Vec<String>,
     pub requirement_ids: Vec<String>,
+    pub required_bindings: Vec<PortableBindingReport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub static_derivation_ref: Option<String>,
     pub title: String,
@@ -344,6 +345,15 @@ pub struct PortableSurfaceReport {
     pub entry: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spa_fallback: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortableBindingReport {
+    pub id: String,
+    pub protocol: String,
+    pub required: bool,
+    pub environment: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -522,6 +532,17 @@ fn report(
             .requirements
             .iter()
             .map(|requirement| requirement.id.clone())
+            .collect(),
+        required_bindings: validated
+            .application
+            .bindings
+            .iter()
+            .map(|binding| PortableBindingReport {
+                id: binding.id.clone(),
+                protocol: binding.protocol.clone(),
+                required: binding.required,
+                environment: binding_environment_name(&binding.id),
+            })
             .collect(),
         static_derivation_ref: static_route.map(|route| route.derivation_ref.to_string()),
         title: validated.application.title.clone(),
