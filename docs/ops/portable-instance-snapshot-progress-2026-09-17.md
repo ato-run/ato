@@ -457,3 +457,72 @@ remained unchanged. macOS restored the same state bytes during import, but
 Process admission failed because bubblewrap is Linux-only and OCI admission
 failed because Docker Desktop keeps the isolated bridge inside its VM; neither
 case silently selected the other D or weakened isolation.
+
+## Portable Binding acceptance
+
+Portable Applications can now declare required runtime Bindings without
+placing recipient values in the bundle, K, or D. Rust maps the declared
+`service` Binding to the stable `ATO_BINDING_SERVICE` process/container
+environment name. CLI and durable local starts require an explicit `--bind`;
+Hosted import prompts for the value before allocating the Run. The API seals
+the value to the exact Run/lease/K context, places only a grant reference in the
+launch specification, and exposes the plaintext once on the authenticated
+Runner channel. Process and OCI launch environments receive the resolved value;
+the OCI env file is removed immediately after `docker run` returns.
+
+The final fixture keeps the Contract observation at `/health` and also serves
+the Surface root so **Open App** is useful without changing K:
+
+```text
+file          .tmp/portable-binding-echo-v2.capsule
+size          5,441 bytes
+bundle SHA    sha256:32875cc24dd6c3116ab2c93e772b22f28460d0ad9bd2538521cde285555ba6d7
+K             sha256:d9fa726e80f46d036801f7333e3b6d5a7791a8f2e393bf82798a40e47c79103f
+Python D      sha256:9f21b0144f6e51fa54ac67443c5339b984ff62238217e3229f925ee2bbfb3465
+OCI D         sha256:eb631e9fc463120fea26d77ee5173e0eb30c25e0cf543ebb150d3c433320b247
+```
+
+The exact bytes passed all four routes on 2026-09-17:
+
+| Entry | D | Result |
+|---|---|---|
+| Linux CLI | Python Process | `binding-health=satisfied`, fully satisfied |
+| Linux CLI | OCI container | `binding-health=satisfied`, fully satisfied |
+| staging PWA | Python Process | Instance `cinst_01M2PDJH18EWFQ63YCF52FN1TB`, Run `run_01M2PDJH6D61VAW7BVJGEFJCJ7`, lease `01M2PDJH6D08NPDMW5S3VJNQBA` |
+| staging PWA | OCI container | Instance `cinst_01M2PDVANHV57MSPRHQ6FVV4EP`, Run `run_01M2PDVAT0D74SZ8FWFTJKB6XJ`, lease `01M2PDVAT01Q7SHZ5WA6KW9PSJ` |
+
+Both Hosted receipts persisted the exact K and selected D, one required
+observation, `outcome=satisfied`, and `fully_satisfied=true`. The PWA displayed
+the required connection form before import, then Contract Verified and Surface
+Ready. **Open App** produced `binding-ok` in a real browser for both Python and
+OCI. The two synthetic acceptance values had zero matches in the lease command
+and verification receipt, and `capsule_hosted_binding_grants` contained zero
+rows for both Runs after redemption. Missing and undeclared Bindings fail before
+runtime allocation; a second redemption returns Gone. Local durable metadata
+and re-export were also scanned without finding the supplied value.
+
+The first browser attempt exposed two operational boundaries rather than being
+hidden: the old validator rejected the new schema, and the staging Worker was
+already at its 128 text-binding limit. The validator was updated from the same
+Ato source. The relay now prefers a dedicated 32-byte key but, when that binding
+is absent, derives an AES-256-GCM key from the existing Run-control root with
+HKDF and binding-specific salt/info. No existing secret or feature flag was
+removed. A rejected bundle row remains immutable; the PWA reuses the digest key
+for ready bundles and creates a fresh attempt key only after confirming the
+prior rejection was `validator_failed`.
+
+Executed/deployed revisions:
+
+```text
+ato source HEAD       07c9788a (runtime/validator binary ancestor 2ad762ba)
+API                   9a00ebeb
+PWA                   3372bad
+API Worker version    61c7127d-eab8-4ca6-89b2-c5f7c1fb61a5
+PWA Worker version    7a95c54d-d329-4cd8-9c6f-150a9b779cf7
+Runner binary SHA     c7ba0bd05e93a4d02bcd69b59e0c4db70f782c7d09433d2a8e72c5abf8f79783
+Validator binary SHA  2e65e6a8f86852a159674413e09c5dc0906a0e02c9ab7f9fd9af18031ccb46de
+```
+
+The acceptance Runs were explicitly stopped. Both leases acknowledged
+`stopped`; the OCI container and per-lease workspace were gone. Production was
+not deployed.
