@@ -2,7 +2,7 @@
 
 ## Scope
 
-Repositories and branches:
+Initial snapshot for this record:
 
 - `ato-run/ato` — `feat/portable-hosted-export` at `d9617096`
 - `ato-run/ato-api` — `feat/portable-hosted-export` at `614cba90`
@@ -176,23 +176,37 @@ npm run build
 - Filesystem capture rejects symlinks and non-regular entries. Restore requires
   an empty Instance-owned destination and never extracts traversal paths.
 
-## Not complete
+## v0 closure status
 
-Browser state, Instance Assets, and one declared filesystem state now complete
-Hosted → local → Hosted roundtrips. The remaining v0 work is still open:
+Browser state, JSON Saved Data, Instance Assets, and one declared filesystem
+state complete the Hosted → local → Hosted roundtrip. The v0 acceptance items
+that were open at the first checkpoint are now closed in the later sections of
+this record and in
+`portable-dependency-export-progress-2026-09-16.md`:
 
-- portable Binding declarations and receive-side manual rebinding without
-  credential transport;
-- explicit User Runner placement for portable Runs without Managed fallback;
-- the normal `capsule.toml` authoring path for the supported v0 shape;
-- empty-cache plus real outbound-network-block acceptance for the offline
-  Datasette profile;
-- large v4 direct-upload acceptance for the approximately 120 MiB offline
-  Datasette bundle.
+- portable Binding declaration and receive-side manual rebinding were accepted
+  without transporting or retaining credential values;
+- an explicitly selected User Runner was accepted without Managed fallback;
+- strict `ato.capsule/2` authoring and `ato pack` produced the existing
+  canonical Contract/Application/Derivation objects;
+- the 120,583,935-byte v4 offline Datasette file passed the PWA direct-upload,
+  Hosted OCI, and real browser flow;
+- that exact file then passed local OCI verification from an empty private
+  Docker store in a network namespace with no external route.
 
-The filesystem increment deliberately supports one declared writable state
-slot. It does not infer arbitrary directories, capture process memory, or
-claim persistence for undeclared paths.
+The final authoring/selection revisions were ato `872abc91`, API `a283adba`,
+and PWA `fc2f531`. The isolated offline harness and failed-launch cleanup were
+completed by ato `4d9f75af`. The API and PWA revisions were deployed only to
+staging; no production deployment, production migration, or feature-flag
+change was performed.
+
+This is the bounded Portable Application v0, not an assertion of arbitrary OSS
+support. It intentionally supports one Application Surface, one serving
+process, explicit inputs/Bindings, at most one declared writable filesystem
+state, and N explicitly selected Derivations. It does not infer arbitrary
+directories, capture process memory, transport host kernels/runtimes/drivers,
+or provide an automatic Planner or fallback. Those are later-version scope,
+not incomplete v0 acceptance items.
 
 ## Hosted export implementation checkpoint
 
