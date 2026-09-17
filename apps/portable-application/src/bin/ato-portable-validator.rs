@@ -47,6 +47,14 @@ fn main() -> Result<()> {
                 bundle_id,
                 fully_satisfied,
             } => println!("hosted-verified bundle={bundle_id} fully_satisfied={fully_satisfied}"),
+            ValidatorRunOutcome::Exported {
+                export_id,
+                bundle_sha256,
+            } => println!("exported export={export_id} bundle_sha256={bundle_sha256}"),
+            ValidatorRunOutcome::ExportFailed {
+                export_id,
+                failure_code,
+            } => println!("export-failed export={export_id} code={failure_code}"),
         }
         return Ok(());
     }

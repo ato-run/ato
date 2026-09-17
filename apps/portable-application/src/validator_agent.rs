@@ -5,7 +5,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use ato_formation::authoring::HTTP_CONTRACT_VERIFIER;
+use ato_formation::authoring::{HTTP_CONTRACT_VERIFIER, StateAccess};
 use ato_formation::verify::{
     ContractVerificationReceipt, RuntimeHttpObservation, RuntimeObservation,
     VerificationExecutionEvidence, VerificationTargetKind, verify_runtime,
@@ -14,15 +14,22 @@ use ato_materializer_static_web::{
     STATIC_WEB_MANIFEST_V1_SCHEMA, StaticWebFileV1, StaticWebManifestV1, StaticWebRoutingV1,
     StaticWebSecurityV1,
 };
+use ato_objects::{PortableDependencyProfile, PortableOciArchive};
 use base64::Engine;
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::header::HeaderValue;
 use serde::{Deserialize, Serialize};
 
-use crate::instance_snapshot::{InstanceSnapshotV1, validated_snapshot};
+use crate::dependency_transport::{discover_wheel_sources, hydrate_external_objects};
+use crate::hosted_export::{
+    HostedInstanceCaptureV1, build_hosted_export, portable_bundle_from_bytes,
+};
+use crate::instance_snapshot::{
+    InstanceSnapshotAssetBindingV1, InstanceSnapshotV1, validated_snapshot,
+};
 use crate::{
-    PortableRealizationKind, ValidatedPortableApplication, bundle_sha256, validate_bytes_all,
-    validate_bytes_for_derivation,
+    PortableRealizationKind, ValidatedPortableApplication, binding_environment_name, bundle_sha256,
+    validate_bytes_all, validate_bytes_for_derivation,
 };
 
 #[derive(Debug, Clone)]
@@ -47,6 +54,14 @@ pub enum ValidatorRunOutcome {
     HostedVerified {
         bundle_id: String,
         fully_satisfied: bool,
+    },
+    Exported {
+        export_id: String,
+        bundle_sha256: String,
+    },
+    ExportFailed {
+        export_id: String,
+        failure_code: String,
     },
 }
 
@@ -75,6 +90,9 @@ impl ValidatorAgent {
         }
         if let Some(job) = self.api.claim_runtime()? {
             return self.verify_hosted(job);
+        }
+        if let Some(job) = self.api.claim_export()? {
+            return self.export_hosted(job);
         }
         Ok(ValidatorRunOutcome::Idle)
     }
@@ -213,6 +231,73 @@ impl ValidatorAgent {
         })
     }
 
+    fn export_hosted(&self, job: ExportJob) -> Result<ValidatorRunOutcome> {
+        let result = (|| -> Result<(Vec<u8>, ato_objects::PortableApplicationBundle)> {
+            let source_bytes = self.api.download_export_source(&job)?;
+            if source_bytes.len() as u64 != job.source_size_bytes
+                || bundle_sha256(&source_bytes) != job.source_bundle_sha256
+            {
+                bail!("export source bundle digest/size mismatch");
+            }
+            let source = portable_bundle_from_bytes(&source_bytes)?;
+            let (source, external_sources) = match job.portability {
+                PortableDependencyProfile::Thin => {
+                    let sources = discover_wheel_sources(&source)?;
+                    (source, sources)
+                }
+                PortableDependencyProfile::Cached | PortableDependencyProfile::Offline => {
+                    (hydrate_external_objects(&source)?.0, BTreeMap::new())
+                }
+            };
+            let archives = if job.portability == PortableDependencyProfile::Offline {
+                source
+                    .portability
+                    .as_ref()
+                    .map(|portability| portability.oci_archives.clone())
+                    .unwrap_or_default()
+            } else {
+                Vec::<PortableOciArchive>::new()
+            };
+            let mut captured = BTreeMap::new();
+            for (object_id, download_url) in &job.capture_downloads {
+                captured.insert(
+                    object_id.clone(),
+                    self.api.download_export_object(&job, download_url)?,
+                );
+            }
+            build_hosted_export(
+                &source,
+                job.capture.as_ref(),
+                &captured,
+                job.portability,
+                &external_sources,
+                &archives,
+            )
+            .map_err(Into::into)
+        })();
+
+        match result {
+            Ok((bytes, _bundle)) => {
+                let digest = bundle_sha256(&bytes);
+                let prepared = self.api.prepare_export_output(&job, &digest, bytes.len())?;
+                self.api.upload_export_output(&job, &prepared, bytes)?;
+                self.api.ack_export_uploaded(&job)?;
+                Ok(ValidatorRunOutcome::Exported {
+                    export_id: job.job_id,
+                    bundle_sha256: digest,
+                })
+            }
+            Err(error) => {
+                let failure_code = classify_export_failure(&error).to_owned();
+                self.api.ack_export_failed(&job, &failure_code)?;
+                Ok(ValidatorRunOutcome::ExportFailed {
+                    export_id: job.job_id,
+                    failure_code,
+                })
+            }
+        }
+    }
+
     pub fn run_forever(&self) -> Result<()> {
         loop {
             if self.run_once()? == ValidatorRunOutcome::Idle {
@@ -232,6 +317,7 @@ pub struct PortableBundleVerificationReport {
     pub application_ref: String,
     pub derivation_refs: Vec<String>,
     pub requirement_ids: Vec<String>,
+    pub required_bindings: Vec<PortableBindingReport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub static_derivation_ref: Option<String>,
     pub title: String,
@@ -263,6 +349,15 @@ pub struct PortableSurfaceReport {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct PortableBindingReport {
+    pub id: String,
+    pub protocol: String,
+    pub required: bool,
+    pub environment: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct PortableRouteReport {
     pub derivation_ref: String,
     pub realization: &'static str,
@@ -272,6 +367,17 @@ pub struct PortableRouteReport {
     pub env: BTreeMap<String, String>,
     pub port: String,
     pub guest_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<PortableStateReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortableStateReport {
+    pub state_key: String,
+    pub protocol: String,
+    pub mount_target: String,
+    pub access: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -309,6 +415,8 @@ pub struct PortableInstanceSnapshotReport {
     pub snapshot_ref: String,
     pub resources: Vec<PortableInstanceSnapshotResourceReport>,
     pub assets: Vec<PortableInstanceSnapshotAssetReport>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub asset_bindings: Vec<InstanceSnapshotAssetBindingV1>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -425,6 +533,17 @@ fn report(
             .iter()
             .map(|requirement| requirement.id.clone())
             .collect(),
+        required_bindings: validated
+            .application
+            .bindings
+            .iter()
+            .map(|binding| PortableBindingReport {
+                id: binding.id.clone(),
+                protocol: binding.protocol.clone(),
+                required: binding.required,
+                environment: binding_environment_name(&binding.id),
+            })
+            .collect(),
         static_derivation_ref: static_route.map(|route| route.derivation_ref.to_string()),
         title: validated.application.title.clone(),
         surface: PortableSurfaceReport {
@@ -501,6 +620,7 @@ fn snapshot_report(
         snapshot_ref,
         resources,
         assets,
+        asset_bindings: snapshot.asset_bindings,
     }))
 }
 
@@ -533,6 +653,19 @@ fn validated_routes(
                 env: step.env.clone(),
                 port: port.id.clone(),
                 guest_port: port.guest_port,
+                state: route
+                    .derivation
+                    .state
+                    .first()
+                    .map(|state| PortableStateReport {
+                        state_key: state.id.clone(),
+                        protocol: state.protocol.clone(),
+                        mount_target: state.mount.clone(),
+                        access: match state.access {
+                            StateAccess::ReadOnly => "read_only",
+                            StateAccess::ReadWrite => "read_write",
+                        },
+                    }),
             })
         })
         .collect()
@@ -612,6 +745,14 @@ impl HttpValidatorApi {
         format!("{}{}", self.base_url, path)
     }
 
+    fn resolved_url(&self, value: &str) -> String {
+        if value.starts_with("https://") || value.starts_with("http://") {
+            value.to_owned()
+        } else {
+            self.url(value)
+        }
+    }
+
     fn authenticated(&self, request: RequestBuilder) -> RequestBuilder {
         request.bearer_auth(&self.token)
     }
@@ -667,11 +808,122 @@ impl HttpValidatorApi {
         ))
     }
 
+    fn claim_export(&self) -> Result<Option<ExportJob>> {
+        let response = self
+            .authenticated(
+                self.client
+                    .post(self.url("/v1/portable-application-exports/jobs/claim"))
+                    .json(&serde_json::json!({
+                        "agent_id": self.agent_id.to_str().expect("validated agent id")
+                    })),
+            )
+            .send()?;
+        if response.status().as_u16() == 204 {
+            return Ok(None);
+        }
+        Ok(Some(
+            decode_json::<ExportJobEnvelope>(response, "portable export claim")?.job,
+        ))
+    }
+
     fn download(&self, job: &ValidationJob) -> Result<Vec<u8>> {
         let response = self
             .claimed(self.client.get(self.url(&job.download_url)), &job.claim_id)
             .send()?;
         decode_bytes(response, "bundle download")
+    }
+
+    fn download_export_source(&self, job: &ExportJob) -> Result<Vec<u8>> {
+        let response = self
+            .claimed(
+                self.client.get(self.resolved_url(&job.source_download_url)),
+                &job.claim_id,
+            )
+            .send()?;
+        decode_bytes(response, "portable export source download")
+    }
+
+    fn download_export_object(&self, job: &ExportJob, path: &str) -> Result<Vec<u8>> {
+        let response = self
+            .claimed(self.client.get(self.resolved_url(path)), &job.claim_id)
+            .send()?;
+        decode_bytes(response, "portable export capture download")
+    }
+
+    fn prepare_export_output(
+        &self,
+        job: &ExportJob,
+        digest: &str,
+        size: usize,
+    ) -> Result<ExportOutputPreparation> {
+        let path = format!(
+            "/v1/portable-application-exports/jobs/{}/output/prepare",
+            job.job_id
+        );
+        let response = self
+            .claimed(
+                self.client.post(self.url(&path)).json(&serde_json::json!({
+                    "transport_digest": digest,
+                    "size_bytes": size,
+                })),
+                &job.claim_id,
+            )
+            .send()?;
+        decode_json(response, "portable export output prepare")
+    }
+
+    fn upload_export_output(
+        &self,
+        job: &ExportJob,
+        prepared: &ExportOutputPreparation,
+        bytes: Vec<u8>,
+    ) -> Result<()> {
+        let target = self.resolved_url(&prepared.upload_url);
+        let mut request = self.client.put(target).body(bytes);
+        for (name, value) in &prepared.upload_headers {
+            request = request.header(name, value);
+        }
+        if !prepared.upload_direct {
+            request = self.claimed(request, &job.claim_id);
+        }
+        let response = request.send()?;
+        if !response.status().is_success() {
+            bail!(
+                "portable export output upload returned {}: {}",
+                response.status(),
+                response.text().unwrap_or_default()
+            );
+        }
+        Ok(())
+    }
+
+    fn ack_export_uploaded(&self, job: &ExportJob) -> Result<()> {
+        self.ack_export(job, &serde_json::json!({ "status": "uploaded" }))
+    }
+
+    fn ack_export_failed(&self, job: &ExportJob, failure_code: &str) -> Result<()> {
+        self.ack_export(
+            job,
+            &serde_json::json!({
+                "status": "failed",
+                "failure_code": failure_code,
+            }),
+        )
+    }
+
+    fn ack_export(&self, job: &ExportJob, body: &serde_json::Value) -> Result<()> {
+        let path = format!("/v1/portable-application-exports/jobs/{}/ack", job.job_id);
+        let response = self
+            .claimed(self.client.post(self.url(&path)).json(body), &job.claim_id)
+            .send()?;
+        if !response.status().is_success() {
+            bail!(
+                "portable export acknowledgement returned {}: {}",
+                response.status(),
+                response.text().unwrap_or_default()
+            );
+        }
+        Ok(())
     }
 
     fn upload_blob(&self, job: &ValidationJob, digest: &str, bytes: &[u8]) -> Result<()> {
@@ -813,6 +1065,39 @@ struct ValidationJobEnvelope {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ExportJobEnvelope {
+    job: ExportJob,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExportJob {
+    job_id: String,
+    claim_id: String,
+    #[allow(dead_code)]
+    claim_expires_at: String,
+    source_bundle_sha256: String,
+    source_size_bytes: u64,
+    source_download_url: String,
+    #[allow(dead_code)]
+    include_saved_data: bool,
+    portability: PortableDependencyProfile,
+    capture: Option<HostedInstanceCaptureV1>,
+    capture_downloads: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExportOutputPreparation {
+    #[allow(dead_code)]
+    bundle_id: String,
+    upload_url: String,
+    upload_direct: bool,
+    upload_headers: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ValidationJob {
     job_id: String,
     claim_id: String,
@@ -918,19 +1203,62 @@ fn classify_rejection(error: &anyhow::Error) -> &'static str {
     }
 }
 
+fn classify_export_failure(error: &anyhow::Error) -> &'static str {
+    let message = format!("{error:#}");
+    if message.contains("dependency unavailable") {
+        "portable_export_dependency_unavailable"
+    } else if message.contains("digest") || message.contains("size") {
+        "portable_export_integrity_failure"
+    } else if message.contains("offline OCI") {
+        "portable_export_offline_incomplete"
+    } else if message.contains("snapshot") || message.contains("capture") {
+        "portable_export_snapshot_invalid"
+    } else {
+        "portable_export_failed"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
     use std::path::Path;
 
     use super::*;
-    use crate::build_static_bundle;
     use crate::instance_snapshot::{
         DATA_JSON_PROTOCOL, INSTANCE_SNAPSHOT_SCHEMA, InstanceSnapshotAssetV1,
         InstanceSnapshotResourceV1, attach_instance_snapshot,
     };
     use crate::portability_export::repack_portable_dependencies;
+    use crate::{PortableRealizationKind, build_multi_derivation_bundle, build_static_bundle};
     use ato_objects::PortableDependencyProfile;
+
+    #[test]
+    fn route_report_carries_validated_filesystem_state_without_host_paths() {
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/interop-multi-derivation");
+        let (_, bundle) = build_multi_derivation_bundle(&source, "State report").unwrap();
+        let mut route =
+            validate_bytes_all(&ato_objects::encode_portable_application_bundle(&bundle).unwrap())
+                .unwrap()
+                .1
+                .into_iter()
+                .find(|route| route.realization == PortableRealizationKind::LocalProcess)
+                .unwrap();
+        route
+            .derivation
+            .state
+            .push(ato_formation::authoring::BoundState {
+                id: "data".to_owned(),
+                protocol: ato_formation::authoring::STATE_FILESYSTEM_PROTOCOL.to_owned(),
+                mount: "/data".to_owned(),
+                access: StateAccess::ReadWrite,
+            });
+        let report = validated_routes(&[route]).unwrap().remove(0);
+        assert_eq!(report.state.as_ref().unwrap().state_key, "data");
+        assert_eq!(report.state.as_ref().unwrap().mount_target, "/data");
+        assert_eq!(report.state.as_ref().unwrap().access, "read_write");
+        assert!(!serde_json::to_string(&report).unwrap().contains("/.ato/"));
+    }
 
     #[test]
     fn report_contains_portable_identity_and_static_artifact() {
@@ -1034,6 +1362,7 @@ mod tests {
                 content_type: "image/jpeg".to_owned(),
                 size: asset_size,
             }],
+            asset_bindings: vec![],
         };
         let (bytes, bundle) = attach_instance_snapshot(
             &original,

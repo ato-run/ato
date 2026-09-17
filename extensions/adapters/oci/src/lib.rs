@@ -6,7 +6,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -35,6 +35,13 @@ pub struct OciResourceLimits {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OciMount {
+    pub host_path: PathBuf,
+    pub guest_path: String,
+    pub writable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OciSpec {
     pub id: String,
     pub image: String,
@@ -43,6 +50,7 @@ pub struct OciSpec {
     pub working_dir: String,
     pub environment: BTreeMap<String, String>,
     pub endpoints: Vec<OciEndpoint>,
+    pub mounts: Vec<OciMount>,
     pub limits: OciResourceLimits,
     pub stop_timeout_seconds: u64,
 }
@@ -68,6 +76,10 @@ struct OfflineImage {
 impl DockerOciAdapter {
     pub fn new(spec: OciSpec) -> Result<Self> {
         validate_spec(&spec)?;
+        ensure!(
+            cfg!(target_os = "linux") || spec.endpoints.is_empty(),
+            "OCI runtime admission failed: isolated HTTP endpoints currently require a native Linux host; Docker Desktop keeps the internal bridge inside its VM"
+        );
         let docker = find_on_path("docker").context(
             "OCI runtime admission failed: Docker CLI is not installed or is not on PATH",
         )?;
@@ -197,11 +209,36 @@ impl DockerOciAdapter {
             &network_name,
             &image_for_run,
         )?;
-        let launched = Command::new(&self.docker)
-            .args(&argv)
-            .output()
-            .context("start OCI container")?;
+        let launched = Command::new(&self.docker).args(&argv).output();
+        // Docker has consumed the file once `docker run` returns. It may hold
+        // runtime Binding values, so it must not become part of a durable Run
+        // directory or survive a failed launch.
+        let removed_environment = fs::remove_file(&env_file);
+        let launched = match launched {
+            Ok(launched) => launched,
+            Err(error) => {
+                let _ = remove_network(&self.docker, &network_name);
+                return Err(error).context("start OCI container");
+            }
+        };
+        if let Err(error) = removed_environment {
+            if launched.status.success()
+                && let Ok(container_id) = String::from_utf8(launched.stdout.clone())
+            {
+                let _ = Command::new(&self.docker)
+                    .args(["rm", "--force", container_id.trim()])
+                    .output();
+            }
+            let _ = remove_network(&self.docker, &network_name);
+            return Err(error).context("remove OCI environment file after launch");
+        }
         if !launched.status.success() {
+            // `docker run` may create the named container before runc rejects
+            // its process. Remove by the Runner-owned name because no stdout
+            // container ID is available on this failure path.
+            let _ = Command::new(&self.docker)
+                .args(["rm", "--force", &container_name])
+                .output();
             let _ = remove_network(&self.docker, &network_name);
             bail!("start OCI container failed: {}", bounded_stderr(&launched));
         }
@@ -273,13 +310,12 @@ impl DockerOciAdapter {
     }
 
     fn inspect_loaded_image(&self, config_reference: &str) -> Result<String> {
-        let manifest_reference = self
-            .spec
-            .image
-            .rsplit_once('@')
-            .map(|(_, reference)| reference)
-            .context("validated OCI image omitted manifest digest")?;
-        for reference in [manifest_reference, config_reference] {
+        // Docker's executable image ID is the verified config digest. Some
+        // containerd-backed daemons also make the manifest digest inspectable,
+        // but launching that alias from an otherwise empty namespace can
+        // produce a rootfs-less container. Prefer config; retain the manifest
+        // fallback for daemons that expose only the loaded manifest alias.
+        for reference in offline_image_reference_candidates(&self.spec.image, config_reference)? {
             let output = Command::new(&self.docker)
                 .args([
                     "image",
@@ -299,6 +335,36 @@ impl DockerOciAdapter {
         }
         bail!("verified offline OCI image was not available after archive load")
     }
+}
+
+fn offline_image_reference_candidates<'a>(
+    image: &'a str,
+    config_reference: &'a str,
+) -> Result<[&'a str; 2]> {
+    let manifest_reference = image
+        .rsplit_once('@')
+        .map(|(_, reference)| reference)
+        .context("validated OCI image omitted manifest digest")?;
+    Ok([config_reference, manifest_reference])
+}
+
+/// Report whether this host can honestly accept an OCI HTTP workload now.
+///
+/// Finding a Docker client is insufficient: a stopped or unreachable daemon
+/// would make the scheduler issue a lease that can only fail. The Connected
+/// Runner uses this probe for its heartbeat capability advertisement; launch
+/// admission still repeats the check and validates the pinned platform/image.
+pub fn docker_runtime_available() -> bool {
+    if !cfg!(target_os = "linux") {
+        return false;
+    }
+    let Some(docker) = find_on_path("docker") else {
+        return false;
+    };
+    Command::new(docker)
+        .args(["version", "--format", "{{.Server.Version}}"])
+        .output()
+        .is_ok_and(|output| output.status.success() && !output.stdout.is_empty())
 }
 
 fn validate_inspected_image(spec: &OciSpec, inspected: &str) -> Result<()> {
@@ -579,6 +645,40 @@ fn validate_spec(spec: &OciSpec) -> Result<()> {
             "OCI environment is invalid"
         );
     }
+    let mut host_ports = BTreeSet::new();
+    for endpoint in &spec.endpoints {
+        ensure!(
+            endpoint.host_port > 0 && endpoint.guest_port > 0,
+            "OCI endpoint Port must be non-zero"
+        );
+        ensure!(
+            host_ports.insert(endpoint.host_port),
+            "OCI host Port is declared more than once"
+        );
+    }
+    let mut guest_mounts = BTreeSet::new();
+    for mount in &spec.mounts {
+        ensure!(
+            mount.host_path.is_dir(),
+            "OCI mount source is not a directory"
+        );
+        ensure!(
+            mount.guest_path.starts_with('/')
+                && mount.guest_path != "/"
+                && mount.guest_path != "/app"
+                && !mount.guest_path.contains(['\0', '\\', ','])
+                && mount
+                    .guest_path
+                    .split('/')
+                    .skip(1)
+                    .all(|segment| !segment.is_empty() && segment != "." && segment != ".."),
+            "OCI mount target is invalid"
+        );
+        ensure!(
+            guest_mounts.insert(mount.guest_path.as_str()),
+            "OCI mount target is declared more than once"
+        );
+    }
     Ok(())
 }
 
@@ -596,6 +696,7 @@ fn docker_run_arguments(
     let env_file = env_file
         .canonicalize()
         .context("canonicalize OCI environment file")?;
+    let writable_mount_user = writable_mount_user(spec)?;
     let mut argv = vec![
         "run".to_owned(),
         "--detach".to_owned(),
@@ -628,9 +729,62 @@ fn docker_run_arguments(
         "--label".to_owned(),
         format!("run.ato.dev/id={}", spec.id),
     ];
+    if let Some(user) = writable_mount_user {
+        argv.extend(["--user".to_owned(), user]);
+    }
+    for mount in &spec.mounts {
+        let source = mount
+            .host_path
+            .canonicalize()
+            .context("canonicalize OCI mount source")?;
+        let source = source
+            .to_str()
+            .context("OCI mount source is not valid UTF-8")?;
+        ensure!(
+            !source.contains([',', '\0']),
+            "OCI mount source cannot be represented safely"
+        );
+        argv.extend([
+            "--mount".to_owned(),
+            format!(
+                "type=bind,src={source},dst={}{}",
+                mount.guest_path,
+                if mount.writable { "" } else { ",readonly" }
+            ),
+        ]);
+    }
     argv.push(image_reference.to_owned());
     argv.extend(spec.argv.iter().cloned());
     Ok(argv)
+}
+
+#[cfg(unix)]
+fn writable_mount_user(spec: &OciSpec) -> Result<Option<String>> {
+    use std::os::unix::fs::MetadataExt;
+
+    let mut owners = BTreeSet::new();
+    for mount in spec.mounts.iter().filter(|mount| mount.writable) {
+        let metadata = fs::metadata(&mount.host_path)
+            .with_context(|| format!("inspect OCI mount source {}", mount.host_path.display()))?;
+        owners.insert((metadata.uid(), metadata.gid()));
+    }
+    ensure!(
+        owners.len() <= 1,
+        "writable OCI mount sources must have one host owner"
+    );
+    Ok(owners
+        .into_iter()
+        .next()
+        .map(|(uid, gid)| format!("{uid}:{gid}")))
+}
+
+#[cfg(not(unix))]
+fn writable_mount_user(spec: &OciSpec) -> Result<Option<String>> {
+    ensure!(
+        !spec.mounts.iter().any(|mount| mount.writable),
+        "writable OCI mounts require a Unix host"
+    );
+    Ok(None)
 }
 
 fn remove_network(docker: &Path, network: &str) -> Result<()> {
@@ -710,6 +864,7 @@ mod tests {
                 host_port: 49152,
                 guest_port: 8000,
             }],
+            mounts: vec![],
             limits: OciResourceLimits {
                 memory_bytes: 256 * 1024 * 1024,
                 cpu_limit_millis: 1000,
@@ -724,6 +879,13 @@ mod tests {
         let mut invalid = spec();
         invalid.image = "docker.io/example/app:latest".to_owned();
         assert!(validate_spec(&invalid).is_err());
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn vm_backed_docker_cannot_admit_an_isolated_http_endpoint() {
+        let error = DockerOciAdapter::new(spec()).err().unwrap();
+        assert!(error.to_string().contains("native Linux host"));
     }
 
     #[test]
@@ -802,6 +964,18 @@ mod tests {
     }
 
     #[test]
+    fn offline_image_launch_prefers_the_verified_config_id() {
+        let config = format!("sha256:{}", "b".repeat(64));
+        let manifest = format!("sha256:{}", "a".repeat(64));
+        let image = format!("docker.io/example/app@{manifest}");
+
+        assert_eq!(
+            offline_image_reference_candidates(&image, &config).unwrap(),
+            [config.as_str(), manifest.as_str()]
+        );
+    }
+
+    #[test]
     fn run_arguments_enforce_isolation_and_limits() {
         let workspace = tempfile::tempdir().unwrap();
         let runtime = tempfile::tempdir().unwrap();
@@ -838,6 +1012,52 @@ mod tests {
         assert_eq!(args[args.len() - 2], "sha256:verified-local-id");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn run_arguments_mount_declared_state_with_requested_access() {
+        use std::os::unix::fs::MetadataExt;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let writable = tempfile::tempdir().unwrap();
+        let read_only = tempfile::tempdir().unwrap();
+        let env_file = runtime.path().join("environment.list");
+        fs::write(&env_file, "").unwrap();
+        let mut value = spec();
+        value.mounts = vec![
+            OciMount {
+                host_path: writable.path().to_path_buf(),
+                guest_path: "/data".to_owned(),
+                writable: true,
+            },
+            OciMount {
+                host_path: read_only.path().to_path_buf(),
+                guest_path: "/seed".to_owned(),
+                writable: false,
+            },
+        ];
+        let args = docker_run_arguments(
+            &value,
+            workspace.path(),
+            &env_file,
+            "ato-test",
+            "ato-test-net",
+            "sha256:verified-local-id",
+        )
+        .unwrap();
+        let rendered = args.join(" ");
+        assert!(rendered.contains("dst=/data"));
+        assert!(!rendered.contains("dst=/data,readonly"));
+        assert!(rendered.contains("dst=/seed,readonly"));
+        let user = args
+            .iter()
+            .position(|value| value == "--user")
+            .map(|index| args[index + 1].as_str());
+        let metadata = fs::metadata(writable.path()).unwrap();
+        let expected_user = format!("{}:{}", metadata.uid(), metadata.gid());
+        assert_eq!(user, Some(expected_user.as_str()));
+    }
+
     #[test]
     fn upstream_close_reaches_a_keepalive_client_without_waiting_for_its_close() {
         let upstream = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -870,5 +1090,41 @@ mod tests {
         assert_eq!(response, b"pong");
         server.join().unwrap();
         proxy.join().unwrap();
+    }
+
+    #[test]
+    fn endpoint_ports_must_be_non_zero() {
+        let mut invalid_host = spec();
+        invalid_host.endpoints[0].host_port = 0;
+        assert!(
+            validate_spec(&invalid_host)
+                .unwrap_err()
+                .to_string()
+                .contains("non-zero")
+        );
+
+        let mut invalid_guest = spec();
+        invalid_guest.endpoints[0].guest_port = 0;
+        assert!(
+            validate_spec(&invalid_guest)
+                .unwrap_err()
+                .to_string()
+                .contains("non-zero")
+        );
+    }
+
+    #[test]
+    fn host_port_may_be_published_only_once() {
+        let mut invalid = spec();
+        invalid.endpoints.push(OciEndpoint {
+            host_port: invalid.endpoints[0].host_port,
+            guest_port: 8001,
+        });
+        assert!(
+            validate_spec(&invalid)
+                .unwrap_err()
+                .to_string()
+                .contains("more than once")
+        );
     }
 }

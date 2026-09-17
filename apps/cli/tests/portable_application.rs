@@ -1,10 +1,13 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Output;
+use std::time::Duration;
 
 use assert_cmd::Command;
 use ato_objects::{
-    CapsuleBundleDocument, PortableDependencyProfile, decode_capsule_bundle_document,
+    CapsuleBundleDocument, PortableApplicationBundle, PortableDependencyProfile,
+    decode_capsule_bundle_document,
 };
 use ato_portable_application::bundle_sha256;
 use ato_portable_application::instance_snapshot::{
@@ -15,7 +18,10 @@ use ato_portable_application::portability_export::repack_portable_dependencies;
 use serde_json::Value;
 
 fn ato() -> Command {
-    Command::cargo_bin("ato").expect("the ato binary is built for integration tests")
+    let mut command =
+        Command::cargo_bin("ato").expect("the ato binary is built for integration tests");
+    command.timeout(Duration::from_secs(30));
+    command
 }
 
 fn ato_with_home(home: &Path) -> Command {
@@ -36,11 +42,38 @@ fn datasette_fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/datasette-cpu.capsule")
 }
 
+fn authored_multi_process_fixture() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/portable-multi-process-authored")
+}
+
+fn succeeded_or_rejected_by_runtime_admission(output: &Output, receipt: &Path) -> bool {
+    if output.status.success() {
+        return true;
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("selected derivation requires Python 3.12")
+            || stderr.contains("portable process sandbox admission failed"),
+        "portable process failed for an unexpected reason: {stderr}"
+    );
+    assert!(
+        !receipt.exists(),
+        "runtime admission failure must not emit a verification receipt"
+    );
+    false
+}
+
 fn snapshot_fixture(destination: &Path) -> Vec<u8> {
     let source = match decode_capsule_bundle_document(&fs::read(fixture()).unwrap()).unwrap() {
         CapsuleBundleDocument::PortableApplicationV3(bundle) => bundle,
         _ => panic!("static fixture must remain portable v3"),
     };
+    let bytes = attach_test_snapshot(source);
+    fs::write(destination, &bytes).unwrap();
+    bytes
+}
+
+fn attach_test_snapshot(source: PortableApplicationBundle) -> Vec<u8> {
     let (_, source) =
         repack_portable_dependencies(&source, PortableDependencyProfile::Cached, &BTreeMap::new())
             .unwrap();
@@ -62,13 +95,12 @@ fn snapshot_fixture(destination: &Path) -> Vec<u8> {
             content_type: "image/jpeg".to_owned(),
             size: asset.len() as u64,
         }],
+        asset_bindings: vec![],
     };
     let content = BTreeMap::from([(saved_data_ref, saved_data), (asset_ref, asset)]);
-    let bytes = attach_instance_snapshot(&source, snapshot, &content)
+    attach_instance_snapshot(&source, snapshot, &content)
         .unwrap()
-        .0;
-    fs::write(destination, &bytes).unwrap();
-    bytes
+        .0
 }
 
 #[test]
@@ -146,7 +178,7 @@ fn explicitly_selected_process_route_satisfies_the_same_contract_at_runtime() {
     let output = tempfile::tempdir().unwrap();
     let receipt_path = output.path().join("process-receipt.json");
     let process_ref = "sha256:5d1ec4660745130f196102c1bd81828993ab75d69130f0fdf2e1e2598fd9f3cc";
-    ato()
+    let run = ato()
         .arg("run")
         .arg(multi_fixture())
         .arg("--derivation")
@@ -154,10 +186,14 @@ fn explicitly_selected_process_route_satisfies_the_same_contract_at_runtime() {
         .arg("--no-open")
         .arg("--verification-receipt")
         .arg(&receipt_path)
-        .assert()
-        .success()
-        .stdout(predicates::str::contains(format!("Route: {process_ref}")))
-        .stdout(predicates::str::contains("Runtime: local process"));
+        .output()
+        .unwrap();
+    if !succeeded_or_rejected_by_runtime_admission(&run, &receipt_path) {
+        return;
+    }
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(stdout.contains(&format!("Route: {process_ref}")));
+    assert!(stdout.contains("Runtime: local process"));
 
     let receipt: Value = serde_json::from_slice(&fs::read(receipt_path).unwrap()).unwrap();
     assert_eq!(
@@ -207,6 +243,54 @@ fn a_multi_route_bundle_never_selects_a_derivation_implicitly() {
         .assert()
         .failure()
         .stderr(predicates::str::contains("is not declared"));
+}
+
+#[test]
+fn pack_compiles_v2_authoring_and_both_explicit_routes_satisfy_one_contract() {
+    let output = tempfile::tempdir().unwrap();
+    let bundle_path = output.path().join("authored.capsule");
+    ato()
+        .arg("pack")
+        .arg(authored_multi_process_fixture())
+        .arg("--output")
+        .arg(&bundle_path)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("contract_ref=sha256:"))
+        .stdout(predicates::str::contains("derivation_ref=sha256:"));
+
+    let bundle = match decode_capsule_bundle_document(&fs::read(&bundle_path).unwrap()).unwrap() {
+        CapsuleBundleDocument::PortableApplicationV3(bundle) => bundle,
+        other => panic!("pack must emit a portable Application, got {other:?}"),
+    };
+    assert_eq!(bundle.index.derivations.len(), 2);
+
+    let mut runtime_missing = false;
+    for (index, derivation_ref) in bundle.index.derivations.iter().enumerate() {
+        let receipt_path = output.path().join(format!("receipt-{index}.json"));
+        let run = ato()
+            .arg("run")
+            .arg(&bundle_path)
+            .arg("--derivation")
+            .arg(derivation_ref)
+            .arg("--no-open")
+            .arg("--verification-receipt")
+            .arg(&receipt_path)
+            .output()
+            .unwrap();
+        if !succeeded_or_rejected_by_runtime_admission(&run, &receipt_path) {
+            runtime_missing = true;
+            continue;
+        }
+        assert!(
+            !runtime_missing,
+            "one route admitted the shared Python runtime after another rejected it"
+        );
+        let receipt: Value = serde_json::from_slice(&fs::read(receipt_path).unwrap()).unwrap();
+        assert_eq!(receipt["contract_ref"], bundle.index.root_contract_ref);
+        assert_eq!(receipt["derivation_ref"], *derivation_ref);
+        assert_eq!(receipt["fully_satisfied"], true);
+    }
 }
 
 #[test]
@@ -292,6 +376,7 @@ fn v4_bundle_can_be_planned_and_reexported_without_changing_identity() {
 #[test]
 fn imported_local_instance_can_stop_and_restart_without_reimporting() {
     let root = tempfile::tempdir().unwrap();
+    eprintln!("durable lifecycle: import");
     let imported = ato_with_home(root.path())
         .args(["app", "import"])
         .arg(fixture())
@@ -321,12 +406,14 @@ fn imported_local_instance_can_stop_and_restart_without_reimporting() {
     );
 
     let first_receipt = root.path().join("first-receipt.json");
+    eprintln!("durable lifecycle: first start");
     ato_with_home(root.path())
         .args(["app", "start", instance_id, "--no-open"])
         .arg("--verification-receipt")
         .arg(&first_receipt)
         .assert()
         .success();
+    eprintln!("durable lifecycle: inspect first run");
     let first_status = ato_with_home(root.path())
         .args(["app", "inspect", instance_id])
         .output()
@@ -342,10 +429,12 @@ fn imported_local_instance_can_stop_and_restart_without_reimporting() {
     let first_receipt: Value = serde_json::from_slice(&fs::read(first_receipt).unwrap()).unwrap();
     assert_eq!(first_receipt["fully_satisfied"], true);
 
+    eprintln!("durable lifecycle: stop first run");
     ato_with_home(root.path())
         .args(["app", "stop", instance_id])
         .assert()
         .success();
+    eprintln!("durable lifecycle: inspect stopped instance");
     let stopped = ato_with_home(root.path())
         .args(["app", "inspect", instance_id])
         .output()
@@ -354,12 +443,14 @@ fn imported_local_instance_can_stop_and_restart_without_reimporting() {
     assert!(stopped["active_run"].is_null());
 
     let second_receipt = root.path().join("second-receipt.json");
+    eprintln!("durable lifecycle: second start");
     ato_with_home(root.path())
         .args(["app", "start", instance_id, "--no-open"])
         .arg("--verification-receipt")
         .arg(&second_receipt)
         .assert()
         .success();
+    eprintln!("durable lifecycle: inspect second run");
     let second_status = ato_with_home(root.path())
         .args(["app", "inspect", instance_id])
         .output()
@@ -379,6 +470,7 @@ fn imported_local_instance_can_stop_and_restart_without_reimporting() {
     );
     assert_eq!(second_receipt["fully_satisfied"], true);
 
+    eprintln!("durable lifecycle: stop second run");
     ato_with_home(root.path())
         .args(["app", "stop", instance_id])
         .assert()
@@ -454,7 +546,7 @@ fn snapshot_bundle_imports_into_independent_asset_namespaces_and_reexports() {
 }
 
 #[test]
-fn snapshot_bundle_does_not_claim_runtime_restore_before_an_adapter_installs_it() {
+fn snapshot_bundle_start_records_the_installed_snapshot_in_its_receipt() {
     let root = tempfile::tempdir().unwrap();
     let capsule = root.path().join("saved.capsule");
     snapshot_fixture(&capsule);
@@ -469,14 +561,79 @@ fn snapshot_bundle_does_not_claim_runtime_restore_before_an_adapter_installs_it(
     ato_with_home(root.path())
         .args(["app", "start", instance_id, "--no-open"])
         .assert()
-        .failure();
+        .success();
 
-    let runs = root.path().join("instances").join(instance_id).join("runs");
+    let instance_root = root.path().join("instances").join(instance_id);
+    let active: Value =
+        serde_json::from_slice(&fs::read(instance_root.join("active-run.json")).unwrap()).unwrap();
+    let receipt: Value = serde_json::from_slice(
+        &fs::read(
+            instance_root
+                .join("runs")
+                .join(active["run_id"].as_str().unwrap())
+                .join(active["receipt_path"].as_str().unwrap()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(receipt["fully_satisfied"], true);
+    assert_eq!(
+        receipt["observations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|observation| observation["id"] == "instance-snapshot")
+            .unwrap()["outcome"],
+        "satisfied"
+    );
+    ato_with_home(root.path())
+        .args(["app", "stop", instance_id])
+        .assert()
+        .success();
+}
+
+#[test]
+fn process_snapshot_start_fails_before_claiming_a_restore() {
+    let root = tempfile::tempdir().unwrap();
+    let capsule = root.path().join("process-saved.capsule");
+    let source = match decode_capsule_bundle_document(&fs::read(multi_fixture()).unwrap()).unwrap()
+    {
+        CapsuleBundleDocument::PortableApplicationV3(bundle) => bundle,
+        _ => panic!("multi-route fixture must remain portable v3"),
+    };
+    fs::write(&capsule, attach_test_snapshot(source)).unwrap();
+    let process_ref = "sha256:5d1ec4660745130f196102c1bd81828993ab75d69130f0fdf2e1e2598fd9f3cc";
+    let imported = ato_with_home(root.path())
+        .args(["app", "import"])
+        .arg(&capsule)
+        .args(["--derivation", process_ref])
+        .output()
+        .unwrap();
+    assert!(imported.status.success());
+    let instance: Value = serde_json::from_slice(&imported.stdout).unwrap();
+
+    ato_with_home(root.path())
+        .args([
+            "app",
+            "start",
+            instance["instance_id"].as_str().unwrap(),
+            "--no-open",
+        ])
+        .assert()
+        .failure();
+    let runs = root
+        .path()
+        .join("instances")
+        .join(instance["instance_id"].as_str().unwrap())
+        .join("runs");
     let log = fs::read_dir(runs)
         .unwrap()
         .next()
         .map(|entry| fs::read_to_string(entry.unwrap().path().join("output.log")).unwrap())
         .unwrap();
-    assert!(log.contains("instance-snapshot"));
-    assert!(log.contains("did not fully satisfy"));
+
+    assert!(log.contains(
+        "local dynamic Instance snapshot restore supports only its declared filesystem state"
+    ));
 }

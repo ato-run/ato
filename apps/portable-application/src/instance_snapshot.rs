@@ -1,8 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{self, OpenOptions};
+use std::io::{Cursor, Write};
+use std::path::{Component, Path, PathBuf};
 
 use ato_computation::ContentRef;
 use ato_formation::authoring::{
     BOUND_CONTRACT_SCHEMA, BoundContract, BoundRequirement, INSTANCE_SNAPSHOT_CONTRACT_VERIFIER,
+    STATE_FILESYSTEM_PROTOCOL,
 };
 use ato_objects::{
     PORTABLE_APPLICATION_BUNDLE_VERSION_V4, PortableApplicationBundle,
@@ -20,9 +24,11 @@ use crate::{
 pub const INSTANCE_SNAPSHOT_SCHEMA: &str = "ato.portable-instance-snapshot/1";
 pub const BROWSER_INSTANCE_STATE_PROTOCOL: &str = "ato.browser-instance-state@1";
 pub const DATA_JSON_PROTOCOL: &str = "ato.data.json@1";
+pub const ASSET_ALIAS_URI_PREFIX: &str = "ato-asset-alias://";
 const MAX_DATA_JSON_BYTES: usize = 1024 * 1024;
 const MAX_BROWSER_STATE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_BROWSER_STATE_ITEMS: usize = 4096;
+pub const MAX_FILESYSTEM_STATE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ASSET_BYTES: u64 = 50 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +37,8 @@ pub struct InstanceSnapshotV1 {
     pub schema: String,
     pub resources: Vec<InstanceSnapshotResourceV1>,
     pub assets: Vec<InstanceSnapshotAssetV1>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub asset_bindings: Vec<InstanceSnapshotAssetBindingV1>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,14 +59,35 @@ pub struct InstanceSnapshotAssetV1 {
     pub size: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstanceSnapshotAssetBindingV1 {
+    pub alias: String,
+    pub resource_slot: String,
+    pub location: InstanceSnapshotAssetLocationV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum InstanceSnapshotAssetLocationV1 {
+    DataJson {
+        pointer: String,
+    },
+    BrowserLocalStorage {
+        key: String,
+        pointer: String,
+        json_encoded: bool,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BrowserStateV1 {
     version: u32,
     local_storage: Vec<BrowserStateEntryV1>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BrowserStateEntryV1 {
     key: String,
@@ -80,7 +109,7 @@ pub(crate) fn validate_snapshot(
         if !valid_slot(&resource.slot)
             || !matches!(
                 resource.protocol.as_str(),
-                BROWSER_INSTANCE_STATE_PROTOCOL | DATA_JSON_PROTOCOL
+                BROWSER_INSTANCE_STATE_PROTOCOL | DATA_JSON_PROTOCOL | STATE_FILESYSTEM_PROTOCOL
             )
             || previous_slot.is_some_and(|previous: &str| previous >= resource.slot.as_str())
         {
@@ -112,7 +141,81 @@ pub(crate) fn validate_snapshot(
         previous_alias = Some(asset.alias.as_str());
         references.push(snapshot_ref(&asset.content_ref)?);
     }
+    let aliases = snapshot
+        .assets
+        .iter()
+        .map(|asset| asset.alias.as_str())
+        .collect::<BTreeSet<_>>();
+    let resources = snapshot
+        .resources
+        .iter()
+        .map(|resource| (resource.slot.as_str(), resource.protocol.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    if snapshot
+        .asset_bindings
+        .windows(2)
+        .any(|bindings| bindings[0] >= bindings[1])
+    {
+        return Err(profile(
+            "Instance snapshot Asset bindings must be sorted and unique",
+        ));
+    }
+    for binding in &snapshot.asset_bindings {
+        if !aliases.contains(binding.alias.as_str()) {
+            return Err(profile(format!(
+                "Instance snapshot Asset binding references unknown alias `{}`",
+                binding.alias
+            )));
+        }
+        let expected_protocol = match &binding.location {
+            InstanceSnapshotAssetLocationV1::DataJson { pointer } => {
+                validate_json_pointer(pointer)?;
+                DATA_JSON_PROTOCOL
+            }
+            InstanceSnapshotAssetLocationV1::BrowserLocalStorage {
+                key,
+                pointer,
+                json_encoded,
+            } => {
+                if key.is_empty() || key.len() > 16 * 1024 {
+                    return Err(profile(
+                        "Instance snapshot browser Asset binding key is invalid",
+                    ));
+                }
+                validate_json_pointer(pointer)?;
+                if !json_encoded && !pointer.is_empty() {
+                    return Err(profile(
+                        "plain browser Asset binding cannot contain a JSON pointer",
+                    ));
+                }
+                BROWSER_INSTANCE_STATE_PROTOCOL
+            }
+        };
+        if resources.get(binding.resource_slot.as_str()).copied() != Some(expected_protocol) {
+            return Err(profile(format!(
+                "Instance snapshot Asset binding references incompatible resource `{}`",
+                binding.resource_slot
+            )));
+        }
+    }
     Ok(references)
+}
+
+fn validate_json_pointer(pointer: &str) -> Result<(), PortableApplicationError> {
+    if pointer.len() > 4096 || (!pointer.is_empty() && !pointer.starts_with('/')) {
+        return Err(profile(
+            "Instance snapshot Asset binding JSON pointer is invalid",
+        ));
+    }
+    let mut characters = pointer.chars();
+    while let Some(character) = characters.next() {
+        if character == '~' && !matches!(characters.next(), Some('0' | '1')) {
+            return Err(profile(
+                "Instance snapshot Asset binding JSON pointer is invalid",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn valid_slot(value: &str) -> bool {
@@ -133,6 +236,7 @@ pub(crate) fn validate_snapshot_resource_bytes(
     let limit = match protocol {
         DATA_JSON_PROTOCOL => MAX_DATA_JSON_BYTES,
         BROWSER_INSTANCE_STATE_PROTOCOL => MAX_BROWSER_STATE_BYTES,
+        STATE_FILESYSTEM_PROTOCOL => MAX_FILESYSTEM_STATE_BYTES,
         _ => {
             return Err(profile(format!(
                 "unsupported snapshot protocol `{protocol}`"
@@ -143,6 +247,9 @@ pub(crate) fn validate_snapshot_resource_bytes(
         return Err(profile(format!(
             "snapshot resource for `{protocol}` exceeds its byte limit"
         )));
+    }
+    if protocol == STATE_FILESYSTEM_PROTOCOL {
+        return validate_filesystem_state(bytes);
     }
     if protocol == DATA_JSON_PROTOCOL {
         let value: serde_json::Value = serde_json::from_slice(bytes)?;
@@ -168,6 +275,689 @@ pub(crate) fn validate_snapshot_resource_bytes(
         ));
     }
     Ok(())
+}
+
+fn validate_filesystem_state(bytes: &[u8]) -> Result<(), PortableApplicationError> {
+    if bytes.len() < 1024
+        || !bytes.len().is_multiple_of(512)
+        || !bytes[bytes.len() - 1024..].iter().all(|byte| *byte == 0)
+    {
+        return Err(profile(
+            "snapshot filesystem state must be an uncompressed canonical tar archive",
+        ));
+    }
+    let mut archive = tar::Archive::new(Cursor::new(bytes));
+    let mut directories = BTreeSet::new();
+    let mut files = BTreeSet::new();
+    let mut previous_directory: Option<String> = None;
+    let mut previous_file: Option<String> = None;
+    let mut saw_file = false;
+    let mut expanded = 0u64;
+    for entry in archive
+        .entries()
+        .map_err(|_| profile("snapshot filesystem state archive is unreadable"))?
+    {
+        let mut entry =
+            entry.map_err(|_| profile("snapshot filesystem state entry is unreadable"))?;
+        let header = entry.header();
+        let entry_type = header.entry_type();
+        if !entry_type.is_dir() && !entry_type.is_file() {
+            return Err(profile(
+                "snapshot filesystem state contains a non-regular entry",
+            ));
+        }
+        if header.mtime().ok() != Some(0)
+            || header.uid().ok() != Some(0)
+            || header.gid().ok() != Some(0)
+        {
+            return Err(profile(
+                "snapshot filesystem state contains non-canonical ownership or time metadata",
+            ));
+        }
+        let path = entry
+            .path()
+            .map_err(|_| profile("snapshot filesystem state path is invalid"))?;
+        let normalized = canonical_state_path(path.as_ref())?;
+        if entry_type.is_dir() {
+            if saw_file
+                || previous_directory
+                    .as_deref()
+                    .is_some_and(|previous| previous >= normalized.as_str())
+                || !directories.insert(normalized.clone())
+                || header.mode().ok() != Some(0o755)
+                || header.size().ok() != Some(0)
+            {
+                return Err(profile(
+                    "snapshot filesystem state directory entries are not canonical",
+                ));
+            }
+            previous_directory = Some(normalized);
+        } else {
+            saw_file = true;
+            if previous_file
+                .as_deref()
+                .is_some_and(|previous| previous >= normalized.as_str())
+                || directories.contains(&normalized)
+                || !files.insert(normalized.clone())
+                || !matches!(header.mode().ok(), Some(0o644 | 0o755))
+            {
+                return Err(profile(
+                    "snapshot filesystem state file entries are not canonical",
+                ));
+            }
+            let size = header
+                .size()
+                .map_err(|_| profile("snapshot filesystem state file size is invalid"))?;
+            expanded = expanded.saturating_add(size);
+            if expanded > MAX_FILESYSTEM_STATE_BYTES as u64 {
+                return Err(profile(
+                    "snapshot filesystem state expands past its byte limit",
+                ));
+            }
+            previous_file = Some(normalized);
+        }
+        std::io::copy(&mut entry, &mut std::io::sink())
+            .map_err(|_| profile("snapshot filesystem state entry is truncated"))?;
+    }
+    Ok(())
+}
+
+pub(crate) fn capture_filesystem_state(root: &Path) -> Result<Vec<u8>, PortableApplicationError> {
+    let metadata = fs::symlink_metadata(root).map_err(|source| PortableApplicationError::Io {
+        path: root.to_path_buf(),
+        source,
+    })?;
+    if !metadata.file_type().is_dir() {
+        return Err(profile("filesystem state working copy is not a directory"));
+    }
+
+    let mut directories = Vec::new();
+    let mut files = Vec::new();
+    collect_filesystem_state(root, root, &mut directories, &mut files)?;
+    directories.sort_by(|left, right| left.0.cmp(&right.0));
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut bytes = Vec::new();
+    {
+        let mut archive = tar::Builder::new(&mut bytes);
+        for (path, _) in &directories {
+            let header = canonical_tar_header(path, 0, 0o755, tar::EntryType::Directory)?;
+            archive.append(&header, Cursor::new([])).map_err(|source| {
+                PortableApplicationError::Io {
+                    path: root.to_path_buf(),
+                    source,
+                }
+            })?;
+        }
+        let mut expanded = 0u64;
+        for (path, source_path) in &files {
+            let mut file =
+                fs::File::open(source_path).map_err(|source| PortableApplicationError::Io {
+                    path: source_path.clone(),
+                    source,
+                })?;
+            let metadata = file
+                .metadata()
+                .map_err(|source| PortableApplicationError::Io {
+                    path: source_path.clone(),
+                    source,
+                })?;
+            if !metadata.file_type().is_file() {
+                return Err(profile(
+                    "filesystem state changed to a non-regular entry during capture",
+                ));
+            }
+            expanded = expanded.saturating_add(metadata.len());
+            if expanded > MAX_FILESYSTEM_STATE_BYTES as u64 {
+                return Err(profile("filesystem state expands past its byte limit"));
+            }
+            let header = canonical_tar_header(
+                path,
+                metadata.len(),
+                canonical_file_mode(&metadata),
+                tar::EntryType::Regular,
+            )?;
+            archive
+                .append(&header, &mut file)
+                .map_err(|source| PortableApplicationError::Io {
+                    path: source_path.clone(),
+                    source,
+                })?;
+        }
+        archive
+            .finish()
+            .map_err(|source| PortableApplicationError::Io {
+                path: root.to_path_buf(),
+                source,
+            })?;
+    }
+    validate_snapshot_resource_bytes(STATE_FILESYSTEM_PROTOCOL, &bytes)?;
+    Ok(bytes)
+}
+
+pub(crate) fn restore_filesystem_state(
+    bytes: &[u8],
+    destination: &Path,
+) -> Result<(), PortableApplicationError> {
+    validate_snapshot_resource_bytes(STATE_FILESYSTEM_PROTOCOL, bytes)?;
+    fs::create_dir_all(destination).map_err(|source| PortableApplicationError::Io {
+        path: destination.to_path_buf(),
+        source,
+    })?;
+    let mut existing =
+        fs::read_dir(destination).map_err(|source| PortableApplicationError::Io {
+            path: destination.to_path_buf(),
+            source,
+        })?;
+    if existing
+        .next()
+        .transpose()
+        .map_err(|source| PortableApplicationError::Io {
+            path: destination.to_path_buf(),
+            source,
+        })?
+        .is_some()
+    {
+        return Err(profile(
+            "filesystem state restore destination must be empty",
+        ));
+    }
+
+    let mut archive = tar::Archive::new(Cursor::new(bytes));
+    for entry in archive
+        .entries()
+        .map_err(|_| profile("snapshot filesystem state archive is unreadable"))?
+    {
+        let mut entry =
+            entry.map_err(|_| profile("snapshot filesystem state entry is unreadable"))?;
+        let relative = entry
+            .path()
+            .map_err(|_| profile("snapshot filesystem state path is invalid"))?;
+        let relative = canonical_state_path(relative.as_ref())?;
+        let target = destination.join(&relative);
+        let mode = entry
+            .header()
+            .mode()
+            .map_err(|_| profile("snapshot filesystem state mode is invalid"))?;
+        if entry.header().entry_type().is_dir() {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(|source| PortableApplicationError::Io {
+                    path: parent.to_path_buf(),
+                    source,
+                })?;
+            }
+            fs::create_dir(&target).map_err(|source| PortableApplicationError::Io {
+                path: target.clone(),
+                source,
+            })?;
+        } else {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(|source| PortableApplicationError::Io {
+                    path: parent.to_path_buf(),
+                    source,
+                })?;
+            }
+            let mut output = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&target)
+                .map_err(|source| PortableApplicationError::Io {
+                    path: target.clone(),
+                    source,
+                })?;
+            std::io::copy(&mut entry, &mut output).map_err(|source| {
+                PortableApplicationError::Io {
+                    path: target.clone(),
+                    source,
+                }
+            })?;
+            output
+                .flush()
+                .map_err(|source| PortableApplicationError::Io {
+                    path: target.clone(),
+                    source,
+                })?;
+        }
+        set_portable_mode(&target, mode)?;
+    }
+    Ok(())
+}
+
+fn collect_filesystem_state(
+    root: &Path,
+    directory: &Path,
+    directories: &mut Vec<(String, PathBuf)>,
+    files: &mut Vec<(String, PathBuf)>,
+) -> Result<(), PortableApplicationError> {
+    let entries = fs::read_dir(directory).map_err(|source| PortableApplicationError::Io {
+        path: directory.to_path_buf(),
+        source,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| PortableApplicationError::Io {
+            path: directory.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+        let metadata =
+            fs::symlink_metadata(&path).map_err(|source| PortableApplicationError::Io {
+                path: path.clone(),
+                source,
+            })?;
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| profile("filesystem state path escapes its working copy"))?;
+        let normalized = canonical_state_path(relative)?;
+        if metadata.file_type().is_dir() {
+            directories.push((normalized, path.clone()));
+            collect_filesystem_state(root, &path, directories, files)?;
+        } else if metadata.file_type().is_file() {
+            files.push((normalized, path));
+        } else {
+            return Err(profile(
+                "filesystem state contains a symlink or non-regular entry",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn canonical_tar_header(
+    path: &str,
+    size: u64,
+    mode: u32,
+    entry_type: tar::EntryType,
+) -> Result<tar::Header, PortableApplicationError> {
+    let mut header = tar::Header::new_ustar();
+    header.set_size(size);
+    header.set_mode(mode);
+    header.set_mtime(0);
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_entry_type(entry_type);
+    header
+        .set_path(path)
+        .map_err(|_| profile("filesystem state path cannot be represented in ustar"))?;
+    header.set_cksum();
+    Ok(header)
+}
+
+#[cfg(unix)]
+fn canonical_file_mode(metadata: &fs::Metadata) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+
+    if metadata.permissions().mode() & 0o111 == 0 {
+        0o644
+    } else {
+        0o755
+    }
+}
+
+#[cfg(not(unix))]
+fn canonical_file_mode(_metadata: &fs::Metadata) -> u32 {
+    0o644
+}
+
+#[cfg(unix)]
+fn set_portable_mode(path: &Path, mode: u32) -> Result<(), PortableApplicationError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(|source| {
+        PortableApplicationError::Io {
+            path: path.to_path_buf(),
+            source,
+        }
+    })
+}
+
+#[cfg(not(unix))]
+fn set_portable_mode(_path: &Path, _mode: u32) -> Result<(), PortableApplicationError> {
+    Ok(())
+}
+
+fn canonical_state_path(path: &Path) -> Result<String, PortableApplicationError> {
+    let mut normalized = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(value) => normalized.push(
+                value
+                    .to_str()
+                    .ok_or_else(|| profile("snapshot filesystem state path is not UTF-8"))?,
+            ),
+            Component::CurDir
+            | Component::ParentDir
+            | Component::RootDir
+            | Component::Prefix(_) => {
+                return Err(profile(
+                    "snapshot filesystem state path escapes or is not canonical",
+                ));
+            }
+        }
+    }
+    if normalized.is_empty() {
+        return Err(profile("snapshot filesystem state path is empty"));
+    }
+    Ok(normalized.join("/"))
+}
+
+pub fn decode_browser_state(
+    bytes: &[u8],
+) -> Result<BTreeMap<String, String>, PortableApplicationError> {
+    validate_snapshot_resource_bytes(BROWSER_INSTANCE_STATE_PROTOCOL, bytes)?;
+    let state: BrowserStateV1 = serde_json::from_slice(bytes)?;
+    Ok(state
+        .local_storage
+        .into_iter()
+        .map(|entry| (entry.key, entry.value))
+        .collect())
+}
+
+pub fn encode_browser_state(
+    local_storage: &BTreeMap<String, String>,
+) -> Result<Vec<u8>, PortableApplicationError> {
+    let state = BrowserStateV1 {
+        version: 1,
+        local_storage: local_storage
+            .iter()
+            .map(|(key, value)| BrowserStateEntryV1 {
+                key: key.clone(),
+                value: value.clone(),
+            })
+            .collect(),
+    };
+    let bytes = serde_jcs::to_vec(&state)?;
+    validate_snapshot_resource_bytes(BROWSER_INSTANCE_STATE_PROTOCOL, &bytes)?;
+    Ok(bytes)
+}
+
+fn alias_uri(alias: &str) -> String {
+    format!("{ASSET_ALIAS_URI_PREFIX}{alias}")
+}
+
+fn count_alias_values(value: &serde_json::Value) -> Result<usize, PortableApplicationError> {
+    match value {
+        serde_json::Value::String(value) => {
+            if value.starts_with(ASSET_ALIAS_URI_PREFIX) {
+                if value.len() == ASSET_ALIAS_URI_PREFIX.len() {
+                    return Err(profile(
+                        "Instance snapshot contains an empty Asset alias URI",
+                    ));
+                }
+                Ok(1)
+            } else if value.contains(ASSET_ALIAS_URI_PREFIX) {
+                Err(profile(
+                    "Instance snapshot Asset alias URI must occupy a complete JSON string",
+                ))
+            } else {
+                Ok(0)
+            }
+        }
+        serde_json::Value::Array(values) => {
+            values.iter().try_fold(
+                0usize,
+                |count, value| Ok(count + count_alias_values(value)?),
+            )
+        }
+        serde_json::Value::Object(values) => {
+            values.values().try_fold(
+                0usize,
+                |count, value| Ok(count + count_alias_values(value)?),
+            )
+        }
+        _ => Ok(0),
+    }
+}
+
+pub(crate) fn validate_asset_bindings(
+    snapshot: &InstanceSnapshotV1,
+    content: &BTreeMap<String, Vec<u8>>,
+) -> Result<(), PortableApplicationError> {
+    let resources = snapshot
+        .resources
+        .iter()
+        .map(|resource| (resource.slot.as_str(), resource))
+        .collect::<BTreeMap<_, _>>();
+    let mut found_aliases = 0usize;
+    for resource in &snapshot.resources {
+        let bytes = content
+            .get(&resource.content_ref)
+            .ok_or_else(|| profile("snapshot resource content is missing"))?;
+        if resource.protocol == DATA_JSON_PROTOCOL {
+            let value: serde_json::Value = serde_json::from_slice(bytes)?;
+            found_aliases += count_alias_values(&value)?;
+        } else if resource.protocol == BROWSER_INSTANCE_STATE_PROTOCOL {
+            let state: BrowserStateV1 = serde_json::from_slice(bytes)?;
+            for entry in state.local_storage {
+                if entry.value.starts_with(ASSET_ALIAS_URI_PREFIX) {
+                    if entry.value.len() == ASSET_ALIAS_URI_PREFIX.len() {
+                        return Err(profile(
+                            "Instance snapshot contains an empty Asset alias URI",
+                        ));
+                    }
+                    found_aliases += 1;
+                } else if let Ok(value) = serde_json::from_str::<serde_json::Value>(&entry.value) {
+                    found_aliases += count_alias_values(&value)?;
+                } else if entry.value.contains(ASSET_ALIAS_URI_PREFIX) {
+                    return Err(profile(
+                        "Instance snapshot Asset alias URI must occupy a complete value",
+                    ));
+                }
+            }
+        }
+    }
+    for binding in &snapshot.asset_bindings {
+        let resource = resources
+            .get(binding.resource_slot.as_str())
+            .ok_or_else(|| profile("snapshot Asset binding resource is missing"))?;
+        let bytes = content
+            .get(&resource.content_ref)
+            .ok_or_else(|| profile("snapshot Asset binding content is missing"))?;
+        let expected = alias_uri(&binding.alias);
+        let actual = match &binding.location {
+            InstanceSnapshotAssetLocationV1::DataJson { pointer } => {
+                let value: serde_json::Value = serde_json::from_slice(bytes)?;
+                value
+                    .pointer(pointer)
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            }
+            InstanceSnapshotAssetLocationV1::BrowserLocalStorage {
+                key,
+                pointer,
+                json_encoded,
+            } => {
+                let state: BrowserStateV1 = serde_json::from_slice(bytes)?;
+                let value = state
+                    .local_storage
+                    .into_iter()
+                    .find(|entry| entry.key == *key)
+                    .map(|entry| entry.value)
+                    .ok_or_else(|| profile("snapshot browser Asset binding key is missing"))?;
+                if !json_encoded {
+                    Some(value)
+                } else {
+                    serde_json::from_str::<serde_json::Value>(&value)
+                        .ok()
+                        .and_then(|value| {
+                            value
+                                .pointer(pointer)
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_owned)
+                        })
+                }
+            }
+        };
+        if actual.as_deref() != Some(expected.as_str()) {
+            return Err(profile(format!(
+                "Instance snapshot Asset binding for `{}` does not resolve to its alias URI",
+                binding.alias
+            )));
+        }
+    }
+    if found_aliases != snapshot.asset_bindings.len() {
+        return Err(profile(
+            "Instance snapshot contains an undeclared or multiply bound Asset alias URI",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn rebind_snapshot_resource_assets(
+    snapshot: &InstanceSnapshotV1,
+    resource: &InstanceSnapshotResourceV1,
+    bytes: &[u8],
+    asset_uris: &BTreeMap<String, String>,
+) -> Result<Vec<u8>, PortableApplicationError> {
+    let bindings = snapshot
+        .asset_bindings
+        .iter()
+        .filter(|binding| binding.resource_slot == resource.slot)
+        .collect::<Vec<_>>();
+    if bindings.is_empty() {
+        return Ok(bytes.to_vec());
+    }
+    if resource.protocol == DATA_JSON_PROTOCOL {
+        let mut value: serde_json::Value = serde_json::from_slice(bytes)?;
+        for binding in bindings {
+            let InstanceSnapshotAssetLocationV1::DataJson { pointer } = &binding.location else {
+                return Err(profile("snapshot Asset binding protocol mismatch"));
+            };
+            let target = value
+                .pointer_mut(pointer)
+                .ok_or_else(|| profile("snapshot Asset binding JSON pointer is missing"))?;
+            let expected = alias_uri(&binding.alias);
+            if target.as_str() != Some(expected.as_str()) {
+                return Err(profile("snapshot Asset binding value changed"));
+            }
+            *target = serde_json::Value::String(
+                asset_uris
+                    .get(&binding.alias)
+                    .ok_or_else(|| profile("snapshot Asset alias was not materialized"))?
+                    .clone(),
+            );
+        }
+        return Ok(serde_jcs::to_vec(&value)?);
+    }
+
+    let mut state: BrowserStateV1 = serde_json::from_slice(bytes)?;
+    for binding in bindings {
+        let InstanceSnapshotAssetLocationV1::BrowserLocalStorage {
+            key,
+            pointer,
+            json_encoded,
+        } = &binding.location
+        else {
+            return Err(profile("snapshot Asset binding protocol mismatch"));
+        };
+        let entry = state
+            .local_storage
+            .iter_mut()
+            .find(|entry| entry.key == *key)
+            .ok_or_else(|| profile("snapshot browser Asset binding key is missing"))?;
+        let expected = alias_uri(&binding.alias);
+        let replacement = asset_uris
+            .get(&binding.alias)
+            .ok_or_else(|| profile("snapshot Asset alias was not materialized"))?;
+        if !json_encoded {
+            if entry.value != expected {
+                return Err(profile("snapshot browser Asset binding value changed"));
+            }
+            entry.value = replacement.clone();
+        } else {
+            let mut value: serde_json::Value = serde_json::from_str(&entry.value)?;
+            let target = value
+                .pointer_mut(pointer)
+                .ok_or_else(|| profile("snapshot browser Asset binding JSON pointer is missing"))?;
+            if target.as_str() != Some(expected.as_str()) {
+                return Err(profile("snapshot browser Asset binding value changed"));
+            }
+            *target = serde_json::Value::String(replacement.clone());
+            entry.value = serde_jcs::to_string(&value)?;
+        }
+    }
+    Ok(serde_jcs::to_vec(&state)?)
+}
+
+pub(crate) fn capture_snapshot_resource_assets(
+    snapshot: &InstanceSnapshotV1,
+    resource: &InstanceSnapshotResourceV1,
+    bytes: &[u8],
+    asset_uris: &BTreeMap<String, String>,
+) -> Result<Vec<u8>, PortableApplicationError> {
+    let bindings = snapshot
+        .asset_bindings
+        .iter()
+        .filter(|binding| binding.resource_slot == resource.slot)
+        .collect::<Vec<_>>();
+    if bindings.is_empty() {
+        validate_snapshot_resource_bytes(&resource.protocol, bytes)?;
+        return Ok(bytes.to_vec());
+    }
+    if resource.protocol == DATA_JSON_PROTOCOL {
+        let mut value: serde_json::Value = serde_json::from_slice(bytes)?;
+        for binding in bindings {
+            let InstanceSnapshotAssetLocationV1::DataJson { pointer } = &binding.location else {
+                return Err(profile("snapshot Asset binding protocol mismatch"));
+            };
+            let target = value
+                .pointer_mut(pointer)
+                .ok_or_else(|| profile("snapshot Asset binding JSON pointer is missing"))?;
+            let local_uri = asset_uris
+                .get(&binding.alias)
+                .ok_or_else(|| profile("snapshot Asset alias was not materialized"))?;
+            if target.as_str() != Some(local_uri.as_str()) {
+                return Err(profile("local snapshot Asset binding value changed"));
+            }
+            *target = serde_json::Value::String(alias_uri(&binding.alias));
+        }
+        let bytes = serde_jcs::to_vec(&value)?;
+        validate_snapshot_resource_bytes(&resource.protocol, &bytes)?;
+        return Ok(bytes);
+    }
+
+    let mut state: BrowserStateV1 = serde_json::from_slice(bytes)?;
+    for binding in bindings {
+        let InstanceSnapshotAssetLocationV1::BrowserLocalStorage {
+            key,
+            pointer,
+            json_encoded,
+        } = &binding.location
+        else {
+            return Err(profile("snapshot Asset binding protocol mismatch"));
+        };
+        let entry = state
+            .local_storage
+            .iter_mut()
+            .find(|entry| entry.key == *key)
+            .ok_or_else(|| profile("snapshot browser Asset binding key is missing"))?;
+        let local_uri = asset_uris
+            .get(&binding.alias)
+            .ok_or_else(|| profile("snapshot Asset alias was not materialized"))?;
+        let alias_uri = alias_uri(&binding.alias);
+        if !json_encoded {
+            if entry.value != *local_uri {
+                return Err(profile(
+                    "local snapshot browser Asset binding value changed",
+                ));
+            }
+            entry.value = alias_uri;
+        } else {
+            let mut value: serde_json::Value = serde_json::from_str(&entry.value)?;
+            let target = value
+                .pointer_mut(pointer)
+                .ok_or_else(|| profile("snapshot browser Asset binding JSON pointer is missing"))?;
+            if target.as_str() != Some(local_uri.as_str()) {
+                return Err(profile(
+                    "local snapshot browser Asset binding value changed",
+                ));
+            }
+            *target = serde_json::Value::String(alias_uri);
+            entry.value = serde_jcs::to_string(&value)?;
+        }
+    }
+    let bytes = serde_jcs::to_vec(&state)?;
+    validate_snapshot_resource_bytes(&resource.protocol, &bytes)?;
+    Ok(bytes)
 }
 
 pub(crate) fn validated_snapshot(
@@ -218,6 +1008,15 @@ pub fn attach_instance_snapshot(
             "snapshot content map must equal the declared resource/Asset closure",
         ));
     }
+    for resource in &snapshot.resources {
+        validate_snapshot_resource_bytes(
+            &resource.protocol,
+            content
+                .get(&resource.content_ref)
+                .ok_or_else(|| profile("snapshot resource content is missing"))?,
+        )?;
+    }
+    validate_asset_bindings(&snapshot, content)?;
 
     let old_contract_ref = parse_ref(&source.index.root_contract_ref, "root_contract_ref")?;
     let mut contract: BoundContract = structured(source, &old_contract_ref, BOUND_CONTRACT_SCHEMA)?;
@@ -393,4 +1192,85 @@ fn remove_object(bundle: &mut PortableApplicationBundle, reference: &str) {
     bundle
         .payloads
         .retain(|payload| payload.reference != reference);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn filesystem_archive(path: &str, entry_type: tar::EntryType) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut archive = tar::Builder::new(&mut bytes);
+            let mut header = tar::Header::new_ustar();
+            let contents = if entry_type.is_file() {
+                b"saved".as_slice()
+            } else {
+                &[]
+            };
+            header.set_size(contents.len() as u64);
+            header.set_mode(if entry_type.is_dir() { 0o755 } else { 0o644 });
+            header.set_mtime(0);
+            header.set_uid(0);
+            header.set_gid(0);
+            header.set_entry_type(entry_type);
+            header.set_path_absolute(path).unwrap();
+            header.set_cksum();
+            archive.append(&header, Cursor::new(contents)).unwrap();
+            archive.finish().unwrap();
+        }
+        bytes
+    }
+
+    #[test]
+    fn filesystem_state_accepts_a_canonical_regular_tree() {
+        let bytes = filesystem_archive("data.sqlite", tar::EntryType::Regular);
+        validate_snapshot_resource_bytes(STATE_FILESYSTEM_PROTOCOL, &bytes).unwrap();
+    }
+
+    #[test]
+    fn filesystem_state_rejects_links_and_path_traversal() {
+        let link = filesystem_archive("link", tar::EntryType::Symlink);
+        assert!(validate_snapshot_resource_bytes(STATE_FILESYSTEM_PROTOCOL, &link).is_err());
+
+        let traversal = filesystem_archive("/escape", tar::EntryType::Regular);
+        assert!(validate_snapshot_resource_bytes(STATE_FILESYSTEM_PROTOCOL, &traversal).is_err());
+    }
+
+    #[test]
+    fn filesystem_state_capture_is_deterministic_and_restorable() {
+        let source = tempfile::tempdir().unwrap();
+        fs::create_dir(source.path().join("nested")).unwrap();
+        fs::write(source.path().join("notes.sqlite"), b"database").unwrap();
+        fs::write(source.path().join("nested/value.txt"), b"saved").unwrap();
+
+        let first = capture_filesystem_state(source.path()).unwrap();
+        let second = capture_filesystem_state(source.path()).unwrap();
+        let restored = tempfile::tempdir().unwrap();
+        restore_filesystem_state(&first, restored.path()).unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(
+            fs::read(restored.path().join("notes.sqlite")).unwrap(),
+            b"database"
+        );
+        assert_eq!(
+            fs::read(restored.path().join("nested/value.txt")).unwrap(),
+            b"saved"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filesystem_state_capture_rejects_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("target"), b"saved").unwrap();
+        symlink("target", source.path().join("link")).unwrap();
+
+        let error = capture_filesystem_state(source.path()).unwrap_err();
+
+        assert!(error.to_string().contains("symlink or non-regular"));
+    }
 }

@@ -11,7 +11,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -20,10 +20,12 @@ use ato_formation::authoring::{
     AuthoringDraft, AuthoringProvenance, BOUND_CONTRACT_SCHEMA, BOUND_DERIVATION_SCHEMA,
     BROWSER_PROTOCOL, BindingContext, BoundContract, BoundDerivation, BoundInput, BoundPort,
     BoundRequirement, BoundStep, DerivationDraft, EffectClass, HTTP_CONTRACT_VERIFIER,
-    HTTP_PROTOCOL, INSTANCE_SNAPSHOT_CONTRACT_VERIFIER, PROCESS_PROTOCOL, PortDraft, StepDraft,
-    WORKSPACE_CONTRACT_VERIFIER, WORKSPACE_PROTOCOL, bind,
+    HTTP_PROTOCOL, INSTANCE_SNAPSHOT_CONTRACT_VERIFIER, PROCESS_PROTOCOL, PortDraft,
+    STATE_FILESYSTEM_PROTOCOL, StateAccess, StepDraft, WORKSPACE_CONTRACT_VERIFIER,
+    WORKSPACE_PROTOCOL, bind,
 };
 use ato_formation::capsule_toml::{CAPSULE_FILE_NAME, parse_capsule_toml};
+use ato_formation::capsule_toml_v2::{PortableDerivationKindV2, parse_capsule_toml_v2};
 use ato_materializer_static_web::{media_type_for, validate_relative_path};
 use ato_objects::{
     PORTABLE_APPLICATION_BUNDLE_VERSION, PORTABLE_APPLICATION_PROFILE, PortableApplicationBundle,
@@ -37,6 +39,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+pub mod dependency_transport;
+pub mod hosted_export;
 pub mod instance_snapshot;
 pub mod local_instance;
 pub mod oci_archive;
@@ -45,7 +49,7 @@ pub mod portability_plan;
 pub mod validator_agent;
 
 use instance_snapshot::{
-    INSTANCE_SNAPSHOT_SCHEMA, InstanceSnapshotV1, validate_snapshot,
+    INSTANCE_SNAPSHOT_SCHEMA, InstanceSnapshotV1, validate_asset_bindings, validate_snapshot,
     validate_snapshot_resource_bytes,
 };
 
@@ -108,6 +112,18 @@ pub struct ApplicationV2 {
     pub schema: String,
     pub title: String,
     pub surfaces: Vec<ApplicationSurfaceV2>,
+    /// Logical connections the recipient must rebind for this Application.
+    /// Values are runtime inputs and are never part of this object.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bindings: Vec<ApplicationBindingV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApplicationBindingV1 {
+    pub id: String,
+    pub protocol: String,
+    pub required: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,6 +146,7 @@ pub struct ValidatedApplication {
     pub schema: String,
     pub title: String,
     pub surfaces: Vec<ValidatedApplicationSurface>,
+    pub bindings: Vec<ApplicationBindingV1>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,26 +224,129 @@ pub struct PortableExecutionSpec {
 }
 
 #[derive(Debug, Clone)]
+pub struct PortableFilesystemStateSpec {
+    pub id: String,
+    pub mount: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct PortableDynamicBundleSpec {
     pub title: String,
     pub surface_path: String,
     pub guest_port: u16,
     pub process: PortableExecutionSpec,
     pub oci: PortableExecutionSpec,
+    pub filesystem_state: Option<PortableFilesystemStateSpec>,
+    pub bindings: Vec<ApplicationBindingV1>,
     pub requirements: Vec<PortableHttpRequirementSpec>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PortableDynamicRouteSpec {
+    pub realization: PortableRealizationKind,
+    pub execution: PortableExecutionSpec,
+    pub guest_port: u16,
+}
+
+#[derive(Debug, Clone)]
+pub struct PortableAuthoredBundleSpec {
+    pub title: String,
+    pub surface_path: String,
+    pub routes: Vec<PortableDynamicRouteSpec>,
+    pub filesystem_state: Option<PortableFilesystemStateSpec>,
+    pub bindings: Vec<ApplicationBindingV1>,
+    pub requirements: Vec<PortableHttpRequirementSpec>,
+}
+
+/// Stable process/OCI projection for a logical Binding id. The declaration is
+/// public; only the value placed in this environment variable is secret.
+pub fn binding_environment_name(id: &str) -> String {
+    format!("ATO_BINDING_{}", id.to_ascii_uppercase())
+}
+
+pub fn resolve_application_bindings(
+    application: &ValidatedApplication,
+    supplied: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, PortableApplicationError> {
+    let declared = application
+        .bindings
+        .iter()
+        .map(|binding| binding.id.as_str())
+        .collect::<BTreeSet<_>>();
+    if let Some(unknown) = supplied.keys().find(|id| !declared.contains(id.as_str())) {
+        return Err(profile(format!(
+            "runtime supplied undeclared Binding `{unknown}`"
+        )));
+    }
+    let missing = application
+        .bindings
+        .iter()
+        .filter(|binding| binding.required && !supplied.contains_key(&binding.id))
+        .map(|binding| binding.id.as_str())
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(profile(format!(
+            "portable Application requires Bindings: {}",
+            missing.join(", ")
+        )));
+    }
+    let mut environment = BTreeMap::new();
+    for binding in &application.bindings {
+        let Some(value) = supplied.get(&binding.id) else {
+            continue;
+        };
+        if value.is_empty() || value.len() > 64 * 1024 || value.contains('\0') {
+            return Err(profile(format!(
+                "runtime Binding `{}` has an invalid value",
+                binding.id
+            )));
+        }
+        environment.insert(binding_environment_name(&binding.id), value.clone());
+    }
+    Ok(environment)
 }
 
 /// Loopback-only static realization used by `ato run`.
 pub struct StaticApplicationServer {
     address: SocketAddr,
     running: Arc<AtomicBool>,
+    local_storage: Option<Arc<Mutex<BTreeMap<String, String>>>>,
     thread: Option<JoinHandle<()>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaticApplicationState {
+    pub persistence_token: String,
+    pub local_storage: BTreeMap<String, String>,
+    pub assets: Vec<StaticApplicationAsset>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaticApplicationAsset {
+    pub asset_id: String,
+    pub filename: String,
+    pub content_type: String,
+    pub bytes: Vec<u8>,
+}
+
+struct StaticApplicationRuntimeState {
+    persistence_token: String,
+    local_storage: Arc<Mutex<BTreeMap<String, String>>>,
+    assets: BTreeMap<String, StaticApplicationAsset>,
 }
 
 impl StaticApplicationServer {
     pub fn start(
         root: &Path,
         validated: &ValidatedPortableApplication,
+    ) -> Result<Self, PortableApplicationError> {
+        Self::start_with_state(root, validated, None)
+    }
+
+    pub fn start_with_state(
+        root: &Path,
+        validated: &ValidatedPortableApplication,
+        state: Option<StaticApplicationState>,
     ) -> Result<Self, PortableApplicationError> {
         if validated.realization != PortableRealizationKind::StaticWeb {
             return Err(profile("static server requires a static-web derivation"));
@@ -261,8 +381,23 @@ impl StaticApplicationServer {
             .ok_or_else(|| profile("static surface omitted its entry"))?;
         let entry_route = format!("/{entry}");
         let spa_fallback = surface.spa_fallback.unwrap_or(false);
+        let state = state.map(|state| {
+            let local_storage = Arc::new(Mutex::new(state.local_storage));
+            let assets = state
+                .assets
+                .into_iter()
+                .map(|asset| (asset.asset_id.clone(), asset))
+                .collect();
+            Arc::new(StaticApplicationRuntimeState {
+                persistence_token: state.persistence_token,
+                local_storage,
+                assets,
+            })
+        });
+        let local_storage = state.as_ref().map(|state| Arc::clone(&state.local_storage));
         let running = Arc::new(AtomicBool::new(true));
         let thread_running = Arc::clone(&running);
+        let thread_state = state;
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let thread = thread::spawn(move || {
             let _ = ready_tx.send(());
@@ -273,7 +408,13 @@ impl StaticApplicationServer {
                 if !thread_running.load(Ordering::Acquire) {
                     break;
                 }
-                let _ = serve_request(stream, &routes, &entry_route, spa_fallback);
+                let _ = serve_request(
+                    stream,
+                    &routes,
+                    &entry_route,
+                    spa_fallback,
+                    thread_state.as_deref(),
+                );
             }
         });
         ready_rx
@@ -282,12 +423,27 @@ impl StaticApplicationServer {
         Ok(Self {
             address,
             running,
+            local_storage,
             thread: Some(thread),
         })
     }
 
     pub fn base_url(&self) -> String {
         format!("http://{}", self.address)
+    }
+
+    pub fn local_storage(
+        &self,
+    ) -> Result<Option<BTreeMap<String, String>>, PortableApplicationError> {
+        self.local_storage
+            .as_ref()
+            .map(|state| {
+                state
+                    .lock()
+                    .map(|state| state.clone())
+                    .map_err(|_| profile("static application state lock was poisoned"))
+            })
+            .transpose()
     }
 }
 
@@ -470,6 +626,7 @@ fn validate_instance_snapshot_binding(
         return Err(profile("Instance snapshot is empty"));
     }
     validate_snapshot(&snapshot)?;
+    let mut snapshot_content = BTreeMap::new();
     for resource in &snapshot.resources {
         let reference = parse_ref(&resource.content_ref, "snapshot resource")?;
         let descriptor = bundle
@@ -480,6 +637,7 @@ fn validate_instance_snapshot_binding(
         }
         let bytes = bundle.payload_bytes(&reference)?;
         validate_snapshot_resource_bytes(&resource.protocol, &bytes)?;
+        snapshot_content.insert(resource.content_ref.clone(), bytes);
     }
     for asset in &snapshot.assets {
         let reference = parse_ref(&asset.content_ref, "snapshot Asset")?;
@@ -491,6 +649,7 @@ fn validate_instance_snapshot_binding(
         }
         bundle.payload_bytes(&reference)?;
     }
+    validate_asset_bindings(&snapshot, &snapshot_content)?;
     Ok(())
 }
 
@@ -528,6 +687,32 @@ fn validate_selected_derivation(
         return Err(profile("derivation reference is not its canonical digest"));
     }
     let realization = validate_initial_route(&contract, &application, &derivation)?;
+    if let Some(snapshot_ref) = instance_snapshot_ref.as_ref() {
+        let snapshot: InstanceSnapshotV1 =
+            structured(bundle, snapshot_ref, INSTANCE_SNAPSHOT_SCHEMA)?;
+        let filesystem = snapshot
+            .resources
+            .iter()
+            .filter(|resource| resource.protocol == STATE_FILESYSTEM_PROTOCOL)
+            .collect::<Vec<_>>();
+        match filesystem.as_slice() {
+            [] => {}
+            [resource]
+                if derivation.state.len() == 1
+                    && derivation.state[0].id == resource.slot
+                    && derivation.state[0].protocol == resource.protocol => {}
+            [_] => {
+                return Err(profile(
+                    "filesystem snapshot resource must match the selected Derivation state slot",
+                ));
+            }
+            _ => {
+                return Err(profile(
+                    "the initial profile permits at most one filesystem snapshot resource",
+                ));
+            }
+        }
+    }
 
     let surface = &application.surfaces[0];
     let tree_reference = surface
@@ -585,6 +770,7 @@ fn validated_application(
             Ok(ValidatedApplication {
                 schema: application.schema,
                 title: application.title,
+                bindings: Vec::new(),
                 surfaces: application
                     .surfaces
                     .into_iter()
@@ -601,9 +787,11 @@ fn validated_application(
         }
         APPLICATION_V2_SCHEMA => {
             let application: ApplicationV2 = structured(bundle, application_ref, schema)?;
+            validate_application_bindings(&application.bindings)?;
             Ok(ValidatedApplication {
                 schema: application.schema,
                 title: application.title,
+                bindings: application.bindings,
                 surfaces: application
                     .surfaces
                     .into_iter()
@@ -622,6 +810,47 @@ fn validated_application(
             "application_ref uses unsupported schema `{other}`"
         ))),
     }
+}
+
+fn validate_application_bindings(
+    bindings: &[ApplicationBindingV1],
+) -> Result<(), PortableApplicationError> {
+    let mut ids = BTreeSet::new();
+    for binding in bindings {
+        let valid_id = !binding.id.is_empty()
+            && binding.id.len() <= 64
+            && binding
+                .id
+                .bytes()
+                .enumerate()
+                .all(|(index, byte)| match byte {
+                    b'a'..=b'z' => true,
+                    b'0'..=b'9' | b'_' => index > 0,
+                    _ => false,
+                });
+        if !valid_id {
+            return Err(profile(format!(
+                "application Binding id `{}` must match [a-z][a-z0-9_]{{0,63}}",
+                binding.id
+            )));
+        }
+        if binding.protocol.trim().is_empty()
+            || binding.protocol.len() > 160
+            || binding.protocol.contains('\0')
+        {
+            return Err(profile(format!(
+                "application Binding `{}` has an invalid protocol",
+                binding.id
+            )));
+        }
+        if !ids.insert(binding.id.as_str()) {
+            return Err(profile(format!(
+                "application declares duplicate Binding `{}`",
+                binding.id
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Deterministically forms a portable static application from the existing
@@ -798,9 +1027,106 @@ pub fn build_dynamic_process_oci_bundle(
     source_root: &Path,
     spec: &PortableDynamicBundleSpec,
 ) -> Result<(Vec<u8>, PortableApplicationBundle), PortableApplicationError> {
+    build_dynamic_routes_bundle(
+        source_root,
+        &PortableAuthoredBundleSpec {
+            title: spec.title.clone(),
+            surface_path: spec.surface_path.clone(),
+            routes: vec![
+                PortableDynamicRouteSpec {
+                    realization: PortableRealizationKind::LocalProcess,
+                    execution: spec.process.clone(),
+                    guest_port: spec.guest_port,
+                },
+                PortableDynamicRouteSpec {
+                    realization: PortableRealizationKind::OciContainer,
+                    execution: spec.oci.clone(),
+                    guest_port: spec.guest_port,
+                },
+            ],
+            filesystem_state: spec.filesystem_state.clone(),
+            bindings: spec.bindings.clone(),
+            requirements: spec.requirements.clone(),
+        },
+    )
+}
+
+/// Compile the supported `ato.capsule/2` v0 subset into the same canonical
+/// Contract/Application/Derivation objects used by fixture builders. The TOML
+/// bytes and author-facing route labels are deliberately not bundled or
+/// digested.
+pub fn build_authored_bundle_v2(
+    source_root: &Path,
+) -> Result<(Vec<u8>, PortableApplicationBundle), PortableApplicationError> {
+    let text = read(source_root.join(CAPSULE_FILE_NAME))?;
+    let text = std::str::from_utf8(&text)
+        .map_err(|error| profile(format!("capsule.toml is not UTF-8: {error}")))?;
+    let draft = parse_capsule_toml_v2(text)
+        .map_err(|error| PortableApplicationError::CapsuleToml(error.to_string()))?;
+    let routes = draft
+        .derivations
+        .into_iter()
+        .map(|derivation| PortableDynamicRouteSpec {
+            realization: match derivation.kind {
+                PortableDerivationKindV2::Process => PortableRealizationKind::LocalProcess,
+                PortableDerivationKindV2::Oci => PortableRealizationKind::OciContainer,
+            },
+            execution: PortableExecutionSpec {
+                runtimes: derivation.runtimes,
+                argv: derivation.argv,
+                cwd: derivation.cwd,
+                env: derivation.env,
+            },
+            guest_port: derivation.guest_port,
+        })
+        .collect();
+    build_dynamic_routes_bundle(
+        source_root,
+        &PortableAuthoredBundleSpec {
+            title: draft.title,
+            surface_path: draft.surface_path,
+            routes,
+            filesystem_state: draft.state.into_iter().next().map(|state| {
+                PortableFilesystemStateSpec {
+                    id: state.id,
+                    mount: state.mount,
+                }
+            }),
+            bindings: draft
+                .bindings
+                .into_iter()
+                .map(|binding| ApplicationBindingV1 {
+                    id: binding.id,
+                    protocol: binding.protocol,
+                    required: binding.required,
+                })
+                .collect(),
+            requirements: draft
+                .observations
+                .into_iter()
+                .map(|observation| PortableHttpRequirementSpec {
+                    id: observation.id,
+                    path: observation.path,
+                    status: observation.status,
+                    body_digest: observation.body_digest,
+                })
+                .collect(),
+        },
+    )
+}
+
+pub fn build_dynamic_routes_bundle(
+    source_root: &Path,
+    spec: &PortableAuthoredBundleSpec,
+) -> Result<(Vec<u8>, PortableApplicationBundle), PortableApplicationError> {
     if spec.title.trim().is_empty() || spec.requirements.is_empty() {
         return Err(profile(
             "dynamic application requires a title and at least one HTTP observation",
+        ));
+    }
+    if spec.routes.is_empty() || spec.routes.len() > 16 {
+        return Err(profile(
+            "dynamic application requires between one and sixteen routes",
         ));
     }
     let (mut objects, tree_ref) =
@@ -810,43 +1136,54 @@ pub fn build_dynamic_process_oci_bundle(
         protocol: WORKSPACE_PROTOCOL.to_owned(),
         content_ref: tree_ref,
     };
-    let port = BoundPort {
-        id: "app.http".to_owned(),
-        protocol: HTTP_PROTOCOL.to_owned(),
-        from: "serve".to_owned(),
-        guest_port: Some(spec.guest_port),
-    };
-    let derivation = |protocol: &str, execution: &PortableExecutionSpec| BoundDerivation {
+    let derivation = |route: &PortableDynamicRouteSpec| BoundDerivation {
         schema: BOUND_DERIVATION_SCHEMA.to_owned(),
         inputs: vec![input.clone()],
-        runtimes: execution.runtimes.clone(),
+        runtimes: route.execution.runtimes.clone(),
         steps: vec![BoundStep {
             id: "serve".to_owned(),
-            protocol: protocol.to_owned(),
+            protocol: match route.realization {
+                PortableRealizationKind::LocalProcess => PROCESS_PROTOCOL.to_owned(),
+                PortableRealizationKind::OciContainer => OCI_PROTOCOL.to_owned(),
+                PortableRealizationKind::StaticWeb => BROWSER_PROTOCOL.to_owned(),
+            },
             op: "serve".to_owned(),
-            argv: execution.argv.clone(),
-            cwd: execution.cwd.clone(),
-            env: execution.env.clone(),
+            argv: route.execution.argv.clone(),
+            cwd: route.execution.cwd.clone(),
+            env: route.execution.env.clone(),
             source: None,
             root: None,
             entry: None,
             spa_fallback: None,
         }],
-        ports: vec![port.clone()],
-        state: Vec::new(),
+        ports: vec![BoundPort {
+            id: "app.http".to_owned(),
+            protocol: HTTP_PROTOCOL.to_owned(),
+            from: "serve".to_owned(),
+            guest_port: Some(route.guest_port),
+        }],
+        state: spec
+            .filesystem_state
+            .as_ref()
+            .map(|state| ato_formation::authoring::BoundState {
+                id: state.id.clone(),
+                protocol: STATE_FILESYSTEM_PROTOCOL.to_owned(),
+                mount: state.mount.clone(),
+                access: StateAccess::ReadWrite,
+            })
+            .into_iter()
+            .collect(),
         workspace_build: None,
         workspace_compiler: None,
         effects: EffectClass::Pure,
     };
-    let process_derivation = derivation(PROCESS_PROTOCOL, &spec.process);
-    let oci_derivation = derivation(OCI_PROTOCOL, &spec.oci);
     let mut requirements = spec
         .requirements
         .iter()
         .map(|requirement| BoundRequirement {
             id: requirement.id.clone(),
             verifier: HTTP_CONTRACT_VERIFIER.to_owned(),
-            port: Some(port.id.clone()),
+            port: Some("app.http".to_owned()),
             method: Some("GET".to_owned()),
             path: Some(requirement.path.clone()),
             status: Some(requirement.status),
@@ -865,44 +1202,38 @@ pub fn build_dynamic_process_oci_bundle(
         schema: BOUND_CONTRACT_SCHEMA.to_owned(),
         requirements,
     };
+    validate_application_bindings(&spec.bindings)?;
     let application = ApplicationV2 {
         schema: APPLICATION_V2_SCHEMA.to_owned(),
         title: spec.title.clone(),
         surfaces: vec![ApplicationSurfaceV2 {
             id: "main".to_owned(),
-            port: port.id,
+            port: "app.http".to_owned(),
             path: spec.surface_path.clone(),
         }],
+        bindings: spec.bindings.clone(),
     };
 
     let contract_ref = add_structured(&mut objects, &contract, BOUND_CONTRACT_SCHEMA)?;
-    let process_ref = add_structured(&mut objects, &process_derivation, BOUND_DERIVATION_SCHEMA)?;
-    let oci_ref = add_structured(&mut objects, &oci_derivation, BOUND_DERIVATION_SCHEMA)?;
-    if process_ref == oci_ref {
-        return Err(profile("process and OCI routes have the same identity"));
+    let mut derivation_refs = Vec::with_capacity(spec.routes.len());
+    for route in &spec.routes {
+        derivation_refs.push(add_structured(
+            &mut objects,
+            &derivation(route),
+            BOUND_DERIVATION_SCHEMA,
+        )?);
+    }
+    if derivation_refs.iter().collect::<BTreeSet<_>>().len() != derivation_refs.len() {
+        return Err(profile(
+            "authored routes have duplicate Derivation identity",
+        ));
     }
     let application_ref = add_structured(&mut objects, &application, APPLICATION_V2_SCHEMA)?;
-    let bundle = finish_bundle(
-        objects,
-        contract_ref,
-        application_ref,
-        vec![process_ref, oci_ref],
-    );
+    let bundle = finish_bundle(objects, contract_ref, application_ref, derivation_refs);
     let validated = validate_all_derivations(&bundle)?;
-    let kinds = validated
-        .iter()
-        .map(|route| route.realization)
-        .collect::<BTreeSet<_>>();
-    if kinds
-        != [
-            PortableRealizationKind::LocalProcess,
-            PortableRealizationKind::OciContainer,
-        ]
-        .into_iter()
-        .collect()
-    {
+    if validated.len() != spec.routes.len() {
         return Err(profile(
-            "dynamic bundle must contain one process and one OCI route",
+            "validated route count does not equal the authored route count",
         ));
     }
     let bytes = encode_portable_application_bundle(&bundle)?;
@@ -993,13 +1324,13 @@ fn validate_initial_route(
             "the initial profile requires one surface, input, serving step, and port",
         ));
     }
-    if !derivation.state.is_empty()
+    if derivation.state.len() > 1
         || derivation.workspace_build.is_some()
         || derivation.workspace_compiler.is_some()
         || derivation.effects != EffectClass::Pure
     {
         return Err(profile(
-            "the initial profile forbids state, builds, and non-pure effects",
+            "the initial profile permits at most one state and forbids builds and non-pure effects",
         ));
     }
     let input = &derivation.inputs[0];
@@ -1019,8 +1350,22 @@ fn validate_initial_route(
             "application surface and derivation do not name one workspace-backed HTTP route",
         ));
     }
+    if let Some(binding) = application.bindings.iter().find(|binding| {
+        step.env
+            .contains_key(&binding_environment_name(&binding.id))
+    }) {
+        return Err(profile(format!(
+            "Binding `{}` conflicts with an authored environment value",
+            binding.id
+        )));
+    }
     let realization = match step.protocol.as_str() {
         BROWSER_PROTOCOL => {
+            if !application.bindings.is_empty() {
+                return Err(profile(
+                    "static-web derivations do not support runtime Bindings",
+                ));
+            }
             if application.schema != APPLICATION_SCHEMA {
                 return Err(profile(
                     "static-web derivations require an ato.application/1 surface",
@@ -1134,6 +1479,24 @@ fn validate_initial_route(
         }
     };
 
+    if let Some(state) = derivation.state.first() {
+        if realization == PortableRealizationKind::StaticWeb {
+            return Err(profile(
+                "static-web derivations cannot declare filesystem state",
+            ));
+        }
+        if state.protocol != STATE_FILESYSTEM_PROTOCOL
+            || state.access != StateAccess::ReadWrite
+            || !valid_state_key(&state.id)
+            || !valid_guest_mount(&state.mount)
+            || state.mount == "/app"
+        {
+            return Err(profile(
+                "portable filesystem state must be one read-write ato.state.filesystem@1 slot at an absolute guest path other than /app",
+            ));
+        }
+    }
+
     let requirement_ids = contract
         .requirements
         .iter()
@@ -1201,6 +1564,23 @@ fn validate_initial_route(
         }
     }
     Ok(realization)
+}
+
+fn valid_guest_mount(target: &str) -> bool {
+    target.starts_with('/')
+        && target != "/"
+        && !target.contains(['\0', '\\'])
+        && target
+            .split('/')
+            .skip(1)
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+}
+
+fn valid_state_key(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    matches!(bytes.next(), Some(b'a'..=b'z'))
+        && value.len() <= 64
+        && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 fn validate_dynamic_surface(
@@ -1298,17 +1678,20 @@ fn serve_request(
     routes: &BTreeMap<String, (PathBuf, String)>,
     entry_route: &str,
     spa_fallback: bool,
+    state: Option<&StaticApplicationRuntimeState>,
 ) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let mut reader = BufReader::new(stream.try_clone()?);
     let mut request_line = String::new();
-    BufReader::new(stream.try_clone()?)
+    reader
+        .by_ref()
         .take(8 * 1024)
         .read_line(&mut request_line)?;
     let mut fields = request_line.split_whitespace();
     let method = fields.next().unwrap_or_default();
     let raw_path = fields.next().unwrap_or_default();
     let request_path = raw_path.split('?').next().unwrap_or_default();
-    if !matches!(method, "GET" | "HEAD") || !request_path.starts_with('/') {
+    if !request_path.starts_with('/') {
         return write_response(
             &mut stream,
             400,
@@ -1316,6 +1699,124 @@ fn serve_request(
             b"Bad Request\n",
             method,
         );
+    }
+    let mut content_length = None;
+    let mut content_type = None;
+    let mut persistence_token = None;
+    let mut header_bytes = request_line.len();
+    loop {
+        let mut line = String::new();
+        let read = reader.by_ref().take(8 * 1024).read_line(&mut line)?;
+        if read == 0 || line == "\r\n" || line == "\n" {
+            break;
+        }
+        header_bytes += read;
+        if header_bytes > 32 * 1024 {
+            return write_response(
+                &mut stream,
+                400,
+                "text/plain; charset=utf-8",
+                b"Bad Request\n",
+                method,
+            );
+        }
+        if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case("content-length")
+        {
+            content_length = value.trim().parse::<usize>().ok();
+        } else if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case("content-type")
+        {
+            content_type = Some(value.trim().to_owned());
+        } else if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case("x-ato-state-token")
+        {
+            persistence_token = Some(value.trim().to_owned());
+        }
+    }
+    if method == "POST" && request_path == "/__ato/instance-state/local-storage" {
+        let Some(state) = state else {
+            return write_response(
+                &mut stream,
+                404,
+                "application/json",
+                br#"{"error":"not_found"}"#,
+                method,
+            );
+        };
+        if persistence_token.as_deref() != Some(state.persistence_token.as_str()) {
+            return write_response(
+                &mut stream,
+                403,
+                "application/json",
+                br#"{"error":"forbidden"}"#,
+                method,
+            );
+        }
+        if content_type.as_deref() != Some("application/json") {
+            return write_response(
+                &mut stream,
+                400,
+                "application/json",
+                br#"{"error":"invalid_state"}"#,
+                method,
+            );
+        }
+        let Some(content_length) = content_length.filter(|length| *length <= 16 * 1024 * 1024)
+        else {
+            return write_response(
+                &mut stream,
+                400,
+                "application/json",
+                br#"{"error":"invalid_state"}"#,
+                method,
+            );
+        };
+        let mut body = vec![0; content_length];
+        reader.read_exact(&mut body)?;
+        let update = serde_json::from_slice::<StaticStateUpdate>(&body).ok();
+        let Some(update) = update.filter(|update| update.local_storage.len() <= 4096) else {
+            return write_response(
+                &mut stream,
+                400,
+                "application/json",
+                br#"{"error":"invalid_state"}"#,
+                method,
+            );
+        };
+        let Ok(mut current) = state.local_storage.lock() else {
+            return write_response(
+                &mut stream,
+                500,
+                "application/json",
+                br#"{"error":"state_unavailable"}"#,
+                method,
+            );
+        };
+        *current = update.local_storage;
+        return write_response(&mut stream, 200, "application/json", b"{}", method);
+    }
+    if !matches!(method, "GET" | "HEAD") {
+        return write_response(
+            &mut stream,
+            400,
+            "text/plain; charset=utf-8",
+            b"Bad Request\n",
+            method,
+        );
+    }
+    if let Some(asset_id) = request_path.strip_prefix("/__ato/assets/") {
+        let selected = state.and_then(|state| state.assets.get(asset_id));
+        let Some(asset) = selected else {
+            return write_response(
+                &mut stream,
+                404,
+                "text/plain; charset=utf-8",
+                b"Not Found\n",
+                method,
+            );
+        };
+        return write_response(&mut stream, 200, &asset.content_type, &asset.bytes, method);
     }
     let route = if request_path == "/" {
         entry_route
@@ -1334,8 +1835,75 @@ fn serve_request(
             method,
         );
     };
-    let body = fs::read(path)?;
+    let mut body = fs::read(path)?;
+    if route == entry_route
+        && media_type.starts_with("text/html")
+        && let Some(state) = state
+    {
+        body = inject_static_application_state(&body, state)?;
+    }
     write_response(&mut stream, 200, media_type, &body, method)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StaticStateUpdate {
+    local_storage: BTreeMap<String, String>,
+}
+
+fn inject_static_application_state(
+    body: &[u8],
+    state: &StaticApplicationRuntimeState,
+) -> std::io::Result<Vec<u8>> {
+    let local_storage = state
+        .local_storage
+        .lock()
+        .map_err(|_| std::io::Error::other("static application state lock was poisoned"))?
+        .clone();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(
+        serde_json::to_vec(&local_storage)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
+    );
+    let persistence_token = &state.persistence_token;
+    let bridge = format!(
+        r#"<script>(()=>{{
+const storage=window.localStorage;
+const bytes=Uint8Array.from(atob('{encoded}'),value=>value.charCodeAt(0));
+const initial=JSON.parse(new TextDecoder().decode(bytes));
+const rawSet=Storage.prototype.setItem;
+const rawRemove=Storage.prototype.removeItem;
+const rawClear=Storage.prototype.clear;
+rawClear.call(storage);
+for(const [key,value] of Object.entries(initial)) rawSet.call(storage,key,value);
+let queue=Promise.resolve();
+function current(){{
+  const values={{}};
+  for(const key of Object.keys(storage).sort()) values[key]=storage.getItem(key);
+  return values;
+}}
+function persist(){{
+  const body=JSON.stringify({{local_storage:current()}});
+  queue=queue.then(()=>fetch('/__ato/instance-state/local-storage',{{
+    method:'POST',credentials:'same-origin',keepalive:true,
+    headers:{{'content-type':'application/json','x-ato-state-token':'{persistence_token}'}},body
+  }})).catch(()=>{{}});
+  return queue;
+}}
+Storage.prototype.setItem=function(key,value){{rawSet.call(this,key,value);if(this===storage)persist();}};
+Storage.prototype.removeItem=function(key){{rawRemove.call(this,key);if(this===storage)persist();}};
+Storage.prototype.clear=function(){{rawClear.call(this);if(this===storage)persist();}};
+window.__atoLocalStateFlush=persist;
+}})();</script>"#
+    );
+    let mut html = String::from_utf8(body.to_vec())
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let lowercase = html.to_ascii_lowercase();
+    let position = lowercase
+        .find("<script")
+        .or_else(|| lowercase.find("</head>"))
+        .unwrap_or(0);
+    html.insert_str(position, &bridge);
+    Ok(html.into_bytes())
 }
 
 fn write_response(
@@ -1348,7 +1916,9 @@ fn write_response(
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
+        403 => "Forbidden",
         404 => "Not Found",
+        500 => "Internal Server Error",
         _ => "Error",
     };
     write!(
@@ -2086,8 +2656,44 @@ mod tests {
                     content_type: "image/jpeg".to_owned(),
                     size: asset.len() as u64,
                 }],
+                asset_bindings: vec![],
             },
             BTreeMap::from([(saved_data_ref, saved_data), (asset_ref, asset)]),
+        )
+    }
+
+    fn filesystem_state_snapshot() -> (
+        crate::instance_snapshot::InstanceSnapshotV1,
+        BTreeMap<String, Vec<u8>>,
+    ) {
+        let mut archive = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut archive);
+            let mut header = tar::Header::new_ustar();
+            header.set_size(5);
+            header.set_mode(0o644);
+            header.set_mtime(0);
+            header.set_uid(0);
+            header.set_gid(0);
+            header.set_entry_type(tar::EntryType::Regular);
+            builder
+                .append_data(&mut header, "saved.txt", std::io::Cursor::new(b"saved"))
+                .unwrap();
+            builder.finish().unwrap();
+        }
+        let reference = bundle_sha256(&archive);
+        (
+            crate::instance_snapshot::InstanceSnapshotV1 {
+                schema: crate::instance_snapshot::INSTANCE_SNAPSHOT_SCHEMA.to_owned(),
+                resources: vec![crate::instance_snapshot::InstanceSnapshotResourceV1 {
+                    slot: "data".to_owned(),
+                    protocol: STATE_FILESYSTEM_PROTOCOL.to_owned(),
+                    content_ref: reference.clone(),
+                }],
+                assets: vec![],
+                asset_bindings: vec![],
+            },
+            BTreeMap::from([(reference, archive)]),
         )
     }
 
@@ -2270,8 +2876,55 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/interop-multi-derivation")
     }
 
+    fn authored_multi_process_fixture_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/portable-multi-process-authored")
+    }
+
     fn datasette_fixture_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/interop-datasette")
+    }
+
+    fn portable_todo_fixture_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/portable-todo-assets")
+    }
+
+    #[test]
+    fn v2_authoring_compiles_multiple_process_routes_without_label_identity() {
+        let source = authored_multi_process_fixture_root();
+        let (bytes, bundle) = build_authored_bundle_v2(&source).unwrap();
+        let routes = validate_all_derivations(&bundle).unwrap();
+        assert_eq!(routes.len(), 2);
+        assert!(
+            routes
+                .iter()
+                .all(|route| route.realization == PortableRealizationKind::LocalProcess)
+        );
+        assert_ne!(routes[0].derivation_ref, routes[1].derivation_ref);
+        assert!(
+            routes
+                .iter()
+                .all(|route| route.contract_ref.as_str() == bundle.index.root_contract_ref)
+        );
+
+        let renamed = tempfile::tempdir().unwrap();
+        fs::write(
+            renamed.path().join("app.py"),
+            fs::read(source.join("app.py")).unwrap(),
+        )
+        .unwrap();
+        let manifest = fs::read_to_string(source.join(CAPSULE_FILE_NAME))
+            .unwrap()
+            .replace("python-a", "route-one")
+            .replace("python-b", "route-two");
+        fs::write(renamed.path().join(CAPSULE_FILE_NAME), manifest).unwrap();
+        let (renamed_bytes, renamed_bundle) = build_authored_bundle_v2(renamed.path()).unwrap();
+
+        assert_eq!(renamed_bytes, bytes);
+        assert_eq!(
+            renamed_bundle.index.root_contract_ref,
+            bundle.index.root_contract_ref
+        );
+        assert_eq!(renamed_bundle.index.derivations, bundle.index.derivations);
     }
 
     fn datasette_spec() -> PortableDynamicBundleSpec {
@@ -2300,6 +2953,8 @@ mod tests {
                 cwd: ".".to_owned(),
                 env: BTreeMap::new(),
             },
+            filesystem_state: None,
+            bindings: Vec::new(),
             requirements: vec![
                 PortableHttpRequirementSpec {
                     id: "entry".to_owned(),
@@ -2341,6 +2996,18 @@ mod tests {
     }
 
     #[test]
+    fn portable_todo_fixture_is_deterministic_and_fully_validated() {
+        let (left, bundle) =
+            build_static_bundle(&portable_todo_fixture_root(), "Portable Todo").unwrap();
+        let (right, _) =
+            build_static_bundle(&portable_todo_fixture_root(), "Portable Todo").unwrap();
+        assert_eq!(left, right);
+        let validated = validate_bundle(&bundle).unwrap();
+        assert_eq!(validated.application.title, "Portable Todo");
+        assert_eq!(validated.realization, PortableRealizationKind::StaticWeb);
+    }
+
+    #[test]
     fn materialization_recomputes_every_file_identity() {
         let (bytes, _) = build_static_bundle(&fixture_root(), "Ato portability proof").unwrap();
         let (bundle, validated) = validate_bytes(&bytes).unwrap();
@@ -2372,6 +3039,140 @@ mod tests {
         stream.read_to_end(&mut response).unwrap();
         assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
         assert!(response.ends_with(b"ato-k-interop-v1\n"));
+    }
+
+    #[test]
+    fn local_static_server_restores_and_tracks_browser_state() {
+        let (bytes, _) =
+            build_static_bundle(&portable_todo_fixture_root(), "Portable Todo").unwrap();
+        let (bundle, validated) = validate_bytes(&bytes).unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let destination = parent.path().join("app");
+        materialize_tree(&bundle, &validated, &destination).unwrap();
+        let server = StaticApplicationServer::start_with_state(
+            &destination,
+            &validated,
+            Some(StaticApplicationState {
+                persistence_token: "test-token".to_owned(),
+                local_storage: BTreeMap::from([(
+                    "portable-todo-v1".to_owned(),
+                    r#"{"todos":["one"],"photo":null}"#.to_owned(),
+                )]),
+                assets: Vec::new(),
+            }),
+        )
+        .unwrap();
+        let mut entry_stream = TcpStream::connect(server.address).unwrap();
+        entry_stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut entry_response = Vec::new();
+        entry_stream.read_to_end(&mut entry_response).unwrap();
+        let update = serde_json::json!({
+            "local_storage": {
+                "portable-todo-v1": r#"{"todos":["one","two"],"photo":null}"#
+            }
+        });
+        let update = serde_json::to_vec(&update).unwrap();
+        let mut update_stream = TcpStream::connect(server.address).unwrap();
+        write!(
+            update_stream,
+            "POST /__ato/instance-state/local-storage HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nX-Ato-State-Token: test-token\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            update.len()
+        )
+        .unwrap();
+        update_stream.write_all(&update).unwrap();
+        let mut update_response = Vec::new();
+        update_stream.read_to_end(&mut update_response).unwrap();
+
+        assert!(
+            String::from_utf8(entry_response)
+                .unwrap()
+                .contains("window.__atoLocalStateFlush=persist")
+        );
+        assert!(update_response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+        assert_eq!(
+            server.local_storage().unwrap().unwrap(),
+            BTreeMap::from([(
+                "portable-todo-v1".to_owned(),
+                r#"{"todos":["one","two"],"photo":null}"#.to_owned()
+            )])
+        );
+    }
+
+    #[test]
+    fn local_static_server_rejects_browser_state_without_the_run_token() {
+        let (bytes, _) =
+            build_static_bundle(&portable_todo_fixture_root(), "Portable Todo").unwrap();
+        let (bundle, validated) = validate_bytes(&bytes).unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let destination = parent.path().join("app");
+        materialize_tree(&bundle, &validated, &destination).unwrap();
+        let initial = BTreeMap::from([("portable-todo-v1".to_owned(), "original".to_owned())]);
+        let server = StaticApplicationServer::start_with_state(
+            &destination,
+            &validated,
+            Some(StaticApplicationState {
+                persistence_token: "test-token".to_owned(),
+                local_storage: initial.clone(),
+                assets: Vec::new(),
+            }),
+        )
+        .unwrap();
+        let update = serde_json::to_vec(&serde_json::json!({
+            "local_storage": {"portable-todo-v1": "changed"}
+        }))
+        .unwrap();
+        let mut stream = TcpStream::connect(server.address).unwrap();
+        write!(
+            stream,
+            "POST /__ato/instance-state/local-storage HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            update.len()
+        )
+        .unwrap();
+        stream.write_all(&update).unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).unwrap();
+
+        assert!(response.starts_with(b"HTTP/1.1 403 Forbidden\r\n"));
+        assert_eq!(server.local_storage().unwrap().unwrap(), initial);
+    }
+
+    #[test]
+    fn local_static_server_serves_restored_asset_bytes() {
+        let (bytes, _) =
+            build_static_bundle(&portable_todo_fixture_root(), "Portable Todo").unwrap();
+        let (bundle, validated) = validate_bytes(&bytes).unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let destination = parent.path().join("app");
+        materialize_tree(&bundle, &validated, &destination).unwrap();
+        let asset_id = "ast_01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let server = StaticApplicationServer::start_with_state(
+            &destination,
+            &validated,
+            Some(StaticApplicationState {
+                persistence_token: "test-token".to_owned(),
+                local_storage: BTreeMap::new(),
+                assets: vec![StaticApplicationAsset {
+                    asset_id: asset_id.to_owned(),
+                    filename: "photo.png".to_owned(),
+                    content_type: "image/png".to_owned(),
+                    bytes: b"restored-image".to_vec(),
+                }],
+            }),
+        )
+        .unwrap();
+        let mut stream = TcpStream::connect(server.address).unwrap();
+        write!(
+            stream,
+            "GET /__ato/assets/{asset_id} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).unwrap();
+
+        assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+        assert!(response.ends_with(b"restored-image"));
     }
 
     #[test]
@@ -2441,6 +3242,179 @@ mod tests {
         assert!(routes[0].contract.requirements.iter().any(|requirement| {
             requirement.path.as_deref() == Some("/catalog/items.json?_shape=array&_sort=id")
         }));
+    }
+
+    #[test]
+    fn runtime_binding_declaration_preserves_k_and_d_and_values_stay_external() {
+        let (_, without_binding) =
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &datasette_spec()).unwrap();
+        let mut spec = datasette_spec();
+        spec.bindings = vec![ApplicationBindingV1 {
+            id: "openai".to_owned(),
+            protocol: "ato.http-api@1".to_owned(),
+            required: true,
+        }];
+        let (bytes, with_binding) =
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &spec).unwrap();
+
+        assert_eq!(
+            without_binding.index.root_contract_ref,
+            with_binding.index.root_contract_ref
+        );
+        assert_eq!(
+            without_binding.index.derivations,
+            with_binding.index.derivations
+        );
+        assert_ne!(
+            without_binding.index.application_ref,
+            with_binding.index.application_ref
+        );
+
+        let route = validate_all_derivations(&with_binding).unwrap().remove(0);
+        let missing =
+            resolve_application_bindings(&route.application, &BTreeMap::new()).unwrap_err();
+        assert!(missing.to_string().contains("requires Bindings: openai"));
+        let secret = "recipient-only-secret";
+        let resolved = resolve_application_bindings(
+            &route.application,
+            &BTreeMap::from([("openai".to_owned(), secret.to_owned())]),
+        )
+        .unwrap();
+        assert_eq!(
+            resolved.get("ATO_BINDING_OPENAI").map(String::as_str),
+            Some(secret)
+        );
+        assert!(
+            !bytes
+                .windows(secret.len())
+                .any(|window| window == secret.as_bytes())
+        );
+    }
+
+    #[test]
+    fn runtime_binding_refuses_unknown_names_and_authored_env_conflicts() {
+        let mut spec = datasette_spec();
+        spec.bindings = vec![ApplicationBindingV1 {
+            id: "service".to_owned(),
+            protocol: "ato.http-api@1".to_owned(),
+            required: false,
+        }];
+        let (_, bundle) =
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &spec).unwrap();
+        let route = validate_all_derivations(&bundle).unwrap().remove(0);
+        assert!(
+            resolve_application_bindings(
+                &route.application,
+                &BTreeMap::from([("other".to_owned(), "secret".to_owned())]),
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("undeclared Binding `other`")
+        );
+
+        spec.process.env.insert(
+            "ATO_BINDING_SERVICE".to_owned(),
+            "authored-value".to_owned(),
+        );
+        assert!(
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &spec)
+                .unwrap_err()
+                .to_string()
+                .contains("conflicts with an authored environment value")
+        );
+    }
+
+    #[test]
+    fn dynamic_routes_accept_one_declared_writable_filesystem_state() {
+        let mut spec = datasette_spec();
+        spec.filesystem_state = Some(PortableFilesystemStateSpec {
+            id: "data".to_owned(),
+            mount: "/data".to_owned(),
+        });
+        let (_, mut bundle) =
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &spec).unwrap();
+        let routes = validate_all_derivations(&bundle).unwrap();
+        assert!(routes.iter().all(|route| {
+            route.derivation.state.len() == 1 && route.derivation.state[0].mount == "/data"
+        }));
+
+        let stateful_ref = route_ref(&bundle, PortableRealizationKind::LocalProcess);
+        let invalid_ref = replace_derivation(&mut bundle, &stateful_ref, |derivation| {
+            derivation.state[0].mount = "/app".to_owned();
+        });
+        assert!(validate_bundle_for_derivation(&bundle, &invalid_ref).is_err());
+    }
+
+    #[test]
+    fn dynamic_routes_reject_multiple_or_read_only_filesystem_states() {
+        let (_, original) =
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &datasette_spec()).unwrap();
+        let process_ref = route_ref(&original, PortableRealizationKind::LocalProcess);
+
+        let mut read_only = original.clone();
+        let read_only_ref = replace_derivation(&mut read_only, &process_ref, |derivation| {
+            derivation.state.push(ato_formation::authoring::BoundState {
+                id: "data".to_owned(),
+                protocol: STATE_FILESYSTEM_PROTOCOL.to_owned(),
+                mount: "/data".to_owned(),
+                access: StateAccess::ReadOnly,
+            });
+        });
+        assert!(validate_bundle_for_derivation(&read_only, &read_only_ref).is_err());
+
+        let mut multiple = original;
+        let multiple_ref = replace_derivation(&mut multiple, &process_ref, |derivation| {
+            for (id, mount) in [("data", "/data"), ("cache", "/cache")] {
+                derivation.state.push(ato_formation::authoring::BoundState {
+                    id: id.to_owned(),
+                    protocol: STATE_FILESYSTEM_PROTOCOL.to_owned(),
+                    mount: mount.to_owned(),
+                    access: StateAccess::ReadWrite,
+                });
+            }
+        });
+        assert!(validate_bundle_for_derivation(&multiple, &multiple_ref).is_err());
+    }
+
+    #[test]
+    fn filesystem_snapshot_requires_the_same_state_slot_on_every_derivation() {
+        let (_, mut source) =
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &datasette_spec()).unwrap();
+        let process_ref = route_ref(&source, PortableRealizationKind::LocalProcess);
+        let oci_ref = route_ref(&source, PortableRealizationKind::OciContainer);
+        for reference in [process_ref, oci_ref] {
+            replace_derivation(&mut source, &reference, |derivation| {
+                derivation.state.push(ato_formation::authoring::BoundState {
+                    id: "data".to_owned(),
+                    protocol: STATE_FILESYSTEM_PROTOCOL.to_owned(),
+                    mount: "/data".to_owned(),
+                    access: StateAccess::ReadWrite,
+                });
+            });
+        }
+        let (_, source) = crate::portability_export::repack_portable_dependencies(
+            &source,
+            ato_objects::PortableDependencyProfile::Cached,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let derivations = source.index.derivations.clone();
+        let (snapshot, content) = filesystem_state_snapshot();
+        let (_, saved) =
+            crate::instance_snapshot::attach_instance_snapshot(&source, snapshot.clone(), &content)
+                .unwrap();
+        assert_eq!(saved.index.derivations, derivations);
+        validate_all_derivations(&saved).unwrap();
+
+        let mut mismatched = source;
+        let first = mismatched.index.derivations[0].clone();
+        replace_derivation(&mut mismatched, &first, |derivation| {
+            derivation.state.clear();
+        });
+        let error =
+            crate::instance_snapshot::attach_instance_snapshot(&mismatched, snapshot, &content)
+                .unwrap_err();
+        assert!(error.to_string().contains("must match"));
     }
 
     #[test]

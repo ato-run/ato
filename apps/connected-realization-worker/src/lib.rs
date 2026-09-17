@@ -10,7 +10,7 @@
 mod activity_controller;
 pub mod runtime_launch;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -91,13 +91,21 @@ use activity_controller::{
 
 const PORTABLE_CAPSULE_LEASE_KIND: &str = "portable_capsule_v2";
 const ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND: &str = "activity_browser_executor_v0";
-const RUNNER_CAPABILITIES: &[&str] = &[
+const BASE_RUNNER_CAPABILITIES: &[&str] = &[
     "execution_abi=process",
     runtime_launch::lease::RUNTIME_LAUNCH_LEASE_KIND,
     "isolation=untrusted-v1",
     "materializer=ato.materialize.vm.snapshot@1",
     "backend=firecracker",
 ];
+
+fn runner_capabilities(oci_available: bool) -> Vec<&'static str> {
+    let mut capabilities = BASE_RUNNER_CAPABILITIES.to_vec();
+    if oci_available {
+        capabilities.push("execution_abi=oci");
+    }
+    capabilities
+}
 const ACTIVE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 /// A Run that is never stopped is still not immortal. The cap exists so a lost
 /// control plane cannot leave a workload and its state slot held forever.
@@ -1052,6 +1060,9 @@ impl ConnectedWorker {
             lease.id.clone(),
             self.api.token.clone(),
         );
+        let secrets = self
+            .api
+            .redeem_runtime_bindings(&lease.id, &spec.secret_grants)?;
 
         // P4-A: publish the process on this Runner's ingress slot.
         //
@@ -1072,6 +1083,7 @@ impl ConnectedWorker {
             lease_root,
             &workspace,
             &state,
+            secrets,
             &assigned_ports,
         )?;
         let probe =
@@ -2868,6 +2880,12 @@ struct ControlResponse {
     stop_requested: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeBindingsResponse {
+    bindings: BTreeMap<String, String>,
+}
+
 #[derive(Serialize)]
 struct StatusReport<'a> {
     status: &'a str,
@@ -2945,7 +2963,9 @@ impl HttpRunnerApi {
             self.base, self.runner_id
         )))
         .json(&serde_json::json!({
-            "capabilities": RUNNER_CAPABILITIES,
+            "capabilities": runner_capabilities(
+                ato_adapter_oci::docker_runtime_available()
+            ),
             "supported_lease_kinds": supported_lease_kinds(config),
             "supported_session_surfaces": [{
                 "kind": "web",
@@ -2984,6 +3004,37 @@ impl HttpRunnerApi {
         .send()?
         .error_for_status()?;
         Ok(())
+    }
+
+    fn redeem_runtime_bindings(
+        &self,
+        lease_id: &str,
+        grants: &[ato_ipc::runtime_launch::SecretGrantV1],
+    ) -> Result<Vec<runtime_launch::resolved::ResolvedSecret>> {
+        if grants.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut response = self
+            .authorized(self.client.post(format!(
+                "{}/v1/runner-leases/{lease_id}/runtime-bindings",
+                self.base
+            )))
+            .send()?
+            .error_for_status()?
+            .json::<RuntimeBindingsResponse>()?;
+        if response.bindings.len() != grants.len() {
+            bail!("runtime Binding grant did not match the launch spec");
+        }
+        grants
+            .iter()
+            .map(|grant| {
+                response
+                    .bindings
+                    .remove(&grant.name)
+                    .map(|value| runtime_launch::resolved::ResolvedSecret::new(&grant.name, value))
+                    .context("runtime Binding grant omitted a declared name")
+            })
+            .collect()
     }
 
     fn report_activity_ready(&self, lease_id: &str, execution_id: &str) -> Result<()> {
@@ -4503,10 +4554,13 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
 
     #[test]
     fn heartbeat_advertises_dispatch_and_vm_requirements() {
-        assert!(RUNNER_CAPABILITIES.contains(&"execution_abi=process"));
-        assert!(RUNNER_CAPABILITIES.contains(&"isolation=untrusted-v1"));
-        assert!(RUNNER_CAPABILITIES.contains(&"materializer=ato.materialize.vm.snapshot@1"));
-        assert!(RUNNER_CAPABILITIES.contains(&"backend=firecracker"));
+        let process_only = runner_capabilities(false);
+        assert!(process_only.contains(&"execution_abi=process"));
+        assert!(!process_only.contains(&"execution_abi=oci"));
+        assert!(process_only.contains(&"isolation=untrusted-v1"));
+        assert!(process_only.contains(&"materializer=ato.materialize.vm.snapshot@1"));
+        assert!(process_only.contains(&"backend=firecracker"));
+        assert!(runner_capabilities(true).contains(&"execution_abi=oci"));
     }
 
     #[test]
