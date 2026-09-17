@@ -304,13 +304,12 @@ impl DockerOciAdapter {
     }
 
     fn inspect_loaded_image(&self, config_reference: &str) -> Result<String> {
-        let manifest_reference = self
-            .spec
-            .image
-            .rsplit_once('@')
-            .map(|(_, reference)| reference)
-            .context("validated OCI image omitted manifest digest")?;
-        for reference in [manifest_reference, config_reference] {
+        // Docker's executable image ID is the verified config digest. Some
+        // containerd-backed daemons also make the manifest digest inspectable,
+        // but launching that alias from an otherwise empty namespace can
+        // produce a rootfs-less container. Prefer config; retain the manifest
+        // fallback for daemons that expose only the loaded manifest alias.
+        for reference in offline_image_reference_candidates(&self.spec.image, config_reference)? {
             let output = Command::new(&self.docker)
                 .args([
                     "image",
@@ -330,6 +329,17 @@ impl DockerOciAdapter {
         }
         bail!("verified offline OCI image was not available after archive load")
     }
+}
+
+fn offline_image_reference_candidates<'a>(
+    image: &'a str,
+    config_reference: &'a str,
+) -> Result<[&'a str; 2]> {
+    let manifest_reference = image
+        .rsplit_once('@')
+        .map(|(_, reference)| reference)
+        .context("validated OCI image omitted manifest digest")?;
+    Ok([config_reference, manifest_reference])
 }
 
 /// Report whether this host can honestly accept an OCI HTTP workload now.
@@ -944,6 +954,18 @@ mod tests {
                 &config
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn offline_image_launch_prefers_the_verified_config_id() {
+        let config = format!("sha256:{}", "b".repeat(64));
+        let manifest = format!("sha256:{}", "a".repeat(64));
+        let image = format!("docker.io/example/app@{manifest}");
+
+        assert_eq!(
+            offline_image_reference_candidates(&image, &config).unwrap(),
+            [config.as_str(), manifest.as_str()]
         );
     }
 
