@@ -21,6 +21,6 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-port = int(os.environ.get("ATO_ENDPOINT_APP_HTTP", "8000"))
+port = int(os.environ.get("ATO_ENDPOINT_APP_HTTP_PORT", "8000"))
 host = os.environ.get("APP_LISTEN_HOST", "127.0.0.1")
 ThreadingHTTPServer((host, port), Handler).serve_forever()
