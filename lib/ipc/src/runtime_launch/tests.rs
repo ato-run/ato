@@ -85,6 +85,7 @@ fn an_oci_reference_must_be_content_addressed() {
             entrypoint: None,
             argv: None,
             working_dir: None,
+            workspace_mount_path: None,
         });
         assert_eq!(
             spec.validate().unwrap_err().code(),
@@ -109,6 +110,24 @@ fn an_oci_entrypoint_is_an_absolute_guest_path() {
         unreachable!()
     };
     realization.entrypoint = Some("/usr/local/bin/app".to_owned());
+    spec.validate().unwrap();
+}
+
+#[test]
+fn an_oci_workspace_mount_is_an_absolute_guest_path() {
+    for target in ["app", "../app", "/ato/../app", "/ato//app", "/", ""] {
+        let mut spec = RuntimeLaunchSpecV1::parse(OCI_FIXTURE).unwrap();
+        let LaunchRealizationV1::Oci(realization) = &mut spec.realization else {
+            unreachable!()
+        };
+        realization.workspace_mount_path = Some(target.to_owned());
+        assert!(spec.validate().is_err(), "workspace mount {target:?}");
+    }
+    let mut spec = RuntimeLaunchSpecV1::parse(OCI_FIXTURE).unwrap();
+    let LaunchRealizationV1::Oci(realization) = &mut spec.realization else {
+        unreachable!()
+    };
+    realization.workspace_mount_path = Some("/ato/workspace".to_owned());
     spec.validate().unwrap();
 }
 

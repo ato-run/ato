@@ -69,6 +69,9 @@ pub const OCI_PIDS_LIMIT_RUNTIME: &str = "oci.pids_limit";
 /// ENTRYPOINT is relative to the image working directory. The Runner owns the
 /// override; workloads still receive no Docker control surface.
 pub const OCI_ENTRYPOINT_RUNTIME: &str = "oci.entrypoint";
+/// Optional read-only mount target for the materialized workspace. Omitting
+/// this key preserves the original `/app` target and existing DerivationRefs.
+pub const OCI_WORKSPACE_MOUNT_RUNTIME: &str = "oci.workspace_mount";
 
 #[derive(Debug, Error)]
 pub enum PortableApplicationError {
@@ -1468,8 +1471,20 @@ fn validate_initial_route(
                     "OCI entrypoint must be an absolute traversal-free guest path",
                 ));
             }
+            if let Some(target) = derivation.runtimes.get(OCI_WORKSPACE_MOUNT_RUNTIME)
+                && (!valid_guest_mount(target) || target.contains(','))
+            {
+                return Err(profile(
+                    "OCI workspace mount must be an absolute traversal-free guest path",
+                ));
+            }
             if derivation.runtimes.len()
                 != 5 + usize::from(derivation.runtimes.contains_key(OCI_ENTRYPOINT_RUNTIME))
+                    + usize::from(
+                        derivation
+                            .runtimes
+                            .contains_key(OCI_WORKSPACE_MOUNT_RUNTIME),
+                    )
                 || step.op != "serve"
                 || step.argv.is_empty()
                 || step.argv.iter().any(|value| value.contains('\0'))
@@ -3537,6 +3552,35 @@ mod tests {
         assert!(
             build_dynamic_process_oci_bundle(&datasette_fixture_root(), &with_entrypoint).is_err()
         );
+    }
+
+    #[test]
+    fn oci_workspace_mount_is_part_of_d_and_not_k() {
+        let (_, original) =
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &datasette_spec()).unwrap();
+        let original_oci_ref = route_ref(&original, PortableRealizationKind::OciContainer);
+
+        let mut moved = datasette_spec();
+        moved.oci.runtimes.insert(
+            OCI_WORKSPACE_MOUNT_RUNTIME.to_owned(),
+            "/ato/workspace".to_owned(),
+        );
+        let (_, moved_bundle) =
+            build_dynamic_process_oci_bundle(&datasette_fixture_root(), &moved).unwrap();
+        let moved_oci_ref = route_ref(&moved_bundle, PortableRealizationKind::OciContainer);
+
+        assert_eq!(
+            original.index.root_contract_ref,
+            moved_bundle.index.root_contract_ref
+        );
+        assert_ne!(original_oci_ref, moved_oci_ref);
+        validate_bundle_for_derivation(&moved_bundle, &moved_oci_ref).unwrap();
+
+        moved.oci.runtimes.insert(
+            OCI_WORKSPACE_MOUNT_RUNTIME.to_owned(),
+            "/ato/../workspace".to_owned(),
+        );
+        assert!(build_dynamic_process_oci_bundle(&datasette_fixture_root(), &moved).is_err());
     }
 
     #[test]

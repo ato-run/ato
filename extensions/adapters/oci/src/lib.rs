@@ -49,6 +49,7 @@ pub struct OciSpec {
     pub entrypoint: Option<String>,
     pub argv: Vec<String>,
     pub working_dir: String,
+    pub workspace_mount_path: String,
     pub environment: BTreeMap<String, String>,
     pub endpoints: Vec<OciEndpoint>,
     pub mounts: Vec<OciMount>,
@@ -646,6 +647,10 @@ fn validate_spec(spec: &OciSpec) -> Result<()> {
         "OCI working directory must be /app"
     );
     ensure!(
+        valid_guest_path(&spec.workspace_mount_path),
+        "OCI workspace mount target is invalid"
+    );
+    ensure!(
         spec.limits.memory_bytes > 0
             && spec.limits.cpu_limit_millis > 0
             && spec.limits.pids_limit > 0,
@@ -675,15 +680,9 @@ fn validate_spec(spec: &OciSpec) -> Result<()> {
             "OCI mount source is not a directory"
         );
         ensure!(
-            mount.guest_path.starts_with('/')
-                && mount.guest_path != "/"
+            valid_guest_path(&mount.guest_path)
                 && mount.guest_path != "/app"
-                && !mount.guest_path.contains(['\0', '\\', ','])
-                && mount
-                    .guest_path
-                    .split('/')
-                    .skip(1)
-                    .all(|segment| !segment.is_empty() && segment != "." && segment != ".."),
+                && mount.guest_path != spec.workspace_mount_path,
             "OCI mount target is invalid"
         );
         ensure!(
@@ -692,6 +691,16 @@ fn validate_spec(spec: &OciSpec) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn valid_guest_path(target: &str) -> bool {
+    target.starts_with('/')
+        && target != "/"
+        && !target.contains(['\0', '\\', ','])
+        && target
+            .split('/')
+            .skip(1)
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
 }
 
 fn docker_run_arguments(
@@ -733,7 +742,11 @@ fn docker_run_arguments(
         "--tmpfs".to_owned(),
         "/tmp:rw,noexec,nosuid,size=67108864".to_owned(),
         "--mount".to_owned(),
-        format!("type=bind,src={},dst=/app,readonly", workspace.display()),
+        format!(
+            "type=bind,src={},dst={},readonly",
+            workspace.display(),
+            spec.workspace_mount_path
+        ),
         "--workdir".to_owned(),
         spec.working_dir.clone(),
         "--env-file".to_owned(),
@@ -875,6 +888,7 @@ mod tests {
             entrypoint: None,
             argv: vec!["--serve".to_owned()],
             working_dir: "/app".to_owned(),
+            workspace_mount_path: "/app".to_owned(),
             environment: BTreeMap::new(),
             endpoints: vec![OciEndpoint {
                 host_port: 49152,
@@ -1026,6 +1040,29 @@ mod tests {
         assert!(!rendered.contains("--privileged"));
         assert!(!rendered.contains("--publish"));
         assert_eq!(args[args.len() - 2], "sha256:verified-local-id");
+    }
+
+    #[test]
+    fn run_arguments_mount_workspace_at_the_declared_guest_path() {
+        let workspace = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let env_file = runtime.path().join("environment.list");
+        fs::write(&env_file, "").unwrap();
+        let mut declared = spec();
+        declared.workspace_mount_path = "/ato/workspace".to_owned();
+
+        let args = docker_run_arguments(
+            &declared,
+            workspace.path(),
+            &env_file,
+            "ato-test",
+            "ato-test-net",
+            "sha256:verified-local-id",
+        )
+        .unwrap();
+        let rendered = args.join(" ");
+        assert!(rendered.contains("dst=/ato/workspace,readonly"));
+        assert!(!rendered.contains("dst=/app,readonly"));
     }
 
     #[test]

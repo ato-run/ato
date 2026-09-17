@@ -34,6 +34,10 @@ This is not a claim of arbitrary-language dependency resolution or a general
 distributed Application graph. Process routes require a declared Python
 runtime. OCI routes require a digest-pinned image and a supported Linux
 platform. Runtime availability remains admission state, not bundle validity.
+OCI authoring may set `oci.workspace_mount` to an absolute, traversal-free
+guest path when an image owns `/app`. Omitting it preserves the original
+read-only `/app` workspace mount. This is a realization instruction and is
+therefore part of D, not K.
 
 ## Identity
 

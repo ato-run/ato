@@ -1928,6 +1928,10 @@ impl PortableLocalRuntime {
                         .cloned(),
                     argv: step.argv.clone(),
                     working_dir: "/app".to_owned(),
+                    workspace_mount_path: runtime
+                        .get(ato_portable_application::OCI_WORKSPACE_MOUNT_RUNTIME)
+                        .cloned()
+                        .unwrap_or_else(|| "/app".to_owned()),
                     environment,
                     endpoints: vec![OciEndpoint {
                         host_port,
