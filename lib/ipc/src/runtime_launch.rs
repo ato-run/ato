@@ -174,6 +174,10 @@ pub struct OciRealizationV1 {
     pub argv: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_dir: Option<String>,
+    /// Read-only target for the materialized Capsule workspace. Absent keeps
+    /// the v1-compatible `/app` target used by existing launch specs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_mount_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -398,6 +402,19 @@ impl RuntimeLaunchSpecV1 {
                 {
                     return Err(RuntimeLaunchSpecError::ForbiddenField {
                         field: "realization.entrypoint".to_owned(),
+                    });
+                }
+                if let Some(target) = &oci.workspace_mount_path
+                    && (!target.starts_with('/')
+                        || target == "/"
+                        || target.contains(['\0', '\\', ','])
+                        || target
+                            .split('/')
+                            .skip(1)
+                            .any(|segment| segment.is_empty() || matches!(segment, "." | "..")))
+                {
+                    return Err(RuntimeLaunchSpecError::ForbiddenField {
+                        field: "realization.workspace_mount_path".to_owned(),
                     });
                 }
                 if let Some(reference) = &oci.image_reference {
