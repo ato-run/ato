@@ -676,7 +676,7 @@ while True:
         let context = context_for(workspace.path(), 39_106);
         let mut spec = spec_for("run_nonexistent", Some(1), "unused", 39_106);
         spec.realization = LaunchRealizationV1::Process(ProcessRealizationV1 {
-            argv: vec!["/nonexistent/program".to_owned()],
+            argv: Vec::new(),
             executable: None,
         });
         assert!(start_run(&spec, &context, &plane, &AlwaysReady).is_err());
@@ -693,7 +693,7 @@ while True:
         let context = context_for(workspace.path(), 39_107);
         let mut spec = spec_for("run_doomed", Some(1), "unused", 39_107);
         spec.realization = LaunchRealizationV1::Process(ProcessRealizationV1 {
-            argv: vec!["/nonexistent/program".to_owned()],
+            argv: Vec::new(),
             executable: None,
         });
         assert!(start_run(&spec, &context, &plane, &AlwaysReady).is_err());

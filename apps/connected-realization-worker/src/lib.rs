@@ -4575,18 +4575,14 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             run_control_verification_key: None,
             once: true,
         };
-        assert_eq!(
-            supported_lease_kinds(&config),
-            [PORTABLE_CAPSULE_LEASE_KIND]
-        );
+        let mut expected = vec![PORTABLE_CAPSULE_LEASE_KIND];
+        if runtime_launch::lease::RUNTIME_LAUNCH_SUPPORTED() {
+            expected.push(runtime_launch::lease::RUNTIME_LAUNCH_LEASE_KIND);
+        }
+        assert_eq!(supported_lease_kinds(&config), expected);
         config.browser_chrome = Some(chrome.path().to_owned());
         config.run_control_verification_key = Some("v".repeat(32));
-        assert_eq!(
-            supported_lease_kinds(&config),
-            [
-                PORTABLE_CAPSULE_LEASE_KIND,
-                ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND,
-            ]
-        );
+        expected.push(ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND);
+        assert_eq!(supported_lease_kinds(&config), expected);
     }
 }
