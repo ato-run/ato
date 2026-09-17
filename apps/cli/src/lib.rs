@@ -973,21 +973,36 @@ fn stop_local_instance(instance_id: &str) -> Result<()> {
     }
     fs::write(&request, b"stop")?;
     let mut acknowledged = None;
+    let mut worker_exited = false;
     for _ in 0..250 {
         if let Ok(value) = fs::read_to_string(&ack) {
             acknowledged = Some(value);
             break;
         }
-        if !identity.matches_live_process()? {
-            bail!("local Instance Run exited before cleanup acknowledgement");
+        if !worker_exited && !identity.matches_live_process()? {
+            // The worker writes the acknowledgement immediately before it
+            // exits. File visibility can lag process observation briefly,
+            // especially on Windows, so keep polling within the same bound.
+            worker_exited = true;
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    let acknowledged = acknowledged.context("timed out waiting for local Instance cleanup")?;
+    let acknowledged = acknowledged.with_context(|| {
+        if worker_exited {
+            "local Instance Run exited before cleanup acknowledgement became readable"
+        } else {
+            "timed out waiting for local Instance cleanup"
+        }
+    })?;
     if let Some(error) = acknowledged.strip_prefix("error:") {
         bail!("local Instance cleanup failed: {error}");
     }
-    terminate_owned_process(&identity)?;
+    // The worker normally exits itself after persisting state and publishing
+    // the acknowledgement. Keep the identity-checked termination as a
+    // bounded fallback for the small race where it is still unwinding.
+    if identity.matches_live_process()? {
+        terminate_owned_process(&identity)?;
+    }
     store.release_run(instance_id, &active.token)?;
     let _ = fs::remove_file(request);
     let _ = fs::remove_file(ack);
@@ -1138,15 +1153,7 @@ fn portable_instance_worker_claimed(
             }
             store.save_filesystem_state_for_run(&active.instance_id, &active.token)?;
             fs::write(&ack, b"ok")?;
-            loop {
-                if shutdown
-                    .as_deref()
-                    .is_some_and(|flag| flag.load(Ordering::Relaxed))
-                {
-                    return Ok(());
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
+            return Ok(());
         }
         if shutdown
             .as_deref()
