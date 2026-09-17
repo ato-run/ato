@@ -1,7 +1,8 @@
 # Datasette dependency export progress — 2026-09-16
 
-This is a partial implementation record, not the final four-route/offline
-acceptance. Production was not changed.
+This record began as a partial implementation checkpoint. Later sections now
+include the completed four-route, Hosted Surface, v4 transport, and isolated
+offline acceptance. Production was not changed.
 
 ## Fixed semantic identity and local transport artifacts
 
@@ -319,6 +320,70 @@ Three failures in the broader API capsule-network route suite reproduced
 unchanged on its parent branch under the same command: unavailable public
 Runner capacity, the newer `managed_pool_unavailable` error code versus the
 old assertion, and a live-continuation 409 versus 202. They are not counted as
-new v4 regressions. Portable v4 Hosted transport is accepted, but full v0
-still requires the isolated image-absent outbound-blocked offline trial and
-the durable Instance / saved-data round trip.
+new v4 regressions. Portable v4 Hosted transport was accepted here; the later
+sections in this record and the Instance snapshot record close the isolated
+offline and durable saved-data acceptance items.
+
+## Empty-store, route-less offline OCI acceptance (completed)
+
+The final local OCI gate ran on `ubuntu-sugamo`, Linux 7.0.0-27 x86_64 with
+Docker Engine 29.1.3. The CLI binary was built from ato `77973a62`; its
+SHA-256 was
+`2cb111ea4ef721afcd3f06ebd7b382071d2d11661029a8a4123bc41eda0f65e6`.
+The reusable harness is `scripts/portable-offline-oci-airgap.sh`, completed by
+`4d9f75af`.
+
+The harness enters a new network namespace containing only loopback, starts a
+private Docker daemon with a new data root and no preloaded images, and leaves
+the host mount namespace shared with containerd/runc. The daemon may create
+only its disconnected `docker0` route; the namespace has no default route.
+Docker's containerd snapshotter is disabled for this private store so the
+classic image store is both empty and scoped to the new data root. The Ato OCI
+Adapter still creates its per-Run Docker network with `--internal`, uses
+`--pull=never`, and receives no Docker socket in the workload.
+
+The exact previously accepted offline file was used without regeneration:
+
+```text
+file          datasette-offline.capsule
+size          120,583,935 bytes
+bundle SHA    sha256:f439923321bfa748af3a8993ab4c7c495f8f0d81ae5f9504c8add92b539591a2
+K             sha256:d4bb7e9ae1be0f6b884d0d58561d7f974092de447da3eea9e2ffe5279b004a19
+OCI D         sha256:d3e7428a6c75e7d5726319ca61f06631e1811a698b2dd16b531029038dfd701f
+image         docker.io/datasetteproject/datasette@sha256:0f57db16cf4eb6cca57f1cedaa0a696bca1c65a1d75b8f7ee372c2dd909a32a0
+platform      linux/amd64
+```
+
+Before the Run, `docker image ls -q` returned zero entries. With no external
+route, `ato run` loaded the verified embedded manifest, config, and seven
+layers and emitted a `cli-local` receipt with `fully_satisfied=true`. All
+three original observations were performed against the live container and
+were satisfied:
+
+```text
+datasette-entry      HTTP 200  body sha256:51dd0ae5820a17212e335917cc29e0e83ed343e09cd5b3f8c14dc57e92ea9898
+items-in-id-order    HTTP 200  body sha256:8607a7b55d2f0b4f9169a1c63b1554a60a6af1c8424ab591aa9a451265e0ee83
+quantity-total       HTTP 200  body sha256:b4d3392b69f97f35ad0c927a0401766b538ebbf1baabd4ee14f620b0ac54632f
+```
+
+After verification, the Adapter removed the container and per-Run network.
+The harness recorded zero remaining containers and zero final images, stopped
+the private daemon, and left no socket or matching process. The immutable test
+evidence is retained outside Git at:
+
+```text
+/home/ekohsuke/.ato-staging/.tmp/portable-datasette/export-policy/
+  offline-airgap-evidence-2026-09-17/
+```
+
+Its receipt SHA-256 is
+`d7f34075429a8b73b48c7599ce631d07a90c4a9cba2cc7e72aaa8fa410a21d9c`.
+Failed diagnostic data roots, their four dedicated containerd namespaces, and
+the temporary decoded image tar were removed after the passing evidence was
+copied. They are not recoverable; the source Capsule and retained evidence
+were not removed.
+
+This completes the image-absent, external-route-less offline acceptance. It
+does not claim that the host kernel or Docker Engine is transported in the
+Capsule: those remain declared host capabilities, as required by the offline
+profile definition.
