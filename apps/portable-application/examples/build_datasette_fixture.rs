@@ -55,6 +55,7 @@ fn main() -> Result<()> {
             env: BTreeMap::new(),
         },
         filesystem_state: None,
+        bindings: Vec::new(),
         requirements: vec![
             PortableHttpRequirementSpec {
                 id: "datasette-entry".to_owned(),

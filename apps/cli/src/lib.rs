@@ -11,6 +11,7 @@ pub mod activity_mcp;
 
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
+use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -61,7 +62,7 @@ use ato_portable_application::{
     OCI_CPU_MILLIS_RUNTIME, OCI_IMAGE_RUNTIME, OCI_MEMORY_BYTES_RUNTIME, OCI_PIDS_LIMIT_RUNTIME,
     OCI_PLATFORM_RUNTIME, PYTHON_RUNTIME, PortableRealizationKind, StaticApplicationAsset,
     StaticApplicationServer, StaticApplicationState, ValidatedPortableApplication, bundle_sha256,
-    materialize_tree, validate_bundle_for_derivation,
+    materialize_tree, resolve_application_bindings, validate_bundle_for_derivation,
 };
 use ato_realization_planner::{
     MaterializationCandidate, Placement, PlannerPolicy, RealizationPlanner, TargetEnvironment,
@@ -227,6 +228,9 @@ struct AppImportArgs {
 #[derive(Debug, Args)]
 struct AppStartArgs {
     instance: String,
+    /// Rebind one declared runtime connection for this Run. Values are not persisted.
+    #[arg(long = "bind", value_parser = parse_binding)]
+    bindings: Vec<(String, String)>,
     /// Leave the durable Run active without opening its Surface.
     #[arg(long)]
     no_open: bool,
@@ -787,6 +791,12 @@ fn import_local_application(args: AppImportArgs) -> Result<()> {
 fn start_local_instance(args: AppStartArgs) -> Result<()> {
     let store = local_application_store()?;
     let instance = store.instance(&args.instance)?;
+    let bindings = runtime_binding_values(args.bindings)?;
+    let bundle_bytes = store.bundle_bytes(&instance)?;
+    let bundle = portable_export_bundle(&bundle_bytes)?;
+    let selected = validate_bundle_for_derivation(&bundle, &instance.selected_derivation_ref)?;
+    resolve_application_bindings(&selected.application, &bindings)?;
+    let binding_payload = serde_json::to_vec(&bindings)?;
     let starting = store.claim_run(&instance.instance_id)?;
     let run_root = store.run_root(&instance.instance_id, &starting.run_id)?;
     let log_path = run_root.join("output.log");
@@ -802,7 +812,7 @@ fn start_local_instance(args: AppStartArgs) -> Result<()> {
         .arg(&starting.run_id)
         .arg(&starting.token)
         .env("ATO_HOME", ato_home()?)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(stdout.try_clone()?)
         .stderr(stdout);
     configure_detached_process(&mut command);
@@ -813,6 +823,13 @@ fn start_local_instance(args: AppStartArgs) -> Result<()> {
             return Err(error).context("start durable local Instance worker");
         }
     };
+    if let Some(mut stdin) = child.stdin.take()
+        && let Err(error) = stdin.write_all(&binding_payload)
+    {
+        let _ = child.kill();
+        let _ = store.release_run(&instance.instance_id, &starting.token);
+        return Err(error).context("deliver runtime Bindings to local Instance worker");
+    }
     let wait_started = Instant::now();
     let active = loop {
         if let Some(active) = store.active_run(&instance.instance_id)?
@@ -949,6 +966,16 @@ fn stop_local_instance(instance_id: &str) -> Result<()> {
 }
 
 fn portable_instance_worker(args: PortableInstanceWorkerArgs) -> Result<()> {
+    let mut binding_payload = Vec::new();
+    std::io::stdin()
+        .take(1024 * 1024)
+        .read_to_end(&mut binding_payload)
+        .context("read runtime Bindings from parent")?;
+    let bindings = if binding_payload.is_empty() {
+        BTreeMap::new()
+    } else {
+        serde_json::from_slice(&binding_payload).context("decode runtime Bindings from parent")?
+    };
     let store = local_application_store()?;
     let claimed = store
         .active_run(&args.instance)?
@@ -959,7 +986,7 @@ fn portable_instance_worker(args: PortableInstanceWorkerArgs) -> Result<()> {
     {
         bail!("local Instance Run claim does not match this worker");
     }
-    let result = portable_instance_worker_claimed(&store, &claimed);
+    let result = portable_instance_worker_claimed(&store, &claimed, &bindings);
     if result.is_err() {
         let _ = store.release_run(&claimed.instance_id, &claimed.token);
     }
@@ -969,6 +996,7 @@ fn portable_instance_worker(args: PortableInstanceWorkerArgs) -> Result<()> {
 fn portable_instance_worker_claimed(
     store: &LocalApplicationStore,
     claimed: &LocalInstanceRun,
+    bindings: &BTreeMap<String, String>,
 ) -> Result<()> {
     #[cfg(unix)]
     let shutdown = Some({
@@ -1039,6 +1067,7 @@ fn portable_instance_worker_claimed(
             restored_snapshot_ref: restored_snapshot_ref.as_deref(),
             static_state,
             filesystem_state: Some(&filesystem_state),
+            bindings: Some(bindings),
         },
     )?;
     if started.receipt.bundle_sha256 != instance.bundle_sha256
@@ -1423,12 +1452,7 @@ fn run_portable_application(
     });
     #[cfg(not(unix))]
     let shutdown: Option<Arc<AtomicBool>> = None;
-    if !args.bindings.is_empty() {
-        bail!(
-            "portable application profile {} has no external Bindings",
-            bundle.index.profile
-        );
-    }
+    let bindings = runtime_binding_values(args.bindings)?;
     let selected_derivation = match args.derivation.as_deref() {
         Some(reference) => reference.to_owned(),
         None if bundle.index.derivations.len() == 1 => bundle.index.derivations[0].clone(),
@@ -1448,7 +1472,10 @@ fn run_portable_application(
         &selected_derivation,
         runtime.path(),
         shutdown.as_deref(),
-        PortableRuntimeState::default(),
+        PortableRuntimeState {
+            bindings: Some(&bindings),
+            ..PortableRuntimeState::default()
+        },
     )?;
     let runtime = started.runtime;
     let receipt = started.receipt;
@@ -1513,6 +1540,7 @@ struct PortableRuntimeState<'a> {
     restored_snapshot_ref: Option<&'a str>,
     static_state: Option<StaticApplicationState>,
     filesystem_state: Option<&'a BTreeMap<String, PathBuf>>,
+    bindings: Option<&'a BTreeMap<String, String>>,
 }
 
 fn start_and_verify_portable_application(
@@ -1524,6 +1552,11 @@ fn start_and_verify_portable_application(
     runtime_state: PortableRuntimeState<'_>,
 ) -> Result<StartedPortableApplication> {
     let validated = validate_bundle_for_derivation(&bundle, selected_derivation)?;
+    let empty_bindings = BTreeMap::new();
+    let binding_environment = resolve_application_bindings(
+        &validated.application,
+        runtime_state.bindings.unwrap_or(&empty_bindings),
+    )?;
     fs::create_dir_all(runtime_root)?;
     let workspace = runtime_root.join("workspace");
     let (hydrated, dependency_fetches) = portable_dependency::hydrate_external_objects(&bundle)?;
@@ -1538,6 +1571,7 @@ fn start_and_verify_portable_application(
         &hydrated,
         runtime_state.static_state,
         runtime_state.filesystem_state,
+        &binding_environment,
     )?;
 
     let mut observation = RuntimeObservation {
@@ -1668,6 +1702,7 @@ impl PortableLocalRuntime {
         bundle: &ato_objects::PortableApplicationBundle,
         static_state: Option<StaticApplicationState>,
         filesystem_state: Option<&BTreeMap<String, PathBuf>>,
+        binding_environment: &BTreeMap<String, String>,
     ) -> Result<Self> {
         let state_mounts = resolve_portable_state_mounts(route, runtime_root, filesystem_state)?;
         match route.realization {
@@ -1717,6 +1752,7 @@ impl PortableLocalRuntime {
                 }
                 let endpoint_name = endpoint_port_env_name(&route.derivation.ports[0].id);
                 let mut environment = step.env.clone();
+                environment.extend(binding_environment.clone());
                 environment.insert(endpoint_name, host_port.clone());
                 for state in &state_mounts {
                     environment.insert(state_path_env_name(&state.id), state.guest_path.clone());
@@ -1784,6 +1820,7 @@ impl PortableLocalRuntime {
                 drop(listener);
                 let runtime = &route.derivation.runtimes;
                 let mut environment = step.env.clone();
+                environment.extend(binding_environment.clone());
                 let mounts = state_mounts
                     .iter()
                     .map(|state| {
@@ -2482,6 +2519,16 @@ fn parse_binding(value: &str) -> Result<(String, String), String> {
         return Err("binding id and value must be non-empty".to_owned());
     }
     Ok((name.to_owned(), value.to_owned()))
+}
+
+fn runtime_binding_values(bindings: Vec<(String, String)>) -> Result<BTreeMap<String, String>> {
+    let mut values = BTreeMap::new();
+    for (id, value) in bindings {
+        if values.insert(id.clone(), value).is_some() {
+            bail!("runtime Binding `{id}` was supplied more than once");
+        }
+    }
+    Ok(values)
 }
 
 #[cfg(test)]

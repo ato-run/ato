@@ -56,6 +56,7 @@ fn main() -> Result<()> {
             id: "data".to_owned(),
             mount: "/data".to_owned(),
         }),
+        bindings: Vec::new(),
         requirements: vec![PortableHttpRequirementSpec {
             id: "notes-health".to_owned(),
             path: "/health".to_owned(),
