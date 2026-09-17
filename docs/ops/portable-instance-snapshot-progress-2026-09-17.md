@@ -526,3 +526,65 @@ Validator binary SHA  2e65e6a8f86852a159674413e09c5dc0906a0e02c9ab7f9fd9af18031c
 The acceptance Runs were explicitly stopped. Both leases acknowledged
 `stopped`; the OCI container and per-lease workspace were gone. Production was
 not deployed.
+
+## Explicit User Runner placement acceptance
+
+Portable dynamic import now accepts a placement request that is separate from
+K and D:
+
+```json
+{"kind":"user_runner","runner_id":"01M1JVXA4DX08ZR0VJQXV3BZFA"}
+```
+
+The API admits only a runner owned by the importing account which is active,
+not drained, online, has a free slot, supports `runtime_launch`, advertises the
+selected execution ABI and platform, and can publish the required Web Surface.
+The chosen runner ID is persisted on the idempotency reservation and import;
+retry and wake reuse it. A rejected User Runner request does not fall back to a
+Managed Runner.
+
+Staging acceptance used the same Binding fixture bytes and explicitly selected
+`p3-acceptance-sugamo-2` in the PWA's **Run on** controls. The result was:
+
+```text
+Instance        cinst_01M2PGTPSXDSAZ12RFSW4FBXYS
+Import          pai_01M2PGTPXNSF5PY3KW52FGVXMD
+Run             run_01M2PGTQ1019X0T00F5A8328F6
+Lease           01M2PGTQ10VFNXSXXWW72466TN
+Runner          01M1JVXA4DX08ZR0VJQXV3BZFA (user_managed)
+Placement       external-runner
+bundle SHA      sha256:32875cc24dd6c3116ab2c93e772b22f28460d0ad9bd2538521cde285555ba6d7
+K               sha256:d9fa726e80f46d036801f7333e3b6d5a7791a8f2e393bf82798a40e47c79103f
+Python D        sha256:9f21b0144f6e51fa54ac67443c5339b984ff62238217e3229f925ee2bbfb3465
+receipt         verified, 1 observation, fully_satisfied=true
+Surface         https://cinst-boru2sqt2mcf36ni.stg-app.ato.run/
+browser result  binding-ok
+```
+
+Both `portable_application_import_requests.placement_json` and
+`portable_application_imports.placement_json` contained the exact User Runner
+ID, and the resulting lease was assigned to that same ID. PWA showed Contract
+Verified and Surface Ready; the public Cloudflare path returned the real
+workload response. The stop control signal was observed within one second, and
+the lease and Run both reached `stopped`.
+
+The acceptance temporarily borrowed the already-routed
+`s2-rstg002.ato.run -> 127.0.0.1:8422` staging ingress. Afterwards the temporary
+credential and work root were removed, the original runner token hash was
+restored, the acceptance ingress rows were revoked, the prior Step 10 ingress
+was reactivated, and the prior Step 10 service was returned to its pre-test
+auto-restart state. Both Managed staging slots remained active throughout.
+
+Executed/deployed revisions for this slice:
+
+```text
+Ato                    d1b53f7e
+API                    56dca1a5
+PWA                    72800a7
+API Worker version     f99b0e30-094a-483e-9200-3962d1cb40b7
+PWA Worker version     eff90245-9604-401f-a5db-3cef2104729d
+Runner binary SHA      919c94e3a80483c2b967d0832cc94601c8e97719f5a499c1ae605386ead4838b
+```
+
+Migration `0273_portable_user_runner_placement.sql` was applied only to
+staging. No production migration or deployment was performed.
