@@ -286,6 +286,7 @@ fn expand_into(bytes: &[u8], staging: &Path, limit: usize) -> Result<()> {
         }
         // The mode is read BEFORE unpacking, because `unpack` consumes the
         // entry.
+        #[cfg(unix)]
         let executable = entry.header().mode().unwrap_or(0o644) & 0o100 != 0;
         entry
             .unpack(&target)
@@ -728,6 +729,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_symlink_in_the_state_directory_is_refused_rather_than_followed() {
         // Following one would let a link inside the attachment pull an
@@ -854,6 +856,7 @@ mod tests {
         assert!(!target.exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_executable_survives_the_round_trip() {
         // The packer records the owner-execute bit and the unpacker used to

@@ -151,6 +151,8 @@ pub fn terminate_process_group_gracefully(
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
     }
+    #[cfg(not(unix))]
+    let _ = grace;
     // Outlived the grace, or a platform with nothing to ask with.
     terminate_process_group(pid)
 }
