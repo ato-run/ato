@@ -3005,7 +3005,7 @@ impl HttpRunnerApi {
             return Ok(Vec::new());
         }
         let mut response = self
-            .authorized(self.client.get(format!(
+            .authorized(self.client.post(format!(
                 "{}/v1/runner-leases/{lease_id}/runtime-bindings",
                 self.base
             )))
