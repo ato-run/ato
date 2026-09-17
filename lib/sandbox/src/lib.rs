@@ -62,6 +62,58 @@ use anyhow::Result;
 use std::path::PathBuf;
 use tracing::debug;
 
+/// Whether this Linux host can create the namespaces used by Ato's
+/// bubblewrap-based workload and build sandboxes.
+///
+/// Finding `bwrap` on `PATH` is not sufficient. Some container hosts install
+/// it while denying the user/network namespaces required by `--unshare-all`.
+/// Advertising execution there accepts work that can only fail after a lease
+/// has already been assigned. Probe the actual boundary once per process and
+/// fail closed on every other platform.
+#[cfg(target_os = "linux")]
+pub fn bubblewrap_containment_available() -> bool {
+    use std::process::{Command, Stdio};
+    use std::sync::OnceLock;
+
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        let Some(binary) = std::env::var_os("PATH").and_then(|path| {
+            std::env::split_paths(&path)
+                .map(|directory| directory.join("bwrap"))
+                .find(|candidate| candidate.is_file())
+        }) else {
+            return false;
+        };
+        Command::new(binary)
+            .args([
+                "--unshare-all",
+                "--die-with-parent",
+                "--new-session",
+                "--proc",
+                "/proc",
+                "--dev",
+                "/dev",
+                "--tmpfs",
+                "/tmp",
+                "--ro-bind",
+                "/usr",
+                "/usr",
+                "--",
+                "/usr/bin/true",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn bubblewrap_containment_available() -> bool {
+    false
+}
+
 #[cfg(target_os = "linux")]
 pub mod linux;
 
