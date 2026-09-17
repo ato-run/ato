@@ -233,6 +233,12 @@ impl DockerOciAdapter {
             return Err(error).context("remove OCI environment file after launch");
         }
         if !launched.status.success() {
+            // `docker run` may create the named container before runc rejects
+            // its process. Remove by the Runner-owned name because no stdout
+            // container ID is available on this failure path.
+            let _ = Command::new(&self.docker)
+                .args(["rm", "--force", &container_name])
+                .output();
             let _ = remove_network(&self.docker, &network_name);
             bail!("start OCI container failed: {}", bounded_stderr(&launched));
         }
