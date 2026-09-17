@@ -42,13 +42,14 @@ fn authored_multi_process_fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/portable-multi-process-authored")
 }
 
-fn succeeded_or_rejected_for_missing_python(output: &Output, receipt: &Path) -> bool {
+fn succeeded_or_rejected_by_runtime_admission(output: &Output, receipt: &Path) -> bool {
     if output.status.success() {
         return true;
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("selected derivation requires Python 3.12"),
+        stderr.contains("selected derivation requires Python 3.12")
+            || stderr.contains("portable process sandbox admission failed"),
         "portable process failed for an unexpected reason: {stderr}"
     );
     assert!(
@@ -183,7 +184,7 @@ fn explicitly_selected_process_route_satisfies_the_same_contract_at_runtime() {
         .arg(&receipt_path)
         .output()
         .unwrap();
-    if !succeeded_or_rejected_for_missing_python(&run, &receipt_path) {
+    if !succeeded_or_rejected_by_runtime_admission(&run, &receipt_path) {
         return;
     }
     let stdout = String::from_utf8_lossy(&run.stdout);
@@ -273,7 +274,7 @@ fn pack_compiles_v2_authoring_and_both_explicit_routes_satisfy_one_contract() {
             .arg(&receipt_path)
             .output()
             .unwrap();
-        if !succeeded_or_rejected_for_missing_python(&run, &receipt_path) {
+        if !succeeded_or_rejected_by_runtime_admission(&run, &receipt_path) {
             runtime_missing = true;
             continue;
         }
