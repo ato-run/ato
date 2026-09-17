@@ -4,7 +4,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path != "/health":
+        if self.path not in ("/", "/health"):
             self.send_error(404)
             return
         if not os.environ.get("ATO_BINDING_SERVICE"):
