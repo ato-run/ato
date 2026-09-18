@@ -283,6 +283,25 @@ pub struct PortableAuthoredBundleSpec {
     pub requirements: Vec<PortableHttpRequirementSpec>,
 }
 
+/// Every `(image, platform)` an OCI route runs: one for a single-container
+/// route, one per service for a service group. Empty for other routes.
+pub fn oci_images(route: &ValidatedPortableApplication) -> Vec<(String, String)> {
+    if !matches!(
+        route.realization,
+        PortableRealizationKind::OciContainer | PortableRealizationKind::OciServiceGroup
+    ) {
+        return Vec::new();
+    }
+    let Some(platform) = route.derivation.runtimes.get(OCI_PLATFORM_RUNTIME) else {
+        return Vec::new();
+    };
+    std::iter::once(&route.derivation.runtimes)
+        .chain(route.derivation.steps.iter().map(|step| &step.runtimes))
+        .filter_map(|runtimes| runtimes.get(OCI_IMAGE_RUNTIME))
+        .map(|image| (image.clone(), platform.clone()))
+        .collect()
+}
+
 /// Stable process/OCI projection for a logical Binding id. The declaration is
 /// public; only the value placed in this environment variable is secret.
 pub fn binding_environment_name(id: &str) -> String {

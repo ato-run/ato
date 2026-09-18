@@ -9,7 +9,7 @@ use ato_objects::{
     PortableOciArchive, encode_portable_application_bundle,
 };
 
-use crate::{PortableApplicationError, PortableRealizationKind, profile, validate_all_derivations};
+use crate::{PortableApplicationError, profile, validate_all_derivations};
 
 pub fn repack_portable_dependencies(
     original: &PortableApplicationBundle,
@@ -38,13 +38,11 @@ pub fn repack_portable_dependencies_with_archives(
     if policy == PortableDependencyProfile::Offline
         && before
             .iter()
-            .filter(|route| route.realization == PortableRealizationKind::OciContainer)
-            .any(|route| {
-                !oci_archives.iter().any(|archive| {
-                    route.derivation.runtimes.get(crate::OCI_IMAGE_RUNTIME) == Some(&archive.image)
-                        && route.derivation.runtimes.get(crate::OCI_PLATFORM_RUNTIME)
-                            == Some(&archive.platform)
-                })
+            .flat_map(crate::oci_images)
+            .any(|(image, platform)| {
+                !oci_archives
+                    .iter()
+                    .any(|archive| archive.image == image && archive.platform == platform)
             })
     {
         return Err(profile(
