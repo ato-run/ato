@@ -146,8 +146,44 @@ pub fn release_all(
 }
 
 /// Give back every slot this Run holds, without committing anything.
+///
+/// Only for a Run whose workload is confirmed stopped (or never started). A
+/// Run whose stop could not be confirmed is quarantined instead.
 pub fn abort_run(transport: &dyn StateArtifactTransport, prepared: &PreparedRun) {
     release_all(transport, &prepared.grants, WriterRelease::Aborted);
+}
+
+/// Hold every slot this Run has, and mark it quarantined: the workload could
+/// not be confirmed stopped, so a new writer must not start. Nothing here
+/// releases or commits. Best effort per slot — a quarantine that fails to
+/// reach the control plane still leaves the slot held, which is the safe
+/// side; reclamation will not free it either.
+pub fn quarantine_run(
+    transport: &dyn StateArtifactTransport,
+    prepared: &PreparedRun,
+    reason: &str,
+) {
+    for (state_key, grant) in &prepared.grants {
+        if let Err(error) = transport.quarantine_writer(state_key, grant.writer_fence, reason) {
+            tracing::warn!(
+                state_key = %state_key,
+                writer_fence = grant.writer_fence,
+                %error,
+                "failed to report a quarantined state writer; the slot stays held"
+            );
+        }
+    }
+}
+
+impl PreparedRun {
+    /// `state_key -> writer_fence` for the slots this Run holds. Non-secret;
+    /// recorded in the Runner's run journal.
+    pub fn writer_fences(&self) -> std::collections::BTreeMap<String, u64> {
+        self.grants
+            .iter()
+            .map(|(key, grant)| (key.clone(), grant.writer_fence))
+            .collect()
+    }
 }
 
 /// Commit whatever the workload wrote, once it has stopped.
@@ -302,6 +338,7 @@ mod tests {
         /// every failure path has to restore.
         held_by_fence: Option<u64>,
         releases: Vec<(u64, &'static str)>,
+        quarantined: Vec<u64>,
     }
 
     impl StateArtifactTransport for FakeControlPlane {
@@ -368,6 +405,21 @@ mod tests {
             if plane.held_by_fence == Some(writer_fence) {
                 plane.held_by_fence = None;
             }
+            Ok(())
+        }
+
+        fn quarantine_writer(
+            &self,
+            _state_key: &str,
+            writer_fence: u64,
+            _reason: &str,
+        ) -> Result<()> {
+            // The slot stays held: quarantine never frees it.
+            self.inner
+                .lock()
+                .expect("lock")
+                .quarantined
+                .push(writer_fence);
             Ok(())
         }
     }
@@ -588,6 +640,28 @@ while True:
             .expect("query runs");
         let listed = String::from_utf8_lossy(&rows.stdout);
         assert_eq!(listed.trim(), "from-run-1,from-run-2");
+    }
+
+    #[test]
+    fn an_unconfirmed_stop_quarantines_and_never_releases() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let context = context_for(workspace.path(), 39_109);
+        let plane = FakeControlPlane::default();
+        let spec = spec_for("run_quarantine", Some(1), "unused", 39_109);
+        let prepared = prepare_run(&spec.state_attachments, &context, &plane).expect("prepared");
+        assert_eq!(prepared.writer_fences().get("app_data"), Some(&1));
+
+        quarantine_run(&plane, &prepared, "container still running after SIGKILL");
+
+        let inner = plane.inner.lock().expect("lock");
+        // Held, quarantined, and neither released nor aborted: a new writer
+        // cannot take it and nothing was committed.
+        assert_eq!(inner.held_by_fence, Some(1));
+        assert_eq!(inner.quarantined, vec![1]);
+        assert!(inner.releases.is_empty());
+        assert!(inner.revisions.is_empty());
+        drop(inner);
+        assert!(plane.acquire_writer("app_data").is_err());
     }
 
     #[test]

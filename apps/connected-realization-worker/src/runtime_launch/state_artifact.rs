@@ -444,6 +444,15 @@ pub trait StateArtifactTransport {
     fn abort_writer(&self, state_key: &str, writer_fence: u64) -> Result<()> {
         self.release_writer(state_key, writer_fence)
     }
+
+    /// Keep the slot away from every future writer: this Run's workload could
+    /// not be confirmed stopped, so it may still be writing. Unlike release or
+    /// abort, nothing about this gives the slot back; only a later confirmed
+    /// stop (Runner recovery) or an operator does.
+    ///
+    /// No default: a transport that silently released here would be exactly
+    /// the bug this exists to prevent.
+    fn quarantine_writer(&self, state_key: &str, writer_fence: u64, reason: &str) -> Result<()>;
 }
 
 /// The real transport: lease-scoped, bearer-authenticated requests to the
@@ -539,6 +548,21 @@ impl StateArtifactTransport for LeaseStateArtifactTransport {
             .send()?
             .error_for_status()
             .context("failed to release the state writer")?;
+        Ok(())
+    }
+
+    fn quarantine_writer(&self, state_key: &str, writer_fence: u64, reason: &str) -> Result<()> {
+        self.client
+            .post(self.url("writers/quarantine"))
+            .bearer_auth(&self.token)
+            .json(&serde_json::json!({
+                "state_key": state_key,
+                "writer_fence": writer_fence,
+                "reason": reason.chars().take(500).collect::<String>(),
+            }))
+            .send()?
+            .error_for_status()
+            .context("failed to quarantine the state writer")?;
         Ok(())
     }
 
@@ -761,6 +785,9 @@ mod tests {
                 _request: &str,
                 _artifact: &StateArtifact,
             ) -> Result<String> {
+                unreachable!()
+            }
+            fn quarantine_writer(&self, _key: &str, _fence: u64, _reason: &str) -> Result<()> {
                 unreachable!()
             }
             fn release_writer(&self, _key: &str, _fence: u64) -> Result<()> {
