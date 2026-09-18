@@ -14,4 +14,5 @@ pub mod sandbox_exec;
 pub mod service_group;
 pub mod session;
 pub mod state_artifact;
+pub mod volume;
 pub mod workspace;

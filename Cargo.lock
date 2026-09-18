@@ -354,6 +354,7 @@ dependencies = [
  "ato-sandbox",
  "base64 0.22.1",
  "clap",
+ "fs2",
  "hex",
  "hmac",
  "libc",
