@@ -253,6 +253,31 @@ impl ResolvedRuntimeLaunchContext {
         environment
     }
 
+    /// Only the named secrets, for a spawn boundary that must not receive the
+    /// rest — one service of a group never sees a sibling's secret. Every
+    /// requested name must have been redeemed.
+    pub fn secret_environment_for(
+        &self,
+        names: &std::collections::BTreeSet<&str>,
+    ) -> anyhow::Result<BTreeMap<String, String>> {
+        let environment = self
+            .secrets
+            .iter()
+            .filter(|secret| names.contains(secret.name()))
+            .map(|secret| {
+                (
+                    secret.name().to_owned(),
+                    secret.expose_for_spawn().to_owned(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        anyhow::ensure!(
+            environment.len() == names.len(),
+            "a requested runtime Binding was not redeemed for this Run"
+        );
+        Ok(environment)
+    }
+
     /// Secret NAMES only. This is what a receipt or diagnostic may record: it
     /// says which grants were applied without saying what they were.
     pub fn observed_secret_names(&self) -> Vec<&str> {

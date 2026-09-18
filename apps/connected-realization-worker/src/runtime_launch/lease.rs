@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! lease command
-//!   -> parse RuntimeLaunchSpecV1
+//!   -> parse RuntimeLaunchSpecV1 or V2 (an OCI service group), by protocol
 //!   -> recompute the canonical digest and compare to the command's
 //!   -> materialize the workspace from its content address
 //!   -> allocate a real host port per endpoint
@@ -27,11 +27,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use ato_adapter_oci::{
-    DockerOciAdapter, OciEndpoint, OciHandle, OciMount, OciResourceLimits, OciSpec,
+    DockerOciAdapter, OciEndpoint, OciHandle, OciMount, OciResourceLimits, OciServiceGroup, OciSpec,
 };
 use ato_ipc::runtime_launch::{
     LaunchRealizationV1, ReadinessV1, RuntimeLaunchSpecV1, StateAccessV1,
 };
+use ato_ipc::runtime_launch_v2::{EndpointExposureV2, RuntimeLaunchSpec};
 
 use super::process_executor::{ReadinessProbe, state_path_env_name, state_working_copy};
 use super::resolved::{
@@ -89,7 +90,7 @@ pub struct RuntimeLaunchLeaseCommand {
 /// what runs: if the bytes that reached the Runner differ from the ones the
 /// control plane digested onto the Run, the Runner would execute something the
 /// receipt does not describe.
-pub fn verified_spec(command: &RuntimeLaunchLeaseCommand) -> Result<RuntimeLaunchSpecV1> {
+pub fn verified_spec(command: &RuntimeLaunchLeaseCommand) -> Result<RuntimeLaunchSpec> {
     if let Some(seconds) = command.max_duration_secs {
         ensure!(
             (1..=RUNTIME_LAUNCH_MAX_DURATION_SECS).contains(&seconds),
@@ -98,7 +99,9 @@ pub fn verified_spec(command: &RuntimeLaunchLeaseCommand) -> Result<RuntimeLaunc
     }
     let encoded = serde_json::to_string(&command.launch_spec)
         .context("lease command launch_spec is not encodable")?;
-    let spec = RuntimeLaunchSpecV1::parse(&encoded)
+    // Dispatch on `protocol` before interpreting the body: a version this
+    // build does not know is refused, never read as the nearest known shape.
+    let spec = RuntimeLaunchSpec::parse(&encoded)
         .map_err(|error| anyhow::anyhow!("lease command launch_spec is invalid: {error}"))?;
     let digest = spec
         .canonical_digest()
@@ -109,11 +112,64 @@ pub fn verified_spec(command: &RuntimeLaunchLeaseCommand) -> Result<RuntimeLaunc
         command.launch_spec_digest
     );
     ensure!(
-        spec.context.run_id == command.run_id
-            && spec.context.compute_instance_id == command.compute_instance_id,
+        spec.context().run_id == command.run_id
+            && spec.context().compute_instance_id == command.compute_instance_id,
         "launch spec identity does not match its lease command"
     );
+    verify_group_cpu_reservation(&spec, command.runtime_cpu_request.as_ref())?;
     Ok(spec)
+}
+
+/// A group reserves its summed CPU as ONE lease. When the control plane sent
+/// the reservation, it must be exactly that sum; a mismatch means the lease
+/// was sized for a different workload than the one about to run.
+fn verify_group_cpu_reservation(
+    spec: &RuntimeLaunchSpec,
+    request: Option<&serde_json::Value>,
+) -> Result<()> {
+    let (RuntimeLaunchSpec::V2(group), Some(request)) = (spec, request) else {
+        return Ok(());
+    };
+    let total = group.service_group().total_limits.cpu_limit_millis;
+    let millis = |field: &str| request.get(field).and_then(serde_json::Value::as_u64);
+    ensure!(
+        millis("min_millis") == Some(total) && millis("max_millis") == Some(total),
+        "the lease's CPU reservation does not equal the service group's total of {total} millis"
+    );
+    Ok(())
+}
+
+/// The one Endpoint the Runner's ingress slot publishes: a v1 spec's only
+/// Endpoint, or a group's Surface Endpoint.
+pub fn published_endpoint_name(spec: &RuntimeLaunchSpec) -> Result<String> {
+    match spec {
+        RuntimeLaunchSpec::V1(spec) => {
+            ensure!(
+                spec.endpoints.len() == 1,
+                "runtime-launch ingress currently supports exactly one declared endpoint"
+            );
+            Ok(spec.endpoints[0].name.clone())
+        }
+        RuntimeLaunchSpec::V2(spec) => spec
+            .service_group()
+            .surface()
+            .map(|(_, endpoint)| endpoint.name.clone())
+            .context("service group declares no Surface Endpoint"),
+    }
+}
+
+impl ActiveWorkload {
+    /// The container, if any, whose forwarder serves the published Endpoint.
+    pub fn surface_container(&self) -> Option<&OciHandle> {
+        match self {
+            ActiveWorkload::Process(_) => None,
+            ActiveWorkload::Oci(container) => Some(container),
+            ActiveWorkload::OciServiceGroup(group) => group
+                .services()
+                .map(|(_, container)| container)
+                .find(|container| !container.port_mapping().1.is_empty()),
+        }
+    }
 }
 
 pub fn maximum_lifetime(command: &RuntimeLaunchLeaseCommand) -> Duration {
@@ -157,19 +213,50 @@ pub struct ResolvedRun {
 /// control plane picking a port it cannot know is free. An endpoint with no
 /// assignment keeps the ephemeral allocation below.
 pub fn resolve_run(
-    spec: &RuntimeLaunchSpecV1,
+    spec: &RuntimeLaunchSpec,
     lease_root: &Path,
     workspace: &dyn WorkspaceTransport,
     state: &dyn StateArtifactTransport,
     secrets: Vec<ResolvedSecret>,
     assigned_ports: &BTreeMap<String, u16>,
 ) -> Result<ResolvedRun> {
+    let (launch_workspace, cwd_relative, public_env, declared_endpoints) = match spec {
+        RuntimeLaunchSpec::V1(spec) => (
+            &spec.workspace,
+            spec.workspace.cwd_relative.as_str(),
+            spec.public_env
+                .iter()
+                .map(|entry| (entry.name.clone(), entry.value.clone()))
+                .collect(),
+            spec.endpoints.clone(),
+        ),
+        // A group's environment is per service and applied at each container;
+        // only its one Surface Endpoint is allocated a host port.
+        RuntimeLaunchSpec::V2(spec) => (
+            &spec.workspace,
+            "",
+            BTreeMap::new(),
+            spec.service_group()
+                .services
+                .iter()
+                .flat_map(|service| &service.endpoints)
+                .filter(|endpoint| endpoint.exposure == EndpointExposureV2::Surface)
+                .map(|endpoint| ato_ipc::runtime_launch::EndpointV1 {
+                    name: endpoint.name.clone(),
+                    protocol: endpoint.protocol.clone(),
+                    guest_port: Some(endpoint.guest_port),
+                    allocation: ato_ipc::runtime_launch::EndpointAllocationV1::Automatic,
+                    preferred_port: None,
+                })
+                .collect(),
+        ),
+    };
     let workspace_root =
-        materialize_workspace(workspace, &spec.workspace.materialization_ref, lease_root)?;
+        materialize_workspace(workspace, &launch_workspace.materialization_ref, lease_root)?;
 
     let mut endpoint_ports = BTreeMap::new();
     let mut endpoints = Vec::new();
-    for endpoint in &spec.endpoints {
+    for endpoint in &declared_endpoints {
         let port = match assigned_ports.get(&endpoint.name) {
             // A slot port is bound because that is where the ingress already
             // sends traffic. If it is taken, failing here is right: binding
@@ -183,7 +270,7 @@ pub fn resolve_run(
     }
 
     let attachments = spec
-        .state_attachments
+        .state_attachments()
         .iter()
         .map(|attachment| {
             ResolvedStateAttachment::new(
@@ -196,8 +283,8 @@ pub fn resolve_run(
         })
         .collect::<Vec<_>>();
 
-    let expected_secret_names = spec
-        .secret_grants
+    let grants = spec.secret_grants();
+    let expected_secret_names = grants
         .iter()
         .map(|grant| grant.name.as_str())
         .collect::<BTreeSet<_>>();
@@ -213,18 +300,15 @@ pub fn resolve_run(
 
     let context = ResolvedRuntimeLaunchContext::new(
         workspace_root,
-        &spec.workspace.cwd_relative,
-        spec.public_env
-            .iter()
-            .map(|entry| (entry.name.clone(), entry.value.clone()))
-            .collect(),
+        cwd_relative,
+        public_env,
         secrets,
         attachments,
         endpoints,
     )
     .map_err(|error| anyhow::anyhow!("cannot resolve the launch: {error}"))?;
 
-    let prepared = super::session::prepare_run(spec, &context, state)?;
+    let prepared = super::session::prepare_run(spec.state_attachments(), &context, state)?;
     Ok(ResolvedRun {
         context,
         prepared,
@@ -236,6 +320,7 @@ pub fn resolve_run(
 pub enum ActiveWorkload {
     Process(super::process_executor::LaunchedProcess),
     Oci(OciHandle),
+    OciServiceGroup(OciServiceGroup),
 }
 
 pub struct ActiveRun {
@@ -258,6 +343,16 @@ pub struct RuntimeExecutionEvidence {
     pub image: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
+    /// Every container of an OCI service group, in start order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<ServiceExecutionEvidence>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ServiceExecutionEvidence {
+    pub name: String,
+    pub container_id: String,
+    pub image: String,
 }
 
 impl ActiveRun {
@@ -267,6 +362,11 @@ impl ActiveRun {
             ActiveWorkload::Oci(container) => {
                 format!("container_id={}", container.container_id())
             }
+            ActiveWorkload::OciServiceGroup(group) => group
+                .services()
+                .map(|(name, container)| format!("{name}={}", container.container_id()))
+                .collect::<Vec<_>>()
+                .join(","),
         }
     }
 
@@ -284,6 +384,7 @@ impl ActiveRun {
                 container_id: None,
                 image: None,
                 platform: None,
+                services: Vec::new(),
             },
             ActiveWorkload::Oci(container) => RuntimeExecutionEvidence {
                 realization: "oci",
@@ -293,6 +394,27 @@ impl ActiveRun {
                 container_id: Some(container.container_id().to_owned()),
                 image: Some(container.image().to_owned()),
                 platform: Some(container.platform().to_owned()),
+                services: Vec::new(),
+            },
+            ActiveWorkload::OciServiceGroup(group) => RuntimeExecutionEvidence {
+                realization: "oci_service_group",
+                runtime_executable: Some("docker".to_owned()),
+                runtime_version: None,
+                pid: None,
+                container_id: None,
+                image: None,
+                platform: group
+                    .services()
+                    .next()
+                    .map(|(_, container)| container.platform().to_owned()),
+                services: group
+                    .services()
+                    .map(|(name, container)| ServiceExecutionEvidence {
+                        name: name.to_owned(),
+                        container_id: container.container_id().to_owned(),
+                        image: container.image().to_owned(),
+                    })
+                    .collect(),
             },
         }
     }
@@ -300,11 +422,28 @@ impl ActiveRun {
 
 /// Launch and wait for readiness. On failure, nothing is left holding a slot.
 pub fn start(
-    spec: &RuntimeLaunchSpecV1,
+    spec: &RuntimeLaunchSpec,
     resolved: ResolvedRun,
     state: &dyn StateArtifactTransport,
     probe: &dyn ReadinessProbe,
 ) -> Result<ActiveRun> {
+    let spec = match spec {
+        RuntimeLaunchSpec::V1(spec) => spec,
+        RuntimeLaunchSpec::V2(spec) => {
+            let group =
+                match super::service_group::launch_service_group(spec, &resolved.context, probe) {
+                    Ok(group) => group,
+                    Err(error) => {
+                        abort_run(state, &resolved.prepared);
+                        return Err(error);
+                    }
+                };
+            return Ok(ActiveRun {
+                launched: ActiveWorkload::OciServiceGroup(group),
+                resolved,
+            });
+        }
+    };
     let launched = match &spec.realization {
         LaunchRealizationV1::Process(_) => {
             let mut launched =
@@ -483,15 +622,17 @@ pub fn wait_for_stop(
 
 /// Stop, pack and commit. The slot is released whatever happens.
 pub fn finish(
-    spec: &RuntimeLaunchSpecV1,
+    spec: &RuntimeLaunchSpec,
     active: ActiveRun,
     state: &dyn StateArtifactTransport,
     commit_request_id: &str,
 ) -> Result<Vec<RunStateOutcome>> {
     let ActiveRun { launched, resolved } = active;
     let stopped = match launched {
-        ActiveWorkload::Process(process) => process.stop(&spec.lifecycle).map(|_| ()),
+        ActiveWorkload::Process(process) => process.stop(spec.lifecycle()).map(|_| ()),
         ActiveWorkload::Oci(container) => container.stop(),
+        // Reverse start order, then the network; packing waits for all of it.
+        ActiveWorkload::OciServiceGroup(group) => group.stop(),
     };
     if let Err(error) = stopped {
         abort_run(state, &resolved.prepared);
@@ -558,7 +699,7 @@ mod tests {
         let spec = RuntimeLaunchSpecV1::parse(PROCESS_FIXTURE).expect("fixture");
         let digest = spec.canonical_digest().expect("digests");
         let verified = verified_spec(&command_for(&spec, &digest)).expect("accepted");
-        assert_eq!(verified.context.run_id, spec.context.run_id);
+        assert_eq!(verified.context().run_id, spec.context.run_id);
     }
 
     #[test]
@@ -592,6 +733,56 @@ mod tests {
             error.to_string().contains("does not match its lease"),
             "{error}"
         );
+    }
+
+    const GROUP_FIXTURE: &str = include_str!(
+        "../../../../lib/ipc/tests/fixtures/runtime-launch-spec-v2/service-group.json"
+    );
+
+    fn group_command(cpu_request: Option<serde_json::Value>) -> RuntimeLaunchLeaseCommand {
+        let spec =
+            ato_ipc::runtime_launch_v2::RuntimeLaunchSpecV2::parse(GROUP_FIXTURE).expect("fixture");
+        RuntimeLaunchLeaseCommand {
+            run_id: spec.context.run_id.clone(),
+            compute_instance_id: spec.context.compute_instance_id.clone(),
+            launch_spec_digest: spec.canonical_digest().expect("digests"),
+            launch_spec: serde_json::from_str(GROUP_FIXTURE).expect("json"),
+            runtime_cpu_request: cpu_request,
+            max_duration_secs: None,
+        }
+    }
+
+    #[test]
+    fn a_service_group_rides_the_same_lease_kind_and_publishes_its_surface() {
+        let verified = verified_spec(&group_command(None)).expect("accepted");
+        assert!(matches!(verified, RuntimeLaunchSpec::V2(_)));
+        assert_eq!(published_endpoint_name(&verified).unwrap(), "app.http");
+        assert_eq!(verified.secret_grants().len(), 1);
+    }
+
+    #[test]
+    fn a_group_lease_must_reserve_exactly_the_summed_cpu() {
+        let request = |min: u64, max: u64| {
+            Some(serde_json::json!({
+                "schema": "ato.runtime-cpu-request/v1",
+                "class": "standard",
+                "min_millis": min,
+                "max_millis": max,
+            }))
+        };
+        verified_spec(&group_command(request(1_000, 1_000))).expect("exact reservation");
+        for (min, max) in [(1_000, 2_000), (500, 500), (2_000, 2_000)] {
+            let error = verified_spec(&group_command(request(min, max))).unwrap_err();
+            assert!(error.to_string().contains("CPU reservation"), "{error}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_spec_protocol_is_refused_before_anything_runs() {
+        let mut command = group_command(None);
+        command.launch_spec["protocol"] = "ato.runtime-launch-spec.v3".into();
+        let error = verified_spec(&command).unwrap_err();
+        assert!(error.to_string().contains("UNSUPPORTED_VERSION"), "{error}");
     }
 
     #[test]
