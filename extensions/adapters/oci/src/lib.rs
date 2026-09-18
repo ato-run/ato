@@ -19,6 +19,15 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 
+mod ownership;
+mod stop;
+
+pub use ownership::{
+    LABEL_INCARNATION, LABEL_LEASE_ID, LABEL_MANAGED, LABEL_RUN_ID, LABEL_RUNNER_ID, LABEL_SERVICE,
+    LABEL_SLOT_ID, OciOwner, OwnedResource, OwnedResourceScanner, OwnedResources, is_label_value,
+};
+pub use stop::{StopBudget, StopOutcome};
+
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +64,8 @@ pub struct OciSpec {
     pub mounts: Vec<OciMount>,
     pub limits: OciResourceLimits,
     pub stop_timeout_seconds: u64,
+    /// Non-secret ownership labels (`run.ato.dev/*`). Empty outside a Runner.
+    pub labels: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,7 +170,7 @@ impl DockerOciAdapter {
     /// Launch in a new `--internal` network owned by the returned handle. The
     /// single-container route: nothing else ever joins that network.
     pub fn spawn(&self, workspace: &Path, runtime_root: &Path) -> Result<OciHandle> {
-        let network = OciNetwork::create_with(&self.docker, &self.spec.id)?;
+        let network = OciNetwork::create_with(&self.docker, &self.spec.id, &self.spec.labels)?;
         let mut handle = self.spawn_in_network(workspace, runtime_root, &network, None)?;
         handle.network = Some(network);
         Ok(handle)
@@ -308,7 +319,7 @@ impl DockerOciAdapter {
             platform: self.spec.platform.clone(),
             endpoints: self.spec.endpoints.clone(),
             forwarders,
-            stopped: false,
+            outcome: None,
         })
     }
 
@@ -452,30 +463,38 @@ pub struct OciNetwork {
 
 impl OciNetwork {
     /// Create the network a group of services shares.
-    pub fn create(label: &str) -> Result<Self> {
+    pub fn create(label: &str, labels: &BTreeMap<String, String>) -> Result<Self> {
         let docker = find_on_path("docker").context(
             "OCI runtime admission failed: Docker CLI is not installed or is not on PATH",
         )?;
-        Self::create_with(&docker, label)
+        Self::create_with(&docker, label, labels)
     }
 
-    fn create_with(docker: &Path, label: &str) -> Result<Self> {
+    fn create_with(docker: &Path, label: &str, labels: &BTreeMap<String, String>) -> Result<Self> {
         let suffix = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let name = format!(
             "ato-{}-{}-{suffix}-net",
             safe_name(label),
             std::process::id()
         );
+        let mut arguments = vec![
+            "network".to_owned(),
+            "create".to_owned(),
+            "--driver".to_owned(),
+            "bridge".to_owned(),
+            "--internal".to_owned(),
+        ];
+        for (key, value) in labels {
+            ensure!(
+                key.starts_with("run.ato.dev/") && is_label_value(value),
+                "OCI network ownership label is invalid"
+            );
+            arguments.extend(["--label".to_owned(), format!("{key}={value}")]);
+        }
+        arguments.push(name.clone());
         run_checked(
             docker,
-            [
-                "network",
-                "create",
-                "--driver",
-                "bridge",
-                "--internal",
-                name.as_str(),
-            ],
+            arguments.iter().map(String::as_str),
             "create isolated OCI network",
         )?;
         Ok(Self {
@@ -492,6 +511,12 @@ impl OciNetwork {
     pub fn remove(mut self) -> Result<()> {
         self.removed = true;
         remove_network(&self.docker, &self.name)
+    }
+
+    /// Give up ownership without removing: the network still has a container
+    /// whose stop was not confirmed, and recovery finds it by its labels.
+    fn forget(mut self) {
+        self.removed = true;
     }
 }
 
@@ -547,31 +572,66 @@ impl OciServiceGroup {
         Ok(None)
     }
 
-    /// Stop every service in reverse start order, then remove the network.
-    /// Every step runs even after a failure; the first error is returned.
-    pub fn stop(mut self) -> Result<()> {
-        self.stop_all()
+    /// Stop every service in reverse start order with a grace period each,
+    /// then remove the network — but only if every service is confirmed
+    /// stopped. Every service is attempted even after a failure.
+    pub fn stop_gracefully(mut self, budget: StopBudget) -> GroupStopReport {
+        self.stop_all(budget)
     }
 
-    fn stop_all(&mut self) -> Result<()> {
-        let mut first_error = None;
-        while let Some((name, handle)) = self.services.pop() {
-            if let Err(error) = handle.stop() {
-                first_error.get_or_insert(error.context(format!("stop OCI service `{name}`")));
+    /// `stop_gracefully` for callers that only need success or failure.
+    pub fn stop(self) -> Result<()> {
+        let report = self.stop_gracefully(StopBudget::DEFAULT);
+        match report.overall() {
+            Some(StopOutcome::Unconfirmed { reason }) => {
+                bail!("OCI service group stop is unconfirmed: {reason}")
             }
+            _ => Ok(()),
         }
-        if let Some(network) = self.network.take()
-            && let Err(error) = network.remove()
-        {
-            first_error.get_or_insert(error);
+    }
+
+    fn stop_all(&mut self, budget: StopBudget) -> GroupStopReport {
+        let mut services = Vec::new();
+        while let Some((name, handle)) = self.services.pop() {
+            services.push((name, handle.stop_gracefully(budget)));
         }
-        first_error.map_or(Ok(()), Err)
+        let all_confirmed = services.iter().all(|(_, outcome)| outcome.is_confirmed());
+        let network_removed = match self.network.take() {
+            // A network with a live endpoint cannot be removed, and removing
+            // it is not how a Run ends; leave it for recovery.
+            Some(network) if all_confirmed => network.remove().is_ok(),
+            Some(network) => {
+                network.forget();
+                false
+            }
+            None => true,
+        };
+        GroupStopReport {
+            services,
+            network_removed,
+        }
+    }
+}
+
+/// How each service of a group stopped, in stop (reverse start) order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupStopReport {
+    pub services: Vec<(String, StopOutcome)>,
+    pub network_removed: bool,
+}
+
+impl GroupStopReport {
+    /// The least favourable service outcome; `None` for an empty group.
+    pub fn overall(&self) -> Option<StopOutcome> {
+        StopOutcome::worst(self.services.iter().map(|(_, outcome)| outcome))
     }
 }
 
 impl Drop for OciServiceGroup {
     fn drop(&mut self) {
-        let _ = self.stop_all();
+        if !self.services.is_empty() || self.network.is_some() {
+            let _ = self.stop_all(StopBudget::DEFAULT);
+        }
     }
 }
 
@@ -586,7 +646,8 @@ pub struct OciHandle {
     platform: String,
     endpoints: Vec<OciEndpoint>,
     forwarders: Vec<PortForwarder>,
-    stopped: bool,
+    /// Set once a stop has been attempted, so drop never stops twice.
+    outcome: Option<StopOutcome>,
 }
 
 impl OciHandle {
@@ -644,29 +705,41 @@ impl OciHandle {
         Ok(Some(code.parse().context("invalid OCI exit code")?))
     }
 
-    pub fn stop(mut self) -> Result<()> {
-        self.cleanup()
+    /// Stop signal, grace, SIGKILL, confirm — then remove only a confirmed
+    /// stop. The forwarder goes first so no new request reaches a workload
+    /// that is shutting down.
+    pub fn stop_gracefully(mut self, budget: StopBudget) -> StopOutcome {
+        self.shutdown(budget)
     }
 
-    fn cleanup(&mut self) -> Result<()> {
-        if self.stopped {
-            return Ok(());
+    /// `stop_gracefully` for callers that only need success or failure.
+    pub fn stop(self) -> Result<()> {
+        match self.stop_gracefully(StopBudget::DEFAULT) {
+            StopOutcome::Unconfirmed { reason } => {
+                bail!("OCI container stop is unconfirmed: {reason}")
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn shutdown(&mut self, budget: StopBudget) -> StopOutcome {
+        if let Some(outcome) = self.outcome.clone() {
+            return outcome;
         }
         self.forwarders.clear();
-        let container = Command::new(&self.docker)
-            .args(["rm", "--force", &self.container_id])
-            .output()
-            .context("remove OCI container")?;
-        // The container is gone (or failed to go) before its network is
-        // removed: Docker refuses to remove a network with an endpoint.
-        let network = self.network.take().map_or(Ok(()), OciNetwork::remove);
-        self.stopped = true;
-        ensure!(
-            container.status.success(),
-            "remove OCI container failed: {}",
-            bounded_stderr(&container)
-        );
-        network
+        let outcome = stop::stop_container(&self.docker, &self.container_id, budget);
+        if outcome.is_confirmed() {
+            let _ = stop::remove_stopped_container(&self.docker, &self.container_id);
+            // Docker refuses to remove a network with an endpoint; a failure
+            // here leaves a labelled network for recovery, not a live writer.
+            if let Some(network) = self.network.take() {
+                let _ = network.remove();
+            }
+        } else if let Some(network) = self.network.take() {
+            network.forget();
+        }
+        self.outcome = Some(outcome.clone());
+        outcome
     }
 }
 
@@ -769,7 +842,7 @@ fn inspect_container_address(docker: &Path, container_id: &str) -> Result<IpAddr
 
 impl Drop for OciHandle {
     fn drop(&mut self) {
-        let _ = self.cleanup();
+        let _ = self.shutdown(StopBudget::DEFAULT);
     }
 }
 
@@ -820,6 +893,12 @@ fn validate_spec(spec: &OciSpec) -> Result<()> {
             && spec.limits.pids_limit > 0,
         "OCI resource limits must be positive"
     );
+    for (key, value) in &spec.labels {
+        ensure!(
+            key.starts_with("run.ato.dev/") && is_label_value(value),
+            "OCI ownership label is invalid"
+        );
+    }
     for (name, value) in &spec.environment {
         ensure!(
             !name.is_empty() && !name.contains('=') && !value.contains(['\0', '\n', '\r']),
@@ -919,6 +998,9 @@ fn docker_run_arguments(
         "--label".to_owned(),
         format!("run.ato.dev/id={}", spec.id),
     ];
+    for (key, value) in &spec.labels {
+        argv.extend(["--label".to_owned(), format!("{key}={value}")]);
+    }
     if let Some(alias) = alias {
         argv.extend(["--network-alias".to_owned(), alias.to_owned()]);
     }
@@ -983,11 +1065,13 @@ fn writable_mount_user(spec: &OciSpec) -> Result<Option<String>> {
     Ok(None)
 }
 
-fn remove_network(docker: &Path, network: &str) -> Result<()> {
-    let output = Command::new(docker)
-        .args(["network", "rm", network])
-        .output()
-        .context("remove isolated OCI network")?;
+pub(crate) fn remove_network(docker: &Path, network: &str) -> Result<()> {
+    let output = stop::docker_output(
+        docker,
+        ["network", "rm", network],
+        stop::DOCKER_CALL_TIMEOUT,
+    )
+    .context("remove isolated OCI network")?;
     ensure!(
         output.status.success(),
         "remove isolated OCI network failed: {}",
@@ -1035,7 +1119,7 @@ fn safe_name(value: &str) -> String {
     }
 }
 
-fn find_on_path(name: &str) -> Option<PathBuf> {
+pub(crate) fn find_on_path(name: &str) -> Option<PathBuf> {
     std::env::var_os("PATH").and_then(|search| {
         std::env::split_paths(&search)
             .map(|directory| directory.join(name))
@@ -1069,6 +1153,7 @@ mod tests {
                 pids_limit: 128,
             },
             stop_timeout_seconds: 5,
+            labels: BTreeMap::new(),
         }
     }
 
