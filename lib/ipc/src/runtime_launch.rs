@@ -67,6 +67,9 @@ pub enum RuntimeLaunchSpecError {
     /// An OCI service group breaks a group invariant: service count or
     /// naming, the one Surface, per-service visibility, or the budget.
     InvalidServiceGroup { field: String },
+    /// A Runner-volume state attachment breaks a volume invariant: its
+    /// reference, capacity, seed or access.
+    InvalidStateVolume { field: String },
 }
 
 impl RuntimeLaunchSpecError {
@@ -88,6 +91,7 @@ impl RuntimeLaunchSpecError {
             Self::InvalidEndpoint { .. } => "ATO_ERR_RUNTIME_LAUNCH_SPEC_INVALID_ENDPOINT",
             Self::InvalidLifecycle { .. } => "ATO_ERR_RUNTIME_LAUNCH_SPEC_INVALID_LIFECYCLE",
             Self::InvalidServiceGroup { .. } => "ATO_ERR_RUNTIME_LAUNCH_SPEC_INVALID_SERVICE_GROUP",
+            Self::InvalidStateVolume { .. } => "ATO_ERR_RUNTIME_LAUNCH_SPEC_INVALID_STATE_VOLUME",
         }
     }
 }
