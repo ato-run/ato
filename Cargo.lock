@@ -642,6 +642,7 @@ dependencies = [
  "anyhow",
  "ato-computation",
  "ato-formation",
+ "ato-ipc",
  "ato-materializer-static-web",
  "ato-objects",
  "base64 0.22.1",

@@ -21,7 +21,7 @@ use ato_formation::authoring::{
     BROWSER_PROTOCOL, BindingContext, BoundContract, BoundDerivation, BoundInput, BoundPort,
     BoundRequirement, BoundStep, DerivationDraft, EffectClass, HTTP_CONTRACT_VERIFIER,
     HTTP_PROTOCOL, INSTANCE_SNAPSHOT_CONTRACT_VERIFIER, PROCESS_PROTOCOL, PortDraft,
-    STATE_FILESYSTEM_PROTOCOL, StateAccess, StepDraft, WORKSPACE_CONTRACT_VERIFIER,
+    STATE_FILESYSTEM_PROTOCOL, StateAccess, StepDraft, TCP_PROTOCOL, WORKSPACE_CONTRACT_VERIFIER,
     WORKSPACE_PROTOCOL, bind,
 };
 use ato_formation::capsule_toml::{CAPSULE_FILE_NAME, parse_capsule_toml};
@@ -202,6 +202,8 @@ pub enum PortableRealizationKind {
     StaticWeb,
     LocalProcess,
     OciContainer,
+    /// Several `ato.oci@1` serving steps of one Derivation, on one Runner.
+    OciServiceGroup,
 }
 
 impl PortableRealizationKind {
@@ -210,6 +212,7 @@ impl PortableRealizationKind {
             Self::StaticWeb => "Static Web",
             Self::LocalProcess => "Local Process",
             Self::OciContainer => "OCI Container",
+            Self::OciServiceGroup => "OCI Service Group",
         }
     }
 }
@@ -251,8 +254,23 @@ pub struct PortableDynamicBundleSpec {
 #[derive(Debug, Clone)]
 pub struct PortableDynamicRouteSpec {
     pub realization: PortableRealizationKind,
+    /// For an OCI service group, `runtimes` holds only the shared platform and
+    /// the other fields are empty; each service carries its own execution.
     pub execution: PortableExecutionSpec,
+    /// Zero for an OCI service group.
     pub guest_port: u16,
+    pub services: Vec<PortableServiceRouteSpec>,
+}
+
+/// One serving step of an OCI service group.
+#[derive(Debug, Clone)]
+pub struct PortableServiceRouteSpec {
+    pub id: String,
+    pub execution: PortableExecutionSpec,
+    /// `(Port id, guest port)`. The Port named `app.http` serves the Surface.
+    pub ports: Vec<(String, u16)>,
+    pub state: Vec<String>,
+    pub bindings: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -549,14 +567,17 @@ fn validate_bundle_closure(
             let reference = parse_ref(value, "derivation")?;
             let derivation: BoundDerivation =
                 structured(bundle, &reference, BOUND_DERIVATION_SCHEMA)?;
-            if derivation
+            // A single OCI route names its image route-wide; each step of a
+            // service group names its own. The platform is always shared.
+            for step in derivation
                 .steps
                 .iter()
-                .any(|step| step.protocol == OCI_PROTOCOL)
+                .filter(|step| step.protocol == OCI_PROTOCOL)
             {
-                let image = derivation
+                let image = step
                     .runtimes
                     .get(OCI_IMAGE_RUNTIME)
+                    .or_else(|| derivation.runtimes.get(OCI_IMAGE_RUNTIME))
                     .ok_or_else(|| profile("OCI derivation has no image"))?;
                 let platform = derivation
                     .runtimes
@@ -1044,11 +1065,13 @@ pub fn build_dynamic_process_oci_bundle(
                     realization: PortableRealizationKind::LocalProcess,
                     execution: spec.process.clone(),
                     guest_port: spec.guest_port,
+                    services: Vec::new(),
                 },
                 PortableDynamicRouteSpec {
                     realization: PortableRealizationKind::OciContainer,
                     execution: spec.oci.clone(),
                     guest_port: spec.guest_port,
+                    services: Vec::new(),
                 },
             ],
             filesystem_state: spec.filesystem_state.clone(),
@@ -1077,6 +1100,9 @@ pub fn build_authored_bundle_v2(
             realization: match derivation.kind {
                 PortableDerivationKindV2::Process => PortableRealizationKind::LocalProcess,
                 PortableDerivationKindV2::Oci => PortableRealizationKind::OciContainer,
+                PortableDerivationKindV2::OciServiceGroup => {
+                    PortableRealizationKind::OciServiceGroup
+                }
             },
             execution: PortableExecutionSpec {
                 runtimes: derivation.runtimes,
@@ -1085,6 +1111,26 @@ pub fn build_authored_bundle_v2(
                 env: derivation.env,
             },
             guest_port: derivation.guest_port,
+            services: derivation
+                .services
+                .into_iter()
+                .map(|service| PortableServiceRouteSpec {
+                    id: service.id,
+                    execution: PortableExecutionSpec {
+                        runtimes: service.runtimes,
+                        argv: service.argv,
+                        cwd: service.cwd,
+                        env: service.env,
+                    },
+                    ports: service
+                        .ports
+                        .into_iter()
+                        .map(|port| (port.id, port.guest_port))
+                        .collect(),
+                    state: service.state,
+                    bindings: service.bindings,
+                })
+                .collect(),
         })
         .collect();
     build_dynamic_routes_bundle(
@@ -1147,28 +1193,74 @@ pub fn build_dynamic_routes_bundle(
         schema: BOUND_DERIVATION_SCHEMA.to_owned(),
         inputs: vec![input.clone()],
         runtimes: route.execution.runtimes.clone(),
-        steps: vec![BoundStep {
-            id: "serve".to_owned(),
-            protocol: match route.realization {
-                PortableRealizationKind::LocalProcess => PROCESS_PROTOCOL.to_owned(),
-                PortableRealizationKind::OciContainer => OCI_PROTOCOL.to_owned(),
-                PortableRealizationKind::StaticWeb => BROWSER_PROTOCOL.to_owned(),
-            },
-            op: "serve".to_owned(),
-            argv: route.execution.argv.clone(),
-            cwd: route.execution.cwd.clone(),
-            env: route.execution.env.clone(),
-            source: None,
-            root: None,
-            entry: None,
-            spa_fallback: None,
-        }],
-        ports: vec![BoundPort {
-            id: "app.http".to_owned(),
-            protocol: HTTP_PROTOCOL.to_owned(),
-            from: "serve".to_owned(),
-            guest_port: Some(route.guest_port),
-        }],
+        steps: if route.realization == PortableRealizationKind::OciServiceGroup {
+            route
+                .services
+                .iter()
+                .map(|service| BoundStep {
+                    id: service.id.clone(),
+                    protocol: OCI_PROTOCOL.to_owned(),
+                    op: "serve".to_owned(),
+                    argv: service.execution.argv.clone(),
+                    cwd: service.execution.cwd.clone(),
+                    env: service.execution.env.clone(),
+                    source: None,
+                    root: None,
+                    entry: None,
+                    spa_fallback: None,
+                    runtimes: service.execution.runtimes.clone(),
+                    state: service.state.clone(),
+                    bindings: service.bindings.clone(),
+                })
+                .collect()
+        } else {
+            vec![BoundStep {
+                id: "serve".to_owned(),
+                protocol: match route.realization {
+                    PortableRealizationKind::LocalProcess => PROCESS_PROTOCOL.to_owned(),
+                    PortableRealizationKind::OciContainer
+                    | PortableRealizationKind::OciServiceGroup => OCI_PROTOCOL.to_owned(),
+                    PortableRealizationKind::StaticWeb => BROWSER_PROTOCOL.to_owned(),
+                },
+                op: "serve".to_owned(),
+                argv: route.execution.argv.clone(),
+                cwd: route.execution.cwd.clone(),
+                env: route.execution.env.clone(),
+                source: None,
+                root: None,
+                entry: None,
+                spa_fallback: None,
+                runtimes: BTreeMap::new(),
+                state: Vec::new(),
+                bindings: Vec::new(),
+            }]
+        },
+        ports: if route.realization == PortableRealizationKind::OciServiceGroup {
+            route
+                .services
+                .iter()
+                .flat_map(|service| {
+                    service.ports.iter().map(|(id, guest_port)| BoundPort {
+                        id: id.clone(),
+                        protocol: if id == "app.http" {
+                            HTTP_PROTOCOL
+                        } else {
+                            TCP_PROTOCOL
+                        }
+                        .to_owned(),
+                        from: service.id.clone(),
+                        guest_port: Some(*guest_port),
+                    })
+                })
+                .collect()
+        } else {
+            vec![BoundPort {
+                id: "app.http".to_owned(),
+                protocol: HTTP_PROTOCOL.to_owned(),
+                from: "serve".to_owned(),
+                guest_port: Some(route.guest_port),
+            }]
+        },
         state: spec
             .filesystem_state
             .as_ref()
@@ -1322,6 +1414,11 @@ fn validate_initial_route(
     {
         return Err(profile("invalid portable Application object"));
     }
+    if derivation.steps.len() > 1 {
+        let surface_port = validate_oci_service_group(application, derivation)?;
+        validate_route_requirements(contract, &derivation.inputs[0], surface_port)?;
+        return Ok(PortableRealizationKind::OciServiceGroup);
+    }
     if application.surfaces.len() != 1
         || derivation.inputs.len() != 1
         || derivation.steps.len() != 1
@@ -1343,6 +1440,14 @@ fn validate_initial_route(
     let input = &derivation.inputs[0];
     let step = &derivation.steps[0];
     let port = &derivation.ports[0];
+    // Step-scoped runtimes, state and Bindings belong to a service group. A
+    // single-step route keeps them route-wide, so any of them here is a shape
+    // this profile does not model.
+    if !step.runtimes.is_empty() || !step.state.is_empty() || !step.bindings.is_empty() {
+        return Err(profile(
+            "a single-step route cannot declare step-scoped runtimes, state, or Bindings",
+        ));
+    }
     let surface = &application.surfaces[0];
     if input.protocol != WORKSPACE_PROTOCOL
         || port.protocol != HTTP_PROTOCOL
@@ -1441,42 +1546,12 @@ fn validate_initial_route(
                 .ok_or_else(|| profile("OCI derivation omitted oci.platform"))?;
             validate_immutable_oci_image(image)?;
             validate_oci_platform(platform)?;
-            for key in [
-                OCI_MEMORY_BYTES_RUNTIME,
-                OCI_CPU_MILLIS_RUNTIME,
-                OCI_PIDS_LIMIT_RUNTIME,
-            ] {
-                let value = derivation
-                    .runtimes
-                    .get(key)
-                    .ok_or_else(|| profile(format!("OCI derivation omitted {key}")))?;
-                let parsed = value
-                    .parse::<u64>()
-                    .map_err(|_| profile(format!("OCI runtime value `{key}` is not an integer")))?;
-                if parsed == 0 {
-                    return Err(profile(format!(
-                        "OCI runtime value `{key}` must be positive"
-                    )));
-                }
+            oci_resource_limits(&derivation.runtimes)?;
+            if let Some(entrypoint) = derivation.runtimes.get(OCI_ENTRYPOINT_RUNTIME) {
+                validate_oci_entrypoint(entrypoint)?;
             }
-            if let Some(entrypoint) = derivation.runtimes.get(OCI_ENTRYPOINT_RUNTIME)
-                && (!entrypoint.starts_with('/')
-                    || entrypoint.contains(['\0', '\\', ','])
-                    || entrypoint
-                        .split('/')
-                        .skip(1)
-                        .any(|segment| segment.is_empty() || matches!(segment, "." | "..")))
-            {
-                return Err(profile(
-                    "OCI entrypoint must be an absolute traversal-free guest path",
-                ));
-            }
-            if let Some(target) = derivation.runtimes.get(OCI_WORKSPACE_MOUNT_RUNTIME)
-                && (!valid_guest_mount(target) || target.contains(','))
-            {
-                return Err(profile(
-                    "OCI workspace mount must be an absolute traversal-free guest path",
-                ));
+            if let Some(target) = derivation.runtimes.get(OCI_WORKSPACE_MOUNT_RUNTIME) {
+                validate_oci_workspace_mount(target)?;
             }
             if derivation.runtimes.len()
                 != 5 + usize::from(derivation.runtimes.contains_key(OCI_ENTRYPOINT_RUNTIME))
@@ -1529,6 +1604,17 @@ fn validate_initial_route(
         }
     }
 
+    validate_route_requirements(contract, input, &port.id)?;
+    Ok(realization)
+}
+
+/// The Contract's requirements against one workspace input and the one Port
+/// the Application Surface serves.
+fn validate_route_requirements(
+    contract: &BoundContract,
+    input: &BoundInput,
+    surface_port: &str,
+) -> Result<(), PortableApplicationError> {
     let requirement_ids = contract
         .requirements
         .iter()
@@ -1549,7 +1635,7 @@ fn validate_initial_route(
                 }
             }
             HTTP_CONTRACT_VERIFIER => {
-                if requirement.port.as_deref() != Some(port.id.as_str())
+                if requirement.port.as_deref() != Some(surface_port)
                     || requirement.method.as_deref() != Some("GET")
                 {
                     return Err(profile(
@@ -1595,7 +1681,292 @@ fn validate_initial_route(
             }
         }
     }
-    Ok(realization)
+    Ok(())
+}
+
+fn validate_oci_entrypoint(entrypoint: &str) -> Result<(), PortableApplicationError> {
+    if !entrypoint.starts_with('/')
+        || entrypoint.contains(['\0', '\\', ','])
+        || entrypoint
+            .split('/')
+            .skip(1)
+            .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
+    {
+        return Err(profile(
+            "OCI entrypoint must be an absolute traversal-free guest path",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_oci_workspace_mount(target: &str) -> Result<(), PortableApplicationError> {
+    if !valid_guest_mount(target) || target.contains(',') {
+        return Err(profile(
+            "OCI workspace mount must be an absolute traversal-free guest path",
+        ));
+    }
+    Ok(())
+}
+
+/// `(memory_bytes, cpu_limit_millis, pids_limit)`, each required and positive.
+fn oci_resource_limits(
+    runtimes: &BTreeMap<String, String>,
+) -> Result<(u64, u64, u64), PortableApplicationError> {
+    let mut values = [0u64; 3];
+    for (slot, key) in values.iter_mut().zip([
+        OCI_MEMORY_BYTES_RUNTIME,
+        OCI_CPU_MILLIS_RUNTIME,
+        OCI_PIDS_LIMIT_RUNTIME,
+    ]) {
+        let value = runtimes
+            .get(key)
+            .ok_or_else(|| profile(format!("OCI derivation omitted {key}")))?;
+        *slot = value
+            .parse::<u64>()
+            .map_err(|_| profile(format!("OCI runtime value `{key}` is not an integer")))?;
+        if *slot == 0 {
+            return Err(profile(format!(
+                "OCI runtime value `{key}` must be positive"
+            )));
+        }
+    }
+    Ok((values[0], values[1], values[2]))
+}
+
+/// The OCI service group profile: 2–4 `ato.oci@1` serving steps of one
+/// Derivation, realized together on one Runner behind one Surface. Returns
+/// the Port the Surface serves.
+///
+/// Visibility is scoped per step: each state slot and each Application
+/// Binding is visible to exactly one step, so a secret or a mail store never
+/// reaches a sibling that does not need it.
+fn validate_oci_service_group<'a>(
+    application: &ValidatedApplication,
+    derivation: &'a BoundDerivation,
+) -> Result<&'a str, PortableApplicationError> {
+    use ato_ipc::oci_service_group::{
+        OCI_SERVICE_GROUP_MAX_PORTS, OCI_SERVICE_GROUP_MAX_SERVICES,
+        OCI_SERVICE_GROUP_MIN_SERVICES, group_totals, is_service_name,
+    };
+
+    if application.schema != APPLICATION_V2_SCHEMA
+        || application.surfaces.len() != 1
+        || derivation.inputs.len() != 1
+        || derivation.inputs[0].protocol != WORKSPACE_PROTOCOL
+    {
+        return Err(profile(
+            "an OCI service group requires one ato.application/2 Surface and one workspace input",
+        ));
+    }
+    let surface = &application.surfaces[0];
+    validate_dynamic_surface(surface)?;
+    if !(OCI_SERVICE_GROUP_MIN_SERVICES..=OCI_SERVICE_GROUP_MAX_SERVICES)
+        .contains(&derivation.steps.len())
+        || derivation.ports.is_empty()
+        || derivation.ports.len() > OCI_SERVICE_GROUP_MAX_PORTS
+    {
+        return Err(profile(
+            "an OCI service group has 2-4 serving steps and 1-8 Ports",
+        ));
+    }
+    if derivation.state.len() > 1
+        || derivation.workspace_build.is_some()
+        || derivation.workspace_compiler.is_some()
+        || derivation.effects != EffectClass::Pure
+    {
+        return Err(profile(
+            "an OCI service group permits at most one state and forbids builds and non-pure effects",
+        ));
+    }
+    if derivation.runtimes.len() != 1 {
+        return Err(profile(
+            "an OCI service group shares only oci.platform at the route level",
+        ));
+    }
+    validate_oci_platform(
+        derivation
+            .runtimes
+            .get(OCI_PLATFORM_RUNTIME)
+            .ok_or_else(|| profile("OCI service group omitted oci.platform"))?,
+    )?;
+
+    let binding_ids = application
+        .bindings
+        .iter()
+        .map(|binding| binding.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let state_ids = derivation
+        .state
+        .iter()
+        .map(|state| state.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut step_ids = BTreeSet::new();
+    let mut state_readers = BTreeMap::<&str, usize>::new();
+    let mut binding_readers = BTreeMap::<&str, usize>::new();
+    let mut limits = Vec::with_capacity(derivation.steps.len());
+    for step in &derivation.steps {
+        if !is_service_name(&step.id) || !step_ids.insert(step.id.as_str()) {
+            return Err(profile(format!(
+                "service `{}` is not a unique DNS label",
+                step.id
+            )));
+        }
+        if step.protocol != OCI_PROTOCOL
+            || step.op != "serve"
+            || step.argv.is_empty()
+            || step.argv.iter().any(|value| value.contains('\0'))
+            || !valid_workspace_relative(&step.cwd)
+            || step
+                .env
+                .iter()
+                .any(|(name, value)| name.is_empty() || name.contains('=') || value.contains('\0'))
+            || step.source.is_some()
+            || step.root.is_some()
+            || step.entry.is_some()
+            || step.spa_fallback.is_some()
+        {
+            return Err(profile(format!(
+                "service `{}` is outside the declared container profile",
+                step.id
+            )));
+        }
+        let image = step
+            .runtimes
+            .get(OCI_IMAGE_RUNTIME)
+            .ok_or_else(|| profile(format!("service `{}` omitted oci.image", step.id)))?;
+        validate_immutable_oci_image(image)?;
+        limits.push(oci_resource_limits(&step.runtimes)?);
+        if let Some(entrypoint) = step.runtimes.get(OCI_ENTRYPOINT_RUNTIME) {
+            validate_oci_entrypoint(entrypoint)?;
+        }
+        let workspace_mount = match step.runtimes.get(OCI_WORKSPACE_MOUNT_RUNTIME) {
+            Some(target) => {
+                validate_oci_workspace_mount(target)?;
+                target.as_str()
+            }
+            None => "/app",
+        };
+        if step.runtimes.len()
+            != 4 + usize::from(step.runtimes.contains_key(OCI_ENTRYPOINT_RUNTIME))
+                + usize::from(step.runtimes.contains_key(OCI_WORKSPACE_MOUNT_RUNTIME))
+        {
+            return Err(profile(format!(
+                "service `{}` declares a runtime fact this profile does not model",
+                step.id
+            )));
+        }
+
+        let mut seen = BTreeSet::new();
+        for state_id in &step.state {
+            let Some(state) = derivation
+                .state
+                .iter()
+                .find(|state| &state.id == state_id)
+                .filter(|_| seen.insert(state_id.as_str()))
+            else {
+                return Err(profile(format!(
+                    "service `{}` names undeclared or repeated state `{state_id}`",
+                    step.id
+                )));
+            };
+            if state.mount == workspace_mount {
+                return Err(profile(format!(
+                    "service `{}` mounts state over its workspace",
+                    step.id
+                )));
+            }
+            *state_readers.entry(state.id.as_str()).or_default() += 1;
+        }
+        // Environment names only need to be unique WITHIN a service: each
+        // service is its own container, so siblings may reuse a name.
+        let mut seen = BTreeSet::new();
+        for binding_id in &step.bindings {
+            if !binding_ids.contains(binding_id.as_str()) || !seen.insert(binding_id.as_str()) {
+                return Err(profile(format!(
+                    "service `{}` names undeclared or repeated Binding `{binding_id}`",
+                    step.id
+                )));
+            }
+            if step.env.contains_key(&binding_environment_name(binding_id)) {
+                return Err(profile(format!(
+                    "Binding `{binding_id}` conflicts with an authored environment value of service `{}`",
+                    step.id
+                )));
+            }
+            *binding_readers.entry(binding_id.as_str()).or_default() += 1;
+        }
+    }
+    if group_totals(limits).is_none() {
+        return Err(profile(
+            "OCI service group resource limits exceed the group budget",
+        ));
+    }
+    for (what, ids, readers) in [
+        ("state", &state_ids, &state_readers),
+        ("Binding", &binding_ids, &binding_readers),
+    ] {
+        if let Some(id) = ids.iter().find(|id| readers.get(*id) != Some(&1)) {
+            return Err(profile(format!(
+                "{what} `{id}` must be visible to exactly one service"
+            )));
+        }
+    }
+    for state in &derivation.state {
+        if state.protocol != STATE_FILESYSTEM_PROTOCOL
+            || state.access != StateAccess::ReadWrite
+            || !valid_state_key(&state.id)
+            || !valid_guest_mount(&state.mount)
+            || state.mount == "/app"
+        {
+            return Err(profile(
+                "portable filesystem state must be one read-write ato.state.filesystem@1 slot at an absolute guest path other than /app",
+            ));
+        }
+    }
+
+    let mut port_ids = BTreeSet::new();
+    let mut guest_ports = BTreeSet::new();
+    let mut surface_port = None;
+    for port in &derivation.ports {
+        let Some(guest_port) = port.guest_port.filter(|port| *port != 0) else {
+            return Err(profile(format!(
+                "Port `{}` omitted its guest port",
+                port.id
+            )));
+        };
+        if !port_ids.insert(port.id.as_str())
+            || !step_ids.contains(port.from.as_str())
+            || !guest_ports.insert((port.from.as_str(), guest_port))
+        {
+            return Err(profile(format!(
+                "Port `{}` is repeated or not served by one declared service",
+                port.id
+            )));
+        }
+        let expected = if port.id == surface.port {
+            surface_port = Some(port.id.as_str());
+            HTTP_PROTOCOL
+        } else {
+            TCP_PROTOCOL
+        };
+        if port.protocol != expected {
+            return Err(profile(format!(
+                "Port `{}` must use {expected}: only the Surface Port is HTTP",
+                port.id
+            )));
+        }
+    }
+    if let Some(step) = derivation
+        .steps
+        .iter()
+        .find(|step| !derivation.ports.iter().any(|port| port.from == step.id))
+    {
+        return Err(profile(format!(
+            "service `{}` serves no Port and cannot report readiness",
+            step.id
+        )));
+    }
+    surface_port.ok_or_else(|| profile("no service serves the Application Surface Port"))
 }
 
 fn valid_guest_mount(target: &str) -> bool {
@@ -2427,6 +2798,269 @@ fn profile(message: impl Into<String>) -> PortableApplicationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SERVICE_GROUP_TOML: &str = r#"
+schema = "ato.capsule/2"
+
+[application]
+title = "Service group"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[binding]]
+id = "admin_secret"
+protocol = "ato.secret@1"
+
+[[state]]
+id = "data"
+use = "ato.state.filesystem@1"
+mount = "/data"
+access = "read-write"
+
+[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "root"
+use = "ato.contract.http@1"
+port = "app.http"
+path = "/"
+status = 200
+
+[[derivation]]
+id = "group"
+use = "ato.oci@1"
+runtimes = { "oci.platform" = "linux/amd64" }
+
+[[derivation.service]]
+id = "backend"
+runtimes = { "oci.image" = "docker.io/traefik/whoami@sha256:1111111111111111111111111111111111111111111111111111111111111111", "oci.memory_bytes" = "268435456", "oci.cpu_limit_millis" = "1500", "oci.pids_limit" = "128" }
+argv = ["--port", "80"]
+ports = [{ id = "backend.http", guest_port = 80 }]
+state = ["data"]
+bindings = ["admin_secret"]
+env = { SHARED = "backend" }
+
+[[derivation.service]]
+id = "web"
+runtimes = { "oci.image" = "docker.io/nginxinc/nginx-unprivileged@sha256:2222222222222222222222222222222222222222222222222222222222222222", "oci.memory_bytes" = "268435456", "oci.cpu_limit_millis" = "1500", "oci.pids_limit" = "128" }
+argv = ["nginx", "-c", "/app/nginx.conf"]
+ports = [{ id = "app.http", guest_port = 8080 }]
+env = { SHARED = "web" }
+
+[effects]
+default = "pure"
+"#;
+
+    fn authored_root(toml: &str) -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join(CAPSULE_FILE_NAME), toml).unwrap();
+        fs::write(root.path().join("nginx.conf"), "events {}\n").unwrap();
+        root
+    }
+
+    fn build_group(
+        toml: &str,
+    ) -> Result<Vec<ValidatedPortableApplication>, PortableApplicationError> {
+        let root = authored_root(toml);
+        let (_, bundle) = build_authored_bundle_v2(root.path())?;
+        validate_all_derivations(&bundle)
+    }
+
+    fn group_route() -> ValidatedPortableApplication {
+        let mut routes = build_group(SERVICE_GROUP_TOML).unwrap();
+        assert_eq!(routes.len(), 1);
+        routes.remove(0)
+    }
+
+    fn revalidate(
+        route: &ValidatedPortableApplication,
+        mutate: impl FnOnce(&mut BoundDerivation),
+    ) -> Result<PortableRealizationKind, PortableApplicationError> {
+        let mut derivation = route.derivation.clone();
+        mutate(&mut derivation);
+        validate_initial_route(&route.contract, &route.application, &derivation)
+    }
+
+    #[test]
+    fn seeded_single_route_identities_survive_step_scoped_fields() {
+        // Contract and Derivation refs published to staging Discover before a
+        // step could carry runtimes, state or Bindings of its own.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/discover-oss/memos");
+        let (_, bundle) = build_authored_bundle_v2(&root).unwrap();
+        assert_eq!(
+            bundle.index.root_contract_ref,
+            "sha256:64368f746f00ed7be9c5e6846c99639d19d402bdc4e96b022407dc3f8863908b"
+        );
+        assert_eq!(
+            bundle.index.derivations,
+            vec!["sha256:25fffed8e727f6716513f3846ff988ff0291fbca17e8725712a2a2684cb2d61d"]
+        );
+    }
+
+    #[test]
+    fn a_service_group_compiles_to_plain_steps_ports_and_scoped_references() {
+        let route = group_route();
+        assert_eq!(route.realization, PortableRealizationKind::OciServiceGroup);
+        let derivation = &route.derivation;
+        assert_eq!(
+            derivation.runtimes,
+            BTreeMap::from([(OCI_PLATFORM_RUNTIME.to_owned(), "linux/amd64".to_owned())])
+        );
+        assert_eq!(
+            derivation
+                .steps
+                .iter()
+                .map(|step| step.id.as_str())
+                .collect::<Vec<_>>(),
+            ["backend", "web"],
+            "authored order is the start order"
+        );
+        assert_eq!(derivation.steps[0].state, ["data"]);
+        assert_eq!(derivation.steps[0].bindings, ["admin_secret"]);
+        assert!(derivation.steps[1].state.is_empty() && derivation.steps[1].bindings.is_empty());
+        let ports = derivation
+            .ports
+            .iter()
+            .map(|port| (port.id.as_str(), port.protocol.as_str(), port.from.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ports,
+            [
+                ("backend.http", TCP_PROTOCOL, "backend"),
+                ("app.http", HTTP_PROTOCOL, "web"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_single_step_route_refuses_step_scoped_fields() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/discover-oss/memos");
+        let (_, bundle) = build_authored_bundle_v2(&root).unwrap();
+        let route = validate_all_derivations(&bundle).unwrap().remove(0);
+        for mutate in [
+            (|d: &mut BoundDerivation| {
+                d.steps[0]
+                    .runtimes
+                    .insert(OCI_IMAGE_RUNTIME.to_owned(), "x@sha256:0".to_owned());
+            }) as fn(&mut BoundDerivation),
+            |d| d.steps[0].state.push("data".to_owned()),
+            |d| d.steps[0].bindings.push("secret".to_owned()),
+        ] {
+            assert!(revalidate(&route, mutate).is_err());
+        }
+    }
+
+    #[test]
+    fn the_group_profile_refuses_every_unmodelled_or_widened_shape() {
+        let route = group_route();
+        // Each case below must be refused for its own reason, not because the
+        // untouched group already was.
+        assert_eq!(
+            revalidate(&route, |_| {}).unwrap(),
+            PortableRealizationKind::OciServiceGroup
+        );
+        type Mutation = fn(&mut BoundDerivation);
+        let cases: Vec<(&str, Mutation)> = vec![
+            ("one step", |d| {
+                d.steps.truncate(1);
+                d.ports.retain(|port| port.from == "backend");
+            }),
+            ("five steps", |d| {
+                for index in 0..3 {
+                    let mut step = d.steps[1].clone();
+                    step.id = format!("extra{index}");
+                    step.state.clear();
+                    step.bindings.clear();
+                    step.runtimes
+                        .insert(OCI_CPU_MILLIS_RUNTIME.to_owned(), "100".to_owned());
+                    let mut port = d.ports[0].clone();
+                    port.id = format!("extra{index}.tcp");
+                    port.from = step.id.clone();
+                    d.steps.push(step);
+                    d.ports.push(port);
+                }
+            }),
+            ("not a DNS label", |d| {
+                d.steps[0].id = "back.end".to_owned();
+                d.ports[0].from = "back.end".to_owned();
+            }),
+            ("unpinned image", |d| {
+                d.steps[0].runtimes.insert(
+                    OCI_IMAGE_RUNTIME.to_owned(),
+                    "traefik/whoami:latest".to_owned(),
+                );
+            }),
+            ("aggregate CPU", |d| {
+                d.steps[1]
+                    .runtimes
+                    .insert(OCI_CPU_MILLIS_RUNTIME.to_owned(), "3000".to_owned());
+            }),
+            ("unmodelled runtime", |d| {
+                d.steps[0]
+                    .runtimes
+                    .insert("oci.privileged".to_owned(), "true".to_owned());
+            }),
+            ("route-wide image", |d| {
+                d.runtimes
+                    .insert(OCI_IMAGE_RUNTIME.to_owned(), "x".to_owned());
+            }),
+            ("state shared by two services", |d| {
+                d.steps[1].state.push("data".to_owned());
+            }),
+            ("state visible to nobody", |d| d.steps[0].state.clear()),
+            ("Binding shared by two services", |d| {
+                d.steps[1].bindings.push("admin_secret".to_owned());
+            }),
+            ("Binding visible to nobody", |d| d.steps[0].bindings.clear()),
+            ("Binding env collision in one service", |d| {
+                d.steps[0].env.insert(
+                    binding_environment_name("admin_secret"),
+                    "shadow".to_owned(),
+                );
+            }),
+            ("state over the workspace", |d| {
+                d.steps[0]
+                    .runtimes
+                    .insert(OCI_WORKSPACE_MOUNT_RUNTIME.to_owned(), "/data".to_owned());
+            }),
+            ("no Surface Port", |d| d.ports[1].id = "web.http".to_owned()),
+            ("HTTP internal Port", |d| {
+                d.ports[0].protocol = HTTP_PROTOCOL.to_owned()
+            }),
+            ("Port from an undeclared service", |d| {
+                d.ports[0].from = "ghost".to_owned()
+            }),
+            ("service without a Port", |d| {
+                d.ports[0].from = "web".to_owned()
+            }),
+            ("non-pure effects", |d| {
+                d.effects = EffectClass::NonRepeatable
+            }),
+        ];
+        for (name, mutate) in cases {
+            assert!(revalidate(&route, mutate).is_err(), "{name} was admitted");
+        }
+    }
+
+    #[test]
+    fn env_names_are_scoped_per_service_and_the_report_says_so() {
+        let route = group_route();
+        let reports = crate::validator_agent::tests_support::route_reports(&[route]).unwrap();
+        let services = &reports[0].services;
+        assert_eq!(reports[0].realization, "oci_service_group");
+        assert_eq!(reports[0].port, "app.http");
+        assert!(reports[0].guest_port.is_none());
+        assert_eq!(services[0].env["SHARED"], "backend");
+        assert_eq!(services[1].env["SHARED"], "web");
+        assert_eq!(services[0].ports[0].exposure, "internal");
+        assert_eq!(services[1].ports[0].exposure, "surface");
+        assert_eq!(services[0].bindings, ["admin_secret"]);
+    }
 
     #[test]
     fn sparse_v4_transport_keeps_datasette_contract_and_derivations() {

@@ -25,6 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             PortableRealizationKind::StaticWeb => "static_derivation_ref",
             PortableRealizationKind::LocalProcess => "process_derivation_ref",
             PortableRealizationKind::OciContainer => "oci_derivation_ref",
+            PortableRealizationKind::OciServiceGroup => "oci_service_group_derivation_ref",
         };
         println!("{name}={}", route.derivation_ref);
     }
