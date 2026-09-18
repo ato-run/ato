@@ -54,6 +54,10 @@ pub const PROCESS_PROTOCOL: &str = "ato.process@1";
 pub const BROWSER_PROTOCOL: &str = "ato.browser@1";
 /// An exported HTTP port. `ato-adapter-http`.
 pub const HTTP_PROTOCOL: &str = "ato.http@1";
+/// A plain, payload-opaque TCP port that one step of a route serves to its
+/// sibling steps. Honoured by the OCI service group executor, which probes it
+/// for readiness and never forwards it to the host.
+pub const TCP_PROTOCOL: &str = "ato.tcp@1";
 /// Writable continuation state, filesystem-shaped. Already the protocol every
 /// Formation `state_slot_declaration` carries.
 pub const STATE_FILESYSTEM_PROTOCOL: &str = "ato.state.filesystem@1";
@@ -346,6 +350,20 @@ pub struct BoundStep {
     pub entry: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spa_fallback: Option<bool>,
+    // The three step-scoped fields below are absent from every Derivation
+    // formed before a route could hold more than one serving step, so those
+    // Derivations digest exactly as they did.
+    /// Runtime facts owned by THIS step, for routes whose steps run
+    /// different images. Route-wide facts stay in `BoundDerivation::runtimes`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub runtimes: BTreeMap<String, String>,
+    /// Ids of `BoundDerivation::state` slots visible to this step only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub state: Vec<String>,
+    /// Ids of Application Bindings injected into this step only, so a secret
+    /// is visible to the one service that needs it and to no sibling.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bindings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -512,6 +530,9 @@ fn bind_derivation(
             root: step.root.clone(),
             entry: step.entry.clone(),
             spa_fallback: step.spa_fallback,
+            runtimes: BTreeMap::new(),
+            state: Vec::new(),
+            bindings: Vec::new(),
         });
     }
 

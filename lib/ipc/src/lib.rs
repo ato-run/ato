@@ -14,6 +14,7 @@ pub mod desktop_control;
 pub mod error;
 pub mod formation;
 pub mod net;
+pub mod oci_service_group;
 pub mod runtime_launch;
 pub mod session_surface;
 pub mod terminal_surface;
