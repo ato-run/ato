@@ -29,6 +29,12 @@ fn canonical_bytes_are_the_fixture_bytes() {
         String::from_utf8(spec.canonical_bytes().unwrap()).unwrap(),
         GROUP_FIXTURE
     );
+    // Pinned in ato-api too: the control plane's factory must produce these
+    // exact bytes for the same group.
+    assert_eq!(
+        spec.canonical_digest().unwrap(),
+        "sha256:0b31af7926415dc9b94027c83af2bb77812fe86f960450e9d55525a8b5afbdb1"
+    );
 }
 
 #[test]
@@ -79,7 +85,7 @@ fn secrets_are_redeemed_across_services_but_scoped_to_one() {
     let spec = RuntimeLaunchSpec::V2(group());
     let grants = spec.secret_grants();
     assert_eq!(grants.len(), 1);
-    assert_eq!(grants[0].grant_ref, "grant_backend_admin");
+    assert_eq!(grants[0].grant_ref, "portable-binding:admin_secret");
     let RuntimeLaunchSpec::V2(group) = spec else {
         unreachable!()
     };
@@ -259,8 +265,8 @@ fn every_group_invariant_is_enforced() {
 #[test]
 fn a_group_payload_never_carries_a_secret_value() {
     let tampered = GROUP_FIXTURE.replace(
-        r#""grant_ref":"grant_backend_admin""#,
-        r#""grant_ref":"grant_backend_admin","value":"hunter2""#,
+        r#""grant_ref":"portable-binding:admin_secret""#,
+        r#""grant_ref":"portable-binding:admin_secret","value":"hunter2""#,
     );
     assert_eq!(
         RuntimeLaunchSpecV2::parse(&tampered).unwrap_err().code(),
