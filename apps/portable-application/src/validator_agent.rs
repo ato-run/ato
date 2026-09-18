@@ -218,6 +218,7 @@ impl ValidatorAgent {
                     dependency_fetches: Vec::new(),
                     portability_profile: None,
                     embedded_oci_image_loaded: None,
+                    services: Vec::new(),
                 });
         execution.endpoint = job.endpoint.clone();
         execution.run_id = job.run_id.clone();
