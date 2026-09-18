@@ -365,16 +365,8 @@ fn path_str(path: &Path, what: &str) -> Result<String> {
         .ok_or_else(|| anyhow::anyhow!("{what} path is not valid UTF-8"))
 }
 
-fn which_bwrap() -> Option<PathBuf> {
-    std::env::var_os("PATH").and_then(|path| {
-        std::env::split_paths(&path)
-            .map(|directory| directory.join("bwrap"))
-            .find(|candidate| candidate.is_file())
-    })
-}
-
 pub fn containment_available() -> bool {
-    which_bwrap().is_some()
+    ato_sandbox::bubblewrap_containment_available()
 }
 
 /// Refuse rather than degrade.
@@ -383,7 +375,7 @@ pub fn require_containment() -> Result<()> {
         return Ok(());
     }
     bail!(
-        "this Formation worker cannot contain a build: `bwrap` is not on PATH. Refusing to run \
-         submitted code unconfined."
+        "this Formation worker cannot contain a build: bubblewrap is unavailable or the host \
+         rejects the required namespaces. Refusing to run submitted code unconfined."
     )
 }

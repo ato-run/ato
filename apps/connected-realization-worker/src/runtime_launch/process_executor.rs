@@ -72,7 +72,18 @@ pub fn process_spec_for(
     spec.validate().context("runtime launch spec is invalid")?;
 
     let argv = match &spec.realization {
-        LaunchRealizationV1::Process(process) => process.argv.clone(),
+        LaunchRealizationV1::Process(process) => {
+            let mut argv = process.argv.clone();
+            if let Some(requirement) = &process.executable {
+                ensure!(
+                    argv[0] == requirement.name
+                        || (requirement.name == "python" && argv[0] == "python3"),
+                    "process argv[0] does not name its declared executable requirement"
+                );
+                argv[0] = resolve_executable(requirement)?.0;
+            }
+            argv
+        }
         LaunchRealizationV1::Oci(_) => {
             // Refused by name rather than ignored. An OCI spec that silently
             // launched as a bare process would run the workload without the
@@ -137,6 +148,8 @@ pub fn state_working_copy(workspace_root: &Path, state_key: &str) -> PathBuf {
 pub struct LaunchedProcess {
     handle: ProcessHandle,
     run_id: String,
+    runtime_executable: String,
+    runtime_version: Option<String>,
 }
 
 impl LaunchedProcess {
@@ -146,6 +159,14 @@ impl LaunchedProcess {
 
     pub fn run_id(&self) -> &str {
         &self.run_id
+    }
+
+    pub fn runtime_executable(&self) -> &str {
+        &self.runtime_executable
+    }
+
+    pub fn runtime_version(&self) -> Option<&str> {
+        self.runtime_version.as_deref()
     }
 
     /// Has the workload already exited on its own?
@@ -270,6 +291,16 @@ pub fn launch_process(
     context: &ResolvedRuntimeLaunchContext,
 ) -> Result<LaunchedProcess> {
     let process_spec = process_spec_for(spec, context)?;
+    let (runtime_executable, runtime_version) = match &spec.realization {
+        LaunchRealizationV1::Process(process) => match &process.executable {
+            Some(requirement) => {
+                let (path, version) = resolve_executable(requirement)?;
+                (path, Some(version))
+            }
+            None => (process_spec.command[0].clone(), None),
+        },
+        LaunchRealizationV1::Oci(_) => unreachable!("process_spec_for refused OCI"),
+    };
     super::sandbox::require_containment()?;
 
     // Every attachment's directory must exist before the workload starts. An
@@ -285,7 +316,12 @@ pub fn launch_process(
     }
 
     let shim = std::env::current_exe().context("cannot locate this Runner's own binary")?;
-    let policy_path = context.workspace_root().join(".ato/sandbox-policy.json");
+    let runtime_root = context
+        .workspace_root()
+        .parent()
+        .context("workspace has no lease root")?
+        .join("process-runtime");
+    let policy_path = runtime_root.join("sandbox-policy.json");
     let sandboxed = super::sandbox::sandboxed_command(
         context,
         &process_spec.command,
@@ -319,7 +355,66 @@ pub fn launch_process(
     Ok(LaunchedProcess {
         handle,
         run_id: spec.context.run_id.clone(),
+        runtime_executable,
+        runtime_version,
     })
+}
+
+fn resolve_executable(
+    requirement: &ato_ipc::runtime_launch::ExecutableRequirementV1,
+) -> Result<(String, String)> {
+    ensure!(
+        requirement.name == "python",
+        "Runner does not provide executable runtime `{}`",
+        requirement.name
+    );
+    let root = Path::new(super::sandbox::TOOLCHAIN_ROOT).join("python");
+    resolve_python_from_root(requirement, &root)
+}
+
+fn resolve_python_from_root(
+    requirement: &ato_ipc::runtime_launch::ExecutableRequirementV1,
+    root: &Path,
+) -> Result<(String, String)> {
+    let mut versions = std::fs::read_dir(root)
+        .with_context(|| format!("Python toolchain root {} is unavailable", root.display()))?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|version| {
+            version == &requirement.version
+                || version.starts_with(&format!("{}.", requirement.version))
+        })
+        .collect::<Vec<_>>();
+    versions.sort();
+    let selected = versions
+        .pop()
+        .with_context(|| format!("Python {} is not provisioned", requirement.version))?;
+    let executable = root.join(&selected).join("bin").join("python3");
+    ensure!(
+        executable.is_file(),
+        "Python {} executable is missing",
+        requirement.version
+    );
+    let output = std::process::Command::new(&executable)
+        .arg("--version")
+        .output()
+        .context("inspect provisioned Python runtime")?;
+    let reported = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    ensure!(
+        output.status.success()
+            && reported
+                .trim()
+                .starts_with(&format!("Python {}.", requirement.version)),
+        "provisioned Python does not satisfy {}: {}",
+        requirement.version,
+        reported.trim()
+    );
+    Ok((executable.display().to_string(), reported.trim().to_owned()))
 }
 
 /// Which state attachments this Run may commit back.
@@ -465,6 +560,13 @@ pub fn observed_launch(
     );
     observed.insert("pid".to_owned(), launched.pid().to_string());
     observed.insert(
+        "runtime_executable".to_owned(),
+        launched.runtime_executable().to_owned(),
+    );
+    if let Some(version) = launched.runtime_version() {
+        observed.insert("runtime_version".to_owned(), version.to_owned());
+    }
+    observed.insert(
         "secret_names".to_owned(),
         context.observed_secret_names().join(","),
     );
@@ -602,6 +704,8 @@ mod tests {
         let mut launched = LaunchedProcess {
             handle: spawn_true(),
             run_id: spec.context.run_id.clone(),
+            runtime_executable: "/bin/true".to_owned(),
+            runtime_version: None,
         };
         struct NeverProbed;
         impl ReadinessProbe for NeverProbed {
@@ -619,6 +723,41 @@ mod tests {
     }
 
     #[test]
+    fn missing_python_requirement_fails_admission_with_a_reason() {
+        let root = tempfile::tempdir().unwrap();
+        let requirement = ato_ipc::runtime_launch::ExecutableRequirementV1 {
+            name: "python".to_owned(),
+            version: "3.12".to_owned(),
+        };
+        let error = resolve_python_from_root(&requirement, root.path()).unwrap_err();
+        assert!(error.to_string().contains("is not provisioned"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mismatched_python_version_fails_admission_with_a_reason() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("3.12.7/bin/python3");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, "#!/bin/sh\necho 'Python 3.11.9'\n").unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+        let requirement = ato_ipc::runtime_launch::ExecutableRequirementV1 {
+            name: "python".to_owned(),
+            version: "3.12".to_owned(),
+        };
+
+        let error = resolve_python_from_root(&requirement, root.path()).unwrap_err();
+        assert!(
+            error.to_string().contains("does not satisfy 3.12"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn a_workload_that_never_reports_ready_fails_rather_than_hangs() {
         let fixture = context_with_state(StateAccessV1::ReadWrite);
         let mut spec = spec(PROCESS_FIXTURE);
@@ -630,6 +769,8 @@ mod tests {
         let mut launched = LaunchedProcess {
             handle: spawn_sleep(),
             run_id: spec.context.run_id.clone(),
+            runtime_executable: "/bin/sleep".to_owned(),
+            runtime_version: None,
         };
         struct AlwaysRefused;
         impl ReadinessProbe for AlwaysRefused {
@@ -664,6 +805,7 @@ mod tests {
         spec.realization =
             LaunchRealizationV1::Process(ato_ipc::runtime_launch::ProcessRealizationV1 {
                 argv: vec!["/bin/sh".to_owned(), "-c".to_owned(), "sleep 30".to_owned()],
+                executable: None,
             });
         let launched = launch_process(&spec, &fixture.context).expect("launches");
         assert!(launched.pid() > 0);
@@ -692,8 +834,13 @@ mod tests {
         let mut spec = spec(PROCESS_FIXTURE);
         spec.realization = LaunchRealizationV1::Oci(OciRealizationV1 {
             image_digest_ref: format!("sha256:{}", "ab".repeat(32)),
+            image_reference: None,
+            platform: None,
+            resource_limits: None,
+            entrypoint: None,
             argv: None,
             working_dir: None,
+            workspace_mount_path: None,
         });
         assert!(launch_process(&spec, &fixture.context).is_err());
     }

@@ -1,0 +1,18 @@
+[package]
+name = "ato-adapter-oci"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/ato-run/ato"
+description = "Runner-owned OCI execution adapter for Ato"
+publish = false
+
+[package.metadata.ato-architecture]
+layer = "adapter"
+
+[dependencies]
+anyhow = "1.0"
+serde_json = "1.0"
+
+[dev-dependencies]
+tempfile = "3.23"

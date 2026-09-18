@@ -62,6 +62,63 @@ use anyhow::Result;
 use std::path::PathBuf;
 use tracing::debug;
 
+/// Whether this Linux host can create the namespaces used by Ato's
+/// bubblewrap-based workload and build sandboxes.
+///
+/// Finding `bwrap` on `PATH` is not sufficient. Some container hosts install
+/// it while denying the user/network namespaces required by `--unshare-all`.
+/// Advertising execution there accepts work that can only fail after a lease
+/// has already been assigned. Probe the actual boundary once per process and
+/// fail closed on every other platform.
+#[cfg(target_os = "linux")]
+pub fn bubblewrap_containment_available() -> bool {
+    use std::process::{Command, Stdio};
+    use std::sync::OnceLock;
+
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        let Some(binary) = std::env::var_os("PATH").and_then(|path| {
+            std::env::split_paths(&path)
+                .map(|directory| directory.join("bwrap"))
+                .find(|candidate| candidate.is_file())
+        }) else {
+            return false;
+        };
+        Command::new(binary)
+            .args([
+                "--unshare-all",
+                "--die-with-parent",
+                "--new-session",
+                "--proc",
+                "/proc",
+                "--dev",
+                "/dev",
+                "--tmpfs",
+                "/tmp",
+                // The probe asks only whether the namespaces can be created.
+                // Binding the host root read-only keeps the probe independent
+                // of the filesystem layout: on merged-/usr hosts the loader
+                // is reached through root-level symlinks, and binding only
+                // /usr made every such host look uncontainable.
+                "--ro-bind",
+                "/",
+                "/",
+                "--",
+                "/usr/bin/true",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn bubblewrap_containment_available() -> bool {
+    false
+}
+
 #[cfg(target_os = "linux")]
 pub mod linux;
 
@@ -197,6 +254,14 @@ pub struct SandboxPolicy {
     pub read_only_paths: Vec<PathBuf>,
     /// Whether to enable network access (default: true for now)
     pub allow_network: bool,
+    /// TCP ports the workload may bind when unrestricted network access is
+    /// disabled. An empty list means it may not bind TCP sockets.
+    #[serde(default)]
+    pub allowed_bind_tcp_ports: Vec<u16>,
+    /// TCP destination ports the workload may connect to when unrestricted
+    /// network access is disabled. An empty list denies TCP egress.
+    #[serde(default)]
+    pub allowed_connect_tcp_ports: Vec<u16>,
     /// Whether this sandbox is in "development mode" (more permissive)
     pub development_mode: bool,
     /// IPC socket paths that must be allowed through the Sandbox.
@@ -212,6 +277,8 @@ impl SandboxPolicy {
             read_write_paths: Vec::new(),
             read_only_paths: Vec::new(),
             allow_network: true,
+            allowed_bind_tcp_ports: Vec::new(),
+            allowed_connect_tcp_ports: Vec::new(),
             development_mode: false,
             ipc_socket_paths: Vec::new(),
         }
@@ -237,6 +304,20 @@ impl SandboxPolicy {
     /// Enable/disable network access
     pub fn with_network(mut self, enabled: bool) -> Self {
         self.allow_network = enabled;
+        self
+    }
+
+    /// Allow the workload to bind selected TCP ports without enabling
+    /// arbitrary TCP egress.
+    pub fn allow_tcp_bind(mut self, ports: impl IntoIterator<Item = u16>) -> Self {
+        self.allowed_bind_tcp_ports.extend(ports);
+        self
+    }
+
+    /// Allow the workload to connect to selected TCP destination ports while
+    /// the rest of TCP egress remains denied.
+    pub fn allow_tcp_connect(mut self, ports: impl IntoIterator<Item = u16>) -> Self {
+        self.allowed_connect_tcp_ports.extend(ports);
         self
     }
 

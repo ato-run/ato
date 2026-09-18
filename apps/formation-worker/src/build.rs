@@ -10,10 +10,12 @@
 //! could tell.
 
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+#[cfg(unix)]
 use ato_formation::failure::{FailureStage, FormationFailure};
 use ato_formation::intent::{BuildStepV1, EffectiveBuildPlanV1};
 
@@ -173,6 +175,7 @@ pub fn run_build(
 /// workspace after the build believed it had finished — and the workspace is
 /// about to be packed and content-addressed, so that corruption becomes
 /// permanent.
+#[cfg(unix)]
 fn run_step(step: &BuildStepV1, argv: &[String], budget: Duration) -> Result<Vec<u8>> {
     use std::os::unix::process::CommandExt as _;
 
@@ -232,6 +235,11 @@ fn run_step(step: &BuildStepV1, argv: &[String], budget: Duration) -> Result<Vec
     }
 }
 
+#[cfg(not(unix))]
+fn run_step(_step: &BuildStepV1, _argv: &[String], _budget: Duration) -> Result<Vec<u8>> {
+    bail!("Formation build execution requires Unix process-group isolation")
+}
+
 /// The typed failure a build step reported about itself, if it reported one.
 ///
 /// The marker is a whole line so it cannot be produced by accident in the
@@ -242,6 +250,7 @@ fn run_step(step: &BuildStepV1, argv: &[String], budget: Duration) -> Result<Vec
 /// build` is not trusted to name its own failure code: it could mint any code
 /// a client branches on, and the uploader's own build script is the last thing
 /// that should decide what the platform says about it.
+#[cfg(unix)]
 fn typed_step_failure(output: &[u8]) -> Option<FormationFailure> {
     const MARKER: &str = "ATO_FORMATION_FAILURE ";
     #[derive(serde::Deserialize)]
@@ -265,6 +274,7 @@ fn typed_step_failure(output: &[u8]) -> Option<FormationFailure> {
     ))
 }
 
+#[cfg(unix)]
 fn terminate_group(pid: u32) {
     let _ = std::process::Command::new("kill")
         .args(["-TERM", "--", &format!("-{pid}")])
@@ -275,6 +285,7 @@ fn terminate_group(pid: u32) {
         .status();
 }
 
+#[cfg(unix)]
 fn ensure_group_gone(pid: u32) -> Result<()> {
     for _ in 0..50 {
         let alive = std::process::Command::new("kill")

@@ -10,7 +10,7 @@
 mod activity_controller;
 pub mod runtime_launch;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -91,20 +91,27 @@ use activity_controller::{
 
 const PORTABLE_CAPSULE_LEASE_KIND: &str = "portable_capsule_v2";
 const ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND: &str = "activity_browser_executor_v0";
-const RUNNER_CAPABILITIES: &[&str] = &[
+const BASE_RUNNER_CAPABILITIES: &[&str] = &[
     "execution_abi=process",
     runtime_launch::lease::RUNTIME_LAUNCH_LEASE_KIND,
     "isolation=untrusted-v1",
     "materializer=ato.materialize.vm.snapshot@1",
     "backend=firecracker",
 ];
+
+fn runner_capabilities(oci_available: bool) -> Vec<&'static str> {
+    let mut capabilities = BASE_RUNNER_CAPABILITIES.to_vec();
+    if oci_available {
+        capabilities.push("execution_abi=oci");
+    }
+    capabilities
+}
 const ACTIVE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
-/// A Run that is never stopped is still not immortal. The cap exists so a lost
-/// control plane cannot leave a workload and its state slot held forever.
-const RUNTIME_LAUNCH_MAX_LIFETIME: Duration = Duration::from_secs(60 * 60);
 const ACTIVITY_FRAME_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 const ACTIVITY_FRAME_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+#[cfg(unix)]
 const GUEST_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+#[cfg(unix)]
 const GUEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const TERMINAL_REPORT_RETRY_DELAYS: [Duration; 3] = [
     Duration::ZERO,
@@ -1039,6 +1046,9 @@ impl ConnectedWorker {
         // not the one the control plane digested onto the Run, the Runner
         // would execute something the receipt does not describe.
         let spec = runtime_launch::lease::verified_spec(command)?;
+        // Arm this before materialization/startup. A public preview's cap owns
+        // the whole allocation, not only the time after readiness.
+        let hard_deadline = Instant::now() + runtime_launch::lease::maximum_lifetime(command);
 
         let workspace = runtime_launch::workspace::LeaseWorkspaceTransport::new(
             self.api.client.clone(),
@@ -1052,6 +1062,9 @@ impl ConnectedWorker {
             lease.id.clone(),
             self.api.token.clone(),
         );
+        let secrets = self
+            .api
+            .redeem_runtime_bindings(&lease.id, &spec.secret_grants)?;
 
         // P4-A: publish the process on this Runner's ingress slot.
         //
@@ -1060,13 +1073,19 @@ impl ConnectedWorker {
         // forwards from. Both are existing Runner configuration — the control
         // plane never picks a host port, because only the Runner knows what is
         // free and the stable URL must not depend on it.
+        ensure!(
+            spec.endpoints.len() == 1,
+            "runtime-launch ingress currently supports exactly one declared endpoint"
+        );
+        let endpoint_name = spec.endpoints[0].name.clone();
         let mut assigned_ports = std::collections::BTreeMap::new();
-        assigned_ports.insert("http".to_owned(), self.config.surface_listen.port());
+        assigned_ports.insert(endpoint_name.clone(), self.config.surface_listen.port());
         let resolved = runtime_launch::lease::resolve_run(
             &spec,
             lease_root,
             &workspace,
             &state,
+            secrets,
             &assigned_ports,
         )?;
         let probe =
@@ -1076,9 +1095,21 @@ impl ConnectedWorker {
         let execution_id = spec
             .canonical_digest()
             .map_err(|error| anyhow::anyhow!("cannot digest the launch spec: {error}"))?;
-        let port = active
-            .endpoint_port("http")
-            .context("the launch declared no `http` endpoint to report")?;
+        let port = active.endpoint_port(&endpoint_name).with_context(|| {
+            format!("the launch declared no `{endpoint_name}` endpoint to report")
+        })?;
+        let execution_evidence = active.execution_evidence();
+        let oci_port_mapping = match &active.launched {
+            runtime_launch::lease::ActiveWorkload::Oci(container) => {
+                let (container_ip, mappings) = container.port_mapping();
+                mappings.first().map(|mapping| OciPortMappingReport {
+                    container_ip: container_ip.to_string(),
+                    guest_port: mapping.guest_port,
+                    runner_forward_port: mapping.host_port,
+                })
+            }
+            runtime_launch::lease::ActiveWorkload::Process(_) => None,
+        };
         // The ready_url is the ingress slot's public hostname, and the process
         // is listening on the loopback port that slot forwards to. Before P4
         // this reported no URL at all, honestly: a process realization was
@@ -1091,15 +1122,36 @@ impl ConnectedWorker {
         // than believed.
         self.api.report_ready(
             &lease.id,
-            &execution_id,
-            Some(&self.config.public_base_url),
-            Some(port),
-            None,
+            ReadyReport {
+                execution_id: &execution_id,
+                ready_url: Some(&self.config.public_base_url),
+                local_port: Some(port),
+                execution: Some(&execution_evidence),
+                port_mapping: oci_port_mapping.as_ref(),
+                control: None,
+            },
         )?;
+        if let runtime_launch::lease::ActiveWorkload::Oci(container) = &active.launched {
+            let (container_ip, mappings) = container.port_mapping();
+            for mapping in mappings {
+                eprintln!(
+                    "[runtime-launch-surface] {}",
+                    serde_json::json!({
+                        "run_id": lease.run_id,
+                        "lease_id": lease.id,
+                        "container_id": container.container_id(),
+                        "container_ip": container_ip.to_string(),
+                        "guest_port": mapping.guest_port,
+                        "runner_forward_port": mapping.host_port,
+                        "public_host": self.config.public_base_url,
+                    })
+                );
+            }
+        }
         eprintln!(
-            "[runtime-launch] run={} ready pid={} endpoint=127.0.0.1:{port} public={}",
+            "[runtime-launch] run={} ready {} endpoint=127.0.0.1:{port} public={}",
             lease.run_id,
-            active.pid(),
+            active.execution_subject(),
             self.config.public_base_url
         );
 
@@ -1108,7 +1160,7 @@ impl ConnectedWorker {
         let outcome = runtime_launch::lease::wait_for_stop(
             &stop,
             Duration::from_millis(500),
-            Some(Instant::now() + RUNTIME_LAUNCH_MAX_LIFETIME),
+            Some(hard_deadline),
         );
 
         // Whether the stop was requested or the lifetime ran out, the Run is
@@ -1213,12 +1265,20 @@ impl ConnectedWorker {
             evolution.current_head().head.as_str() == command.expected_root_computation_ref,
             "hosted evolution authority root changed before the first operation"
         );
+        let control = browser.as_ref().map(|runtime| runtime.control_capability());
         self.api.report_ready(
             &lease.id,
-            &execution_id,
-            Some(&self.config.public_base_url),
-            Some(ready_local_port(&self.config)),
-            browser.as_ref().map(|runtime| runtime.control_capability()),
+            ReadyReport {
+                execution_id: &execution_id,
+                ready_url: Some(&self.config.public_base_url),
+                local_port: Some(ready_local_port(&self.config)),
+                execution: None,
+                port_mapping: None,
+                control: control.as_ref().map(|capability| BrowserControlReport {
+                    protocol: &capability.protocol,
+                    port: &capability.port,
+                }),
+            },
         )?;
         let mut last_control = Instant::now() - Duration::from_secs(1);
         let mut last_frame = Instant::now();
@@ -2830,6 +2890,12 @@ struct ControlResponse {
     stop_requested: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeBindingsResponse {
+    bindings: BTreeMap<String, String>,
+}
+
 #[derive(Serialize)]
 struct StatusReport<'a> {
     status: &'a str,
@@ -2850,6 +2916,13 @@ struct BrowserControlReport<'a> {
 }
 
 #[derive(Serialize)]
+struct OciPortMappingReport {
+    container_ip: String,
+    guest_port: u16,
+    runner_forward_port: u16,
+}
+
+#[derive(Serialize)]
 struct ReadyReport<'a> {
     execution_id: &'a str,
     /// Omitted when the realization has no externally reachable URL.
@@ -2864,6 +2937,10 @@ struct ReadyReport<'a> {
     ready_url: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     local_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    execution: Option<&'a runtime_launch::lease::RuntimeExecutionEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    port_mapping: Option<&'a OciPortMappingReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     control: Option<BrowserControlReport<'a>>,
 }
@@ -2896,7 +2973,9 @@ impl HttpRunnerApi {
             self.base, self.runner_id
         )))
         .json(&serde_json::json!({
-            "capabilities": RUNNER_CAPABILITIES,
+            "capabilities": runner_capabilities(
+                ato_adapter_oci::docker_runtime_available()
+            ),
             "supported_lease_kinds": supported_lease_kinds(config),
             "supported_session_surfaces": [{
                 "kind": "web",
@@ -2935,6 +3014,37 @@ impl HttpRunnerApi {
         .send()?
         .error_for_status()?;
         Ok(())
+    }
+
+    fn redeem_runtime_bindings(
+        &self,
+        lease_id: &str,
+        grants: &[ato_ipc::runtime_launch::SecretGrantV1],
+    ) -> Result<Vec<runtime_launch::resolved::ResolvedSecret>> {
+        if grants.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut response = self
+            .authorized(self.client.post(format!(
+                "{}/v1/runner-leases/{lease_id}/runtime-bindings",
+                self.base
+            )))
+            .send()?
+            .error_for_status()?
+            .json::<RuntimeBindingsResponse>()?;
+        if response.bindings.len() != grants.len() {
+            bail!("runtime Binding grant did not match the launch spec");
+        }
+        grants
+            .iter()
+            .map(|grant| {
+                response
+                    .bindings
+                    .remove(&grant.name)
+                    .map(|value| runtime_launch::resolved::ResolvedSecret::new(&grant.name, value))
+                    .context("runtime Binding grant omitted a declared name")
+            })
+            .collect()
     }
 
     fn report_activity_ready(&self, lease_id: &str, execution_id: &str) -> Result<()> {
@@ -2979,27 +3089,12 @@ impl HttpRunnerApi {
             .into())
     }
 
-    fn report_ready(
-        &self,
-        lease_id: &str,
-        execution_id: &str,
-        ready_url: Option<&str>,
-        local_port: Option<u16>,
-        control: Option<BrowserControlCapability>,
-    ) -> Result<()> {
+    fn report_ready(&self, lease_id: &str, report: ReadyReport<'_>) -> Result<()> {
         self.authorized(
             self.client
                 .post(format!("{}/v1/runner-leases/{lease_id}/ready", self.base)),
         )
-        .json(&ReadyReport {
-            execution_id,
-            ready_url,
-            local_port,
-            control: control.as_ref().map(|capability| BrowserControlReport {
-                protocol: &capability.protocol,
-                port: &capability.port,
-            }),
-        })
+        .json(&report)
         .send()?
         .error_for_status()?;
         Ok(())
@@ -3493,6 +3588,7 @@ pub fn run_netns_surface_relay(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn connect_tcp_until(target: SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
     let started = Instant::now();
     loop {
@@ -4450,10 +4546,13 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
 
     #[test]
     fn heartbeat_advertises_dispatch_and_vm_requirements() {
-        assert!(RUNNER_CAPABILITIES.contains(&"execution_abi=process"));
-        assert!(RUNNER_CAPABILITIES.contains(&"isolation=untrusted-v1"));
-        assert!(RUNNER_CAPABILITIES.contains(&"materializer=ato.materialize.vm.snapshot@1"));
-        assert!(RUNNER_CAPABILITIES.contains(&"backend=firecracker"));
+        let process_only = runner_capabilities(false);
+        assert!(process_only.contains(&"execution_abi=process"));
+        assert!(!process_only.contains(&"execution_abi=oci"));
+        assert!(process_only.contains(&"isolation=untrusted-v1"));
+        assert!(process_only.contains(&"materializer=ato.materialize.vm.snapshot@1"));
+        assert!(process_only.contains(&"backend=firecracker"));
+        assert!(runner_capabilities(true).contains(&"execution_abi=oci"));
     }
 
     #[test]
@@ -4476,18 +4575,14 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             run_control_verification_key: None,
             once: true,
         };
-        assert_eq!(
-            supported_lease_kinds(&config),
-            [PORTABLE_CAPSULE_LEASE_KIND]
-        );
+        let mut expected = vec![PORTABLE_CAPSULE_LEASE_KIND];
+        if runtime_launch::lease::RUNTIME_LAUNCH_SUPPORTED() {
+            expected.push(runtime_launch::lease::RUNTIME_LAUNCH_LEASE_KIND);
+        }
+        assert_eq!(supported_lease_kinds(&config), expected);
         config.browser_chrome = Some(chrome.path().to_owned());
         config.run_control_verification_key = Some("v".repeat(32));
-        assert_eq!(
-            supported_lease_kinds(&config),
-            [
-                PORTABLE_CAPSULE_LEASE_KIND,
-                ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND,
-            ]
-        );
+        expected.push(ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND);
+        assert_eq!(supported_lease_kinds(&config), expected);
     }
 }

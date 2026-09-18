@@ -20,16 +20,23 @@
 //! There is no fallback for an unrecognized command. A Runner that guessed
 //! would run a workload under a contract nobody agreed to.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::TcpListener;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
-use ato_ipc::runtime_launch::{RuntimeLaunchSpecV1, StateAccessV1};
+use ato_adapter_oci::{
+    DockerOciAdapter, OciEndpoint, OciHandle, OciMount, OciResourceLimits, OciSpec,
+};
+use ato_ipc::runtime_launch::{
+    LaunchRealizationV1, ReadinessV1, RuntimeLaunchSpecV1, StateAccessV1,
+};
 
-use super::process_executor::{ReadinessProbe, state_working_copy};
-use super::resolved::{ResolvedRuntimeLaunchContext, ResolvedStateAttachment, allocate_endpoint};
+use super::process_executor::{ReadinessProbe, state_path_env_name, state_working_copy};
+use super::resolved::{
+    ResolvedRuntimeLaunchContext, ResolvedSecret, ResolvedStateAttachment, allocate_endpoint,
+};
 use super::session::{PreparedRun, RunStateOutcome, abort_run, commit_run};
 use super::state_artifact::StateArtifactTransport;
 use super::workspace::{WorkspaceTransport, materialize_workspace};
@@ -41,6 +48,10 @@ use super::workspace::{WorkspaceTransport, materialize_workspace};
 /// pins the two together, because a silent mismatch does not fail loudly — it
 /// looks like "no runner available" forever.
 pub const RUNTIME_LAUNCH_LEASE_KIND: &str = "runtime_launch";
+/// Absolute upper bound accepted from the control plane for one workload.
+/// Public previews may request a shorter lease-owned deadline; omitting the
+/// field preserves the ordinary one-hour safety cap.
+pub const RUNTIME_LAUNCH_MAX_DURATION_SECS: u64 = 60 * 60;
 
 /// Whether this Runner may take `runtime_launch` leases at all.
 ///
@@ -65,6 +76,11 @@ pub struct RuntimeLaunchLeaseCommand {
     /// this handler; declared so the envelope still parses.
     #[serde(default)]
     pub runtime_cpu_request: Option<serde_json::Value>,
+    /// Runtime orchestration policy, outside the digested launch spec/K/D.
+    /// Used by bounded public previews so cleanup does not depend on a browser
+    /// request or a coarse control-plane cron sweep.
+    #[serde(default)]
+    pub max_duration_secs: Option<u64>,
 }
 
 /// Parse the command's spec and prove it is the one that was dispatched.
@@ -74,6 +90,12 @@ pub struct RuntimeLaunchLeaseCommand {
 /// control plane digested onto the Run, the Runner would execute something the
 /// receipt does not describe.
 pub fn verified_spec(command: &RuntimeLaunchLeaseCommand) -> Result<RuntimeLaunchSpecV1> {
+    if let Some(seconds) = command.max_duration_secs {
+        ensure!(
+            (1..=RUNTIME_LAUNCH_MAX_DURATION_SECS).contains(&seconds),
+            "runtime launch max_duration_secs must be between 1 and {RUNTIME_LAUNCH_MAX_DURATION_SECS}"
+        );
+    }
     let encoded = serde_json::to_string(&command.launch_spec)
         .context("lease command launch_spec is not encodable")?;
     let spec = RuntimeLaunchSpecV1::parse(&encoded)
@@ -92,6 +114,14 @@ pub fn verified_spec(command: &RuntimeLaunchLeaseCommand) -> Result<RuntimeLaunc
         "launch spec identity does not match its lease command"
     );
     Ok(spec)
+}
+
+pub fn maximum_lifetime(command: &RuntimeLaunchLeaseCommand) -> Duration {
+    Duration::from_secs(
+        command
+            .max_duration_secs
+            .unwrap_or(RUNTIME_LAUNCH_MAX_DURATION_SECS),
+    )
 }
 
 /// Bind an ephemeral port and keep it only long enough to learn its number.
@@ -131,6 +161,7 @@ pub fn resolve_run(
     lease_root: &Path,
     workspace: &dyn WorkspaceTransport,
     state: &dyn StateArtifactTransport,
+    secrets: Vec<ResolvedSecret>,
     assigned_ports: &BTreeMap<String, u16>,
 ) -> Result<ResolvedRun> {
     let workspace_root =
@@ -165,6 +196,21 @@ pub fn resolve_run(
         })
         .collect::<Vec<_>>();
 
+    let expected_secret_names = spec
+        .secret_grants
+        .iter()
+        .map(|grant| grant.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let resolved_secret_names = secrets
+        .iter()
+        .map(ResolvedSecret::name)
+        .collect::<BTreeSet<_>>();
+    ensure!(
+        expected_secret_names == resolved_secret_names
+            && resolved_secret_names.len() == secrets.len(),
+        "redeemed runtime Bindings do not match the launch spec"
+    );
+
     let context = ResolvedRuntimeLaunchContext::new(
         workspace_root,
         &spec.workspace.cwd_relative,
@@ -172,20 +218,11 @@ pub fn resolve_run(
             .iter()
             .map(|entry| (entry.name.clone(), entry.value.clone()))
             .collect(),
-        // Secret grants are references. Redeeming them is a separate concern
-        // and this handler holds none, so a spec that asks for one is refused
-        // rather than launched without it.
-        Vec::new(),
+        secrets,
         attachments,
         endpoints,
     )
     .map_err(|error| anyhow::anyhow!("cannot resolve the launch: {error}"))?;
-
-    ensure!(
-        spec.secret_grants.is_empty(),
-        "this Runner cannot redeem secret grants; refusing to launch a workload without the \
-         secrets its spec requires"
-    );
 
     let prepared = super::session::prepare_run(spec, &context, state)?;
     Ok(ResolvedRun {
@@ -196,18 +233,68 @@ pub fn resolve_run(
 }
 
 /// A Run that is up and serving.
+pub enum ActiveWorkload {
+    Process(super::process_executor::LaunchedProcess),
+    Oci(OciHandle),
+}
+
 pub struct ActiveRun {
-    pub launched: super::process_executor::LaunchedProcess,
+    pub launched: ActiveWorkload,
     pub resolved: ResolvedRun,
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct RuntimeExecutionEvidence {
+    pub realization: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_executable: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+}
+
 impl ActiveRun {
-    pub fn pid(&self) -> u32 {
-        self.launched.pid()
+    pub fn execution_subject(&self) -> String {
+        match &self.launched {
+            ActiveWorkload::Process(process) => format!("pid={}", process.pid()),
+            ActiveWorkload::Oci(container) => {
+                format!("container_id={}", container.container_id())
+            }
+        }
     }
 
     pub fn endpoint_port(&self, name: &str) -> Option<u16> {
         self.resolved.endpoint_ports.get(name).copied()
+    }
+
+    pub fn execution_evidence(&self) -> RuntimeExecutionEvidence {
+        match &self.launched {
+            ActiveWorkload::Process(process) => RuntimeExecutionEvidence {
+                realization: "process",
+                runtime_executable: Some(process.runtime_executable().to_owned()),
+                runtime_version: process.runtime_version().map(str::to_owned),
+                pid: Some(process.pid()),
+                container_id: None,
+                image: None,
+                platform: None,
+            },
+            ActiveWorkload::Oci(container) => RuntimeExecutionEvidence {
+                realization: "oci",
+                runtime_executable: Some("docker".to_owned()),
+                runtime_version: None,
+                pid: None,
+                container_id: Some(container.container_id().to_owned()),
+                image: Some(container.image().to_owned()),
+                platform: Some(container.platform().to_owned()),
+            },
+        }
     }
 }
 
@@ -218,21 +305,158 @@ pub fn start(
     state: &dyn StateArtifactTransport,
     probe: &dyn ReadinessProbe,
 ) -> Result<ActiveRun> {
-    let mut launched = match super::process_executor::launch_process(spec, &resolved.context) {
-        Ok(launched) => launched,
-        Err(error) => {
-            abort_run(state, &resolved.prepared);
-            return Err(error);
+    let launched = match &spec.realization {
+        LaunchRealizationV1::Process(_) => {
+            let mut launched =
+                match super::process_executor::launch_process(spec, &resolved.context) {
+                    Ok(launched) => launched,
+                    Err(error) => {
+                        abort_run(state, &resolved.prepared);
+                        return Err(error);
+                    }
+                };
+            if let Err(error) = super::process_executor::wait_until_ready(
+                spec,
+                &resolved.context,
+                &mut launched,
+                probe,
+            ) {
+                let _ = launched.stop(&spec.lifecycle);
+                abort_run(state, &resolved.prepared);
+                return Err(error);
+            }
+            ActiveWorkload::Process(launched)
+        }
+        LaunchRealizationV1::Oci(oci) => {
+            let image = oci
+                .image_reference
+                .clone()
+                .context("OCI execution requires a pullable image_reference")?;
+            let platform = oci
+                .platform
+                .clone()
+                .context("OCI execution requires a platform")?;
+            let limits = oci
+                .resource_limits
+                .clone()
+                .context("OCI execution requires resource_limits")?;
+            let endpoints = resolved
+                .context
+                .endpoints()
+                .iter()
+                .map(|endpoint| {
+                    Ok(OciEndpoint {
+                        host_port: endpoint.host_port,
+                        guest_port: endpoint.guest_port.context(
+                            "OCI endpoint requires a guest port for container port mapping",
+                        )?,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let mounts = resolved
+                .context
+                .state_attachments()
+                .iter()
+                .map(|attachment| OciMount {
+                    host_path: attachment.working_copy_for_mount().to_path_buf(),
+                    guest_path: attachment.guest_target().to_owned(),
+                    writable: attachment.access() == StateAccessV1::ReadWrite,
+                })
+                .collect();
+            let mut environment = resolved.context.environment_for_spawn();
+            for attachment in resolved.context.state_attachments() {
+                environment.insert(
+                    state_path_env_name(attachment.state_key()),
+                    attachment.guest_target().to_owned(),
+                );
+            }
+            let adapter = DockerOciAdapter::new(OciSpec {
+                id: spec.context.run_id.clone(),
+                image,
+                platform,
+                entrypoint: oci.entrypoint.clone(),
+                argv: oci.argv.clone().unwrap_or_default(),
+                working_dir: oci.working_dir.clone().unwrap_or_else(|| "/app".to_owned()),
+                workspace_mount_path: oci
+                    .workspace_mount_path
+                    .clone()
+                    .unwrap_or_else(|| "/app".to_owned()),
+                environment,
+                endpoints,
+                mounts,
+                limits: OciResourceLimits {
+                    memory_bytes: limits.memory_bytes,
+                    cpu_limit_millis: limits.cpu_limit_millis,
+                    pids_limit: limits.pids_limit,
+                },
+                stop_timeout_seconds: spec.lifecycle.graceful_shutdown_ms.div_ceil(1000).max(1),
+            })?;
+            let runtime_root = resolved
+                .context
+                .workspace_root()
+                .parent()
+                .context("workspace has no lease root")?
+                .join("oci-runtime");
+            let mut launched = match adapter.spawn(resolved.context.workspace_root(), &runtime_root)
+            {
+                Ok(launched) => launched,
+                Err(error) => {
+                    abort_run(state, &resolved.prepared);
+                    return Err(error);
+                }
+            };
+            if let Err(error) = wait_until_oci_ready(spec, &resolved.context, &mut launched, probe)
+            {
+                let _ = launched.stop();
+                abort_run(state, &resolved.prepared);
+                return Err(error);
+            }
+            ActiveWorkload::Oci(launched)
         }
     };
-    if let Err(error) =
-        super::process_executor::wait_until_ready(spec, &resolved.context, &mut launched, probe)
-    {
-        let _ = launched.stop(&spec.lifecycle);
-        abort_run(state, &resolved.prepared);
-        return Err(error);
-    }
     Ok(ActiveRun { launched, resolved })
+}
+
+fn wait_until_oci_ready(
+    spec: &RuntimeLaunchSpecV1,
+    context: &ResolvedRuntimeLaunchContext,
+    launched: &mut OciHandle,
+    probe: &dyn ReadinessProbe,
+) -> Result<()> {
+    let (timeout_ms, target) = match &spec.readiness {
+        ReadinessV1::Http {
+            endpoint_name,
+            path,
+            timeout_ms,
+        } => (*timeout_ms, Some((endpoint_name, path.as_str()))),
+        ReadinessV1::Tcp {
+            endpoint_name,
+            timeout_ms,
+        } => (*timeout_ms, Some((endpoint_name, ""))),
+        ReadinessV1::Process { timeout_ms } => (*timeout_ms, None),
+    };
+    let Some((endpoint_name, path)) = target else {
+        return Ok(());
+    };
+    let host_port = context
+        .endpoints()
+        .iter()
+        .find(|endpoint| endpoint.name == *endpoint_name)
+        .map(|endpoint| endpoint.host_port)
+        .with_context(|| format!("readiness names missing endpoint `{endpoint_name}`"))?;
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        if let Some(code) = launched.exit_code()? {
+            bail!("OCI container exited before readiness with code {code}");
+        }
+        match probe.probe(host_port, path) {
+            Ok(()) => return Ok(()),
+            Err(error) if Instant::now() >= deadline => {
+                bail!("OCI container did not become ready within {timeout_ms}ms: {error}")
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
 }
 
 /// Hold the Run ACTIVE until the control plane asks it to stop.
@@ -265,7 +489,11 @@ pub fn finish(
     commit_request_id: &str,
 ) -> Result<Vec<RunStateOutcome>> {
     let ActiveRun { launched, resolved } = active;
-    if let Err(error) = launched.stop(&spec.lifecycle) {
+    let stopped = match launched {
+        ActiveWorkload::Process(process) => process.stop(&spec.lifecycle).map(|_| ()),
+        ActiveWorkload::Oci(container) => container.stop(),
+    };
+    if let Err(error) = stopped {
         abort_run(state, &resolved.prepared);
         return Err(error);
     }
@@ -301,6 +529,7 @@ mod tests {
             launch_spec_digest: digest.to_owned(),
             launch_spec: serde_json::to_value(spec).expect("spec encodes"),
             runtime_cpu_request: None,
+            max_duration_secs: None,
         }
     }
 
@@ -330,6 +559,26 @@ mod tests {
         let digest = spec.canonical_digest().expect("digests");
         let verified = verified_spec(&command_for(&spec, &digest)).expect("accepted");
         assert_eq!(verified.context.run_id, spec.context.run_id);
+    }
+
+    #[test]
+    fn a_bounded_preview_uses_its_shorter_runner_deadline() {
+        let spec = RuntimeLaunchSpecV1::parse(PROCESS_FIXTURE).expect("fixture");
+        let digest = spec.canonical_digest().expect("digests");
+        let mut command = command_for(&spec, &digest);
+        command.max_duration_secs = Some(180);
+        verified_spec(&command).expect("bounded command accepted");
+        assert_eq!(maximum_lifetime(&command), Duration::from_secs(180));
+    }
+
+    #[test]
+    fn an_unbounded_control_plane_override_is_refused() {
+        let spec = RuntimeLaunchSpecV1::parse(PROCESS_FIXTURE).expect("fixture");
+        let digest = spec.canonical_digest().expect("digests");
+        let mut command = command_for(&spec, &digest);
+        command.max_duration_secs = Some(RUNTIME_LAUNCH_MAX_DURATION_SECS + 1);
+        let error = verified_spec(&command).unwrap_err();
+        assert!(error.to_string().contains("max_duration_secs"), "{error}");
     }
 
     #[test]
