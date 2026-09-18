@@ -67,6 +67,8 @@ pub struct PortableHttpObservationDraftV2 {
 pub enum PortableDerivationKindV2 {
     Process,
     Oci,
+    /// Several `ato.oci@1` serving steps realized together on one Runner.
+    OciServiceGroup,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +79,30 @@ pub struct PortableDerivationDraftV2 {
     pub argv: Vec<String>,
     pub cwd: String,
     pub env: BTreeMap<String, String>,
+    /// Zero for an OCI service group: each service names its own Ports.
+    pub guest_port: u16,
+    /// Empty unless `kind` is [`PortableDerivationKindV2::OciServiceGroup`].
+    pub services: Vec<PortableServiceDraftV2>,
+}
+
+/// One serving step of an OCI service group. Authoring shorthand only: it
+/// compiles to one `BoundStep` plus the `BoundPort`s it serves, never to a
+/// Service object of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortableServiceDraftV2 {
+    pub id: String,
+    pub runtimes: BTreeMap<String, String>,
+    pub argv: Vec<String>,
+    pub cwd: String,
+    pub env: BTreeMap<String, String>,
+    pub ports: Vec<PortableServicePortDraftV2>,
+    pub state: Vec<String>,
+    pub bindings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortableServicePortDraftV2 {
+    pub id: String,
     pub guest_port: u16,
 }
 
@@ -169,11 +195,36 @@ struct Derivation {
     #[serde(rename = "use")]
     protocol: String,
     runtimes: BTreeMap<String, String>,
-    argv: Vec<String>,
+    // Single-route fields. Absent exactly when `service` is present.
+    argv: Option<Vec<String>>,
+    cwd: Option<String>,
+    env: Option<BTreeMap<String, String>>,
+    guest_port: Option<u16>,
     #[serde(default)]
+    service: Vec<Service>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Service {
+    id: String,
+    runtimes: BTreeMap<String, String>,
+    argv: Vec<String>,
+    #[serde(default = "default_workspace_path")]
     cwd: String,
     #[serde(default)]
     env: BTreeMap<String, String>,
+    ports: Vec<ServicePort>,
+    #[serde(default)]
+    state: Vec<String>,
+    #[serde(default)]
+    bindings: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServicePort {
+    id: String,
     guest_port: u16,
 }
 
@@ -331,6 +382,11 @@ pub fn parse_capsule_toml_v2(text: &str) -> Result<PortableAuthoringDraftV2, Cap
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    let state_ids = state
+        .iter()
+        .map(|state| state.id.clone())
+        .collect::<BTreeSet<_>>();
+
     if document.contract.mode != ContractMode::All || document.contract.observation.is_empty() {
         return Err(invalid(
             "contract",
@@ -400,78 +456,11 @@ pub fn parse_capsule_toml_v2(text: &str) -> Result<PortableAuthoringDraftV2, Cap
                     format!("duplicate id {:?}", derivation.id),
                 ));
             }
-            if derivation.argv.is_empty() || derivation.argv.iter().any(|item| item.contains('\0'))
-            {
-                return Err(invalid(
-                    "derivation.argv",
-                    "must be a non-empty NUL-free argv array",
-                ));
+            if derivation.service.is_empty() {
+                parse_single_route(derivation)
+            } else {
+                parse_service_group(derivation, &state_ids, &binding_ids)
             }
-            if derivation.guest_port == 0 {
-                return Err(invalid(
-                    "derivation.guest_port",
-                    "must be between 1 and 65535",
-                ));
-            }
-            validate_relative(&derivation.cwd, "derivation.cwd")?;
-            if derivation.env.iter().any(|(name, value)| {
-                name.is_empty() || name.contains('=') || name.contains('\0') || value.contains('\0')
-            }) {
-                return Err(invalid("derivation.env", "contains an invalid name or NUL"));
-            }
-            let kind = match derivation.protocol.as_str() {
-                PROCESS_PROTOCOL => {
-                    if derivation
-                        .runtimes
-                        .get("python")
-                        .is_none_or(|value| value.trim().is_empty())
-                    {
-                        return Err(invalid(
-                            "derivation.runtimes.python",
-                            "is required for a process route",
-                        ));
-                    }
-                    PortableDerivationKindV2::Process
-                }
-                OCI_PROTOCOL => {
-                    let image = derivation
-                        .runtimes
-                        .get("oci.image")
-                        .map(String::as_str)
-                        .unwrap_or("");
-                    let platform = derivation
-                        .runtimes
-                        .get("oci.platform")
-                        .map(String::as_str)
-                        .unwrap_or("");
-                    if !image.contains("@sha256:")
-                        || !matches!(platform, "linux/amd64" | "linux/arm64")
-                    {
-                        return Err(invalid(
-                            "derivation.runtimes",
-                            "OCI requires a digest-pinned image and linux/amd64 or linux/arm64",
-                        ));
-                    }
-                    PortableDerivationKindV2::Oci
-                }
-                other => {
-                    return Err(invalid(
-                        "derivation.use",
-                        format!(
-                            "{other:?} is unsupported; use {PROCESS_PROTOCOL:?} or {OCI_PROTOCOL:?}"
-                        ),
-                    ));
-                }
-            };
-            Ok(PortableDerivationDraftV2 {
-                label: derivation.id,
-                kind,
-                runtimes: derivation.runtimes,
-                argv: derivation.argv,
-                cwd: derivation.cwd,
-                env: derivation.env,
-                guest_port: derivation.guest_port,
-            })
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -482,6 +471,264 @@ pub fn parse_capsule_toml_v2(text: &str) -> Result<PortableAuthoringDraftV2, Cap
         state,
         observations,
         derivations,
+    })
+}
+
+fn validate_argv(field: &str, argv: &[String]) -> Result<(), CapsuleTomlV2Error> {
+    if argv.is_empty() || argv.iter().any(|item| item.contains('\0')) {
+        return Err(invalid(field, "must be a non-empty NUL-free argv array"));
+    }
+    Ok(())
+}
+
+fn validate_env(field: &str, env: &BTreeMap<String, String>) -> Result<(), CapsuleTomlV2Error> {
+    if env.iter().any(|(name, value)| {
+        name.is_empty() || name.contains('=') || name.contains('\0') || value.contains('\0')
+    }) {
+        return Err(invalid(field, "contains an invalid name or NUL"));
+    }
+    Ok(())
+}
+
+fn validate_oci_image(field: &str, image: Option<&String>) -> Result<(), CapsuleTomlV2Error> {
+    if !image.is_some_and(|image| image.contains("@sha256:")) {
+        return Err(invalid(field, "OCI requires a digest-pinned image"));
+    }
+    Ok(())
+}
+
+fn validate_oci_platform(field: &str, platform: Option<&String>) -> Result<(), CapsuleTomlV2Error> {
+    if !platform.is_some_and(|platform| matches!(platform.as_str(), "linux/amd64" | "linux/arm64"))
+    {
+        return Err(invalid(field, "OCI requires linux/amd64 or linux/arm64"));
+    }
+    Ok(())
+}
+
+fn parse_single_route(
+    derivation: Derivation,
+) -> Result<PortableDerivationDraftV2, CapsuleTomlV2Error> {
+    let argv = derivation.argv.unwrap_or_default();
+    let cwd = derivation.cwd.unwrap_or_default();
+    let env = derivation.env.unwrap_or_default();
+    let guest_port = derivation.guest_port.unwrap_or(0);
+    validate_argv("derivation.argv", &argv)?;
+    if guest_port == 0 {
+        return Err(invalid(
+            "derivation.guest_port",
+            "must be between 1 and 65535",
+        ));
+    }
+    validate_relative(&cwd, "derivation.cwd")?;
+    validate_env("derivation.env", &env)?;
+    let kind = match derivation.protocol.as_str() {
+        PROCESS_PROTOCOL => {
+            if derivation
+                .runtimes
+                .get("python")
+                .is_none_or(|value| value.trim().is_empty())
+            {
+                return Err(invalid(
+                    "derivation.runtimes.python",
+                    "is required for a process route",
+                ));
+            }
+            PortableDerivationKindV2::Process
+        }
+        OCI_PROTOCOL => {
+            validate_oci_image("derivation.runtimes", derivation.runtimes.get("oci.image"))
+                .and_then(|()| {
+                    validate_oci_platform(
+                        "derivation.runtimes",
+                        derivation.runtimes.get("oci.platform"),
+                    )
+                })
+                .map_err(|_| {
+                    invalid(
+                        "derivation.runtimes",
+                        "OCI requires a digest-pinned image and linux/amd64 or linux/arm64",
+                    )
+                })?;
+            PortableDerivationKindV2::Oci
+        }
+        other => {
+            return Err(invalid(
+                "derivation.use",
+                format!("{other:?} is unsupported; use {PROCESS_PROTOCOL:?} or {OCI_PROTOCOL:?}"),
+            ));
+        }
+    };
+    Ok(PortableDerivationDraftV2 {
+        label: derivation.id,
+        kind,
+        runtimes: derivation.runtimes,
+        argv,
+        cwd,
+        env,
+        guest_port,
+        services: Vec::new(),
+    })
+}
+
+/// Grammar and reference integrity of an OCI service group. Resource budgets
+/// and the Surface/Port exposure rules are the portable profile's to judge:
+/// they are checked where the bound Derivation is validated, so a bundle
+/// built by any frontend meets the same bar.
+fn parse_service_group(
+    derivation: Derivation,
+    state_ids: &BTreeSet<String>,
+    binding_ids: &BTreeSet<String>,
+) -> Result<PortableDerivationDraftV2, CapsuleTomlV2Error> {
+    if derivation.argv.is_some()
+        || derivation.cwd.is_some()
+        || derivation.env.is_some()
+        || derivation.guest_port.is_some()
+    {
+        return Err(invalid(
+            "derivation",
+            "argv, cwd, env and guest_port belong to each service when `service` is declared",
+        ));
+    }
+    if derivation.protocol != OCI_PROTOCOL {
+        return Err(invalid(
+            "derivation.use",
+            format!("services require {OCI_PROTOCOL:?}"),
+        ));
+    }
+    if derivation.runtimes.len() != 1 {
+        return Err(invalid(
+            "derivation.runtimes",
+            "a service group declares only the shared oci.platform",
+        ));
+    }
+    validate_oci_platform(
+        "derivation.runtimes",
+        derivation.runtimes.get("oci.platform"),
+    )?;
+
+    let mut service_ids = BTreeSet::new();
+    let mut port_ids = BTreeSet::new();
+    let mut state_users = BTreeMap::<String, usize>::new();
+    let mut binding_users = BTreeMap::<String, usize>::new();
+    let services = derivation
+        .service
+        .into_iter()
+        .map(|service| {
+            validate_id("derivation.service.id", &service.id)?;
+            if !service_ids.insert(service.id.clone()) {
+                return Err(invalid(
+                    "derivation.service.id",
+                    format!("duplicate id {:?}", service.id),
+                ));
+            }
+            validate_argv("derivation.service.argv", &service.argv)?;
+            validate_relative(&service.cwd, "derivation.service.cwd")?;
+            validate_env("derivation.service.env", &service.env)?;
+            validate_oci_image(
+                "derivation.service.runtimes",
+                service.runtimes.get("oci.image"),
+            )?;
+            if service.runtimes.contains_key("oci.platform") {
+                return Err(invalid(
+                    "derivation.service.runtimes",
+                    "oci.platform is shared and belongs to the derivation",
+                ));
+            }
+            if service.ports.is_empty() {
+                return Err(invalid(
+                    "derivation.service.ports",
+                    "every service serves at least one Port",
+                ));
+            }
+            let ports = service
+                .ports
+                .into_iter()
+                .map(|port| {
+                    validate_id("derivation.service.ports.id", &port.id)?;
+                    if !port_ids.insert(port.id.clone()) {
+                        return Err(invalid(
+                            "derivation.service.ports.id",
+                            format!("duplicate Port {:?}", port.id),
+                        ));
+                    }
+                    if port.guest_port == 0 {
+                        return Err(invalid(
+                            "derivation.service.ports.guest_port",
+                            "must be between 1 and 65535",
+                        ));
+                    }
+                    Ok(PortableServicePortDraftV2 {
+                        id: port.id,
+                        guest_port: port.guest_port,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            for (field, references, known, users) in [
+                (
+                    "derivation.service.state",
+                    &service.state,
+                    state_ids,
+                    &mut state_users,
+                ),
+                (
+                    "derivation.service.bindings",
+                    &service.bindings,
+                    binding_ids,
+                    &mut binding_users,
+                ),
+            ] {
+                let mut seen = BTreeSet::new();
+                for reference in references {
+                    if !known.contains(reference) || !seen.insert(reference) {
+                        return Err(invalid(
+                            field,
+                            format!("{reference:?} is undeclared or repeated"),
+                        ));
+                    }
+                    *users.entry(reference.clone()).or_default() += 1;
+                }
+            }
+            Ok(PortableServiceDraftV2 {
+                id: service.id,
+                runtimes: service.runtimes,
+                argv: service.argv,
+                cwd: service.cwd,
+                env: service.env,
+                ports,
+                state: service.state,
+                bindings: service.bindings,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    // Visibility is scoped per service, so every slot and every secret has
+    // exactly one reader. Unreferenced ones would be declared but reachable
+    // by nobody; shared ones would widen visibility past one service.
+    for (field, known, users) in [
+        ("state", state_ids, &state_users),
+        ("binding", binding_ids, &binding_users),
+    ] {
+        if let Some(id) = known.iter().find(|id| users.get(*id) != Some(&1)) {
+            return Err(invalid(
+                field,
+                format!("{id:?} must be used by exactly one service"),
+            ));
+        }
+    }
+    if !port_ids.contains("app.http") {
+        return Err(invalid(
+            "derivation.service.ports",
+            "exactly one service must serve the app.http Surface Port",
+        ));
+    }
+    Ok(PortableDerivationDraftV2 {
+        label: derivation.id,
+        kind: PortableDerivationKindV2::OciServiceGroup,
+        runtimes: derivation.runtimes,
+        argv: Vec::new(),
+        cwd: String::new(),
+        env: BTreeMap::new(),
+        guest_port: 0,
+        services,
     })
 }
 
@@ -580,5 +827,115 @@ default = "pure"
                 .to_string()
                 .contains("digest-pinned")
         );
+    }
+
+    const SERVICE_GROUP: &str = r#"
+schema = "ato.capsule/2"
+
+[application]
+title = "Group"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[binding]]
+id = "admin_secret"
+protocol = "ato.secret@1"
+
+[[state]]
+id = "data"
+use = "ato.state.filesystem@1"
+mount = "/data"
+access = "read-write"
+
+[contract]
+[[contract.observation]]
+id = "root"
+use = "ato.contract.http@1"
+port = "app.http"
+path = "/"
+status = 200
+
+[[derivation]]
+id = "group"
+use = "ato.oci@1"
+runtimes = { "oci.platform" = "linux/amd64" }
+
+[[derivation.service]]
+id = "backend"
+runtimes = { "oci.image" = "example/backend@sha256:1111111111111111111111111111111111111111111111111111111111111111" }
+argv = ["serve"]
+ports = [{ id = "backend.http", guest_port = 80 }]
+state = ["data"]
+bindings = ["admin_secret"]
+
+[[derivation.service]]
+id = "web"
+runtimes = { "oci.image" = "example/web@sha256:2222222222222222222222222222222222222222222222222222222222222222" }
+argv = ["web"]
+ports = [{ id = "app.http", guest_port = 8080 }]
+
+[effects]
+default = "pure"
+"#;
+
+    #[test]
+    fn parses_a_service_group_as_one_route_with_scoped_references() {
+        let draft = parse_capsule_toml_v2(SERVICE_GROUP).unwrap();
+        let [route] = draft.derivations.as_slice() else {
+            panic!("one route");
+        };
+        assert_eq!(route.kind, PortableDerivationKindV2::OciServiceGroup);
+        assert_eq!(route.guest_port, 0);
+        assert!(route.argv.is_empty());
+        assert_eq!(route.services[0].state, ["data"]);
+        assert_eq!(route.services[0].bindings, ["admin_secret"]);
+        assert_eq!(route.services[0].cwd, ".");
+        assert_eq!(route.services[1].ports[0].id, "app.http");
+    }
+
+    #[test]
+    fn refuses_service_groups_that_widen_or_drop_visibility() {
+        let refused = [
+            ("route-level argv", SERVICE_GROUP.replace(
+                "runtimes = { \"oci.platform\" = \"linux/amd64\" }",
+                "runtimes = { \"oci.platform\" = \"linux/amd64\" }\nargv = [\"x\"]",
+            )),
+            ("route-level image", SERVICE_GROUP.replace(
+                "{ \"oci.platform\" = \"linux/amd64\" }",
+                "{ \"oci.platform\" = \"linux/amd64\", \"oci.image\" = \"x@sha256:1\" }",
+            )),
+            ("process services", SERVICE_GROUP.replace("use = \"ato.oci@1\"", "use = \"ato.process@1\"")),
+            ("service platform", SERVICE_GROUP.replace(
+                "example/web@sha256:2222222222222222222222222222222222222222222222222222222222222222\"",
+                "example/web@sha256:2222222222222222222222222222222222222222222222222222222222222222\", \"oci.platform\" = \"linux/amd64\"",
+            )),
+            ("unpinned image", SERVICE_GROUP.replace(
+                "example/web@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+                "example/web:latest",
+            )),
+            ("shared state", SERVICE_GROUP.replace("argv = [\"web\"]", "argv = [\"web\"]\nstate = [\"data\"]")),
+            ("unused state", SERVICE_GROUP.replace("state = [\"data\"]\n", "")),
+            ("shared Binding", SERVICE_GROUP.replace(
+                "argv = [\"web\"]",
+                "argv = [\"web\"]\nbindings = [\"admin_secret\"]",
+            )),
+            ("unused Binding", SERVICE_GROUP.replace("bindings = [\"admin_secret\"]\n", "")),
+            ("undeclared state", SERVICE_GROUP.replace("state = [\"data\"]", "state = [\"data\", \"ghost\"]")),
+            ("duplicate Port", SERVICE_GROUP.replace("backend.http", "app.http")),
+            ("no Surface Port", SERVICE_GROUP.replace("id = \"app.http\"", "id = \"web.http\"")),
+            ("duplicate service", SERVICE_GROUP.replace("id = \"web\"", "id = \"backend\"")),
+            ("unknown service field", SERVICE_GROUP.replace("argv = [\"web\"]", "argv = [\"web\"]\nprivileged = true")),
+            ("service without Ports", SERVICE_GROUP.replace(
+                "ports = [{ id = \"backend.http\", guest_port = 80 }]",
+                "ports = []",
+            )),
+        ];
+        parse_capsule_toml_v2(SERVICE_GROUP).expect("baseline group parses");
+        for (name, toml) in refused {
+            assert!(parse_capsule_toml_v2(&toml).is_err(), "{name} was accepted");
+        }
     }
 }
