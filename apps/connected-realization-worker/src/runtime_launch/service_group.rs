@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use ato_adapter_oci::{
-    DockerOciAdapter, OciEndpoint, OciMount, OciNetwork, OciResourceLimits, OciServiceGroup,
-    OciSpec,
+    DockerOciAdapter, OciEndpoint, OciMount, OciNetwork, OciOwner, OciResourceLimits,
+    OciServiceGroup, OciSpec,
 };
 use ato_ipc::runtime_launch::StateAccessV1;
 use ato_ipc::runtime_launch_v2::{
@@ -36,6 +36,7 @@ pub fn launch_service_group(
     spec: &RuntimeLaunchSpecV2,
     context: &ResolvedRuntimeLaunchContext,
     probe: &dyn ReadinessProbe,
+    owner: &OciOwner,
 ) -> Result<OciServiceGroup> {
     ensure!(
         cfg!(target_os = "linux"),
@@ -47,12 +48,12 @@ pub fn launch_service_group(
         .parent()
         .context("workspace has no lease root")?
         .join("oci-runtime");
-    let network = OciNetwork::create(&spec.context.run_id)?;
+    let network = OciNetwork::create(&spec.context.run_id, &owner.labels(None)?)?;
     // From here on, dropping `group` stops whatever started and removes the
     // network, so every early return below cleans up.
     let mut group = OciServiceGroup::new(network);
     for service in &group_spec.services {
-        let adapter = DockerOciAdapter::new(service_oci_spec(spec, service, context)?)?;
+        let adapter = DockerOciAdapter::new(service_oci_spec(spec, service, context, owner)?)?;
         let handle = adapter.spawn_in_network(
             context.workspace_root(),
             &runtime_root.join(&service.name),
@@ -69,6 +70,7 @@ fn service_oci_spec(
     spec: &RuntimeLaunchSpecV2,
     service: &OciServiceV2,
     context: &ResolvedRuntimeLaunchContext,
+    owner: &OciOwner,
 ) -> Result<OciSpec> {
     let group = spec.service_group();
     let endpoints = service
@@ -148,6 +150,7 @@ fn service_oci_spec(
             pids_limit: service.resource_limits.pids_limit,
         },
         stop_timeout_seconds: spec.lifecycle.graceful_shutdown_ms.div_ceil(1000).max(1),
+        labels: owner.labels(Some(&service.name))?,
     })
 }
 

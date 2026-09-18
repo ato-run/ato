@@ -7,6 +7,7 @@
 
 pub mod lease;
 pub mod process_executor;
+pub mod recovery;
 pub mod resolved;
 pub mod sandbox;
 pub mod sandbox_exec;

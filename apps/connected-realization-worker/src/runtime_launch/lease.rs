@@ -27,7 +27,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use ato_adapter_oci::{
-    DockerOciAdapter, OciEndpoint, OciHandle, OciMount, OciResourceLimits, OciServiceGroup, OciSpec,
+    DockerOciAdapter, OciEndpoint, OciHandle, OciMount, OciOwner, OciResourceLimits,
+    OciServiceGroup, OciSpec, StopOutcome,
 };
 use ato_ipc::runtime_launch::{
     LaunchRealizationV1, ReadinessV1, RuntimeLaunchSpecV1, StateAccessV1,
@@ -35,10 +36,11 @@ use ato_ipc::runtime_launch::{
 use ato_ipc::runtime_launch_v2::{EndpointExposureV2, RuntimeLaunchSpec};
 
 use super::process_executor::{ReadinessProbe, state_path_env_name, state_working_copy};
+use super::recovery::{settle_lease, stop_budget};
 use super::resolved::{
     ResolvedRuntimeLaunchContext, ResolvedSecret, ResolvedStateAttachment, allocate_endpoint,
 };
-use super::session::{PreparedRun, RunStateOutcome, abort_run, commit_run};
+use super::session::{PreparedRun, RunStateOutcome, abort_run, commit_run, quarantine_run};
 use super::state_artifact::StateArtifactTransport;
 use super::workspace::{WorkspaceTransport, materialize_workspace};
 
@@ -420,24 +422,83 @@ impl ActiveRun {
     }
 }
 
-/// Launch and wait for readiness. On failure, nothing is left holding a slot.
+/// After a start failed part-way: give the slots back only if every workload
+/// the start may have created is confirmed stopped; otherwise quarantine them.
+fn settle_failed_start(
+    state: &dyn StateArtifactTransport,
+    prepared: &PreparedRun,
+    stop: &StopOutcome,
+    error: anyhow::Error,
+) -> StartFailure {
+    if stop.is_confirmed() {
+        abort_run(state, prepared);
+    } else {
+        quarantine_run(
+            state,
+            prepared,
+            &format!("start failed; stop unconfirmed: {stop:?}"),
+        );
+    }
+    StartFailure {
+        error,
+        stop: stop.clone(),
+    }
+}
+
+/// A start that failed, and whether everything it may have created is
+/// confirmed stopped. Unconfirmed means the slots were quarantined.
+#[derive(Debug)]
+pub struct StartFailure {
+    pub error: anyhow::Error,
+    pub stop: StopOutcome,
+}
+
+impl std::fmt::Display for StartFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{:#} (stop: {:?})", self.error, self.stop)
+    }
+}
+
+impl std::error::Error for StartFailure {}
+
+impl From<anyhow::Error> for StartFailure {
+    /// A failure before any workload was created: nothing can be running.
+    fn from(error: anyhow::Error) -> Self {
+        StartFailure {
+            error,
+            stop: StopOutcome::AlreadyExited { exit_code: 0 },
+        }
+    }
+}
+
+/// Launch and wait for readiness. On failure, a slot is given back only when
+/// nothing the start created can still be running; otherwise it stays held
+/// and quarantined.
 pub fn start(
     spec: &RuntimeLaunchSpec,
     resolved: ResolvedRun,
     state: &dyn StateArtifactTransport,
     probe: &dyn ReadinessProbe,
-) -> Result<ActiveRun> {
+    owner: &OciOwner,
+) -> std::result::Result<ActiveRun, StartFailure> {
+    let budget = stop_budget(spec.lifecycle());
     let spec = match spec {
         RuntimeLaunchSpec::V1(spec) => spec,
         RuntimeLaunchSpec::V2(spec) => {
-            let group =
-                match super::service_group::launch_service_group(spec, &resolved.context, probe) {
-                    Ok(group) => group,
-                    Err(error) => {
-                        abort_run(state, &resolved.prepared);
-                        return Err(error);
-                    }
-                };
+            let group = match super::service_group::launch_service_group(
+                spec,
+                &resolved.context,
+                probe,
+                owner,
+            ) {
+                Ok(group) => group,
+                Err(error) => {
+                    // The group stopped what it had started on its way out;
+                    // the labels confirm nothing of this lease survived.
+                    let stop = settle_lease(owner, budget);
+                    return Err(settle_failed_start(state, &resolved.prepared, &stop, error));
+                }
+            };
             return Ok(ActiveRun {
                 launched: ActiveWorkload::OciServiceGroup(group),
                 resolved,
@@ -450,8 +511,10 @@ pub fn start(
                 match super::process_executor::launch_process(spec, &resolved.context) {
                     Ok(launched) => launched,
                     Err(error) => {
+                        // `launch_process` fails before spawning or kills
+                        // what it spawned; nothing is left running.
                         abort_run(state, &resolved.prepared);
-                        return Err(error);
+                        return Err(error.into());
                     }
                 };
             if let Err(error) = super::process_executor::wait_until_ready(
@@ -460,9 +523,13 @@ pub fn start(
                 &mut launched,
                 probe,
             ) {
-                let _ = launched.stop(&spec.lifecycle);
-                abort_run(state, &resolved.prepared);
-                return Err(error);
+                let stop = match launched.stop(&spec.lifecycle) {
+                    Ok(_) => StopOutcome::Forced { exit_code: -1 },
+                    Err(stop_error) => StopOutcome::Unconfirmed {
+                        reason: format!("{stop_error:#}"),
+                    },
+                };
+                return Err(settle_failed_start(state, &resolved.prepared, &stop, error));
             }
             ActiveWorkload::Process(launched)
         }
@@ -529,6 +596,7 @@ pub fn start(
                     pids_limit: limits.pids_limit,
                 },
                 stop_timeout_seconds: spec.lifecycle.graceful_shutdown_ms.div_ceil(1000).max(1),
+                labels: owner.labels(None)?,
             })?;
             let runtime_root = resolved
                 .context
@@ -540,15 +608,16 @@ pub fn start(
             {
                 Ok(launched) => launched,
                 Err(error) => {
-                    abort_run(state, &resolved.prepared);
-                    return Err(error);
+                    // A spawn can fail after `docker run` created the
+                    // container; only the labels can tell.
+                    let stop = settle_lease(owner, budget);
+                    return Err(settle_failed_start(state, &resolved.prepared, &stop, error));
                 }
             };
             if let Err(error) = wait_until_oci_ready(spec, &resolved.context, &mut launched, probe)
             {
-                let _ = launched.stop();
-                abort_run(state, &resolved.prepared);
-                return Err(error);
+                let stop = launched.stop_gracefully(budget);
+                return Err(settle_failed_start(state, &resolved.prepared, &stop, error));
             }
             ActiveWorkload::Oci(launched)
         }
@@ -620,30 +689,83 @@ pub fn wait_for_stop(
     }
 }
 
-/// Stop, pack and commit. The slot is released whatever happens.
+/// How a finished Run stopped, per workload, before anything was committed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FinishedStop {
+    /// The least favourable outcome across the Run's workloads.
+    pub overall: StopOutcome,
+    /// Per service for a group, in stop order; one entry otherwise.
+    pub services: Vec<(String, StopOutcome)>,
+}
+
+fn process_stop_outcome(stopped: Result<super::process_executor::StopOutcome>) -> StopOutcome {
+    use super::process_executor::StopKind;
+    match stopped {
+        Ok(outcome) => {
+            let exit_code = outcome
+                .exit_status
+                .and_then(|status| status.code())
+                .unwrap_or(-1);
+            match outcome.kind {
+                StopKind::AlreadyExited => StopOutcome::AlreadyExited { exit_code },
+                StopKind::Graceful => StopOutcome::Graceful { exit_code },
+                StopKind::Forced => StopOutcome::Forced { exit_code },
+            }
+        }
+        Err(error) => StopOutcome::Unconfirmed {
+            reason: format!("{error:#}"),
+        },
+    }
+}
+
+/// Stop, then commit — or, if the stop cannot be confirmed, quarantine.
+///
+/// Packing and committing happen only after every workload is confirmed
+/// stopped: a live writer would tear the state being packed. When the stop
+/// is unconfirmed, nothing is committed or released; the slots stay held and
+/// quarantined until recovery or an operator confirms the stop.
 pub fn finish(
     spec: &RuntimeLaunchSpec,
     active: ActiveRun,
     state: &dyn StateArtifactTransport,
     commit_request_id: &str,
-) -> Result<Vec<RunStateOutcome>> {
+) -> (FinishedStop, Result<Vec<RunStateOutcome>>) {
     let ActiveRun { launched, resolved } = active;
-    let stopped = match launched {
-        ActiveWorkload::Process(process) => process.stop(spec.lifecycle()).map(|_| ()),
-        ActiveWorkload::Oci(container) => container.stop(),
-        // Reverse start order, then the network; packing waits for all of it.
-        ActiveWorkload::OciServiceGroup(group) => group.stop(),
+    let budget = stop_budget(spec.lifecycle());
+    let services = match launched {
+        ActiveWorkload::Process(process) => vec![(
+            "process".to_owned(),
+            process_stop_outcome(process.stop(spec.lifecycle())),
+        )],
+        ActiveWorkload::Oci(container) => {
+            vec![("container".to_owned(), container.stop_gracefully(budget))]
+        }
+        // Reverse start order; the network goes only after every service.
+        ActiveWorkload::OciServiceGroup(group) => group.stop_gracefully(budget).services,
     };
-    if let Err(error) = stopped {
-        abort_run(state, &resolved.prepared);
-        return Err(error);
+    let stop = FinishedStop {
+        overall: StopOutcome::worst(services.iter().map(|(_, outcome)| outcome))
+            .unwrap_or(StopOutcome::AlreadyExited { exit_code: 0 }),
+        services,
+    };
+    if !stop.overall.is_confirmed() {
+        quarantine_run(
+            state,
+            &resolved.prepared,
+            &format!("stop unconfirmed: {:?}", stop.overall),
+        );
+        let error = anyhow::anyhow!(
+            "the Run's workload could not be confirmed stopped; its state was quarantined, not committed"
+        );
+        return (stop, Err(error));
     }
-    commit_run(
+    let committed = commit_run(
         &resolved.context,
         state,
         &resolved.prepared,
         commit_request_id,
-    )
+    );
+    (stop, committed)
 }
 
 /// Which attachments this Run is allowed to write back.
