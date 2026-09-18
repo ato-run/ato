@@ -649,7 +649,11 @@ mod tests {
         let evidence: VerificationExecutionEvidence = serde_json::from_str(raw).unwrap();
         assert_eq!(evidence.services.len(), 2);
         assert_eq!(evidence.services[1].name, "web");
-        assert!(serde_json::to_string(&evidence).unwrap().contains("\"services\""));
+        assert!(
+            serde_json::to_string(&evidence)
+                .unwrap()
+                .contains("\"services\"")
+        );
         let single: VerificationExecutionEvidence =
             serde_json::from_str(r#"{"realization":"oci"}"#).unwrap();
         assert!(!serde_json::to_string(&single).unwrap().contains("services"));
