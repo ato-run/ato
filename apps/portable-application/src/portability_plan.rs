@@ -8,8 +8,8 @@ use clap::ValueEnum;
 use serde::Serialize;
 
 use crate::{
-    OCI_IMAGE_RUNTIME, OCI_PLATFORM_RUNTIME, PYTHON_RUNTIME, PortableApplicationError,
-    PortableRealizationKind, validate_all_derivations,
+    OCI_PLATFORM_RUNTIME, PYTHON_RUNTIME, PortableApplicationError, PortableRealizationKind,
+    validate_all_derivations,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
@@ -74,13 +74,8 @@ pub fn plan_portable_export(
                 }
             }
             PortableRealizationKind::OciContainer | PortableRealizationKind::OciServiceGroup => {
-                // A group's images are step-scoped; a single route's is route-wide.
-                for runtimes in std::iter::once(&route.derivation.runtimes)
-                    .chain(route.derivation.steps.iter().map(|step| &step.runtimes))
-                {
-                    if let Some(image) = runtimes.get(OCI_IMAGE_RUNTIME) {
-                        oci_images.insert(image.clone());
-                    }
+                for (image, _) in crate::oci_images(route) {
+                    oci_images.insert(image);
                 }
                 if let Some(platform) = route.derivation.runtimes.get(OCI_PLATFORM_RUNTIME) {
                     capabilities.insert(format!("oci-runtime:{platform}"));
@@ -235,7 +230,7 @@ mod tests {
             oci: PortableExecutionSpec {
                 runtimes: BTreeMap::from([
                     (
-                        OCI_IMAGE_RUNTIME.to_owned(),
+                        crate::OCI_IMAGE_RUNTIME.to_owned(),
                         format!("docker.io/example/app@sha256:{}", "a".repeat(64)),
                     ),
                     (OCI_PLATFORM_RUNTIME.to_owned(), "linux/amd64".to_owned()),

@@ -64,6 +64,9 @@ pub enum RuntimeLaunchSpecError {
     InvalidEndpoint { name: String },
     /// A timeout is zero, or shutdown bounds are inconsistent.
     InvalidLifecycle { field: String },
+    /// An OCI service group breaks a group invariant: service count or
+    /// naming, the one Surface, per-service visibility, or the budget.
+    InvalidServiceGroup { field: String },
 }
 
 impl RuntimeLaunchSpecError {
@@ -84,6 +87,7 @@ impl RuntimeLaunchSpecError {
             Self::InvalidImageDigest { .. } => "ATO_ERR_RUNTIME_LAUNCH_SPEC_INVALID_IMAGE_DIGEST",
             Self::InvalidEndpoint { .. } => "ATO_ERR_RUNTIME_LAUNCH_SPEC_INVALID_ENDPOINT",
             Self::InvalidLifecycle { .. } => "ATO_ERR_RUNTIME_LAUNCH_SPEC_INVALID_LIFECYCLE",
+            Self::InvalidServiceGroup { .. } => "ATO_ERR_RUNTIME_LAUNCH_SPEC_INVALID_SERVICE_GROUP",
         }
     }
 }
@@ -393,25 +397,14 @@ impl RuntimeLaunchSpecV1 {
                     return Err(RuntimeLaunchSpecError::EmptyArgv);
                 }
                 if let Some(entrypoint) = &oci.entrypoint
-                    && (!entrypoint.starts_with('/')
-                        || entrypoint.contains(['\0', '\\', ','])
-                        || entrypoint
-                            .split('/')
-                            .skip(1)
-                            .any(|segment| segment.is_empty() || matches!(segment, "." | "..")))
+                    && !is_guest_path(entrypoint)
                 {
                     return Err(RuntimeLaunchSpecError::ForbiddenField {
                         field: "realization.entrypoint".to_owned(),
                     });
                 }
                 if let Some(target) = &oci.workspace_mount_path
-                    && (!target.starts_with('/')
-                        || target == "/"
-                        || target.contains(['\0', '\\', ','])
-                        || target
-                            .split('/')
-                            .skip(1)
-                            .any(|segment| segment.is_empty() || matches!(segment, "." | "..")))
+                    && !is_guest_path(target)
                 {
                     return Err(RuntimeLaunchSpecError::ForbiddenField {
                         field: "realization.workspace_mount_path".to_owned(),
@@ -549,9 +542,21 @@ impl RuntimeLaunchSpecV1 {
     }
 }
 
+/// An absolute, normalized, non-root guest path that Docker's comma-separated
+/// `--mount` syntax can carry unambiguously.
+pub(crate) fn is_guest_path(path: &str) -> bool {
+    path.starts_with('/')
+        && path != "/"
+        && !path.contains(['\0', '\\', ','])
+        && path
+            .split('/')
+            .skip(1)
+            .all(|segment| !segment.is_empty() && !matches!(segment, "." | ".."))
+}
+
 /// `sha256:<64 lowercase hex>`. A tag is refused: the same spec must always
 /// name the same image, or its digest names something unreproducible.
-fn is_content_addressed_digest(reference: &str) -> bool {
+pub(crate) fn is_content_addressed_digest(reference: &str) -> bool {
     let Some(hex) = reference.strip_prefix("sha256:") else {
         return false;
     };
@@ -564,7 +569,7 @@ fn is_content_addressed_digest(reference: &str) -> bool {
 /// A cwd must stay inside the workspace. Absolute paths and `..` are refused
 /// outright rather than normalized, because a spec that needed normalizing is
 /// a spec whose author disagreed with the executor about what it meant.
-fn validate_workspace_relative(cwd: &str) -> Result<(), RuntimeLaunchSpecError> {
+pub(crate) fn validate_workspace_relative(cwd: &str) -> Result<(), RuntimeLaunchSpecError> {
     let invalid = || RuntimeLaunchSpecError::InvalidCwd {
         cwd: cwd.to_owned(),
     };
@@ -590,7 +595,7 @@ fn validate_workspace_relative(cwd: &str) -> Result<(), RuntimeLaunchSpecError> 
 /// A mount target is a guest path and must be absolute and normal. Anything
 /// relative would depend on the executor's cwd, which differs between Process
 /// and OCI — the one place the two realizations must not diverge.
-fn validate_mount_target(target: &str) -> Result<(), RuntimeLaunchSpecError> {
+pub(crate) fn validate_mount_target(target: &str) -> Result<(), RuntimeLaunchSpecError> {
     let invalid = || RuntimeLaunchSpecError::InvalidMountTarget {
         target: target.to_owned(),
     };

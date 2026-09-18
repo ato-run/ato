@@ -103,6 +103,10 @@ fn runner_capabilities(oci_available: bool) -> Vec<&'static str> {
     let mut capabilities = BASE_RUNNER_CAPABILITIES.to_vec();
     if oci_available {
         capabilities.push("execution_abi=oci");
+        // A group is a capability of the OCI evaluator, not a separate ABI:
+        // it is offered exactly where single-container OCI is, by a build that
+        // understands ato.runtime-launch-spec.v2.
+        capabilities.push(ato_ipc::oci_service_group::OCI_SERVICE_GROUP_RUNTIME_FEATURE);
     }
     capabilities
 }
@@ -1064,7 +1068,7 @@ impl ConnectedWorker {
         );
         let secrets = self
             .api
-            .redeem_runtime_bindings(&lease.id, &spec.secret_grants)?;
+            .redeem_runtime_bindings(&lease.id, &spec.secret_grants())?;
 
         // P4-A: publish the process on this Runner's ingress slot.
         //
@@ -1073,11 +1077,7 @@ impl ConnectedWorker {
         // forwards from. Both are existing Runner configuration — the control
         // plane never picks a host port, because only the Runner knows what is
         // free and the stable URL must not depend on it.
-        ensure!(
-            spec.endpoints.len() == 1,
-            "runtime-launch ingress currently supports exactly one declared endpoint"
-        );
-        let endpoint_name = spec.endpoints[0].name.clone();
+        let endpoint_name = runtime_launch::lease::published_endpoint_name(&spec)?;
         let mut assigned_ports = std::collections::BTreeMap::new();
         assigned_ports.insert(endpoint_name.clone(), self.config.surface_listen.port());
         let resolved = runtime_launch::lease::resolve_run(
@@ -1099,17 +1099,14 @@ impl ConnectedWorker {
             format!("the launch declared no `{endpoint_name}` endpoint to report")
         })?;
         let execution_evidence = active.execution_evidence();
-        let oci_port_mapping = match &active.launched {
-            runtime_launch::lease::ActiveWorkload::Oci(container) => {
-                let (container_ip, mappings) = container.port_mapping();
-                mappings.first().map(|mapping| OciPortMappingReport {
-                    container_ip: container_ip.to_string(),
-                    guest_port: mapping.guest_port,
-                    runner_forward_port: mapping.host_port,
-                })
-            }
-            runtime_launch::lease::ActiveWorkload::Process(_) => None,
-        };
+        let oci_port_mapping = active.launched.surface_container().and_then(|container| {
+            let (container_ip, mappings) = container.port_mapping();
+            mappings.first().map(|mapping| OciPortMappingReport {
+                container_ip: container_ip.to_string(),
+                guest_port: mapping.guest_port,
+                runner_forward_port: mapping.host_port,
+            })
+        });
         // The ready_url is the ingress slot's public hostname, and the process
         // is listening on the loopback port that slot forwards to. Before P4
         // this reported no URL at all, honestly: a process realization was
@@ -1131,7 +1128,7 @@ impl ConnectedWorker {
                 control: None,
             },
         )?;
-        if let runtime_launch::lease::ActiveWorkload::Oci(container) = &active.launched {
+        if let Some(container) = active.launched.surface_container() {
             let (container_ip, mappings) = container.port_mapping();
             for mapping in mappings {
                 eprintln!(
@@ -1156,7 +1153,16 @@ impl ConnectedWorker {
         );
 
         // ACTIVE. The control plane decides when this ends.
-        let stop = || -> Result<bool> { Ok(self.api.control(&lease.id)?.stop_requested) };
+        let stop = || -> Result<bool> {
+            // A group is one Application: a service that exits while ACTIVE
+            // fails the whole Run, which is then stopped and committed below.
+            if let runtime_launch::lease::ActiveWorkload::OciServiceGroup(group) = &active.launched
+                && let Some((name, code)) = group.exited_service()?
+            {
+                bail!("OCI service `{name}` exited while the group was active with code {code}");
+            }
+            Ok(self.api.control(&lease.id)?.stop_requested)
+        };
         let outcome = runtime_launch::lease::wait_for_stop(
             &stop,
             Duration::from_millis(500),
@@ -4553,6 +4559,8 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
         assert!(process_only.contains(&"materializer=ato.materialize.vm.snapshot@1"));
         assert!(process_only.contains(&"backend=firecracker"));
         assert!(runner_capabilities(true).contains(&"execution_abi=oci"));
+        assert!(runner_capabilities(true).contains(&"runtime_feature=oci_service_group_v1"));
+        assert!(!process_only.contains(&"runtime_feature=oci_service_group_v1"));
     }
 
     #[test]

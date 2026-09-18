@@ -5,10 +5,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
 use ato_objects::{PortableApplicationBundle, PortableOciArchive};
-use ato_portable_application::{
-    OCI_IMAGE_RUNTIME, OCI_PLATFORM_RUNTIME, PortableRealizationKind,
-    oci_archive::verify_oci_archive, validate_all_derivations,
-};
+use ato_portable_application::{oci_archive::verify_oci_archive, validate_all_derivations};
 use base64::Engine;
 
 pub use ato_portable_application::dependency_transport::{
@@ -20,28 +17,12 @@ pub fn oci_archive_from_file(
     path: &Path,
 ) -> Result<Vec<PortableOciArchive>> {
     let images = validate_all_derivations(bundle)?
-        .into_iter()
-        .filter(|route| route.realization == PortableRealizationKind::OciContainer)
-        .map(|route| {
-            Ok((
-                route
-                    .derivation
-                    .runtimes
-                    .get(OCI_IMAGE_RUNTIME)
-                    .context("OCI image missing")?
-                    .clone(),
-                route
-                    .derivation
-                    .runtimes
-                    .get(OCI_PLATFORM_RUNTIME)
-                    .context("OCI platform missing")?
-                    .clone(),
-            ))
-        })
-        .collect::<Result<Vec<_>>>()?;
+        .iter()
+        .flat_map(ato_portable_application::oci_images)
+        .collect::<Vec<_>>();
     ensure!(
         images.len() == 1,
-        "--oci-archive requires exactly one OCI Derivation"
+        "--oci-archive requires exactly one OCI image across the bundle's Derivations"
     );
     let size = std::fs::metadata(path)
         .with_context(|| format!("inspect {}", path.display()))?

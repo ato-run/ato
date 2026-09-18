@@ -156,8 +156,35 @@ impl DockerOciAdapter {
         ))
     }
 
+    /// Launch in a new `--internal` network owned by the returned handle. The
+    /// single-container route: nothing else ever joins that network.
     pub fn spawn(&self, workspace: &Path, runtime_root: &Path) -> Result<OciHandle> {
+        let network = OciNetwork::create_with(&self.docker, &self.spec.id)?;
+        let mut handle = self.spawn_in_network(workspace, runtime_root, &network, None)?;
+        handle.network = Some(network);
+        Ok(handle)
+    }
+
+    /// Launch into a network the caller owns, optionally under a network
+    /// alias sibling containers resolve by DNS. The handle does NOT own the
+    /// network: an [`OciServiceGroup`] removes it after its last service.
+    pub fn spawn_in_network(
+        &self,
+        workspace: &Path,
+        runtime_root: &Path,
+        network: &OciNetwork,
+        alias: Option<&str>,
+    ) -> Result<OciHandle> {
         ensure!(workspace.is_dir(), "OCI workspace does not exist");
+        if let Some(alias) = alias {
+            ensure!(
+                !alias.is_empty()
+                    && alias.bytes().all(|byte| byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || byte == b'-'),
+                "OCI network alias is not a DNS label"
+            );
+        }
         fs::create_dir_all(runtime_root).context("create OCI runtime directory")?;
         if let Some(offline) = &self.offline_image {
             let path = runtime_root.join("verified-oci-image.tar");
@@ -178,21 +205,20 @@ impl DockerOciAdapter {
         let (_, image_for_run) = self.admit_image()?;
 
         let suffix = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        let stem = safe_name(&self.spec.id);
+        // A service's alias is kept whole in its container name so an operator
+        // can tell the containers of one group apart; the id is shortened to
+        // leave room for it.
+        let stem = match alias {
+            Some(alias) => format!(
+                "{}-{alias}",
+                safe_name(&self.spec.id)
+                    .chars()
+                    .take(24)
+                    .collect::<String>()
+            ),
+            None => safe_name(&self.spec.id),
+        };
         let container_name = format!("ato-{stem}-{}-{suffix}", std::process::id());
-        let network_name = format!("{container_name}-net");
-        run_checked(
-            &self.docker,
-            [
-                "network",
-                "create",
-                "--driver",
-                "bridge",
-                "--internal",
-                network_name.as_str(),
-            ],
-            "create isolated OCI network",
-        )?;
 
         let env_file = runtime_root.join("environment.list");
         let environment = self
@@ -208,7 +234,8 @@ impl DockerOciAdapter {
             workspace,
             &env_file,
             &container_name,
-            &network_name,
+            network.name(),
+            alias,
             &image_for_run,
         )?;
         let launched = Command::new(&self.docker).args(&argv).output();
@@ -219,7 +246,6 @@ impl DockerOciAdapter {
         let launched = match launched {
             Ok(launched) => launched,
             Err(error) => {
-                let _ = remove_network(&self.docker, &network_name);
                 return Err(error).context("start OCI container");
             }
         };
@@ -231,7 +257,6 @@ impl DockerOciAdapter {
                     .args(["rm", "--force", container_id.trim()])
                     .output();
             }
-            let _ = remove_network(&self.docker, &network_name);
             return Err(error).context("remove OCI environment file after launch");
         }
         if !launched.status.success() {
@@ -241,7 +266,6 @@ impl DockerOciAdapter {
             let _ = Command::new(&self.docker)
                 .args(["rm", "--force", &container_name])
                 .output();
-            let _ = remove_network(&self.docker, &network_name);
             bail!("start OCI container failed: {}", bounded_stderr(&launched));
         }
         let container_id = String::from_utf8(launched.stdout)
@@ -258,7 +282,6 @@ impl DockerOciAdapter {
                 let _ = Command::new(&self.docker)
                     .args(["rm", "--force", &container_id])
                     .output();
-                let _ = remove_network(&self.docker, &network_name);
                 return Err(error);
             }
         };
@@ -271,7 +294,6 @@ impl DockerOciAdapter {
                     let _ = Command::new(&self.docker)
                         .args(["rm", "--force", &container_id])
                         .output();
-                    let _ = remove_network(&self.docker, &network_name);
                     return Err(error).context("start OCI loopback Port forwarder");
                 }
             }
@@ -281,7 +303,7 @@ impl DockerOciAdapter {
             container_id,
             container_address,
             container_name,
-            network_name,
+            network: None,
             image: self.spec.image.clone(),
             platform: self.spec.platform.clone(),
             endpoints: self.spec.endpoints.clone(),
@@ -420,12 +442,146 @@ fn validate_loaded_image(
     Ok(())
 }
 
+/// One `--internal` bridge for one Run. Removed on [`OciNetwork::remove`] or,
+/// best effort, on drop — so a failed launch never leaks a network.
+pub struct OciNetwork {
+    docker: PathBuf,
+    name: String,
+    removed: bool,
+}
+
+impl OciNetwork {
+    /// Create the network a group of services shares.
+    pub fn create(label: &str) -> Result<Self> {
+        let docker = find_on_path("docker").context(
+            "OCI runtime admission failed: Docker CLI is not installed or is not on PATH",
+        )?;
+        Self::create_with(&docker, label)
+    }
+
+    fn create_with(docker: &Path, label: &str) -> Result<Self> {
+        let suffix = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let name = format!(
+            "ato-{}-{}-{suffix}-net",
+            safe_name(label),
+            std::process::id()
+        );
+        run_checked(
+            docker,
+            [
+                "network",
+                "create",
+                "--driver",
+                "bridge",
+                "--internal",
+                name.as_str(),
+            ],
+            "create isolated OCI network",
+        )?;
+        Ok(Self {
+            docker: docker.to_path_buf(),
+            name,
+            removed: false,
+        })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn remove(mut self) -> Result<()> {
+        self.removed = true;
+        remove_network(&self.docker, &self.name)
+    }
+}
+
+impl Drop for OciNetwork {
+    fn drop(&mut self) {
+        if !self.removed {
+            let _ = remove_network(&self.docker, &self.name);
+        }
+    }
+}
+
+/// The containers of one OCI service group and the network they share.
+///
+/// Services are held in start order and always stopped in reverse, then the
+/// network is removed. Dropping the group does the same, best effort, so a
+/// group that fails half-way through its start leaves nothing behind.
+pub struct OciServiceGroup {
+    network: Option<OciNetwork>,
+    services: Vec<(String, OciHandle)>,
+}
+
+impl OciServiceGroup {
+    pub fn new(network: OciNetwork) -> Self {
+        Self {
+            network: Some(network),
+            services: Vec::new(),
+        }
+    }
+
+    pub fn network(&self) -> &OciNetwork {
+        self.network
+            .as_ref()
+            .expect("a live service group always owns its network")
+    }
+
+    pub fn push(&mut self, name: String, handle: OciHandle) {
+        self.services.push((name, handle));
+    }
+
+    pub fn services(&self) -> impl Iterator<Item = (&str, &OciHandle)> {
+        self.services
+            .iter()
+            .map(|(name, handle)| (name.as_str(), handle))
+    }
+
+    /// The first service, in start order, that is no longer running.
+    pub fn exited_service(&self) -> Result<Option<(&str, i32)>> {
+        for (name, handle) in &self.services {
+            if let Some(code) = handle.exit_code()? {
+                return Ok(Some((name.as_str(), code)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Stop every service in reverse start order, then remove the network.
+    /// Every step runs even after a failure; the first error is returned.
+    pub fn stop(mut self) -> Result<()> {
+        self.stop_all()
+    }
+
+    fn stop_all(&mut self) -> Result<()> {
+        let mut first_error = None;
+        while let Some((name, handle)) = self.services.pop() {
+            if let Err(error) = handle.stop() {
+                first_error.get_or_insert(error.context(format!("stop OCI service `{name}`")));
+            }
+        }
+        if let Some(network) = self.network.take()
+            && let Err(error) = network.remove()
+        {
+            first_error.get_or_insert(error);
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+}
+
+impl Drop for OciServiceGroup {
+    fn drop(&mut self) {
+        let _ = self.stop_all();
+    }
+}
+
 pub struct OciHandle {
     docker: PathBuf,
     container_id: String,
     container_address: IpAddr,
     container_name: String,
-    network_name: String,
+    /// Owned only by a single-container route; a group owns its network.
+    network: Option<OciNetwork>,
     image: String,
     platform: String,
     endpoints: Vec<OciEndpoint>,
@@ -446,6 +602,12 @@ impl OciHandle {
 
     pub fn container_name(&self) -> &str {
         &self.container_name
+    }
+
+    /// The container's address on its Run network. Used to probe internal
+    /// Endpoints from the Runner, which is the trusted execution substrate.
+    pub fn container_address(&self) -> IpAddr {
+        self.container_address
     }
 
     pub fn image(&self) -> &str {
@@ -495,7 +657,9 @@ impl OciHandle {
             .args(["rm", "--force", &self.container_id])
             .output()
             .context("remove OCI container")?;
-        let network = remove_network(&self.docker, &self.network_name);
+        // The container is gone (or failed to go) before its network is
+        // removed: Docker refuses to remove a network with an endpoint.
+        let network = self.network.take().map_or(Ok(()), OciNetwork::remove);
         self.stopped = true;
         ensure!(
             container.status.success(),
@@ -709,6 +873,7 @@ fn docker_run_arguments(
     env_file: &Path,
     container_name: &str,
     network_name: &str,
+    alias: Option<&str>,
     image_reference: &str,
 ) -> Result<Vec<String>> {
     let workspace = workspace
@@ -754,6 +919,9 @@ fn docker_run_arguments(
         "--label".to_owned(),
         format!("run.ato.dev/id={}", spec.id),
     ];
+    if let Some(alias) = alias {
+        argv.extend(["--network-alias".to_owned(), alias.to_owned()]);
+    }
     if let Some(user) = writable_mount_user {
         argv.extend(["--user".to_owned(), user]);
     }
@@ -1017,6 +1185,7 @@ mod tests {
             &env_file,
             "ato-test",
             "ato-test-net",
+            None,
             "sha256:verified-local-id",
         )
         .unwrap();
@@ -1043,6 +1212,41 @@ mod tests {
     }
 
     #[test]
+    fn a_service_joins_the_shared_network_under_its_alias_with_the_same_hardening() {
+        let workspace = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let env_file = runtime.path().join("environment.list");
+        fs::write(&env_file, "").unwrap();
+        let alone = docker_run_arguments(
+            &spec(),
+            workspace.path(),
+            &env_file,
+            "ato-test",
+            "ato-group-net",
+            None,
+            "sha256:verified-local-id",
+        )
+        .unwrap();
+        let aliased = docker_run_arguments(
+            &spec(),
+            workspace.path(),
+            &env_file,
+            "ato-test",
+            "ato-group-net",
+            Some("backend"),
+            "sha256:verified-local-id",
+        )
+        .unwrap();
+        let rendered = aliased.join(" ");
+        assert!(rendered.contains("--network ato-group-net --read-only"));
+        assert!(rendered.contains("--network-alias backend"));
+        assert!(!alone.join(" ").contains("--network-alias"));
+        // The alias adds exactly two arguments and removes nothing.
+        assert_eq!(aliased.len(), alone.len() + 2);
+        assert!(!rendered.contains("--publish"));
+    }
+
+    #[test]
     fn run_arguments_mount_workspace_at_the_declared_guest_path() {
         let workspace = tempfile::tempdir().unwrap();
         let runtime = tempfile::tempdir().unwrap();
@@ -1057,6 +1261,7 @@ mod tests {
             &env_file,
             "ato-test",
             "ato-test-net",
+            None,
             "sha256:verified-local-id",
         )
         .unwrap();
@@ -1079,6 +1284,7 @@ mod tests {
             &env_file,
             "ato-test",
             "ato-test-net",
+            None,
             "sha256:verified-local-id",
         )
         .unwrap();
@@ -1120,6 +1326,7 @@ mod tests {
             &env_file,
             "ato-test",
             "ato-test-net",
+            None,
             "sha256:verified-local-id",
         )
         .unwrap();

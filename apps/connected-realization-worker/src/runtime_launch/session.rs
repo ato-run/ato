@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use ato_ipc::runtime_launch::RuntimeLaunchSpecV1;
+use ato_ipc::runtime_launch::{RuntimeLaunchSpecV1, StateAttachmentV1};
 
 use super::process_executor::{
     LaunchedProcess, ReadinessProbe, launch_process, state_working_copy, wait_until_ready,
@@ -50,7 +50,7 @@ pub struct PreparedRun {
 /// Done BEFORE the workload starts, never lazily: an app that finds its state
 /// path missing does not wait for it, it either fails or writes somewhere else.
 pub fn prepare_run(
-    spec: &RuntimeLaunchSpecV1,
+    state_attachments: &[StateAttachmentV1],
     context: &ResolvedRuntimeLaunchContext,
     transport: &dyn StateArtifactTransport,
 ) -> Result<PreparedRun> {
@@ -89,7 +89,7 @@ pub fn prepare_run(
     // The spec's fence and the grant's fence must agree, or the control plane
     // handed out the slot between projection and acquisition. Refusing here
     // means a Run never starts believing it holds a generation it does not.
-    for attachment in &spec.state_attachments {
+    for attachment in state_attachments {
         if let (Some(expected), Some((_, grant))) = (
             attachment.writer_fence,
             grants.iter().find(|(key, _)| key == &attachment.state_key),
@@ -223,7 +223,7 @@ pub fn start_run(
     transport: &dyn StateArtifactTransport,
     probe: &dyn ReadinessProbe,
 ) -> Result<(PreparedRun, LaunchedProcess)> {
-    let prepared = prepare_run(spec, context, transport)?;
+    let prepared = prepare_run(&spec.state_attachments, context, transport)?;
     let mut launched = match launch_process(spec, context) {
         Ok(launched) => launched,
         Err(error) => {
@@ -600,7 +600,7 @@ while True:
         // anyway would mean running a workload that believes it holds a
         // generation it does not.
         let spec = spec_for("run_stale", Some(7), "unused", 39_104);
-        let error = prepare_run(&spec, &context, &plane).unwrap_err();
+        let error = prepare_run(&spec.state_attachments, &context, &plane).unwrap_err();
         assert!(error.to_string().contains("re-assigned"), "{error}");
     }
 
@@ -711,7 +711,7 @@ while True:
         let context = context_for(workspace.path(), 39_108);
         // Projected at generation 7, granted 1 — the slot moved underneath it.
         let spec = spec_for("run_stale_release", Some(7), "unused", 39_108);
-        prepare_run(&spec, &context, &plane).unwrap_err();
+        prepare_run(&spec.state_attachments, &context, &plane).unwrap_err();
 
         let inner = plane.inner.lock().expect("lock");
         assert_eq!(inner.held_by_fence, None);
