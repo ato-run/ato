@@ -1558,7 +1558,7 @@ fn run_portable_application(
             ..PortableRuntimeState::default()
         },
     )?;
-    let runtime = started.runtime;
+    let mut runtime = started.runtime;
     let receipt = started.receipt;
     if let Some(path) = &args.verification_receipt {
         fs::write(path, receipt.canonical_bytes()?)
@@ -1595,8 +1595,13 @@ fn run_portable_application(
         {
             break;
         }
+        // A service group is one Application: when any service exits, the
+        // whole group is stopped (by dropping the runtime) and the run fails.
+        if matches!(runtime, PortableLocalRuntime::OciServiceGroup { .. }) {
+            runtime.try_wait()?;
+        }
         #[cfg(not(unix))]
-        std::thread::park();
+        std::thread::park_timeout(Duration::from_millis(500));
         #[cfg(unix)]
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -2088,7 +2093,7 @@ impl PortableLocalRuntime {
             },
             Self::OciServiceGroup { group, .. } => match group.exited_service()? {
                 Some((name, code)) => {
-                    bail!("OCI service `{name}` exited before verification: {code}")
+                    bail!("OCI service `{name}` exited with code {code}; the group was stopped")
                 }
                 None => Ok(None),
             },
