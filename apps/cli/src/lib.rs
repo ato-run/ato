@@ -1963,6 +1963,7 @@ impl PortableLocalRuntime {
                         pids_limit: parse_runtime_limit(runtime, OCI_PIDS_LIMIT_RUNTIME)?,
                     },
                     stop_timeout_seconds: 5,
+                    labels: BTreeMap::new(),
                 };
                 let adapter = local_oci_adapter(bundle, spec)?;
                 let handle = adapter.spawn(workspace, &runtime_root.join("oci"))?;
@@ -2172,7 +2173,10 @@ fn start_local_service_group(
     let host_port = listener.local_addr()?.port();
     drop(listener);
 
-    let mut group = OciServiceGroup::new(OciNetwork::create(&route.derivation_ref.to_string())?);
+    let mut group = OciServiceGroup::new(OciNetwork::create(
+        &route.derivation_ref.to_string(),
+        &BTreeMap::new(),
+    )?);
     for step in &derivation.steps {
         let runtime = &step.runtimes;
         let mut environment = step.env.clone();
@@ -2228,6 +2232,8 @@ fn start_local_service_group(
                 pids_limit: parse_runtime_limit(runtime, OCI_PIDS_LIMIT_RUNTIME)?,
             },
             stop_timeout_seconds: 5,
+            // Local runs are not Runner-owned; recovery never scans them.
+            labels: BTreeMap::new(),
         };
         let handle = local_oci_adapter(bundle, spec)?.spawn_in_network(
             workspace,
