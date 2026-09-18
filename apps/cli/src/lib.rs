@@ -1786,6 +1786,11 @@ impl PortableLocalRuntime {
     ) -> Result<Self> {
         let state_mounts = resolve_portable_state_mounts(route, runtime_root, filesystem_state)?;
         match route.realization {
+            PortableRealizationKind::OciServiceGroup => {
+                bail!(
+                    "this build cannot realize an OCI service group; it needs the oci_service_group_v1 runtime feature"
+                )
+            }
             PortableRealizationKind::StaticWeb => {
                 let server =
                     StaticApplicationServer::start_with_state(workspace, route, static_state)?;

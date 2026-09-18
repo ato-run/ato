@@ -5,7 +5,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use ato_formation::authoring::{HTTP_CONTRACT_VERIFIER, StateAccess};
+use ato_formation::authoring::{HTTP_CONTRACT_VERIFIER, HTTP_PROTOCOL, StateAccess};
 use ato_formation::verify::{
     ContractVerificationReceipt, RuntimeHttpObservation, RuntimeObservation,
     VerificationExecutionEvidence, VerificationTargetKind, verify_runtime,
@@ -369,6 +369,36 @@ pub struct PortableRouteReport {
     pub guest_port: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<PortableStateReport>,
+    /// Present only for `oci_service_group`, whose execution is per service.
+    /// The route-level `argv`/`cwd`/`env` are then empty, `port` names the
+    /// Surface Port and `guest_port` is null.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<PortableServiceReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortableServiceReport {
+    pub name: String,
+    pub runtimes: BTreeMap<String, String>,
+    pub argv: Vec<String>,
+    pub cwd: String,
+    pub env: BTreeMap<String, String>,
+    pub ports: Vec<PortableServicePortReport>,
+    /// State keys mounted into this service only.
+    pub state: Vec<String>,
+    /// Binding ids injected into this service only.
+    pub bindings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortableServicePortReport {
+    pub id: String,
+    pub guest_port: u16,
+    /// `surface` is loopback-forwarded to the Application Surface; `internal`
+    /// is reachable only by sibling services and is never forwarded.
+    pub exposure: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -624,12 +654,88 @@ fn snapshot_report(
     }))
 }
 
+#[cfg(test)]
+pub(crate) mod tests_support {
+    pub(crate) fn route_reports(
+        validated: &[crate::ValidatedPortableApplication],
+    ) -> anyhow::Result<Vec<super::PortableRouteReport>> {
+        super::validated_routes(validated)
+    }
+}
+
 fn validated_routes(
     validated: &[ValidatedPortableApplication],
 ) -> Result<Vec<PortableRouteReport>> {
     validated
         .iter()
         .map(|route| {
+            let state = route
+                .derivation
+                .state
+                .first()
+                .map(|state| PortableStateReport {
+                    state_key: state.id.clone(),
+                    protocol: state.protocol.clone(),
+                    mount_target: state.mount.clone(),
+                    access: match state.access {
+                        StateAccess::ReadOnly => "read_only",
+                        StateAccess::ReadWrite => "read_write",
+                    },
+                });
+            if route.realization == PortableRealizationKind::OciServiceGroup {
+                let surface = route
+                    .derivation
+                    .ports
+                    .iter()
+                    .find(|port| port.protocol == HTTP_PROTOCOL)
+                    .context("service group omitted its Surface Port")?;
+                return Ok(PortableRouteReport {
+                    derivation_ref: route.derivation_ref.to_string(),
+                    realization: "oci_service_group",
+                    runtimes: route.derivation.runtimes.clone(),
+                    argv: Vec::new(),
+                    cwd: String::new(),
+                    env: BTreeMap::new(),
+                    port: surface.id.clone(),
+                    guest_port: None,
+                    state,
+                    services: route
+                        .derivation
+                        .steps
+                        .iter()
+                        .map(|step| {
+                            Ok(PortableServiceReport {
+                                name: step.id.clone(),
+                                runtimes: step.runtimes.clone(),
+                                argv: step.argv.clone(),
+                                cwd: step.cwd.clone(),
+                                env: step.env.clone(),
+                                ports: route
+                                    .derivation
+                                    .ports
+                                    .iter()
+                                    .filter(|port| port.from == step.id)
+                                    .map(|port| {
+                                        Ok(PortableServicePortReport {
+                                            id: port.id.clone(),
+                                            guest_port: port
+                                                .guest_port
+                                                .context("service Port omitted its guest port")?,
+                                            exposure: if port.id == surface.id {
+                                                "surface"
+                                            } else {
+                                                "internal"
+                                            },
+                                        })
+                                    })
+                                    .collect::<Result<_>>()?,
+                                state: step.state.clone(),
+                                bindings: step.bindings.clone(),
+                            })
+                        })
+                        .collect::<Result<_>>()?,
+                });
+            }
             let step = route
                 .derivation
                 .steps
@@ -646,6 +752,7 @@ fn validated_routes(
                     PortableRealizationKind::StaticWeb => "static_web",
                     PortableRealizationKind::LocalProcess => "process",
                     PortableRealizationKind::OciContainer => "oci",
+                    PortableRealizationKind::OciServiceGroup => "oci_service_group",
                 },
                 runtimes: route.derivation.runtimes.clone(),
                 argv: step.argv.clone(),
@@ -653,19 +760,8 @@ fn validated_routes(
                 env: step.env.clone(),
                 port: port.id.clone(),
                 guest_port: port.guest_port,
-                state: route
-                    .derivation
-                    .state
-                    .first()
-                    .map(|state| PortableStateReport {
-                        state_key: state.id.clone(),
-                        protocol: state.protocol.clone(),
-                        mount_target: state.mount.clone(),
-                        access: match state.access {
-                            StateAccess::ReadOnly => "read_only",
-                            StateAccess::ReadWrite => "read_write",
-                        },
-                    }),
+                state,
+                services: Vec::new(),
             })
         })
         .collect()

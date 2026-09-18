@@ -19,6 +19,7 @@ path = "src/bin/ato-portable-validator.rs"
 [dependencies]
 ato-computation = { path = "../../lib/computation", version = "0.1.0" }
 ato-formation = { path = "../../lib/formation", version = "0.1.0" }
+ato-ipc = { path = "../../lib/ipc", version = "0.1.0" }
 ato-materializer-static-web = { path = "../../extensions/materializers/static-web", version = "0.1.0" }
 ato-objects = { path = "../../lib/objects", version = "0.1.0" }
 base64 = "0.22"

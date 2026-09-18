@@ -73,9 +73,14 @@ pub fn plan_portable_export(
                     capabilities.insert(format!("python:{version}"));
                 }
             }
-            PortableRealizationKind::OciContainer => {
-                if let Some(image) = route.derivation.runtimes.get(OCI_IMAGE_RUNTIME) {
-                    oci_images.insert(image.clone());
+            PortableRealizationKind::OciContainer | PortableRealizationKind::OciServiceGroup => {
+                // A group's images are step-scoped; a single route's is route-wide.
+                for runtimes in std::iter::once(&route.derivation.runtimes)
+                    .chain(route.derivation.steps.iter().map(|step| &step.runtimes))
+                {
+                    if let Some(image) = runtimes.get(OCI_IMAGE_RUNTIME) {
+                        oci_images.insert(image.clone());
+                    }
                 }
                 if let Some(platform) = route.derivation.runtimes.get(OCI_PLATFORM_RUNTIME) {
                     capabilities.insert(format!("oci-runtime:{platform}"));
