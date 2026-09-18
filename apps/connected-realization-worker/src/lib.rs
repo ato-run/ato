@@ -963,6 +963,13 @@ pub struct WorkerConfig {
     pub once: bool,
 }
 
+/// How a runtime launch ended, and whether its workloads are confirmed
+/// stopped (the journal entry may then go).
+struct RuntimeLaunchOutcome {
+    result: Result<()>,
+    stop_confirmed: bool,
+}
+
 pub struct ConnectedWorker {
     config: WorkerConfig,
     api: HttpRunnerApi,
@@ -977,9 +984,48 @@ impl ConnectedWorker {
         Ok(Self { config, api })
     }
 
+    /// Stop and report whatever this slot left running before it advertises
+    /// runtime work. A failure leaves the slot unrecovered, not the worker
+    /// dead: other lease kinds keep working and recovery is retried.
+    fn recover_runtime_launch(&self) {
+        if runtime_launch::recovery::slot_recovered()
+            || !runtime_launch::lease::RUNTIME_LAUNCH_SUPPORTED()
+        {
+            return;
+        }
+        let journal = runtime_launch::recovery::RunJournal::new(&self.config.work_root);
+        let scanner = ato_adapter_oci::OwnedResourceScanner::new(
+            &self.config.runner_id,
+            &self.config.slot_id,
+        )
+        .ok();
+        match runtime_launch::recovery::recover_slot(
+            &journal,
+            scanner.as_ref(),
+            &self.api,
+            ato_adapter_oci::StopBudget::DEFAULT,
+        ) {
+            Ok(result) => {
+                for report in &result.reports {
+                    eprintln!(
+                        "[runtime-launch-recovery] {}",
+                        serde_json::to_string(report).unwrap_or_default()
+                    );
+                }
+                runtime_launch::recovery::mark_slot_recovered(result.clean);
+            }
+            Err(error) => {
+                eprintln!("[runtime-launch-recovery] blocked: {error:#}");
+                runtime_launch::recovery::mark_slot_recovered(false);
+            }
+        }
+    }
+
     pub fn run(&self) -> Result<()> {
+        self.recover_runtime_launch();
         self.api.heartbeat(&self.config, 0)?;
         loop {
+            self.recover_runtime_launch();
             let claim = self.api.claim_next()?;
             let Some(lease) = claim.lease else {
                 if self.config.once {
@@ -1046,6 +1092,12 @@ impl ConnectedWorker {
         command: &runtime_launch::lease::RuntimeLaunchLeaseCommand,
         lease_root: &Path,
     ) -> Result<()> {
+        // A slot that has not finished recovering may still have a previous
+        // incarnation's workload running; it takes no runtime work.
+        ensure!(
+            runtime_launch::recovery::slot_recovered(),
+            "this Runner slot has not confirmed its previous Runs stopped; refusing runtime launch"
+        );
         // Proven before anything is materialized: if the spec that arrived is
         // not the one the control plane digested onto the Run, the Runner
         // would execute something the receipt does not describe.
@@ -1054,6 +1106,57 @@ impl ConnectedWorker {
         // the whole allocation, not only the time after readiness.
         let hard_deadline = Instant::now() + runtime_launch::lease::maximum_lifetime(command);
 
+        // Journaled before any writer, network or container exists, so a
+        // Runner that dies from here on leaves something recovery can find.
+        let owner = ato_adapter_oci::OciOwner {
+            runner_id: self.config.runner_id.clone(),
+            slot_id: self.config.slot_id.clone(),
+            lease_id: lease.id.clone(),
+            run_id: spec.context().run_id.clone(),
+            incarnation: runtime_launch::recovery::incarnation().to_owned(),
+        };
+        let journal = runtime_launch::recovery::RunJournal::new(&self.config.work_root);
+        let mut entry = runtime_launch::recovery::RunJournalEntry::new(&owner);
+        journal.record(&entry)?;
+
+        let outcome = self.run_runtime_launch(
+            lease,
+            &spec,
+            hard_deadline,
+            &owner,
+            &journal,
+            &mut entry,
+            lease_root,
+        );
+        if outcome.stop_confirmed {
+            // Confirmed stopped, or never started: nothing left to recover.
+            journal.remove(&lease.id)?;
+        } else {
+            // Kept for recovery; the slots are quarantined, not released.
+            entry.phase = runtime_launch::recovery::RunPhase::StopUnconfirmed;
+            journal.record(&entry)?;
+        }
+        outcome.result
+    }
+
+    /// One runtime launch, from resolution to a stop. Every path after the
+    /// workload starts goes through `finish`, which stops it before anything
+    /// is committed or released.
+    #[allow(clippy::too_many_arguments)]
+    fn run_runtime_launch(
+        &self,
+        lease: &ClaimedLease,
+        spec: &ato_ipc::runtime_launch_v2::RuntimeLaunchSpec,
+        hard_deadline: Instant,
+        owner: &ato_adapter_oci::OciOwner,
+        journal: &runtime_launch::recovery::RunJournal,
+        entry: &mut runtime_launch::recovery::RunJournalEntry,
+        lease_root: &Path,
+    ) -> RuntimeLaunchOutcome {
+        let not_started = |result: Result<()>| RuntimeLaunchOutcome {
+            result,
+            stop_confirmed: true,
+        };
         let workspace = runtime_launch::workspace::LeaseWorkspaceTransport::new(
             self.api.client.clone(),
             self.api.base.clone(),
@@ -1066,9 +1169,13 @@ impl ConnectedWorker {
             lease.id.clone(),
             self.api.token.clone(),
         );
-        let secrets = self
+        let secrets = match self
             .api
-            .redeem_runtime_bindings(&lease.id, &spec.secret_grants())?;
+            .redeem_runtime_bindings(&lease.id, &spec.secret_grants())
+        {
+            Ok(secrets) => secrets,
+            Err(error) => return not_started(Err(error)),
+        };
 
         // P4-A: publish the process on this Runner's ingress slot.
         //
@@ -1077,25 +1184,118 @@ impl ConnectedWorker {
         // forwards from. Both are existing Runner configuration — the control
         // plane never picks a host port, because only the Runner knows what is
         // free and the stable URL must not depend on it.
-        let endpoint_name = runtime_launch::lease::published_endpoint_name(&spec)?;
+        let endpoint_name = match runtime_launch::lease::published_endpoint_name(spec) {
+            Ok(name) => name,
+            Err(error) => return not_started(Err(error)),
+        };
         let mut assigned_ports = std::collections::BTreeMap::new();
         assigned_ports.insert(endpoint_name.clone(), self.config.surface_listen.port());
-        let resolved = runtime_launch::lease::resolve_run(
-            &spec,
+        // `resolve_run` acquires the writers and gives them back itself if it
+        // fails; no workload exists yet.
+        let resolved = match runtime_launch::lease::resolve_run(
+            spec,
             lease_root,
             &workspace,
             &state,
             secrets,
             &assigned_ports,
-        )?;
+        ) {
+            Ok(resolved) => resolved,
+            Err(error) => return not_started(Err(error)),
+        };
+        entry.writer_fences = resolved.prepared.writer_fences();
+        entry.phase = runtime_launch::recovery::RunPhase::Launching;
+        if let Err(error) = journal.record(entry) {
+            runtime_launch::session::abort_run(&state, &resolved.prepared);
+            return not_started(Err(error));
+        }
         let probe =
             runtime_launch::process_executor::LoopbackReadinessProbe::new(self.api.client.clone());
-        let active = runtime_launch::lease::start(&spec, resolved, &state, &probe)?;
+        let active = match runtime_launch::lease::start(spec, resolved, &state, &probe, owner) {
+            Ok(active) => active,
+            Err(failure) => {
+                return RuntimeLaunchOutcome {
+                    stop_confirmed: failure.stop.is_confirmed(),
+                    result: Err(anyhow::Error::new(failure)),
+                };
+            }
+        };
+        entry.phase = runtime_launch::recovery::RunPhase::Active;
+        if let runtime_launch::lease::ActiveWorkload::Process(process) = &active.launched {
+            entry.process =
+                runtime_launch::recovery::process_start_time(process.pid()).map(|start_time| {
+                    runtime_launch::recovery::ProcessIdentity {
+                        pid: process.pid(),
+                        start_time,
+                    }
+                });
+        }
 
+        // Everything between readiness and the stop request. Any error here
+        // still ends in `finish` below.
+        let serving = journal.record(entry).and_then(|()| {
+            self.serve_runtime_launch(lease, spec, &active, &endpoint_name, hard_deadline)
+        });
+
+        entry.phase = runtime_launch::recovery::RunPhase::Stopping;
+        let _ = journal.record(entry);
+        // Whether the stop was requested, the lifetime ran out or serving
+        // failed, the Run ends the same way: stop, prove the workloads are
+        // gone, then pack, commit and release — or quarantine if the stop
+        // cannot be confirmed.
+        let (stopped, committed) = runtime_launch::lease::finish(
+            spec,
+            active,
+            &state,
+            &format!("commit_{}", lease.run_id),
+        );
+        eprintln!(
+            "[runtime-launch] run={} stop={}",
+            lease.run_id,
+            serde_json::json!({
+                "overall": &stopped.overall,
+                "services": stopped
+                    .services
+                    .iter()
+                    .map(|(name, outcome)| serde_json::json!({ "name": name, "outcome": outcome }))
+                    .collect::<Vec<_>>(),
+            })
+        );
+        let stop_confirmed = stopped.overall.is_confirmed();
+        let result = serving.and_then(|execution_id| {
+            let committed = committed?;
+            for entry in &committed {
+                eprintln!(
+                    "[runtime-launch] run={} state={} fence={} {} -> {}",
+                    lease.run_id,
+                    entry.state_key,
+                    entry.writer_fence,
+                    entry.parent_revision_ref.as_deref().unwrap_or("<new>"),
+                    entry.revision_ref.as_deref().unwrap_or("<unchanged>")
+                );
+            }
+            self.api.report_stopped(&lease.id, &execution_id)
+        });
+        RuntimeLaunchOutcome {
+            result,
+            stop_confirmed,
+        }
+    }
+
+    /// Report readiness and hold the Run ACTIVE until the control plane asks
+    /// it to stop. Returns the execution id to report the stop against.
+    fn serve_runtime_launch(
+        &self,
+        lease: &ClaimedLease,
+        spec: &ato_ipc::runtime_launch_v2::RuntimeLaunchSpec,
+        active: &runtime_launch::lease::ActiveRun,
+        endpoint_name: &str,
+        hard_deadline: Instant,
+    ) -> Result<String> {
         let execution_id = spec
             .canonical_digest()
             .map_err(|error| anyhow::anyhow!("cannot digest the launch spec: {error}"))?;
-        let port = active.endpoint_port(&endpoint_name).with_context(|| {
+        let port = active.endpoint_port(endpoint_name).with_context(|| {
             format!("the launch declared no `{endpoint_name}` endpoint to report")
         })?;
         let execution_evidence = active.execution_evidence();
@@ -1108,15 +1308,10 @@ impl ConnectedWorker {
             })
         });
         // The ready_url is the ingress slot's public hostname, and the process
-        // is listening on the loopback port that slot forwards to. Before P4
-        // this reported no URL at all, honestly: a process realization was
-        // reachable only on the Runner's own loopback, and synthesizing a
-        // public address would have published a URL that served nothing. It
-        // serves something now.
-        //
-        // The API still validates the hostname against this Runner's active
-        // ingress slots, so a misconfigured `public_base_url` is refused rather
-        // than believed.
+        // is listening on the loopback port that slot forwards to. The API
+        // still validates the hostname against this Runner's active ingress
+        // slots, so a misconfigured `public_base_url` is refused rather than
+        // believed.
         self.api.report_ready(
             &lease.id,
             ReadyReport {
@@ -1155,7 +1350,7 @@ impl ConnectedWorker {
         // ACTIVE. The control plane decides when this ends.
         let stop = || -> Result<bool> {
             // A group is one Application: a service that exits while ACTIVE
-            // fails the whole Run, which is then stopped and committed below.
+            // fails the whole Run, which is then stopped by `finish`.
             if let runtime_launch::lease::ActiveWorkload::OciServiceGroup(group) = &active.launched
                 && let Some((name, code)) = group.exited_service()?
             {
@@ -1163,36 +1358,12 @@ impl ConnectedWorker {
             }
             Ok(self.api.control(&lease.id)?.stop_requested)
         };
-        let outcome = runtime_launch::lease::wait_for_stop(
+        runtime_launch::lease::wait_for_stop(
             &stop,
             Duration::from_millis(500),
             Some(hard_deadline),
-        );
-
-        // Whether the stop was requested or the lifetime ran out, the Run is
-        // finished the same way: stop, prove the subtree is gone, pack, commit,
-        // release. A lifetime overrun must not skip the commit — the App's
-        // users produced that state either way.
-        let committed = runtime_launch::lease::finish(
-            &spec,
-            active,
-            &state,
-            &format!("commit_{}", lease.run_id),
-        );
-        outcome?;
-        let committed = committed?;
-        for entry in &committed {
-            eprintln!(
-                "[runtime-launch] run={} state={} fence={} {} -> {}",
-                lease.run_id,
-                entry.state_key,
-                entry.writer_fence,
-                entry.parent_revision_ref.as_deref().unwrap_or("<new>"),
-                entry.revision_ref.as_deref().unwrap_or("<unchanged>")
-            );
-        }
-        self.api.report_stopped(&lease.id, &execution_id)?;
-        Ok(())
+        )?;
+        Ok(execution_id)
     }
 
     fn execute_portable_lease(
@@ -3194,12 +3365,41 @@ impl HttpRunnerApi {
     }
 }
 
+impl runtime_launch::recovery::RecoveryReporter for HttpRunnerApi {
+    /// Tell the control plane what recovery found for one lease. A lease the
+    /// control plane no longer knows has nothing to release: that is an
+    /// acknowledgement, not a failure.
+    fn report_recovery(
+        &self,
+        report: &runtime_launch::recovery::LeaseRecoveryReport,
+    ) -> Result<()> {
+        let response = self
+            .authorized(self.client.post(format!(
+                "{}/v1/runner-leases/{}/recovery",
+                self.base, report.lease_id
+            )))
+            .json(report)
+            .send()?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        response
+            .error_for_status()
+            .context("control plane refused the recovery report")?;
+        Ok(())
+    }
+}
+
 fn supported_lease_kinds(config: &WorkerConfig) -> Vec<&'static str> {
     let mut kinds = vec![PORTABLE_CAPSULE_LEASE_KIND];
     // Only advertised where the workload can actually be contained. A Runner
     // that took `runtime_launch` leases it must then refuse would look
     // available to the scheduler and fail every Run it won.
-    if runtime_launch::lease::RUNTIME_LAUNCH_SUPPORTED() {
+    // A slot still holding an unconfirmed previous Run takes no new runtime
+    // work: its old workload may still be writing.
+    if runtime_launch::lease::RUNTIME_LAUNCH_SUPPORTED()
+        && runtime_launch::recovery::slot_recovered()
+    {
         kinds.push(runtime_launch::lease::RUNTIME_LAUNCH_LEASE_KIND);
     }
     if config.browser_chrome.as_deref().is_some_and(Path::is_file)
@@ -4583,6 +4783,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             run_control_verification_key: None,
             once: true,
         };
+        runtime_launch::recovery::mark_slot_recovered(true);
         let mut expected = vec![PORTABLE_CAPSULE_LEASE_KIND];
         if runtime_launch::lease::RUNTIME_LAUNCH_SUPPORTED() {
             expected.push(runtime_launch::lease::RUNTIME_LAUNCH_LEASE_KIND);
