@@ -95,9 +95,14 @@ pub fn bubblewrap_containment_available() -> bool {
                 "/dev",
                 "--tmpfs",
                 "/tmp",
+                // The probe asks only whether the namespaces can be created.
+                // Binding the host root read-only keeps the probe independent
+                // of the filesystem layout: on merged-/usr hosts the loader
+                // is reached through root-level symlinks, and binding only
+                // /usr made every such host look uncontainable.
                 "--ro-bind",
-                "/usr",
-                "/usr",
+                "/",
+                "/",
                 "--",
                 "/usr/bin/true",
             ])
