@@ -2016,6 +2016,7 @@ impl PortableLocalRuntime {
                 dependency_fetches: Vec::new(),
                 portability_profile: None,
                 embedded_oci_image_loaded: None,
+                services: Vec::new(),
             },
             Self::Process {
                 handle,
@@ -2037,6 +2038,7 @@ impl PortableLocalRuntime {
                 dependency_fetches: Vec::new(),
                 portability_profile: None,
                 embedded_oci_image_loaded: None,
+                services: Vec::new(),
             },
             Self::OciServiceGroup {
                 group,
@@ -2062,6 +2064,16 @@ impl PortableLocalRuntime {
                     dependency_fetches: Vec::new(),
                     portability_profile: None,
                     embedded_oci_image_loaded: None,
+                    services: group
+                        .services()
+                        .map(
+                            |(name, handle)| ato_formation::verify::VerificationServiceEvidence {
+                                name: name.to_owned(),
+                                container_id: handle.container_id().to_owned(),
+                                image: handle.image().to_owned(),
+                            },
+                        )
+                        .collect(),
                 }
             }
             Self::Oci { handle, base_url } => VerificationExecutionEvidence {
@@ -2079,6 +2091,7 @@ impl PortableLocalRuntime {
                 dependency_fetches: Vec::new(),
                 portability_profile: None,
                 embedded_oci_image_loaded: None,
+                services: Vec::new(),
             },
         }
     }
