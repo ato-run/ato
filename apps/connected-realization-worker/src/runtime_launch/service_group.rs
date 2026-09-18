@@ -208,3 +208,79 @@ fn wait_until_service_ready(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use ato_ipc::runtime_launch::{EndpointAllocationV1, EndpointV1};
+    use ato_ipc::runtime_launch_v2::RuntimeLaunchSpec;
+
+    use super::super::resolved::{ResolvedSecret, ResolvedStateAttachment, allocate_endpoint};
+    use super::super::volume::VolumeStore;
+    use super::*;
+
+    const VOLUME_FIXTURE: &str = include_str!(
+        "../../../../lib/ipc/tests/fixtures/runtime-launch-spec-v3/service-group-volume.json"
+    );
+
+    #[test]
+    fn a_volume_is_mounted_into_its_one_service_and_no_other() {
+        let parsed = RuntimeLaunchSpec::parse(VOLUME_FIXTURE).expect("v3 fixture");
+        let spec = parsed.service_group_spec().expect("a group");
+        let root = tempfile::tempdir().unwrap();
+        let store = VolumeStore::open(root.path(), "runner-a").unwrap();
+        let backing = parsed.runner_volume("data").unwrap();
+        let volume_data = store.data_dir(&backing.volume_ref).unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let context = ResolvedRuntimeLaunchContext::new(
+            workspace.path().to_path_buf(),
+            "",
+            BTreeMap::new(),
+            vec![ResolvedSecret::new("ATO_BINDING_ADMIN_SECRET", "s")],
+            vec![ResolvedStateAttachment::new(
+                "data",
+                None,
+                volume_data.clone(),
+                "/data",
+                StateAccessV1::ReadWrite,
+            )],
+            vec![allocate_endpoint(
+                &EndpointV1 {
+                    name: "app.http".to_owned(),
+                    protocol: "http".to_owned(),
+                    guest_port: Some(8080),
+                    allocation: EndpointAllocationV1::Automatic,
+                    preferred_port: None,
+                },
+                18080,
+            )],
+        )
+        .expect("context");
+        let owner = OciOwner {
+            runner_id: "runner-a".to_owned(),
+            slot_id: "slot-1".to_owned(),
+            lease_id: "lease-1".to_owned(),
+            run_id: spec.context.run_id.clone(),
+            incarnation: "inc".to_owned(),
+        };
+        let group = spec.service_group();
+        let spec_for = |name: &str| {
+            let service = group.services.iter().find(|s| s.name == name).unwrap();
+            service_oci_spec(spec, service, &context, &owner).expect("service spec")
+        };
+
+        let backend = spec_for("backend");
+        assert_eq!(backend.mounts.len(), 1);
+        assert_eq!(backend.mounts[0].host_path, volume_data);
+        assert_eq!(backend.mounts[0].guest_path, "/data");
+        assert!(backend.mounts[0].writable);
+
+        let web = spec_for("web");
+        assert!(web.mounts.is_empty(), "the volume never reaches a sibling");
+        assert!(
+            !web.environment.keys().any(|name| name.starts_with("ATO_STATE_PATH")),
+            "nor does its path"
+        );
+    }
+}
