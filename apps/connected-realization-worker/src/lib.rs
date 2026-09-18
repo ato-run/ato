@@ -993,7 +993,18 @@ impl ConnectedWorker {
         {
             return;
         }
-        let journal = runtime_launch::recovery::RunJournal::new(&self.config.work_root);
+        let journal = match runtime_launch::recovery::RunJournal::new(
+            &self.config.work_root,
+            &self.config.runner_id,
+            &self.config.slot_id,
+        ) {
+            Ok(journal) => journal,
+            Err(error) => {
+                eprintln!("[runtime-launch-recovery] blocked: {error:#}");
+                runtime_launch::recovery::mark_slot_recovered(false);
+                return;
+            }
+        };
         let scanner = ato_adapter_oci::OwnedResourceScanner::new(
             &self.config.runner_id,
             &self.config.slot_id,
@@ -1115,7 +1126,11 @@ impl ConnectedWorker {
             run_id: spec.context().run_id.clone(),
             incarnation: runtime_launch::recovery::incarnation().to_owned(),
         };
-        let journal = runtime_launch::recovery::RunJournal::new(&self.config.work_root);
+        let journal = runtime_launch::recovery::RunJournal::new(
+            &self.config.work_root,
+            &self.config.runner_id,
+            &self.config.slot_id,
+        )?;
         let mut entry = runtime_launch::recovery::RunJournalEntry::new(&owner);
         journal.record(&entry)?;
 
