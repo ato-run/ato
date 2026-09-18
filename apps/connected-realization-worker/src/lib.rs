@@ -99,7 +99,7 @@ const BASE_RUNNER_CAPABILITIES: &[&str] = &[
     "backend=firecracker",
 ];
 
-fn runner_capabilities(oci_available: bool) -> Vec<&'static str> {
+fn runner_capabilities(oci_available: bool, persistent_volumes: bool) -> Vec<&'static str> {
     let mut capabilities = BASE_RUNNER_CAPABILITIES.to_vec();
     if oci_available {
         capabilities.push("execution_abi=oci");
@@ -107,6 +107,11 @@ fn runner_capabilities(oci_available: bool) -> Vec<&'static str> {
         // it is offered exactly where single-container OCI is, by a build that
         // understands ato.runtime-launch-spec.v2.
         capabilities.push(ato_ipc::oci_service_group::OCI_SERVICE_GROUP_RUNTIME_FEATURE);
+        // Volumes are their own feature: a group Runner is not a volume
+        // Runner until it understands v3 AND has a writable volume store.
+        if persistent_volumes {
+            capabilities.push(runtime_launch::volume::RUNNER_PERSISTENT_VOLUME_FEATURE);
+        }
     }
     capabilities
 }
@@ -959,6 +964,11 @@ pub struct WorkerConfig {
     /// a Runner. Required only for Browser-aware Hosted Runs.
     #[arg(long, env = "ATO_RUN_CONTROL_VERIFICATION_KEY", hide_env_values = true)]
     pub run_control_verification_key: Option<String>,
+    /// Host-wide root for Runner-local persistent volumes, shared by every
+    /// slot worker of this Runner. Unset: volume-backed Runs are neither
+    /// advertised nor accepted. Never under a lease or work directory.
+    #[arg(long, env = "ATO_RUNNER_STATE_VOLUME_ROOT")]
+    pub state_volume_root: Option<PathBuf>,
     #[arg(long)]
     pub once: bool,
 }
@@ -973,6 +983,7 @@ struct RuntimeLaunchOutcome {
 pub struct ConnectedWorker {
     config: WorkerConfig,
     api: HttpRunnerApi,
+    volume_store: Option<runtime_launch::volume::VolumeStore>,
 }
 
 impl ConnectedWorker {
@@ -980,8 +991,23 @@ impl ConnectedWorker {
         resolve_runner_credentials(&mut config)?;
         validate_config(&config)?;
         fs::create_dir_all(&config.work_root)?;
-        let api = HttpRunnerApi::new(&config.api_base, &config.runner_id, &config.runner_token)?;
-        Ok(Self { config, api })
+        let mut api =
+            HttpRunnerApi::new(&config.api_base, &config.runner_id, &config.runner_token)?;
+        // A store that cannot be opened is not advertised; the worker still
+        // serves everything else.
+        let volume_store = config.state_volume_root.as_deref().and_then(|root| {
+            runtime_launch::volume::VolumeStore::open(root, &config.runner_id)
+                .map_err(|error| {
+                    eprintln!("[runtime-launch] persistent volumes disabled: {error:#}")
+                })
+                .ok()
+        });
+        api.persistent_volumes = volume_store.is_some();
+        Ok(Self {
+            config,
+            api,
+            volume_store,
+        })
     }
 
     /// Stop and report whatever this slot left running before it advertises
@@ -1214,6 +1240,7 @@ impl ConnectedWorker {
             &state,
             secrets,
             &assigned_ports,
+            self.volume_store.as_ref(),
         ) {
             Ok(resolved) => resolved,
             Err(error) => return not_started(Err(error)),
@@ -3143,6 +3170,8 @@ pub struct HttpRunnerApi {
     base: String,
     runner_id: String,
     token: String,
+    /// Whether this worker has a usable persistent volume store.
+    persistent_volumes: bool,
 }
 
 impl HttpRunnerApi {
@@ -3152,6 +3181,7 @@ impl HttpRunnerApi {
             base: base.trim_end_matches('/').to_owned(),
             runner_id: runner_id.to_owned(),
             token: token.to_owned(),
+            persistent_volumes: false,
         })
     }
 
@@ -3166,7 +3196,8 @@ impl HttpRunnerApi {
         )))
         .json(&serde_json::json!({
             "capabilities": runner_capabilities(
-                ato_adapter_oci::docker_runtime_available()
+                ato_adapter_oci::docker_runtime_available(),
+                self.persistent_volumes,
             ),
             "supported_lease_kinds": supported_lease_kinds(config),
             "supported_session_surfaces": [{
@@ -4650,6 +4681,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             max_slots: 1,
             browser_chrome: None,
             run_control_verification_key: None,
+            state_volume_root: None,
             once: true,
         };
         assert!(validate_config(&config).is_err());
@@ -4672,6 +4704,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             max_slots: 0,
             browser_chrome: None,
             run_control_verification_key: None,
+            state_volume_root: None,
             once: true,
         };
         assert!(validate_config(&config).is_err());
@@ -4705,6 +4738,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             max_slots: 1,
             browser_chrome: None,
             run_control_verification_key: None,
+            state_volume_root: None,
             once: true,
         };
         resolve_runner_credentials(&mut config).unwrap();
@@ -4756,6 +4790,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             max_slots: 1,
             browser_chrome: None,
             run_control_verification_key: None,
+            state_volume_root: None,
             once: true,
         };
         assert_eq!(ready_local_port(&config), 8420);
@@ -4767,15 +4802,20 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
 
     #[test]
     fn heartbeat_advertises_dispatch_and_vm_requirements() {
-        let process_only = runner_capabilities(false);
+        let process_only = runner_capabilities(false, true);
         assert!(process_only.contains(&"execution_abi=process"));
         assert!(!process_only.contains(&"execution_abi=oci"));
         assert!(process_only.contains(&"isolation=untrusted-v1"));
         assert!(process_only.contains(&"materializer=ato.materialize.vm.snapshot@1"));
         assert!(process_only.contains(&"backend=firecracker"));
-        assert!(runner_capabilities(true).contains(&"execution_abi=oci"));
-        assert!(runner_capabilities(true).contains(&"runtime_feature=oci_service_group_v1"));
+        assert!(runner_capabilities(true, false).contains(&"execution_abi=oci"));
+        assert!(runner_capabilities(true, false).contains(&"runtime_feature=oci_service_group_v1"));
         assert!(!process_only.contains(&"runtime_feature=oci_service_group_v1"));
+        // Volumes are advertised only with OCI AND a usable store.
+        let volume = "runtime_feature=runner_persistent_volume_v1";
+        assert!(runner_capabilities(true, true).contains(&volume));
+        assert!(!runner_capabilities(true, false).contains(&volume));
+        assert!(!process_only.contains(&volume));
     }
 
     #[test]
@@ -4796,6 +4836,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             max_slots: 1,
             browser_chrome: None,
             run_control_verification_key: None,
+            state_volume_root: None,
             once: true,
         };
         runtime_launch::recovery::mark_slot_recovered(true);

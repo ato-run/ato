@@ -40,8 +40,11 @@ use super::recovery::{settle_lease, stop_budget};
 use super::resolved::{
     ResolvedRuntimeLaunchContext, ResolvedSecret, ResolvedStateAttachment, allocate_endpoint,
 };
-use super::session::{PreparedRun, RunStateOutcome, abort_run, commit_run, quarantine_run};
+use super::session::{
+    PreparedRun, RunStateOutcome, VolumeAttachments, abort_run, commit_run, quarantine_run,
+};
 use super::state_artifact::StateArtifactTransport;
+use super::volume::VolumeStore;
 use super::workspace::{WorkspaceTransport, materialize_workspace};
 
 /// The lease kind this handler answers to.
@@ -129,7 +132,7 @@ fn verify_group_cpu_reservation(
     spec: &RuntimeLaunchSpec,
     request: Option<&serde_json::Value>,
 ) -> Result<()> {
-    let (RuntimeLaunchSpec::V2(group), Some(request)) = (spec, request) else {
+    let (Some(group), Some(request)) = (spec.service_group_spec(), request) else {
         return Ok(());
     };
     let total = group.service_group().total_limits.cpu_limit_millis;
@@ -152,7 +155,7 @@ pub fn published_endpoint_name(spec: &RuntimeLaunchSpec) -> Result<String> {
             );
             Ok(spec.endpoints[0].name.clone())
         }
-        RuntimeLaunchSpec::V2(spec) => spec
+        RuntimeLaunchSpec::V2(spec) | RuntimeLaunchSpec::V3 { view: spec, .. } => spec
             .service_group()
             .surface()
             .map(|(_, endpoint)| endpoint.name.clone())
@@ -221,7 +224,20 @@ pub fn resolve_run(
     state: &dyn StateArtifactTransport,
     secrets: Vec<ResolvedSecret>,
     assigned_ports: &BTreeMap<String, u16>,
+    volume_store: Option<&VolumeStore>,
 ) -> Result<ResolvedRun> {
+    // Which keys live in a Runner-local volume. Decided before anything is
+    // materialized: a Runner that cannot hold volumes refuses here rather
+    // than restoring an empty working copy in the volume's place.
+    let mut volume_attachments: VolumeAttachments<'_> = BTreeMap::new();
+    for attachment in spec.state_attachments() {
+        if let Some(backing) = spec.runner_volume(&attachment.state_key) {
+            let store = volume_store.context(
+                "this launch attaches a Runner-local volume, and this Runner has no volume store",
+            )?;
+            volume_attachments.insert(attachment.state_key.clone(), (store, backing));
+        }
+    }
     let (launch_workspace, cwd_relative, public_env, declared_endpoints) = match spec {
         RuntimeLaunchSpec::V1(spec) => (
             &spec.workspace,
@@ -234,7 +250,7 @@ pub fn resolve_run(
         ),
         // A group's environment is per service and applied at each container;
         // only its one Surface Endpoint is allocated a host port.
-        RuntimeLaunchSpec::V2(spec) => (
+        RuntimeLaunchSpec::V2(spec) | RuntimeLaunchSpec::V3 { view: spec, .. } => (
             &spec.workspace,
             "",
             BTreeMap::new(),
@@ -275,15 +291,22 @@ pub fn resolve_run(
         .state_attachments()
         .iter()
         .map(|attachment| {
-            ResolvedStateAttachment::new(
+            let host_path = match volume_attachments.get(&attachment.state_key) {
+                // The volume itself, mounted in place. Never a copy.
+                Some((store, backing)) => store
+                    .data_dir(&backing.volume_ref)
+                    .map_err(anyhow::Error::new)?,
+                None => state_working_copy(&workspace_root, &attachment.state_key),
+            };
+            Ok(ResolvedStateAttachment::new(
                 attachment.state_key.clone(),
                 attachment.revision_ref.clone(),
-                state_working_copy(&workspace_root, &attachment.state_key),
+                host_path,
                 attachment.mount_target.clone(),
                 attachment.access,
-            )
+            ))
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
 
     let grants = spec.secret_grants();
     let expected_secret_names = grants
@@ -310,7 +333,12 @@ pub fn resolve_run(
     )
     .map_err(|error| anyhow::anyhow!("cannot resolve the launch: {error}"))?;
 
-    let prepared = super::session::prepare_run(spec.state_attachments(), &context, state)?;
+    let prepared = super::session::prepare_run(
+        spec.state_attachments(),
+        &context,
+        state,
+        &volume_attachments,
+    )?;
     Ok(ResolvedRun {
         context,
         prepared,
@@ -484,7 +512,7 @@ pub fn start(
     let budget = stop_budget(spec.lifecycle());
     let spec = match spec {
         RuntimeLaunchSpec::V1(spec) => spec,
-        RuntimeLaunchSpec::V2(spec) => {
+        RuntimeLaunchSpec::V2(spec) | RuntimeLaunchSpec::V3 { view: spec, .. } => {
             let group = match super::service_group::launch_service_group(
                 spec,
                 &resolved.context,
@@ -902,9 +930,64 @@ mod tests {
     #[test]
     fn an_unknown_spec_protocol_is_refused_before_anything_runs() {
         let mut command = group_command(None);
-        command.launch_spec["protocol"] = "ato.runtime-launch-spec.v3".into();
+        command.launch_spec["protocol"] = "ato.runtime-launch-spec.v999".into();
         let error = verified_spec(&command).unwrap_err();
         assert!(error.to_string().contains("UNSUPPORTED_VERSION"), "{error}");
+    }
+
+    #[test]
+    fn a_volume_launch_on_a_runner_without_volumes_touches_nothing() {
+        const VOLUME_FIXTURE: &str = include_str!(
+            "../../../../lib/ipc/tests/fixtures/runtime-launch-spec-v3/service-group-volume.json"
+        );
+        struct Untouched;
+        impl WorkspaceTransport for Untouched {
+            fn download(&self, _: &str) -> Result<Vec<u8>> {
+                panic!("the workspace was fetched for a launch this Runner cannot hold")
+            }
+        }
+        impl StateArtifactTransport for Untouched {
+            fn acquire_writer(
+                &self,
+                _: &str,
+            ) -> Result<super::super::state_artifact::StateWriterGrant> {
+                panic!("a writer was taken for a launch this Runner cannot hold")
+            }
+            fn download(&self, _: &str) -> Result<Vec<u8>> {
+                unreachable!()
+            }
+            fn commit(
+                &self,
+                _: &str,
+                _: u64,
+                _: Option<&str>,
+                _: &str,
+                _: &super::super::state_artifact::StateArtifact,
+            ) -> Result<String> {
+                unreachable!()
+            }
+            fn release_writer(&self, _: &str, _: u64) -> Result<()> {
+                unreachable!()
+            }
+            fn quarantine_writer(&self, _: &str, _: u64, _: &str) -> Result<()> {
+                unreachable!()
+            }
+        }
+        let spec = RuntimeLaunchSpec::parse(VOLUME_FIXTURE).expect("v3 fixture");
+        let lease_root = tempfile::tempdir().unwrap();
+        let error = match resolve_run(
+            &spec,
+            lease_root.path(),
+            &Untouched,
+            &Untouched,
+            Vec::new(),
+            &BTreeMap::new(),
+            None,
+        ) {
+            Ok(_) => panic!("a volume launch resolved without a volume store"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("no volume store"), "{error}");
     }
 
     #[test]
