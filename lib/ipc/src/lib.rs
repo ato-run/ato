@@ -16,6 +16,7 @@ pub mod formation;
 pub mod net;
 pub mod oci_service_group;
 pub mod runtime_launch;
+pub mod runtime_launch_v2;
 pub mod session_surface;
 pub mod terminal_surface;
 
