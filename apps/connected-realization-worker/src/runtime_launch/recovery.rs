@@ -118,9 +118,15 @@ impl RunJournalEntry {
     }
 }
 
-/// `<work_root>/runtime-launch/journal/<lease_id>.json`, one slot per root.
+/// `<work_root>/runtime-launch/journal/<runner_id>/<slot_id>/<lease_id>.json`.
+///
+/// Scoped by Runner and slot because several slots can share one work root
+/// (the hosted Runner's six slots do): a slot must never read — let alone
+/// report as stopped — a Run another slot is still serving.
 pub struct RunJournal {
     dir: PathBuf,
+    runner_id: String,
+    slot_id: String,
 }
 
 fn valid_lease_id(value: &str) -> bool {
@@ -128,10 +134,20 @@ fn valid_lease_id(value: &str) -> bool {
 }
 
 impl RunJournal {
-    pub fn new(work_root: &Path) -> Self {
-        Self {
-            dir: work_root.join("runtime-launch").join("journal"),
-        }
+    pub fn new(work_root: &Path, runner_id: &str, slot_id: &str) -> Result<Self> {
+        anyhow::ensure!(
+            valid_lease_id(runner_id) && valid_lease_id(slot_id),
+            "journal Runner and slot ids must be plain identifiers"
+        );
+        Ok(Self {
+            dir: work_root
+                .join("runtime-launch")
+                .join("journal")
+                .join(runner_id)
+                .join(slot_id),
+            runner_id: runner_id.to_owned(),
+            slot_id: slot_id.to_owned(),
+        })
     }
 
     fn path(&self, lease_id: &str) -> Result<PathBuf> {
@@ -144,6 +160,10 @@ impl RunJournal {
 
     /// Durably replace the entry: write, fsync, rename, fsync the directory.
     pub fn record(&self, entry: &RunJournalEntry) -> Result<()> {
+        anyhow::ensure!(
+            entry.runner_id == self.runner_id && entry.slot_id == self.slot_id,
+            "a journal entry must belong to this Runner slot"
+        );
         fs::create_dir_all(&self.dir).context("create the run journal directory")?;
         let path = self.path(&entry.lease_id)?;
         let temporary = self.dir.join(format!(".{}.tmp", entry.lease_id));
@@ -188,6 +208,13 @@ impl RunJournal {
             anyhow::ensure!(
                 parsed.schema == RUN_JOURNAL_SCHEMA,
                 "journal entry {} has an unknown schema",
+                path.display()
+            );
+            // Another slot's entry here is corruption, not something to act
+            // on or to skip: stop recovery until someone looks.
+            anyhow::ensure!(
+                parsed.runner_id == self.runner_id && parsed.slot_id == self.slot_id,
+                "journal entry {} belongs to another Runner slot",
                 path.display()
             );
             loaded.push(parsed);
@@ -424,7 +451,7 @@ mod tests {
     #[test]
     fn journal_entries_round_trip_and_refuse_path_like_ids() {
         let root = tempfile::tempdir().unwrap();
-        let journal = RunJournal::new(root.path());
+        let journal = RunJournal::new(root.path(), "runner1", "slot1").unwrap();
         let mut entry = RunJournalEntry::new(&owner("L1"));
         entry.writer_fences.insert("data".to_owned(), 7);
         journal.record(&entry).unwrap();
@@ -436,9 +463,28 @@ mod tests {
     }
 
     #[test]
+    fn slots_sharing_a_work_root_never_see_each_others_runs() {
+        let root = tempfile::tempdir().unwrap();
+        let slot1 = RunJournal::new(root.path(), "runner1", "slot1").unwrap();
+        let slot2 = RunJournal::new(root.path(), "runner1", "slot2").unwrap();
+        slot1.record(&RunJournalEntry::new(&owner("L1"))).unwrap();
+        assert!(slot2.load().unwrap().is_empty());
+        let mut foreign = RunJournalEntry::new(&owner("L9"));
+        foreign.slot_id = "slot2".to_owned();
+        assert!(slot1.record(&foreign).is_err());
+        // A misplaced foreign entry blocks recovery instead of being settled.
+        fs::write(
+            slot1.dir.join("L9.json"),
+            serde_json::to_vec(&foreign).unwrap(),
+        )
+        .unwrap();
+        assert!(slot1.load().is_err());
+    }
+
+    #[test]
     fn a_malformed_entry_blocks_recovery_rather_than_being_forgotten() {
         let root = tempfile::tempdir().unwrap();
-        let journal = RunJournal::new(root.path());
+        let journal = RunJournal::new(root.path(), "runner1", "slot1").unwrap();
         fs::create_dir_all(&journal.dir).unwrap();
         fs::write(journal.dir.join("L1.json"), b"{not json").unwrap();
         assert!(recover_slot(&journal, None, &Reporter::default(), StopBudget::DEFAULT).is_err());
@@ -447,7 +493,7 @@ mod tests {
     #[test]
     fn without_docker_a_container_run_stays_unconfirmed_and_journaled() {
         let root = tempfile::tempdir().unwrap();
-        let journal = RunJournal::new(root.path());
+        let journal = RunJournal::new(root.path(), "runner1", "slot1").unwrap();
         journal.record(&RunJournalEntry::new(&owner("L1"))).unwrap();
         let reporter = Reporter::default();
         let result = recover_slot(&journal, None, &reporter, StopBudget::DEFAULT).unwrap();
@@ -473,7 +519,7 @@ mod tests {
              esac\n",
         );
         let scanner = OwnedResourceScanner::with_docker(docker, "runner1", "slot1");
-        let journal = RunJournal::new(root.path());
+        let journal = RunJournal::new(root.path(), "runner1", "slot1").unwrap();
 
         let failing = Reporter {
             fail: true,
@@ -498,6 +544,31 @@ mod tests {
             ),
             ("L2", Some("run_L2"), "stopped")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_runner_that_died_after_creating_only_the_network_is_recovered() {
+        let root = tempfile::tempdir().unwrap();
+        // No container yet; one owned network of lease L3; `network rm` works.
+        let docker = fake_docker(
+            root.path(),
+            "#!/bin/sh\n\
+             case \"$1 $2\" in\n\
+             'ps --all') ;;\n\
+             'network ls') echo 'n1|ato-net|run.ato.dev/managed=true,run.ato.dev/runner-id=runner1,run.ato.dev/slot-id=slot1,run.ato.dev/lease-id=L3';;\n\
+             *) exit 0;;\n\
+             esac\n",
+        );
+        let scanner = OwnedResourceScanner::with_docker(docker, "runner1", "slot1");
+        let journal = RunJournal::new(root.path(), "runner1", "slot1").unwrap();
+        journal.record(&RunJournalEntry::new(&owner("L3"))).unwrap();
+        let reporter = Reporter::default();
+        let result =
+            recover_slot(&journal, Some(&scanner), &reporter, StopBudget::DEFAULT).unwrap();
+        assert!(result.clean);
+        assert_eq!(reporter.reports.borrow()[0].outcome, "stopped");
+        assert!(journal.load().unwrap().is_empty());
     }
 
     #[test]
