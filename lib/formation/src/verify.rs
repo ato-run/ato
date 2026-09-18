@@ -271,6 +271,19 @@ pub struct VerificationExecutionEvidence {
     pub portability_profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedded_oci_image_loaded: Option<String>,
+    /// Every container of an OCI service group, in start order. Empty for
+    /// every other realization, and then absent from the receipt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<VerificationServiceEvidence>,
+}
+
+/// One container of an OCI service group. Evidence only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerificationServiceEvidence {
+    pub name: String,
+    pub container_id: String,
+    pub image: String,
 }
 
 /// Shared proof emitted by both local and hosted execution paths.
@@ -626,6 +639,21 @@ mod tests {
     use sha2::Digest;
 
     use super::*;
+
+    #[test]
+    fn runner_group_evidence_decodes_and_round_trips() {
+        // The Runner's ready evidence for an OCI service group reaches the
+        // hosted verifier verbatim; refusing its `services` would stop every
+        // group verification.
+        let raw = r#"{"realization":"oci_service_group","runtime_executable":"docker","platform":"linux/amd64","services":[{"name":"backend","container_id":"c1","image":"a@sha256:1"},{"name":"web","container_id":"c2","image":"b@sha256:2"}]}"#;
+        let evidence: VerificationExecutionEvidence = serde_json::from_str(raw).unwrap();
+        assert_eq!(evidence.services.len(), 2);
+        assert_eq!(evidence.services[1].name, "web");
+        assert!(serde_json::to_string(&evidence).unwrap().contains("\"services\""));
+        let single: VerificationExecutionEvidence =
+            serde_json::from_str(r#"{"realization":"oci"}"#).unwrap();
+        assert!(!serde_json::to_string(&single).unwrap().contains("services"));
+    }
     use crate::authoring::{BOUND_CONTRACT_SCHEMA, BoundRequirement};
 
     fn http(id: &str, port: &str, path: &str) -> BoundRequirement {
