@@ -115,6 +115,7 @@ contract.
 slot identity, not by a raw `(instance_id, state_key)` pair. A launch spec
 carries only `volume_ref` and `writer_fence`, never a host path. When the old
 writer's stop cannot be confirmed, the slot is not moved to another Runner.
+The first slice of this is specified below (Runner-local persistent volumes).
 
 **Always-on authorization (P2).** The Coordinator issues an authorization
 expiry for an `always_on` Run. The Runner requests renewal about every three
@@ -130,9 +131,78 @@ operators only and audited, and an active binding
 previous Run's stop is confirmed, so the public address never reaches a
 stale Run.
 
+## Runner-local persistent volumes (Step ②b)
+
+Status: implemented on staging behind a control-plane flag.
+
+**Two kinds of slot.** A state slot is either revision-backed (the existing
+model: its truth is the State Revision, restored into a per-Run working copy
+and packed back after a confirmed stop) or runner-volume-backed (its truth is
+a directory on one Runner, mounted in place and written by the application
+directly). For a volume-backed slot a State Revision is only a seed, and
+later a checkpoint (②c); `head_revision_id` is not "the latest data".
+
+**Choosing the mode.** A control-plane policy, not part of K or D. While the
+flag `PERSISTENT_STATE_VOLUMES` is on, the state slot of an OCI service group
+switches to runner-volume at its next launch, seeded from the head revision
+at that moment. The switch is recorded on the slot once and never reversed.
+With the flag off nothing changes.
+
+**Control plane.** `instance_state_volumes(volume_ref, state_slot_id UNIQUE,
+runner_id, status, seed_revision_id, capacity_bytes, usage_bytes, …)`.
+`status` is `provisioning | ready | missing`. Quarantine stays on the slot
+(Step ②a) and is not duplicated on the volume. The first volume for a slot is
+claimed with an insert that conflicts on `state_slot_id`, so concurrent
+launches that picked different Runners still create exactly one volume; the
+loser does not launch.
+
+**Placement.** A slot with a volume is launched only on its resident Runner.
+If that Runner is offline, drained or lacks the capability, the launch fails
+with a typed error and no lease; it never falls back to another Runner and
+never creates an empty volume elsewhere. A Runner must advertise
+`execution_abi=oci`, `runtime_feature=oci_service_group_v1` and
+`runtime_feature=runner_persistent_volume_v1`.
+
+**Wire.** `ato.runtime-launch-spec.v3` is the v2 group with
+`state_attachments[]` of `{state_key, mount_target, access = read_write,
+writer_fence, backing: {kind: runner_volume, volume_ref, capacity_bytes,
+initialize_from_revision_ref}}`. A new protocol rather than a v2 field
+because the attachment means something different. v1 and v2 bytes and
+digests are unchanged; a Runner without v3 refuses it by protocol before
+anything is materialized, and the control plane never selects one.
+
+**Runner.** Volumes live under a host-wide root
+(`<root>/<runner_id>/volumes/<volume_ref>/{metadata.json,data}`), shared by
+every slot worker of the host and outside any lease directory. A volume is
+provisioned once — temporary directory, one-time seed, fsync, atomic rename —
+then reported ready. A volume recorded ready that is absent or does not carry
+this Runner's metadata is reported `missing` and the launch refused; it is
+never rebuilt from an older revision. Recovery from a missing volume is an
+explicit, later operation.
+
+**Stop.** Unchanged from ②a: only a confirmed stop releases the writer, and
+for a volume-backed slot the release does not pack or commit. An unconfirmed
+stop quarantines the slot and keeps the volume. A host-local lock keeps two
+attachments on one host apart; it is not evidence that a previous workload
+stopped.
+
+**Capacity.** `capacity_bytes` is admitted per volume: the Runner refuses to
+start when the filesystem cannot offer what the volume may still grow by plus
+a reserve, or when the volume already exceeds its capacity, and reports usage
+after every stop. The State Artifact size limit does not apply to volumes.
+There is no hard quota yet: an application can exceed its capacity while it
+runs. **A hard quota is a production gate**; volumes stay staging-only until
+it exists. Host reboot and Docker daemon failure are also production
+acceptance items not exercised on the shared staging host.
+
+**Consumers of the head revision.** Export, import, snapshot and schema
+update paths that read or replace a slot's head refuse a volume-backed slot
+(`state_volume_backed_checkpoint_unavailable`) until checkpoints exist (②c).
+
 ## Deferred
 
 - Importing a limited Compose file into this typed form. It does not advance
   the Mail acceptance and follows a working group on staging.
-- Durable running volumes, restart policy, runtime egress, fixed TCP and
-  private Bindings (P2–P4).
+- Moving a volume to another Runner, failover, checkpoints, backup, restore
+  and clone of volumes (②c and later).
+- Restart policy, runtime egress, fixed TCP and private Bindings (P2–P4).
