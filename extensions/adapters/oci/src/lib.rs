@@ -205,7 +205,19 @@ impl DockerOciAdapter {
         let (_, image_for_run) = self.admit_image()?;
 
         let suffix = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        let stem = safe_name(&self.spec.id);
+        // A service's alias is kept whole in its container name so an operator
+        // can tell the containers of one group apart; the id is shortened to
+        // leave room for it.
+        let stem = match alias {
+            Some(alias) => format!(
+                "{}-{alias}",
+                safe_name(&self.spec.id)
+                    .chars()
+                    .take(24)
+                    .collect::<String>()
+            ),
+            None => safe_name(&self.spec.id),
+        };
         let container_name = format!("ato-{stem}-{}-{suffix}", std::process::id());
 
         let env_file = runtime_root.join("environment.list");
