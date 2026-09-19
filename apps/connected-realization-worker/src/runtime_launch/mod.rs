@@ -15,4 +15,5 @@ pub mod service_group;
 pub mod session;
 pub mod state_artifact;
 pub mod volume;
+pub mod volume_maintenance;
 pub mod workspace;

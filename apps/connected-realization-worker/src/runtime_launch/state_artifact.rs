@@ -490,6 +490,25 @@ pub trait StateArtifactTransport {
     ) -> Result<()> {
         anyhow::bail!("this state transport cannot report on Runner-local volumes")
     }
+
+    /// Report the outcome of the volume operation this lease carries
+    /// (checkpoint, restore, delete). Refused by default, like
+    /// `report_volume`.
+    fn complete_volume_operation(
+        &self,
+        _operation_id: &str,
+        _outcome: VolumeOperationOutcome,
+        _error: Option<&str>,
+    ) -> Result<()> {
+        anyhow::bail!("this state transport cannot report volume operations")
+    }
+}
+
+/// What a Runner reports about a volume operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VolumeOperationOutcome {
+    Succeeded,
+    Failed,
 }
 
 /// The real transport: lease-scoped, bearer-authenticated requests to the
@@ -663,6 +682,29 @@ impl StateArtifactTransport for LeaseStateArtifactTransport {
             .send()?
             .error_for_status()
             .with_context(|| format!("failed to report the state volume ({suffix})"))?;
+        Ok(())
+    }
+
+    fn complete_volume_operation(
+        &self,
+        operation_id: &str,
+        outcome: VolumeOperationOutcome,
+        error: Option<&str>,
+    ) -> Result<()> {
+        self.client
+            .post(self.url("volume-operations/complete"))
+            .bearer_auth(&self.token)
+            .json(&serde_json::json!({
+                "operation_id": operation_id,
+                "outcome": match outcome {
+                    VolumeOperationOutcome::Succeeded => "succeeded",
+                    VolumeOperationOutcome::Failed => "failed",
+                },
+                "error": error.map(|error| error.chars().take(500).collect::<String>()),
+            }))
+            .send()?
+            .error_for_status()
+            .context("failed to report the volume operation")?;
         Ok(())
     }
 

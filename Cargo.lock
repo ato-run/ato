@@ -360,6 +360,7 @@ dependencies = [
  "libc",
  "rand 0.8.6",
  "reqwest",
+ "rustix",
  "serde",
  "serde_jcs",
  "serde_json",

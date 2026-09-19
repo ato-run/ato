@@ -33,6 +33,8 @@ pub const RUNNER_PERSISTENT_VOLUME_FEATURE: &str = "runtime_feature=runner_persi
 const METADATA_SCHEMA: &str = "ato.runner-volume/1";
 const METADATA_FILE: &str = "metadata.json";
 const DATA_DIR: &str = "data";
+const REPLACE_PREFIX: &str = ".replace-";
+const DELETED_PREFIX: &str = ".deleted-";
 /// Kept free on the volume filesystem beyond what a volume may still grow by,
 /// so one volume reaching its capacity does not fill the disk for the others.
 pub const VOLUME_FREE_SPACE_RESERVE: u64 = 256 * 1024 * 1024;
@@ -293,6 +295,106 @@ impl VolumeStore {
             provisioned,
             _lock: lock,
         })
+    }
+
+    /// Open an existing volume for maintenance (checkpoint, restore, delete):
+    /// lock it and verify it is this Runner's. Never provisions — a volume
+    /// that is not here is missing, never rebuilt.
+    pub fn open_existing(&self, volume_ref: &str) -> Result<AttachedVolume, VolumeError> {
+        let dir = self.volume_dir(volume_ref)?;
+        let lock = self.lock(volume_ref)?;
+        if !dir.exists() {
+            return Err(VolumeError::Missing {
+                reason: "the volume is not present on this Runner".to_owned(),
+            });
+        }
+        self.verify(&dir, volume_ref)?;
+        // A replacement a previous attempt left half-way is this volume's own
+        // leftover; the live data was never touched by it.
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(REPLACE_PREFIX)
+            {
+                fs::remove_dir_all(entry.path())?;
+            }
+        }
+        Ok(AttachedVolume {
+            volume_ref: volume_ref.to_owned(),
+            data_dir: dir.join(DATA_DIR),
+            provisioned: false,
+            _lock: lock,
+        })
+    }
+
+    /// Replace a volume's data with what `fill` writes into a fresh directory.
+    ///
+    /// The fresh tree is written and fsynced first, then swapped with the live
+    /// `data` in ONE atomic exchange. A crash at any point leaves either the
+    /// old data or the complete new data in place — never a mix, and never
+    /// no `data` at all.
+    pub fn replace_data(
+        &self,
+        volume: &AttachedVolume,
+        fill: &dyn Fn(&Path) -> Result<()>,
+    ) -> Result<(), VolumeError> {
+        let dir = volume
+            .data_dir
+            .parent()
+            .ok_or_else(|| VolumeError::Invalid {
+                reason: "volume data has no parent".to_owned(),
+            })?
+            .to_path_buf();
+        let staging = dir.join(format!(
+            "{REPLACE_PREFIX}{}",
+            super::recovery::incarnation().replace(|c: char| !c.is_ascii_alphanumeric(), "")
+        ));
+        if staging.exists() {
+            fs::remove_dir_all(&staging)?;
+        }
+        fill(&staging).map_err(VolumeError::Io)?;
+        fs::create_dir_all(&staging)?;
+        sync_tree(&staging)?;
+        rustix::fs::renameat_with(
+            rustix::fs::CWD,
+            &staging,
+            rustix::fs::CWD,
+            &volume.data_dir,
+            rustix::fs::RenameFlags::EXCHANGE,
+        )
+        .map_err(|error| VolumeError::Io(std::io::Error::from(error).into()))?;
+        File::open(&dir)?.sync_all()?;
+        // `staging` now holds the previous data.
+        fs::remove_dir_all(&staging)?;
+        File::open(&dir)?.sync_all()?;
+        Ok(())
+    }
+
+    /// Delete a volume: one atomic rename out of the store's namespace, then
+    /// removal. After the rename the volume is simply not here; a crash
+    /// before the removal leaves only a `.deleted-<volume_ref>-*` directory
+    /// that the next delete of the same volume clears.
+    pub fn delete(&self, volume: AttachedVolume) -> Result<(), VolumeError> {
+        let dir = self.volume_dir(&volume.volume_ref)?;
+        let prefix = format!("{DELETED_PREFIX}{}-", volume.volume_ref);
+        let grave = self.volumes.join(format!(
+            "{prefix}{}",
+            super::recovery::incarnation().replace(|c: char| !c.is_ascii_alphanumeric(), "")
+        ));
+        fs::rename(&dir, &grave)?;
+        File::open(&self.volumes)?.sync_all()?;
+        for entry in fs::read_dir(&self.volumes)? {
+            let entry = entry?;
+            if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                fs::remove_dir_all(entry.path())?;
+            }
+        }
+        let lock = self.locks.join(format!("{}.lock", volume.volume_ref));
+        drop(volume);
+        let _ = fs::remove_file(lock);
+        Ok(())
     }
 
     fn lock(&self, volume_ref: &str) -> Result<File, VolumeError> {
