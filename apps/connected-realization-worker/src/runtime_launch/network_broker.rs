@@ -43,24 +43,39 @@ pub fn prepare_egress_firewall() -> Result<()> {
 
 fn ensure_iptables_rule(accept: bool) -> Result<()> {
     let check = iptables_arguments("-C", accept);
-    let checked = Command::new("iptables")
-        .args(&check)
-        .output()
-        .context("inspect TCP egress firewall rule")?;
+    let checked = iptables_output(&check).context("inspect TCP egress firewall rule")?;
     if checked.status.success() {
         return Ok(());
     }
     let insert = iptables_arguments("-I", accept);
-    let output = Command::new("iptables")
-        .args(&insert)
-        .output()
-        .context("install TCP egress firewall rule")?;
+    let output = iptables_output(&insert).context("install TCP egress firewall rule")?;
     ensure!(
         output.status.success(),
         "install TCP egress firewall rule failed: {}",
         bounded_stderr(&output)
     );
     Ok(())
+}
+
+fn iptables_output(arguments: &[String]) -> Result<Output> {
+    let direct = Command::new("iptables").args(arguments).output();
+    if direct.as_ref().is_ok_and(|output| output.status.success()) {
+        return direct.context("run iptables directly");
+    }
+    // Production workers stay unprivileged. A host may grant only these
+    // idempotent rule shapes through sudoers; the workload namespaces never
+    // receive sudo, the Docker socket, or CAP_NET_ADMIN.
+    let privileged = Command::new("sudo")
+        .args(["-n", "iptables"])
+        .args(arguments)
+        .output();
+    match (direct, privileged) {
+        (_, Ok(output)) => Ok(output),
+        (Ok(output), Err(_)) => Ok(output),
+        (Err(direct_error), Err(privileged_error)) => Err(anyhow::anyhow!(
+            "iptables is unavailable directly ({direct_error}) and through sudo ({privileged_error})"
+        )),
+    }
 }
 
 fn iptables_arguments(operation: &str, accept: bool) -> Vec<String> {

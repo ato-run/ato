@@ -301,7 +301,9 @@ generation metadata, never packet payloads or Binding secrets.
 On Linux, Runner-owned egress interfaces use the reserved `atoe` prefix. A
 startup preflight idempotently installs an INPUT default-deny rule for that
 prefix and opens only the SOCKS5 broker on TCP 1080. This requires
-`CAP_NET_ADMIN`; a Runner without the privilege fails startup instead of
+a narrowly scoped privileged firewall helper (for example, exact sudoers rules
+for these idempotent commands); the worker and workloads do not receive
+`CAP_NET_ADMIN`. A Runner without the helper fails startup instead of
 advertising egress capability. Every egress bridge has a distinct gateway, so
 the same fixed broker Port does not merge grants or make a broker reachable
 from another Run network.
