@@ -25,6 +25,16 @@ target binary.
   labels, the run journal). An older target does not recover leftovers; step 2
   below must then leave nothing behind before switching.
 
+- Know whether the target understands `ato.runtime-launch-spec.v3`
+  (Runner-local persistent volumes). A target without it, or without
+  `ATO_RUNNER_STATE_VOLUME_ROOT`, does not advertise
+  `runtime_feature=runner_persistent_volume_v1`. Every Instance whose state
+  already lives in a volume on this Runner then fails to launch with
+  `state_volume_runner_unavailable` until a volume-capable binary is back.
+  That is intended: its data stays in the volume and is never rebuilt from an
+  older revision or moved to another Runner. Never delete or move
+  `<ATO_RUNNER_STATE_VOLUME_ROOT>/<runner_id>/volumes/` as part of a rollback.
+
 ## 1. Stop new assignment
 
 Drain every Runner device served by the host:
@@ -61,6 +71,14 @@ and point the service at it. On ubuntu-sugamo each service's effective
 `ExecStart` comes from the last drop-in; the OCI service group rollout uses
 `zzz-oci-service-group.conf`. Editing or removing that drop-in is how the
 binary is switched — it is one step of this procedure, not the procedure.
+
+Volume-capable targets also need the host-wide volume root, shared by every
+slot worker of the Runner, owned by the service user and outside any work
+root:
+
+```sh
+Environment=ATO_RUNNER_STATE_VOLUME_ROOT=/var/lib/ato-runner-volumes
+```
 
 ```sh
 sudo systemctl daemon-reload
