@@ -1615,11 +1615,15 @@ impl ConnectedWorker {
             {
                 bail!("OCI service `{name}` exited while the group was active with code {code}");
             }
-            self.refresh_execution_authorization(
-                &lease.id,
-                execution_authorization.as_deref_mut(),
-            )?;
-            Ok(self.api.control(&lease.id)?.stop_requested)
+            poll_runtime_launch_control(
+                || Ok(self.api.control(&lease.id)?.stop_requested),
+                || {
+                    self.refresh_execution_authorization(
+                        &lease.id,
+                        execution_authorization.as_deref_mut(),
+                    )
+                },
+            )
         };
         runtime_launch::lease::wait_for_stop(&mut stop, Duration::from_millis(500), hard_deadline)?;
         Ok(execution_id)
@@ -1956,6 +1960,23 @@ impl ConnectedWorker {
             anyhow::bail!(shutdown_errors.join("; "))
         }
     }
+}
+
+/// Read the control-plane stop fence before renewing authority to continue.
+///
+/// Setting desired state to stopped revokes the renewable authorization and
+/// requests teardown as one control-plane operation. Reading the stop request
+/// first lets the Runner acknowledge that intentional teardown cleanly. When
+/// no stop was requested, continuation still requires a successful renewal.
+fn poll_runtime_launch_control(
+    mut stop_requested: impl FnMut() -> Result<bool>,
+    mut refresh_execution_authorization: impl FnMut() -> Result<()>,
+) -> Result<bool> {
+    if stop_requested()? {
+        return Ok(true);
+    }
+    refresh_execution_authorization()?;
+    Ok(false)
 }
 
 #[derive(Deserialize)]
@@ -4196,10 +4217,48 @@ fn proxy_unix_tcp_pair(client: &mut UnixStream, mut upstream: TcpStream) {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::io::{Read, Write};
 
     use super::*;
     use tungstenite::client::IntoClientRequest;
+
+    #[test]
+    fn explicit_stop_wins_a_race_with_revoked_continuation_authority() {
+        let refreshed = Cell::new(false);
+
+        let stopped = poll_runtime_launch_control(
+            || Ok(true),
+            || {
+                refreshed.set(true);
+                anyhow::bail!("execution authorization renewal was refused")
+            },
+        )
+        .expect("an explicit stop does not require authority to continue");
+
+        assert!(stopped);
+        assert!(!refreshed.get());
+    }
+
+    #[test]
+    fn continuing_run_checks_stop_before_renewing_authority() {
+        let step = Cell::new(0_u8);
+
+        let stopped = poll_runtime_launch_control(
+            || {
+                assert_eq!(step.replace(1), 0);
+                Ok(false)
+            },
+            || {
+                assert_eq!(step.replace(2), 1);
+                Ok(())
+            },
+        )
+        .expect("continuation authority is current");
+
+        assert!(!stopped);
+        assert_eq!(step.get(), 2);
+    }
 
     #[test]
     fn activity_frame_capture_failure_keeps_the_run_alive_and_backs_off() {
