@@ -1380,10 +1380,16 @@ impl ConnectedWorker {
             Ok(secrets) => secrets,
             Err(error) => return not_started(Err(error)),
         };
-        if let Err(error) =
-            self.refresh_execution_authorization(&lease.id, execution_authorization.as_mut())
-        {
-            return not_started(Err(error));
+        match self.refresh_execution_authorization(&lease.id, execution_authorization.as_mut()) {
+            Ok(true) => {
+                let execution_id = match spec.canonical_digest() {
+                    Ok(digest) => digest,
+                    Err(error) => return not_started(Err(error.into())),
+                };
+                return not_started(self.api.report_stopped(&lease.id, &execution_id));
+            }
+            Ok(false) => {}
+            Err(error) => return not_started(Err(error)),
         }
 
         // P4-A: publish the process on this Runner's ingress slot.
@@ -1528,10 +1534,14 @@ impl ConnectedWorker {
             hard_deadline.is_none_or(|deadline| Instant::now() < deadline),
             "runtime launch maximum lifetime elapsed during startup"
         );
-        self.refresh_execution_authorization(&lease.id, execution_authorization.as_deref_mut())?;
         let execution_id = spec
             .canonical_digest()
             .map_err(|error| anyhow::anyhow!("cannot digest the launch spec: {error}"))?;
+        if self
+            .refresh_execution_authorization(&lease.id, execution_authorization.as_deref_mut())?
+        {
+            return Ok(execution_id);
+        }
         let port = active.endpoint_port(endpoint_name).with_context(|| {
             format!("the launch declared no `{endpoint_name}` endpoint to report")
         })?;
@@ -1633,21 +1643,30 @@ impl ConnectedWorker {
         &self,
         lease_id: &str,
         monitor: Option<&mut runtime_launch::lease::ExecutionAuthorizationMonitor>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let Some(monitor) = monitor else {
-            return Ok(());
+            return Ok(false);
         };
         let now = Instant::now();
         ensure!(!monitor.is_expired(now), "execution authorization expired");
         if !monitor.should_renew(now) {
-            return Ok(());
+            return Ok(false);
         }
+        let request_started = Instant::now();
         match self.api.renew_execution_authorization(lease_id) {
             Ok(ExecutionAuthorizationRenewalOutcome::Renewed(renewal)) => {
-                monitor.apply(&renewal, Instant::now())?;
+                monitor.apply(&renewal, request_started, Instant::now())?;
             }
-            Ok(ExecutionAuthorizationRenewalOutcome::Refused) => {
-                bail!("execution authorization renewal was refused")
+            Ok(ExecutionAuthorizationRenewalOutcome::Refused {
+                reason,
+                stop_requested,
+            }) => {
+                if reason == "owner_stop" && stop_requested {
+                    return Ok(true);
+                }
+                bail!(
+                    "execution authorization renewal was refused: reason={reason} stop_requested={stop_requested}"
+                )
             }
             Err(error) => {
                 // A transport failure grants no time. Retry quickly within the
@@ -1663,7 +1682,7 @@ impl ConnectedWorker {
             !monitor.is_expired(Instant::now()),
             "execution authorization expired"
         );
-        Ok(())
+        Ok(false)
     }
 
     fn execute_portable_lease(
@@ -1970,13 +1989,12 @@ impl ConnectedWorker {
 /// no stop was requested, continuation still requires a successful renewal.
 fn poll_runtime_launch_control(
     mut stop_requested: impl FnMut() -> Result<bool>,
-    mut refresh_execution_authorization: impl FnMut() -> Result<()>,
+    mut refresh_execution_authorization: impl FnMut() -> Result<bool>,
 ) -> Result<bool> {
     if stop_requested()? {
         return Ok(true);
     }
-    refresh_execution_authorization()?;
-    Ok(false)
+    refresh_execution_authorization()
 }
 
 #[derive(Deserialize)]
@@ -3404,9 +3422,22 @@ struct ExecutionAuthorizationRenewalResponse {
     renew_after_secs: u64,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutionAuthorizationRefusalResponse {
+    error: String,
+    reason: String,
+    stop_requested: bool,
+    server_time: String,
+    message: String,
+}
+
 enum ExecutionAuthorizationRenewalOutcome {
     Renewed(runtime_launch::lease::ExecutionAuthorizationRenewal),
-    Refused,
+    Refused {
+        reason: String,
+        stop_requested: bool,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -3668,7 +3699,20 @@ impl HttpRunnerApi {
             )))
             .send()?;
         if response.status() == reqwest::StatusCode::CONFLICT {
-            return Ok(ExecutionAuthorizationRenewalOutcome::Refused);
+            let refusal = response.json::<ExecutionAuthorizationRefusalResponse>()?;
+            ensure!(
+                refusal.error == "execution_authorization_refused",
+                "unexpected execution authorization refusal: {}",
+                refusal.error
+            );
+            ensure!(
+                !refusal.server_time.is_empty() && !refusal.message.is_empty(),
+                "execution authorization refusal omitted Coordinator evidence"
+            );
+            return Ok(ExecutionAuthorizationRenewalOutcome::Refused {
+                reason: refusal.reason,
+                stop_requested: refusal.stop_requested,
+            });
         }
         let renewal = response
             .error_for_status()?
@@ -4231,13 +4275,27 @@ mod tests {
             || Ok(true),
             || {
                 refreshed.set(true);
-                anyhow::bail!("execution authorization renewal was refused")
+                Ok(false)
             },
         )
         .expect("an explicit stop does not require authority to continue");
 
         assert!(stopped);
         assert!(!refreshed.get());
+    }
+
+    #[test]
+    fn renewal_refusal_is_clean_only_when_the_coordinator_confirms_stop() {
+        let stopped = poll_runtime_launch_control(|| Ok(false), || Ok(true))
+            .expect("renewal response confirms the owner stop");
+        assert!(stopped);
+
+        let error = poll_runtime_launch_control(
+            || Ok(false),
+            || anyhow::bail!("execution authorization revoked without stop intent"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("without stop intent"));
     }
 
     #[test]
@@ -4251,7 +4309,7 @@ mod tests {
             },
             || {
                 assert_eq!(step.replace(2), 1);
-                Ok(())
+                Ok(false)
             },
         )
         .expect("continuation authority is current");

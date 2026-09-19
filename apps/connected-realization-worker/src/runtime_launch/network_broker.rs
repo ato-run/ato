@@ -8,18 +8,19 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
 
 use super::lease::{FixedTcpAllocation, TcpEgressGrant};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const CONNECTION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_CONNECTIONS_PER_LISTENER: usize = 128;
 const EGRESS_BRIDGE_PATTERN: &str = "atoe+";
 const EGRESS_BROKER_PORT: u16 = 1080;
@@ -141,6 +142,120 @@ impl Drop for ConnectionPermit {
     }
 }
 
+/// Owns every accepted connection for one Run/grant generation. Socket clones
+/// are kept only as cancellation handles; shutting them down interrupts both
+/// directions of a blocking copy. Worker joins are bounded so revocation can
+/// never hang the Runner indefinitely.
+#[derive(Default)]
+struct ConnectionGroup {
+    stopping: AtomicBool,
+    next_id: AtomicUsize,
+    sockets: Mutex<BTreeMap<usize, Vec<TcpStream>>>,
+    workers: Mutex<Vec<JoinHandle<()>>>,
+}
+
+impl ConnectionGroup {
+    fn spawn(
+        self: &Arc<Self>,
+        client: TcpStream,
+        permit: ConnectionPermit,
+        work: impl FnOnce(usize, TcpStream, Arc<Self>) + Send + 'static,
+    ) {
+        if self.stopping.load(Ordering::Acquire) {
+            let _ = client.shutdown(Shutdown::Both);
+            return;
+        }
+        let id = self.next_id.fetch_add(1, Ordering::AcqRel);
+        let Ok(cancel) = client.try_clone() else {
+            return;
+        };
+        if let Ok(mut sockets) = self.sockets.lock() {
+            sockets.insert(id, vec![cancel]);
+        } else {
+            return;
+        }
+        let Ok(mut workers) = self.workers.lock() else {
+            self.finish(id);
+            return;
+        };
+        if self.stopping.load(Ordering::Acquire) {
+            self.finish(id);
+            let _ = client.shutdown(Shutdown::Both);
+            return;
+        }
+        let group = Arc::clone(self);
+        let worker = thread::spawn(move || {
+            let _permit = permit;
+            work(id, client, Arc::clone(&group));
+            group.finish(id);
+        });
+        workers.push(worker);
+    }
+
+    fn track(&self, id: usize, stream: &TcpStream) -> bool {
+        if self.stopping.load(Ordering::Acquire) {
+            let _ = stream.shutdown(Shutdown::Both);
+            return false;
+        }
+        let Ok(cancel) = stream.try_clone() else {
+            return false;
+        };
+        let Ok(mut sockets) = self.sockets.lock() else {
+            return false;
+        };
+        let Some(owned) = sockets.get_mut(&id) else {
+            return false;
+        };
+        owned.push(cancel);
+        if self.stopping.load(Ordering::Acquire) {
+            for socket in owned {
+                let _ = socket.shutdown(Shutdown::Both);
+            }
+            return false;
+        }
+        true
+    }
+
+    fn finish(&self, id: usize) {
+        if let Ok(mut sockets) = self.sockets.lock() {
+            sockets.remove(&id);
+        }
+    }
+
+    fn cancel_and_join(&self) {
+        self.stopping.store(true, Ordering::Release);
+        if let Ok(sockets) = self.sockets.lock() {
+            for owned in sockets.values() {
+                for socket in owned {
+                    let _ = socket.shutdown(Shutdown::Both);
+                }
+            }
+        }
+        let deadline = Instant::now() + CONNECTION_SHUTDOWN_TIMEOUT;
+        loop {
+            let all_finished = self
+                .workers
+                .lock()
+                .map(|workers| workers.iter().all(JoinHandle::is_finished))
+                .unwrap_or(true);
+            if all_finished || Instant::now() >= deadline {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        if let Ok(mut workers) = self.workers.lock() {
+            for worker in workers.drain(..) {
+                if worker.is_finished() {
+                    let _ = worker.join();
+                }
+                // A connect still inside the bounded connect timeout is
+                // detached. It observes `stopping` before publishing success
+                // and can never become an authorized live connection.
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Ipv4Cidr {
     network: u32,
@@ -231,6 +346,7 @@ pub struct TcpEgressBroker {
     endpoint: SocketAddr,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
+    connections: Arc<ConnectionGroup>,
 }
 
 impl TcpEgressBroker {
@@ -243,6 +359,8 @@ impl TcpEgressBroker {
         let endpoint = listener.local_addr()?;
         let stop = Arc::new(AtomicBool::new(false));
         let active_connections = Arc::new(AtomicUsize::new(0));
+        let connections = Arc::new(ConnectionGroup::default());
+        let thread_connections = Arc::clone(&connections);
         let thread_stop = Arc::clone(&stop);
         let worker = thread::spawn(move || {
             while !thread_stop.load(Ordering::Acquire) {
@@ -252,9 +370,8 @@ impl TcpEgressBroker {
                             continue;
                         };
                         let policy = policy.clone();
-                        thread::spawn(move || {
-                            let _permit = permit;
-                            serve_socks5(stream, &policy);
+                        thread_connections.spawn(stream, permit, move |id, stream, group| {
+                            serve_socks5(id, stream, &policy, &group)
                         });
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -268,6 +385,7 @@ impl TcpEgressBroker {
             endpoint,
             stop,
             worker: Some(worker),
+            connections,
         })
     }
 
@@ -282,10 +400,16 @@ impl Drop for TcpEgressBroker {
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
+        self.connections.cancel_and_join();
     }
 }
 
-fn serve_socks5(mut client: TcpStream, policy: &EgressPolicy) {
+fn serve_socks5(
+    connection_id: usize,
+    mut client: TcpStream,
+    policy: &EgressPolicy,
+    connections: &ConnectionGroup,
+) {
     let _ = client.set_read_timeout(Some(CONNECT_TIMEOUT));
     let _ = client.set_write_timeout(Some(CONNECT_TIMEOUT));
     let mut greeting = [0u8; 2];
@@ -323,6 +447,9 @@ fn serve_socks5(mut client: TcpStream, policy: &EgressPolicy) {
         let _ = socks_reply(&mut client, 5);
         return;
     };
+    if !connections.track(connection_id, &target) {
+        return;
+    }
     if socks_reply(&mut client, 0).is_err() {
         return;
     }
@@ -332,8 +459,13 @@ fn serve_socks5(mut client: TcpStream, policy: &EgressPolicy) {
     let Ok(mut client_write) = client.try_clone() else {
         return;
     };
-    let reverse = thread::spawn(move || io::copy(&mut target_read, &mut client_write));
+    let reverse = thread::spawn(move || {
+        let copied = io::copy(&mut target_read, &mut client_write);
+        let _ = client_write.shutdown(Shutdown::Write);
+        copied
+    });
     let _ = io::copy(&mut client, &mut target);
+    let _ = target.shutdown(Shutdown::Write);
     let _ = reverse.join();
 }
 
@@ -346,7 +478,7 @@ struct FixedTarget {
     run_id: String,
     generation: u64,
     address: SocketAddr,
-    drain: Arc<AtomicBool>,
+    connections: Arc<ConnectionGroup>,
 }
 
 #[derive(Default)]
@@ -384,9 +516,9 @@ impl FixedListener {
                             .ok()
                             .and_then(|state| state.target.clone());
                         if let Some(target) = target {
-                            thread::spawn(move || {
-                                let _permit = permit;
-                                proxy_fixed(client, target);
+                            let connections = Arc::clone(&target.connections);
+                            connections.spawn(client, permit, move |id, client, group| {
+                                proxy_fixed(id, client, target.address, &group);
                             });
                         }
                         // No target during handover: dropping the accepted
@@ -410,13 +542,16 @@ impl FixedListener {
 impl Drop for FixedListener {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
-        if let Ok(mut state) = self.state.write()
-            && let Some(target) = state.target.take()
-        {
-            target.drain.store(true, Ordering::Release);
-        }
+        let target = self
+            .state
+            .write()
+            .ok()
+            .and_then(|mut state| state.target.take());
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
+        }
+        if let Some(target) = target {
+            target.connections.cancel_and_join();
         }
     }
 }
@@ -478,30 +613,36 @@ impl FixedTcpRegistry {
                 .state
                 .write()
                 .map_err(|_| anyhow::anyhow!("fixed TCP listener lock poisoned"))?;
-            ensure!(
-                state
-                    .allocation_id
-                    .as_deref()
-                    .is_none_or(|id| id == allocation.allocation_id),
-                "fixed TCP address belongs to another allocation"
-            );
-            ensure!(
-                allocation.generation > state.generation
-                    || (allocation.generation == state.generation
-                        && state.pending_run_id.as_deref() == Some(run_id)),
-                "fixed TCP allocation generation is stale"
-            );
+            let same_allocation =
+                state.allocation_id.as_deref() == Some(allocation.allocation_id.as_str());
+            if same_allocation {
+                ensure!(
+                    allocation.generation > state.generation
+                        || (allocation.generation == state.generation
+                            && state.pending_run_id.as_deref() == Some(run_id)),
+                    "fixed TCP allocation generation is stale"
+                );
+            } else {
+                ensure!(
+                    state.pending_run_id.is_none() && state.target.is_none(),
+                    "fixed TCP address belongs to another live allocation"
+                );
+            }
             pending.push((allocation, state));
         }
         // Nothing above mutates listener state. Either every allocation is
         // admissible, or the prior generation remains fully intact.
+        let mut cancelled = Vec::new();
         for (allocation, mut state) in pending {
             if let Some(target) = state.target.take() {
-                target.drain.store(true, Ordering::Release);
+                cancelled.push(target.connections);
             }
             state.allocation_id = Some(allocation.allocation_id.clone());
             state.generation = allocation.generation;
             state.pending_run_id = Some(run_id.to_owned());
+        }
+        for connections in cancelled {
+            connections.cancel_and_join();
         }
         Ok(())
     }
@@ -534,7 +675,7 @@ impl FixedTcpRegistry {
             run_id: run_id.to_owned(),
             generation: allocation.generation,
             address: target,
-            drain: Arc::new(AtomicBool::new(false)),
+            connections: Arc::new(ConnectionGroup::default()),
         });
         Ok(())
     }
@@ -560,19 +701,29 @@ impl FixedTcpRegistry {
         {
             return;
         }
-        if let Some(target) = state.target.take() {
-            target.drain.store(true, Ordering::Release);
-        }
+        let target = state.target.take();
         if state.pending_run_id.as_deref() == Some(run_id) {
             state.pending_run_id = None;
+        }
+        drop(state);
+        if let Some(target) = target {
+            target.connections.cancel_and_join();
         }
     }
 }
 
-fn proxy_fixed(mut client: TcpStream, target: FixedTarget) {
-    let Ok(mut upstream) = TcpStream::connect_timeout(&target.address, CONNECT_TIMEOUT) else {
+fn proxy_fixed(
+    connection_id: usize,
+    mut client: TcpStream,
+    address: SocketAddr,
+    connections: &ConnectionGroup,
+) {
+    let Ok(mut upstream) = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) else {
         return;
     };
+    if !connections.track(connection_id, &upstream) {
+        return;
+    }
     let timeout = Some(Duration::from_millis(250));
     let _ = client.set_read_timeout(timeout);
     let _ = client.set_write_timeout(timeout);
@@ -584,17 +735,18 @@ fn proxy_fixed(mut client: TcpStream, target: FixedTarget) {
     let Ok(mut upstream_read) = upstream.try_clone() else {
         return;
     };
-    let reverse_stop = Arc::clone(&target.drain);
     let reverse = thread::spawn(move || {
-        copy_until_drained(&mut upstream_read, &mut client_write, &reverse_stop)
+        copy_until_closed(&mut upstream_read, &mut client_write);
+        let _ = client_write.shutdown(Shutdown::Write);
     });
-    copy_until_drained(&mut client, &mut upstream, &target.drain);
+    copy_until_closed(&mut client, &mut upstream);
+    let _ = upstream.shutdown(Shutdown::Write);
     let _ = reverse.join();
 }
 
-fn copy_until_drained(reader: &mut TcpStream, writer: &mut TcpStream, stop: &AtomicBool) {
+fn copy_until_closed(reader: &mut TcpStream, writer: &mut TcpStream) {
     let mut buffer = [0u8; 16 * 1024];
-    while !stop.load(Ordering::Acquire) {
+    loop {
         match reader.read(&mut buffer) {
             Ok(0) => break,
             Ok(count) if writer.write_all(&buffer[..count]).is_err() => break,
@@ -613,9 +765,13 @@ fn copy_until_drained(reader: &mut TcpStream, writer: &mut TcpStream, stop: &Ato
 mod tests {
     use super::*;
 
-    fn allocation(address: SocketAddr, generation: u64) -> FixedTcpAllocation {
+    fn named_allocation(
+        allocation_id: &str,
+        address: SocketAddr,
+        generation: u64,
+    ) -> FixedTcpAllocation {
         FixedTcpAllocation {
-            allocation_id: "tcp_test".to_owned(),
+            allocation_id: allocation_id.to_owned(),
             port_id: "smtp.tcp".to_owned(),
             service_id: "smtp".to_owned(),
             guest_port: 2525,
@@ -623,6 +779,10 @@ mod tests {
             port: address.port(),
             generation,
         }
+    }
+
+    fn allocation(address: SocketAddr, generation: u64) -> FixedTcpAllocation {
+        named_allocation("tcp_test", address, generation)
     }
 
     #[test]
@@ -686,6 +846,119 @@ mod tests {
         client.read_exact(&mut echoed).unwrap();
         assert_eq!(echoed, *b"x");
         registry.deactivate("run-current", &current);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_revoked_allocation_hands_its_address_to_a_new_allocation_without_restart() {
+        let reserved = TcpListener::bind("127.0.0.1:0").unwrap();
+        let public = reserved.local_addr().unwrap();
+        drop(reserved);
+        let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+        let target = upstream.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = upstream.accept().unwrap();
+            let mut byte = [0u8; 1];
+            stream.read_exact(&mut byte).unwrap();
+            stream.write_all(&byte).unwrap();
+        });
+
+        let registry = FixedTcpRegistry::new(&public.to_string()).unwrap();
+        let allocation_a = named_allocation("tcp_a", public, 1);
+        registry
+            .register_pending("run-a", std::slice::from_ref(&allocation_a))
+            .unwrap();
+        registry.activate("run-a", &allocation_a, target).unwrap();
+        registry.deactivate("run-a", &allocation_a);
+
+        let allocation_b = named_allocation("tcp_b", public, 1);
+        registry
+            .register_pending("run-b", std::slice::from_ref(&allocation_b))
+            .expect("a fully deactivated allocation releases the address");
+        registry.activate("run-b", &allocation_b, target).unwrap();
+
+        assert!(registry.activate("run-a", &allocation_a, target).is_err());
+        registry.deactivate("run-a", &allocation_a);
+        let mut client = TcpStream::connect(public).unwrap();
+        client.write_all(b"b").unwrap();
+        let mut echoed = [0u8; 1];
+        client.read_exact(&mut echoed).unwrap();
+        assert_eq!(echoed, *b"b");
+        registry.deactivate("run-b", &allocation_b);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn fixed_tcp_propagates_client_eof_and_returns_the_connection_slot() {
+        let reserved = TcpListener::bind("127.0.0.1:0").unwrap();
+        let public = reserved.local_addr().unwrap();
+        drop(reserved);
+        let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+        let target = upstream.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = upstream.accept().unwrap();
+            let mut bytes = Vec::new();
+            stream.read_to_end(&mut bytes).unwrap();
+            assert_eq!(bytes, b"request");
+            stream.write_all(b"response").unwrap();
+        });
+
+        let registry = FixedTcpRegistry::new(&public.to_string()).unwrap();
+        let current = allocation(public, 1);
+        registry
+            .register_pending("run-current", std::slice::from_ref(&current))
+            .unwrap();
+        registry.activate("run-current", &current, target).unwrap();
+
+        let mut client = TcpStream::connect(public).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        client.write_all(b"request").unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .expect("upstream sees EOF and completes within the deadline");
+        assert_eq!(response, b"response");
+
+        registry.deactivate("run-current", &current);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn fixed_tcp_deactivation_cancels_an_open_connection_within_the_deadline() {
+        let reserved = TcpListener::bind("127.0.0.1:0").unwrap();
+        let public = reserved.local_addr().unwrap();
+        drop(reserved);
+        let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+        let target = upstream.local_addr().unwrap();
+        let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = upstream.accept().unwrap();
+            accepted_tx.send(()).unwrap();
+            let mut byte = [0u8; 1];
+            let outcome = stream.read(&mut byte);
+            assert!(matches!(outcome, Ok(0) | Err(_)));
+        });
+
+        let registry = FixedTcpRegistry::new(&public.to_string()).unwrap();
+        let current = allocation(public, 1);
+        registry
+            .register_pending("run-current", std::slice::from_ref(&current))
+            .unwrap();
+        registry.activate("run-current", &current, target).unwrap();
+        let mut client = TcpStream::connect(public).unwrap();
+        client
+            .set_read_timeout(Some(CONNECTION_SHUTDOWN_TIMEOUT))
+            .unwrap();
+        accepted_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let started = Instant::now();
+        registry.deactivate("run-current", &current);
+        assert!(started.elapsed() <= CONNECTION_SHUTDOWN_TIMEOUT);
+        let mut byte = [0u8; 1];
+        assert!(matches!(client.read(&mut byte), Ok(0) | Err(_)));
         server.join().unwrap();
     }
 

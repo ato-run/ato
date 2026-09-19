@@ -169,7 +169,7 @@ pub struct ExecutionAuthorizationMonitor {
 
 impl ExecutionAuthorizationMonitor {
     pub fn new(authorization: &ExecutionAuthorization, now: Instant) -> Result<Self> {
-        let (deadline, renew_at) = authorization_window(
+        let (deadline, _) = authorization_window(
             &authorization.server_time,
             &authorization.expires_at,
             authorization.renew_after_secs,
@@ -183,11 +183,28 @@ impl ExecutionAuthorizationMonitor {
             policy_generation: authorization.policy_generation,
             authorization_generation: authorization.authorization_generation,
             deadline,
-            renew_at,
+            // A queued command may have spent part or all of its wall-clock
+            // authority waiting for a Runner slot. Revalidate with the
+            // Coordinator before materialization instead of sliding that
+            // stale window forward from receipt time.
+            renew_at: now,
         })
     }
 
-    pub fn apply(&mut self, renewal: &ExecutionAuthorizationRenewal, now: Instant) -> Result<()> {
+    pub fn apply(
+        &mut self,
+        renewal: &ExecutionAuthorizationRenewal,
+        request_started: Instant,
+        received_at: Instant,
+    ) -> Result<()> {
+        ensure!(
+            request_started <= received_at,
+            "execution authorization renewal timing is invalid"
+        );
+        ensure!(
+            received_at < self.deadline,
+            "execution authorization renewal arrived after the previous deadline"
+        );
         ensure!(
             renewal.policy_generation == self.policy_generation,
             "execution authorization policy generation changed"
@@ -200,7 +217,7 @@ impl ExecutionAuthorizationMonitor {
             &renewal.server_time,
             &renewal.expires_at,
             renewal.renew_after_secs,
-            now,
+            request_started,
         )?;
         self.authorization_generation = renewal.authorization_generation;
         self.deadline = deadline;
@@ -1172,11 +1189,12 @@ mod tests {
         let started = Instant::now();
         let mut monitor =
             ExecutionAuthorizationMonitor::new(&execution_authorization(), started).unwrap();
-        assert!(!monitor.should_renew(started + Duration::from_secs(179)));
-        assert!(monitor.should_renew(started + Duration::from_secs(180)));
+        assert!(monitor.should_renew(started));
         assert!(!monitor.is_expired(started + Duration::from_secs(899)));
         assert!(monitor.is_expired(started + Duration::from_secs(900)));
 
+        let requested = started + Duration::from_secs(180);
+        let received = requested + Duration::from_secs(3);
         monitor
             .apply(
                 &ExecutionAuthorizationRenewal {
@@ -1186,11 +1204,12 @@ mod tests {
                     expires_at: "2038-01-01T00:15:00Z".to_owned(),
                     renew_after_secs: 180,
                 },
-                started + Duration::from_secs(180),
+                requested,
+                received,
             )
             .unwrap();
-        assert!(!monitor.is_expired(started + Duration::from_secs(1_079)));
-        assert!(monitor.is_expired(started + Duration::from_secs(1_080)));
+        assert!(!monitor.is_expired(requested + Duration::from_secs(899)));
+        assert!(monitor.is_expired(requested + Duration::from_secs(900)));
     }
 
     #[test]
@@ -1209,10 +1228,32 @@ mod tests {
                         renew_after_secs: 180,
                     },
                     started + Duration::from_secs(180),
+                    started + Duration::from_secs(181),
                 )
                 .unwrap_err();
             assert!(error.to_string().contains("generation"), "{error}");
         }
+    }
+
+    #[test]
+    fn a_renewal_arriving_after_the_previous_deadline_cannot_revive_authority() {
+        let started = Instant::now();
+        let mut monitor =
+            ExecutionAuthorizationMonitor::new(&execution_authorization(), started).unwrap();
+        let error = monitor
+            .apply(
+                &ExecutionAuthorizationRenewal {
+                    policy_generation: 7,
+                    authorization_generation: 2,
+                    server_time: "2026-09-19T00:03:00Z".to_owned(),
+                    expires_at: "2026-09-19T00:18:00Z".to_owned(),
+                    renew_after_secs: 180,
+                },
+                started + Duration::from_secs(899),
+                started + Duration::from_secs(901),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("previous deadline"), "{error}");
     }
 
     #[test]
