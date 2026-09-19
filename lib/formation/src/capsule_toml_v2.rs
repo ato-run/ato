@@ -10,7 +10,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Deserialize;
 
-use crate::authoring::{PROCESS_PROTOCOL, STATE_FILESYSTEM_PROTOCOL, WORKSPACE_PROTOCOL};
+use crate::authoring::{
+    EffectClass, PROCESS_PROTOCOL, STATE_FILESYSTEM_PROTOCOL, TCP_EGRESS_PROTOCOL,
+    WORKSPACE_PROTOCOL,
+};
 
 pub const CAPSULE_SCHEMA_V2: &str = "ato.capsule/2";
 pub const OCI_PROTOCOL: &str = "ato.oci@1";
@@ -40,6 +43,7 @@ pub struct PortableAuthoringDraftV2 {
     pub state: Vec<PortableStateDraftV2>,
     pub observations: Vec<PortableHttpObservationDraftV2>,
     pub derivations: Vec<PortableDerivationDraftV2>,
+    pub effects: EffectClass,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -305,12 +309,17 @@ pub fn parse_capsule_toml_v2(text: &str) -> Result<PortableAuthoringDraftV2, Cap
             "must be an absolute request path",
         ));
     }
-    if document.effects.default != "pure" {
-        return Err(invalid(
-            "effects.default",
-            "portable v0 supports only `pure`",
-        ));
-    }
+    let effects = match document.effects.default.as_str() {
+        "pure" => EffectClass::Pure,
+        "requires-confirmation" => EffectClass::RequiresConfirmation,
+        "non-repeatable" => EffectClass::NonRepeatable,
+        _ => {
+            return Err(invalid(
+                "effects.default",
+                "must be `pure`, `requires-confirmation`, or `non-repeatable`",
+            ));
+        }
+    };
     if document.input.len() != 1 {
         return Err(invalid(
             "input",
@@ -354,6 +363,26 @@ pub fn parse_capsule_toml_v2(text: &str) -> Result<PortableAuthoringDraftV2, Cap
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let has_tcp_egress = bindings
+        .iter()
+        .any(|binding| binding.protocol == TCP_EGRESS_PROTOCOL);
+    if has_tcp_egress
+        && !matches!(
+            effects,
+            EffectClass::RequiresConfirmation | EffectClass::NonRepeatable
+        )
+    {
+        return Err(invalid(
+            "effects.default",
+            "a tcp-egress Binding requires `requires-confirmation` or `non-repeatable`",
+        ));
+    }
+    if !has_tcp_egress && effects != EffectClass::Pure {
+        return Err(invalid(
+            "effects.default",
+            "must be `pure` when no tcp-egress Binding is declared",
+        ));
+    }
 
     let state = document
         .state
@@ -471,6 +500,7 @@ pub fn parse_capsule_toml_v2(text: &str) -> Result<PortableAuthoringDraftV2, Cap
         state,
         observations,
         derivations,
+        effects,
     })
 }
 
@@ -894,6 +924,32 @@ default = "pure"
         assert_eq!(route.services[0].bindings, ["admin_secret"]);
         assert_eq!(route.services[0].cwd, ".");
         assert_eq!(route.services[1].ports[0].id, "app.http");
+        assert_eq!(draft.effects, EffectClass::Pure);
+    }
+
+    #[test]
+    fn couples_tcp_egress_to_an_explicit_external_effect() {
+        let egress = SERVICE_GROUP
+            .replace(
+                "protocol = \"ato.secret@1\"",
+                "protocol = \"ato.tcp-egress@1\"",
+            )
+            .replace("default = \"pure\"", "default = \"requires-confirmation\"");
+        let draft = parse_capsule_toml_v2(&egress).unwrap();
+        assert_eq!(draft.effects, EffectClass::RequiresConfirmation);
+
+        assert!(
+            parse_capsule_toml_v2(
+                &egress.replace("default = \"requires-confirmation\"", "default = \"pure\"",)
+            )
+            .is_err()
+        );
+        assert!(
+            parse_capsule_toml_v2(
+                &SERVICE_GROUP.replace("default = \"pure\"", "default = \"non-repeatable\"",)
+            )
+            .is_err()
+        );
     }
 
     #[test]

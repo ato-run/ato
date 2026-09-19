@@ -21,8 +21,8 @@ use ato_formation::authoring::{
     BROWSER_PROTOCOL, BindingContext, BoundContract, BoundDerivation, BoundInput, BoundPort,
     BoundRequirement, BoundStep, DerivationDraft, EffectClass, HTTP_CONTRACT_VERIFIER,
     HTTP_PROTOCOL, INSTANCE_SNAPSHOT_CONTRACT_VERIFIER, PROCESS_PROTOCOL, PortDraft,
-    STATE_FILESYSTEM_PROTOCOL, StateAccess, StepDraft, TCP_PROTOCOL, WORKSPACE_CONTRACT_VERIFIER,
-    WORKSPACE_PROTOCOL, bind,
+    STATE_FILESYSTEM_PROTOCOL, StateAccess, StepDraft, TCP_EGRESS_PROTOCOL, TCP_PROTOCOL,
+    WORKSPACE_CONTRACT_VERIFIER, WORKSPACE_PROTOCOL, bind,
 };
 use ato_formation::capsule_toml::{CAPSULE_FILE_NAME, parse_capsule_toml};
 use ato_formation::capsule_toml_v2::{PortableDerivationKindV2, parse_capsule_toml_v2};
@@ -281,6 +281,7 @@ pub struct PortableAuthoredBundleSpec {
     pub filesystem_state: Option<PortableFilesystemStateSpec>,
     pub bindings: Vec<ApplicationBindingV1>,
     pub requirements: Vec<PortableHttpRequirementSpec>,
+    pub effects: EffectClass,
 }
 
 /// Every `(image, platform)` an OCI route runs: one for a single-container
@@ -1096,6 +1097,7 @@ pub fn build_dynamic_process_oci_bundle(
             filesystem_state: spec.filesystem_state.clone(),
             bindings: spec.bindings.clone(),
             requirements: spec.requirements.clone(),
+            effects: EffectClass::Pure,
         },
     )
 }
@@ -1183,6 +1185,7 @@ pub fn build_authored_bundle_v2(
                     body_digest: observation.body_digest,
                 })
                 .collect(),
+            effects: draft.effects,
         },
     )
 }
@@ -1293,7 +1296,7 @@ pub fn build_dynamic_routes_bundle(
             .collect(),
         workspace_build: None,
         workspace_compiler: None,
-        effects: EffectClass::Pure,
+        effects: spec.effects,
     };
     let mut requirements = spec
         .requirements
@@ -1791,11 +1794,29 @@ fn validate_oci_service_group<'a>(
     if derivation.state.len() > 1
         || derivation.workspace_build.is_some()
         || derivation.workspace_compiler.is_some()
-        || derivation.effects != EffectClass::Pure
     {
         return Err(profile(
-            "an OCI service group permits at most one state and forbids builds and non-pure effects",
+            "an OCI service group permits at most one state and forbids builds",
         ));
+    }
+    let has_tcp_egress = application
+        .bindings
+        .iter()
+        .any(|binding| binding.protocol == TCP_EGRESS_PROTOCOL);
+    let valid_effect = if has_tcp_egress {
+        matches!(
+            derivation.effects,
+            EffectClass::RequiresConfirmation | EffectClass::NonRepeatable
+        )
+    } else {
+        derivation.effects == EffectClass::Pure
+    };
+    if !valid_effect {
+        return Err(profile(if has_tcp_egress {
+            "an OCI service group with tcp-egress requires confirmation or is non-repeatable"
+        } else {
+            "an OCI service group without tcp-egress must be pure"
+        }));
     }
     if derivation.runtimes.len() != 1 {
         return Err(profile(
