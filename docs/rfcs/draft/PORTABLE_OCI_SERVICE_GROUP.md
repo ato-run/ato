@@ -199,6 +199,44 @@ acceptance items not exercised on the shared staging host.
 update paths that read or replace a slot's head refuse a volume-backed slot
 (`state_volume_backed_checkpoint_unavailable`) until checkpoints exist (②c).
 
+## Volume operations: checkpoint, restore, delete (Step ②c)
+
+Status: implemented on staging.
+
+**One handover order.** Every operation on a volume, and every new Run after
+one, follows: stop input to the current Run (its route drains) → the current
+Run's stop is confirmed and its writer released (②a; lease expiry, fences and
+host locks are never taken as a stop) → the operation takes the next writer
+generation by CAS → the resident Runner performs it with no workload running
+→ its report releases the writer. While an operation is active no Run starts
+(`state_volume_maintenance`); an operation never falls back to another Runner.
+
+**Operations** (`instance_state_volume_operations`, one active per slot; lease
+kind `state_volume_maintenance`):
+
+- *checkpoint* packs the stopped volume and commits it as a State Revision —
+  the only revision a volume-backed slot can take. It becomes the head and the
+  volume's latest checkpoint, recorded with the writer generation it was taken
+  under.
+- *restore* writes a checkpoint beside `data/` and swaps it in with one atomic
+  exchange; the target becomes the head.
+- *delete* renames the volume out of the Runner's store in one step, removes
+  it, and forgets the volume and the head. This is "Delete data"; removing an
+  App is refused while a volume holds its data (`state_volume_retained`).
+
+A Runner that dies mid-operation is recovered as a confirmed stop; the
+operation is `interrupted` and the volume holds either the old or the new
+contents, never a mix. Reports must match the operation, its lease, Runner,
+Run and generation; anything older is refused.
+
+**Export and clone.** Saved data is exported only from a checkpoint taken
+after the last writer (`state_volume_checkpoint_required` otherwise). Importing
+that export creates an independent Instance whose first launch seeds its own
+volume from the imported revision.
+
+**Limits.** A checkpoint is a single State Artifact (64 MiB); larger ones fail
+typed (`state_checkpoint_too_large`) until chunked transfer exists.
+
 ## Deferred
 
 - Importing a limited Compose file into this typed form. It does not advance
