@@ -58,6 +58,9 @@ pub const HTTP_PROTOCOL: &str = "ato.http@1";
 /// sibling steps. Honoured by the OCI service group executor, which probes it
 /// for readiness and never forwards it to the host.
 pub const TCP_PROTOCOL: &str = "ato.tcp@1";
+/// A runtime-provided, policy-bound raw TCP egress endpoint. The binding value
+/// is an endpoint selected by the Runner, never an unrestricted network grant.
+pub const TCP_EGRESS_PROTOCOL: &str = "ato.tcp-egress@1";
 /// Writable continuation state, filesystem-shaped. Already the protocol every
 /// Formation `state_slot_declaration` carries.
 pub const STATE_FILESYSTEM_PROTOCOL: &str = "ato.state.filesystem@1";
