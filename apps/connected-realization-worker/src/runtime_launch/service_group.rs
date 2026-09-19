@@ -279,7 +279,9 @@ mod tests {
         let web = spec_for("web");
         assert!(web.mounts.is_empty(), "the volume never reaches a sibling");
         assert!(
-            !web.environment.keys().any(|name| name.starts_with("ATO_STATE_PATH")),
+            !web.environment
+                .keys()
+                .any(|name| name.starts_with("ATO_STATE_PATH")),
             "nor does its path"
         );
     }

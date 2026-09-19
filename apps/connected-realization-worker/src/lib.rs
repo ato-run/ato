@@ -1108,6 +1108,9 @@ impl ConnectedWorker {
             LeaseCommand::RuntimeLaunch(command) => {
                 self.execute_runtime_launch_lease(lease, command, &lease_root)
             }
+            LeaseCommand::VolumeMaintenance(command) => {
+                self.execute_volume_maintenance_lease(lease, command)
+            }
         };
         let cleanup = cleanup_lease_directory(&lease_root);
         match (result, cleanup) {
@@ -1115,6 +1118,78 @@ impl ConnectedWorker {
             (Err(error), _) => Err(error),
             (Ok(()), Err(error)) => Err(error),
         }
+    }
+
+    /// Checkpoint, restore or delete a Runner-local volume. No workload runs:
+    /// the control plane issued this lease only after the previous Run's stop
+    /// was confirmed and this operation took the next writer generation.
+    fn execute_volume_maintenance_lease(
+        &self,
+        lease: &ClaimedLease,
+        command: &runtime_launch::volume_maintenance::VolumeMaintenanceLeaseCommand,
+    ) -> Result<()> {
+        ensure!(
+            runtime_launch::recovery::slot_recovered(),
+            "this Runner slot has not confirmed its previous Runs stopped; refusing volume work"
+        );
+        let store = self
+            .volume_store
+            .as_ref()
+            .context("this Runner has no volume store; refusing a volume operation")?;
+        // Journaled first: a Runner that dies mid-operation is recovered as a
+        // confirmed stop (there is no workload), and the control plane marks
+        // the operation interrupted. Restore and delete swap atomically, so
+        // the volume is consistent either way.
+        let owner = ato_adapter_oci::OciOwner {
+            runner_id: self.config.runner_id.clone(),
+            slot_id: self.config.slot_id.clone(),
+            lease_id: lease.id.clone(),
+            run_id: command.run_id.clone(),
+            incarnation: runtime_launch::recovery::incarnation().to_owned(),
+        };
+        let journal = runtime_launch::recovery::RunJournal::new(
+            &self.config.work_root,
+            &self.config.runner_id,
+            &self.config.slot_id,
+        )?;
+        journal.record(&runtime_launch::recovery::RunJournalEntry::new(&owner))?;
+
+        let transport = runtime_launch::state_artifact::LeaseStateArtifactTransport::new(
+            self.api.client.clone(),
+            self.api.base.clone(),
+            lease.id.clone(),
+            self.api.token.clone(),
+        );
+        let performed = runtime_launch::volume_maintenance::perform(command, store, &transport);
+        let (outcome, error) = match &performed {
+            Ok(()) => (
+                runtime_launch::state_artifact::VolumeOperationOutcome::Succeeded,
+                None,
+            ),
+            Err(error) => (
+                runtime_launch::state_artifact::VolumeOperationOutcome::Failed,
+                Some(format!("{error:#}")),
+            ),
+        };
+        eprintln!(
+            "[volume-operation] {}",
+            serde_json::json!({
+                "operation_id": command.operation_id,
+                "operation": format!("{:?}", command.operation).to_lowercase(),
+                "volume_ref": command.volume_ref,
+                "outcome": if performed.is_ok() { "succeeded" } else { "failed" },
+                "error": error,
+            })
+        );
+        runtime_launch::state_artifact::StateArtifactTransport::complete_volume_operation(
+            &transport,
+            &command.operation_id,
+            outcome,
+            error.as_deref(),
+        )?;
+        // Reported: the control plane has the outcome and released the writer.
+        journal.remove(&lease.id)?;
+        Ok(())
     }
 
     /// One Dynamic Compute Run: contained process, real state, real stop.
@@ -1830,6 +1905,13 @@ fn validate_lease(lease: &ClaimedLease, now: SystemTime) -> Result<()> {
             ensure!(
                 valid_sha256_digest(&command.launch_spec_digest),
                 "runtime launch lease spec digest is invalid"
+            );
+        }
+        LeaseCommand::VolumeMaintenance(command) => {
+            command.validate(&lease.run_id)?;
+            ensure!(
+                valid_control_id(&command.compute_instance_id),
+                "volume operation ComputeInstance scope is invalid"
             );
         }
         LeaseCommand::Activity(command) => {
@@ -3041,6 +3123,8 @@ pub(crate) enum LeaseCommand {
     Activity(ActivityLeaseCommand),
     #[serde(rename = "runtime_launch")]
     RuntimeLaunch(runtime_launch::lease::RuntimeLaunchLeaseCommand),
+    #[serde(rename = "state_volume_maintenance")]
+    VolumeMaintenance(runtime_launch::volume_maintenance::VolumeMaintenanceLeaseCommand),
 }
 
 #[derive(Debug, Deserialize)]
@@ -3199,7 +3283,7 @@ impl HttpRunnerApi {
                 ato_adapter_oci::docker_runtime_available(),
                 self.persistent_volumes,
             ),
-            "supported_lease_kinds": supported_lease_kinds(config),
+            "supported_lease_kinds": supported_lease_kinds(config, self.persistent_volumes),
             "supported_session_surfaces": [{
                 "kind": "web",
                 "profiles": ["ato.web-surface.v1"],
@@ -3436,7 +3520,7 @@ impl runtime_launch::recovery::RecoveryReporter for HttpRunnerApi {
     }
 }
 
-fn supported_lease_kinds(config: &WorkerConfig) -> Vec<&'static str> {
+fn supported_lease_kinds(config: &WorkerConfig, persistent_volumes: bool) -> Vec<&'static str> {
     let mut kinds = vec![PORTABLE_CAPSULE_LEASE_KIND];
     // Only advertised where the workload can actually be contained. A Runner
     // that took `runtime_launch` leases it must then refuse would look
@@ -3447,6 +3531,11 @@ fn supported_lease_kinds(config: &WorkerConfig) -> Vec<&'static str> {
         && runtime_launch::recovery::slot_recovered()
     {
         kinds.push(runtime_launch::lease::RUNTIME_LAUNCH_LEASE_KIND);
+        // Volume operations need the volume store, and the same recovered
+        // slot: an unrecovered one may still have a workload writing.
+        if persistent_volumes {
+            kinds.push(runtime_launch::volume_maintenance::STATE_VOLUME_MAINTENANCE_LEASE_KIND);
+        }
     }
     if config.browser_chrome.as_deref().is_some_and(Path::is_file)
         && config
@@ -4844,10 +4933,10 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
         if runtime_launch::lease::RUNTIME_LAUNCH_SUPPORTED() {
             expected.push(runtime_launch::lease::RUNTIME_LAUNCH_LEASE_KIND);
         }
-        assert_eq!(supported_lease_kinds(&config), expected);
+        assert_eq!(supported_lease_kinds(&config, false), expected);
         config.browser_chrome = Some(chrome.path().to_owned());
         config.run_control_verification_key = Some("v".repeat(32));
         expected.push(ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND);
-        assert_eq!(supported_lease_kinds(&config), expected);
+        assert_eq!(supported_lease_kinds(&config, false), expected);
     }
 }
