@@ -6,6 +6,7 @@
 //! CLI or netd, all of which link the contract crate.
 
 pub mod lease;
+pub mod network_broker;
 pub mod process_executor;
 pub mod recovery;
 pub mod resolved;

@@ -17,7 +17,7 @@ A group is expressed with objects that already exist:
 | service | one `BoundStep` with `protocol = "ato.oci@1"`, `op = "serve"` |
 | service Port | one `BoundPort` with `from = <step id>` |
 | service state | `BoundStep.state` naming a `BoundDerivation.state` slot |
-| service secret | `BoundStep.bindings` naming an Application Binding |
+| service Binding | `BoundStep.bindings` naming an Application Binding |
 
 `BoundStep` gains three additive fields — `runtimes`, `state`, `bindings` —
 each omitted from canonical JSON when empty. Every Derivation formed before
@@ -53,7 +53,10 @@ A route with more than one serving step is admitted only when:
   not mounted over that step's workspace;
 - every Application Binding is visible to exactly one step; environment-name
   collisions are checked per service, so siblings may reuse a name;
-- `effects = "pure"`, with no workspace build or compiler.
+- a route without an external network Binding has `effects = "pure"`; a route
+  with `ato.tcp-egress@1` has `effects = "requires-confirmation"` or
+  `"non-repeatable"`;
+- there is no workspace build or compiler.
 
 Host networking, privileged mode, the Docker socket, arbitrary host mounts and
 runtime builds have no field in the model and cannot be expressed.
@@ -107,8 +110,9 @@ enforcement is completed with runtime egress policy (P4).
 
 ## Decisions fixed for the following steps
 
-These are design commitments for P2–P4. They are not implemented by this
-contract.
+These are design commitments for P2–P4. The volume commitments are implemented
+by Steps ②b/②c below. The authorization and network commitments are implemented
+by Step ③ below.
 
 **Volume residency (P3).** An Instance state slot maps to a `volume_ref` with
 `residency { runner_id }`. The physical volume is keyed by the durable state
@@ -237,10 +241,105 @@ volume from the imported revision.
 **Limits.** A checkpoint is a single State Artifact (64 MiB); larger ones fail
 typed (`state_checkpoint_too_large`) until chunked transfer exists.
 
+## Always-on and network controls (Step ③)
+
+Status: implementation contract.
+
+### Always-on policy and renewable authorization
+
+`always_on` is mutable Instance policy, not part of K, Application or D. The
+Coordinator stores the desired state (`running | stopped`) separately from the
+observed Run state. An explicit stop commits `desired_state = stopped` before
+requesting a Run stop, so a concurrent failure report cannot restart it. The
+idle-sleep sweep skips an Instance whose mode and desired state are
+`always_on/running`.
+
+The Coordinator is the only restart authority. An abnormal exit creates a new
+Run, lease and route generation through the ordinary launch path. The Runner
+never restarts a container or extends its own authorization. Consecutive
+failures use delays of 5 seconds, 30 seconds, 2 minutes, 10 minutes and 30
+minutes; a sixth failure before 15 minutes of healthy operation leaves the
+Instance `degraded` until an owner explicitly starts it again.
+
+An always-on lease command carries an `execution_authorization` outside the
+digested launch spec. It names the Instance policy generation and the initial
+expiry. About every three minutes the Runner renews through the lease control
+plane. A successful response advances the expiry to Coordinator time + 15
+minutes. Stop, revocation, policy-generation mismatch, wrong Runner or a
+terminal lease refuses renewal. The Runner converts the response's
+`server_time` and `expires_at` into a monotonic local deadline; wall-clock
+changes cannot extend it. A transient control-plane failure is tolerated only
+until that deadline, after which the workload is stopped before the failure is
+reported. Fixed-duration commands and renewable authorization are mutually
+exclusive. Public tries remain fixed at 180 seconds.
+
+### External TCP Binding and egress grant
+
+External connectivity reuses the Application Binding boundary. An Application
+declares `protocol = "ato.tcp-egress@1"`; exactly one service references that
+Binding. D therefore records which service needs the connection, while the
+actual endpoint and permission remain mutable Instance input and do not alter
+the Contract, Application or Derivation identity.
+
+The first grant version contains an exact numeric IPv4 address or IPv4 CIDR
+and one or more TCP ports. IPv6, hostname resolution, UDP, unrestricted
+Internet and implicit `allow_all` are unsupported. A grant never permits
+loopback, link-local, private, multicast or cloud metadata destinations, even
+when a broader CIDR contains one. Restore and clone copy the declaration but
+not the grant; the new Instance starts unbound.
+
+The hosted Runner keeps the group-only `--internal` bridge and adds a separate
+egress bridge only to the service that owns the Binding. A host-wide network
+broker installs a default-deny forwarding policy for that bridge before the
+container can join it. Failure to install or recover the policy refuses the
+Run; removing `--internal`, sharing the host network or falling back to the
+ordinary Docker bridge is never an error recovery path. Policy handles are
+installed idempotently at host startup, while the Run journal records the
+grant generations needed for recovery. The broker records grant and
+generation metadata, never packet payloads or Binding secrets.
+
+On Linux, Runner-owned egress interfaces use the reserved `atoe` prefix. A
+startup preflight idempotently installs an INPUT default-deny rule for that
+prefix and opens only the SOCKS5 broker on TCP 1080. This requires
+a narrowly scoped privileged firewall helper (for example, exact sudoers rules
+for these idempotent commands); the worker and workloads do not receive
+`CAP_NET_ADMIN`. A Runner without the helper fails startup instead of
+advertising egress capability. Every egress bridge has a distinct gateway, so
+the same fixed broker Port does not merge grants or make a broker reachable
+from another Run network.
+
+This raw TCP path is distinct from the existing HTTP CONNECT proxy. Direct MX
+delivery and a DNS policy are not implied by this version; staging acceptance
+uses an operator-managed fixed-address sink.
+
+### Fixed TCP allocation and active generation
+
+A fixed TCP allocation is operator-created and Runner-affine. It names an
+existing `ato.tcp@1` `BoundPort`; it does not add a public-port semantic to D.
+The Coordinator stores the stable allocation independently from its active
+Run binding. Restore and clone receive neither.
+
+The host-wide network broker owns the public socket. It registers a Run target
+as pending, then atomically activates it only for a generation newer than the
+current one after the Coordinator has confirmed the prior Run stopped. A
+deregister request includes the exact Run and generation, so stale cleanup
+cannot remove the current target. During handover the stable listener has no
+target and refuses new connections rather than forwarding to an old Run.
+Existing connections receive a bounded drain before they are closed.
+
+The Runner advertises the egress and fixed-TCP capabilities only when the
+broker, firewall backend, configured bind-address/port allowlist and required
+host privileges pass startup preflight. An allocation outside that allowlist
+is refused before workload launch. General user-selected ports, cross-Runner
+failover, private inter-Instance Bindings and production DNS/TLS publication
+are not part of Step ③.
+
 ## Deferred
 
 - Importing a limited Compose file into this typed form. It does not advance
   the Mail acceptance and follows a working group on staging.
-- Moving a volume to another Runner, failover, checkpoints, backup, restore
-  and clone of volumes (②c and later).
-- Restart policy, runtime egress, fixed TCP and private Bindings (P2–P4).
+- Moving a volume to another Runner, automatic failover, chunked checkpoints
+  and scheduled backup.
+- Sleep inhibition for foreground jobs and private inter-Instance Bindings.
+- IPv6 and DNS-scoped egress, direct MX delivery, general user-selected public
+  ports, and production DNS/TLS publication.

@@ -170,7 +170,8 @@ impl DockerOciAdapter {
     /// Launch in a new `--internal` network owned by the returned handle. The
     /// single-container route: nothing else ever joins that network.
     pub fn spawn(&self, workspace: &Path, runtime_root: &Path) -> Result<OciHandle> {
-        let network = OciNetwork::create_with(&self.docker, &self.spec.id, &self.spec.labels)?;
+        let network =
+            OciNetwork::create_with(&self.docker, &self.spec.id, &self.spec.labels, "ator")?;
         let mut handle = self.spawn_in_network(workspace, runtime_root, &network, None)?;
         handle.network = Some(network);
         Ok(handle)
@@ -458,6 +459,7 @@ fn validate_loaded_image(
 pub struct OciNetwork {
     docker: PathBuf,
     name: String,
+    bridge_name: String,
     removed: bool,
 }
 
@@ -467,22 +469,40 @@ impl OciNetwork {
         let docker = find_on_path("docker").context(
             "OCI runtime admission failed: Docker CLI is not installed or is not on PATH",
         )?;
-        Self::create_with(&docker, label, labels)
+        Self::create_with(&docker, label, labels, "ator")
     }
 
-    fn create_with(docker: &Path, label: &str, labels: &BTreeMap<String, String>) -> Result<Self> {
+    /// Create the dedicated bridge used only to reach the Runner-owned TCP
+    /// egress broker. Its interface prefix is part of the firewall admission
+    /// contract and is deliberately distinct from ordinary Run bridges.
+    pub fn create_egress(label: &str, labels: &BTreeMap<String, String>) -> Result<Self> {
+        let docker = find_on_path("docker").context(
+            "OCI runtime admission failed: Docker CLI is not installed or is not on PATH",
+        )?;
+        Self::create_with(&docker, label, labels, "atoe")
+    }
+
+    fn create_with(
+        docker: &Path,
+        label: &str,
+        labels: &BTreeMap<String, String>,
+        bridge_prefix: &str,
+    ) -> Result<Self> {
         let suffix = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let name = format!(
             "ato-{}-{}-{suffix}-net",
             safe_name(label),
             std::process::id()
         );
+        let bridge_name = bridge_name(bridge_prefix, suffix);
         let mut arguments = vec![
             "network".to_owned(),
             "create".to_owned(),
             "--driver".to_owned(),
             "bridge".to_owned(),
             "--internal".to_owned(),
+            "--opt".to_owned(),
+            format!("com.docker.network.bridge.name={bridge_name}"),
         ];
         for (key, value) in labels {
             ensure!(
@@ -500,12 +520,50 @@ impl OciNetwork {
         Ok(Self {
             docker: docker.to_path_buf(),
             name,
+            bridge_name,
             removed: false,
         })
     }
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn bridge_name(&self) -> &str {
+        &self.bridge_name
+    }
+
+    /// Address of the host-side bridge endpoint. An internal network has no
+    /// external forwarding, but containers may reach a Runner-owned broker on
+    /// this exact address.
+    pub fn gateway_address(&self) -> Result<IpAddr> {
+        let output = run_checked(
+            &self.docker,
+            [
+                "network",
+                "inspect",
+                "--format",
+                "{{(index .IPAM.Config 0).Gateway}}",
+                self.name.as_str(),
+            ],
+            "inspect isolated OCI network gateway",
+        )?;
+        output
+            .trim()
+            .parse()
+            .context("isolated OCI network gateway is not an IP address")
+    }
+
+    /// Attach one already-running owned container. The network is internal,
+    /// so this adds access only to host-side listeners on its bridge.
+    pub fn connect_container(&self, container_id: &str) -> Result<()> {
+        ensure!(!container_id.trim().is_empty(), "container id is empty");
+        run_checked(
+            &self.docker,
+            ["network", "connect", self.name.as_str(), container_id],
+            "attach OCI container to isolated broker network",
+        )?;
+        Ok(())
     }
 
     pub fn remove(mut self) -> Result<()> {
@@ -535,14 +593,18 @@ impl Drop for OciNetwork {
 /// group that fails half-way through its start leaves nothing behind.
 pub struct OciServiceGroup {
     network: Option<OciNetwork>,
+    auxiliary_networks: Vec<OciNetwork>,
     services: Vec<(String, OciHandle)>,
+    retained_resources: Vec<Box<dyn Send>>,
 }
 
 impl OciServiceGroup {
     pub fn new(network: OciNetwork) -> Self {
         Self {
             network: Some(network),
+            auxiliary_networks: Vec::new(),
             services: Vec::new(),
+            retained_resources: Vec::new(),
         }
     }
 
@@ -554,6 +616,18 @@ impl OciServiceGroup {
 
     pub fn push(&mut self, name: String, handle: OciHandle) {
         self.services.push((name, handle));
+    }
+
+    /// Keep an additional internal bridge owned by this group. It is removed
+    /// only after every service is confirmed stopped.
+    pub fn push_auxiliary_network(&mut self, network: OciNetwork) {
+        self.auxiliary_networks.push(network);
+    }
+
+    /// Keep a Runner-owned broker or similar guard alive for exactly this
+    /// group's lifetime. Resources are dropped after services stop.
+    pub fn retain_resource(&mut self, resource: Box<dyn Send>) {
+        self.retained_resources.push(resource);
     }
 
     pub fn services(&self) -> impl Iterator<Item = (&str, &OciHandle)> {
@@ -595,6 +669,7 @@ impl OciServiceGroup {
         while let Some((name, handle)) = self.services.pop() {
             services.push((name, handle.stop_gracefully(budget)));
         }
+        self.retained_resources.clear();
         let all_confirmed = services.iter().all(|(_, outcome)| outcome.is_confirmed());
         let network_removed = match self.network.take() {
             // A network with a live endpoint cannot be removed, and removing
@@ -606,9 +681,19 @@ impl OciServiceGroup {
             }
             None => true,
         };
+        let auxiliary_removed = if all_confirmed {
+            self.auxiliary_networks
+                .drain(..)
+                .all(|network| network.remove().is_ok())
+        } else {
+            for network in self.auxiliary_networks.drain(..) {
+                network.forget();
+            }
+            false
+        };
         GroupStopReport {
             services,
-            network_removed,
+            network_removed: network_removed && auxiliary_removed,
         }
     }
 }
@@ -1119,6 +1204,17 @@ fn safe_name(value: &str) -> String {
     }
 }
 
+fn bridge_name(prefix: &str, suffix: u64) -> String {
+    // Linux interface names are limited to 15 bytes. Five hex digits for the
+    // PID and sequence keep concurrently created bridges distinct while
+    // retaining the firewall-significant prefix.
+    format!(
+        "{prefix}{:05x}{:05x}",
+        std::process::id() & 0x0f_ffff,
+        suffix & 0x0f_ffff
+    )
+}
+
 pub(crate) fn find_on_path(name: &str) -> Option<PathBuf> {
     std::env::var_os("PATH").and_then(|search| {
         std::env::split_paths(&search)
@@ -1155,6 +1251,15 @@ mod tests {
             stop_timeout_seconds: 5,
             labels: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn egress_bridge_names_fit_linux_and_keep_the_firewall_prefix() {
+        let first = bridge_name("atoe", 1);
+        let second = bridge_name("atoe", 2);
+        assert!(first.starts_with("atoe"));
+        assert!(first.len() <= 15);
+        assert_ne!(first, second);
     }
 
     #[test]

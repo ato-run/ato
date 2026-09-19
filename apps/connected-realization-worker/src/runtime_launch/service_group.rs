@@ -10,7 +10,7 @@
 //! Visibility is per service: a container receives only its own public
 //! environment, its own secrets and its own state mounts.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
@@ -26,6 +26,7 @@ use ato_ipc::runtime_launch_v2::{
 
 use super::process_executor::{ReadinessProbe, state_path_env_name};
 use super::resolved::ResolvedRuntimeLaunchContext;
+use super::{lease::NetworkAuthorization, network_broker::TcpEgressBroker};
 
 const INTERNAL_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -37,6 +38,7 @@ pub fn launch_service_group(
     context: &ResolvedRuntimeLaunchContext,
     probe: &dyn ReadinessProbe,
     owner: &OciOwner,
+    network_authorization: Option<&NetworkAuthorization>,
 ) -> Result<OciServiceGroup> {
     ensure!(
         cfg!(target_os = "linux"),
@@ -52,17 +54,65 @@ pub fn launch_service_group(
     // From here on, dropping `group` stops whatever started and removes the
     // network, so every early return below cleans up.
     let mut group = OciServiceGroup::new(network);
+    let mut egress = Vec::new();
+    if let Some(authorization) = network_authorization {
+        for grant in &authorization.egress {
+            let network = OciNetwork::create_egress(
+                &format!("{}-egress-{}", spec.context.run_id, grant.binding_id),
+                &owner.labels(Some(&grant.service_id))?,
+            )?;
+            let broker = TcpEgressBroker::start(network.gateway_address()?, grant)?;
+            egress.push((
+                grant.service_id.clone(),
+                grant.environment.clone(),
+                broker.binding_value(),
+                network,
+                broker,
+            ));
+        }
+    }
     for service in &group_spec.services {
-        let adapter = DockerOciAdapter::new(service_oci_spec(spec, service, context, owner)?)?;
+        let network_environment = egress
+            .iter()
+            .filter(|(service_id, _, _, _, _)| service_id == &service.name)
+            .map(|(_, name, value, _, _)| (name.clone(), value.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let adapter = DockerOciAdapter::new(service_oci_spec(
+            spec,
+            service,
+            context,
+            owner,
+            &network_environment,
+        )?)?;
         let handle = adapter.spawn_in_network(
             context.workspace_root(),
             &runtime_root.join(&service.name),
             group.network(),
             Some(&service.name),
         )?;
+        for (_, _, _, network, _) in egress
+            .iter()
+            .filter(|(service_id, _, _, _, _)| service_id == &service.name)
+        {
+            network.connect_container(handle.container_id())?;
+        }
         group.push(service.name.clone(), handle);
+        let mut remaining = Vec::new();
+        for prepared in egress.drain(..) {
+            if prepared.0 == service.name {
+                group.push_auxiliary_network(prepared.3);
+                group.retain_resource(Box::new(prepared.4));
+            } else {
+                remaining.push(prepared);
+            }
+        }
+        egress = remaining;
         wait_until_service_ready(service, context, &group, probe)?;
     }
+    ensure!(
+        egress.is_empty(),
+        "TCP egress grant names an absent service"
+    );
     Ok(group)
 }
 
@@ -71,6 +121,7 @@ fn service_oci_spec(
     service: &OciServiceV2,
     context: &ResolvedRuntimeLaunchContext,
     owner: &OciOwner,
+    network_environment: &BTreeMap<String, String>,
 ) -> Result<OciSpec> {
     let group = spec.service_group();
     let endpoints = service
@@ -119,6 +170,12 @@ fn service_oci_spec(
         .map(|entry| (entry.name.clone(), entry.value.clone()))
         .collect::<std::collections::BTreeMap<_, _>>();
     environment.extend(context.secret_environment_for(&secret_names)?);
+    for (name, value) in network_environment {
+        ensure!(
+            environment.insert(name.clone(), value.clone()).is_none(),
+            "network Binding `{name}` conflicts with another environment value"
+        );
+    }
     for attachment in &attachments {
         environment.insert(
             state_path_env_name(attachment.state_key()),
@@ -267,7 +324,8 @@ mod tests {
         let group = spec.service_group();
         let spec_for = |name: &str| {
             let service = group.services.iter().find(|s| s.name == name).unwrap();
-            service_oci_spec(spec, service, &context, &owner).expect("service spec")
+            service_oci_spec(spec, service, &context, &owner, &BTreeMap::new())
+                .expect("service spec")
         };
 
         let backend = spec_for("backend");
