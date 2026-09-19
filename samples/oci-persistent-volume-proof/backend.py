@@ -9,7 +9,9 @@ Standard library only.
 
 import json
 import os
+import signal
 import sqlite3
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 DATA = os.environ.get("ATO_STATE_PATH_DATA", "/data")
@@ -80,5 +82,12 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+def stop(signum, frame):
+    # As PID 1 the default SIGTERM action is ignored; exit on the stop signal
+    # so a normal stop is graceful. Committed writes are already durable.
+    sys.exit(0)
+
+
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, stop)
     ThreadingHTTPServer(("0.0.0.0", 8081), Handler).serve_forever()
