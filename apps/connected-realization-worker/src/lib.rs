@@ -99,7 +99,12 @@ const BASE_RUNNER_CAPABILITIES: &[&str] = &[
     "backend=firecracker",
 ];
 
-fn runner_capabilities(oci_available: bool, persistent_volumes: bool) -> Vec<&'static str> {
+fn runner_capabilities(
+    oci_available: bool,
+    persistent_volumes: bool,
+    network_controls: bool,
+    fixed_tcp: bool,
+) -> Vec<&'static str> {
     let mut capabilities = BASE_RUNNER_CAPABILITIES.to_vec();
     if oci_available {
         capabilities.push("execution_abi=oci");
@@ -111,6 +116,12 @@ fn runner_capabilities(oci_available: bool, persistent_volumes: bool) -> Vec<&'s
         // Runner until it understands v3 AND has a writable volume store.
         if persistent_volumes {
             capabilities.push(runtime_launch::volume::RUNNER_PERSISTENT_VOLUME_FEATURE);
+        }
+        if network_controls {
+            capabilities.push("network=ato.tcp-egress@1");
+        }
+        if network_controls && fixed_tcp {
+            capabilities.push("network=ato.fixed-tcp@1");
         }
     }
     capabilities
@@ -969,6 +980,13 @@ pub struct WorkerConfig {
     /// advertised nor accepted. Never under a lease or work directory.
     #[arg(long, env = "ATO_RUNNER_STATE_VOLUME_ROOT")]
     pub state_volume_root: Option<PathBuf>,
+    /// Enable the isolated raw-TCP broker. Disabled by default; capability is
+    /// advertised only when Docker admission also passes.
+    #[arg(long, env = "ATO_RUNTIME_NETWORK_CONTROLS", default_value_t = false)]
+    pub network_controls: bool,
+    /// Comma-separated exact sockets this slot may own as fixed listeners.
+    #[arg(long, env = "ATO_RUNTIME_FIXED_TCP_ALLOWLIST", default_value = "")]
+    pub fixed_tcp_allowlist: String,
     #[arg(long)]
     pub once: bool,
 }
@@ -980,10 +998,17 @@ struct RuntimeLaunchOutcome {
     stop_confirmed: bool,
 }
 
+struct RuntimeServeControls<'a> {
+    hard_deadline: Option<Instant>,
+    execution_authorization: Option<&'a mut runtime_launch::lease::ExecutionAuthorizationMonitor>,
+    network_authorization: Option<&'a runtime_launch::lease::NetworkAuthorization>,
+}
+
 pub struct ConnectedWorker {
     config: WorkerConfig,
     api: HttpRunnerApi,
     volume_store: Option<runtime_launch::volume::VolumeStore>,
+    fixed_tcp: runtime_launch::network_broker::FixedTcpRegistry,
 }
 
 impl ConnectedWorker {
@@ -1003,10 +1028,17 @@ impl ConnectedWorker {
                 .ok()
         });
         api.persistent_volumes = volume_store.is_some();
+        let fixed_tcp =
+            runtime_launch::network_broker::FixedTcpRegistry::new(if config.network_controls {
+                &config.fixed_tcp_allowlist
+            } else {
+                ""
+            })?;
         Ok(Self {
             config,
             api,
             volume_store,
+            fixed_tcp,
         })
     }
 
@@ -1075,7 +1107,12 @@ impl ConnectedWorker {
             self.api.heartbeat(&self.config, 1)?;
             if let Err(error) = self.execute_lease(&lease) {
                 let message = format!("connected Realization failed: {error:#}");
-                if let Err(report_error) = self.api.report_failed(&lease.id, &message) {
+                let code = if message.contains("execution authorization") {
+                    "execution_authorization_ended"
+                } else {
+                    "realization_failed"
+                };
+                if let Err(report_error) = self.api.report_failed(&lease.id, code, &message) {
                     // Never print credentials or the remote response body. The
                     // lease id and bounded HTTP error are enough to distinguish
                     // a physical failure from a terminal-evidence delivery gap.
@@ -1216,7 +1253,21 @@ impl ConnectedWorker {
         let spec = runtime_launch::lease::verified_spec(command)?;
         // Arm this before materialization/startup. A public preview's cap owns
         // the whole allocation, not only the time after readiness.
-        let hard_deadline = Instant::now() + runtime_launch::lease::maximum_lifetime(command);
+        let started = Instant::now();
+        let hard_deadline = runtime_launch::lease::maximum_lifetime(command)
+            .map(|duration| {
+                started
+                    .checked_add(duration)
+                    .context("runtime launch deadline overflowed")
+            })
+            .transpose()?;
+        let mut execution_authorization = command
+            .execution_authorization
+            .as_ref()
+            .map(|authorization| {
+                runtime_launch::lease::ExecutionAuthorizationMonitor::new(authorization, started)
+            })
+            .transpose()?;
 
         // Journaled before any writer, network or container exists, so a
         // Runner that dies from here on leaves something recovery can find.
@@ -1233,17 +1284,47 @@ impl ConnectedWorker {
             &self.config.slot_id,
         )?;
         let mut entry = runtime_launch::recovery::RunJournalEntry::new(&owner);
+        if let Some(network) = command.network_authorization.as_ref() {
+            entry.network_generations.extend(
+                network
+                    .egress
+                    .iter()
+                    .map(|grant| (grant.grant_id.clone(), grant.generation)),
+            );
+            entry.network_generations.extend(
+                network
+                    .fixed_tcp
+                    .iter()
+                    .map(|allocation| (allocation.allocation_id.clone(), allocation.generation)),
+            );
+        }
         journal.record(&entry)?;
+
+        if let Some(network) = command.network_authorization.as_ref() {
+            ensure!(
+                self.config.network_controls,
+                "this Runner did not enable network controls"
+            );
+            self.fixed_tcp
+                .register_pending(&lease.run_id, &network.fixed_tcp)?;
+        }
 
         let outcome = self.run_runtime_launch(
             lease,
             &spec,
             hard_deadline,
+            &mut execution_authorization,
+            command.network_authorization.as_ref(),
             &owner,
             &journal,
             &mut entry,
             lease_root,
         );
+        if let Some(network) = command.network_authorization.as_ref() {
+            for allocation in &network.fixed_tcp {
+                self.fixed_tcp.deactivate(&lease.run_id, allocation);
+            }
+        }
         if outcome.stop_confirmed {
             // Confirmed stopped, or never started: nothing left to recover.
             journal.remove(&lease.id)?;
@@ -1263,7 +1344,9 @@ impl ConnectedWorker {
         &self,
         lease: &ClaimedLease,
         spec: &ato_ipc::runtime_launch_v2::RuntimeLaunchSpec,
-        hard_deadline: Instant,
+        hard_deadline: Option<Instant>,
+        execution_authorization: &mut Option<runtime_launch::lease::ExecutionAuthorizationMonitor>,
+        network_authorization: Option<&runtime_launch::lease::NetworkAuthorization>,
         owner: &ato_adapter_oci::OciOwner,
         journal: &runtime_launch::recovery::RunJournal,
         entry: &mut runtime_launch::recovery::RunJournalEntry,
@@ -1292,6 +1375,11 @@ impl ConnectedWorker {
             Ok(secrets) => secrets,
             Err(error) => return not_started(Err(error)),
         };
+        if let Err(error) =
+            self.refresh_execution_authorization(&lease.id, execution_authorization.as_mut())
+        {
+            return not_started(Err(error));
+        }
 
         // P4-A: publish the process on this Runner's ingress slot.
         //
@@ -1328,7 +1416,14 @@ impl ConnectedWorker {
         }
         let probe =
             runtime_launch::process_executor::LoopbackReadinessProbe::new(self.api.client.clone());
-        let active = match runtime_launch::lease::start(spec, resolved, &state, &probe, owner) {
+        let active = match runtime_launch::lease::start(
+            spec,
+            resolved,
+            &state,
+            &probe,
+            owner,
+            network_authorization,
+        ) {
             Ok(active) => active,
             Err(failure) => {
                 return RuntimeLaunchOutcome {
@@ -1351,7 +1446,17 @@ impl ConnectedWorker {
         // Everything between readiness and the stop request. Any error here
         // still ends in `finish` below.
         let serving = journal.record(entry).and_then(|()| {
-            self.serve_runtime_launch(lease, spec, &active, &endpoint_name, hard_deadline)
+            self.serve_runtime_launch(
+                lease,
+                spec,
+                &active,
+                &endpoint_name,
+                RuntimeServeControls {
+                    hard_deadline,
+                    execution_authorization: execution_authorization.as_mut(),
+                    network_authorization,
+                },
+            )
         });
 
         entry.phase = runtime_launch::recovery::RunPhase::Stopping;
@@ -1407,8 +1512,18 @@ impl ConnectedWorker {
         spec: &ato_ipc::runtime_launch_v2::RuntimeLaunchSpec,
         active: &runtime_launch::lease::ActiveRun,
         endpoint_name: &str,
-        hard_deadline: Instant,
+        controls: RuntimeServeControls<'_>,
     ) -> Result<String> {
+        let RuntimeServeControls {
+            hard_deadline,
+            mut execution_authorization,
+            network_authorization,
+        } = controls;
+        ensure!(
+            hard_deadline.is_none_or(|deadline| Instant::now() < deadline),
+            "runtime launch maximum lifetime elapsed during startup"
+        );
+        self.refresh_execution_authorization(&lease.id, execution_authorization.as_deref_mut())?;
         let execution_id = spec
             .canonical_digest()
             .map_err(|error| anyhow::anyhow!("cannot digest the launch spec: {error}"))?;
@@ -1440,6 +1555,28 @@ impl ConnectedWorker {
                 control: None,
             },
         )?;
+        if let Some(network) = network_authorization {
+            let runtime_launch::lease::ActiveWorkload::OciServiceGroup(group) = &active.launched
+            else {
+                bail!("network authorization was attached to a non-group workload")
+            };
+            for allocation in &network.fixed_tcp {
+                let (_, container) = group
+                    .services()
+                    .find(|(name, _)| *name == allocation.service_id)
+                    .with_context(|| {
+                        format!(
+                            "fixed TCP allocation names absent service `{}`",
+                            allocation.service_id
+                        )
+                    })?;
+                self.fixed_tcp.activate(
+                    &lease.run_id,
+                    allocation,
+                    SocketAddr::new(container.container_address(), allocation.guest_port),
+                )?;
+            }
+        }
         if let Some(container) = active.launched.surface_container() {
             let (container_ip, mappings) = container.port_mapping();
             for mapping in mappings {
@@ -1465,7 +1602,7 @@ impl ConnectedWorker {
         );
 
         // ACTIVE. The control plane decides when this ends.
-        let stop = || -> Result<bool> {
+        let mut stop = || -> Result<bool> {
             // A group is one Application: a service that exits while ACTIVE
             // fails the whole Run, which is then stopped by `finish`.
             if let runtime_launch::lease::ActiveWorkload::OciServiceGroup(group) = &active.launched
@@ -1473,14 +1610,51 @@ impl ConnectedWorker {
             {
                 bail!("OCI service `{name}` exited while the group was active with code {code}");
             }
+            self.refresh_execution_authorization(
+                &lease.id,
+                execution_authorization.as_deref_mut(),
+            )?;
             Ok(self.api.control(&lease.id)?.stop_requested)
         };
-        runtime_launch::lease::wait_for_stop(
-            &stop,
-            Duration::from_millis(500),
-            Some(hard_deadline),
-        )?;
+        runtime_launch::lease::wait_for_stop(&mut stop, Duration::from_millis(500), hard_deadline)?;
         Ok(execution_id)
+    }
+
+    fn refresh_execution_authorization(
+        &self,
+        lease_id: &str,
+        monitor: Option<&mut runtime_launch::lease::ExecutionAuthorizationMonitor>,
+    ) -> Result<()> {
+        let Some(monitor) = monitor else {
+            return Ok(());
+        };
+        let now = Instant::now();
+        ensure!(!monitor.is_expired(now), "execution authorization expired");
+        if !monitor.should_renew(now) {
+            return Ok(());
+        }
+        match self.api.renew_execution_authorization(lease_id) {
+            Ok(ExecutionAuthorizationRenewalOutcome::Renewed(renewal)) => {
+                monitor.apply(&renewal, Instant::now())?;
+            }
+            Ok(ExecutionAuthorizationRenewalOutcome::Refused) => {
+                bail!("execution authorization renewal was refused")
+            }
+            Err(error) => {
+                // A transport failure grants no time. Retry quickly within the
+                // existing monotonic deadline; once it passes, the next poll
+                // tears the workload down even if the local wall clock moved.
+                monitor.defer_retry(Instant::now(), Duration::from_secs(5));
+                eprintln!(
+                    "execution authorization renewal deferred lease_id={lease_id} error={error:#}"
+                );
+            }
+        }
+        ensure!(
+            !monitor.is_expired(Instant::now()),
+            "execution authorization expired"
+        );
+        Ok(())
     }
 
     fn execute_portable_lease(
@@ -3195,6 +3369,22 @@ struct ControlResponse {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ExecutionAuthorizationRenewalResponse {
+    ok: bool,
+    policy_generation: u64,
+    authorization_generation: u64,
+    server_time: String,
+    expires_at: String,
+    renew_after_secs: u64,
+}
+
+enum ExecutionAuthorizationRenewalOutcome {
+    Renewed(runtime_launch::lease::ExecutionAuthorizationRenewal),
+    Refused,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RuntimeBindingsResponse {
     bindings: BTreeMap<String, String>,
 }
@@ -3282,6 +3472,8 @@ impl HttpRunnerApi {
             "capabilities": runner_capabilities(
                 ato_adapter_oci::docker_runtime_available(),
                 self.persistent_volumes,
+                config.network_controls,
+                !config.fixed_tcp_allowlist.trim().is_empty(),
             ),
             "supported_lease_kinds": supported_lease_kinds(config, self.persistent_volumes),
             "supported_session_surfaces": [{
@@ -3368,7 +3560,7 @@ impl HttpRunnerApi {
         Ok(())
     }
 
-    fn report_failed(&self, lease_id: &str, message: &str) -> Result<()> {
+    fn report_failed(&self, lease_id: &str, code: &str, message: &str) -> Result<()> {
         let message = truncate(message, 2000);
         let mut last_error = None;
         for delay in TERMINAL_REPORT_RETRY_DELAYS {
@@ -3382,7 +3574,7 @@ impl HttpRunnerApi {
                 )
                 .json(&serde_json::json!({
                     "status": "failed",
-                    "error": { "code": "realization_failed", "message": message }
+                    "error": { "code": code, "message": message }
                 }))
                 .send()
                 .and_then(reqwest::blocking::Response::error_for_status)
@@ -3437,6 +3629,37 @@ impl HttpRunnerApi {
             .send()?
             .error_for_status()?
             .json()?)
+    }
+
+    fn renew_execution_authorization(
+        &self,
+        lease_id: &str,
+    ) -> Result<ExecutionAuthorizationRenewalOutcome> {
+        let response = self
+            .authorized(self.client.post(format!(
+                "{}/v1/runner-leases/{lease_id}/execution-authorization/renew",
+                self.base
+            )))
+            .send()?;
+        if response.status() == reqwest::StatusCode::CONFLICT {
+            return Ok(ExecutionAuthorizationRenewalOutcome::Refused);
+        }
+        let renewal = response
+            .error_for_status()?
+            .json::<ExecutionAuthorizationRenewalResponse>()?;
+        ensure!(
+            renewal.ok,
+            "execution authorization renewal was not accepted"
+        );
+        Ok(ExecutionAuthorizationRenewalOutcome::Renewed(
+            runtime_launch::lease::ExecutionAuthorizationRenewal {
+                policy_generation: renewal.policy_generation,
+                authorization_generation: renewal.authorization_generation,
+                server_time: renewal.server_time,
+                expires_at: renewal.expires_at,
+                renew_after_secs: renewal.renew_after_secs,
+            },
+        ))
     }
 
     fn report_stopped(&self, lease_id: &str, execution_id: &str) -> Result<()> {
@@ -4771,6 +4994,8 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             browser_chrome: None,
             run_control_verification_key: None,
             state_volume_root: None,
+            network_controls: false,
+            fixed_tcp_allowlist: String::new(),
             once: true,
         };
         assert!(validate_config(&config).is_err());
@@ -4794,6 +5019,8 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             browser_chrome: None,
             run_control_verification_key: None,
             state_volume_root: None,
+            network_controls: false,
+            fixed_tcp_allowlist: String::new(),
             once: true,
         };
         assert!(validate_config(&config).is_err());
@@ -4828,6 +5055,8 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             browser_chrome: None,
             run_control_verification_key: None,
             state_volume_root: None,
+            network_controls: false,
+            fixed_tcp_allowlist: String::new(),
             once: true,
         };
         resolve_runner_credentials(&mut config).unwrap();
@@ -4880,6 +5109,8 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             browser_chrome: None,
             run_control_verification_key: None,
             state_volume_root: None,
+            network_controls: false,
+            fixed_tcp_allowlist: String::new(),
             once: true,
         };
         assert_eq!(ready_local_port(&config), 8420);
@@ -4891,20 +5122,26 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
 
     #[test]
     fn heartbeat_advertises_dispatch_and_vm_requirements() {
-        let process_only = runner_capabilities(false, true);
+        let process_only = runner_capabilities(false, true, true, true);
         assert!(process_only.contains(&"execution_abi=process"));
         assert!(!process_only.contains(&"execution_abi=oci"));
         assert!(process_only.contains(&"isolation=untrusted-v1"));
         assert!(process_only.contains(&"materializer=ato.materialize.vm.snapshot@1"));
         assert!(process_only.contains(&"backend=firecracker"));
-        assert!(runner_capabilities(true, false).contains(&"execution_abi=oci"));
-        assert!(runner_capabilities(true, false).contains(&"runtime_feature=oci_service_group_v1"));
+        assert!(runner_capabilities(true, false, false, false).contains(&"execution_abi=oci"));
+        assert!(
+            runner_capabilities(true, false, false, false)
+                .contains(&"runtime_feature=oci_service_group_v1")
+        );
         assert!(!process_only.contains(&"runtime_feature=oci_service_group_v1"));
         // Volumes are advertised only with OCI AND a usable store.
         let volume = "runtime_feature=runner_persistent_volume_v1";
-        assert!(runner_capabilities(true, true).contains(&volume));
-        assert!(!runner_capabilities(true, false).contains(&volume));
+        assert!(runner_capabilities(true, true, false, false).contains(&volume));
+        assert!(!runner_capabilities(true, false, false, false).contains(&volume));
         assert!(!process_only.contains(&volume));
+        let network = runner_capabilities(true, false, true, true);
+        assert!(network.contains(&"network=ato.tcp-egress@1"));
+        assert!(network.contains(&"network=ato.fixed-tcp@1"));
     }
 
     #[test]
@@ -4926,6 +5163,8 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             browser_chrome: None,
             run_control_verification_key: None,
             state_volume_root: None,
+            network_controls: false,
+            fixed_tcp_allowlist: String::new(),
             once: true,
         };
         runtime_launch::recovery::mark_slot_recovered(true);

@@ -281,12 +281,12 @@ Binding. D therefore records which service needs the connection, while the
 actual endpoint and permission remain mutable Instance input and do not alter
 the Contract, Application or Derivation identity.
 
-The first grant version contains an exact destination IP or CIDR and one or
-more TCP ports. Hostname resolution, UDP, unrestricted Internet and implicit
-`allow_all` are unsupported. A grant never permits loopback, link-local,
-private/ULA, multicast or cloud metadata destinations, even when a broader
-CIDR contains one. Restore and clone copy the declaration but not the grant;
-the new Instance starts unbound.
+The first grant version contains an exact numeric IPv4 address or IPv4 CIDR
+and one or more TCP ports. IPv6, hostname resolution, UDP, unrestricted
+Internet and implicit `allow_all` are unsupported. A grant never permits
+loopback, link-local, private, multicast or cloud metadata destinations, even
+when a broader CIDR contains one. Restore and clone copy the declaration but
+not the grant; the new Instance starts unbound.
 
 The hosted Runner keeps the group-only `--internal` bridge and adds a separate
 egress bridge only to the service that owns the Binding. A host-wide network
@@ -330,5 +330,5 @@ are not part of Step ③.
 - Moving a volume to another Runner, automatic failover, chunked checkpoints
   and scheduled backup.
 - Sleep inhibition for foreground jobs and private inter-Instance Bindings.
-- DNS-scoped egress, direct MX delivery, general user-selected public ports,
-  and production DNS/TLS publication.
+- IPv6 and DNS-scoped egress, direct MX delivery, general user-selected public
+  ports, and production DNS/TLS publication.
