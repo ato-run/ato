@@ -1018,6 +1018,11 @@ impl ConnectedWorker {
         fs::create_dir_all(&config.work_root)?;
         let mut api =
             HttpRunnerApi::new(&config.api_base, &config.runner_id, &config.runner_token)?;
+        if config.network_controls {
+            runtime_launch::network_broker::prepare_egress_firewall().context(
+                "TCP egress controls failed host firewall admission; capability not advertised",
+            )?;
+        }
         // A store that cannot be opened is not advertised; the worker still
         // serves everything else.
         let volume_store = config.state_volume_root.as_deref().and_then(|root| {

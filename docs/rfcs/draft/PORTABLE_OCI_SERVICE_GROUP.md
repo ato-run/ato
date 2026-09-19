@@ -294,8 +294,17 @@ broker installs a default-deny forwarding policy for that bridge before the
 container can join it. Failure to install or recover the policy refuses the
 Run; removing `--internal`, sharing the host network or falling back to the
 ordinary Docker bridge is never an error recovery path. Policy handles are
-journaled and cleanup is idempotent. The broker records grant and generation
-metadata, never packet payloads or Binding secrets.
+installed idempotently at host startup, while the Run journal records the
+grant generations needed for recovery. The broker records grant and
+generation metadata, never packet payloads or Binding secrets.
+
+On Linux, Runner-owned egress interfaces use the reserved `atoe` prefix. A
+startup preflight idempotently installs an INPUT default-deny rule for that
+prefix and opens only the SOCKS5 broker on TCP 1080. This requires
+`CAP_NET_ADMIN`; a Runner without the privilege fails startup instead of
+advertising egress capability. Every egress bridge has a distinct gateway, so
+the same fixed broker Port does not merge grants or make a broker reachable
+from another Run network.
 
 This raw TCP path is distinct from the existing HTTP CONNECT proxy. Direct MX
 delivery and a DNS policy are not implied by this version; staging acceptance

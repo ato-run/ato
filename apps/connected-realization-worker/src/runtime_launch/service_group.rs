@@ -57,7 +57,7 @@ pub fn launch_service_group(
     let mut egress = Vec::new();
     if let Some(authorization) = network_authorization {
         for grant in &authorization.egress {
-            let network = OciNetwork::create(
+            let network = OciNetwork::create_egress(
                 &format!("{}-egress-{}", spec.context.run_id, grant.binding_id),
                 &owner.labels(Some(&grant.service_id))?,
             )?;

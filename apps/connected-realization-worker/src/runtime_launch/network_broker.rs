@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::process::{Command, Output};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
@@ -20,6 +21,91 @@ use super::lease::{FixedTcpAllocation, TcpEgressGrant};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CONNECTIONS_PER_LISTENER: usize = 128;
+const EGRESS_BRIDGE_PATTERN: &str = "atoe+";
+const EGRESS_BROKER_PORT: u16 = 1080;
+
+/// Install the host-wide admission boundary for Runner-created egress
+/// bridges. Docker's `--internal` route blocks forwarding; these INPUT rules
+/// additionally expose exactly the broker Port on interfaces that only an
+/// authorized service joins. The rules are idempotent across worker slots and
+/// intentionally remain installed while the host can create such bridges.
+pub fn prepare_egress_firewall() -> Result<()> {
+    ensure!(
+        cfg!(target_os = "linux"),
+        "TCP egress firewall requires a native Linux Runner"
+    );
+    // Install default deny first. If the exact accept rule cannot be added,
+    // startup fails with the egress bridges still closed.
+    ensure_iptables_rule(false)?;
+    ensure_iptables_rule(true)?;
+    Ok(())
+}
+
+fn ensure_iptables_rule(accept: bool) -> Result<()> {
+    let check = iptables_arguments("-C", accept);
+    let checked = Command::new("iptables")
+        .args(&check)
+        .output()
+        .context("inspect TCP egress firewall rule")?;
+    if checked.status.success() {
+        return Ok(());
+    }
+    let insert = iptables_arguments("-I", accept);
+    let output = Command::new("iptables")
+        .args(&insert)
+        .output()
+        .context("install TCP egress firewall rule")?;
+    ensure!(
+        output.status.success(),
+        "install TCP egress firewall rule failed: {}",
+        bounded_stderr(&output)
+    );
+    Ok(())
+}
+
+fn iptables_arguments(operation: &str, accept: bool) -> Vec<String> {
+    let mut arguments = vec![
+        "--wait".to_owned(),
+        "5".to_owned(),
+        operation.to_owned(),
+        "INPUT".to_owned(),
+    ];
+    if operation == "-I" {
+        arguments.push("1".to_owned());
+    }
+    arguments.extend(["-i".to_owned(), EGRESS_BRIDGE_PATTERN.to_owned()]);
+    if accept {
+        arguments.extend([
+            "-p".to_owned(),
+            "tcp".to_owned(),
+            "--dport".to_owned(),
+            EGRESS_BROKER_PORT.to_string(),
+        ]);
+    }
+    arguments.extend([
+        "-m".to_owned(),
+        "comment".to_owned(),
+        "--comment".to_owned(),
+        if accept {
+            "ato-runtime-egress-broker"
+        } else {
+            "ato-runtime-egress-default-deny"
+        }
+        .to_owned(),
+        "-j".to_owned(),
+        if accept { "ACCEPT" } else { "DROP" }.to_owned(),
+    ]);
+    arguments
+}
+
+fn bounded_stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr)
+        .chars()
+        .take(2048)
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
 
 struct ConnectionPermit(Arc<AtomicUsize>);
 
@@ -136,7 +222,7 @@ impl TcpEgressBroker {
     pub fn start(gateway: IpAddr, grant: &TcpEgressGrant) -> Result<Self> {
         ensure!(gateway.is_ipv4(), "TCP egress bridge gateway must be IPv4");
         let policy = EgressPolicy::from_grant(grant)?;
-        let listener = TcpListener::bind(SocketAddr::new(gateway, 0))
+        let listener = TcpListener::bind(SocketAddr::new(gateway, EGRESS_BROKER_PORT))
             .context("bind TCP egress broker on isolated bridge")?;
         listener.set_nonblocking(true)?;
         let endpoint = listener.local_addr()?;
@@ -540,6 +626,17 @@ mod tests {
         };
         assert!(!upper_half.permits(Ipv4Addr::new(169, 254, 169, 254), 443));
         assert!(Ipv4Cidr::parse("0.0.0.0/0").is_err());
+    }
+
+    #[test]
+    fn firewall_opens_only_the_broker_port_before_default_deny() {
+        let accept = iptables_arguments("-I", true);
+        let deny = iptables_arguments("-I", false);
+        assert!(accept.windows(2).any(|part| part == ["--dport", "1080"]));
+        assert!(accept.windows(2).any(|part| part == ["-i", "atoe+"]));
+        assert_eq!(accept.last().map(String::as_str), Some("ACCEPT"));
+        assert!(!deny.iter().any(|part| part == "--dport"));
+        assert_eq!(deny.last().map(String::as_str), Some("DROP"));
     }
 
     #[test]
