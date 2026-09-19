@@ -98,6 +98,10 @@ pub struct RunJournalEntry {
     /// `state_key -> writer_fence` held by this Run.
     #[serde(default)]
     pub writer_fences: BTreeMap<String, u64>,
+    /// Broker policy/allocation id -> generation. Metadata only; destinations,
+    /// payloads and Binding values are never journaled.
+    #[serde(default)]
+    pub network_generations: BTreeMap<String, u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process: Option<ProcessIdentity>,
 }
@@ -113,6 +117,7 @@ impl RunJournalEntry {
             incarnation: owner.incarnation.clone(),
             phase: RunPhase::Preparing,
             writer_fences: BTreeMap::new(),
+            network_generations: BTreeMap::new(),
             process: None,
         }
     }

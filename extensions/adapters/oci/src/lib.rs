@@ -508,6 +508,39 @@ impl OciNetwork {
         &self.name
     }
 
+    /// Address of the host-side bridge endpoint. An internal network has no
+    /// external forwarding, but containers may reach a Runner-owned broker on
+    /// this exact address.
+    pub fn gateway_address(&self) -> Result<IpAddr> {
+        let output = run_checked(
+            &self.docker,
+            [
+                "network",
+                "inspect",
+                "--format",
+                "{{(index .IPAM.Config 0).Gateway}}",
+                self.name.as_str(),
+            ],
+            "inspect isolated OCI network gateway",
+        )?;
+        output
+            .trim()
+            .parse()
+            .context("isolated OCI network gateway is not an IP address")
+    }
+
+    /// Attach one already-running owned container. The network is internal,
+    /// so this adds access only to host-side listeners on its bridge.
+    pub fn connect_container(&self, container_id: &str) -> Result<()> {
+        ensure!(!container_id.trim().is_empty(), "container id is empty");
+        run_checked(
+            &self.docker,
+            ["network", "connect", self.name.as_str(), container_id],
+            "attach OCI container to isolated broker network",
+        )?;
+        Ok(())
+    }
+
     pub fn remove(mut self) -> Result<()> {
         self.removed = true;
         remove_network(&self.docker, &self.name)
@@ -535,14 +568,18 @@ impl Drop for OciNetwork {
 /// group that fails half-way through its start leaves nothing behind.
 pub struct OciServiceGroup {
     network: Option<OciNetwork>,
+    auxiliary_networks: Vec<OciNetwork>,
     services: Vec<(String, OciHandle)>,
+    retained_resources: Vec<Box<dyn Send>>,
 }
 
 impl OciServiceGroup {
     pub fn new(network: OciNetwork) -> Self {
         Self {
             network: Some(network),
+            auxiliary_networks: Vec::new(),
             services: Vec::new(),
+            retained_resources: Vec::new(),
         }
     }
 
@@ -554,6 +591,18 @@ impl OciServiceGroup {
 
     pub fn push(&mut self, name: String, handle: OciHandle) {
         self.services.push((name, handle));
+    }
+
+    /// Keep an additional internal bridge owned by this group. It is removed
+    /// only after every service is confirmed stopped.
+    pub fn push_auxiliary_network(&mut self, network: OciNetwork) {
+        self.auxiliary_networks.push(network);
+    }
+
+    /// Keep a Runner-owned broker or similar guard alive for exactly this
+    /// group's lifetime. Resources are dropped after services stop.
+    pub fn retain_resource(&mut self, resource: Box<dyn Send>) {
+        self.retained_resources.push(resource);
     }
 
     pub fn services(&self) -> impl Iterator<Item = (&str, &OciHandle)> {
@@ -595,6 +644,7 @@ impl OciServiceGroup {
         while let Some((name, handle)) = self.services.pop() {
             services.push((name, handle.stop_gracefully(budget)));
         }
+        self.retained_resources.clear();
         let all_confirmed = services.iter().all(|(_, outcome)| outcome.is_confirmed());
         let network_removed = match self.network.take() {
             // A network with a live endpoint cannot be removed, and removing
@@ -606,9 +656,19 @@ impl OciServiceGroup {
             }
             None => true,
         };
+        let auxiliary_removed = if all_confirmed {
+            self.auxiliary_networks
+                .drain(..)
+                .all(|network| network.remove().is_ok())
+        } else {
+            for network in self.auxiliary_networks.drain(..) {
+                network.forget();
+            }
+            false
+        };
         GroupStopReport {
             services,
-            network_removed,
+            network_removed: network_removed && auxiliary_removed,
         }
     }
 }
