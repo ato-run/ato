@@ -25,6 +25,10 @@ use crate::runtime_launch::{
     StateAttachmentV1, is_content_addressed_digest, is_guest_path, validate_mount_target,
 };
 
+use crate::runtime_launch_v3::{
+    RUNTIME_LAUNCH_SPEC_V3_PROTOCOL, RunnerVolumeBackingV3, RuntimeLaunchSpecV3, StateAttachmentV3,
+};
+
 pub const RUNTIME_LAUNCH_SPEC_V2_PROTOCOL: &str = "ato.runtime-launch-spec.v2";
 
 /// Surface Endpoint protocol. Matches the v1 endpoint vocabulary.
@@ -449,6 +453,12 @@ impl RuntimeLaunchSpecV2 {
 pub enum RuntimeLaunchSpec {
     V1(RuntimeLaunchSpecV1),
     V2(RuntimeLaunchSpecV2),
+    /// A v3 spec with its v2 group view: everything that handles a group
+    /// reads `view`; only state backing reads `spec`.
+    V3 {
+        spec: RuntimeLaunchSpecV3,
+        view: RuntimeLaunchSpecV2,
+    },
 }
 
 impl RuntimeLaunchSpec {
@@ -464,6 +474,10 @@ impl RuntimeLaunchSpec {
         match discriminator.protocol.as_str() {
             RUNTIME_LAUNCH_SPEC_V1_PROTOCOL => RuntimeLaunchSpecV1::parse(raw).map(Self::V1),
             RUNTIME_LAUNCH_SPEC_V2_PROTOCOL => RuntimeLaunchSpecV2::parse(raw).map(Self::V2),
+            RUNTIME_LAUNCH_SPEC_V3_PROTOCOL => RuntimeLaunchSpecV3::parse(raw).map(|spec| {
+                let view = spec.group_view();
+                Self::V3 { spec, view }
+            }),
             other => Err(RuntimeLaunchSpecError::UnsupportedVersion {
                 found: other.to_owned(),
             }),
@@ -474,27 +488,51 @@ impl RuntimeLaunchSpec {
         match self {
             Self::V1(spec) => spec.canonical_digest(),
             Self::V2(spec) => spec.canonical_digest(),
+            // The digest is always of the bytes that were sent, never of the
+            // derived view.
+            Self::V3 { spec, .. } => spec.canonical_digest(),
         }
     }
 
     pub fn context(&self) -> &LaunchContextV1 {
         match self {
             Self::V1(spec) => &spec.context,
-            Self::V2(spec) => &spec.context,
+            Self::V2(spec) | Self::V3 { view: spec, .. } => &spec.context,
         }
     }
 
     pub fn state_attachments(&self) -> &[StateAttachmentV1] {
         match self {
             Self::V1(spec) => &spec.state_attachments,
-            Self::V2(spec) => &spec.state_attachments,
+            Self::V2(spec) | Self::V3 { view: spec, .. } => &spec.state_attachments,
         }
     }
 
     pub fn lifecycle(&self) -> &LifecycleV1 {
         match self {
             Self::V1(spec) => &spec.lifecycle,
-            Self::V2(spec) => &spec.lifecycle,
+            Self::V2(spec) | Self::V3 { view: spec, .. } => &spec.lifecycle,
+        }
+    }
+
+    /// The Run as an OCI service group, for either group protocol.
+    pub fn service_group_spec(&self) -> Option<&RuntimeLaunchSpecV2> {
+        match self {
+            Self::V1(_) => None,
+            Self::V2(spec) | Self::V3 { view: spec, .. } => Some(spec),
+        }
+    }
+
+    /// The Runner-local volume behind a state key, when this is a v3 Run.
+    /// `None` means the key is revision-backed (or absent).
+    pub fn runner_volume(&self, state_key: &str) -> Option<&RunnerVolumeBackingV3> {
+        match self {
+            Self::V3 { spec, .. } => spec
+                .state_attachments
+                .iter()
+                .find(|attachment| attachment.state_key == state_key)
+                .map(StateAttachmentV3::runner_volume),
+            Self::V1(_) | Self::V2(_) => None,
         }
     }
 
@@ -502,7 +540,7 @@ impl RuntimeLaunchSpec {
     pub fn secret_grants(&self) -> Vec<SecretGrantV1> {
         match self {
             Self::V1(spec) => spec.secret_grants.clone(),
-            Self::V2(spec) => spec
+            Self::V2(spec) | Self::V3 { view: spec, .. } => spec
                 .service_group()
                 .services
                 .iter()

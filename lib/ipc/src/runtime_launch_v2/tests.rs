@@ -53,12 +53,12 @@ fn the_versioned_parser_dispatches_on_protocol_and_refuses_the_unknown() {
         inner.canonical_digest().unwrap(),
         "dispatch must not change a v1 digest"
     );
-    let v3 = GROUP_FIXTURE.replace(
+    let unknown = GROUP_FIXTURE.replace(
         RUNTIME_LAUNCH_SPEC_V2_PROTOCOL,
-        "ato.runtime-launch-spec.v3",
+        "ato.runtime-launch-spec.v999",
     );
     assert_eq!(
-        RuntimeLaunchSpec::parse(&v3).unwrap_err().code(),
+        RuntimeLaunchSpec::parse(&unknown).unwrap_err().code(),
         "ATO_ERR_RUNTIME_LAUNCH_SPEC_UNSUPPORTED_VERSION"
     );
 }

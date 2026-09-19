@@ -400,6 +400,31 @@ pub struct StateWriterGrant {
     /// commit; it authorizes nothing, and an authenticated Runner holding its
     /// assigned Run is what authorizes the write.
     pub writer_fence: u64,
+    /// Present when the slot is backed by a Runner-local volume: which one,
+    /// and what the control plane believes about it. For such a slot
+    /// `revision_ref` is the one-time seed, and only while provisioning.
+    pub volume: Option<GrantedVolume>,
+}
+
+/// The control plane's view of a Runner-local volume at grant time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantedVolume {
+    pub volume_ref: String,
+    pub status: super::volume::VolumeStatus,
+}
+
+/// What a Runner tells the control plane about a volume it holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VolumeReport {
+    /// Created (or found already created) on this Runner.
+    Ready { volume_ref: String },
+    /// Should be here and is not. The control plane stops scheduling it.
+    Missing { volume_ref: String, reason: String },
+    /// Bytes the volume occupies, measured after a confirmed stop.
+    Usage {
+        volume_ref: String,
+        usage_bytes: u64,
+    },
 }
 
 /// Moving state artifacts between the Runner and the control plane.
@@ -453,6 +478,18 @@ pub trait StateArtifactTransport {
     /// No default: a transport that silently released here would be exactly
     /// the bug this exists to prevent.
     fn quarantine_writer(&self, state_key: &str, writer_fence: u64, reason: &str) -> Result<()>;
+
+    /// Report on a Runner-local volume this Run holds the writer for.
+    /// Refused by default: a transport that cannot report cannot run a
+    /// volume-backed Run, and saying so is the safe answer.
+    fn report_volume(
+        &self,
+        _state_key: &str,
+        _writer_fence: u64,
+        _report: &VolumeReport,
+    ) -> Result<()> {
+        anyhow::bail!("this state transport cannot report on Runner-local volumes")
+    }
 }
 
 /// The real transport: lease-scoped, bearer-authenticated requests to the
@@ -518,10 +555,26 @@ impl StateArtifactTransport for LeaseStateArtifactTransport {
             revision_ref.is_some() == artifact_digest.is_some(),
             "writer grant names a revision without its artifact, or the reverse"
         );
+        let volume = match body.get("volume") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(volume) => Some(GrantedVolume {
+                volume_ref: volume
+                    .get("volume_ref")
+                    .and_then(serde_json::Value::as_str)
+                    .context("writer grant names a volume without its reference")?
+                    .to_owned(),
+                status: volume
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(super::volume::VolumeStatus::parse)
+                    .context("writer grant names a volume with an unknown status")?,
+            }),
+        };
         Ok(StateWriterGrant {
             revision_ref,
             artifact_digest,
             writer_fence,
+            volume,
         })
     }
 
@@ -563,6 +616,53 @@ impl StateArtifactTransport for LeaseStateArtifactTransport {
             .send()?
             .error_for_status()
             .context("failed to quarantine the state writer")?;
+        Ok(())
+    }
+
+    fn report_volume(
+        &self,
+        state_key: &str,
+        writer_fence: u64,
+        report: &VolumeReport,
+    ) -> Result<()> {
+        let (suffix, body) = match report {
+            VolumeReport::Ready { volume_ref } => (
+                "volumes/ready",
+                serde_json::json!({
+                    "state_key": state_key,
+                    "writer_fence": writer_fence,
+                    "volume_ref": volume_ref,
+                }),
+            ),
+            VolumeReport::Missing { volume_ref, reason } => (
+                "volumes/missing",
+                serde_json::json!({
+                    "state_key": state_key,
+                    "writer_fence": writer_fence,
+                    "volume_ref": volume_ref,
+                    "reason": reason.chars().take(500).collect::<String>(),
+                }),
+            ),
+            VolumeReport::Usage {
+                volume_ref,
+                usage_bytes,
+            } => (
+                "volumes/usage",
+                serde_json::json!({
+                    "state_key": state_key,
+                    "writer_fence": writer_fence,
+                    "volume_ref": volume_ref,
+                    "usage_bytes": usage_bytes,
+                }),
+            ),
+        };
+        self.client
+            .post(self.url(suffix))
+            .bearer_auth(&self.token)
+            .json(&body)
+            .send()?
+            .error_for_status()
+            .with_context(|| format!("failed to report the state volume ({suffix})"))?;
         Ok(())
     }
 
@@ -803,6 +903,7 @@ mod tests {
                 revision_ref: None,
                 artifact_digest: None,
                 writer_fence: 1,
+                volume: None,
             },
             &target,
         )
