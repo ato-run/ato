@@ -116,3 +116,105 @@ later D1 query found zero replacement Runs after the stop, and the PWA showed
   HTML referenced the expected hashed asset, whose bytes matched the local
   build exactly and contained only the staging API origin.
 - API health returned HTTP 200 on the active version. Production was untouched.
+
+## Boundary follow-up — 2026-09-20
+
+The additional restore, connection-lifetime, address-handover, and renewal
+boundaries were implemented after the acceptance above. This follow-up used:
+
+| Item | Value |
+|---|---|
+| ato commit / Draft PR | `7391dbee` / [#1365](https://github.com/ato-run/ato/pull/1365) |
+| API commit / Draft PR | `41a436f6` / [#663](https://github.com/ato-run/ato-api/pull/663) |
+| PWA commit / Draft PR | `7d05963` / [#400](https://github.com/ato-run/ato-pwa/pull/400) |
+| API Worker | `be123584-aa2b-482b-ab6a-7b7029dc8401` |
+| PWA Worker / asset | `7d9829a2-fc97-463f-adf3-526c2aae2383` / `/assets/index-DNnP0zLt.js` |
+| Runner binary | `/usr/local/bin/ato-connected-realization-worker-7391dbee`, SHA-256 `60427a09c5624bfba13c94cc7858e87fc1be1a64757844a2ed0fd7a319712c12` |
+| Dedicated Runner PID | `783035` throughout the clean fixed-address handover |
+| Additional staging migration | `0285_restore_external_effects_hold.sql` |
+
+### Restore external-effect hold
+
+The stateful follow-up bundle had bundle SHA-256
+`sha256:ba412a8abb5f9789d71a7d3630485d89e4a99d1832ac482b71b8e37999b88643`,
+ContractRef
+`sha256:adc919903a0b7f4a27e670ae4cc500536d1ed4c955fd52fb0d04193171dc425c`,
+and DerivationRef
+`sha256:59d02da636021846b82017dca72a8160c46d0ad85750eab33d5c68b55d6b8200`.
+Instance `cinst_01M2X74EN2Q17AXEEH26955P7C` used volume
+`svol_01M2X77D2MNZZ7SBAR91CBFCX7` and state slot
+`isslot_01M2X77CTKFPSBRSWKJ1GFK2G4`.
+
+Checkpoint operation `vop_01M2X7AKQK8MKDGKD6RJHYE931` captured marker
+`checkpoint-A` as revision `isrev_01M2X7ANNVAPAX27EN6AGDVPRV`. After the live
+volume was changed to `after-checkpoint`, restore operation
+`vop_01M2X7RPMWRQH3M2KXP0XGZ1E3` restored that revision under writer fence 5
+and completed with recovery-hold generation 2 still `active`.
+
+While the hold was active:
+
+- the egress grant `egr_13bcba25-09ae-4326-993c-a21a2051f2e0` stayed enabled
+  and allocation `tcp_2bc19ec5-1b92-4962-b76c-12cb2cb6376c` stayed allocated;
+- all runtime HTTP routes and fixed-TCP bindings remained detached;
+- a normal **Open App** attempt created no Run (the Instance remained at five
+  recorded Runs);
+- toggling **Use on demand** and then **Keep running** changed policy
+  generation to 3 but did not release the hold or create a Run; and
+- the PWA displayed the restore-specific warning and exact **Allow network
+  access** action.
+
+The hold was explicitly released only for that operation and generation. The
+always-on reconciler then created Run `run_01M2X80GQ9YPGT3JC4TXAJK6EY`, the
+HTTP route became ready, fixed-TCP binding generation 4 became active, the
+persisted marker read `checkpoint-A`, `/egress` returned `socks-status=0`, and
+the fixed address returned `fixed-tcp:post-restore`.
+
+The staging admin surface required a fresh Cloudflare Access login. The test
+did not reuse or request an OTP. Operator-only staging mutations therefore
+used guarded direct D1 statements and append-only `admin_audit_events`; this
+includes operation creation/recovery, exact hold release, and network
+allocation changes. The PWA display and normal owner wake/policy paths were
+still exercised. This is a limitation of the staging evidence: the exact
+release HTTP endpoint is covered by API tests, not by an authenticated admin
+browser call in this run.
+
+One malformed staging-only operation ID was rejected by the Runner before it
+opened the volume. It was recovered only when the state-slot ID, writer Run,
+writer fence 4, operation, and hold generation 1 all matched; the audit event
+is `aae_restore_probe_recover_20260920`. It is retained as an interrupted
+operation rather than hidden from the record.
+
+### Connection ownership and clean fixed-address handover
+
+With Run `run_01M2X8EV77QRNBADWTYYXZCWHA` serving as owner A, the exact
+address returned `fixed-tcp:clean-A`. A live fixed-TCP client observed EOF
+after the stop (`16.486s` from connect); the binding reached `detached`, and
+the Run and lease both reached `stopped`. The Runner process stayed PID
+`783035`.
+
+Allocation A `tcp_2bc19ec5-1b92-4962-b76c-12cb2cb6376c` was then revoked at
+allocation generation 8. The same `0.0.0.0:19001` address was assigned to the
+already verified Instance `cinst_01M2WZQPDGFSKN2C154RH3MHRF` as allocation B
+`tcp_34d3a612-983d-4374-b3bb-d78bd96cbcb3`. Run
+`run_01M2X8JAQMAFDPEED2T11957MA` installed binding generation 9 and returned
+`fixed-tcp:clean-B`, still from Runner PID `783035`. B was stopped after the
+proof. A late operation naming allocation A cannot match B's allocation ID,
+generation, Run, or lease; deterministic Runner tests exercise that stale-A
+case directly.
+
+The egress probe established a real SOCKS connection, but the selected
+Cloudflare endpoint closes an idle connection after about ten seconds. Its
+EOF is therefore **not** claimed as stop-caused staging evidence. Bounded
+broker cancellation, connection-slot return, bidirectional EOF, and both
+fixed/egress connection groups are established by the Runner tests; a
+controlled long-lived relay is reserved for the Mail fixture acceptance.
+
+### Follow-up verification
+
+- Runner: all 134 tests passed; targeted boundary suite 7/7 passed; clippy
+  with warnings denied and rustfmt check passed.
+- API: typecheck passed; targeted suites 61/61 plus always-on suite 7/7 passed.
+- PWA: typecheck, targeted suite 7/7, and production build passed. `pnpm lint`
+  could not run because this checkout has no `eslint` command.
+- Production, public ingress, low ports, public mail sending, and feature flags
+  were not changed.
