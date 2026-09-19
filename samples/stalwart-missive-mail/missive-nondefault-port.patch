@@ -1,0 +1,36 @@
+diff --git a/src/jmap.rs b/src/jmap.rs
+--- a/src/jmap.rs
++++ b/src/jmap.rs
+@@ -86,11 +86,20 @@ impl JmapUrl {
+-    pub fn host(&self) -> &str {
+-        self.0
++    pub fn host(&self) -> String {
++        let authority = self
++            .0
+             .split("://")
+             .nth(1)
+             .unwrap_or(&self.0)
+             .split('/')
+             .next()
+-            .unwrap_or(&self.0)
++            .unwrap_or(&self.0);
++        authority
++            .rsplit_once(':')
++            .and_then(|(host, port)| {
++                port.parse::<u16>()
++                    .ok()
++                    .map(|_| host.to_owned())
++            })
++            .unwrap_or_else(|| authority.to_owned())
+     }
+ 
+     pub fn as_str(&self) -> &str {
+@@ -1443,7 +1452,7 @@ mod tests {
+     #[test]
+     fn jmap_url_host_with_port() {
+         let url = JmapUrl::from("https://mail.example.com:443/jmap");
+-        assert_eq!(url.host(), "mail.example.com:443");
++        assert_eq!(url.host(), "mail.example.com");
+     }
+ 
+     #[test]
