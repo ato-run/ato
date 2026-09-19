@@ -34,6 +34,7 @@ use ato_ipc::runtime_launch::{
     LaunchRealizationV1, ReadinessV1, RuntimeLaunchSpecV1, StateAccessV1,
 };
 use ato_ipc::runtime_launch_v2::{EndpointExposureV2, RuntimeLaunchSpec};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use super::process_executor::{ReadinessProbe, state_path_env_name, state_working_copy};
 use super::recovery::{settle_lease, stop_budget};
@@ -58,6 +59,9 @@ pub const RUNTIME_LAUNCH_LEASE_KIND: &str = "runtime_launch";
 /// Public previews may request a shorter lease-owned deadline; omitting the
 /// field preserves the ordinary one-hour safety cap.
 pub const RUNTIME_LAUNCH_MAX_DURATION_SECS: u64 = 60 * 60;
+const EXECUTION_AUTHORIZATION_MAX_TTL_SECS: u64 = 60 * 60;
+const MAX_TCP_EGRESS_GRANTS: usize = 64;
+const MAX_FIXED_TCP_ALLOCATIONS: usize = 8;
 
 /// Whether this Runner may take `runtime_launch` leases at all.
 ///
@@ -87,6 +91,168 @@ pub struct RuntimeLaunchLeaseCommand {
     /// request or a coarse control-plane cron sweep.
     #[serde(default)]
     pub max_duration_secs: Option<u64>,
+    /// Renewable Coordinator authority for an Instance whose desired state is
+    /// `always_on`. Mutually exclusive with a bounded one-shot duration.
+    #[serde(default)]
+    pub execution_authorization: Option<ExecutionAuthorization>,
+    /// Mutable Instance network grants and stable listener allocations. Like
+    /// execution authorization, these never participate in the launch-spec
+    /// digest or Capsule identity.
+    #[serde(default)]
+    pub network_authorization: Option<NetworkAuthorization>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkAuthorization {
+    pub egress: Vec<TcpEgressGrant>,
+    pub fixed_tcp: Vec<FixedTcpAllocation>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TcpEgressGrant {
+    pub grant_id: String,
+    pub binding_id: String,
+    pub environment: String,
+    pub service_id: String,
+    pub destination_cidr: String,
+    pub ports: Vec<u16>,
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FixedTcpAllocation {
+    pub allocation_id: String,
+    pub port_id: String,
+    pub service_id: String,
+    pub guest_port: u16,
+    pub bind_ip: std::net::IpAddr,
+    pub port: u16,
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionAuthorization {
+    pub policy_generation: u64,
+    pub authorization_generation: u64,
+    pub server_time: String,
+    pub expires_at: String,
+    pub renew_after_secs: u64,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionAuthorizationRenewal {
+    pub policy_generation: u64,
+    pub authorization_generation: u64,
+    pub server_time: String,
+    pub expires_at: String,
+    pub renew_after_secs: u64,
+}
+
+/// Monotonic projection of Coordinator-issued wall-clock authority.
+///
+/// The Runner never compares its wall clock with `expires_at`. It derives a
+/// duration from two timestamps issued by the same Coordinator response and
+/// applies that duration to `Instant`, so local clock changes cannot extend a
+/// workload's authority.
+#[derive(Debug, Clone)]
+pub struct ExecutionAuthorizationMonitor {
+    policy_generation: u64,
+    authorization_generation: u64,
+    deadline: Instant,
+    renew_at: Instant,
+}
+
+impl ExecutionAuthorizationMonitor {
+    pub fn new(authorization: &ExecutionAuthorization, now: Instant) -> Result<Self> {
+        let (deadline, renew_at) = authorization_window(
+            &authorization.server_time,
+            &authorization.expires_at,
+            authorization.renew_after_secs,
+            now,
+        )?;
+        ensure!(
+            authorization.policy_generation > 0 && authorization.authorization_generation > 0,
+            "execution authorization generations must be positive"
+        );
+        Ok(Self {
+            policy_generation: authorization.policy_generation,
+            authorization_generation: authorization.authorization_generation,
+            deadline,
+            renew_at,
+        })
+    }
+
+    pub fn apply(&mut self, renewal: &ExecutionAuthorizationRenewal, now: Instant) -> Result<()> {
+        ensure!(
+            renewal.policy_generation == self.policy_generation,
+            "execution authorization policy generation changed"
+        );
+        ensure!(
+            renewal.authorization_generation > self.authorization_generation,
+            "execution authorization generation did not advance"
+        );
+        let (deadline, renew_at) = authorization_window(
+            &renewal.server_time,
+            &renewal.expires_at,
+            renewal.renew_after_secs,
+            now,
+        )?;
+        self.authorization_generation = renewal.authorization_generation;
+        self.deadline = deadline;
+        self.renew_at = renew_at;
+        Ok(())
+    }
+
+    pub fn should_renew(&self, now: Instant) -> bool {
+        now >= self.renew_at
+    }
+
+    pub fn is_expired(&self, now: Instant) -> bool {
+        now >= self.deadline
+    }
+
+    /// Retry a transient transport failure without ever sliding the deadline.
+    pub fn defer_retry(&mut self, now: Instant, delay: Duration) {
+        self.renew_at = now
+            .checked_add(delay)
+            .unwrap_or(self.deadline)
+            .min(self.deadline);
+    }
+}
+
+fn authorization_window(
+    server_time: &str,
+    expires_at: &str,
+    renew_after_secs: u64,
+    now: Instant,
+) -> Result<(Instant, Instant)> {
+    let issued = OffsetDateTime::parse(server_time, &Rfc3339)
+        .context("execution authorization server_time is not RFC 3339")?;
+    let expires = OffsetDateTime::parse(expires_at, &Rfc3339)
+        .context("execution authorization expires_at is not RFC 3339")?;
+    let ttl = Duration::try_from(expires - issued)
+        .context("execution authorization expiry precedes server_time")?;
+    ensure!(
+        !ttl.is_zero() && ttl <= Duration::from_secs(EXECUTION_AUTHORIZATION_MAX_TTL_SECS),
+        "execution authorization TTL is outside the accepted range"
+    );
+    let renew_after = Duration::from_secs(renew_after_secs);
+    ensure!(
+        !renew_after.is_zero() && renew_after < ttl,
+        "execution authorization renew_after_secs must precede expiry"
+    );
+    let deadline = now
+        .checked_add(ttl)
+        .context("execution authorization deadline overflowed")?;
+    let renew_at = now
+        .checked_add(renew_after)
+        .context("execution authorization renewal time overflowed")?;
+    Ok((deadline, renew_at))
 }
 
 /// Parse the command's spec and prove it is the one that was dispatched.
@@ -96,6 +262,10 @@ pub struct RuntimeLaunchLeaseCommand {
 /// control plane digested onto the Run, the Runner would execute something the
 /// receipt does not describe.
 pub fn verified_spec(command: &RuntimeLaunchLeaseCommand) -> Result<RuntimeLaunchSpec> {
+    ensure!(
+        command.max_duration_secs.is_none() || command.execution_authorization.is_none(),
+        "runtime launch cannot combine max_duration_secs with execution_authorization"
+    );
     if let Some(seconds) = command.max_duration_secs {
         ensure!(
             (1..=RUNTIME_LAUNCH_MAX_DURATION_SECS).contains(&seconds),
@@ -122,7 +292,81 @@ pub fn verified_spec(command: &RuntimeLaunchLeaseCommand) -> Result<RuntimeLaunc
         "launch spec identity does not match its lease command"
     );
     verify_group_cpu_reservation(&spec, command.runtime_cpu_request.as_ref())?;
+    verify_network_authorization(&spec, command.network_authorization.as_ref())?;
     Ok(spec)
+}
+
+fn verify_network_authorization(
+    spec: &RuntimeLaunchSpec,
+    authorization: Option<&NetworkAuthorization>,
+) -> Result<()> {
+    let Some(authorization) = authorization else {
+        return Ok(());
+    };
+    ensure!(
+        !authorization.egress.is_empty() || !authorization.fixed_tcp.is_empty(),
+        "empty network authorization must be omitted"
+    );
+    ensure!(
+        authorization.egress.len() <= MAX_TCP_EGRESS_GRANTS
+            && authorization.fixed_tcp.len() <= MAX_FIXED_TCP_ALLOCATIONS,
+        "network authorization exceeds the bounded grant count"
+    );
+    let group = spec
+        .service_group_spec()
+        .context("network authorization requires an OCI service group")?
+        .service_group();
+    let mut grant_ids = BTreeSet::new();
+    let mut binding_ids = BTreeSet::new();
+    let mut environments = BTreeSet::new();
+    for grant in &authorization.egress {
+        ensure!(
+            grant.grant_id.starts_with("egr_")
+                && grant.grant_id.len() <= 200
+                && !grant.binding_id.is_empty()
+                && grant.binding_id.len() <= 128
+                && grant.environment.starts_with("ATO_BINDING_")
+                && grant.environment.len() <= 128
+                && grant
+                    .environment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+                && group
+                    .services
+                    .iter()
+                    .any(|service| service.name == grant.service_id)
+                && grant.generation > 0
+                && !grant.ports.is_empty()
+                && grant.ports.len() <= 32
+                && grant.ports.iter().all(|port| *port > 0)
+                && grant_ids.insert(&grant.grant_id)
+                && binding_ids.insert(&grant.binding_id)
+                && environments.insert(&grant.environment),
+            "TCP egress authorization is invalid"
+        );
+    }
+    let mut allocation_ids = BTreeSet::new();
+    let mut allocation_ports = BTreeSet::new();
+    for allocation in &authorization.fixed_tcp {
+        let endpoint_matches = group.services.iter().any(|service| {
+            service.name == allocation.service_id
+                && service.endpoints.iter().any(|endpoint| {
+                    endpoint.name == allocation.port_id
+                        && endpoint.guest_port == allocation.guest_port
+                        && endpoint.exposure == EndpointExposureV2::Internal
+                })
+        });
+        ensure!(
+            allocation.allocation_id.starts_with("tcp_")
+                && allocation.allocation_id.len() <= 200
+                && allocation.generation > 0
+                && endpoint_matches
+                && allocation_ids.insert(&allocation.allocation_id)
+                && allocation_ports.insert((&allocation.bind_ip, allocation.port)),
+            "fixed TCP allocation is invalid"
+        );
+    }
+    Ok(())
 }
 
 /// A group reserves its summed CPU as ONE lease. When the control plane sent
@@ -177,11 +421,16 @@ impl ActiveWorkload {
     }
 }
 
-pub fn maximum_lifetime(command: &RuntimeLaunchLeaseCommand) -> Duration {
-    Duration::from_secs(
-        command
-            .max_duration_secs
-            .unwrap_or(RUNTIME_LAUNCH_MAX_DURATION_SECS),
+pub fn maximum_lifetime(command: &RuntimeLaunchLeaseCommand) -> Option<Duration> {
+    command.execution_authorization.as_ref().map_or_else(
+        || {
+            Some(Duration::from_secs(
+                command
+                    .max_duration_secs
+                    .unwrap_or(RUNTIME_LAUNCH_MAX_DURATION_SECS),
+            ))
+        },
+        |_| None,
     )
 }
 
@@ -508,6 +757,7 @@ pub fn start(
     state: &dyn StateArtifactTransport,
     probe: &dyn ReadinessProbe,
     owner: &OciOwner,
+    network_authorization: Option<&NetworkAuthorization>,
 ) -> std::result::Result<ActiveRun, StartFailure> {
     let budget = stop_budget(spec.lifecycle());
     let spec = match spec {
@@ -518,6 +768,7 @@ pub fn start(
                 &resolved.context,
                 probe,
                 owner,
+                network_authorization,
             ) {
                 Ok(group) => group,
                 Err(error) => {
@@ -702,7 +953,7 @@ fn wait_until_oci_ready(
 /// anyone could use it. The Run stays up, and the state it commits is the
 /// state its users produced.
 pub fn wait_for_stop(
-    stop_requested: &dyn Fn() -> Result<bool>,
+    stop_requested: &mut dyn FnMut() -> Result<bool>,
     poll: Duration,
     deadline: Option<Instant>,
 ) -> Result<()> {
@@ -821,6 +1072,8 @@ mod tests {
             launch_spec: serde_json::to_value(spec).expect("spec encodes"),
             runtime_cpu_request: None,
             max_duration_secs: None,
+            execution_authorization: None,
+            network_authorization: None,
         }
     }
 
@@ -859,7 +1112,7 @@ mod tests {
         let mut command = command_for(&spec, &digest);
         command.max_duration_secs = Some(180);
         verified_spec(&command).expect("bounded command accepted");
-        assert_eq!(maximum_lifetime(&command), Duration::from_secs(180));
+        assert_eq!(maximum_lifetime(&command), Some(Duration::from_secs(180)));
     }
 
     #[test]
@@ -899,7 +1152,78 @@ mod tests {
             launch_spec: serde_json::from_str(GROUP_FIXTURE).expect("json"),
             runtime_cpu_request: cpu_request,
             max_duration_secs: None,
+            execution_authorization: None,
+            network_authorization: None,
         }
+    }
+
+    fn execution_authorization() -> ExecutionAuthorization {
+        ExecutionAuthorization {
+            policy_generation: 7,
+            authorization_generation: 1,
+            server_time: "2026-09-19T00:00:00Z".to_owned(),
+            expires_at: "2026-09-19T00:15:00Z".to_owned(),
+            renew_after_secs: 180,
+        }
+    }
+
+    #[test]
+    fn renewable_authority_uses_monotonic_windows_and_advancing_generations() {
+        let started = Instant::now();
+        let mut monitor =
+            ExecutionAuthorizationMonitor::new(&execution_authorization(), started).unwrap();
+        assert!(!monitor.should_renew(started + Duration::from_secs(179)));
+        assert!(monitor.should_renew(started + Duration::from_secs(180)));
+        assert!(!monitor.is_expired(started + Duration::from_secs(899)));
+        assert!(monitor.is_expired(started + Duration::from_secs(900)));
+
+        monitor
+            .apply(
+                &ExecutionAuthorizationRenewal {
+                    policy_generation: 7,
+                    authorization_generation: 2,
+                    server_time: "2038-01-01T00:00:00Z".to_owned(),
+                    expires_at: "2038-01-01T00:15:00Z".to_owned(),
+                    renew_after_secs: 180,
+                },
+                started + Duration::from_secs(180),
+            )
+            .unwrap();
+        assert!(!monitor.is_expired(started + Duration::from_secs(1_079)));
+        assert!(monitor.is_expired(started + Duration::from_secs(1_080)));
+    }
+
+    #[test]
+    fn renewable_authority_rejects_sliding_or_wrong_policy_generations() {
+        let started = Instant::now();
+        let mut monitor =
+            ExecutionAuthorizationMonitor::new(&execution_authorization(), started).unwrap();
+        for (policy_generation, authorization_generation) in [(8, 2), (7, 1)] {
+            let error = monitor
+                .apply(
+                    &ExecutionAuthorizationRenewal {
+                        policy_generation,
+                        authorization_generation,
+                        server_time: "2026-09-19T00:03:00Z".to_owned(),
+                        expires_at: "2026-09-19T00:18:00Z".to_owned(),
+                        renew_after_secs: 180,
+                    },
+                    started + Duration::from_secs(180),
+                )
+                .unwrap_err();
+            assert!(error.to_string().contains("generation"), "{error}");
+        }
+    }
+
+    #[test]
+    fn renewable_authority_and_bounded_duration_are_mutually_exclusive() {
+        let spec = RuntimeLaunchSpecV1::parse(PROCESS_FIXTURE).expect("fixture");
+        let digest = spec.canonical_digest().expect("digests");
+        let mut command = command_for(&spec, &digest);
+        command.max_duration_secs = Some(60);
+        command.execution_authorization = Some(execution_authorization());
+        let error = verified_spec(&command).unwrap_err();
+        assert!(error.to_string().contains("cannot combine"), "{error}");
     }
 
     #[test]
