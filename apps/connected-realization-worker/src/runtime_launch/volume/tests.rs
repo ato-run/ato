@@ -230,3 +230,84 @@ fn a_volume_the_disk_cannot_hold_is_not_started() {
     // Refused before anything was created.
     assert!(!store.data_dir(VOLUME).unwrap().exists());
 }
+
+#[test]
+fn maintenance_never_provisions_a_volume_that_is_not_here() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store(root.path());
+    assert_eq!(
+        store.open_existing(VOLUME).unwrap_err().code(),
+        "state_volume_missing"
+    );
+    assert!(!store.data_dir(VOLUME).unwrap().exists());
+}
+
+#[test]
+fn a_replacement_is_all_or_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store(root.path());
+    let volume = attach(&store, VolumeStatus::Provisioning).unwrap();
+    fs::write(volume.data_dir().join("app.db"), "B").unwrap();
+    drop(volume);
+
+    // A fill that fails part-way leaves the live data exactly as it was.
+    let volume = store.open_existing(VOLUME).unwrap();
+    let failing = |staging: &Path| {
+        fs::create_dir_all(staging)?;
+        fs::write(staging.join("app.db"), "partial")?;
+        anyhow::bail!("download failed")
+    };
+    assert!(store.replace_data(&volume, &failing).is_err());
+    assert_eq!(
+        fs::read_to_string(volume.data_dir().join("app.db")).unwrap(),
+        "B"
+    );
+    drop(volume);
+
+    // A complete fill replaces it, and the old tree is gone.
+    let volume = store.open_existing(VOLUME).unwrap();
+    let restore = |staging: &Path| {
+        fs::create_dir_all(staging)?;
+        fs::write(staging.join("app.db"), "A")?;
+        Ok(())
+    };
+    store.replace_data(&volume, &restore).unwrap();
+    assert_eq!(
+        fs::read_to_string(volume.data_dir().join("app.db")).unwrap(),
+        "A"
+    );
+    let leftovers: Vec<_> = fs::read_dir(volume.data_dir().parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(leftovers.len(), 2, "{leftovers:?}"); // metadata.json + data
+}
+
+#[test]
+fn a_delete_removes_only_its_own_volume() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store(root.path());
+    drop(attach(&store, VolumeStatus::Provisioning).unwrap());
+    let other = store
+        .attach(OTHER, CAPACITY, VolumeStatus::Provisioning, None, &no_seed)
+        .unwrap();
+    fs::write(other.data_dir().join("keep"), "x").unwrap();
+    drop(other);
+
+    let volume = store.open_existing(VOLUME).unwrap();
+    store.delete(volume).unwrap();
+    assert_eq!(
+        store.open_existing(VOLUME).unwrap_err().code(),
+        "state_volume_missing"
+    );
+    let remaining: Vec<_> = fs::read_dir(root.path().join("runner-a/volumes"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(remaining, vec![OTHER.to_owned()]);
+    let other = store.open_existing(OTHER).unwrap();
+    assert_eq!(
+        fs::read_to_string(other.data_dir().join("keep")).unwrap(),
+        "x"
+    );
+}
