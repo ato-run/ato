@@ -1647,42 +1647,13 @@ impl ConnectedWorker {
         let Some(monitor) = monitor else {
             return Ok(false);
         };
-        let now = Instant::now();
-        ensure!(!monitor.is_expired(now), "execution authorization expired");
-        if !monitor.should_renew(now) {
-            return Ok(false);
-        }
-        let request_started = Instant::now();
-        match self.api.renew_execution_authorization(lease_id) {
-            Ok(ExecutionAuthorizationRenewalOutcome::Renewed(renewal)) => {
-                monitor.apply(&renewal, request_started, Instant::now())?;
-            }
-            Ok(ExecutionAuthorizationRenewalOutcome::Refused {
-                reason,
-                stop_requested,
-            }) => {
-                if reason == "owner_stop" && stop_requested {
-                    return Ok(true);
-                }
-                bail!(
-                    "execution authorization renewal was refused: reason={reason} stop_requested={stop_requested}"
-                )
-            }
-            Err(error) => {
-                // A transport failure grants no time. Retry quickly within the
-                // existing monotonic deadline; once it passes, the next poll
-                // tears the workload down even if the local wall clock moved.
-                monitor.defer_retry(Instant::now(), Duration::from_secs(5));
-                eprintln!(
-                    "execution authorization renewal deferred lease_id={lease_id} error={error:#}"
-                );
-            }
-        }
-        ensure!(
-            !monitor.is_expired(Instant::now()),
-            "execution authorization expired"
-        );
-        Ok(false)
+        runtime_launch::lease::refresh_execution_authorization(
+            monitor,
+            lease_id,
+            Instant::now,
+            || self.api.renew_execution_authorization(lease_id),
+            std::thread::sleep,
+        )
     }
 
     fn execute_portable_lease(
@@ -3432,13 +3403,7 @@ struct ExecutionAuthorizationRefusalResponse {
     message: String,
 }
 
-enum ExecutionAuthorizationRenewalOutcome {
-    Renewed(runtime_launch::lease::ExecutionAuthorizationRenewal),
-    Refused {
-        reason: String,
-        stop_requested: bool,
-    },
-}
+use runtime_launch::lease::ExecutionAuthorizationRenewalOutcome;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
