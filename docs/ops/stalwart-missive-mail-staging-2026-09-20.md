@@ -15,10 +15,14 @@ the stopped Run to the replacement Run with incremented generations, while
 the Stalwart volume and the previously delivered message remained intact.
 
 A checkpoint was created and a post-checkpoint message was then written and
-verified. The final restore action is deliberately waiting at the destructive
-confirmation boundary: the UI states that everything saved after the selected
-checkpoint will be replaced. The restore and the post-restore external-effect
-hold will be recorded below after that action-time confirmation is supplied.
+verified. Restoring that checkpoint removed the later message, retained the
+checkpointed message, and installed an external-effect hold. `Keep running`
+did not release the hold: the fixed addresses remained configured, but both
+listeners returned EOF and no workload was running. Releasing the exact
+operation/generation restored TLS, IMAPS, Missive, and controlled relay access.
+The final acceptance Run was stopped, its bindings were detached, its fixed
+TCP and egress grants were revoked, and the temporary relay/probe resources
+were removed.
 
 Production was not changed.
 
@@ -148,7 +152,7 @@ This demonstrates that the API decrypted Instance/Contract-bound durable
 configuration and issued a fresh one-time Runner secret grant; the plaintext
 secret was not stored in the portable import row.
 
-### Checkpoint and prepared restore
+### Checkpoint, restore, and post-restore hold
 
 Checkpoint creation stopped the application, captured 2,452,992 bytes, and
 advanced the slot head to `isrev_01M2XNXA6NRSP1TMJESAERSTBB`, digest
@@ -157,9 +161,53 @@ Opening the app created `run_01M2XNXTMABRARS981AWSSRFAP` with lease
 `01M2XNXTMAE6723B75J0DB7Q2G`; the slot writer epoch was 4.
 
 After that checkpoint, authenticated local Submission and IMAPS both verified
-the new message `Ato final post-checkpoint mutation 2026-09-20`. The Restore
-selector is prepared for the 2026-09-20 05:32 JST checkpoint. The final
-destructive confirmation has not yet been activated in this record.
+the new message `Ato final post-checkpoint mutation 2026-09-20`.
+
+Restore operation `vop_01M2Y5YZH5MFZNT1M51RJV690B` restored that exact
+checkpoint revision and succeeded at `2026-09-20T01:12:51.634Z`. The operation
+created active recovery-hold generation 1. While that hold was active:
+
+- the UI reported that the application remained stopped with network access
+  off;
+- selecting `Keep running` changed the availability policy but neither
+  released the hold nor started a workload;
+- both fixed listener addresses accepted TCP and immediately returned EOF,
+  and no service-group container existed behind them.
+
+The owner released the exact restore operation and generation at
+`2026-09-20T01:15:21.138Z`. Run `run_01M2Y63KBT1RXWX374TAVSBVN6`, lease
+`01M2Y63KBTDD70T9T47M8242CR`, then reached ready using the retained durable
+Binding configuration. Both allocation IDs moved to active generation 5.
+TLS 1.3 and the `mail.ato-mail.test` SAN verified again. Authenticated IMAPS
+and Missive showed the checkpointed `Ato final clean bundle acceptance
+2026-09-20` message, while the post-checkpoint mutation was absent.
+
+The post-restore controlled relay message `Ato final post-restore relay
+acceptance 2026-09-20` increased the sink from five to six records and was
+recorded with SHA-256
+`452a8bedbf2dd364258243f4f1c4a1d9b32f74b23280e83e508dcf31b98845bc`.
+
+### Acceptance cleanup
+
+Availability was returned to on-demand and the post-restore lease stopped at
+`2026-09-20T01:25:11.880Z`. The open viewer briefly acquired one final
+on-demand Run, `run_01M2Y6NTH5GKPSYJP0H2TGP7XM`, which was also stopped; its
+lease stopped at `2026-09-20T01:25:47.468Z`. Both proxy bindings are `stopped`,
+and the state slot has writer epoch 7 with no active writer.
+
+After those stop fences were observed, a guarded staging-only D1 transaction
+revoked both fixed TCP allocations at generation 7 and the egress grant at
+generation 2. Audit event `aae_stalwart_v9_cleanup_20260920` records the exact
+before/after generations. The Runner keeps its allowlisted listener sockets
+open, but a connection to either revoked address immediately received EOF.
+
+The five named manual probe containers, their anonymous volume and dedicated
+network, the temporary Runner build directory, the controlled relay process,
+and its credential/certificate directory were removed. The public raw-TCP
+handler for port 10000 was removed; the unrelated existing HTTPS handler on
+443 remains. Tailscale retains an inert `AllowFunnel` marker for port 10000,
+but its status has no TCP or Web handler for that port and the host has no
+listener on 10000 or the former local sink port 2465.
 
 ## Local verification
 
@@ -176,8 +224,6 @@ destructive confirmation has not yet been activated in this record.
 
 ## Remaining gates and limitations
 
-- Restore completion and the post-restore external-effect hold remain pending
-  the action-time destructive confirmation described above.
 - The Runner currently extracts the state seed as its host uid and does not
   provide an id-mapped OCI state mount. The fixture therefore uses a thin
   Stalwart uid-1000 image while retaining the pinned upstream binary.
