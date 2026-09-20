@@ -101,21 +101,51 @@ Checked in Chrome against the staging App:
 | Autosave | pass — "保存されました" after each edit, content survived reloads |
 | Search | pass — searching `永続化` found the note with a highlighted snippet |
 
+## WebSocket acceptance
+
+The fixed Instance URL now sustains the application WebSocket. The fault was
+in the generic process-backed App proxy, not in Trilium, Caddy or the Runner:
+`proxyToRuntimeRoute()` rebuilt the upstream `101` response as a new
+`Response`. That detached the Cloudflare-runtime-owned WebSocket lifetime and
+closed an otherwise healthy connection as soon as the Worker request ended.
+
+The API fix is
+[`cd973fac`](https://github.com/ato-run/ato-api/commit/cd973fac5979767c1c9dc309aba99be3f8109546)
+([ato-api#665](https://github.com/ato-run/ato-api/pull/665)). It returns an
+upstream response with `response.webSocket` unchanged, before applying the
+HTTP-only presentation and marker-header pipeline. No Trilium source,
+`capsule.toml`, Caddy or Runner change was needed.
+
+The regression test
+`passes a process-backed runtime-owned WebSocket response through unchanged`
+first failed before the fix because the final response reconstruction rejected
+status 101. It now verifies response identity and WebSocket identity as well as
+the forwarded path, query, upgrade headers and optional subprotocol. It also
+verifies that Ato credentials are stripped while the application's own cookie
+is retained.
+
+The fix was deployed to staging as Worker version
+`33a4b80f-1d02-4349-a8dc-99ce4c6ceacc`. Acceptance against this Instance found:
+
+| Item | Result |
+| --- | --- |
+| Browser upgrade | pass — DevTools Network showed `101 Switching Protocols` for `wss://cinst-tfgnfdkubznb7xh2.stg-app.ato.run/` |
+| Connection lifetime | pass — 162.7 s observed without a close, then a separate DevTools-captured `101` remained `Pending` for 67.0 s |
+| Server side | pass — Trilium logged one `websocket client connected` per page load and did not immediately reconnect in the observation window |
+| Create live update | pass — `WebSocket受入 2026-09-20` appeared in the note tree without reload |
+| Rename live update | pass — the tree changed to `WebSocket受入 rename済み` without reload |
+| Navigation | pass — switched to another note and back while the WebSocket stayed connected |
+| HTTP/save/search | pass — save returned success, the renamed note and body were searchable, and normal HTTP navigation continued |
+| Persistence | pass — reloading retained `WebSocket受入 rename済み` and `WebSocket live acceptance: 保存とライブ更新を確認。` |
+
+No WebSocket close occurred during either observation, so there was no browser
+close code to record. Trilium does not log a close code for this connection.
+
+This is the process-backed fixed-URL invariant used by application WebSockets,
+HMR, collaborative editors, streaming/live UIs and WebSocket-backed terminals;
+the proxy does not special-case Trilium headers or paths.
+
 ## Open gaps
-
-**The Instance Surface does not sustain a WebSocket.** Trilium opens one for
-live updates. The upgrade does reach Trilium — its log shows repeated
-`websocket client connected` — but the socket is torn down within about a
-second, and the browser sees an error at ~1.0 s every time. The Runner's own
-surface proxy is a raw TCP splice with no timeouts and Caddy passes upgrades,
-so the drop is above the Runner.
-
-Consequence for a person using Trilium: the note tree does not refresh by
-itself. A note created or renamed appears after a page reload. Editing,
-saving, search and persistence are unaffected.
-
-This is a generic capability, not a Trilium feature: any app with live
-updates, HMR, collaborative editing, a terminal or streaming chat needs it.
 
 **A personal App carries no category or licence metadata.** The My Apps editor
 offers picture, name, colour and letter only. Category and licence exist on the
