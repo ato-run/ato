@@ -19,10 +19,10 @@ use ato_computation::ContentRef;
 use ato_formation::authoring::{
     AuthoringDraft, AuthoringProvenance, BOUND_CONTRACT_SCHEMA, BOUND_DERIVATION_SCHEMA,
     BROWSER_PROTOCOL, BindingContext, BoundContract, BoundDerivation, BoundInput, BoundPort,
-    BoundRequirement, BoundStep, DerivationDraft, EffectClass, HTTP_CONTRACT_VERIFIER,
-    HTTP_PROTOCOL, INSTANCE_SNAPSHOT_CONTRACT_VERIFIER, PROCESS_PROTOCOL, PortDraft,
-    STATE_FILESYSTEM_PROTOCOL, StateAccess, StepDraft, TCP_EGRESS_PROTOCOL, TCP_PROTOCOL,
-    WORKSPACE_CONTRACT_VERIFIER, WORKSPACE_PROTOCOL, bind,
+    BoundRequirement, BoundStep, ClientAddressTransport, DerivationDraft, EffectClass,
+    HTTP_CONTRACT_VERIFIER, HTTP_PROTOCOL, INSTANCE_SNAPSHOT_CONTRACT_VERIFIER, PROCESS_PROTOCOL,
+    PortDraft, STATE_FILESYSTEM_PROTOCOL, StateAccess, StepDraft, TCP_EGRESS_PROTOCOL,
+    TCP_PROTOCOL, WORKSPACE_CONTRACT_VERIFIER, WORKSPACE_PROTOCOL, bind,
 };
 use ato_formation::capsule_toml::{CAPSULE_FILE_NAME, parse_capsule_toml};
 use ato_formation::capsule_toml_v2::{PortableDerivationKindV2, parse_capsule_toml_v2};
@@ -267,10 +267,18 @@ pub struct PortableDynamicRouteSpec {
 pub struct PortableServiceRouteSpec {
     pub id: String,
     pub execution: PortableExecutionSpec,
-    /// `(Port id, guest port)`. The Port named `app.http` serves the Surface.
-    pub ports: Vec<(String, u16)>,
+    /// The Port named `app.http` serves the Surface.
+    pub ports: Vec<PortableServicePortSpec>,
     pub state: Vec<String>,
     pub bindings: Vec<String>,
+}
+
+/// One Port a service serves, and how the Runner addresses its clients.
+#[derive(Debug, Clone)]
+pub struct PortableServicePortSpec {
+    pub id: String,
+    pub guest_port: u16,
+    pub client_address_transport: Option<ClientAddressTransport>,
 }
 
 #[derive(Debug, Clone)]
@@ -1003,6 +1011,7 @@ pub fn build_multi_derivation_bundle(
                 protocol: process_port.protocol.clone(),
                 from: static_step_id,
                 guest_port: None,
+                client_address_transport: None,
             }],
             state: Vec::new(),
             workspace_build: None,
@@ -1146,7 +1155,11 @@ pub fn build_authored_bundle_v2(
                     ports: service
                         .ports
                         .into_iter()
-                        .map(|port| (port.id, port.guest_port))
+                        .map(|port| PortableServicePortSpec {
+                            id: port.id,
+                            guest_port: port.guest_port,
+                            client_address_transport: port.client_address_transport,
+                        })
                         .collect(),
                     state: service.state,
                     bindings: service.bindings,
@@ -1262,16 +1275,17 @@ pub fn build_dynamic_routes_bundle(
                 .services
                 .iter()
                 .flat_map(|service| {
-                    service.ports.iter().map(|(id, guest_port)| BoundPort {
-                        id: id.clone(),
-                        protocol: if id == "app.http" {
+                    service.ports.iter().map(|port| BoundPort {
+                        id: port.id.clone(),
+                        protocol: if port.id == "app.http" {
                             HTTP_PROTOCOL
                         } else {
                             TCP_PROTOCOL
                         }
                         .to_owned(),
                         from: service.id.clone(),
-                        guest_port: Some(*guest_port),
+                        guest_port: Some(port.guest_port),
+                        client_address_transport: port.client_address_transport,
                     })
                 })
                 .collect()
@@ -1281,6 +1295,7 @@ pub fn build_dynamic_routes_bundle(
                 protocol: HTTP_PROTOCOL.to_owned(),
                 from: "serve".to_owned(),
                 guest_port: Some(route.guest_port),
+                client_address_transport: None,
             }]
         },
         state: spec
