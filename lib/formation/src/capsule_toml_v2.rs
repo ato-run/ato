@@ -11,8 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Deserialize;
 
 use crate::authoring::{
-    EffectClass, PROCESS_PROTOCOL, STATE_FILESYSTEM_PROTOCOL, TCP_EGRESS_PROTOCOL,
-    WORKSPACE_PROTOCOL,
+    ClientAddressTransport, EffectClass, PROCESS_PROTOCOL, STATE_FILESYSTEM_PROTOCOL,
+    TCP_EGRESS_PROTOCOL, WORKSPACE_PROTOCOL,
 };
 
 pub const CAPSULE_SCHEMA_V2: &str = "ato.capsule/2";
@@ -108,6 +108,7 @@ pub struct PortableServiceDraftV2 {
 pub struct PortableServicePortDraftV2 {
     pub id: String,
     pub guest_port: u16,
+    pub client_address_transport: Option<ClientAddressTransport>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -230,6 +231,10 @@ struct Service {
 struct ServicePort {
     id: String,
     guest_port: u16,
+    /// Optional Port transport metadata. Omitting it leaves the Contract's
+    /// canonical bytes exactly as they were before this existed.
+    #[serde(default)]
+    client_address_transport: Option<ClientAddressTransport>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -690,6 +695,7 @@ fn parse_service_group(
                     Ok(PortableServicePortDraftV2 {
                         id: port.id,
                         guest_port: port.guest_port,
+                        client_address_transport: port.client_address_transport,
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;

@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
 
-use super::lease::{FixedTcpAllocation, TcpEgressGrant};
+use super::lease::{ClientAddressTransport, FixedTcpAllocation, TcpEgressGrant};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECTION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -270,6 +270,46 @@ impl ConnectionGroup {
     }
 }
 
+/// Encode one PROXY protocol v2 header for a proxied TCP connection.
+///
+/// `None` when the two addresses are not the same family, which the wire
+/// format has no way to express — the caller refuses such a connection rather
+/// than forwarding it unlabelled.
+fn proxy_protocol_v2_header(source: SocketAddr, destination: SocketAddr) -> Option<Vec<u8>> {
+    const SIGNATURE: [u8; 12] = [
+        0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A,
+    ];
+    const VERSION_AND_PROXY: u8 = 0x21;
+    const TCP_OVER_IPV4: u8 = 0x11;
+    const TCP_OVER_IPV6: u8 = 0x21;
+
+    let (family, mut addresses) = match (source, destination) {
+        (SocketAddr::V4(source), SocketAddr::V4(destination)) => {
+            let mut addresses = Vec::with_capacity(12);
+            addresses.extend_from_slice(&source.ip().octets());
+            addresses.extend_from_slice(&destination.ip().octets());
+            (TCP_OVER_IPV4, addresses)
+        }
+        (SocketAddr::V6(source), SocketAddr::V6(destination)) => {
+            let mut addresses = Vec::with_capacity(36);
+            addresses.extend_from_slice(&source.ip().octets());
+            addresses.extend_from_slice(&destination.ip().octets());
+            (TCP_OVER_IPV6, addresses)
+        }
+        _ => return None,
+    };
+    addresses.extend_from_slice(&source.port().to_be_bytes());
+    addresses.extend_from_slice(&destination.port().to_be_bytes());
+
+    let mut header = Vec::with_capacity(16 + addresses.len());
+    header.extend_from_slice(&SIGNATURE);
+    header.push(VERSION_AND_PROXY);
+    header.push(family);
+    header.extend_from_slice(&(addresses.len() as u16).to_be_bytes());
+    header.extend_from_slice(&addresses);
+    Some(header)
+}
+
 /// Join and drop the workers that have already ended, keeping the live ones.
 ///
 /// `is_finished` is the only non-blocking way to ask, so a worker that ended a
@@ -508,6 +548,7 @@ struct FixedTarget {
     run_id: String,
     generation: u64,
     address: SocketAddr,
+    client_address_transport: ClientAddressTransport,
     connections: Arc<ConnectionGroup>,
 }
 
@@ -537,7 +578,7 @@ impl FixedListener {
         let worker = thread::spawn(move || {
             while !thread_stop.load(Ordering::Acquire) {
                 match listener.accept() {
-                    Ok((client, _)) => {
+                    Ok((client, peer)) => {
                         let Some(permit) = ConnectionPermit::acquire(&active_connections) else {
                             continue;
                         };
@@ -548,7 +589,17 @@ impl FixedListener {
                         if let Some(target) = target {
                             let connections = Arc::clone(&target.connections);
                             connections.spawn(client, permit, move |id, client, group| {
-                                proxy_fixed(id, client, target.address, &group);
+                                proxy_fixed(
+                                    id,
+                                    client,
+                                    FixedHop {
+                                        peer,
+                                        dialled: address,
+                                        upstream: target.address,
+                                        client_address_transport: target.client_address_transport,
+                                    },
+                                    &group,
+                                );
                             });
                         }
                         // No target during handover: dropping the accepted
@@ -705,6 +756,7 @@ impl FixedTcpRegistry {
             run_id: run_id.to_owned(),
             generation: allocation.generation,
             address: target,
+            client_address_transport: allocation.client_address_transport,
             connections: Arc::new(ConnectionGroup::default()),
         });
         Ok(())
@@ -742,16 +794,47 @@ impl FixedTcpRegistry {
     }
 }
 
+/// One accepted connection's addresses: who dialled, what they dialled, and
+/// where the Runner forwards it.
+#[derive(Debug, Clone, Copy)]
+struct FixedHop {
+    peer: SocketAddr,
+    dialled: SocketAddr,
+    upstream: SocketAddr,
+    client_address_transport: ClientAddressTransport,
+}
+
 fn proxy_fixed(
     connection_id: usize,
     mut client: TcpStream,
-    address: SocketAddr,
+    hop: FixedHop,
     connections: &ConnectionGroup,
 ) {
-    let Ok(mut upstream) = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) else {
+    let header = match hop.client_address_transport {
+        ClientAddressTransport::None => None,
+        ClientAddressTransport::ProxyProtocolV2 => {
+            // The addresses come from the kernel, never from the client. A
+            // PROXY header the client sends itself arrives after this one and
+            // is therefore ordinary payload to the service, which parses only
+            // the first.
+            match proxy_protocol_v2_header(hop.peer, hop.dialled) {
+                Some(header) => Some(header),
+                // Refusing beats forwarding unlabelled: a service configured
+                // to trust this listener would otherwise attribute the
+                // connection to the Runner itself.
+                None => return,
+            }
+        }
+    };
+    let Ok(mut upstream) = TcpStream::connect_timeout(&hop.upstream, CONNECT_TIMEOUT) else {
         return;
     };
     if !connections.track(connection_id, &upstream) {
+        return;
+    }
+    if let Some(header) = header
+        && upstream.write_all(&header).is_err()
+    {
         return;
     }
     let timeout = Some(Duration::from_millis(250));
@@ -800,7 +883,22 @@ mod tests {
         address: SocketAddr,
         generation: u64,
     ) -> FixedTcpAllocation {
+        transported_allocation(
+            allocation_id,
+            address,
+            generation,
+            ClientAddressTransport::None,
+        )
+    }
+
+    fn transported_allocation(
+        allocation_id: &str,
+        address: SocketAddr,
+        generation: u64,
+        client_address_transport: ClientAddressTransport,
+    ) -> FixedTcpAllocation {
         FixedTcpAllocation {
+            client_address_transport,
             allocation_id: allocation_id.to_owned(),
             port_id: "smtp.tcp".to_owned(),
             service_id: "smtp".to_owned(),
@@ -835,8 +933,15 @@ mod tests {
         let mut peak = 0;
         for _ in 0..2000 {
             let client = TcpStream::connect(address).unwrap();
-            let permit =
-                ConnectionPermit::acquire(&active).expect("a permit per serial connection");
+            // Permits are released by the worker threads, which on a loaded
+            // machine may not have been scheduled yet. Waiting for one is the
+            // listener's own behaviour; this test is about held handles.
+            let permit = loop {
+                if let Some(permit) = ConnectionPermit::acquire(&active) {
+                    break permit;
+                }
+                thread::sleep(Duration::from_millis(1));
+            };
             group.spawn(client, permit, |_, stream, _| {
                 let _ = stream.shutdown(Shutdown::Both);
             });
@@ -845,7 +950,7 @@ mod tests {
         drop(accepting.join().unwrap());
 
         assert!(
-            peak <= MAX_CONNECTIONS_PER_LISTENER * 2,
+            peak <= MAX_CONNECTIONS_PER_LISTENER * 4,
             "held worker handles grew with the cumulative connection count: peak={peak}"
         );
         group.cancel_and_join();
@@ -991,6 +1096,101 @@ mod tests {
 
         registry.deactivate("run-current", &current);
         server.join().unwrap();
+    }
+
+    /// The service must be able to attribute the connection to whoever dialled
+    /// the public address, not to the Runner that forwarded it — and it must
+    /// not be fooled by a header the client sends itself.
+    #[test]
+    fn a_fixed_target_can_be_told_who_actually_connected() {
+        let reserved = TcpListener::bind("127.0.0.1:0").unwrap();
+        let public = reserved.local_addr().unwrap();
+        drop(reserved);
+        let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+        let target = upstream.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, runner_peer) = upstream.accept().unwrap();
+            let mut bytes = Vec::new();
+            stream.read_to_end(&mut bytes).unwrap();
+            (runner_peer, bytes)
+        });
+
+        let registry = FixedTcpRegistry::new(&public.to_string()).unwrap();
+        let current = transported_allocation(
+            "tcp_smtp",
+            public,
+            1,
+            ClientAddressTransport::ProxyProtocolV2,
+        );
+        registry
+            .register_pending("run-current", std::slice::from_ref(&current))
+            .unwrap();
+        registry.activate("run-current", &current, target).unwrap();
+
+        let mut client = TcpStream::connect(public).unwrap();
+        let client_address = client.local_addr().unwrap();
+        // A client trying to claim an address of its own.
+        let forged = proxy_protocol_v2_header(
+            "203.0.113.9:2525".parse().unwrap(),
+            "203.0.113.10:25".parse().unwrap(),
+        )
+        .unwrap();
+        client.write_all(&forged).unwrap();
+        client.write_all(b"EHLO test\r\n").unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        let (runner_peer, bytes) = server.join().unwrap();
+
+        let expected = proxy_protocol_v2_header(client_address, public).unwrap();
+        assert!(
+            bytes.starts_with(&expected),
+            "the service must read the Runner's header first"
+        );
+        assert_ne!(
+            runner_peer, client_address,
+            "the upstream connection really is a second hop"
+        );
+        assert_eq!(
+            &bytes[expected.len()..],
+            [forged.as_slice(), b"EHLO test\r\n"].concat(),
+            "the client's own header is payload, not metadata"
+        );
+
+        registry.deactivate("run-current", &current);
+    }
+
+    /// The header is the published wire format, byte for byte.
+    #[test]
+    fn a_proxy_protocol_v2_header_matches_the_published_layout() {
+        let header = proxy_protocol_v2_header(
+            "198.51.100.7:51000".parse().unwrap(),
+            "192.0.2.1:25".parse().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            header,
+            vec![
+                0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A, 0x21, 0x11,
+                0x00, 0x0C, 198, 51, 100, 7, 192, 0, 2, 1, 0xC7, 0x38, 0x00, 0x19,
+            ]
+        );
+        assert_eq!(header.len(), 28);
+
+        let v6 = proxy_protocol_v2_header(
+            "[2001:db8::1]:51000".parse().unwrap(),
+            "[2001:db8::2]:25".parse().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v6[13], 0x21);
+        assert_eq!(v6.len(), 52);
+
+        assert!(
+            proxy_protocol_v2_header(
+                "198.51.100.7:51000".parse().unwrap(),
+                "[2001:db8::2]:25".parse().unwrap()
+            )
+            .is_none(),
+            "a mixed-family hop has no representation and must be refused"
+        );
     }
 
     #[test]

@@ -136,6 +136,28 @@ pub struct FixedTcpAllocation {
     pub bind_ip: std::net::IpAddr,
     pub port: u16,
     pub generation: u64,
+    /// How the Runner tells the service who connected to it.
+    ///
+    /// A fixed TCP listener terminates the client's connection and opens its
+    /// own to the service, so by default the service sees the Runner. Any
+    /// protocol whose policy depends on the peer — SMTP being the reason this
+    /// exists — needs that address carried across the hop explicitly.
+    #[serde(default)]
+    pub client_address_transport: ClientAddressTransport,
+}
+
+/// The optional L4 metadata a fixed TCP listener prepends to a connection.
+///
+/// This is transport metadata on the Port, not a property of any application
+/// protocol: the listener does not parse or even look at the bytes it carries.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientAddressTransport {
+    /// The service sees the Runner's address, as before.
+    #[default]
+    None,
+    /// The Runner writes one PROXY protocol v2 header before any payload.
+    ProxyProtocolV2,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]

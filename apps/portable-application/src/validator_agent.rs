@@ -5,7 +5,9 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use ato_formation::authoring::{HTTP_CONTRACT_VERIFIER, HTTP_PROTOCOL, StateAccess};
+use ato_formation::authoring::{
+    ClientAddressTransport, HTTP_CONTRACT_VERIFIER, HTTP_PROTOCOL, StateAccess,
+};
 use ato_formation::verify::{
     ContractVerificationReceipt, RuntimeHttpObservation, RuntimeObservation,
     VerificationExecutionEvidence, VerificationTargetKind, verify_runtime,
@@ -400,6 +402,10 @@ pub struct PortableServicePortReport {
     /// `surface` is loopback-forwarded to the Application Surface; `internal`
     /// is reachable only by sibling services and is never forwarded.
     pub exposure: &'static str,
+    /// Present only when the Contract declares it, so a bundle that predates
+    /// the field still reports exactly what it used to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_address_transport: Option<ClientAddressTransport>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -727,6 +733,7 @@ fn validated_routes(
                                             } else {
                                                 "internal"
                                             },
+                                            client_address_transport: port.client_address_transport,
                                         })
                                     })
                                     .collect::<Result<_>>()?,
