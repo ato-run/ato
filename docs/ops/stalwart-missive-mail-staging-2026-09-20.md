@@ -209,6 +209,11 @@ handler for port 10000 was removed; the unrelated existing HTTPS handler on
 but its status has no TCP or Web handler for that port and the host has no
 listener on 10000 or the former local sink port 2465.
 
+Local generated PKI/private keys, bootstrap responses, bytecode/build output,
+state-seed scratch files, and superseded bundle drafts were moved to Trash.
+Only the final digest-matched `.tmp/stalwart-missive-mail-verify.capsule`
+remains in the acceptance worktree's temporary directory.
+
 ## Local verification
 
 - transport Adapter: `cargo fmt --check`, `cargo clippy -- -D warnings`, and
