@@ -434,6 +434,7 @@ pub fn synthesize_authoring(preset: AppPreset) -> AuthoringDraft {
                 protocol: HTTP_PROTOCOL.to_owned(),
                 from: PRESET_SERVE_STEP_ID.to_owned(),
                 guest_port: None,
+                client_address_transport: None,
             }],
             state: vec![],
             // `node-static/v1` builds before it serves. That step is not yet
