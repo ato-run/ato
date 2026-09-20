@@ -60,6 +60,11 @@ pub const RUNTIME_LAUNCH_LEASE_KIND: &str = "runtime_launch";
 /// field preserves the ordinary one-hour safety cap.
 pub const RUNTIME_LAUNCH_MAX_DURATION_SECS: u64 = 60 * 60;
 const EXECUTION_AUTHORIZATION_MAX_TTL_SECS: u64 = 60 * 60;
+/// How many times the first confirmation may retry a transport failure before
+/// the launch is abandoned. The workload does not exist yet, so refusing costs
+/// nothing; proceeding would run it on authority nobody has confirmed.
+const EXECUTION_AUTHORIZATION_FIRST_CONFIRM_ATTEMPTS: u32 = 3;
+const EXECUTION_AUTHORIZATION_FIRST_CONFIRM_BACKOFF: Duration = Duration::from_secs(2);
 const MAX_TCP_EGRESS_GRANTS: usize = 64;
 const MAX_FIXED_TCP_ALLOCATIONS: usize = 8;
 
@@ -165,6 +170,11 @@ pub struct ExecutionAuthorizationMonitor {
     authorization_generation: u64,
     deadline: Instant,
     renew_at: Instant,
+    /// Whether the Coordinator has confirmed this authority since the command
+    /// was received. A queued command carries a window the Runner only knows
+    /// second-hand, so until the first renewal succeeds there is no authority
+    /// to fall back on when a renewal fails.
+    confirmed: bool,
 }
 
 impl ExecutionAuthorizationMonitor {
@@ -188,7 +198,13 @@ impl ExecutionAuthorizationMonitor {
             // Coordinator before materialization instead of sliding that
             // stale window forward from receipt time.
             renew_at: now,
+            confirmed: false,
         })
+    }
+
+    /// Whether the Coordinator has confirmed this authority at least once.
+    pub fn is_confirmed(&self) -> bool {
+        self.confirmed
     }
 
     pub fn apply(
@@ -222,6 +238,7 @@ impl ExecutionAuthorizationMonitor {
         self.authorization_generation = renewal.authorization_generation;
         self.deadline = deadline;
         self.renew_at = renew_at;
+        self.confirmed = true;
         Ok(())
     }
 
@@ -270,6 +287,96 @@ fn authorization_window(
         .checked_add(renew_after)
         .context("execution authorization renewal time overflowed")?;
     Ok((deadline, renew_at))
+}
+
+/// What the Coordinator said when asked to renew an execution authorization.
+#[derive(Debug)]
+pub enum ExecutionAuthorizationRenewalOutcome {
+    Renewed(ExecutionAuthorizationRenewal),
+    Refused {
+        reason: String,
+        stop_requested: bool,
+    },
+}
+
+/// Bring `monitor` up to date with the Coordinator, and say whether the owner
+/// has stopped the Run.
+///
+/// The first confirmation and later renewals fail differently on purpose. A
+/// later renewal that cannot reach the Coordinator still has a confirmed
+/// window to live inside, so it retries within that window and the workload
+/// keeps running until the window closes. The first confirmation has no such
+/// window: the command may have waited in a queue, and the only authority the
+/// Runner holds is what that queued command asserted about itself. Treating a
+/// timeout there as "carry on" would start the workload on authority nobody
+/// confirmed, so it retries a bounded number of times and then refuses.
+pub fn refresh_execution_authorization(
+    monitor: &mut ExecutionAuthorizationMonitor,
+    lease_id: &str,
+    mut clock: impl FnMut() -> Instant,
+    mut renew: impl FnMut() -> Result<ExecutionAuthorizationRenewalOutcome>,
+    mut sleep: impl FnMut(Duration),
+) -> Result<bool> {
+    let now = clock();
+    ensure!(!monitor.is_expired(now), "execution authorization expired");
+    if monitor.is_confirmed() && !monitor.should_renew(now) {
+        return Ok(false);
+    }
+    let attempts = if monitor.is_confirmed() {
+        1
+    } else {
+        EXECUTION_AUTHORIZATION_FIRST_CONFIRM_ATTEMPTS
+    };
+    let mut unconfirmed_error = None;
+    for attempt in 0..attempts {
+        let request_started = clock();
+        match renew() {
+            Ok(ExecutionAuthorizationRenewalOutcome::Renewed(renewal)) => {
+                let received_at = clock();
+                monitor.apply(&renewal, request_started, received_at)?;
+                unconfirmed_error = None;
+                break;
+            }
+            Ok(ExecutionAuthorizationRenewalOutcome::Refused {
+                reason,
+                stop_requested,
+            }) => {
+                if reason == "owner_stop" && stop_requested {
+                    return Ok(true);
+                }
+                bail!(
+                    "execution authorization renewal was refused: reason={reason} stop_requested={stop_requested}"
+                )
+            }
+            Err(error) => {
+                if monitor.is_confirmed() {
+                    // A transport failure grants no time. Retry quickly within
+                    // the existing monotonic deadline; once it passes, the next
+                    // poll tears the workload down even if the local wall clock
+                    // moved.
+                    monitor.defer_retry(clock(), Duration::from_secs(5));
+                    eprintln!(
+                        "execution authorization renewal deferred lease_id={lease_id} error={error:#}"
+                    );
+                    break;
+                }
+                unconfirmed_error = Some(error);
+                if attempt + 1 < attempts {
+                    sleep(EXECUTION_AUTHORIZATION_FIRST_CONFIRM_BACKOFF);
+                }
+            }
+        }
+    }
+    if let Some(error) = unconfirmed_error {
+        return Err(error).context(format!(
+            "the Coordinator never confirmed the execution authorization for lease {lease_id}"
+        ));
+    }
+    ensure!(
+        !monitor.is_expired(clock()),
+        "execution authorization expired"
+    );
+    Ok(false)
 }
 
 /// Parse the command's spec and prove it is the one that was dispatched.
@@ -1210,6 +1317,113 @@ mod tests {
             .unwrap();
         assert!(!monitor.is_expired(requested + Duration::from_secs(899)));
         assert!(monitor.is_expired(requested + Duration::from_secs(900)));
+    }
+
+    fn renewal(authorization_generation: u64) -> ExecutionAuthorizationRenewalOutcome {
+        ExecutionAuthorizationRenewalOutcome::Renewed(ExecutionAuthorizationRenewal {
+            policy_generation: 7,
+            authorization_generation,
+            server_time: "2026-09-19T00:03:00Z".to_owned(),
+            expires_at: "2026-09-19T00:18:00Z".to_owned(),
+            renew_after_secs: 180,
+        })
+    }
+
+    /// The queued command's own window is not authority to start on. If the
+    /// Coordinator cannot be reached for the first confirmation, the launch
+    /// fails before anything is materialized.
+    #[test]
+    fn an_unconfirmed_authorization_refuses_the_launch_when_the_coordinator_is_unreachable() {
+        let started = Instant::now();
+        let mut monitor =
+            ExecutionAuthorizationMonitor::new(&execution_authorization(), started).unwrap();
+        let mut attempts = 0;
+        let mut slept = Vec::new();
+        let error = refresh_execution_authorization(
+            &mut monitor,
+            "lease_test",
+            || started,
+            || {
+                attempts += 1;
+                Err(anyhow::anyhow!("503 Service Unavailable"))
+            },
+            |delay| slept.push(delay),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            attempts, EXECUTION_AUTHORIZATION_FIRST_CONFIRM_ATTEMPTS,
+            "the first confirmation must retry a bounded number of times"
+        );
+        assert_eq!(slept.len(), attempts as usize - 1);
+        assert!(!monitor.is_confirmed());
+        assert!(
+            format!("{error:#}").contains("never confirmed"),
+            "{error:#}"
+        );
+    }
+
+    /// Once confirmed, the same transport failure is survivable: the workload
+    /// keeps running inside the window the Coordinator already granted.
+    #[test]
+    fn a_confirmed_authorization_survives_a_transient_renewal_failure() {
+        let started = Instant::now();
+        let mut monitor =
+            ExecutionAuthorizationMonitor::new(&execution_authorization(), started).unwrap();
+        let mut generation = 1;
+        refresh_execution_authorization(
+            &mut monitor,
+            "lease_test",
+            || started,
+            || {
+                generation += 1;
+                Ok(renewal(generation))
+            },
+            |_| panic!("a successful first confirmation must not sleep"),
+        )
+        .unwrap();
+        assert!(monitor.is_confirmed());
+
+        let later = started + Duration::from_secs(180);
+        let mut attempts = 0;
+        let stopped = refresh_execution_authorization(
+            &mut monitor,
+            "lease_test",
+            || later,
+            || {
+                attempts += 1;
+                Err(anyhow::anyhow!("503 Service Unavailable"))
+            },
+            |_| panic!("a confirmed renewal retries on the next poll, not by sleeping"),
+        )
+        .unwrap();
+        assert!(!stopped);
+        assert_eq!(attempts, 1);
+    }
+
+    /// An owner stop is a decision, not a failure: it is reported even on the
+    /// very first confirmation, so a queued command that the owner cancelled
+    /// while it waited is never materialized.
+    #[test]
+    fn an_owner_stop_during_the_first_confirmation_stops_instead_of_starting() {
+        let started = Instant::now();
+        let mut monitor =
+            ExecutionAuthorizationMonitor::new(&execution_authorization(), started).unwrap();
+        let stopped = refresh_execution_authorization(
+            &mut monitor,
+            "lease_test",
+            || started,
+            || {
+                Ok(ExecutionAuthorizationRenewalOutcome::Refused {
+                    reason: "owner_stop".to_owned(),
+                    stop_requested: true,
+                })
+            },
+            |_| panic!("a decided refusal must not be retried"),
+        )
+        .unwrap();
+        assert!(stopped);
+        assert!(!monitor.is_confirmed());
     }
 
     #[test]

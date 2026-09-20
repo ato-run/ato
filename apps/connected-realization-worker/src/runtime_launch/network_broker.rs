@@ -178,6 +178,12 @@ impl ConnectionGroup {
             self.finish(id);
             return;
         };
+        // A long-lived listener accepts far more connections than it ever holds
+        // open at once. Without this, every connection that has already ended
+        // keeps its handle here until the group is torn down, so the group's
+        // bookkeeping grows with the total connection count rather than with
+        // the live one.
+        reap_finished(&mut workers);
         if self.stopping.load(Ordering::Acquire) {
             self.finish(id);
             let _ = client.shutdown(Shutdown::Both);
@@ -222,6 +228,14 @@ impl ConnectionGroup {
         }
     }
 
+    #[cfg(test)]
+    fn tracked_workers(&self) -> usize {
+        self.workers
+            .lock()
+            .map(|workers| workers.len())
+            .unwrap_or(0)
+    }
+
     fn cancel_and_join(&self) {
         self.stopping.store(true, Ordering::Release);
         if let Ok(sockets) = self.sockets.lock() {
@@ -254,6 +268,22 @@ impl ConnectionGroup {
             }
         }
     }
+}
+
+/// Join and drop the workers that have already ended, keeping the live ones.
+///
+/// `is_finished` is the only non-blocking way to ask, so a worker that ended a
+/// moment ago may survive one pass and be collected by the next.
+fn reap_finished(workers: &mut Vec<JoinHandle<()>>) {
+    let mut live = Vec::with_capacity(workers.len());
+    for worker in workers.drain(..) {
+        if worker.is_finished() {
+            let _ = worker.join();
+        } else {
+            live.push(worker);
+        }
+    }
+    *workers = live;
 }
 
 #[derive(Debug, Clone)]
@@ -783,6 +813,43 @@ mod tests {
 
     fn allocation(address: SocketAddr, generation: u64) -> FixedTcpAllocation {
         named_allocation("tcp_test", address, generation)
+    }
+
+    /// A listener that has served thousands of short connections must not be
+    /// holding thousands of dead worker handles.
+    #[test]
+    fn a_long_lived_group_does_not_accumulate_finished_workers() {
+        let group = Arc::new(ConnectionGroup::default());
+        let active = Arc::new(AtomicUsize::new(0));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let accepting = std::thread::spawn(move || {
+            let mut accepted = Vec::new();
+            for _ in 0..2000 {
+                let (stream, _) = listener.accept().unwrap();
+                accepted.push(stream);
+            }
+            accepted
+        });
+
+        let mut peak = 0;
+        for _ in 0..2000 {
+            let client = TcpStream::connect(address).unwrap();
+            let permit =
+                ConnectionPermit::acquire(&active).expect("a permit per serial connection");
+            group.spawn(client, permit, |_, stream, _| {
+                let _ = stream.shutdown(Shutdown::Both);
+            });
+            peak = peak.max(group.tracked_workers());
+        }
+        drop(accepting.join().unwrap());
+
+        assert!(
+            peak <= MAX_CONNECTIONS_PER_LISTENER * 2,
+            "held worker handles grew with the cumulative connection count: peak={peak}"
+        );
+        group.cancel_and_join();
+        assert_eq!(group.tracked_workers(), 0);
     }
 
     #[test]
