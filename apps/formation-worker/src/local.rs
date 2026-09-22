@@ -24,6 +24,7 @@ use anyhow::{Context, Result, bail};
 use ato_formation::authoring::{AuthoringDraft, AuthoringProvenance, HTTP_CONTRACT_VERIFIER};
 use ato_formation::browser::{
     BrowserBudget, BrowserTarget, BrowserVerdict, BrowserVerificationReceipt,
+    effective_contract_ref,
 };
 use ato_formation::capsule_toml::{parse_capsule_toml, read_capsule_toml};
 use ato_formation::detect::{DetectorEvidence, detect};
@@ -141,6 +142,7 @@ pub fn run_with_executor(
                                 runtime_id: runtime_id.clone(),
                                 status: AttemptStatus::Filtered,
                                 verification: None,
+                                base_contract_ref: None,
                                 realization: None,
                                 browser_verification: None,
                                 failure: Some(AttemptFailure {
@@ -215,6 +217,7 @@ fn attempt_one(
         runtime_id: runtime_id.to_owned(),
         status: AttemptStatus::Failed,
         verification: None,
+        base_contract_ref: None,
         realization: None,
         browser_verification: None,
         failure: None,
@@ -235,7 +238,16 @@ fn attempt_one(
             return (attempt, None);
         }
     };
-    attempt.contract_ref = Some(planned.contract_ref.clone());
+    // The K this attempt verifies. A browser Contract is a condition of
+    // success, so it is part of the identity; without one nothing changes.
+    let contract_ref = effective_contract_ref(
+        &planned.contract_ref,
+        browser.map(|browser| &browser.contract),
+    );
+    if contract_ref != planned.contract_ref {
+        attempt.base_contract_ref = Some(planned.contract_ref.clone());
+    }
+    attempt.contract_ref = Some(contract_ref.clone());
     attempt.derivation_ref = Some(planned.derivation_ref.clone());
 
     if let Some(failure) = admits(profile, &planned, network, browser.is_some()) {
@@ -395,7 +407,7 @@ fn attempt_one(
             (
                 attempt,
                 Some((
-                    planned.contract_ref.clone(),
+                    contract_ref.clone(),
                     VerifiedRoute {
                         derivation_ref: planned.derivation_ref.clone(),
                         runtime_id: runtime_id.to_owned(),

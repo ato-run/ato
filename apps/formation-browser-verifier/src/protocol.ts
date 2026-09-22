@@ -62,14 +62,33 @@ export interface CriterionResult {
   reason: string | null;
 }
 
+/// Where a piece of evidence came from. Never mixed.
+///  - browser_snapshot: read from the browser through the page API
+///  - model_extracted_facts: a model's reading of the page
+///  - agent_report: what the browser agent said it did
+export type EvidenceKind = "browser_snapshot" | "model_extracted_facts" | "agent_report";
+
 export interface Evidence {
   id: string;
-  kind: string;
+  kind: EvidenceKind;
+  sequence: number;
   url: string | null;
   title: string | null;
   facts: string[];
   text_excerpt: string | null;
 }
+
+/// What the browser itself reported: navigations, loads, and every request
+/// the origin boundary refused.
+export type EventKind = "navigation" | "load" | "blocked_request" | "origin_violation";
+
+export interface BrowserEvent {
+  sequence: number;
+  kind: EventKind;
+  url: string | null;
+}
+
+export const MAX_EVENTS = 200;
 
 export interface Action {
   kind: string;
@@ -90,6 +109,7 @@ export interface VerificationResult {
   verdict: Verdict;
   criteria: CriterionResult[];
   evidence: Evidence[];
+  observed_events: BrowserEvent[];
   action_trace: Action[];
   verifier: VerifierIdentity;
   reason: string | null;
