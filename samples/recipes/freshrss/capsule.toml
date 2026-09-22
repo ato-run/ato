@@ -1,6 +1,6 @@
 schema_version = "0.3"
 name = "fresh-rss"
-version = "1.24.0"
+version = "1.30.0"
 type = "app"
 description = "A free, self-hostable RSS aggregator"
 homepage = "https://github.com/FreshRSS/FreshRSS"
@@ -12,16 +12,16 @@ repository = "FreshRSS/FreshRSS"
 
 [targets.app]
 runtime = "oci"
-image = "freshrss/freshrss:latest"
+image = "freshrss/freshrss:1.30.0"
 port = 80
-env = { CRON_MIN = "*/20" }
+env = { CRON_MIN = "7" }
 
 [state.data]
 kind = "filesystem"
 durability = "persistent"
 purpose = "RSS feed data and configuration"
 attach = "explicit"
-schema_id = "sha256:0000000000000000000000000000000000000000000000000000000000000002"
+schema_id = "sha256:33026e1fa02a5197975ab0908af0d8f2aa3695c73c4bb06f8d0aad9c2a1b1acf"
 
 [services.main]
 target = "app"
