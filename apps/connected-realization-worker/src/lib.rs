@@ -1396,15 +1396,22 @@ impl ConnectedWorker {
         //
         // `surface_listen` is the loopback port the slot's reverse proxy
         // already forwards to, and `public_base_url` is the hostname it
-        // forwards from. Both are existing Runner configuration — the control
-        // plane never picks a host port, because only the Runner knows what is
-        // free and the stable URL must not depend on it.
+        // forwards from. The workload does NOT bind it: it binds
+        // `hidden_surface_listen`, and the worker's own gate owns the public
+        // port — the slot host is internet-reachable, so a request has to
+        // prove it came through the app proxy before it may reach the app.
+        // Both are existing Runner configuration — the control plane never
+        // picks a host port, because only the Runner knows what is free and
+        // the stable URL must not depend on it.
         let endpoint_name = match runtime_launch::lease::published_endpoint_name(spec) {
             Ok(name) => name,
             Err(error) => return not_started(Err(error)),
         };
         let mut assigned_ports = std::collections::BTreeMap::new();
-        assigned_ports.insert(endpoint_name.clone(), self.config.surface_listen.port());
+        assigned_ports.insert(
+            endpoint_name.clone(),
+            self.config.hidden_surface_listen.port(),
+        );
         // `resolve_run` acquires the writers and gives them back itself if it
         // fails; no workload exists yet.
         let resolved = match runtime_launch::lease::resolve_run(
@@ -1554,6 +1561,22 @@ impl ConnectedWorker {
                 runner_forward_port: mapping.host_port,
             })
         });
+        // The public slot port is this worker's gate, not the workload: a
+        // request is forwarded to the hidden loopback port only after it
+        // proves it came through the app proxy. When the claim carried no
+        // assertion key the gate is absent and the proxy passes through —
+        // that is exactly the state in which the control plane cannot sign
+        // assertions, so nothing enforceable is lost.
+        let _surface_gate = TcpProxy::start_with_mux(
+            self.config.surface_listen,
+            ProxyTarget::Tcp(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)),
+            Some(SurfaceMux {
+                control_target: None,
+                presentation_frame: None,
+                gate: HttpProxyGate::for_lease(lease, &self.config.runner_id),
+                guest_surface_gateway: false,
+            }),
+        )?;
         // The ready_url is the ingress slot's public hostname, and the process
         // is listening on the loopback port that slot forwards to. The API
         // still validates the hostname against this Runner's active ingress
@@ -1721,11 +1744,15 @@ impl ConnectedWorker {
                     .map(|frame| Arc::new(RwLock::new(frame)))
             })
             .transpose()?;
-        let proxy = TcpProxy::start_with_control(
+        let proxy = TcpProxy::start_with_mux(
             self.config.surface_listen,
             ProxyTarget::Tcp(self.config.hidden_surface_listen),
-            browser.as_ref().map(|runtime| runtime.control_address()),
-            presentation_frame.clone(),
+            Some(SurfaceMux {
+                control_target: browser.as_ref().map(|runtime| runtime.control_address()),
+                presentation_frame: presentation_frame.clone(),
+                gate: HttpProxyGate::for_lease(lease, &self.config.runner_id),
+                guest_surface_gateway: true,
+            }),
         )?;
         let execution_id = format!("vm:{}:{}", lease.run_id, lease.id);
         ensure!(
@@ -3301,6 +3328,13 @@ struct ClaimedLease {
     run_id: String,
     command: LeaseCommand,
     expires_at: Option<String>,
+    /// Runner-scoped HMAC key for the HTTP proxy-origin gate, delivered by the
+    /// control plane inside the claim. Absent means the API does not mint
+    /// assertions for this Runner — the gate stays off, which is the only
+    /// ordering-safe read (an enforcing gate with a non-signing API would
+    /// refuse every request).
+    #[serde(default)]
+    proxy_assertion_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3944,38 +3978,202 @@ enum ProxyTarget {
     Unix(PathBuf),
 }
 
-impl TcpProxy {
-    fn start(listen: SocketAddr, target: ProxyTarget) -> Result<Self> {
-        Self::start_with_control(listen, target, None, None)
+/// `x-ato-run-assertion` — the control plane's per-request proof that a
+/// request arriving at this slot's public ingress already passed the app
+/// proxy's authentication and authorization. The slot port is reachable from
+/// the internet through the Runner's ingress, so without this proof a direct
+/// hit on the slot hostname bypasses the instance host's auth boundary
+/// entirely. The gate strips the header before forwarding: the workload never
+/// sees the credential it was admitted by.
+const RUN_ASSERTION_HEADER: &str = "x-ato-run-assertion";
+
+/// The session-surface WebSocket connect path. It bypasses the HTTP gate on
+/// VM guests only: the in-guest surface gateway verifies its own
+/// (keyring-signed) assertion, so gating it here would demand a credential the
+/// exchange flow never issues for that path.
+const SURFACE_CONNECT_PATH: &str = "/__ato/surface";
+
+/// The lease scope an HTTP proxy assertion is bound to. The verification key
+/// is the per-runner key derived from the control plane's Run-control root —
+/// the same key the Run-control capability verifier uses — delivered inside
+/// the lease claim so it never sits in config or command_json.
+struct HttpProxyGate {
+    verification_key: String,
+    run_id: String,
+    lease_id: String,
+    runner_id: String,
+}
+
+#[derive(Deserialize)]
+struct HttpProxyAssertionClaims {
+    v: u32,
+    kind: String,
+    run_id: String,
+    lease_id: String,
+    runner_id: String,
+    exp: i64,
+    jti: String,
+}
+
+impl HttpProxyGate {
+    /// The gate for one lease, or None when the claim carried no key — the
+    /// control plane does not sign assertions for this Runner, so there is
+    /// nothing to enforce with.
+    fn for_lease(lease: &ClaimedLease, runner_id: &str) -> Option<Arc<Self>> {
+        let key = lease.proxy_assertion_key.as_ref()?.trim();
+        if key.len() < 32 {
+            return None;
+        }
+        Some(Arc::new(Self {
+            verification_key: key.to_owned(),
+            run_id: lease.run_id.clone(),
+            lease_id: lease.id.clone(),
+            runner_id: runner_id.to_owned(),
+        }))
     }
 
-    /// The Browser control listener is intentionally not a second public
-    /// socket. A bounded request prelude routes its one exact WebSocket path;
-    /// every other request keeps the existing VM Surface proxy unchanged.
-    fn start_with_control(
+    /// Compact-HMAC envelope identical to Run-control credentials
+    /// (`base64url(json).hex_mac`). Scope is exact: the assertion opens only
+    /// this lease on this runner, and only until `exp`. No replay cache —
+    /// a captured assertion replays against the same Run for at most its TTL.
+    fn verify(&self, assertion: &str) -> bool {
+        let Some((encoded, signature)) = assertion.split_once('.') else {
+            return false;
+        };
+        if signature.contains('.') {
+            return false;
+        }
+        let Ok(signature) = hex::decode(signature) else {
+            return false;
+        };
+        let Ok(mut mac) = HmacSha256::new_from_slice(self.verification_key.as_bytes()) else {
+            return false;
+        };
+        mac.update(encoded.as_bytes());
+        if mac.verify_slice(&signature).is_err() {
+            return false;
+        }
+        let Ok(payload) = URL_SAFE_NO_PAD.decode(encoded) else {
+            return false;
+        };
+        let Ok(claims) = serde_json::from_slice::<HttpProxyAssertionClaims>(&payload) else {
+            return false;
+        };
+        claims.v == 1
+            && claims.kind == "http"
+            && claims.run_id == self.run_id
+            && claims.lease_id == self.lease_id
+            && claims.runner_id == self.runner_id
+            && claims.exp > OffsetDateTime::now_utc().unix_timestamp()
+            && !claims.jti.is_empty()
+    }
+}
+
+/// Split a bounded request prelude at the header terminator. The read that
+/// found CRLFCRLF may already hold body or pipelined bytes; header logic
+/// applies to the head only. A binary body is not valid UTF-8 and must not
+/// fail header lookup, and no body byte may be rebuilt line-wise — the tail
+/// is forwarded exactly as received.
+fn split_http_prelude(prelude: &[u8]) -> Option<(&[u8], &[u8])> {
+    prelude
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| (&prelude[..index], &prelude[index + 4..]))
+}
+
+/// First-value-wins header lookup over a request head (request line +
+/// headers, terminator excluded).
+fn http_prelude_header<'a>(head: &'a [u8], name: &str) -> Option<&'a str> {
+    let text = std::str::from_utf8(head).ok()?;
+    text.split("\r\n").skip(1).find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.trim().eq_ignore_ascii_case(name).then(|| value.trim())
+    })
+}
+
+/// Remove every `name` header line from the request head and rebuild
+/// head + terminator + tail. The workload never sees the assertion it was
+/// admitted by, so a compromised app cannot replay it against anything else
+/// that trusts it. The tail is appended untouched: it is data, not headers.
+fn strip_http_prelude_header(head: &[u8], tail: &[u8], name: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(head.len() + tail.len() + 4);
+    match std::str::from_utf8(head) {
+        Ok(text) => {
+            for (index, line) in text.split("\r\n").enumerate() {
+                let is_header = index > 0
+                    && line
+                        .split_once(':')
+                        .is_some_and(|(key, _)| key.trim().eq_ignore_ascii_case(name));
+                if !is_header {
+                    out.extend_from_slice(line.as_bytes());
+                    out.extend_from_slice(b"\r\n");
+                }
+            }
+        }
+        // A non-UTF-8 head cannot be parsed line-wise; forward it unchanged.
+        // With the gate on this is unreachable — the assertion lookup already
+        // failed closed — so this only keeps the helper total.
+        Err(_) => {
+            out.extend_from_slice(head);
+            out.extend_from_slice(b"\r\n");
+        }
+    }
+    out.extend_from_slice(b"\r\n");
+    out.extend_from_slice(tail);
+    out
+}
+
+fn proxy_assertion_forbidden(client: &mut TcpStream) {
+    let _ = client.write_all(
+        b"HTTP/1.1 403 Forbidden\r\nCache-Control: no-store\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+    );
+}
+
+/// How a public slot listener dispatches one request beyond "forward
+/// everything". Any field set forces the bounded prelude read.
+struct SurfaceMux {
+    /// Run-control WebSocket target; the handshake carries its own capability
+    /// credential, verified inside the control server.
+    control_target: Option<SocketAddr>,
+    presentation_frame: Option<Arc<RwLock<Vec<u8>>>>,
+    /// The proxy-origin gate. None only when the control plane does not sign
+    /// assertions for this Runner.
+    gate: Option<Arc<HttpProxyGate>>,
+    /// True when surface_target is a guest hosting the session-surface
+    /// gateway, which authenticates `SURFACE_CONNECT_PATH` itself. False for
+    /// runtime-launch workloads — there the path is just an app path and stays
+    /// behind the gate.
+    guest_surface_gateway: bool,
+}
+
+impl TcpProxy {
+    fn start(listen: SocketAddr, target: ProxyTarget) -> Result<Self> {
+        Self::start_with_mux(listen, target, None)
+    }
+
+    /// The Browser control listener and the proxy-origin gate are
+    /// intentionally not second public sockets. A bounded request prelude
+    /// routes reserved paths and enforces the gate; every other request keeps
+    /// the existing VM Surface proxy unchanged.
+    fn start_with_mux(
         listen: SocketAddr,
         target: ProxyTarget,
-        control_target: Option<SocketAddr>,
-        presentation_frame: Option<Arc<RwLock<Vec<u8>>>>,
+        mux: Option<SurfaceMux>,
     ) -> Result<Self> {
         let listener = TcpListener::bind(listen)?;
         listener.set_nonblocking(true)?;
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
+        let mux = mux.map(Arc::new);
         let worker = thread::spawn(move || {
             while !thread_stop.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((client, _)) => {
                         let target = target.clone();
-                        let presentation_frame = presentation_frame.clone();
+                        let mux = mux.clone();
                         thread::spawn(move || {
-                            if let Some(control_target) = control_target {
-                                proxy_surface_or_browser(
-                                    client,
-                                    &target,
-                                    control_target,
-                                    presentation_frame,
-                                );
+                            if let Some(mux) = mux.as_deref() {
+                                proxy_dispatched(client, &target, mux);
                             } else {
                                 proxy_connection(client, &target);
                             }
@@ -4008,26 +4206,49 @@ fn proxy_connection(mut client: TcpStream, target: &ProxyTarget) {
     proxy_connection_with_prelude(&mut client, target, &[]);
 }
 
-fn proxy_surface_or_browser(
-    mut client: TcpStream,
-    surface_target: &ProxyTarget,
-    control_target: SocketAddr,
-    presentation_frame: Option<Arc<RwLock<Vec<u8>>>>,
-) {
+fn proxy_dispatched(mut client: TcpStream, surface_target: &ProxyTarget, mux: &SurfaceMux) {
     let Ok(prelude) = read_http_request_prelude(&mut client) else {
         return;
     };
-    let path = control_request_path(&prelude);
-    if path == Some(BROWSER_PRESENTATION_PATH) {
-        serve_browser_presentation(&mut client, presentation_frame.as_ref());
+    // The prelude read may hold bytes past the header terminator — request
+    // body or pipelined traffic. All header parsing runs on the head alone;
+    // the tail is data and is forwarded byte-for-byte.
+    let Some((head, tail)) = split_http_prelude(&prelude) else {
+        return;
+    };
+    let path = control_request_path(head);
+    // Reserved paths keep their own verifier. Run control carries a
+    // capability credential inside the WS handshake; the session-surface
+    // connect is authenticated by the in-guest gateway. The gate must not
+    // double- or un-authenticate either.
+    if path == Some(RUN_CONTROL_PATH) {
+        if let Some(control) = mux.control_target {
+            proxy_connection_with_prelude(&mut client, &ProxyTarget::Tcp(control), &prelude);
+        }
         return;
     }
-    let target = if path == Some(RUN_CONTROL_PATH) {
-        ProxyTarget::Tcp(control_target)
+    if mux.guest_surface_gateway && path == Some(SURFACE_CONNECT_PATH) {
+        proxy_connection_with_prelude(&mut client, surface_target, &prelude);
+        return;
+    }
+    if let Some(gate) = mux.gate.as_deref() {
+        let asserted = http_prelude_header(head, RUN_ASSERTION_HEADER)
+            .is_some_and(|assertion| gate.verify(assertion));
+        if !asserted {
+            proxy_assertion_forbidden(&mut client);
+            return;
+        }
+    }
+    if path == Some(BROWSER_PRESENTATION_PATH) {
+        serve_browser_presentation(&mut client, mux.presentation_frame.as_ref());
+        return;
+    }
+    let forwarded = if mux.gate.is_some() {
+        strip_http_prelude_header(head, tail, RUN_ASSERTION_HEADER)
     } else {
-        surface_target.clone()
+        prelude
     };
-    proxy_connection_with_prelude(&mut client, &target, &prelude);
+    proxy_connection_with_prelude(&mut client, surface_target, &forwarded);
 }
 
 fn serve_browser_presentation(
@@ -4073,8 +4294,8 @@ fn read_http_request_prelude(client: &mut TcpStream) -> io::Result<Vec<u8>> {
     ))
 }
 
-fn control_request_path(prelude: &[u8]) -> Option<&str> {
-    let headers = std::str::from_utf8(prelude).ok()?;
+fn control_request_path(head: &[u8]) -> Option<&str> {
+    let headers = std::str::from_utf8(head).ok()?;
     let request = headers.lines().next()?;
     let mut fields = request.split_whitespace();
     let method = fields.next()?;
@@ -5007,6 +5228,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
         ClaimedLease {
             id: "lease_1".to_owned(),
             run_id: "run_1".to_owned(),
+            proxy_assertion_key: None,
             command: LeaseCommand::Portable(PortableLeaseCommand {
                 bundle_id: "bnd_1".to_owned(),
                 transport_digest: format!("sha256:{}", "11".repeat(32)),
@@ -5264,5 +5486,256 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
         config.run_control_verification_key = Some("v".repeat(32));
         expected.push(ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND);
         assert_eq!(supported_lease_kinds(&config, false), expected);
+    }
+
+    fn http_assertion(
+        key: &str,
+        run_id: &str,
+        lease_id: &str,
+        runner_id: &str,
+        exp: i64,
+    ) -> String {
+        let claims = serde_json::json!({
+            "v": 1,
+            "kind": "http",
+            "run_id": run_id,
+            "lease_id": lease_id,
+            "runner_id": runner_id,
+            "exp": exp,
+            "jti": "jti_1",
+        });
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
+        let mut mac = HmacSha256::new_from_slice(key.as_bytes()).unwrap();
+        mac.update(encoded.as_bytes());
+        format!("{encoded}.{}", hex::encode(mac.finalize().into_bytes()))
+    }
+
+    fn test_gate() -> Arc<HttpProxyGate> {
+        Arc::new(HttpProxyGate {
+            verification_key: "k".repeat(32),
+            run_id: "run_1".to_owned(),
+            lease_id: "lease_1".to_owned(),
+            runner_id: "runner_1".to_owned(),
+        })
+    }
+
+    /// One-shot HTTP upstream: returns the received request prelude so a test
+    /// can assert what the gate forwarded.
+    fn prelude_echo_upstream() -> (SocketAddr, JoinHandle<Vec<u8>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let worker = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut prelude = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !prelude.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).unwrap();
+                if read == 0 {
+                    break;
+                }
+                prelude.extend_from_slice(&chunk[..read]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .unwrap();
+            prelude
+        });
+        (address, worker)
+    }
+
+    fn gated_proxy(gate: Arc<HttpProxyGate>, target: SocketAddr) -> (SocketAddr, TcpProxy) {
+        let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+        let public = reservation.local_addr().unwrap();
+        drop(reservation);
+        let proxy = TcpProxy::start_with_mux(
+            public,
+            ProxyTarget::Tcp(target),
+            Some(SurfaceMux {
+                control_target: None,
+                presentation_frame: None,
+                gate: Some(gate),
+                guest_surface_gateway: false,
+            }),
+        )
+        .unwrap();
+        (public, proxy)
+    }
+
+    fn http_get(public: SocketAddr, path: &str, assertion: Option<&str>) -> Vec<u8> {
+        let mut client = TcpStream::connect(public).unwrap();
+        let mut request =
+            format!("GET {path} HTTP/1.1\r\nHost: s0-runner.ato.run\r\nConnection: close\r\n")
+                .into_bytes();
+        if let Some(assertion) = assertion {
+            request
+                .extend_from_slice(format!("{RUN_ASSERTION_HEADER}: {assertion}\r\n").as_bytes());
+        }
+        request.extend_from_slice(b"\r\n");
+        client.write_all(&request).unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+        response
+    }
+
+    #[test]
+    fn http_gate_admits_only_scoped_assertions() {
+        let key = "k".repeat(32);
+        let gate = test_gate();
+        let (upstream_addr, upstream) = prelude_echo_upstream();
+        let (public, proxy) = gated_proxy(Arc::clone(&gate), upstream_addr);
+
+        // No assertion — the direct slot-host hit this gate exists to refuse.
+        let response = http_get(public, "/i/", None);
+        assert!(response.starts_with(b"HTTP/1.1 403"), "{response:?}");
+
+        // Wrong scope: an assertion minted for a different Run opens nothing.
+        let foreign = http_assertion(
+            &key,
+            "run_2",
+            "lease_1",
+            "runner_1",
+            OffsetDateTime::now_utc().unix_timestamp() + 60,
+        );
+        let response = http_get(public, "/i/", Some(&foreign));
+        assert!(response.starts_with(b"HTTP/1.1 403"), "{response:?}");
+
+        // Expired.
+        let expired = http_assertion(
+            &key,
+            "run_1",
+            "lease_1",
+            "runner_1",
+            OffsetDateTime::now_utc().unix_timestamp() - 1,
+        );
+        let response = http_get(public, "/i/", Some(&expired));
+        assert!(response.starts_with(b"HTTP/1.1 403"), "{response:?}");
+
+        // Valid: forwarded, and the credential itself is stripped.
+        let valid = http_assertion(
+            &key,
+            "run_1",
+            "lease_1",
+            "runner_1",
+            OffsetDateTime::now_utc().unix_timestamp() + 60,
+        );
+        let response = http_get(public, "/i/", Some(&valid));
+        assert!(response.starts_with(b"HTTP/1.1 200"), "{response:?}");
+        let forwarded = upstream.join().unwrap();
+        let forwarded = String::from_utf8(forwarded).unwrap();
+        assert!(forwarded.starts_with("GET /i/ HTTP/1.1"), "{forwarded}");
+        assert!(forwarded.contains("Host: s0-runner.ato.run"), "{forwarded}");
+        assert!(!forwarded.contains(RUN_ASSERTION_HEADER), "{forwarded}");
+        drop(proxy);
+    }
+
+    #[test]
+    fn reserved_paths_keep_their_own_verifier() {
+        let gate = test_gate();
+
+        // A guest-hosted surface gateway authenticates /__ato/surface itself:
+        // the HTTP gate must not demand the run assertion on that path.
+        let (guest_addr, guest) = prelude_echo_upstream();
+        let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+        let public = reservation.local_addr().unwrap();
+        drop(reservation);
+        let proxy = TcpProxy::start_with_mux(
+            public,
+            ProxyTarget::Tcp(guest_addr),
+            Some(SurfaceMux {
+                control_target: None,
+                presentation_frame: None,
+                gate: Some(gate),
+                guest_surface_gateway: true,
+            }),
+        )
+        .unwrap();
+        let response = http_get(public, SURFACE_CONNECT_PATH, None);
+        assert!(response.starts_with(b"HTTP/1.1 200"), "{response:?}");
+        guest.join().unwrap();
+        drop(proxy);
+
+        // A runtime-launch workload owns no such gateway — the same path is
+        // just an app path and stays behind the gate.
+        let (app_addr, _app) = prelude_echo_upstream();
+        let (public, proxy) = gated_proxy(test_gate(), app_addr);
+        let response = http_get(public, SURFACE_CONNECT_PATH, None);
+        assert!(response.starts_with(b"HTTP/1.1 403"), "{response:?}");
+        drop(proxy);
+    }
+
+    /// One-shot upstream that captures EVERYTHING it receives until the
+    /// client half-closes, then answers. Used to assert the body tail
+    /// survives the gate byte-for-byte.
+    fn request_capture_upstream() -> (SocketAddr, JoinHandle<Vec<u8>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let worker = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut received = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            loop {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => received.extend_from_slice(&chunk[..read]),
+                }
+            }
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+            received
+        });
+        (address, worker)
+    }
+
+    #[test]
+    fn http_gate_forwards_binary_body_byte_for_byte() {
+        let key = "k".repeat(32);
+        let gate = test_gate();
+        let (upstream_addr, upstream) = request_capture_upstream();
+        let (public, proxy) = gated_proxy(Arc::clone(&gate), upstream_addr);
+
+        // A binary body: non-UTF-8 bytes, embedded CRLFs, and a forged
+        // assertion line inside the body — none of it is header data, and a
+        // single TCP read can deliver all of it with the headers.
+        let mut body = vec![0xFF, 0xFE, 0x00, 0x80];
+        body.extend_from_slice(b"\r\nx-ato-run-assertion: forged-in-body\r\n");
+        body.extend_from_slice(&[0x00; 64]);
+        body.extend_from_slice(&[0xAB; 64]);
+
+        let assertion = http_assertion(
+            &key,
+            "run_1",
+            "lease_1",
+            "runner_1",
+            OffsetDateTime::now_utc().unix_timestamp() + 60,
+        );
+        let mut request = format!(
+            "POST /upload HTTP/1.1\r\nHost: s0-runner.ato.run\r\nContent-Length: {}\r\nConnection: close\r\n{RUN_ASSERTION_HEADER}: {assertion}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        request.extend_from_slice(&body);
+
+        let mut client = TcpStream::connect(public).unwrap();
+        // Headers AND the binary body in ONE write: the regression this pins
+        // is the prelude read returning head+body and header logic then
+        // failing (non-UTF-8 → 403) or rewriting (CRLF rebuild) the tail.
+        client.write_all(&request).unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+        assert!(response.starts_with(b"HTTP/1.1 200"), "{response:?}");
+
+        let received = upstream.join().unwrap();
+        let mut expected = format!(
+            "POST /upload HTTP/1.1\r\nHost: s0-runner.ato.run\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        expected.extend_from_slice(&body);
+        assert_eq!(received, expected);
+        drop(proxy);
     }
 }
