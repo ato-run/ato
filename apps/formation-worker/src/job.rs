@@ -18,16 +18,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use ato_formation::authoring::{AuthoringProvenance, BindingContext, BoundDerivation, bind};
+use ato_formation::authoring::{
+    AuthoringDraft, AuthoringProvenance, BindingContext, BoundContract, BoundDerivation, bind,
+};
 use ato_formation::capsule_toml::{parse_capsule_toml, read_capsule_toml};
-use ato_formation::detect::{FieldOrigins, detect};
+use ato_formation::detect::{DetectorEvidence, FieldOrigins, detect};
 use ato_formation::failure::{FailureStage, FormationFailure};
 use ato_formation::intent::{
     AuthoredOverrides, EffectiveBuildPlanV1, Lane, ProgramIntentV1, compile_build_plan,
     compile_intent,
 };
 use ato_formation::preset::{select_preset, synthesize_authoring};
-use ato_formation::projection::project;
+use ato_formation::projection::{DerivationProjection, project};
 use ato_formation::source::{DownloadedArchive, SourceClosureRef, SourceLimits};
 use ato_formation::verify::{CandidateObservation, ContractVerification, verify};
 
@@ -257,33 +259,7 @@ pub fn run_claimed_job(
         }
     };
 
-    // ── bind: drafts become addressable ─────────────────────────────────────
-    //
-    // A draft names a workspace by path and may ask for an observation to be
-    // captured rather than stated. Binding resolves both against the closure
-    // this build has already verified, and only then is there something to
-    // hash. The Contract's digest is the Capsule's identity; the Derivation's
-    // is this route's, separately.
-    let (contract, derivation) = bind(
-        &draft,
-        &BindingContext {
-            source_closure_ref: closure_ref.as_str(),
-        },
-    )
-    .map_err(FormationFailure::from)?;
-    let contract_ref = contract.contract_ref().map_err(FormationFailure::from)?;
-    let derivation_ref = derivation
-        .derivation_ref()
-        .map_err(FormationFailure::from)?;
-
-    // ── project onto this worker's execution machinery ──────────────────────
-    //
-    // `ProgramIntent` and `EffectiveBuildPlan` are below this line: an
-    // execution plan for running THIS Derivation on THIS worker, and never an
-    // input to either digest above.
-    let projected = project(&derivation, &contract).map_err(FormationFailure::from)?;
-
-    let mut authored: BTreeMap<String, String> = job["authoring"]["overrides"]
+    let authored_overrides: BTreeMap<String, String> = job["authoring"]["overrides"]
         .as_object()
         .map(|map| {
             map.iter()
@@ -293,24 +269,6 @@ pub fn run_claimed_job(
                 .collect()
         })
         .unwrap_or_default();
-    match draft.provenance {
-        // An author who wrote a route is authoritative over it. A job override
-        // silently changing an authored argv is the same sin as a Preset
-        // fallback, arriving through a different door.
-        AuthoringProvenance::Authored => {
-            for (key, value) in projected.overrides.0.clone() {
-                authored.insert(key, value);
-            }
-        }
-        // Nobody stated an intent, so an explicit override from the caller is
-        // the most specific thing anybody said.
-        AuthoringProvenance::PresetSynthesized { .. } => {
-            for (key, value) in projected.overrides.0.clone() {
-                authored.entry(key).or_insert(value);
-            }
-        }
-    }
-    let overrides = AuthoredOverrides(authored);
     let guest_root = job["target"]["workspace_guest_root"]
         .as_str()
         .unwrap_or("/app");
@@ -318,22 +276,24 @@ pub fn run_claimed_job(
         .as_str()
         .unwrap_or("x86_64-linux-gnu");
 
-    let mut origins = FieldOrigins::new();
-    let intent = compile_intent(&evidence, &overrides, guest_root, &mut origins)
-        .map_err(FormationFailure::from)?;
-    // A plan that cannot be compiled is a projection problem, not the author's
-    // grammar: it is this worker failing to turn a valid intent into steps.
-    let plan = compile_build_plan(&intent, guest_root, triple).map_err(|error| {
-        FormationFailure::new(error.code(), FailureStage::Projection, error.to_string())
-    })?;
-    // Digest failures are ours, not the author's: nothing they could change
-    // would fix one, so they stay anonymous and reach the operator log only.
-    let intent_digest = intent
-        .canonical_digest()
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
-    let plan_digest = plan
-        .canonical_digest()
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let PlannedCandidate {
+        contract,
+        derivation,
+        contract_ref,
+        derivation_ref,
+        projected,
+        intent,
+        plan,
+        intent_digest,
+        plan_digest,
+    } = plan_candidate(
+        &draft,
+        &closure_ref,
+        &evidence,
+        authored_overrides,
+        guest_root,
+        triple,
+    )?;
 
     // ── build ───────────────────────────────────────────────────────────────
     let workspace_root = attempt_root.join("workspace");
@@ -468,18 +428,122 @@ pub fn run_claimed_job(
     })
 }
 
+/// One candidate Derivation, bound and projected onto this worker's
+/// execution machinery — everything an attempt needs to run.
+pub struct PlannedCandidate {
+    pub contract: BoundContract,
+    pub derivation: BoundDerivation,
+    pub contract_ref: String,
+    pub derivation_ref: String,
+    pub projected: DerivationProjection,
+    pub intent: ProgramIntentV1,
+    pub plan: EffectiveBuildPlanV1,
+    pub intent_digest: String,
+    pub plan_digest: String,
+}
+
+/// Bind one authoring draft against the verified closure, then project and
+/// compile it into an intent and a build plan.
+///
+/// This is the shared middle of every Formation attempt: the hosted job calls
+/// it once, a local Formation calls it per candidate. Nothing here executes —
+/// it turns a route somebody named into a plan a Runtime can be asked to run.
+pub fn plan_candidate(
+    draft: &AuthoringDraft,
+    closure_ref: &SourceClosureRef,
+    evidence: &DetectorEvidence,
+    authored_overrides: BTreeMap<String, String>,
+    guest_root: &str,
+    triple: &str,
+) -> Result<PlannedCandidate> {
+    // ── bind: drafts become addressable ─────────────────────────────────────
+    //
+    // A draft names a workspace by path and may ask for an observation to be
+    // captured rather than stated. Binding resolves both against the closure
+    // this build has already verified, and only then is there something to
+    // hash. The Contract's digest is the Capsule's identity; the Derivation's
+    // is this route's, separately.
+    let (contract, derivation) = bind(
+        draft,
+        &BindingContext {
+            source_closure_ref: closure_ref.as_str(),
+        },
+    )
+    .map_err(FormationFailure::from)?;
+    let contract_ref = contract.contract_ref().map_err(FormationFailure::from)?;
+    let derivation_ref = derivation
+        .derivation_ref()
+        .map_err(FormationFailure::from)?;
+
+    // ── project onto this worker's execution machinery ──────────────────────
+    //
+    // `ProgramIntent` and `EffectiveBuildPlan` are below this line: an
+    // execution plan for running THIS Derivation on THIS worker, and never an
+    // input to either digest above.
+    let projected = project(&derivation, &contract).map_err(FormationFailure::from)?;
+
+    let mut authored = authored_overrides;
+    match draft.provenance {
+        // An author who wrote a route is authoritative over it. A job override
+        // silently changing an authored argv is the same sin as a Preset
+        // fallback, arriving through a different door.
+        AuthoringProvenance::Authored => {
+            for (key, value) in projected.overrides.0.clone() {
+                authored.insert(key, value);
+            }
+        }
+        // Nobody stated an intent, so an explicit override from the caller is
+        // the most specific thing anybody said.
+        AuthoringProvenance::PresetSynthesized { .. } => {
+            for (key, value) in projected.overrides.0.clone() {
+                authored.entry(key).or_insert(value);
+            }
+        }
+    }
+    let overrides = AuthoredOverrides(authored);
+
+    let mut origins = FieldOrigins::new();
+    let intent = compile_intent(evidence, &overrides, guest_root, &mut origins)
+        .map_err(FormationFailure::from)?;
+    // A plan that cannot be compiled is a projection problem, not the author's
+    // grammar: it is this worker failing to turn a valid intent into steps.
+    let plan = compile_build_plan(&intent, guest_root, triple).map_err(|error| {
+        FormationFailure::new(error.code(), FailureStage::Projection, error.to_string())
+    })?;
+    // Digest failures are ours, not the author's: nothing they could change
+    // would fix one, so they stay anonymous and reach the operator log only.
+    let intent_digest = intent
+        .canonical_digest()
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let plan_digest = plan
+        .canonical_digest()
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+
+    Ok(PlannedCandidate {
+        contract,
+        derivation,
+        contract_ref,
+        derivation_ref,
+        projected,
+        intent,
+        plan,
+        intent_digest,
+        plan_digest,
+    })
+}
+
 /// Copy the source into the workspace the build writes to.
 ///
 /// A copy rather than a bind: the source is read-only inside the sandbox on
 /// purpose, and a build that edited it would produce an artifact whose closure
 /// ref no longer describes it.
-fn stage_workspace(source_root: &Path, workspace_root: &Path) -> Result<()> {
+pub fn stage_workspace(source_root: &Path, workspace_root: &Path) -> Result<()> {
     std::fs::create_dir_all(workspace_root)
         .with_context(|| format!("cannot create {}", workspace_root.display()))?;
     copy_tree(source_root, workspace_root)
 }
 
-fn copy_tree(from: &Path, to: &Path) -> Result<()> {
+pub fn copy_tree(from: &Path, to: &Path) -> Result<()> {
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;
         let metadata = std::fs::symlink_metadata(entry.path())?;
@@ -642,7 +706,7 @@ fn compose_result(
     }))
 }
 
-fn digest(bytes: &[u8]) -> String {
+pub fn digest(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
@@ -675,7 +739,7 @@ pub fn preflight(job: &serde_json::Value) -> Result<()> {
 /// candidate does not exist yet — it starts on a Runner — so its HTTP
 /// observation is handed to the readiness gate the projection derived from the
 /// very same Contract, and to nothing else.
-fn observe_candidate(
+pub fn observe_candidate(
     derivation: &BoundDerivation,
     projected: &ato_formation::projection::DerivationProjection,
     static_bundle: Option<&crate::static_lane::StaticFormationOutput>,
