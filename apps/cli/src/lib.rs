@@ -349,6 +349,21 @@ struct FormArgs {
     /// Scratch space for attempts: staged workspaces, build caches.
     #[arg(long)]
     work_root: Option<PathBuf>,
+    /// Also verify the running candidate in a browser against the
+    /// '--accept' prompt. Only a browser PASS forms the candidate.
+    #[arg(long, requires = "accept")]
+    verify_browser: bool,
+    /// The acceptance prompt, in plain language. Kept verbatim in the
+    /// browser Contract.
+    #[arg(long, requires = "verify_browser")]
+    accept: Option<String>,
+    /// The browser verifier helper (apps/formation-browser-verifier). Without
+    /// one, a browser verification is recorded as unavailable — never passed.
+    #[arg(long, env = "ATO_BROWSER_VERIFIER")]
+    browser_verifier: Option<PathBuf>,
+    /// The Node binary that runs the browser verifier.
+    #[arg(long, env = "ATO_NODE", default_value = "node")]
+    node: String,
 }
 
 /// The build's own identity: what this binary is, not merely which release
@@ -535,7 +550,26 @@ fn form(args: FormArgs) -> Result<()> {
         budget: SearchBudget {
             max_attempts: args.max_attempts,
         },
+        browser_contract: args
+            .accept
+            .as_deref()
+            .map(ato_formation::browser::BrowserContractV0::from_prompt)
+            .transpose()
+            .context("--accept is not a usable acceptance prompt")?,
     };
+    let browser_verifier = args
+        .browser_verifier
+        .map(|dir| {
+            dir.canonicalize()
+                .with_context(|| format!("cannot read the browser verifier at {}", dir.display()))
+                .map(|dir| {
+                    ato_formation_worker::browser_verify::BrowserVerifierCommand::node_helper(
+                        args.node.clone(),
+                        dir,
+                    )
+                })
+        })
+        .transpose()?;
     let env = ato_formation_worker::local::LocalFormation {
         work_root,
         out_dir,
@@ -543,6 +577,8 @@ fn form(args: FormArgs) -> Result<()> {
         shim: std::env::current_exe().context("cannot locate this binary")?,
         limits: ato_formation_worker::sandbox::BuildLimits::default(),
         source_limits: ato_formation::source::SourceLimits::default(),
+        browser_verifier,
+        browser_budget: ato_formation::browser::BrowserBudget::default(),
     };
     let result = ato_formation_worker::local::run(&request, &env)?;
     println!("{}", serde_json::to_string_pretty(&result)?);
