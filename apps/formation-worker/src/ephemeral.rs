@@ -123,18 +123,21 @@ impl TemporaryRealization {
 
         // Owned from the first byte written: any error below drops it, and
         // dropping it removes the scratch and stops anything launched.
+        // Absolute: bwrap binds these from a working directory of its own.
+        let scratch = std::path::absolute(request.scratch)
+            .context("cannot resolve the realization scratch")?;
         let mut realization = Self {
             launched: None,
             endpoints: Vec::new(),
-            scratch: request.scratch.to_path_buf(),
-            output: request.scratch.join("candidate.log"),
+            scratch: scratch.to_path_buf(),
+            output: scratch.join("candidate.log"),
         };
-        let workspace_root = request.scratch.join("workspace");
+        let workspace_root = scratch.join("workspace");
         std::fs::create_dir_all(&workspace_root)
             .context("cannot create the realization workspace")?;
         copy_tree(request.workspace, &workspace_root)
             .context("cannot copy the build output into the realization")?;
-        let runtime_root = request.scratch.join("runtime");
+        let runtime_root = scratch.join("runtime");
         std::fs::create_dir_all(&runtime_root)
             .context("cannot create the realization runtime root")?;
 
