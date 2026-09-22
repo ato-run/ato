@@ -121,12 +121,14 @@ carries only `volume_ref` and `writer_fence`, never a host path. When the old
 writer's stop cannot be confirmed, the slot is not moved to another Runner.
 The first slice of this is specified below (Runner-local persistent volumes).
 
-**Always-on authorization (P2).** The Coordinator issues an authorization
-expiry for an `always_on` Run. The Runner requests renewal about every three
-minutes and the Coordinator extends the expiry to now + 15 minutes. After an
-explicit stop or revocation, renewal is refused. On expiry the Runner stops
-the workload gracefully. **The Runner never extends its own authority.**
-Public tries keep their fixed 180-second limit.
+**Execution authorization (P2).** The Coordinator issues renewable execution
+authority for ato-managed compute and for a self-hosted Run whose owner
+explicitly delegated execution management through `always_on`. The Runner
+requests renewal about every three minutes and the Coordinator extends the
+expiry to now + 15 minutes. After an explicit stop or revocation, renewal is
+refused. On expiry the Runner stops the workload gracefully. **The Runner
+never extends its own authority.** An independent maximum-duration policy may
+end the same Run earlier; public tries keep their fixed 180-second limit.
 
 **Fixed TCP (P4).** Two layers: a stable allocation
 `(allocation_id, runner_id, ip, protocol, port, instance_id)`, assigned by
@@ -245,6 +247,39 @@ typed (`state_checkpoint_too_large`) until chunked transfer exists.
 
 Status: implementation contract.
 
+### Control-plane responsibility boundaries
+
+The runtime control plane keeps five meanings separate even when they share a
+control exchange:
+
+- **Assignment** records which Runner and incarnation handles a Run. Its claim
+  deadline governs startup, not an already-running process.
+- **Ownership** fences state writers, volumes and physical slots. It moves only
+  after exact old-owner stop evidence or physical isolation, never because a
+  timestamp elapsed.
+- **Grant** is authority from one issuer for named actions on one resource.
+  Execution, ato.run connectivity, state writes and Bindings are separate
+  grants; expiry affects only the scope that was granted.
+- **Observation** records Runner reachability, Run progress and route use. A
+  stale observation may trigger reconciliation but is not proof of physical
+  stop.
+- **Policy/deadline** decides when to request work such as startup, idle sleep,
+  maximum-duration stop or stop-ACK reconciliation. It does not itself release
+  ownership.
+
+The resulting invariants are:
+
+```text
+connection grant expiry != Run stopped
+execution grant expiry  != stop confirmed
+stop confirmed          != state commit succeeded
+assignment ended        != physical resource released
+```
+
+An authenticated clean stop acknowledgement settles the exact Run's state
+grants with their recorded writer fences. A terminal assignment without such
+evidence quarantines ownership. A claim deadline never performs either action.
+
 ### Always-on policy and renewable authorization
 
 `always_on` is mutable Instance policy, not part of K, Application or D. The
@@ -261,17 +296,23 @@ failures use delays of 5 seconds, 30 seconds, 2 minutes, 10 minutes and 30
 minutes; a sixth failure before 15 minutes of healthy operation leaves the
 Instance `degraded` until an owner explicitly starts it again.
 
-An always-on lease command carries an `execution_authorization` outside the
-digested launch spec. It names the Instance policy generation and the initial
-expiry. About every three minutes the Runner renews through the lease control
-plane. A successful response advances the expiry to Coordinator time + 15
-minutes. Stop, revocation, policy-generation mismatch, wrong Runner or a
-terminal lease refuses renewal. The Runner converts the response's
-`server_time` and `expires_at` into a monotonic local deadline; wall-clock
-changes cannot extend it. A transient control-plane failure is tolerated only
-until that deadline, after which the workload is stopped before the failure is
-reported. Fixed-duration commands and renewable authorization are mutually
-exclusive. Public tries remain fixed at 180 seconds.
+A lease command carries `execution_authorization` outside the digested launch
+spec when execution occurs on ato-managed compute, or when `always_on`
+expresses explicit delegation to the Coordinator. About every three minutes
+the Runner renews through the lease control plane. A successful response
+advances the expiry to Coordinator time + 15 minutes. Stop, revocation,
+policy-generation mismatch for delegated always-on execution, wrong Runner or
+a terminal assignment refuses renewal. A self-hosted on-demand Run receives
+no such grant merely because ato.run provides a route to it.
+
+The Runner converts the response's `server_time` and `expires_at` into a
+monotonic local deadline; wall-clock changes cannot extend it. A transient
+control-plane failure is tolerated only until that deadline, after which the
+workload is stopped before the failure is reported. `max_duration_secs`, idle
+policy and renewable execution authorization are independent stop conditions;
+the first one reached requests/causes the stop without changing the meaning of
+the others. Public tries therefore remain fixed at 180 seconds while still
+requiring renewable authority when they consume ato-managed compute.
 
 ### External TCP Binding and egress grant
 
