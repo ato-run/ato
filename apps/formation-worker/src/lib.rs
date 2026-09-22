@@ -7,7 +7,11 @@
 
 pub mod api;
 pub mod build;
+pub mod ephemeral;
+pub mod executor;
 pub mod job;
+pub mod local;
 pub mod pack;
 pub mod sandbox;
+pub mod sandbox_exec;
 pub mod static_lane;
