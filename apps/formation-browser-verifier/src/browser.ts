@@ -1,14 +1,19 @@
 // The browser: Stagehand v3 driving a LOCAL Chrome at the realized candidate.
 //
-// Order of preference, smallest first:
-//   1. deterministic navigation (`page.goto` to the URL we were given)
-//   2. deterministic observation (URL, title, page text via extract())
-//   3. Stagehand's agent, bounded by steps, for the task itself
+// What comes from where is kept apart, because it is worth different things:
+//   - observed: URL, title, visible text and navigation/load events, read from
+//     the browser through CDP — no model involved
+//   - model-derived: facts Stagehand's extract() read off the page
+//   - claimed: the agent's own account of what it did
 //
-// The browser never leaves the machine: Stagehand runs LOCAL (no Browserbase),
-// and Chrome is started with a proxy that goes nowhere, so every request that
-// is not to loopback fails. Chrome bypasses proxies for loopback by default,
-// which is exactly the realized candidate.
+// The browser can reach exactly one origin, the candidate's. Every other
+// request — the page's and the browser's own background traffic alike — is
+// routed to the OriginGuard and refused (see guard.ts). What counts as the
+// CANDIDATE reaching out is attributed separately, from the page's own CDP
+// network events: a request the page made to another origin is a
+// `blocked_request`; the browser's background traffic is refused without
+// being held against the candidate. The page's origin is also checked after
+// every step, as defence in depth.
 
 import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -16,9 +21,12 @@ import { join } from "node:path";
 import { Stagehand } from "@browserbasehq/stagehand";
 import { z } from "zod";
 
+import { OriginGuard } from "./guard.ts";
 import {
   type Action,
+  type BrowserEvent,
   bound,
+  MAX_EVENTS,
   MAX_FACTS_PER_EVIDENCE,
   MAX_TEXT_BYTES,
   PAGE_EXCERPT_BYTES,
@@ -45,13 +53,55 @@ export const AGENT_SYSTEM_PROMPT = [
   "Stay inside the application under test. Do not use web search.",
 ].join(" ");
 
-export interface Observation {
+/// Chrome flags that keep the browser quiet: no background network the guard
+/// would have to refuse on the browser's own behalf.
+const QUIET_CHROME_ARGS = [
+  "--no-first-run",
+  "--no-default-browser-check",
+  "--disable-background-networking",
+  "--disable-component-update",
+  "--disable-sync",
+  "--disable-default-apps",
+  "--disable-domain-reliability",
+  "--disable-client-side-phishing-detection",
+  "--no-pings",
+  "--metrics-recording-only",
+  "--disable-features=OptimizationHints,MediaRouter,Translate,AutofillServerCommunication",
+];
+
+/// What the browser shows, read through CDP.
+export interface Snapshot {
   url: string | null;
   title: string | null;
-  facts: string[];
+  /// `document.body.innerText`, bounded.
   text: string | null;
-  /// The fact extraction itself failed: an absence of facts, not a fact.
-  factsUnavailable?: boolean;
+  /// `navigate`, `reload`, `back_forward` — from the Navigation Timing entry.
+  navigationType: string | null;
+}
+
+export interface Observation {
+  snapshot: Snapshot;
+  /// A model's reading of the page. Not an observation.
+  facts: string[];
+  factsUnavailable: boolean;
+}
+
+export interface TaskOutcome {
+  /// What the agent says it did. Claims, not events.
+  claimedActions: Action[];
+  completed: boolean;
+  /// The agent's own closing message: a claim, recorded as untrusted.
+  message: string | null;
+}
+
+export interface BrowserDriver {
+  open(url: string): Promise<Snapshot>;
+  runTask(instruction: string, maxSteps: number, signal: AbortSignal): Promise<TaskOutcome>;
+  observe(focus: string): Promise<Observation>;
+  /// Everything the browser reported so far, in order.
+  events(): BrowserEvent[];
+  identity(): { stagehand_version: string | null; browser_version: string | null; agent_model: string };
+  close(): Promise<void>;
 }
 
 /// The browser agent could not operate (model unreachable, out of credit,
@@ -61,21 +111,6 @@ export class AgentFailed extends Error {
     super(`agent_failed: ${detail}`);
     this.name = "AgentFailed";
   }
-}
-
-export interface TaskOutcome {
-  actions: Action[];
-  completed: boolean;
-  /// The agent's own closing message: a claim, recorded as untrusted.
-  message: string | null;
-}
-
-export interface BrowserDriver {
-  open(url: string): Promise<Observation>;
-  runTask(instruction: string, maxSteps: number, signal: AbortSignal): Promise<TaskOutcome>;
-  observe(focus: string): Promise<Observation>;
-  identity(): { stagehand_version: string | null; browser_version: string | null; agent_model: string };
-  close(): Promise<void>;
 }
 
 function stagehandVersion(): string | null {
@@ -94,7 +129,7 @@ function stagehandVersion(): string | null {
   }
 }
 
-/// A short description of one agent action, bounded.
+/// A short description of one claimed agent action, bounded.
 function describeAgentAction(action: Record<string, unknown>): string {
   const parts = [action.type, action.action, action.instruction, action.reasoning]
     .filter((part): part is string => typeof part === "string" && part.length > 0)
@@ -102,10 +137,29 @@ function describeAgentAction(action: Record<string, unknown>): string {
   return bound(parts.join(": ") || "agent step", 512);
 }
 
+/// Is `url` on `origin`?
+export function onOrigin(url: string | null, origin: string): boolean {
+  if (!url) return false;
+  try {
+    return new URL(url).origin === origin;
+  } catch {
+    return false;
+  }
+}
+
+const SNAPSHOT_EXPRESSION = `JSON.stringify({
+  url: location.href,
+  title: document.title,
+  text: document.body ? document.body.innerText : "",
+  navigationType: (performance.getEntriesByType("navigation")[0] || {}).type || null
+})`;
+
 export class StagehandDriver implements BrowserDriver {
   private stagehand: Stagehand | null = null;
+  private guard: OriginGuard | null = null;
   private browserVersion: string | null = null;
   private origin = "";
+  private readonly recorded: BrowserEvent[] = [];
 
   constructor(
     private readonly options: {
@@ -113,6 +167,8 @@ export class StagehandDriver implements BrowserDriver {
       agentApiKey: string;
       scratchDir: string;
       chromePath?: string;
+      /// The run's shared sequence, so events and evidence interleave.
+      sequence: () => number;
     },
   ) {}
 
@@ -121,11 +177,17 @@ export class StagehandDriver implements BrowserDriver {
     return this.stagehand.context.pages()[0]!;
   }
 
-  async open(url: string): Promise<Observation> {
+  private event(kind: BrowserEvent["kind"], url: string | null) {
+    if (this.recorded.length >= MAX_EVENTS) return;
+    this.recorded.push({ sequence: this.options.sequence(), kind, url: url ? bound(url, 1024) : null });
+  }
+
+  async open(url: string): Promise<Snapshot> {
     this.origin = new URL(url).origin;
     const profile = join(this.options.scratchDir, "profile");
     // chrome-launcher writes its logs into the profile before Chrome starts.
     mkdirSync(profile, { recursive: true });
+    this.guard = await OriginGuard.start();
     const stagehand = new Stagehand({
       env: "LOCAL",
       model: { modelName: this.options.agentModel, apiKey: this.options.agentApiKey },
@@ -145,12 +207,7 @@ export class StagehandDriver implements BrowserDriver {
         executablePath: this.options.chromePath,
         userDataDir: profile,
         viewport: { width: 1280, height: 800 },
-        args: [
-          // Nothing but loopback: a proxy that answers nobody.
-          "--proxy-server=http://127.0.0.1:9",
-          "--no-first-run",
-          "--no-default-browser-check",
-        ],
+        args: [...this.guard.chromeArgs(this.origin), ...QUIET_CHROME_ARGS],
         connectTimeoutMs: 30_000,
       },
     });
@@ -163,8 +220,28 @@ export class StagehandDriver implements BrowserDriver {
     } catch {
       this.browserVersion = null;
     }
+    // Navigations and loads, as the browser reports them.
+    const session = page.getSessionForFrame(page.mainFrameId());
+    session.on<{ frame: { parentId?: string; url: string } }>("Page.frameNavigated", (params) => {
+      if (!params.frame.parentId) {
+        this.event("navigation", params.frame.url);
+        if (!onOrigin(params.frame.url, this.origin)) this.event("origin_violation", params.frame.url);
+      }
+    });
+    session.on("Page.loadEventFired", () => this.event("load", page.url() || null));
+    // Requests the page itself made. Anything off the candidate's origin was
+    // routed to the guard and refused; here it is attributed to the page.
+    const offOrigin = (url: string) =>
+      !onOrigin(url, this.origin) && !url.startsWith("data:") && !url.startsWith("blob:");
+    session.on<{ request: { url: string } }>("Network.requestWillBeSent", (params) => {
+      if (offOrigin(params.request.url)) this.event("blocked_request", params.request.url);
+    });
+    session.on<{ url: string }>("Network.webSocketCreated", (params) => {
+      if (offOrigin(params.url)) this.event("blocked_request", params.url);
+    });
+    await page.sendCDP("Network.enable").catch(() => {});
     await page.goto(url, { waitUntil: "load" });
-    return this.snapshot([]);
+    return this.snapshot();
   }
 
   async runTask(instruction: string, maxSteps: number, signal: AbortSignal): Promise<TaskOutcome> {
@@ -183,13 +260,12 @@ export class StagehandDriver implements BrowserDriver {
     if (result.success === false && result.completed !== true) {
       throw new AgentFailed(bound((result.message ?? "the agent failed").replace(/\s+/g, " "), 512));
     }
-    const actions: Action[] = (result.actions ?? []).map((action) => ({
-      kind: "agent_step",
-      description: describeAgentAction(action as Record<string, unknown>),
-      url: typeof action.pageUrl === "string" ? bound(action.pageUrl, 1024) : null,
-    }));
     return {
-      actions,
+      claimedActions: (result.actions ?? []).map((action) => ({
+        kind: "agent_claimed_step",
+        description: describeAgentAction(action as Record<string, unknown>),
+        url: typeof action.pageUrl === "string" ? bound(action.pageUrl, 1024) : null,
+      })),
       completed: result.completed === true,
       message: typeof result.message === "string" ? bound(result.message, 1024) : null,
     };
@@ -197,6 +273,7 @@ export class StagehandDriver implements BrowserDriver {
 
   async observe(focus: string): Promise<Observation> {
     if (!this.stagehand) throw new Error("browser_not_started");
+    const snapshot = await this.snapshot();
     let facts: string[] = [];
     let factsUnavailable = false;
     try {
@@ -206,43 +283,42 @@ export class StagehandDriver implements BrowserDriver {
       );
       facts = (extracted.facts ?? []).slice(0, MAX_FACTS_PER_EVIDENCE).map((f) => bound(f, 512));
     } catch {
-      facts = [];
       factsUnavailable = true;
     }
-    return { ...(await this.snapshot(facts)), factsUnavailable };
+    return { snapshot, facts, factsUnavailable };
   }
 
-  private async snapshot(facts: string[]): Promise<Observation> {
+  /// URL, title, visible text and navigation type, straight from the page.
+  private async snapshot(): Promise<Snapshot> {
     const page = this.page();
-    let text: string | null = null;
+    let read: { url?: string; title?: string; text?: string; navigationType?: string | null } = {};
     try {
-      const extracted = await this.stagehand!.extract();
-      text = bound(extracted.pageText ?? "", PAGE_EXCERPT_BYTES);
+      const evaluated = await page.sendCDP<{ result?: { value?: string } }>("Runtime.evaluate", {
+        expression: SNAPSHOT_EXPRESSION,
+        returnByValue: true,
+      });
+      read = JSON.parse(evaluated.result?.value ?? "{}");
     } catch {
-      text = null;
+      read = {};
     }
-    let title: string | null = null;
-    try {
-      title = bound(await page.title(), MAX_TEXT_BYTES);
-    } catch {
-      title = null;
-    }
-    const url = page.url();
+    const url = read.url ?? page.url() ?? null;
+    // Defence in depth: the proxy already refused anything else.
+    if (!onOrigin(url, this.origin)) this.event("origin_violation", url);
     return {
       url: url ? bound(url, 1024) : null,
-      title,
-      facts,
-      text,
+      title: typeof read.title === "string" ? bound(read.title, MAX_TEXT_BYTES) : null,
+      text: typeof read.text === "string" ? bound(read.text, PAGE_EXCERPT_BYTES) : null,
+      navigationType: typeof read.navigationType === "string" ? read.navigationType : null,
     };
   }
 
-  /// Is the page still on the application under test?
-  onOrigin(): boolean {
-    try {
-      return new URL(this.page().url()).origin === this.origin;
-    } catch {
-      return false;
-    }
+  events(): BrowserEvent[] {
+    return [...this.recorded].sort((a, b) => a.sequence - b.sequence);
+  }
+
+  /// Requests the guard refused in total — the page's and the browser's own.
+  refusedTotal(): number {
+    return this.guard?.refusedTotal ?? 0;
   }
 
   identity() {
@@ -257,5 +333,8 @@ export class StagehandDriver implements BrowserDriver {
     const stagehand = this.stagehand;
     this.stagehand = null;
     if (stagehand) await stagehand.close({ force: true }).catch(() => {});
+    const guard = this.guard;
+    this.guard = null;
+    if (guard) await guard.close().catch(() => {});
   }
 }

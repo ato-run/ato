@@ -50,9 +50,10 @@ def answer(verdict, choice, reason=None, extra=None):
             "rounds": 1, "evidence_refs": ["e1"], "reason": reason,
         }],
         "evidence": [{
-            "id": "e1", "kind": "page_state", "url": request["url"], "title": "Notes",
-            "facts": ["a note named formation-check is listed"], "text_excerpt": None,
+            "id": "e1", "kind": "browser_snapshot", "sequence": 1, "url": request["url"], "title": "Notes",
+            "facts": [], "text_excerpt": "Notes formation-check",
         }],
+        "observed_events": [{"sequence": 1, "kind": "navigation", "url": request["url"]}],
         "action_trace": [{"kind": "navigate", "description": "open the candidate", "url": request["url"]}],
         "verifier": {
             "verifier": "stand-in", "stagehand_version": None, "browser_version": None,
@@ -97,7 +98,7 @@ fn a_supported_pass_is_a_pass_bound_to_the_contract_and_target() {
     let receipt = run(r#"answer("pass", "complete")"#);
     assert_eq!(receipt.overall, BrowserVerdict::Pass, "{receipt:?}");
     let contract = BrowserContractV0::from_prompt(PROMPT).unwrap();
-    assert_eq!(receipt.contract_ref, contract.contract_ref());
+    assert_eq!(receipt.browser_contract_ref, contract.contract_ref());
     assert_eq!(
         receipt.original_prompt_digest,
         contract.original_prompt_digest()
@@ -298,4 +299,14 @@ fn a_missing_helper_binary_is_unavailable() {
         target(),
     );
     assert_eq!(receipt.overall, BrowserVerdict::Inconclusive);
+}
+
+#[test]
+fn the_helper_runs_with_its_home_inside_the_scratch_directory() {
+    let receipt = run(r#"
+home = os.environ.get("HOME", "")
+ok = home == request["scratch_dir"] + "/home" and os.path.isdir(home)
+answer("pass" if ok else "fail", "complete" if ok else "incomplete")
+"#);
+    assert_eq!(receipt.overall, BrowserVerdict::Pass, "{receipt:?}");
 }

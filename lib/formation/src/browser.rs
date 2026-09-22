@@ -109,6 +109,43 @@ impl BrowserContractV0 {
     }
 }
 
+pub const EFFECTIVE_CONTRACT_V0_SCHEMA: &str = "ato.effective-contract/0";
+
+/// The Contract a Formation actually verified, when a browser Contract is
+/// part of it.
+///
+/// A browser acceptance criterion is a condition of success, so it is part of
+/// the final K: the same base Contract with "the note persists after reload"
+/// and with "export CSV works" are two different Ks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EffectiveContractV0 {
+    pub schema: String,
+    pub base_contract_ref: String,
+    pub browser_contract_ref: String,
+}
+
+/// The ref of the K a Formation verifies.
+///
+/// Without a browser Contract this is the base ref, unchanged — no existing
+/// identity moves. With one, it is the digest of the canonical (JCS)
+/// [`EffectiveContractV0`] naming both.
+pub fn effective_contract_ref(
+    base_contract_ref: &str,
+    browser: Option<&BrowserContractV0>,
+) -> String {
+    let Some(browser) = browser else {
+        return base_contract_ref.to_owned();
+    };
+    let effective = EffectiveContractV0 {
+        schema: EFFECTIVE_CONTRACT_V0_SCHEMA.to_owned(),
+        base_contract_ref: base_contract_ref.to_owned(),
+        browser_contract_ref: browser.contract_ref(),
+    };
+    let canonical = serde_jcs::to_vec(&effective).expect("an effective Contract always serializes");
+    format!("sha256:{:x}", Sha256::digest(canonical))
+}
+
 /// How much a verifier may spend before it must answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -183,20 +220,69 @@ pub struct CriterionResult {
     pub reason: Option<String>,
 }
 
-/// One bounded observation of the page.
+/// Evidence read from the browser itself — URL, title, visible text — through
+/// the page API, with no model in between.
+pub const EVIDENCE_BROWSER_SNAPSHOT: &str = "browser_snapshot";
+/// Facts a model extracted from the page. Derived, not observed.
+pub const EVIDENCE_MODEL_EXTRACTED: &str = "model_extracted_facts";
+/// What the browser agent said it did. A claim.
+pub const EVIDENCE_AGENT_REPORT: &str = "agent_report";
+const EVIDENCE_KINDS: &[&str] = &[
+    EVIDENCE_BROWSER_SNAPSHOT,
+    EVIDENCE_MODEL_EXTRACTED,
+    EVIDENCE_AGENT_REPORT,
+];
+
+/// A navigation or load the browser reported.
+pub const EVENT_NAVIGATION: &str = "navigation";
+pub const EVENT_LOAD: &str = "load";
+/// A request the origin boundary refused before it was sent anywhere.
+pub const EVENT_BLOCKED_REQUEST: &str = "blocked_request";
+/// The page was found on an origin other than the target.
+pub const EVENT_ORIGIN_VIOLATION: &str = "origin_violation";
+const EVENT_KINDS: &[&str] = &[
+    EVENT_NAVIGATION,
+    EVENT_LOAD,
+    EVENT_BLOCKED_REQUEST,
+    EVENT_ORIGIN_VIOLATION,
+];
+pub const MAX_EVENTS: usize = 200;
+
+/// One bounded piece of evidence. `kind` says where it came from, and the
+/// kinds are never mixed: an observation, a model's reading of the page and
+/// the agent's own account are different things.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BrowserEvidence {
     pub id: String,
-    /// e.g. `page_state`, `extracted_facts`, `agent_report`.
+    /// `browser_snapshot`, `model_extracted_facts` or `agent_report`.
     pub kind: String,
+    /// Order among the run's observations.
+    pub sequence: u32,
     pub url: Option<String>,
     pub title: Option<String>,
     pub facts: Vec<String>,
     pub text_excerpt: Option<String>,
 }
 
-/// One step the verifier took, bounded.
+/// Something the browser itself reported, in order — not what the agent says
+/// it did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserEvent {
+    pub sequence: u32,
+    /// `navigation`, `load`, `blocked_request` or `origin_violation`.
+    pub kind: String,
+    pub url: Option<String>,
+}
+
+impl BrowserEvent {
+    fn is_boundary_violation(&self) -> bool {
+        self.kind == EVENT_BLOCKED_REQUEST || self.kind == EVENT_ORIGIN_VIOLATION
+    }
+}
+
+/// One step the verifier took or the agent claims it took, bounded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BrowserAction {
@@ -224,10 +310,14 @@ pub struct BrowserVerificationResult {
     pub verdict: BrowserVerdict,
     pub criteria: Vec<CriterionResult>,
     pub evidence: Vec<BrowserEvidence>,
+    /// What the browser reported happening, including every request the
+    /// origin boundary refused.
+    pub observed_events: Vec<BrowserEvent>,
+    /// The verifier's own steps and the agent's claimed steps.
     pub action_trace: Vec<BrowserAction>,
     pub verifier: VerifierIdentity,
     /// Why the run ended where it did, when that is not a criterion's fault:
-    /// `judge_unavailable`, `browser_failed`, `timeout`.
+    /// `judge_unavailable`, `browser_failed`, `timeout`, `boundary_violation`.
     pub reason: Option<String>,
 }
 
@@ -240,10 +330,13 @@ pub struct BrowserTarget {
 /// The record of one browser verification, bound to its Contract and target.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct BrowserVerificationReceipt {
-    pub contract_ref: String,
+    /// The browser Contract's own ref. The K the Formation verified is the
+    /// effective ref, which names this one.
+    pub browser_contract_ref: String,
     pub original_prompt_digest: String,
     pub verifier: VerifierIdentity,
     pub target: BrowserTarget,
+    pub observed_events: Vec<BrowserEvent>,
     pub actions: Vec<BrowserAction>,
     pub evidence: Vec<BrowserEvidence>,
     pub criteria: Vec<CriterionResult>,
@@ -303,6 +396,14 @@ pub enum BrowserResultError {
     UnknownEvidence { id: String, evidence: String },
     #[error("the verifier's result exceeds the evidence bounds ({0})")]
     Unbounded(&'static str),
+    #[error("the verifier returned evidence or an event of unknown kind {0:?}")]
+    UnknownKind(String),
+    #[error(
+        "criterion {0:?} passed without citing a browser snapshot; a claim or a model's reading is not an observation"
+    )]
+    PassWithoutObservation(String),
+    #[error("criterion {0:?} passed although the origin boundary was violated")]
+    PassDespiteViolation(String),
     #[error("the verifier claimed {claimed:?}, but its criteria add up to {actual:?}")]
     OverallMismatch {
         claimed: BrowserVerdict,
@@ -331,7 +432,25 @@ pub fn validate_result(
         return Err(BrowserResultError::Unbounded("evidence"));
     }
     let long = |text: &Option<String>, limit: usize| text.as_ref().is_some_and(|t| t.len() > limit);
+    if result.observed_events.len() > MAX_EVENTS {
+        return Err(BrowserResultError::Unbounded("observed_events"));
+    }
+    for event in &result.observed_events {
+        if !EVENT_KINDS.contains(&event.kind.as_str()) {
+            return Err(BrowserResultError::UnknownKind(event.kind.clone()));
+        }
+        if long(&event.url, MAX_TEXT_BYTES) {
+            return Err(BrowserResultError::Unbounded("event"));
+        }
+    }
+    let violated = result
+        .observed_events
+        .iter()
+        .any(BrowserEvent::is_boundary_violation);
     for evidence in &result.evidence {
+        if !EVIDENCE_KINDS.contains(&evidence.kind.as_str()) {
+            return Err(BrowserResultError::UnknownKind(evidence.kind.clone()));
+        }
         if evidence.facts.len() > MAX_FACTS_PER_EVIDENCE
             || evidence
                 .facts
@@ -375,8 +494,10 @@ pub fn validate_result(
         let supported = match criterion.verdict {
             BrowserVerdict::Pass => choice == Some("complete"),
             BrowserVerdict::Fail => choice == Some("incomplete"),
+            // A judgment of "complete" can only be held back by a boundary
+            // violation, which makes the observation untrustworthy.
             BrowserVerdict::Inconclusive => {
-                choice != Some("complete") && choice != Some("incomplete")
+                choice != Some("incomplete") && (choice != Some("complete") || violated)
             }
         };
         if !supported {
@@ -392,6 +513,24 @@ pub fn validate_result(
                     id: criterion.id.clone(),
                     evidence: evidence.clone(),
                 });
+            }
+        }
+        if criterion.verdict == BrowserVerdict::Pass {
+            if violated {
+                return Err(BrowserResultError::PassDespiteViolation(
+                    criterion.id.clone(),
+                ));
+            }
+            let observed = criterion.evidence_refs.iter().any(|reference| {
+                result
+                    .evidence
+                    .iter()
+                    .any(|e| &e.id == reference && e.kind == EVIDENCE_BROWSER_SNAPSHOT)
+            });
+            if !observed {
+                return Err(BrowserResultError::PassWithoutObservation(
+                    criterion.id.clone(),
+                ));
             }
         }
     }
@@ -415,10 +554,11 @@ impl BrowserVerificationReceipt {
     ) -> Result<Self, BrowserResultError> {
         let overall = validate_result(contract, &result)?;
         Ok(Self {
-            contract_ref: contract.contract_ref(),
+            browser_contract_ref: contract.contract_ref(),
             original_prompt_digest: contract.original_prompt_digest(),
             verifier: result.verifier,
             target,
+            observed_events: result.observed_events,
             actions: result.action_trace,
             evidence: result.evidence,
             criteria: result.criteria,
@@ -445,7 +585,7 @@ impl BrowserVerificationReceipt {
             reason.truncate(cut);
         }
         Self {
-            contract_ref: contract.contract_ref(),
+            browser_contract_ref: contract.contract_ref(),
             original_prompt_digest: contract.original_prompt_digest(),
             verifier: VerifierIdentity {
                 verifier: verifier.to_owned(),
@@ -455,6 +595,7 @@ impl BrowserVerificationReceipt {
                 judge_model: None,
             },
             target,
+            observed_events: Vec::new(),
             actions: Vec::new(),
             evidence: Vec::new(),
             criteria: contract
@@ -504,11 +645,17 @@ mod tests {
             }],
             evidence: vec![BrowserEvidence {
                 id: "e1".to_owned(),
-                kind: "page_state".to_owned(),
+                kind: EVIDENCE_BROWSER_SNAPSHOT.to_owned(),
+                sequence: 1,
                 url: Some("http://127.0.0.1:41234/".to_owned()),
                 title: Some("Notes".to_owned()),
                 facts: vec!["a note 'formation-check' is listed".to_owned()],
                 text_excerpt: None,
+            }],
+            observed_events: vec![BrowserEvent {
+                sequence: 1,
+                kind: EVENT_NAVIGATION.to_owned(),
+                url: Some("http://127.0.0.1:41234/".to_owned()),
             }],
             action_trace: vec![BrowserAction {
                 kind: "navigate".to_owned(),
@@ -665,7 +812,7 @@ mod tests {
         );
         assert_eq!(receipt.overall, BrowserVerdict::Inconclusive);
         assert_eq!(receipt.criteria[0].verdict, BrowserVerdict::Inconclusive);
-        assert_eq!(receipt.contract_ref, contract.contract_ref());
+        assert_eq!(receipt.browser_contract_ref, contract.contract_ref());
     }
 
     #[test]
@@ -675,5 +822,91 @@ mod tests {
         assert_eq!(parsed.verdict, BrowserVerdict::Pass);
         let extra = text.replacen('{', "{\"cookies\":[],", 1);
         assert!(serde_json::from_str::<BrowserVerificationResult>(&extra).is_err());
+    }
+    #[test]
+    fn the_effective_ref_names_the_browser_contract_only_when_there_is_one() {
+        let base = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+        let a = BrowserContractV0::from_prompt(PROMPT).unwrap();
+        let a_again = BrowserContractV0::from_prompt(PROMPT).unwrap();
+        let b = BrowserContractV0::from_prompt("Export the notes as CSV.").unwrap();
+        // No browser Contract: the base identity, exactly.
+        assert_eq!(effective_contract_ref(base, None), base);
+        // Same base, same prompt: same K.
+        assert_eq!(
+            effective_contract_ref(base, Some(&a)),
+            effective_contract_ref(base, Some(&a_again))
+        );
+        // Same base, different prompt: different K.
+        assert_ne!(
+            effective_contract_ref(base, Some(&a)),
+            effective_contract_ref(base, Some(&b))
+        );
+        assert_ne!(effective_contract_ref(base, Some(&a)), base);
+        // A different base with the same prompt is a different K too.
+        let other = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+        assert_ne!(
+            effective_contract_ref(base, Some(&a)),
+            effective_contract_ref(other, Some(&a))
+        );
+    }
+
+    #[test]
+    fn a_pass_must_cite_a_browser_snapshot() {
+        let contract = BrowserContractV0::from_prompt(PROMPT).unwrap();
+        for kind in [EVIDENCE_AGENT_REPORT, EVIDENCE_MODEL_EXTRACTED] {
+            let mut claimed = result(BrowserVerdict::Pass, Some("complete"));
+            claimed.evidence[0].kind = kind.to_owned();
+            assert_eq!(
+                validate_result(&contract, &claimed),
+                Err(BrowserResultError::PassWithoutObservation(
+                    PRIMARY_CRITERION_ID.to_owned()
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn a_boundary_violation_rules_out_a_pass() {
+        let contract = BrowserContractV0::from_prompt(PROMPT).unwrap();
+        for kind in [EVENT_BLOCKED_REQUEST, EVENT_ORIGIN_VIOLATION] {
+            let mut violated = result(BrowserVerdict::Pass, Some("complete"));
+            violated.observed_events.push(BrowserEvent {
+                sequence: 2,
+                kind: kind.to_owned(),
+                url: Some("http://127.0.0.1:9999/".to_owned()),
+            });
+            assert!(matches!(
+                validate_result(&contract, &violated),
+                Err(BrowserResultError::PassDespiteViolation(_))
+            ));
+            // Held back to inconclusive, the complete judgment is accepted.
+            let mut held = violated.clone();
+            held.verdict = BrowserVerdict::Inconclusive;
+            held.criteria[0].verdict = BrowserVerdict::Inconclusive;
+            assert_eq!(
+                validate_result(&contract, &held),
+                Ok(BrowserVerdict::Inconclusive)
+            );
+        }
+        // Without a violation, "complete" cannot be quietly downgraded.
+        let downgraded = result(BrowserVerdict::Inconclusive, Some("complete"));
+        assert!(validate_result(&contract, &downgraded).is_err());
+    }
+
+    #[test]
+    fn unknown_evidence_and_event_kinds_are_refused() {
+        let contract = BrowserContractV0::from_prompt(PROMPT).unwrap();
+        let mut odd = result(BrowserVerdict::Pass, Some("complete"));
+        odd.evidence[0].kind = "page_state".to_owned();
+        assert!(matches!(
+            validate_result(&contract, &odd),
+            Err(BrowserResultError::UnknownKind(_))
+        ));
+        let mut odd_event = result(BrowserVerdict::Pass, Some("complete"));
+        odd_event.observed_events[0].kind = "click".to_owned();
+        assert!(matches!(
+            validate_result(&contract, &odd_event),
+            Err(BrowserResultError::UnknownKind(_))
+        ));
     }
 }

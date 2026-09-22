@@ -29,7 +29,6 @@ use ato_formation::browser::{
 /// ambient credentials.
 const FORWARDED_ENV: &[&str] = &[
     "PATH",
-    "HOME",
     "TMPDIR",
     "LANG",
     "LC_ALL",
@@ -186,6 +185,12 @@ fn run_helper(
     }
     if let Some(cwd) = &command.cwd {
         process.current_dir(cwd);
+    }
+    // The helper and its browser get a home inside the scratch directory:
+    // nothing under the user's HOME is theirs to read or write.
+    let home = std::path::Path::new(&request.scratch_dir).join("home");
+    if std::fs::create_dir_all(&home).is_ok() {
+        process.env("HOME", &home);
     }
     // Its own process group: the browser it starts goes down with it.
     #[cfg(unix)]

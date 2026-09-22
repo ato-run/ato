@@ -8,7 +8,7 @@
 import { agentKeyVariable, StagehandDriver, DEFAULT_AGENT_MODEL, type BrowserDriver } from "./browser.ts";
 import { DEFAULT_JEV_MODEL, JevJudge, type Judge } from "./judge.ts";
 import { RequestSchema } from "./protocol.ts";
-import { verify } from "./verify.ts";
+import { sequencer, verify } from "./verify.ts";
 
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
@@ -26,6 +26,9 @@ class UnconfiguredDriver implements BrowserDriver {
   }
   async observe(): Promise<never> {
     throw new Error("agent_not_configured");
+  }
+  events() {
+    return [];
   }
   identity() {
     return { stagehand_version: null, browser_version: null, agent_model: this.agentModel };
@@ -46,12 +49,14 @@ async function main(): Promise<number> {
   const agentKey = keyVariable ? (process.env[keyVariable] ?? "") : "";
   const judgeKey = process.env.JEV_API_KEY ?? "";
 
+  const sequence = sequencer();
   const browser: BrowserDriver = agentKey
     ? new StagehandDriver({
         agentModel,
         agentApiKey: agentKey,
         scratchDir: request.scratch_dir,
         chromePath: process.env.ATO_BROWSER_CHROME_PATH || undefined,
+        sequence,
       })
     : new UnconfiguredDriver(agentModel);
   let judge: Judge | null = null;
@@ -61,7 +66,7 @@ async function main(): Promise<number> {
     judge = null;
   }
 
-  const result = await verify(request, { browser, judge });
+  const result = await verify(request, { browser, judge, sequence });
   process.stdout.write(JSON.stringify(result) + "\n");
   return 0;
 }

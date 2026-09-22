@@ -124,8 +124,14 @@ pub struct FormationAttempt {
     pub candidate: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub derivation_ref: Option<String>,
+    /// The K this attempt verified: the base Contract, or — when a browser
+    /// Contract is part of the request — the effective Contract naming both.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub contract_ref: Option<String>,
+    /// The base Contract's own ref, kept for provenance when `contract_ref`
+    /// is an effective Contract. Absent when the two are the same.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_contract_ref: Option<String>,
     pub runtime_id: String,
     pub status: AttemptStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
