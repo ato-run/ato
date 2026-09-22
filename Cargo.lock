@@ -269,6 +269,7 @@ dependencies = [
  "ato-computation",
  "ato-contracts",
  "ato-formation",
+ "ato-formation-worker",
  "ato-ipc",
  "ato-kernel",
  "ato-local-execution",
