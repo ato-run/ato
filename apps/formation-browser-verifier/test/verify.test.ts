@@ -352,3 +352,19 @@ test("the request schema refuses unknown fields and other protocols", () => {
   assert.throws(() => RequestSchema.parse({ ...base, cookies: [] }));
   assert.throws(() => RequestSchema.parse({ ...base, protocol: "other" }));
 });
+
+test("a large result reaches the caller whole through a pipe", async () => {
+  // Regression: exiting right after the write cut the result at 8 KiB.
+  const { spawn } = await import("node:child_process");
+  const script = `
+    const text = JSON.stringify({ filler: "x".repeat(200000) }) + "\\n";
+    await new Promise((resolve, reject) => process.stdout.write(text, (e) => (e ? reject(e) : resolve())));
+    process.exit(0);
+  `;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: ["ignore", "pipe", "inherit"] });
+  let out = "";
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => (out += chunk));
+  await new Promise((resolve) => child.on("close", resolve));
+  assert.equal(JSON.parse(out).filler.length, 200000);
+});
