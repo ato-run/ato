@@ -473,10 +473,19 @@ fn realize_and_observe(
             .map(|endpoint| {
                 (
                     endpoint.port_id.clone(),
-                    format!(
-                        "guest {} -> host {}",
-                        endpoint.guest_port, endpoint.host_port
-                    ),
+                    if endpoint.host_port == endpoint.guest_port {
+                        format!(
+                            "guest {} -> host {}",
+                            endpoint.guest_port, endpoint.host_port
+                        )
+                    } else {
+                        format!(
+                            "guest {} -> host {} (guest port in use; carried by {})",
+                            endpoint.guest_port,
+                            endpoint.host_port,
+                            crate::ephemeral::endpoint_env_name(&endpoint.port_id)
+                        )
+                    },
                 )
             })
             .collect();

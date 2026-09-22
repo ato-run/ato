@@ -60,11 +60,38 @@ part of a Capsule would be a different, explicit Contract.
 
 ## Ports
 
-A process realization has no NAT: the Runtime allocates a host port, exports
-it as `ATO_ENDPOINT_<NAME>_PORT`, and Landlock admits a TCP bind on that port
-only. A launch argv or env value that states the Derivation's guest port
-verbatim is lowered to the allocated host port. The verifier maps logical
-port id → realized endpoint and never assumes `127.0.0.1:<guest_port>`.
+The Derivation is executed exactly: the Runtime never reads argv or
+environment values for port numbers, and never rewrites them.
+
+A process realization has no NAT, so the port a workload binds is a host port.
+The Runtime's endpoint ABI tells the workload which one:
+`ATO_ENDPOINT_<NAME>_PORT` (`app.http` → `ATO_ENDPOINT_APP_HTTP_PORT`), and
+Landlock admits a TCP bind on that port only. The guest port is used as the
+host port when it is free; otherwise the Runtime allocates one.
+
+- A Derivation that reads the endpoint variable runs either way. Generated
+  and Preset routes should be written this way.
+- An authored Derivation that binds its guest port literally runs when that
+  port is free, and fails visibly when it is not — the attempt names the port
+  and the variable that carried the replacement. NAT or port forwarding is
+  not part of Phase 1.
+
+The verifier maps logical port id → realized endpoint and never assumes
+`127.0.0.1:<guest_port>`.
+
+## Working directory
+
+`cwd_relative` is honored by the Runtime itself (`sandbox::guest_cwd`): the
+resolved `effective_cwd` is re-expressed under `/app`, so `apps/web` starts at
+`/app/apps/web` for a Run and for a Formation candidate alike. Absolute,
+`..` and symlink-escaping cwds are refused by `ResolvedRuntimeLaunchContext`.
+
+## Output
+
+Candidate stdout/stderr are drained continuously and kept in two rotating
+segments bounded to 8 MiB in total (`ProcessAdapter::with_output_file`), so
+an untrusted candidate can neither block on a pipe nor fill the disk. Failure
+messages carry a 4 KiB tail.
 
 ## Network
 
@@ -87,6 +114,10 @@ written.
   a failed attempt produces evidence, never a fallback.
 - Phase 1 process verification needs Linux with unprivileged user namespaces
   and bwrap; elsewhere process candidates are Filtered, not run unconfined.
-- The Runtime's contained launch starts workloads at the workspace root and
-  ignores `cwd_relative`; a candidate whose Derivation names another cwd is
-  not realized (see "Detected mismatch" in the PR).
+- Crate boundary: `formation-worker` depends on
+  `ato-connected-realization-worker` for `runtime_launch::{process_executor,
+  sandbox, sandbox_exec, resolved}`. That module is a library surface today,
+  but its crate is the connected worker application (leases, network broker,
+  Docker, record pipeline). The process-execution part is a donor boundary to
+  extract into a runtime-execution library before a second consumer grows
+  around it; Phase 1 does not extract it.

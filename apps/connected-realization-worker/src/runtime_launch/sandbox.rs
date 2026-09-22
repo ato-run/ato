@@ -251,7 +251,7 @@ pub fn sandboxed_command(
         GUEST_POLICY.to_owned(),
     ]);
 
-    argv.extend(["--chdir".to_owned(), GUEST_APP_ROOT.to_owned()]);
+    argv.extend(["--chdir".to_owned(), guest_cwd(context)?]);
 
     argv.extend([
         GUEST_SHIM.to_owned(),
@@ -273,6 +273,35 @@ pub fn sandboxed_command(
                 .collect::<Vec<_>>(),
         ),
     })
+}
+
+/// Where the workload starts, as a GUEST path.
+///
+/// The resolved context already placed `effective_cwd` inside the workspace
+/// (lexically, and against the real paths when they exist). This re-derives
+/// the relative remainder and mounts it under [`GUEST_APP_ROOT`], so
+/// `cwd_relative = "apps/web"` starts the workload at `/app/apps/web` and no
+/// host path reaches the guest.
+pub fn guest_cwd(context: &ResolvedRuntimeLaunchContext) -> Result<String> {
+    let relative = context
+        .effective_cwd()
+        .strip_prefix(context.workspace_root())
+        .context("resolved cwd escaped the workspace after resolution")?;
+    let mut guest = GUEST_APP_ROOT.to_owned();
+    for component in relative.components() {
+        match component {
+            std::path::Component::Normal(segment) => {
+                guest.push('/');
+                guest.push_str(
+                    segment
+                        .to_str()
+                        .context("workload cwd is not valid UTF-8")?,
+                );
+            }
+            other => bail!("workload cwd has a non-normal component: {other:?}"),
+        }
+    }
+    Ok(guest)
 }
 
 /// The variable naming the host port the Runner actually allocated for an
@@ -347,4 +376,76 @@ pub fn require_containment() -> Result<()> {
         "this Runner cannot contain a process workload: bubblewrap is unavailable or the host \
          rejects the required namespaces. Refusing to launch unconfined on a multi-tenant host."
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn context(root: &Path, cwd: &str) -> Result<ResolvedRuntimeLaunchContext, String> {
+        ResolvedRuntimeLaunchContext::new(
+            root.to_path_buf(),
+            cwd,
+            BTreeMap::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn the_workload_starts_at_its_cwd_under_the_guest_root() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("apps/web")).unwrap();
+        std::fs::create_dir_all(root.path().join("sub")).unwrap();
+        for (cwd, guest) in [
+            ("", "/app"),
+            ("sub", "/app/sub"),
+            ("apps/web", "/app/apps/web"),
+        ] {
+            let resolved = context(root.path(), cwd).unwrap();
+            assert_eq!(guest_cwd(&resolved).unwrap(), guest, "{cwd:?}");
+        }
+    }
+
+    #[test]
+    fn the_sandbox_changes_into_the_guest_cwd() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("server")).unwrap();
+        let resolved = context(root.path(), "server").unwrap();
+        let command = sandboxed_command(
+            &resolved,
+            &["python3".to_owned(), "app.py".to_owned()],
+            Path::new("/bin/true"),
+            Path::new("/tmp/policy.json"),
+            true,
+        )
+        .unwrap();
+        let chdir = command
+            .argv
+            .iter()
+            .position(|arg| arg == "--chdir")
+            .expect("--chdir");
+        assert_eq!(command.argv[chdir + 1], "/app/server");
+        // No host path is handed to the guest as its cwd.
+        assert!(!command.argv[chdir + 1].contains(&*root.path().to_string_lossy()));
+    }
+
+    #[test]
+    fn an_escaping_cwd_is_refused_before_it_reaches_the_sandbox() {
+        let root = tempfile::tempdir().unwrap();
+        for cwd in ["../escape", "sub/../../escape", "/etc", "./sub"] {
+            assert!(context(root.path(), cwd).is_err(), "{cwd:?} was accepted");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_cwd_that_leaves_the_workspace_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("link")).unwrap();
+        assert!(context(root.path(), "link").is_err());
+    }
 }
