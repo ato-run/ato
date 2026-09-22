@@ -22,6 +22,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail};
 use ato_formation::authoring::{AuthoringDraft, AuthoringProvenance, HTTP_CONTRACT_VERIFIER};
+use ato_formation::browser::{
+    BrowserBudget, BrowserTarget, BrowserVerdict, BrowserVerificationReceipt,
+};
 use ato_formation::capsule_toml::{parse_capsule_toml, read_capsule_toml};
 use ato_formation::detect::{DetectorEvidence, detect};
 use ato_formation::failure::{FailureStage, FormationFailure};
@@ -32,7 +35,9 @@ use ato_formation::request::{
     RuntimeProfile, VerifiedRoute,
 };
 use ato_formation::source::{DownloadedArchive, SourceClosureRef, SourceLimits};
-use ato_formation::verify::{RuntimeObservation, verify, verify_runtime};
+use ato_formation::verify::{ContractVerification, RuntimeObservation, verify, verify_runtime};
+
+use crate::browser_verify::{BrowserVerification, BrowserVerifierCommand, verify_in_browser};
 
 use crate::ephemeral::{
     RequiredObservation, RequiredPort, TemporaryRealization, TemporaryRealizationRequest,
@@ -52,6 +57,10 @@ pub struct LocalFormation {
     pub shim: PathBuf,
     pub limits: BuildLimits,
     pub source_limits: SourceLimits,
+    /// The browser verifier this Runtime has, if any. Used only when a
+    /// request carries a browser Contract.
+    pub browser_verifier: Option<BrowserVerifierCommand>,
+    pub browser_budget: BrowserBudget,
 }
 
 static ATTEMPT_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -92,7 +101,17 @@ pub fn run_with_executor(
         shim: env.shim.clone(),
         limits: env.limits,
         source_limits: env.source_limits,
+        browser_verifier: env.browser_verifier.clone(),
+        browser_budget: env.browser_budget,
     };
+    let browser = request
+        .browser_contract
+        .as_ref()
+        .map(|contract| BrowserVerification {
+            contract: contract.clone(),
+            verifier: env.browser_verifier.clone(),
+            budget: env.browser_budget,
+        });
 
     let InitialCondition::LocalDirectory { path } = &request.initial_condition;
     let frozen = freeze_local_source(path, &env.work_root, env.source_limits)?;
@@ -123,6 +142,7 @@ pub fn run_with_executor(
                                 status: AttemptStatus::Filtered,
                                 verification: None,
                                 realization: None,
+                                browser_verification: None,
                                 failure: Some(AttemptFailure {
                                     code: mismatch.code.to_owned(),
                                     stage: FailureStage::Preset.as_str().to_owned(),
@@ -149,6 +169,7 @@ pub fn run_with_executor(
             &profile,
             executor,
             network,
+            browser.as_ref(),
             env,
         );
         attempts.push(attempt);
@@ -181,6 +202,7 @@ fn attempt_one(
     profile: &RuntimeProfile,
     executor: &dyn AttemptExecutor,
     network: NetworkPolicy,
+    browser: Option<&BrowserVerification>,
     env: &LocalFormation,
 ) -> (FormationAttempt, Option<(String, VerifiedRoute)>) {
     let mut attempt = FormationAttempt {
@@ -194,6 +216,7 @@ fn attempt_one(
         status: AttemptStatus::Failed,
         verification: None,
         realization: None,
+        browser_verification: None,
         failure: None,
     };
 
@@ -215,7 +238,7 @@ fn attempt_one(
     attempt.contract_ref = Some(planned.contract_ref.clone());
     attempt.derivation_ref = Some(planned.derivation_ref.clone());
 
-    if let Some(failure) = admits(profile, &planned, network) {
+    if let Some(failure) = admits(profile, &planned, network, browser.is_some()) {
         attempt.status = AttemptStatus::Filtered;
         attempt.failure = Some(failure);
         return (attempt, None);
@@ -259,6 +282,7 @@ fn attempt_one(
         ExecutedCandidate::StaticWeb { .. } => verify(&planned.contract, &observation),
         ExecutedCandidate::Process { workspace_root } => {
             let (ports, required) = required_observations(&planned);
+            let input_refs = observation.input_refs.clone();
             let measured = realize_and_observe(
                 &TemporaryRealizationRequest {
                     workspace: workspace_root,
@@ -269,18 +293,23 @@ fn attempt_one(
                     attempt_id: &attempt_id,
                 },
                 &required,
+                &|http| {
+                    verify_runtime(
+                        &planned.contract,
+                        &RuntimeObservation {
+                            input_refs: input_refs.clone(),
+                            http,
+                            instance_snapshot_ref: None,
+                        },
+                    )
+                },
+                browser,
+                runtime_id,
                 network,
                 &mut attempt,
             );
             match measured {
-                Ok(http) => verify_runtime(
-                    &planned.contract,
-                    &RuntimeObservation {
-                        input_refs: observation.input_refs.clone(),
-                        http,
-                        instance_snapshot_ref: None,
-                    },
-                ),
+                Ok(verification) => verification,
                 Err(error) => {
                     // The candidate could not be observed at all: nothing is
                     // verified, and guessing verdicts would invent evidence.
@@ -316,6 +345,46 @@ fn attempt_one(
             });
         attempt.verification = Some(verification);
         return (attempt, None);
+    }
+
+    // The acceptance prompt, when one was asked for: only a browser PASS
+    // lets the candidate form. Fail and inconclusive are both "not formed".
+    if browser.is_some() {
+        let outcome = attempt
+            .browser_verification
+            .as_ref()
+            .map(|receipt| (receipt.overall, receipt.reason.clone()));
+        let failure = match outcome {
+            Some((BrowserVerdict::Pass, _)) => None,
+            Some((BrowserVerdict::Fail, _)) => Some((
+                "browser_contract_failed",
+                "the candidate was observed in a browser and did not satisfy the acceptance \
+                 prompt"
+                    .to_owned(),
+            )),
+            Some((BrowserVerdict::Inconclusive, reason)) => Some((
+                "browser_contract_inconclusive",
+                format!(
+                    "the browser verification did not reach a verdict{}",
+                    reason
+                        .map(|reason| format!(": {reason}"))
+                        .unwrap_or_default()
+                ),
+            )),
+            None => Some((
+                "browser_contract_inconclusive",
+                "the candidate was not verified in a browser".to_owned(),
+            )),
+        };
+        if let Some((code, message)) = failure {
+            attempt.failure = Some(AttemptFailure {
+                code: code.to_owned(),
+                stage: FailureStage::Verification.as_str().to_owned(),
+                message: bounded(&message),
+            });
+            attempt.verification = Some(verification);
+            return (attempt, None);
+        }
     }
 
     // Verified — only now does the artifact become worth keeping.
@@ -355,7 +424,19 @@ fn admits(
     profile: &RuntimeProfile,
     planned: &PlannedCandidate,
     network: NetworkPolicy,
+    browser: bool,
 ) -> Option<AttemptFailure> {
+    if browser && planned.intent.lane != ato_formation::intent::Lane::PythonProcess {
+        // A browser Contract is verified against a running candidate, and in
+        // Phase 1 only a process lane is realized.
+        return Some(AttemptFailure {
+            code: "browser_contract_needs_realization".to_owned(),
+            stage: "admission".to_owned(),
+            message: "a browser Contract is verified against a running candidate; this \
+                      candidate's lane is not realized on this Runtime"
+                .to_owned(),
+        });
+    }
     if !planned.plan.steps.is_empty()
         && profile.get("formation.containment") != Some("bwrap+landlock")
     {
@@ -452,12 +533,18 @@ fn required_observations(
 ///
 /// The realization is destroyed before this returns on every path: an
 /// explicit `destroy` after observing, `Drop` on any early return.
+#[allow(clippy::too_many_arguments)]
 fn realize_and_observe(
     request: &TemporaryRealizationRequest<'_>,
     required: &[RequiredObservation],
+    verify_http: &dyn Fn(
+        Vec<ato_formation::verify::RuntimeHttpObservation>,
+    ) -> ContractVerification,
+    browser: Option<&BrowserVerification>,
+    runtime_id: &str,
     build_network: NetworkPolicy,
     attempt: &mut FormationAttempt,
-) -> Result<Vec<ato_formation::verify::RuntimeHttpObservation>> {
+) -> Result<ContractVerification> {
     let mut evidence = RealizationEvidence {
         executor: "runtime-process".to_owned(),
         containment: "bwrap+landlock".to_owned(),
@@ -498,12 +585,20 @@ fn realize_and_observe(
                 )
             })
             .collect();
-        let observed = realization.observe(required);
+        let verification = realization.observe(required).map(verify_http);
+        // The browser drives the SAME realization, and only one that already
+        // satisfies the typed observations: a candidate that fails its HTTP
+        // Contract has nothing to show a browser.
+        if let (Ok(verification), Some(browser)) = (&verification, browser)
+            && verification.fully_satisfied()
+        {
+            attempt.browser_verification = Some(browse(&realization, browser, runtime_id));
+        }
         let destroyed = realization.destroy();
         evidence.destroyed = destroyed.is_ok();
-        let observed = observed?;
+        let verification = verification?;
         destroyed.context("the candidate could not be destroyed")?;
-        Ok(observed)
+        Ok(verification)
     })();
     if result.is_err() && !evidence.destroyed {
         // Dropped on the error path: gone unless the Runtime said otherwise,
@@ -512,6 +607,36 @@ fn realize_and_observe(
     }
     attempt.realization = Some(evidence);
     result
+}
+
+/// Verify the running candidate against the browser Contract, through the
+/// endpoint the realization reports — never a guessed guest port.
+fn browse(
+    realization: &TemporaryRealization,
+    browser: &BrowserVerification,
+    runtime_id: &str,
+) -> BrowserVerificationReceipt {
+    let endpoints = realization.endpoints();
+    let target = |endpoint: String| BrowserTarget {
+        runtime_id: runtime_id.to_owned(),
+        endpoint,
+    };
+    match endpoints {
+        [endpoint] => verify_in_browser(
+            browser,
+            target(format!("http://127.0.0.1:{}/", endpoint.host_port)),
+        ),
+        _ => BrowserVerificationReceipt::unavailable(
+            &browser.contract,
+            target(String::new()),
+            "none",
+            &format!(
+                "browser_endpoint_ambiguous: the candidate exposes {} observed ports; v0 \
+                 verifies a candidate with exactly one",
+                endpoints.len()
+            ),
+        ),
+    }
 }
 
 /// Keep the artifact of a verified candidate, content-addressed.

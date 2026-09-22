@@ -43,6 +43,8 @@ fn formation(scratch: &tempfile::TempDir) -> LocalFormation {
         shim: PathBuf::from(env!("CARGO_BIN_EXE_ato-formation-worker")),
         limits: BuildLimits::default(),
         source_limits: SourceLimits::default(),
+        browser_verifier: None,
+        browser_budget: Default::default(),
     }
 }
 
@@ -57,6 +59,7 @@ fn request(path: &Path, network: FormationNetworkPolicy) -> FormationRequest {
         },
         policy: FormationPolicy { network },
         budget: SearchBudget { max_attempts: 4 },
+        browser_contract: None,
     }
 }
 

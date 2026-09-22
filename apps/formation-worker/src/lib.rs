@@ -6,6 +6,7 @@
 //! artifact afterwards is somebody else's decision.
 
 pub mod api;
+pub mod browser_verify;
 pub mod build;
 pub mod ephemeral;
 pub mod executor;

@@ -18,6 +18,7 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
+use crate::browser::{BrowserContractV0, BrowserVerificationReceipt};
 use crate::verify::ContractVerification;
 
 /// What the Formation starts from. 'I' in the model.
@@ -75,6 +76,9 @@ pub struct FormationRequest {
     pub runtime: RuntimeConstraint,
     pub policy: FormationPolicy,
     pub budget: SearchBudget,
+    /// An acceptance prompt to verify in a browser, on top of the Contract's
+    /// typed observations. Opt-in: `None` leaves Formation exactly as it is.
+    pub browser_contract: Option<BrowserContractV0>,
 }
 
 /// The facts a Runtime reports about itself, as a flat map.
@@ -114,7 +118,7 @@ pub enum AttemptStatus {
 }
 
 /// One tried candidate, with whatever it proved.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FormationAttempt {
     /// Which candidate this was: '"authored"' or a preset id.
     pub candidate: String,
@@ -129,6 +133,10 @@ pub struct FormationAttempt {
     /// How the candidate was run to be observed, when it was.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub realization: Option<RealizationEvidence>,
+    /// The browser verification of the request's acceptance prompt, when one
+    /// was asked for and the candidate got that far.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser_verification: Option<BrowserVerificationReceipt>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure: Option<AttemptFailure>,
 }
@@ -167,7 +175,7 @@ pub struct VerifiedRoute {
 ///
 /// An enum rather than a struct with an optional 'contract_ref': 'Formed'
 /// without a Contract identity is a state that must not be representable.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum FormationResult {
     /// At least one 'D x R' was observed satisfying one canonical Contract.
