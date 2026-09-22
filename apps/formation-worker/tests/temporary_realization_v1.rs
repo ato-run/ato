@@ -1,10 +1,13 @@
 //! Temporary realization on the local Runtime (ADR-019).
 //!
 //! A candidate is run to be measured through the Runtime's own process
-//! executor — bwrap namespaces, the Landlock shim, an allocated host port —
-//! and destroyed before the attempt returns. These tests run the real thing:
-//! on a host that cannot contain a process they assert the refusal instead,
-//! because a Formation that cannot contain a candidate must not run it.
+//! executor — bwrap namespaces, the Landlock shim, the endpoint ABI — and
+//! destroyed before the attempt returns. The Derivation's argv, environment
+//! and cwd are executed exactly: nothing reads them for port numbers.
+//!
+//! These tests run the real thing. On a host that cannot contain a process
+//! they assert the refusal instead, because a Formation that cannot contain a
+//! candidate must not run it.
 
 use std::collections::BTreeMap;
 use std::net::TcpListener;
@@ -17,9 +20,10 @@ use ato_formation_worker::ephemeral::{
 };
 use ato_formation_worker::sandbox::containment_available;
 
-/// A small server with a few probes of its own surroundings.
+/// An endpoint-aware server: it binds the port the Runtime hands it through
+/// ATO_ENDPOINT_APP_HTTP_PORT, and reports on its own surroundings.
 const PROBE_SERVER: &str = r#"
-import socket, sys
+import json, os, socket, sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -39,6 +43,12 @@ class Handler(BaseHTTPRequestHandler):
             status, body = 200, b"ok"
         elif url.path == "/fail":
             status, body = 500, b"no"
+        elif url.path == "/argv":
+            status, body = 200, json.dumps(sys.argv).encode()
+        elif url.path == "/cwd":
+            status, body = 200, os.getcwd().encode()
+        elif url.path == "/env":
+            status, body = 200, os.environ.get(query["name"][0], "<unset>").encode()
         elif url.path == "/read":
             try:
                 with open(query["path"][0], "rb") as handle:
@@ -54,6 +64,24 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.end_headers()
         self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+port = int(os.environ["ATO_ENDPOINT_APP_HTTP_PORT"])
+HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+"#;
+
+/// A fixed-port server: it binds the port its argv names, literally.
+const FIXED_SERVER: &str = r#"
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200 if self.path == "/health" else 404)
+        self.end_headers()
+        self.wfile.write(b"ok" if self.path == "/health" else b"")
 
     def log_message(self, *args):
         pass
@@ -85,19 +113,25 @@ fn intent(argv: Vec<String>, guest_port: u16) -> ProgramIntentV1 {
     }
 }
 
-/// A process argv the realization can be found by afterwards.
+/// The probe server's argv, with a marker the processes can be found by and
+/// two values that merely LOOK like the guest port.
 fn server_argv(marker: &str, guest_port: u16) -> Vec<String> {
     vec![
         python().to_owned(),
         "/app/server.py".to_owned(),
         marker.to_owned(),
         guest_port.to_string(),
+        format!("http://example:{guest_port}"),
+        format!("--port={guest_port}"),
     ]
 }
 
 fn workspace() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(dir.path().join("server.py"), PROBE_SERVER).expect("server");
+    std::fs::write(dir.path().join("fixed.py"), FIXED_SERVER).expect("fixed");
+    std::fs::create_dir_all(dir.path().join("server")).expect("subdir");
+    std::fs::write(dir.path().join("server/app.py"), PROBE_SERVER).expect("nested");
     dir
 }
 
@@ -198,7 +232,7 @@ fn refused_here() -> bool {
     if containment_available() {
         return false;
     }
-    let launch = Launch::new(server_argv(&marker("refused"), 8080), 8080);
+    let launch = Launch::new(server_argv(&marker("refused"), free_port()), 8080);
     let error = launch
         .launch()
         .err()
@@ -208,27 +242,135 @@ fn refused_here() -> bool {
     true
 }
 
+// ── the endpoint ABI, and exact execution ───────────────────────────────────
+
 #[test]
-fn the_candidate_is_reached_through_its_allocated_endpoint_even_when_the_guest_port_is_taken() {
+fn an_endpoint_aware_candidate_runs_on_the_runtime_port_when_its_guest_port_is_taken() {
     if refused_here() {
         return;
     }
     // Somebody else already listens on the Derivation's guest port.
     let occupant = TcpListener::bind("127.0.0.1:0").expect("occupant");
     let guest_port = occupant.local_addr().expect("addr").port();
-    let marker = marker("ports");
+    let marker = marker("endpoint-aware");
     let launch = Launch::new(server_argv(&marker, guest_port), guest_port);
 
     let realization = launch.launch().expect("launched");
     let endpoint = realization.endpoints()[0].clone();
     assert_eq!(endpoint.guest_port, guest_port);
     assert_ne!(endpoint.host_port, guest_port);
-    let (status, body) = get(&realization, "/health");
-    assert_eq!((status, body.as_str()), (200, "ok"));
+    assert_eq!(get(&realization, "/health"), (200, "ok".to_owned()));
+    // The ABI carried the Runtime's port.
+    let (_, injected) = get(&realization, "/env?name=ATO_ENDPOINT_APP_HTTP_PORT");
+    assert_eq!(injected, endpoint.host_port.to_string());
     realization.destroy().expect("destroyed");
     assert_gone(&marker);
     drop(occupant);
 }
+
+#[test]
+fn the_derivation_argv_reaches_the_candidate_unchanged() {
+    if refused_here() {
+        return;
+    }
+    // Even with the guest port taken — the case a rewrite would have
+    // "helped" — every value that looks like a port arrives as written.
+    let occupant = TcpListener::bind("127.0.0.1:0").expect("occupant");
+    let guest_port = occupant.local_addr().expect("addr").port();
+    let marker = marker("argv");
+    let argv = server_argv(&marker, guest_port);
+    let launch = Launch::new(argv.clone(), guest_port);
+    let realization = launch.launch().expect("launched");
+    let (_, reported) = get(&realization, "/argv");
+    let reported: Vec<String> = serde_json::from_str(&reported).expect("argv json");
+    // sys.argv drops the interpreter; everything after it is verbatim.
+    assert_eq!(reported, argv[1..].to_vec());
+    realization.destroy().expect("destroyed");
+    assert_gone(&marker);
+    drop(occupant);
+}
+
+#[test]
+fn a_fixed_port_candidate_runs_on_its_own_port_when_it_is_free() {
+    if refused_here() {
+        return;
+    }
+    let guest_port = free_port();
+    let marker = marker("fixed-free");
+    let launch = Launch::new(
+        vec![
+            python().to_owned(),
+            "/app/fixed.py".to_owned(),
+            marker.clone(),
+            guest_port.to_string(),
+        ],
+        guest_port,
+    );
+    let realization = launch.launch().expect("launched");
+    assert_eq!(realization.endpoints()[0].host_port, guest_port);
+    assert_eq!(get(&realization, "/health").0, 200);
+    realization.destroy().expect("destroyed");
+    assert_gone(&marker);
+}
+
+#[test]
+fn a_fixed_port_candidate_fails_visibly_when_its_port_is_taken() {
+    if refused_here() {
+        return;
+    }
+    let occupant = TcpListener::bind("127.0.0.1:0").expect("occupant");
+    let guest_port = occupant.local_addr().expect("addr").port();
+    let marker = marker("fixed-taken");
+    let launch = Launch::new(
+        vec![
+            python().to_owned(),
+            "/app/fixed.py".to_owned(),
+            marker.clone(),
+            guest_port.to_string(),
+        ],
+        guest_port,
+    );
+    let error = launch
+        .launch()
+        .err()
+        .expect("a literal port that is taken is not moved elsewhere");
+    let text = format!("{error:#}");
+    assert!(text.contains("cannot run here"), "{text}");
+    assert!(text.contains("ATO_ENDPOINT_APP_HTTP_PORT"), "{text}");
+    assert!(!launch.realization_scratch().exists());
+    assert_gone(&marker);
+    drop(occupant);
+}
+
+// ── cwd ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn a_candidate_starts_in_its_derivation_cwd() {
+    if refused_here() {
+        return;
+    }
+    let marker = marker("cwd");
+    let mut launch = Launch::new(
+        vec![python().to_owned(), "app.py".to_owned(), marker.clone()],
+        free_port(),
+    );
+    launch.intent.cwd_relative = "server".to_owned();
+    let realization = launch.launch().expect("launched from /app/server");
+    assert_eq!(get(&realization, "/health").0, 200);
+    assert_eq!(get(&realization, "/cwd").1, "/app/server");
+    realization.destroy().expect("destroyed");
+    assert_gone(&marker);
+}
+
+#[test]
+fn a_cwd_outside_the_workspace_is_refused() {
+    let mut launch = Launch::new(server_argv(&marker("escape"), 8080), 8080);
+    launch.intent.cwd_relative = "../escape".to_owned();
+    assert!(launch.launch().is_err());
+    assert!(!launch.realization_scratch().exists());
+}
+
+// ── containment and disposal ────────────────────────────────────────────────
 
 #[test]
 fn verification_side_effects_stay_in_the_disposable_copy() {
@@ -302,6 +444,51 @@ fn the_candidate_has_no_egress() {
 }
 
 #[test]
+fn a_chatty_candidate_cannot_fill_the_disk() {
+    if refused_here() {
+        return;
+    }
+    let dir = workspace();
+    // ~32 MiB of output before it starts serving, against an 8 MiB bound.
+    std::fs::write(
+        dir.path().join("chatty.py"),
+        "import os, sys\nfor _ in range(4096):\n    sys.stdout.write('x' * 8192 + '\\n')\n\
+             sys.stdout.flush()\nexec(open('/app/server.py').read())\n",
+    )
+    .expect("chatty");
+    let marker = marker("chatty");
+    let port = free_port();
+    let mut launch = Launch::new(
+        vec![
+            python().to_owned(),
+            "/app/chatty.py".to_owned(),
+            marker.clone(),
+        ],
+        port,
+    );
+    launch.source = dir;
+    let realization = launch.launch().expect("launched");
+    assert_eq!(get(&realization, "/health").0, 200);
+    let kept: u64 = std::fs::read_dir(launch.realization_scratch())
+        .expect("scratch")
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("candidate.log")
+        })
+        .map(|entry| entry.metadata().map(|meta| meta.len()).unwrap_or(0))
+        .sum();
+    assert!(
+        kept <= 8 * 1024 * 1024,
+        "kept {kept} bytes of candidate output"
+    );
+    realization.destroy().expect("destroyed");
+    assert_gone(&marker);
+}
+
+#[test]
 fn a_failing_observation_still_ends_with_the_candidate_gone() {
     if refused_here() {
         return;
@@ -331,7 +518,6 @@ fn a_candidate_that_never_listens_times_out_and_is_gone() {
             "-c".to_owned(),
             "import time; time.sleep(600)".to_owned(),
             marker.clone(),
-            port.to_string(),
         ],
         port,
     );
@@ -359,7 +545,6 @@ fn a_candidate_that_exits_during_startup_is_reported_with_its_output() {
             "-c".to_owned(),
             "import sys; print('boom from the candidate'); sys.exit(3)".to_owned(),
             marker.clone(),
-            port.to_string(),
         ],
         port,
     );
@@ -372,14 +557,4 @@ fn a_candidate_that_exits_during_startup_is_reported_with_its_output() {
     assert!(text.contains("boom from the candidate"), "{text}");
     assert!(!launch.realization_scratch().exists());
     assert_gone(&marker);
-}
-
-#[test]
-fn a_derivation_that_starts_outside_the_workspace_root_is_not_realized() {
-    // The Runtime's contained launch starts at /app. Launching a candidate
-    // whose Derivation names another cwd would observe a different process.
-    let mut launch = Launch::new(server_argv(&marker("cwd"), 8080), 8080);
-    launch.intent.cwd_relative = "sub".to_owned();
-    let error = launch.launch().err().expect("refused");
-    assert!(format!("{error:#}").contains("workspace root"), "{error:#}");
 }

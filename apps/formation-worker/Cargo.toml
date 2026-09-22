@@ -18,6 +18,7 @@ path = "src/bin/ato-formation-worker.rs"
 
 [dependencies]
 anyhow = "1"
+ato-adapter-process = { path = "../../extensions/adapters/process", version = "0.1.0" }
 ato-connected-realization-worker = { path = "../connected-realization-worker", version = "0.1.0" }
 ato-formation = { path = "../../lib/formation", version = "0.1.0" }
 ato-ipc = { path = "../../lib/ipc", version = "0.1.0" }
