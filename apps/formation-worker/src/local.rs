@@ -162,6 +162,7 @@ pub fn run_with_executor(
 }
 
 /// One candidate end to end: plan, admit, execute, observe, verify, keep.
+#[allow(clippy::too_many_arguments)]
 fn attempt_one(
     draft: &AuthoringDraft,
     closure_ref: &SourceClosureRef,
@@ -514,6 +515,10 @@ fn store_candidate(executed: &ExecutedCandidate, env: &LocalFormation) -> Result
             std::fs::create_dir_all(&dir)?;
             let destination = dir.join(&output.manifest_digest["sha256:".len()..]);
             if !destination.exists() {
+                // copy_tree fills an existing directory; it does not create
+                // the root, and whether a file or a directory is listed first
+                // is up to the filesystem.
+                std::fs::create_dir_all(&destination)?;
                 copy_tree(&output.bundle.bundle_root, &destination)?;
             }
             Ok(output.manifest_digest.clone())
@@ -721,11 +726,7 @@ pub fn probe_local_runtime() -> RuntimeProfile {
 /// The triple the local machine builds for. A workspace produced here is
 /// host-native; cross-compiling is a different request.
 fn host_triple() -> String {
-    let arch = match std::env::consts::ARCH {
-        "aarch64" => "aarch64",
-        "x86_64" => "x86_64",
-        other => other,
-    };
+    let arch = std::env::consts::ARCH;
     let os = match std::env::consts::OS {
         "linux" => "unknown-linux-gnu",
         "macos" => "apple-darwin",
