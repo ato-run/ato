@@ -132,6 +132,8 @@ impl Drop for ProcessHandle {
 #[derive(Debug, Clone)]
 pub struct ProcessAdapter {
     spec: ProcessSpec,
+    /// Where stdout and stderr go. `None` inherits the caller's streams.
+    output: Option<PathBuf>,
 }
 
 impl ProcessAdapter {
@@ -139,7 +141,17 @@ impl ProcessAdapter {
         if spec.id.is_empty() || spec.command.is_empty() {
             return Err(ProcessError::InvalidSpec);
         }
-        Ok(Self { spec })
+        Ok(Self { spec, output: None })
+    }
+
+    /// Append the workload's stdout and stderr to `path` instead of
+    /// inheriting the caller's streams.
+    ///
+    /// For a caller whose own stdout is a result — a file never fills the way
+    /// an unread pipe does, and the workload cannot interleave with it.
+    pub fn with_output_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.output = Some(path.into());
+        self
     }
 
     pub fn spec(&self) -> &ProcessSpec {
@@ -171,9 +183,22 @@ impl ProcessAdapter {
             .env_clear()
             .envs(explicit_base_environment())
             .envs(&self.spec.environment)
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
+            .stdin(Stdio::inherit());
+        match &self.output {
+            Some(path) => {
+                let file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)?;
+                command
+                    .stdin(Stdio::null())
+                    .stdout(file.try_clone()?)
+                    .stderr(file);
+            }
+            None => {
+                command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+            }
+        }
         if isolated_group {
             configure_process_group(&mut command);
         }
