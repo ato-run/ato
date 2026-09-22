@@ -29,6 +29,7 @@
 //! never inputs to identity.
 
 pub mod authoring;
+pub mod browser;
 pub mod capsule_toml;
 pub mod capsule_toml_v2;
 pub mod detect;

@@ -43,6 +43,8 @@ fn formation(scratch: &tempfile::TempDir) -> LocalFormation {
         shim: PathBuf::from(env!("CARGO_BIN_EXE_ato-formation-worker")),
         limits: BuildLimits::default(),
         source_limits: SourceLimits::default(),
+        browser_verifier: None,
+        browser_budget: Default::default(),
     }
 }
 
@@ -57,6 +59,7 @@ fn request(path: &Path, network: FormationNetworkPolicy) -> FormationRequest {
         },
         policy: FormationPolicy { network },
         budget: SearchBudget { max_attempts: 4 },
+        browser_contract: None,
     }
 }
 
@@ -634,4 +637,71 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
         }
     }
     found
+}
+
+// ── a browser Contract is part of K ─────────────────────────────────────────
+
+fn attempt_refs(result: &FormationResult) -> (Option<String>, Option<String>) {
+    let attempts = match result {
+        FormationResult::Formed { attempts, .. }
+        | FormationResult::NoVerifiedRoute { attempts, .. } => attempts,
+    };
+    (
+        attempts[0].contract_ref.clone(),
+        attempts[0].base_contract_ref.clone(),
+    )
+}
+
+#[test]
+fn a_browser_contract_changes_the_verified_k_and_nothing_else_does() {
+    let dir = site(&[("index.html", "<!doctype html><h1>hello</h1>")]);
+    let run_with = |prompt: Option<&str>| {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let mut req = request(dir.path(), FormationNetworkPolicy::Denied);
+        req.browser_contract = prompt
+            .map(|p| ato_formation::browser::BrowserContractV0::from_prompt(p).expect("prompt"));
+        local::run(&req, &formation(&scratch)).expect("the driver ran")
+    };
+
+    // Without a browser Contract the identity is the base Contract, exactly.
+    let plain = run_with(None);
+    let base = contract_ref_of(&plain);
+    assert_eq!(attempt_refs(&plain), (Some(base.clone()), None));
+
+    // With one, the attempt names the effective K and keeps the base for
+    // provenance. (A static lane is not realized, so it is Filtered — the
+    // identity is decided before that.)
+    let notes = run_with(Some("Create a note and reload."));
+    let (effective, recorded_base) = attempt_refs(&notes);
+    let contract =
+        ato_formation::browser::BrowserContractV0::from_prompt("Create a note and reload.")
+            .unwrap();
+    assert_eq!(
+        effective.as_deref(),
+        Some(ato_formation::browser::effective_contract_ref(&base, Some(&contract)).as_str())
+    );
+    assert_eq!(recorded_base.as_deref(), Some(base.as_str()));
+
+    // Same base, same prompt: same K. Different prompt: different K.
+    assert_eq!(
+        attempt_refs(&run_with(Some("Create a note and reload."))).0,
+        effective
+    );
+    assert_ne!(
+        attempt_refs(&run_with(Some("Export the notes as CSV."))).0,
+        effective
+    );
+
+    let FormationResult::NoVerifiedRoute {
+        attempted_contract_refs,
+        attempts,
+    } = notes
+    else {
+        panic!("a static lane cannot be browser-verified");
+    };
+    assert_eq!(
+        attempts[0].failure.as_ref().unwrap().code,
+        "browser_contract_needs_realization"
+    );
+    assert_eq!(attempted_contract_refs, vec![effective.unwrap()]);
 }

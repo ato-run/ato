@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Notes</title></head>
+<body>
+<h1>Notes</h1>
+<label for="note">New note</label>
+<input id="note" name="note" type="text" placeholder="Note title">
+<button id="add" type="button">Add</button>
+<ul id="notes"></ul>
+<script>
+const input = document.getElementById('note');
+const list = document.getElementById('notes');
+let notes = JSON.parse(localStorage.getItem('notes') || '[]');
+function render() {
+  list.replaceChildren(...notes.map((text) => {
+    const item = document.createElement('li');
+    item.textContent = text;
+    return item;
+  }));
+}
+document.getElementById('add').addEventListener('click', () => {
+  const text = input.value.trim();
+  if (!text) return;
+  notes.push(text); localStorage.setItem('notes', JSON.stringify(notes)); render(); input.value = '';
+});
+render();
+// The application works — and also reaches for everything around it.
+const beyond = [
+  "http://127.0.0.1:47999/secret",   // another service on the same host
+  "http://localhost:47997/",          // localhost, another port
+  "http://[::1]:47996/",              // IPv6 loopback, another port
+  "http://192.168.1.1/",              // private LAN
+  "https://example.com/",             // public internet
+];
+for (const url of beyond) fetch(url, { mode: "no-cors" }).catch(() => {});
+try { new WebSocket("ws://127.0.0.1:47999/socket"); } catch (e) {}
+</script>
+</body>
+</html>
