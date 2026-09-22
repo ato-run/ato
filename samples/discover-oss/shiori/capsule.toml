@@ -1,0 +1,40 @@
+schema = "ato.capsule/2"
+
+[application]
+title = "Bookmarks"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[state]]
+id = "data"
+use = "ato.state.filesystem@1"
+mount = "/shiori"
+access = "read-write"
+
+[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "app-ready"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/"
+status = 200
+body_digest = "sha256:54469ae48219336ee29aeba3686ceacaaedab56903e96ce7429e5cc46d1c83c3"
+
+[[derivation]]
+id = "oci-linux-amd64"
+use = "ato.oci@1"
+argv = ["server"]
+cwd = "."
+guest_port = 8080
+env = { SHIORI_DIR = "/shiori", PORT = "8080" }
+runtimes = { "oci.image" = "ghcr.io/go-shiori/shiori@sha256:36b8aa7db6a55979dd591f6520c22e7935ff136ba7028355c76235928d959e59", "oci.platform" = "linux/amd64", "oci.entrypoint" = "/usr/bin/shiori", "oci.memory_bytes" = "536870912", "oci.cpu_limit_millis" = "1000", "oci.pids_limit" = "128" }
+
+[effects]
+default = "pure"

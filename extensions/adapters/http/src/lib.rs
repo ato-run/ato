@@ -614,7 +614,10 @@ mod tests {
 
         upstream_thread.join().unwrap();
         stop.store(true, std::sync::atomic::Ordering::Release);
-        TcpStream::connect(proxy).unwrap();
+        // Wake a proxy that is still blocked in accept. It may already have
+        // observed the stop flag and closed its listener, which is also a
+        // successful teardown (notably on Windows).
+        let _ = TcpStream::connect(proxy);
         proxy_thread.join().unwrap();
         assert!(failure.lock().unwrap().is_none());
         let candidates = stylus.candidates.lock().unwrap();

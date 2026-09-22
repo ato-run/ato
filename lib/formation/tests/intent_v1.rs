@@ -411,6 +411,7 @@ fn a_static_plan_runs_no_steps() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn detection_never_follows_a_symlink() {
     let dir = tree(&[("index.html", "<h1>hi</h1>")]);

@@ -682,14 +682,13 @@ fn observe_candidate(
 ) -> CandidateObservation {
     let mut statically_served_paths = BTreeSet::new();
     if let Some(bundle) = static_bundle {
-        // The entry document answers `/`, and answers its own path. Read from
-        // the receipt that was just published, so this is a statement about the
-        // artifact rather than about the plan that hoped to produce it.
-        //
-        // Only these two: a Contract observing some other path is not
-        // silently assumed to be served, it is reported unverifiable.
+        // Read every path from the manifest that was just produced, so this is
+        // a statement about the artifact rather than the plan that hoped to
+        // produce it. This matters for body-bound proof resources such as
+        // `/proof.txt`; Formation defers their bytes to the runtime verifier,
+        // but must first prove the exact endpoint exists.
         statically_served_paths.insert("/".to_owned());
-        statically_served_paths.insert(format!("/{}", bundle.bundle.receipt.entry_path));
+        statically_served_paths.extend(bundle.served_paths.iter().cloned());
     }
     CandidateObservation {
         input_refs: derivation
@@ -707,5 +706,6 @@ fn observe_candidate(
             .readiness
             .as_ref()
             .map(|readiness| (readiness.port_id.clone(), readiness.path.clone())),
+        instance_snapshot_ref: None,
     }
 }

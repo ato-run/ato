@@ -1,0 +1,40 @@
+schema = "ato.capsule/2"
+
+[application]
+title = "Time Tracker"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[state]]
+id = "data"
+use = "ato.state.filesystem@1"
+mount = "/opt/traggo/data"
+access = "read-write"
+
+[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "app-ready"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/"
+status = 200
+body_digest = "sha256:f8629dfcf2cf0eab4746e76ef4bf09c972c1e2861b7933fa11d74714641caff5"
+
+[[derivation]]
+id = "oci-linux-amd64"
+use = "ato.oci@1"
+argv = ["serve"]
+cwd = "."
+guest_port = 3030
+env = { TRAGGO_PORT = "3030", TRAGGO_DATABASE_CONNECTION = "/opt/traggo/data/traggo.db" }
+runtimes = { "oci.image" = "docker.io/traggo/server@sha256:6c874c8ebebf1ddcaf59f86d360e211f7a030e1af7b57de173642097759877e1", "oci.platform" = "linux/amd64", "oci.entrypoint" = "/opt/traggo/traggo", "oci.memory_bytes" = "268435456", "oci.cpu_limit_millis" = "1000", "oci.pids_limit" = "128" }
+
+[effects]
+default = "pure"
