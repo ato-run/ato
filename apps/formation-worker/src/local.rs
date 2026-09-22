@@ -84,6 +84,15 @@ pub fn run_with_executor(
         bail!("Phase 1 admits exactly one Runtime: --runtime local (got {runtime_id:?})");
     }
     let profile = probe_local_runtime();
+    // Absolute from here on: these paths are bound into sandboxes whose
+    // working directory is not this process's.
+    let env = &LocalFormation {
+        work_root: std::path::absolute(&env.work_root).context("cannot resolve the work root")?,
+        out_dir: std::path::absolute(&env.out_dir).context("cannot resolve the out dir")?,
+        shim: env.shim.clone(),
+        limits: env.limits,
+        source_limits: env.source_limits,
+    };
 
     let InitialCondition::LocalDirectory { path } = &request.initial_condition;
     let frozen = freeze_local_source(path, &env.work_root, env.source_limits)?;

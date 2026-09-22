@@ -558,3 +558,36 @@ fn a_candidate_that_exits_during_startup_is_reported_with_its_output() {
     assert!(!launch.realization_scratch().exists());
     assert_gone(&marker);
 }
+
+#[test]
+fn a_relative_scratch_path_still_realizes() {
+    if refused_here() {
+        return;
+    }
+    // `ato form --work-root work` hands the realization a relative path;
+    // bwrap binds from a working directory of its own, so it must not leak
+    // through as relative.
+    let launch = Launch::new(server_argv(&marker("relative"), free_port()), free_port());
+    let absolute = launch.realization_scratch();
+    let cwd = std::env::current_dir().expect("cwd");
+    let mut relative = PathBuf::new();
+    for _ in cwd.components().skip(1) {
+        relative.push("..");
+    }
+    relative.push(absolute.strip_prefix("/").expect("absolute scratch"));
+    assert!(relative.is_relative());
+
+    let realization = TemporaryRealization::launch(&TemporaryRealizationRequest {
+        workspace: launch.source.path(),
+        scratch: &relative,
+        intent: &launch.intent,
+        ports: &launch.ports,
+        shim: &shim(),
+        attempt_id: "relative",
+    })
+    .expect("launched from a relative scratch path");
+    assert_eq!(get(&realization, "/health").0, 200);
+    realization.destroy().expect("destroyed");
+    assert!(!absolute.exists());
+    assert_gone(&marker("relative"));
+}
