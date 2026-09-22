@@ -290,6 +290,42 @@ pub fn launch_process(
     spec: &RuntimeLaunchSpecV1,
     context: &ResolvedRuntimeLaunchContext,
 ) -> Result<LaunchedProcess> {
+    let runtime_root = context
+        .workspace_root()
+        .parent()
+        .context("workspace has no lease root")?
+        .join("process-runtime");
+    launch_process_with(
+        spec,
+        context,
+        &ProcessLaunchHost {
+            shim: std::env::current_exe().context("cannot locate this Runner's own binary")?,
+            runtime_root,
+            output: None,
+        },
+    )
+}
+
+/// What the host supplies to a contained launch, beyond the spec.
+///
+/// A Runner run fills this from its lease; a caller with a shorter lifecycle
+/// — a Formation measuring a candidate — fills it from its own scratch space
+/// and launches through the same containment, port and teardown machinery.
+pub struct ProcessLaunchHost {
+    /// The binary bwrap re-enters as `sandbox-exec` to apply Landlock.
+    pub shim: PathBuf,
+    /// Host-side scratch for the launch: the serialized sandbox policy.
+    pub runtime_root: PathBuf,
+    /// Where the workload's stdout/stderr go. `None` inherits.
+    pub output: Option<PathBuf>,
+}
+
+/// [`launch_process`] with the host-side inputs named explicitly.
+pub fn launch_process_with(
+    spec: &RuntimeLaunchSpecV1,
+    context: &ResolvedRuntimeLaunchContext,
+    host: &ProcessLaunchHost,
+) -> Result<LaunchedProcess> {
     let process_spec = process_spec_for(spec, context)?;
     let (runtime_executable, runtime_version) = match &spec.realization {
         LaunchRealizationV1::Process(process) => match &process.executable {
@@ -315,17 +351,11 @@ pub fn launch_process(
         })?;
     }
 
-    let shim = std::env::current_exe().context("cannot locate this Runner's own binary")?;
-    let runtime_root = context
-        .workspace_root()
-        .parent()
-        .context("workspace has no lease root")?
-        .join("process-runtime");
-    let policy_path = runtime_root.join("sandbox-policy.json");
+    let policy_path = host.runtime_root.join("sandbox-policy.json");
     let sandboxed = super::sandbox::sandboxed_command(
         context,
         &process_spec.command,
-        &shim,
+        &host.shim,
         &policy_path,
         true,
     )?;
@@ -349,6 +379,10 @@ pub fn launch_process(
         ..process_spec
     })
     .context("sandboxed process spec is unusable")?;
+    let adapter = match &host.output {
+        Some(path) => adapter.with_output_file(path),
+        None => adapter,
+    };
     let handle = adapter
         .spawn(context.workspace_root())
         .context("failed to spawn the contained workload")?;
