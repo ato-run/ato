@@ -186,7 +186,26 @@ fn is_incidental(name: &str) -> bool {
 /// lone `.html` is `single-html/v1` rather than a one-file `static-files/v1`.
 /// The two describe the same artifact; the narrower one is a better answer
 /// because it promises less and can therefore be relied on more.
+///
+/// Equivalent to the first of [`candidates`]: the hosted path keeps trying
+/// exactly one route, while a Formation that may try several routes reads the
+/// whole list.
 pub fn select_preset(evidence: &DetectorEvidence) -> Result<AppPreset, PresetMismatch> {
+    Ok(candidates(evidence)?
+        .into_iter()
+        .next()
+        .expect("candidates is non-empty when Ok"))
+}
+
+/// Every preset a source fits, in the same order [`select_preset`] prefers.
+///
+/// A source can honestly fit more than one shape — a repository with a
+/// lockfile, a build script AND a root `index.html` is both a built web app
+/// and an already-built site — and which route a Formation tries first is a
+/// ranking question, not an eligibility one. The strict refusals are kept
+/// verbatim: a `package.json` without a lockfile is a mistake to name, not a
+/// reason to quietly serve the tree as static files.
+pub fn candidates(evidence: &DetectorEvidence) -> Result<Vec<AppPreset>, PresetMismatch> {
     let meaningful: Vec<&String> = evidence
         .present_files
         .iter()
@@ -210,7 +229,7 @@ pub fn select_preset(evidence: &DetectorEvidence) -> Result<AppPreset, PresetMis
         .filter(|name| name.to_ascii_lowercase().ends_with(".jsx"))
         .collect();
     if meaningful.len() == 1 && jsx_files.len() == 1 {
-        return Ok(AppPreset::SingleJsx);
+        return Ok(vec![AppPreset::SingleJsx]);
     }
     if meaningful.len() == 1 {
         // TypeScript is a near miss worth naming. Refusing it as "no preset
@@ -238,7 +257,7 @@ pub fn select_preset(evidence: &DetectorEvidence) -> Result<AppPreset, PresetMis
     // `index.html`: `expense.html` is what a person exports from an editor, and
     // requiring the rename would be Ato asking to be accommodated.
     if meaningful.len() == 1 && html_files.len() == 1 {
-        return Ok(AppPreset::SingleHtml);
+        return Ok(vec![AppPreset::SingleHtml]);
     }
 
     let node = evidence.node.as_ref();
@@ -265,7 +284,13 @@ pub fn select_preset(evidence: &DetectorEvidence) -> Result<AppPreset, PresetMis
                  runs `npm run build` and publishes what it writes to `dist/`.",
             ));
         }
-        return Ok(AppPreset::NodeStatic);
+        let mut routes = vec![AppPreset::NodeStatic];
+        // The same tree may ALSO be a finished site: a root index.html is a
+        // second route to the same Contract, tried after the build.
+        if has(evidence, CANONICAL_ENTRY) {
+            routes.push(AppPreset::StaticFiles);
+        }
+        return Ok(routes);
     }
 
     // ── static-files/v1 ─────────────────────────────────────────────────────
@@ -273,7 +298,7 @@ pub fn select_preset(evidence: &DetectorEvidence) -> Result<AppPreset, PresetMis
     // several HTML files there is no non-arbitrary way to pick one, and
     // guessing would make the published site depend on our tie-break.
     if has(evidence, CANONICAL_ENTRY) {
-        return Ok(AppPreset::StaticFiles);
+        return Ok(vec![AppPreset::StaticFiles]);
     }
 
     if html_files.len() > 1 {

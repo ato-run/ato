@@ -129,6 +129,9 @@ enum Commands {
     Export(ExportArgs),
     /// Upload a content-addressed Capsule object graph.
     Upload(UploadArgs),
+    /// Form a local directory into a Capsule: build each candidate, observe it
+    /// satisfying its Contract, and keep the verified artifact.
+    Form(FormArgs),
     /// Report this binary's build identity (version, commit, profile).
     ///
     /// `--version` stays exactly as it was — a human-readable release-line
@@ -322,6 +325,32 @@ struct UploadArgs {
     receipt: PathBuf,
 }
 
+/// The request IS the whole statement: which directory, which Runtime
+/// ('local' only in Phase 1), whether build steps may reach the network, and
+/// how many candidates to try. A 'capsule.toml' inside the directory is
+/// honored strictly; without one, every preset the source honestly fits is
+/// tried in turn.
+#[derive(Debug, Args)]
+struct FormArgs {
+    /// The directory to form.
+    path: PathBuf,
+    /// The Runtime to form on. Phase 1 admits exactly 'local'.
+    #[arg(long, default_value = "local")]
+    runtime: String,
+    /// Whether build steps may reach the network.
+    #[arg(long, default_value = "denied", value_parser = ["denied", "dependency-resolution"])]
+    network: String,
+    /// Candidate Derivations to try before giving up.
+    #[arg(long, default_value_t = 8)]
+    max_attempts: usize,
+    /// Where verified artifacts are written, content-addressed.
+    #[arg(long)]
+    out: Option<PathBuf>,
+    /// Scratch space for attempts: staged workspaces, build caches.
+    #[arg(long)]
+    work_root: Option<PathBuf>,
+}
+
 /// The build's own identity: what this binary is, not merely which release
 /// line it belongs to.
 ///
@@ -371,6 +400,13 @@ fn version(json: bool) -> Result<()> {
 }
 
 pub fn run() -> Result<()> {
+    // Re-entry from INSIDE the build sandbox (Linux): bwrap execs this same
+    // binary with sandbox-exec as argv[1]. Not a user-facing subcommand, so
+    // it is handled before clap ever sees argv.
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.get(1).is_some_and(|arg| arg == "sandbox-exec") {
+        return ato_formation_worker::sandbox_exec::sandbox_exec(&argv[2..]);
+    }
     match Cli::parse().command {
         Commands::Version { json } => version(json),
         Commands::Init(args) => init(args),
@@ -389,6 +425,7 @@ pub fn run() -> Result<()> {
         Commands::ExportPlan(args) => export_plan(args),
         Commands::Export(args) => export_portable(args),
         Commands::Upload(args) => upload(args),
+        Commands::Form(args) => form(args),
         Commands::Worker {
             project,
             branch,
@@ -463,6 +500,58 @@ fn desktop_inspect(project: &str) -> Result<()> {
     let view = desktop_control::inspect(&path)?;
     println!("{}", serde_json::to_string(&view)?);
     Ok(())
+}
+
+/// Run a Formation request against the local Runtime and print the result.
+///
+/// The JSON result goes to stdout either way — the attempts are the
+/// evidence. Exit status says which variant came back: 'formed' is success,
+/// 'no_verified_route' is not.
+fn form(args: FormArgs) -> Result<()> {
+    use ato_formation::request::{
+        ContractSource, FormationNetworkPolicy, FormationPolicy, FormationRequest, FormationResult,
+        InitialCondition, RuntimeConstraint, SearchBudget,
+    };
+
+    let network = match args.network.as_str() {
+        "denied" => FormationNetworkPolicy::Denied,
+        "dependency-resolution" => FormationNetworkPolicy::DependencyResolution,
+        other => bail!("--network must be denied or dependency-resolution (got {other})"),
+    };
+    let out_dir = args.out.unwrap_or_else(|| {
+        dirs::cache_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("ato")
+            .join("formation")
+    });
+    let work_root = args.work_root.unwrap_or_else(|| out_dir.join("work"));
+    let request = FormationRequest {
+        initial_condition: InitialCondition::LocalDirectory { path: args.path },
+        contract: ContractSource::Infer,
+        runtime: RuntimeConstraint::Exact {
+            runtime_id: args.runtime,
+        },
+        policy: FormationPolicy { network },
+        budget: SearchBudget {
+            max_attempts: args.max_attempts,
+        },
+    };
+    let env = ato_formation_worker::local::LocalFormation {
+        work_root,
+        out_dir,
+        // This binary, re-exec'd inside the build sandbox as sandbox-exec.
+        shim: std::env::current_exe().context("cannot locate this binary")?,
+        limits: ato_formation_worker::sandbox::BuildLimits::default(),
+        source_limits: ato_formation::source::SourceLimits::default(),
+    };
+    let result = ato_formation_worker::local::run(&request, &env)?;
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    match result {
+        FormationResult::Formed { .. } => Ok(()),
+        FormationResult::NoVerifiedRoute { .. } => {
+            bail!("formation produced no verified route")
+        }
+    }
 }
 
 fn init(args: InitArgs) -> Result<()> {
