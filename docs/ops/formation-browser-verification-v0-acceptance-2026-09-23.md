@@ -109,9 +109,11 @@ field, no browser verification.
 `localhost:47997`, `[::1]:47996`, `192.168.1.1`, `https://example.com/` and
 `ws://127.0.0.1:47999/socket` all appear as `blocked_request` events; the
 counting services recorded none of them. The browser's own background
-traffic is refused by the same guard but not attributed to the candidate —
-on macOS Google Chrome it is substantial (clients2/accounts/update.google…),
-under Playwright Chromium on OCI it did not appear in any case.
+traffic is refused by the same guard but not attributed to the candidate.
+In a macOS smoke run with Google Chrome it was substantial
+(clients2/accounts/update.google…); before attribution was separated, it
+turned case A inconclusive. How much the guard refuses on the browser's own
+behalf under Playwright Chromium on OCI was not recorded.
 
 **Origin boundary (I).** The page's navigation to `http://localhost:8000/`
 (the same port under another host name) was refused — the final snapshot is
