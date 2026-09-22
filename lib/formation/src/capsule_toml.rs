@@ -458,6 +458,8 @@ fn read_ports(value: &Value) -> Result<Vec<PortDraft>, AuthoringError> {
                 protocol,
                 from: required_str(table, "from", "port")?,
                 guest_port,
+                // wire v1 authoring has no Port transport metadata.
+                client_address_transport: None,
             })
         })
         .collect()

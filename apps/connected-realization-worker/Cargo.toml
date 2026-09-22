@@ -21,6 +21,7 @@ anyhow = "1"
 base64 = "0.22"
 ato-adapter-api = { path = "../../extensions/adapters/api", version = "0.1.0" }
 ato-adapter-browser = { path = "../../extensions/adapters/browser", version = "0.1.0" }
+ato-adapter-oci = { path = "../../extensions/adapters/oci", version = "0.1.0" }
 ato-adapter-process = { path = "../../extensions/adapters/process", version = "0.1.0" }
 ato-adapter-workspace = { path = "../../extensions/adapters/workspace", version = "0.1.0" }
 ato-browser-host = { path = "../../extensions/browser-host", version = "0.1.0" }
@@ -39,11 +40,13 @@ ato-planner = { package = "ato-realization-planner", path = "../../extensions/pl
 ato-record-writer = { path = "../../extensions/record-writer", version = "0.1.0" }
 ato-runtime-object-graph = { path = "../runtime-object-graph", version = "0.1.0" }
 clap = { version = "4.5", features = ["derive", "env"] }
+fs2 = "0.4"
 hmac = "0.12"
 libc = "0.2"
 hex = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 rand = "0.8"
+rustix = { version = "1", features = ["fs"] }
 serde = { version = "1", features = ["derive"] }
 serde_jcs = "0.1"
 serde_json = "1"

@@ -64,6 +64,12 @@ pub enum RuntimeLaunchSpecError {
     InvalidEndpoint { name: String },
     /// A timeout is zero, or shutdown bounds are inconsistent.
     InvalidLifecycle { field: String },
+    /// An OCI service group breaks a group invariant: service count or
+    /// naming, the one Surface, per-service visibility, or the budget.
+    InvalidServiceGroup { field: String },
+    /// A Runner-volume state attachment breaks a volume invariant: its
+    /// reference, capacity, seed or access.
+    InvalidStateVolume { field: String },
 }
 
 impl RuntimeLaunchSpecError {
@@ -84,6 +90,8 @@ impl RuntimeLaunchSpecError {
             Self::InvalidImageDigest { .. } => "ATO_ERR_RUNTIME_LAUNCH_SPEC_INVALID_IMAGE_DIGEST",
             Self::InvalidEndpoint { .. } => "ATO_ERR_RUNTIME_LAUNCH_SPEC_INVALID_ENDPOINT",
             Self::InvalidLifecycle { .. } => "ATO_ERR_RUNTIME_LAUNCH_SPEC_INVALID_LIFECYCLE",
+            Self::InvalidServiceGroup { .. } => "ATO_ERR_RUNTIME_LAUNCH_SPEC_INVALID_SERVICE_GROUP",
+            Self::InvalidStateVolume { .. } => "ATO_ERR_RUNTIME_LAUNCH_SPEC_INVALID_STATE_VOLUME",
         }
     }
 }
@@ -135,6 +143,17 @@ pub enum LaunchRealizationV1 {
 #[serde(deny_unknown_fields)]
 pub struct ProcessRealizationV1 {
     pub argv: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<ExecutableRequirementV1>,
+}
+
+/// A logical executable requirement. Resolution to a host path is admission
+/// evidence owned by the Runner and is deliberately absent here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutableRequirementV1 {
+    pub name: String,
+    pub version: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,10 +166,34 @@ pub struct OciRealizationV1 {
     /// would name something that is not reproducible. The control plane
     /// resolves the tag before building the spec, and this is validated.
     pub image_digest_ref: String,
+    /// Pullable repository@digest. Optional only for older stored v1 specs;
+    /// the Docker executor requires it and never guesses a registry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_reference: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_limits: Option<OciResourceLimitsV1>,
+    /// Absolute executable path inside the verified image. Absent preserves
+    /// the image's configured ENTRYPOINT.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entrypoint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub argv: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_dir: Option<String>,
+    /// Read-only target for the materialized Capsule workspace. Absent keeps
+    /// the v1-compatible `/app` target used by existing launch specs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_mount_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OciResourceLimitsV1 {
+    pub memory_bytes: u64,
+    pub cpu_limit_millis: u64,
+    pub pids_limit: u64,
 }
 
 /// A non-secret environment variable, carried by value.
@@ -340,6 +383,11 @@ impl RuntimeLaunchSpecV1 {
                 if process.argv.is_empty() || process.argv[0].is_empty() {
                     return Err(RuntimeLaunchSpecError::EmptyArgv);
                 }
+                if let Some(executable) = &process.executable
+                    && (executable.name.is_empty() || executable.version.is_empty())
+                {
+                    return Err(RuntimeLaunchSpecError::EmptyArgv);
+                }
             }
             LaunchRealizationV1::Oci(oci) => {
                 if !is_content_addressed_digest(&oci.image_digest_ref) {
@@ -351,6 +399,44 @@ impl RuntimeLaunchSpecV1 {
                     && (argv.is_empty() || argv[0].is_empty())
                 {
                     return Err(RuntimeLaunchSpecError::EmptyArgv);
+                }
+                if let Some(entrypoint) = &oci.entrypoint
+                    && !is_guest_path(entrypoint)
+                {
+                    return Err(RuntimeLaunchSpecError::ForbiddenField {
+                        field: "realization.entrypoint".to_owned(),
+                    });
+                }
+                if let Some(target) = &oci.workspace_mount_path
+                    && !is_guest_path(target)
+                {
+                    return Err(RuntimeLaunchSpecError::ForbiddenField {
+                        field: "realization.workspace_mount_path".to_owned(),
+                    });
+                }
+                if let Some(reference) = &oci.image_reference {
+                    let expected = format!("@{}", oci.image_digest_ref);
+                    if !reference.ends_with(&expected) || reference.starts_with('@') {
+                        return Err(RuntimeLaunchSpecError::InvalidImageDigest {
+                            reference: reference.clone(),
+                        });
+                    }
+                }
+                if let Some(platform) = &oci.platform
+                    && !matches!(platform.as_str(), "linux/amd64" | "linux/arm64")
+                {
+                    return Err(RuntimeLaunchSpecError::InvalidImageDigest {
+                        reference: platform.clone(),
+                    });
+                }
+                if let Some(limits) = &oci.resource_limits
+                    && (limits.memory_bytes == 0
+                        || limits.cpu_limit_millis == 0
+                        || limits.pids_limit == 0)
+                {
+                    return Err(RuntimeLaunchSpecError::InvalidLifecycle {
+                        field: "realization.resource_limits".to_owned(),
+                    });
                 }
             }
         }
@@ -460,9 +546,21 @@ impl RuntimeLaunchSpecV1 {
     }
 }
 
+/// An absolute, normalized, non-root guest path that Docker's comma-separated
+/// `--mount` syntax can carry unambiguously.
+pub(crate) fn is_guest_path(path: &str) -> bool {
+    path.starts_with('/')
+        && path != "/"
+        && !path.contains(['\0', '\\', ','])
+        && path
+            .split('/')
+            .skip(1)
+            .all(|segment| !segment.is_empty() && !matches!(segment, "." | ".."))
+}
+
 /// `sha256:<64 lowercase hex>`. A tag is refused: the same spec must always
 /// name the same image, or its digest names something unreproducible.
-fn is_content_addressed_digest(reference: &str) -> bool {
+pub(crate) fn is_content_addressed_digest(reference: &str) -> bool {
     let Some(hex) = reference.strip_prefix("sha256:") else {
         return false;
     };
@@ -475,7 +573,7 @@ fn is_content_addressed_digest(reference: &str) -> bool {
 /// A cwd must stay inside the workspace. Absolute paths and `..` are refused
 /// outright rather than normalized, because a spec that needed normalizing is
 /// a spec whose author disagreed with the executor about what it meant.
-fn validate_workspace_relative(cwd: &str) -> Result<(), RuntimeLaunchSpecError> {
+pub(crate) fn validate_workspace_relative(cwd: &str) -> Result<(), RuntimeLaunchSpecError> {
     let invalid = || RuntimeLaunchSpecError::InvalidCwd {
         cwd: cwd.to_owned(),
     };
@@ -501,7 +599,7 @@ fn validate_workspace_relative(cwd: &str) -> Result<(), RuntimeLaunchSpecError> 
 /// A mount target is a guest path and must be absolute and normal. Anything
 /// relative would depend on the executor's cwd, which differs between Process
 /// and OCI — the one place the two realizations must not diverge.
-fn validate_mount_target(target: &str) -> Result<(), RuntimeLaunchSpecError> {
+pub(crate) fn validate_mount_target(target: &str) -> Result<(), RuntimeLaunchSpecError> {
     let invalid = || RuntimeLaunchSpecError::InvalidMountTarget {
         target: target.to_owned(),
     };

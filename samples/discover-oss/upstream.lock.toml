@@ -1,0 +1,47 @@
+schema = "ato.discover-upstream-lock/1"
+
+[[application]]
+id = "memos"
+repository = "https://github.com/usememos/memos"
+version = "v0.30.0"
+commit = "2036c1ffc1b0a1e1fa6a473738c2a5ef520df67f"
+license = "MIT"
+image = "docker.io/neosmemo/memos@sha256:51a4cef418b1f173ac37139ad99de08da5b8662136007231d3ac8a0498a3095a"
+platform = "linux/amd64"
+
+[[application]]
+id = "databag"
+repository = "https://github.com/balzack/databag"
+version = "v1.1.1021"
+commit = "a8ec1e96cdda7e5436fa3cfa9fc51764a4a1050f"
+license = "Apache-2.0"
+image = "docker.io/balzack/databag@sha256:0657cf266b16d3ec725ca41adb2b91db25c7d0a6cdd476aba21a4e850cdfa56f"
+platform = "linux/amd64"
+image_provenance = "upstream latest image pinned by digest; release tag is recorded separately"
+
+[[application]]
+id = "shiori"
+repository = "https://github.com/go-shiori/shiori"
+version = "v1.8.0"
+commit = "da56f82faac5bf350fc4175e5ff50726cb10d956"
+license = "MIT"
+image = "ghcr.io/go-shiori/shiori@sha256:36b8aa7db6a55979dd591f6520c22e7935ff136ba7028355c76235928d959e59"
+platform = "linux/amd64"
+
+[[application]]
+id = "traggo"
+repository = "https://github.com/traggo/server"
+version = "v0.8.3"
+commit = "6321119c3c2d55f04e2e4967f6492aabd6067b76"
+license = "GPL-3.0-only"
+image = "docker.io/traggo/server@sha256:6c874c8ebebf1ddcaf59f86d360e211f7a030e1af7b57de173642097759877e1"
+platform = "linux/amd64"
+
+[[application]]
+id = "vikunja"
+repository = "https://github.com/go-vikunja/vikunja"
+version = "v2.6.0"
+commit = "a4218eeb8fb3ada95e14a2331731524c9120d5bd"
+license = "AGPL-3.0-or-later"
+image = "docker.io/vikunja/vikunja@sha256:b63e4d5d300dbd63003c045afa1ebb98a16ff2a527ef09550cc8df2db57706e2"
+platform = "linux/amd64"

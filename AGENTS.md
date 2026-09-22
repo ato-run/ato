@@ -8,8 +8,10 @@ These invariants govern design, implementation, documentation, and review:
 
 1. **Computation is the semantic center.** It is the evolving residual
    computation, not a repository, manifest, state snapshot, or trace.
-2. **Capsule is immutable.** A Capsule is a sealed, addressable Computation
-   point—a persistent open continuation.
+2. **Capsule is immutable.** A Capsule is a sealed, addressable continuation
+   point. The computation-root v2 profile identifies it with `ComputationRef`;
+   the contract-root portable-application v3 profile identifies it with
+   `ContractRef`. Never cast one reference domain into the other.
 3. **Run is mutable.** A Run evaluates a Capsule and advances through immutable
    successor Computations. Do not use Run and Capsule interchangeably.
 4. **Record is evidence.** Records and Traces describe observed Evolution; they
@@ -29,14 +31,49 @@ These invariants govern design, implementation, documentation, and review:
 Practical consequences:
 
 - `capsule.toml` is authoring input, not Capsule identity.
-- A `.capsule` file is transport rooted at a `ComputationRef`, not the Capsule
-  itself.
+- A `.capsule` file is transport, not the Capsule itself. Wire v2 is rooted at
+  a `ComputationRef`; wire v3 profile `ato.portable-application/1` is rooted at
+  the canonical `BoundContract`'s `ContractRef`.
 - State is a purpose-specific projection of a Computation.
 - PortRef is logical and persistent; Binding owns its mapping to a physical
   Endpoint.
 - Ready State is a Contract/realization concern, not a universal primitive.
 - Prefer one extensible Adapter and Materializer model over workload-specific
   special cases, and remain safe by default at every physical boundary.
+
+### Portable application v3 invariants
+
+- Keep the v2 types, decoder, digests, fixtures, and CLI path unchanged. Dispatch
+  wire versions into explicit types such as computation v2 and portable
+  application v3; never grow v2 with optional v3 fields or fall back between
+  profiles.
+- `CapsuleId = root_contract_ref` for v3. Recompute it from the bundled canonical
+  `ato.contract/1` bytes. Treat the whole-file SHA-256 only as transport equality.
+- Validate canonical JCS, lowercase SHA-256 references, descriptor sizes,
+  payload digests, sorted uniqueness, and the exact reachable object closure
+  before realization. Unknown fields and unsupported profiles fail closed.
+- Keep seal admission and run acceptance separate. Seal may admit `Satisfied`
+  and `Deferred`; a verification receipt may set `fully_satisfied` only when
+  every original Contract observation is `Satisfied` from actual runtime
+  evidence. Never recapture or rewrite K while running.
+- CLI-local and ato.run-hosted use the same Rust-owned receipt schema and
+  Contract algorithm. TypeScript may route and display results but must not
+  independently canonicalize K or decide Contract satisfaction.
+- Hosted import reuses the capsule-bundle quarantine/validator path and connects
+  the verified artifact directly to the Static App runtime. A v3 `.capsule`
+  must never be treated as a source ZIP or sent through Formation again.
+- A bundle may declare multiple sorted `DerivationRef` roots. Their membership,
+  order, and success do not enter `ContractRef`; adding, removing, or failing a
+  route must not rewrite K. Every runtime must select a declared D explicitly
+  when more than one exists, and the receipt must name that selected D.
+- The current interoperability gate admits declared Static Web, pinned Python
+  `ato.process@1`, and pinned OCI routes over immutable workspace trees. The
+  Datasette acceptance uses one Python route and one OCI route for the same K.
+  CLI and the ato.run development import UI select a declared DerivationRef
+  explicitly; neither may infer, replace, or silently fall back to another D.
+  Do not add planner/capability inference or complex runtime controls to the
+  normal-user surface as part of this gate. Every acceptance target consumes
+  the same file bytes and finishes with `fully_satisfied = true`.
 
 ## Repository Structure
 
@@ -308,6 +345,38 @@ try {
 
 ## Architecture Principles
 
+### Portable application execution boundaries
+
+- `ato.portable-application/1` のPython processとOCI containerはAdapter routeであり、
+  Kernel/Coreへapplication種別やdomain-specific actionを追加しない。
+- validatorは全declared Derivationのschema、digest、closureを検証するが、runtime能力判定は
+  明示選択された1つのDにだけ行う。format invalid、admission failure、execution failure、
+  Contract failureを同じエラーへ畳み込まない。
+- dynamic HTTP pathをworkspace file pathとして検証しない。Static Webだけがartifact/fileを
+  必須とし、process/OCIはlogical Portと実行時endpointを通して観測する。
+- OCI AdapterはRunnerが所有し、digest固定image、platform、readonly workspace、internal network、
+  resource limit、停止回収を強制する。Docker socket、privileged、host全体mountをworkloadへ渡さない。
+- Python processはOS sandboxでread-only workspace、Run専用write領域、宣言portだけのbindを強制し、
+  TCP egressを既定拒否する。network制約を完全適用できないHosted Runnerはadmissionで拒否する。
+- receiptのPID、container ID、runtime、image、endpoint、Run/lease/attemptは観測証跡であり、
+  ContractRefやDerivationRefへ実測値として混入させない。
+
+### Durable local portable Instances
+
+- `ato run <file.capsule>`はephemeralのまま維持する。durable import/start/stopは別の
+  Application Instance lifecycleとして実装し、author repositoryの`init/resume/stop`へ
+  Contract-root bundleを読み替えない。
+- Local Application/Instance ID、保存path、active worker、PID、process group、endpoint、
+  Run IDはlocal orchestrationであり、ContractRef/DerivationRefへ入れない。元bundle bytesは
+  immutable inputとしてdigest確認し、各startは新しいRunとreceiptを生成する。
+- 同じbundleの別importは独立Instanceにできること。active Runのpublish/releaseはtokenで
+  fenceし、停止時はPIDだけでなくboot sessionとprocess start timeを照合する。
+- `data_snapshot_ref`やBindingsの空fieldを、Saved Data/Asset/Secretのportability完成と扱わない。
+  保存データを含むexportは別のsnapshot Contractを作り、単なるpacking変更と区別する。
+- v4のportable Instance snapshotは保存内容のdigestをKへ結合するが、元/受取先のInstance ID、
+  Asset ID、保存path、grant、signed URLをK/Dへ入れない。bundle validation・local materialization・
+  runtime restore evidenceを分離し、indexにrefがあるだけでrestore成功と報告しない。
+
 ### Semantic classification
 
 Every public concept must be classified as a property of the current
@@ -425,4 +494,4 @@ Serena は、コードベースのシンボルレベルの読み書きを提供�
 
 ---
 
-Last updated: 2026-08-17
+Last updated: 2026-09-16

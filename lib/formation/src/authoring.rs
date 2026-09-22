@@ -54,6 +54,13 @@ pub const PROCESS_PROTOCOL: &str = "ato.process@1";
 pub const BROWSER_PROTOCOL: &str = "ato.browser@1";
 /// An exported HTTP port. `ato-adapter-http`.
 pub const HTTP_PROTOCOL: &str = "ato.http@1";
+/// A plain, payload-opaque TCP port that one step of a route serves to its
+/// sibling steps. Honoured by the OCI service group executor, which probes it
+/// for readiness and never forwards it to the host.
+pub const TCP_PROTOCOL: &str = "ato.tcp@1";
+/// A runtime-provided, policy-bound raw TCP egress endpoint. The binding value
+/// is an endpoint selected by the Runner, never an unrestricted network grant.
+pub const TCP_EGRESS_PROTOCOL: &str = "ato.tcp-egress@1";
 /// Writable continuation state, filesystem-shaped. Already the protocol every
 /// Formation `state_slot_declaration` carries.
 pub const STATE_FILESYSTEM_PROTOCOL: &str = "ato.state.filesystem@1";
@@ -61,6 +68,8 @@ pub const STATE_FILESYSTEM_PROTOCOL: &str = "ato.state.filesystem@1";
 pub const HTTP_CONTRACT_VERIFIER: &str = "ato.contract.http@1";
 /// The workspace-content acceptance verifier. `extensions/contracts`.
 pub const WORKSPACE_CONTRACT_VERIFIER: &str = "ato.contract.workspace@1";
+/// The exact portable saved-data/Asset snapshot restored for an Instance.
+pub const INSTANCE_SNAPSHOT_CONTRACT_VERIFIER: &str = "ato.contract.instance-snapshot@1";
 
 pub const BOUND_CONTRACT_SCHEMA: &str = "ato.contract/1";
 pub const BOUND_DERIVATION_SCHEMA: &str = "ato.derivation/1";
@@ -186,6 +195,24 @@ pub struct PortDraft {
     pub protocol: String,
     pub from: String,
     pub guest_port: Option<u16>,
+    pub client_address_transport: Option<ClientAddressTransport>,
+}
+
+/// How a Runner tells the service behind a Port who connected to it.
+///
+/// A Runner that publishes a Port terminates the client's connection and opens
+/// its own, so by default the service sees the Runner. A service whose policy
+/// depends on the peer — an SMTP server deciding whether to relay, for
+/// instance — declares here that it expects that address to be carried across
+/// the hop. It is transport metadata on the Port: the Runner writes the header
+/// and never inspects, or even parses, the payload that follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientAddressTransport {
+    /// The service sees the address the Runner connects from.
+    None,
+    /// The Runner writes one PROXY protocol v2 header before any payload.
+    ProxyProtocolV2,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -344,6 +371,20 @@ pub struct BoundStep {
     pub entry: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spa_fallback: Option<bool>,
+    // The three step-scoped fields below are absent from every Derivation
+    // formed before a route could hold more than one serving step, so those
+    // Derivations digest exactly as they did.
+    /// Runtime facts owned by THIS step, for routes whose steps run
+    /// different images. Route-wide facts stay in `BoundDerivation::runtimes`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub runtimes: BTreeMap<String, String>,
+    /// Ids of `BoundDerivation::state` slots visible to this step only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub state: Vec<String>,
+    /// Ids of Application Bindings injected into this step only, so a secret
+    /// is visible to the one service that needs it and to no sibling.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bindings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -354,6 +395,11 @@ pub struct BoundPort {
     pub from: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guest_port: Option<u16>,
+    /// Omitted, and absent from the canonical bytes, unless the Application
+    /// asked for it — so a Contract that predates this field keeps its exact
+    /// `ContractRef`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_address_transport: Option<ClientAddressTransport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -510,6 +556,9 @@ fn bind_derivation(
             root: step.root.clone(),
             entry: step.entry.clone(),
             spa_fallback: step.spa_fallback,
+            runtimes: BTreeMap::new(),
+            state: Vec::new(),
+            bindings: Vec::new(),
         });
     }
 
@@ -534,6 +583,7 @@ fn bind_derivation(
             protocol: port.protocol.clone(),
             from: port.from.clone(),
             guest_port: port.guest_port,
+            client_address_transport: port.client_address_transport,
         });
     }
     ports.sort_by(|a, b| a.id.cmp(&b.id));
@@ -739,6 +789,7 @@ mod tests {
                     protocol: HTTP_PROTOCOL.to_owned(),
                     from: "site".to_owned(),
                     guest_port: None,
+                    client_address_transport: None,
                 }],
                 state: vec![],
                 workspace_build: None,
@@ -765,6 +816,41 @@ mod tests {
         .expect("binds");
         assert_eq!(ka.contract_ref().unwrap(), kb.contract_ref().unwrap());
         assert_eq!(da.derivation_ref().unwrap(), db.derivation_ref().unwrap());
+    }
+
+    /// Port transport metadata is new, so it must be invisible to every
+    /// Contract that does not ask for it — otherwise adding the field would
+    /// silently re-address every Capsule that already exists.
+    #[test]
+    fn a_port_without_transport_metadata_keeps_its_contract_ref() {
+        let (baseline_k, baseline_d) =
+            bind(&minimal(AuthoringProvenance::Authored), &ctx()).expect("binds");
+        let baseline_json = serde_json::to_string(&baseline_d).unwrap();
+        assert!(
+            !baseline_json.contains("client_address_transport"),
+            "{baseline_json}"
+        );
+
+        let mut draft = minimal(AuthoringProvenance::Authored);
+        draft.derivation.ports[0].client_address_transport =
+            Some(ClientAddressTransport::ProxyProtocolV2);
+        let (asking_k, asking_d) = bind(&draft, &ctx()).expect("binds");
+        assert_eq!(
+            asking_k.contract_ref().unwrap(),
+            baseline_k.contract_ref().unwrap(),
+            "the Contract observes behaviour, not how the Runner addresses clients"
+        );
+        assert_ne!(
+            asking_d.derivation_ref().unwrap(),
+            baseline_d.derivation_ref().unwrap(),
+            "the Derivation is what changes when a Port is published differently"
+        );
+        assert!(
+            serde_json::to_string(&asking_d)
+                .unwrap()
+                .contains("\"client_address_transport\":\"proxy_protocol_v2\""),
+            "the declared value is carried verbatim"
+        );
     }
 
     #[test]

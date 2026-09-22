@@ -48,8 +48,21 @@ pub fn run(policy_path: &Path, argv: &[String]) -> Result<()> {
         // contains the workload. A kernel that cannot apply it is not a reason
         // to fail the Run — but it IS recorded, so "namespace-only" is never
         // silently reported as fully sandboxed.
-        if let Err(error) = apply_sandbox(&policy) {
-            eprintln!("[sandbox-exec] Landlock not applied (namespace-only): {error}");
+        match apply_sandbox(&policy) {
+            Ok(applied) if !policy.allow_network && !applied.fully_enforced => {
+                return Err(anyhow!(
+                    "sandbox-exec: network isolation is not fully enforced: {}",
+                    applied.message
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if !policy.allow_network => {
+                return Err(error)
+                    .context("sandbox-exec: required network isolation could not be applied");
+            }
+            Err(error) => {
+                eprintln!("[sandbox-exec] Landlock not applied (namespace-only): {error}");
+            }
         }
     } else {
         eprintln!("[sandbox-exec] Landlock unsupported on this kernel; namespace-only");
