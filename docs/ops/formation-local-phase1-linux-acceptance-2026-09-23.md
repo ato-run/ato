@@ -1,5 +1,9 @@
 # Local Formation Phase 1 — Linux acceptance (2026-09-23)
 
+> Finalization re-run (exact Derivation execution, Runtime cwd, bounded
+> output) is at the end of this file and supersedes the port behaviour
+> described in the first run.
+
 What was run to accept `ato form <dir> --runtime local` after the Phase 1
 hardening (frozen Initial Condition, Runtime-backed temporary realization,
 disposable verification state). ADR-019 describes the design.
@@ -82,3 +86,27 @@ Pre-existing, reproduced on base `a1cf5c42` under the same conditions:
 
 On macOS (no bwrap) process candidates are Filtered at admission and the
 realization refuses to launch; those paths are what the macOS run asserts.
+
+## Finalization re-run (exact Derivation execution, Runtime cwd)
+
+After removing the argv/env port rewriting, fixing the Runtime's
+`cwd_relative`, and bounding candidate output. Same host; each app is an
+authored Python 3.12.7 process route with `GET /health` 200, `GET /` 200 and
+workspace identity. `ato form ... --work-root work-X` (a RELATIVE path — this
+run found and fixed a bug where it reached bwrap unresolved).
+
+| Case | Setup | Result |
+|---|---|---|
+| A. root | argv `[python3, -B, /app/app.py]`, app reads `ATO_ENDPOINT_APP_HTTP_PORT`; 8000 free | formed · 3/3 satisfied · `guest 8000 -> host 8000` · destroyed · artifact `app.py capsule.toml` (no `first-run.db`) · no leftover process |
+| B. subdirectory | `cwd = "server"`, argv `[python3, -B, app.py]` | formed · 3/3 satisfied · started from `/app/server` · artifact `server/app.py tasks.py capsule.toml` |
+| C. fixed port | argv `[python3, -B, /app/app.py, "8000"]`, another process holds 8000 | exit 1 · `failed` · "guest port 8000 was unavailable on this Runtime, so ATO_ENDPOINT_APP_HTTP_PORT carries 46581 — a Derivation that binds 8000 literally cannot run here; candidate output: … server_bind …" · argv not rewritten · no artifact |
+| D. endpoint-aware | case A's app, another process holds 8000 | formed · 3/3 satisfied · `guest 8000 -> host 40681 (guest port in use; carried by ATO_ENDPOINT_APP_HTTP_PORT)` · same Contract as A |
+
+Suites on the host after the change: `temporary_realization_v1` 14/14 (argv
+reaches the candidate verbatim incl. `8000`, `http://example:8000`,
+`--port=8000`; endpoint variable injected; fixed port free → runs / taken →
+visible failure; `/app/server` cwd; `../escape` refused; ~32 MiB of output
+kept ≤ 8 MiB; relative scratch path), `local_formation_v1` 12/12 (incl. the
+subdirectory route end to end), `ato-adapter-process` 5/5,
+`runtime_launch::sandbox` 4/4 (`""→/app`, `sub→/app/sub`,
+`apps/web→/app/apps/web`, escape/symlink refused).
