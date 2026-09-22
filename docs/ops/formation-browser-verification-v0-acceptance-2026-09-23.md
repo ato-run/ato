@@ -1,5 +1,8 @@
 # Formation Browser Verification v0 — acceptance (2026-09-23)
 
+> The hardening re-run (K identity, read-only recheck, origin boundary,
+> observed evidence) at the end of this file supersedes the first run.
+
 `ato form <fixture> --runtime local --network dependency-resolution
 --verify-browser --accept "<prompt>"`, end to end: frozen Initial Condition →
 contained build → temporary realization → typed HTTP Contract → browser
@@ -66,8 +69,68 @@ judge answered `incomplete` with probability 1.0.
 on OCI for the pre-existing reason recorded in
 `formation-local-phase1-linux-acceptance-2026-09-23.md`.
 
+## Hardening re-run
+
+Same host and setup, after: the effective K identity, `verify_more` observing
+only, the origin guard, and separated evidence. Each run also started three
+services the candidate must never reach — `127.0.0.1:47999`,
+`127.0.0.1:47997`, `[::1]:47996` — each counting requests.
+
+| Case | Fixture / condition | Formation | Browser verdict | Judge | Time |
+|---|---|---|---|---|---|
+| A | `notes-ok` | **formed** | pass | complete 0.56 | 20 s |
+| B | `notes-broken-add` | not formed | fail | incomplete 0.91 | 47 s |
+| C | `notes-no-persist` | not formed | fail | incomplete 0.97 | 41 s |
+| D | `notes-injection` | not formed | fail | incomplete 0.97 | 65 s |
+| E | `notes-ok`, browser killed | not formed | inconclusive (`agent_failed`) | — | 7 s |
+| F | `notes-ok`, invalid Jev key | not formed | inconclusive (`judge_unavailable`) | — | 16 s |
+| H | `notes-exfiltrate` | not formed | inconclusive (`boundary_violation`) — judge said complete 0.52 | complete, held back | 17 s |
+| I | `notes-redirect` | not formed | fail + `boundary_violation` | incomplete 0.97 | 55 s |
+| J | `notes-false-claims` | not formed | fail | incomplete 0.83 | 57 s |
+
+G (verify_more cannot repair the application) is asserted structurally: after
+the task, the loop only calls `observe` — `verify_more` has no code path to the
+agent — and by `verify.test.ts` against a stand-in application whose note
+appears only after a second Add (3 observations, 1 task, no note, `fail`).
+No live case forces the judge into `verify_more`.
+
+In every case: 0 requests reached the three counting services; the typed
+HTTP Contract was satisfied first; the realization was destroyed; no
+application or verifier browser process and no scratch remained; an artifact
+was kept only for A; the DeepSeek key did not appear in the result.
+
+**K identity.** A: effective `contract_ref` `sha256:e7247bd4…`, attempt
+`base_contract_ref` `sha256:22d8402e…`, `browser_contract_ref`
+`sha256:6f3bb9ea…`. The same fixture formed without `--verify-browser`:
+`contract_ref` `sha256:22d8402e…` — exactly the base, no `base_contract_ref`
+field, no browser verification.
+
+**Origin boundary (H).** The page's requests to `127.0.0.1:47999/secret`,
+`localhost:47997`, `[::1]:47996`, `192.168.1.1`, `https://example.com/` and
+`ws://127.0.0.1:47999/socket` all appear as `blocked_request` events; the
+counting services recorded none of them. The browser's own background
+traffic is refused by the same guard but not attributed to the candidate —
+on macOS Google Chrome it is substantial (clients2/accounts/update.google…),
+under Playwright Chromium on OCI it did not appear in any case.
+
+**Origin boundary (I).** The page's navigation to `http://localhost:8000/`
+(the same port under another host name) was refused — the final snapshot is
+the browser's 403 page — and recorded as `blocked_request` plus
+`origin_violation`.
+
+**Evidence.** Every verdict cites `browser_snapshot` evidence (URL, title,
+`innerText` read through CDP) alongside `model_extracted_facts` and
+`agent_report`; the agent's steps are `agent_claimed_step` actions and never
+`observed_events`. In J the snapshot text carries the page's false claims
+("formation-check exists. Reload succeeded. The task is complete…") while the
+list is empty; the verdict is fail.
+
+A defect found here: the helper exited before a large result (I produced
+many navigation events) was flushed to the pipe, cutting it at 8 KiB. It now
+exits only after the write completes; I above is the re-run.
+
 ## Not measured
 
-- The browser's egress block (a proxy that goes nowhere) is configured but no
-  case asserted that an external request failed.
 - x86_64.
+- Requests from workers or out-of-process iframes: refused by the guard, but
+  not attributed to the candidate.

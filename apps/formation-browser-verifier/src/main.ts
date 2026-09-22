@@ -67,8 +67,16 @@ async function main(): Promise<number> {
   }
 
   const result = await verify(request, { browser, judge, sequence });
-  process.stdout.write(JSON.stringify(result) + "\n");
+  await writeAll(JSON.stringify(result) + "\n");
   return 0;
+}
+
+/// Write to stdout and wait until it is flushed. `process.exit` right after a
+/// write to a pipe can cut the result off mid-document.
+function writeAll(text: string): Promise<void> {
+  return new Promise((resolve, reject) =>
+    process.stdout.write(text, (error) => (error ? reject(error) : resolve())),
+  );
 }
 
 main().then(
