@@ -114,8 +114,20 @@ pub fn run_with_executor(
             budget: env.browser_budget,
         });
 
-    let InitialCondition::LocalDirectory { path } = &request.initial_condition;
-    let frozen = freeze_local_source(path, &env.work_root, env.source_limits)?;
+    let frozen = match &request.initial_condition {
+        InitialCondition::LocalDirectory { path } => {
+            freeze_local_source(path, &env.work_root, env.source_limits)?
+        }
+        InitialCondition::Archive {
+            bytes,
+            expected_digest,
+        } => freeze_archive(
+            bytes.clone(),
+            expected_digest,
+            &env.work_root,
+            env.source_limits,
+        )?,
+    };
     let (closure_ref, source_root) = (frozen.closure_ref.clone(), frozen.root.clone());
     let evidence = detect(&source_root).context("detection failed")?;
 
@@ -683,9 +695,9 @@ fn store_candidate(executed: &ExecutedCandidate, env: &LocalFormation) -> Result
 
 /// The Initial Condition, frozen: one snapshot of the directory, verified
 /// and materialized. Removed when the Formation ends.
-struct FrozenSource {
-    closure_ref: SourceClosureRef,
-    root: PathBuf,
+pub(crate) struct FrozenSource {
+    pub(crate) closure_ref: SourceClosureRef,
+    pub(crate) root: PathBuf,
     scratch: PathBuf,
 }
 
@@ -708,16 +720,33 @@ impl Drop for FrozenSource {
 /// source module's rules — refused symlinks, path limits — apply unchanged.
 /// After this returns the directory is never read again.
 fn freeze_local_source(dir: &Path, work_root: &Path, limits: SourceLimits) -> Result<FrozenSource> {
+    let archive = snapshot_directory(dir)?;
+    let archive_digest = digest(&archive);
+    freeze_archive(archive, &archive_digest, work_root, limits)
+}
+
+/// Snapshot a directory into the archive a Formation measures: the codeload
+/// shape, no `.git`, symlinks kept for the source rules to decide.
+pub fn snapshot_directory(dir: &Path) -> Result<Vec<u8>> {
     let directory = dir
         .canonicalize()
         .with_context(|| format!("cannot read {}", dir.display()))?;
     if !directory.is_dir() {
         bail!("{} is not a directory", directory.display());
     }
-    let archive = tar_directory(&directory)?;
-    let archive_digest = digest(&archive);
+    tar_directory(&directory)
+}
+
+/// Verify an archive against the digest it was named by, measure its tree and
+/// materialize it: the frozen Initial Condition.
+pub(crate) fn freeze_archive(
+    archive: Vec<u8>,
+    archive_digest: &str,
+    work_root: &Path,
+    limits: SourceLimits,
+) -> Result<FrozenSource> {
     let verified = DownloadedArchive::new(archive)
-        .verify_archive_digest(&archive_digest)
+        .verify_archive_digest(archive_digest)
         .and_then(|archive| archive.verify_tree_digest(None, limits))
         .context("the directory is not a usable source")?;
     let closure_ref = verified
@@ -880,7 +909,7 @@ pub fn probe_local_runtime() -> RuntimeProfile {
 
 /// The triple the local machine builds for. A workspace produced here is
 /// host-native; cross-compiling is a different request.
-fn host_triple() -> String {
+pub(crate) fn host_triple() -> String {
     let arch = std::env::consts::ARCH;
     let os = match std::env::consts::OS {
         "linux" => "unknown-linux-gnu",

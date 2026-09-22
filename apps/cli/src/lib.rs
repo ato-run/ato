@@ -132,6 +132,10 @@ enum Commands {
     /// Form a local directory into a Capsule: build each candidate, observe it
     /// satisfying its Contract, and keep the verified artifact.
     Form(FormArgs),
+    /// Take part in the Runtime Network: advertise this host's execution
+    /// environments and run the Formation attempts addressed to it.
+    #[command(subcommand)]
+    RuntimeNetwork(RuntimeNetworkCommand),
     /// Report this binary's build identity (version, commit, profile).
     ///
     /// `--version` stays exactly as it was — a human-readable release-line
@@ -364,6 +368,62 @@ struct FormArgs {
     /// The Node binary that runs the browser verifier.
     #[arg(long, env = "ATO_NODE", default_value = "node")]
     node: String,
+    /// Satisfy the Contract on the Runtime Network instead of this machine:
+    /// every authorized route × every available owned Runtime, hard-filtered,
+    /// executed and verified. `--runtime local` is unaffected.
+    #[arg(long)]
+    runtime_network: bool,
+    /// The coordinator (ato-api) base URL.
+    #[arg(long, env = "ATO_RUNTIME_NETWORK_API")]
+    api: Option<String>,
+    /// A file holding the bearer token that acts for the requesting account.
+    #[arg(long, env = "ATO_RUNTIME_NETWORK_TOKEN_FILE")]
+    token_file: Option<PathBuf>,
+    /// An authorized route (capsule.toml). Repeatable; default: the
+    /// directory's own capsule.toml. Every route must bind to the same K.
+    #[arg(long = "route")]
+    routes: Vec<PathBuf>,
+    /// Run only on this Runtime (runner id). No fallback elsewhere.
+    #[arg(long)]
+    exact_runtime: Option<String>,
+    /// `first_pass` stops at the first verified route; `all` attempts every
+    /// admissible candidate.
+    #[arg(long, default_value = "first_pass", value_parser = ["first_pass", "all"])]
+    mode: String,
+    /// May control-plane-managed Runtimes be used?
+    #[arg(long)]
+    allow_managed: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum RuntimeNetworkCommand {
+    /// Serve Formation attempts on this host until stopped.
+    Serve(RuntimeNetworkServeArgs),
+}
+
+#[derive(Debug, Args)]
+struct RuntimeNetworkServeArgs {
+    /// The coordinator (ato-api) base URL.
+    #[arg(long, env = "ATO_RUNTIME_NETWORK_API")]
+    api: String,
+    /// A file holding this Runtime's runner token.
+    #[arg(long, env = "ATO_RUNTIME_NETWORK_TOKEN_FILE")]
+    token_file: PathBuf,
+    /// Scratch for attempts.
+    #[arg(long)]
+    work_root: Option<PathBuf>,
+    /// Where verified artifacts are written.
+    #[arg(long)]
+    out: Option<PathBuf>,
+    /// The browser verifier helper (apps/formation-browser-verifier).
+    #[arg(long, env = "ATO_BROWSER_VERIFIER")]
+    browser_verifier: Option<PathBuf>,
+    /// The Node binary that runs the browser verifier.
+    #[arg(long, env = "ATO_NODE", default_value = "node")]
+    node: String,
+    /// Stop after handling this many attempts.
+    #[arg(long)]
+    max_attempts: Option<u32>,
 }
 
 /// The build's own identity: what this binary is, not merely which release
@@ -440,7 +500,9 @@ pub fn run() -> Result<()> {
         Commands::ExportPlan(args) => export_plan(args),
         Commands::Export(args) => export_portable(args),
         Commands::Upload(args) => upload(args),
+        Commands::Form(args) if args.runtime_network => form_on_runtime_network(args),
         Commands::Form(args) => form(args),
+        Commands::RuntimeNetwork(RuntimeNetworkCommand::Serve(args)) => runtime_network_serve(args),
         Commands::Worker {
             project,
             branch,
@@ -522,6 +584,120 @@ fn desktop_inspect(project: &str) -> Result<()> {
 /// The JSON result goes to stdout either way — the attempts are the
 /// evidence. Exit status says which variant came back: 'formed' is success,
 /// 'no_verified_route' is not.
+fn read_token(path: &Path) -> Result<String> {
+    Ok(std::fs::read_to_string(path)
+        .with_context(|| format!("cannot read the token file {}", path.display()))?
+        .trim()
+        .to_owned())
+}
+
+fn browser_verifier_command(
+    dir: Option<PathBuf>,
+    node: &str,
+) -> Result<Option<ato_formation_worker::browser_verify::BrowserVerifierCommand>> {
+    dir.map(|dir| {
+        dir.canonicalize()
+            .with_context(|| format!("cannot read the browser verifier at {}", dir.display()))
+            .map(|dir| {
+                ato_formation_worker::browser_verify::BrowserVerifierCommand::node_helper(
+                    node.to_owned(),
+                    dir,
+                )
+            })
+    })
+    .transpose()
+}
+
+/// Submit a SatisfyRequest and wait for the coordinator to settle it.
+fn form_on_runtime_network(args: FormArgs) -> Result<()> {
+    use ato_formation_worker::runtime_network::{
+        Client, RuntimeConstraintWire, SatisfyBudget, SatisfyPolicy, prepare_submission,
+    };
+    let api = args.api.context("--runtime-network needs --api")?;
+    let token = read_token(
+        &args
+            .token_file
+            .context("--runtime-network needs --token-file")?,
+    )?;
+    let browser_contract = args
+        .accept
+        .as_deref()
+        .map(ato_formation::browser::BrowserContractV0::from_prompt)
+        .transpose()
+        .context("--accept is not a usable acceptance prompt")?;
+    let work_root = args.work_root.clone().unwrap_or_else(|| {
+        dirs::cache_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("ato/runtime-network/submit")
+    });
+    let submission = prepare_submission(
+        &args.path,
+        &args.routes,
+        browser_contract,
+        &work_root,
+        match args.exact_runtime {
+            Some(runtime_id) => RuntimeConstraintWire::Exact {
+                runtime_id,
+                environment_id: None,
+            },
+            None => RuntimeConstraintWire::Any,
+        },
+        SatisfyPolicy {
+            network: args.network.clone(),
+            allow_managed: args.allow_managed,
+        },
+        SatisfyBudget {
+            max_attempts: args.max_attempts as u32,
+            mode: args.mode.clone(),
+        },
+    )?;
+    let client = Client::new(&api, &token)?;
+    let accepted = client.satisfy(&submission.request)?;
+    let id = accepted["satisfy_id"]
+        .as_str()
+        .context("the coordinator returned no satisfy_id")?
+        .to_owned();
+    eprintln!(
+        "satisfy {id}: {} candidate(s) admissible",
+        accepted["admissible"]
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60 * 30);
+    loop {
+        let status = client.satisfy_status(&id)?;
+        let state = status["status"].as_str().unwrap_or("");
+        if matches!(state, "satisfied" | "unsatisfied" | "exhausted") {
+            println!("{}", serde_json::to_string_pretty(&status)?);
+            return if state == "satisfied" {
+                Ok(())
+            } else {
+                bail!("the Runtime Network produced no verified route ({state})")
+            };
+        }
+        if std::time::Instant::now() > deadline {
+            bail!("satisfy {id} did not settle within 30 minutes");
+        }
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    }
+}
+
+fn runtime_network_serve(args: RuntimeNetworkServeArgs) -> Result<()> {
+    let base = dirs::cache_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("ato/runtime-network");
+    ato_formation_worker::runtime_network::serve(
+        &ato_formation_worker::runtime_network::ServeConfig {
+            api: args.api,
+            token: read_token(&args.token_file)?,
+            work_root: args.work_root.unwrap_or_else(|| base.join("work")),
+            out_dir: args.out.unwrap_or_else(|| base.join("out")),
+            shim: std::env::current_exe().context("cannot locate this binary")?,
+            browser_verifier: browser_verifier_command(args.browser_verifier, &args.node)?,
+            poll: std::time::Duration::from_secs(2),
+            max_tickets: args.max_attempts,
+        },
+    )
+}
+
 fn form(args: FormArgs) -> Result<()> {
     use ato_formation::request::{
         ContractSource, FormationNetworkPolicy, FormationPolicy, FormationRequest, FormationResult,
