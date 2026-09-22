@@ -262,21 +262,24 @@ impl TemporaryRealization {
                 .as_mut()
                 .expect("launched until destroyed");
             if let Err(error) = wait_until_ready(&per_endpoint, &context, launched, &probe) {
-                let mut detail = format!("candidate output: {}", realization.output_tail());
+                // The port explanation first: the output tail is long, and
+                // a bounded report must not lose the actionable part.
+                let mut detail = String::new();
                 if let Some(moved) = realization
                     .endpoints
                     .iter()
                     .find(|endpoint| endpoint.host_port != endpoint.guest_port)
                 {
                     detail.push_str(&format!(
-                        "; guest port {} was unavailable on this Runtime, so {} carries {} — a \
-                         Derivation that binds {} literally cannot run here",
+                        "guest port {} was unavailable on this Runtime, so {} carries {} — a \
+                         Derivation that binds {} literally cannot run here; ",
                         moved.guest_port,
                         endpoint_env_name(&moved.port_id),
                         moved.host_port,
                         moved.guest_port
                     ));
                 }
+                detail.push_str(&format!("candidate output: {}", realization.output_tail()));
                 return Err(error.context(detail));
             }
         }
