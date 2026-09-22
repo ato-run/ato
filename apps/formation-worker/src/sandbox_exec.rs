@@ -8,13 +8,12 @@
 use std::path::Path;
 
 use anyhow::{Result, anyhow};
-use ato_sandbox::{SandboxPolicy, apply_sandbox, is_sandbox_supported, set_no_new_privs};
 
 /// Re-entry from INSIDE the sandbox. bwrap sets up the namespaces, then execs
-/// this binary, which restricts itself with Landlock and execs the build step.
-/// Landlock must be applied by the process that will exec — `restrict_self`
-/// survives `exec` — and applying it to bwrap instead denies bwrap its own
-/// `/proc/self/uid_map` write.
+/// this binary, which restricts itself with Landlock and execs the workload —
+/// a build step or a Formation candidate. Landlock must be applied by the
+/// process that will exec — `restrict_self` survives `exec` — and applying it
+/// to bwrap instead denies bwrap its own `/proc/self/uid_map` write.
 ///
 /// Handled before clap in each host binary because it is not a user-facing
 /// subcommand.
@@ -26,14 +25,8 @@ pub fn sandbox_exec(args: &[String]) -> Result<()> {
         .position(|arg| arg == "--")
         .map(|index| args[index + 1..].to_vec())
         .unwrap_or_default();
-    let (program, arguments) = workload
-        .split_first()
-        .ok_or_else(|| anyhow!("sandbox-exec: no build step to execute"))?;
-
-    // Landlock needs either CAP_SYS_ADMIN or this flag, and the flag survives
-    // the coming exec.
-    if let Err(error) = set_no_new_privs() {
-        eprintln!("[formation sandbox-exec] PR_SET_NO_NEW_PRIVS failed: {error}");
+    if workload.is_empty() {
+        return Err(anyhow!("sandbox-exec: no workload to execute"));
     }
 
     // A process ceiling, enforced by the kernel rather than by watching. A
@@ -42,31 +35,15 @@ pub fn sandbox_exec(args: &[String]) -> Result<()> {
         set_process_limit(limit);
     }
 
-    if is_sandbox_supported() {
-        let policy: SandboxPolicy =
-            serde_json::from_slice(&std::fs::read(Path::new(policy_path))?)?;
-        // Defence in depth on top of the bubblewrap namespace and bind mounts,
-        // which are what actually contain the build. Recorded when it cannot be
-        // applied, so "namespace-only" is never silently reported as fully
-        // sandboxed.
-        if let Err(error) = apply_sandbox(&policy) {
-            eprintln!("[formation sandbox-exec] Landlock not applied (namespace-only): {error}");
-        }
-    } else {
-        eprintln!("[formation sandbox-exec] Landlock unsupported on this kernel; namespace-only");
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt as _;
-        let error = std::process::Command::new(program).args(arguments).exec();
-        Err(anyhow!("sandbox-exec: cannot exec {program}: {error}"))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (program, arguments);
-        Err(anyhow!("sandbox-exec is only available on Unix"))
-    }
+    // Everything else is the Runtime's shim, not a copy of it: the same
+    // no-new-privs, the same Landlock application, and the same refusal to
+    // exec a workload whose network isolation was asked for and could not be
+    // enforced. A build and a Formation candidate are contained by exactly
+    // the rules a Run is.
+    ato_connected_realization_worker::runtime_launch::sandbox_exec::run(
+        Path::new(policy_path),
+        &workload,
+    )
 }
 
 fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
