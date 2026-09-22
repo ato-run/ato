@@ -442,6 +442,7 @@ pub fn synthesize_authoring(preset: AppPreset) -> AuthoringDraft {
                 path: ".".to_owned(),
             }],
             runtimes: vec![],
+            platforms: vec![],
             steps: vec![StepDraft {
                 id: PRESET_SERVE_STEP_ID.to_owned(),
                 protocol: BROWSER_PROTOCOL.to_owned(),

@@ -37,9 +37,9 @@ use toml::Value;
 use crate::authoring::{
     AuthoringDraft, AuthoringError, AuthoringProvenance, BROWSER_PROTOCOL, ContractDraft,
     DerivationDraft, EffectClass, HTTP_PROTOCOL, HttpRequirement, InputDraft,
-    InputIdentityRequirement, ObservationDraft, Observed, PROCESS_PROTOCOL, PortDraft,
-    RequirementDraft, RuntimeDraft, STATE_FILESYSTEM_PROTOCOL, StateAccess, StateDraft, StepDraft,
-    WORKSPACE_PROTOCOL, malformed,
+    InputIdentityRequirement, ObservationDraft, Observed, PROCESS_PROTOCOL, PlatformDraft,
+    PortDraft, RequirementDraft, RuntimeDraft, STATE_FILESYSTEM_PROTOCOL, StateAccess, StateDraft,
+    StepDraft, WORKSPACE_PROTOCOL, malformed,
 };
 
 /// The file an author writes, at the root of the source they upload.
@@ -181,10 +181,11 @@ pub fn parse_capsule_toml(text: &str) -> Result<AuthoringDraft, CapsuleTomlError
             "state" => derivation.state = read_state(value)?,
             "contract" => contract.requirements = read_contract(value)?,
             "effects" => derivation.effects = read_effects(value)?,
+            "platform" => derivation.platforms = read_platforms(value)?,
             other => {
                 return Err(malformed(
                     other,
-                    "this build reads schema, input, runtime, derive, port, state, \
+                    "this build reads schema, input, runtime, platform, derive, port, state, \
                      contract and effects",
                 )
                 .into());
@@ -282,6 +283,31 @@ fn read_runtimes(value: &Value) -> Result<Vec<RuntimeDraft>, AuthoringError> {
                 name: required_str(table, "name", "runtime")?,
                 version: required_str(table, "version", "runtime")?,
             })
+        })
+        .collect()
+}
+
+/// `[[platform]] os = "linux" arch = "x86_64"`: where this route can run.
+fn read_platforms(value: &Value) -> Result<Vec<PlatformDraft>, AuthoringError> {
+    array_of_tables(value, "platform")?
+        .into_iter()
+        .map(|table| {
+            only(table, "platform", &["os", "arch"])?;
+            let os = required_str(table, "os", "platform")?;
+            let arch = required_str(table, "arch", "platform")?;
+            if !matches!(os.as_str(), "linux" | "macos" | "windows") {
+                return Err(malformed(
+                    "platform.os",
+                    format!("{os:?} is not linux, macos or windows"),
+                ));
+            }
+            if !matches!(arch.as_str(), "x86_64" | "aarch64") {
+                return Err(malformed(
+                    "platform.arch",
+                    format!("{arch:?} is not x86_64 or aarch64"),
+                ));
+            }
+            Ok(PlatformDraft { os, arch })
         })
         .collect()
 }

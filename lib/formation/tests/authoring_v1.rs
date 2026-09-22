@@ -423,3 +423,36 @@ fn a_candidate_that_does_not_satisfy_the_contract_is_not_this_capsule() {
     assert!(!verification.passed());
     assert_eq!(verification.failure().unwrap().1, "input_identity_mismatch");
 }
+
+// ── platforms ───────────────────────────────────────────────────────────────
+
+#[test]
+fn a_route_restricted_to_a_platform_is_another_route_and_the_same_capsule() {
+    let base = parse_capsule_toml(EQUIVALENT_TO_SINGLE_HTML).expect("parses");
+    let restricted_text =
+        format!("{EQUIVALENT_TO_SINGLE_HTML}\n[[platform]]\nos = \"linux\"\narch = \"x86_64\"\n");
+    let restricted = parse_capsule_toml(&restricted_text).expect("parses");
+    let (_, bound_restricted) = bound(&restricted, SOURCE_A);
+    assert_eq!(bound_restricted.platforms.len(), 1);
+    assert_eq!(bound_restricted.platforms[0].arch, "x86_64");
+
+    let (base_contract, base_route) = refs_of(&base, SOURCE_A);
+    let (restricted_contract, restricted_route) = refs_of(&restricted, SOURCE_A);
+    // Where a route can run is part of the route, not of what it must satisfy.
+    assert_eq!(base_contract, restricted_contract);
+    assert_ne!(base_route, restricted_route);
+    // A route that states no platform digests exactly as it always did.
+    let (_, unrestricted) = bound(&base, SOURCE_A);
+    assert!(
+        !serde_json::to_string(&unrestricted)
+            .unwrap()
+            .contains("platforms")
+    );
+}
+
+#[test]
+fn an_unknown_platform_is_refused() {
+    let text =
+        format!("{EQUIVALENT_TO_SINGLE_HTML}\n[[platform]]\nos = \"plan9\"\narch = \"x86_64\"\n");
+    assert!(parse_capsule_toml(&text).is_err());
+}
