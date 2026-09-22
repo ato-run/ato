@@ -1,5 +1,4 @@
-//! A Formation request and its result — the seam Phase 1 (local Formation)
-//! and every later phase share.
+//! A Formation request and its result — the Phase 1 (local Formation) seam.
 //!
 //! The model is "I -- D on R --> C, C |= K": a request names the Initial
 //! Condition, where the Contract comes from, which Runtime may be used, and a
@@ -8,9 +7,11 @@
 //!
 //! What is deliberately not here: candidate generation (presets live in
 //! 'preset', authoring in 'capsule_toml'), execution (the worker's), and any
-//! runtime model richer than a flat fact map. 'RuntimeProfile' is open-ended
-//! key/value so Phase 2 can grow it without re-shaping this file — and so it
-//! can be dropped without loss if a richer one lands instead.
+//! runtime model richer than a flat fact map.
+//!
+//! These types are the seam Phase 1 needs, not a stable contract. Contract
+//! normalization from a prompt, other verifiers and a Runtime Network may
+//! extend or replace them.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -76,11 +77,10 @@ pub struct FormationRequest {
     pub budget: SearchBudget,
 }
 
-/// The facts a Runtime reports about itself, as an open-ended map.
+/// The facts a Runtime reports about itself, as a flat map.
 ///
-/// Flat key/value on purpose: 'platform.os', 'platform.arch',
-/// 'formation.containment' and friends are conventions over the keys, not a
-/// closed enum — new facts are added by emitting them, not by editing a type.
+/// Phase 1 admission reads only 'platform.os', 'platform.arch' and
+/// 'formation.containment'. Deliberately not a facts framework.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RuntimeProfile {
     pub runtime_id: String,
@@ -126,8 +126,33 @@ pub struct FormationAttempt {
     pub status: AttemptStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verification: Option<ContractVerification>,
+    /// How the candidate was run to be observed, when it was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub realization: Option<RealizationEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure: Option<AttemptFailure>,
+}
+
+/// The conditions a candidate was observed under.
+///
+/// Recorded so "verified" always says verified WHERE: which executor, what
+/// containment, what network, and that the realization was taken down.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RealizationEvidence {
+    /// Which execution machinery ran the candidate.
+    pub executor: String,
+    pub containment: String,
+    /// What the candidate's filesystem was, and what happened to its writes.
+    pub workspace: String,
+    /// What the build was allowed.
+    pub build_network: String,
+    /// What the running candidate was allowed — stated separately because it
+    /// is not the same thing.
+    pub candidate_network: String,
+    /// Logical port id to where it was realized.
+    pub endpoints: BTreeMap<String, String>,
+    /// The realization was stopped and its scratch removed.
+    pub destroyed: bool,
 }
 
 /// A route that was observed satisfying the Contract on a concrete Runtime.
