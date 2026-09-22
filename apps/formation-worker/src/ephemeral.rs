@@ -25,8 +25,6 @@
 //! `/tmp`; whatever the candidate writes goes with the realization, and the
 //! artifact that is kept is packed from the untouched build output instead.
 
-use std::collections::BTreeMap;
-use std::io::{Read as _, Seek as _, SeekFrom};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -56,8 +54,11 @@ const LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// Bodies larger than this are not hashed into evidence.
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+/// How much of the candidate's output is kept while it runs. An untrusted
+/// candidate cannot fill the disk by talking.
+const OUTPUT_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
 /// How much of the candidate's output a failure message carries.
-const OUTPUT_TAIL_BYTES: u64 = 4 * 1024;
+const OUTPUT_TAIL_BYTES: usize = 4 * 1024;
 /// The teardown bounds handed to the Runtime's stop.
 const LIFECYCLE: LifecycleV1 = LifecycleV1 {
     graceful_shutdown_ms: 2_000,
@@ -116,16 +117,6 @@ impl TemporaryRealization {
     /// until every required port accepts connections.
     pub fn launch(request: &TemporaryRealizationRequest<'_>) -> Result<Self> {
         let intent = request.intent;
-        if !intent.cwd_relative.is_empty() {
-            // The Runtime's contained launch starts every workload at the
-            // workspace root. Launching this candidate there would observe a
-            // different process than the Derivation describes.
-            bail!(
-                "the Derivation starts in {:?}, and the local Runtime's process executor starts \
-                 workloads at the workspace root",
-                intent.cwd_relative
-            );
-        }
         if intent.launch_argv.is_empty() {
             bail!("the intent declares no launch argv");
         }
@@ -149,13 +140,17 @@ impl TemporaryRealization {
 
         // ── ports ───────────────────────────────────────────────────────────
         //
-        // The Derivation names a guest port; the host port is the Runtime's to
-        // choose. A process realization has no NAT, so the allocated port is
-        // what the workload must bind: the Runtime exports it as
-        // ATO_ENDPOINT_<NAME>_PORT and Landlock admits a bind on it and on
-        // nothing else. An argv or env value that states the guest port
-        // verbatim is lowered to the allocated one — the only translation a
-        // NAT-less realization has.
+        // The Derivation names a guest port. A process realization has no NAT,
+        // so the port the workload binds IS a host port, and the Runtime
+        // tells the workload which one through its endpoint ABI:
+        // ATO_ENDPOINT_<NAME>_PORT. The guest port is preferred when it is
+        // free, otherwise the kernel picks one.
+        //
+        // The argv and environment are executed EXACTLY as the Derivation
+        // states them. Nothing here reads a string for a port number: a
+        // Derivation that reads the endpoint variable runs either way; one
+        // that binds its guest port literally runs when that port is free and
+        // fails, visibly, when it is not.
         let mut endpoints = Vec::new();
         let mut resolved = Vec::new();
         let mut declared = Vec::new();
@@ -166,14 +161,21 @@ impl TemporaryRealization {
             {
                 continue;
             }
-            let host_port = allocate_host_port()?;
+            let (host_port, allocation, preferred_port) = match reserve_port(port.guest_port) {
+                Some(host_port) => (
+                    host_port,
+                    EndpointAllocationV1::Preferred,
+                    Some(port.guest_port),
+                ),
+                None => (allocate_host_port()?, EndpointAllocationV1::Automatic, None),
+            };
             let name = endpoint_name(&port.port_id);
             declared.push(EndpointV1 {
                 name: name.clone(),
                 protocol: "http".to_owned(),
                 guest_port: Some(port.guest_port),
-                allocation: EndpointAllocationV1::Automatic,
-                preferred_port: None,
+                allocation,
+                preferred_port,
             });
             resolved.push(ResolvedEndpoint {
                 name,
@@ -186,14 +188,10 @@ impl TemporaryRealization {
                 host_port,
             });
         }
-        let lower = |value: &str| lower_port(value, &endpoints);
+        realization.endpoints = endpoints;
 
-        let argv: Vec<String> = intent.launch_argv.iter().map(|arg| lower(arg)).collect();
-        let public_env: BTreeMap<String, String> = intent
-            .public_env
-            .iter()
-            .map(|(name, value)| (name.clone(), lower(value)))
-            .collect();
+        let argv = intent.launch_argv.clone();
+        let public_env = intent.public_env.clone();
 
         let spec = RuntimeLaunchSpecV1 {
             protocol: RUNTIME_LAUNCH_SPEC_V1_PROTOCOL.to_owned(),
@@ -205,7 +203,7 @@ impl TemporaryRealization {
             },
             workspace: LaunchWorkspaceV1 {
                 materialization_ref: format!("formation-attempt:{}", request.attempt_id),
-                cwd_relative: String::new(),
+                cwd_relative: intent.cwd_relative.clone(),
             },
             realization: LaunchRealizationV1::Process(ProcessRealizationV1 {
                 argv,
@@ -228,7 +226,7 @@ impl TemporaryRealization {
         };
         let context = ResolvedRuntimeLaunchContext::new(
             workspace_root,
-            "",
+            &intent.cwd_relative,
             public_env,
             Vec::new(),
             Vec::new(),
@@ -242,11 +240,10 @@ impl TemporaryRealization {
             &ProcessLaunchHost {
                 shim: request.shim.to_path_buf(),
                 runtime_root,
-                output: Some(realization.output.clone()),
+                output: Some((realization.output.clone(), OUTPUT_LIMIT_BYTES)),
             },
         )?;
         realization.launched = Some(launched);
-        realization.endpoints = endpoints;
 
         // Readiness: every observed port accepts a connection. The Runtime's
         // probe and its "exited before ready" check, one endpoint at a time.
@@ -262,8 +259,22 @@ impl TemporaryRealization {
                 .as_mut()
                 .expect("launched until destroyed");
             if let Err(error) = wait_until_ready(&per_endpoint, &context, launched, &probe) {
-                let tail = realization.output_tail();
-                return Err(error.context(format!("candidate output: {tail}")));
+                let mut detail = format!("candidate output: {}", realization.output_tail());
+                if let Some(moved) = realization
+                    .endpoints
+                    .iter()
+                    .find(|endpoint| endpoint.host_port != endpoint.guest_port)
+                {
+                    detail.push_str(&format!(
+                        "; guest port {} was unavailable on this Runtime, so {} carries {} — a \
+                         Derivation that binds {} literally cannot run here",
+                        moved.guest_port,
+                        endpoint_env_name(&moved.port_id),
+                        moved.host_port,
+                        moved.guest_port
+                    ));
+                }
+                return Err(error.context(detail));
             }
         }
         Ok(realization)
@@ -332,13 +343,7 @@ impl TemporaryRealization {
     }
 
     fn output_tail(&self) -> String {
-        let Ok(mut file) = std::fs::File::open(&self.output) else {
-            return "(none)".to_owned();
-        };
-        let length = file.metadata().map(|meta| meta.len()).unwrap_or(0);
-        let _ = file.seek(SeekFrom::Start(length.saturating_sub(OUTPUT_TAIL_BYTES)));
-        let mut tail = String::new();
-        let _ = file.read_to_string(&mut tail);
+        let tail = ato_adapter_process::read_output_tail(&self.output, OUTPUT_TAIL_BYTES);
         let tail = tail.trim();
         if tail.is_empty() {
             "(none)".to_owned()
@@ -378,24 +383,20 @@ pub fn endpoint_env_name(port_id: &str) -> String {
     endpoint_port_env_name(&endpoint_name(port_id))
 }
 
-/// Replace a value that states a guest port verbatim — `8080`, or the
-/// right-hand side of `--port=8080` / `host:8080` — with its host port.
-fn lower_port(value: &str, endpoints: &[RealizedEndpoint]) -> String {
-    for endpoint in endpoints {
-        let guest = endpoint.guest_port.to_string();
-        let host = endpoint.host_port.to_string();
-        if value == guest {
-            return host;
-        }
-        for separator in ['=', ':'] {
-            if let Some(prefix) = value.strip_suffix(&guest)
-                && prefix.ends_with(separator)
-            {
-                return format!("{prefix}{host}");
-            }
-        }
+/// The guest port itself, if nothing on this host holds it.
+///
+/// Probed on the wildcard address: a listener on `0.0.0.0` or `127.0.0.1`
+/// both make the port unusable for a workload.
+fn reserve_port(guest_port: u16) -> Option<u16> {
+    // One at a time: a listener held across the second probe would make the
+    // port look taken by this very check.
+    if TcpListener::bind(("0.0.0.0", guest_port)).is_err() {
+        return None;
     }
-    value.to_owned()
+    if TcpListener::bind(("127.0.0.1", guest_port)).is_err() {
+        return None;
+    }
+    Some(guest_port)
 }
 
 /// A free loopback port, chosen by the kernel.
@@ -455,30 +456,6 @@ fn make_writable(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn endpoints() -> Vec<RealizedEndpoint> {
-        vec![RealizedEndpoint {
-            port_id: "app.http".to_owned(),
-            guest_port: 8080,
-            host_port: 41234,
-        }]
-    }
-
-    #[test]
-    fn a_verbatim_guest_port_is_lowered_to_the_host_port() {
-        let endpoints = endpoints();
-        assert_eq!(lower_port("8080", &endpoints), "41234");
-        assert_eq!(lower_port("--port=8080", &endpoints), "--port=41234");
-        assert_eq!(lower_port("0.0.0.0:8080", &endpoints), "0.0.0.0:41234");
-    }
-
-    #[test]
-    fn a_value_that_merely_contains_the_digits_is_left_alone() {
-        let endpoints = endpoints();
-        assert_eq!(lower_port("18080", &endpoints), "18080");
-        assert_eq!(lower_port("/app/8080", &endpoints), "/app/8080");
-        assert_eq!(lower_port("app.py", &endpoints), "app.py");
-    }
 
     #[test]
     fn endpoint_names_follow_the_runtime_abi() {

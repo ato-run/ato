@@ -459,7 +459,7 @@ version = "3.12.7"
 id = "app"
 use = "ato.process@1"
 op = "serve"
-argv = ["/opt/ato/toolchains/python/3.12.7/bin/python3", "-B", "/app/server.py", "8000"]
+argv = ["/opt/ato/toolchains/python/3.12.7/bin/python3", "-B", "/app/server.py"]
 
 [[port]]
 id = "app.http"
@@ -486,9 +486,10 @@ input = "workspace"
 digest = "capture"
 "#;
 
-/// Serves /health, and tries to leave a mark in its workspace on the way up.
+/// Serves /health on the port the Runtime hands it, and tries to leave a
+/// mark in its workspace on the way up.
 const MARKING_SERVER: &str = r#"
-import sys
+import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 for target in ("/app/runtime-created.txt", "/tmp/runtime-created.txt"):
@@ -508,7 +509,7 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-HTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
+HTTPServer(("127.0.0.1", int(os.environ["ATO_ENDPOINT_APP_HTTP_PORT"])), Handler).serve_forever()
 "#;
 
 fn tar_entries(path: &Path) -> Vec<String> {
@@ -527,12 +528,9 @@ fn tar_entries(path: &Path) -> Vec<String> {
         .collect()
 }
 
-#[test]
-fn a_process_candidate_is_realized_verified_and_kept_without_its_side_effects() {
-    let dir = site(&[
-        ("server.py", MARKING_SERVER),
-        ("capsule.toml", AUTHORED_PROCESS),
-    ]);
+/// Form an authored process route end to end and check what was kept.
+fn form_process_route(files: &[(&str, &str)], kept_script: &str) {
+    let dir = site(files);
     let scratch = tempfile::tempdir().expect("tempdir");
     let result = local::run(
         &request(dir.path(), FormationNetworkPolicy::DependencyResolution),
@@ -547,7 +545,7 @@ fn a_process_candidate_is_realized_verified_and_kept_without_its_side_effects() 
         let FormationResult::NoVerifiedRoute { attempts, .. } = &result else {
             panic!("expected no_verified_route on this host, got {result:?}");
         };
-        assert_eq!(attempts[0].status, AttemptStatus::Filtered);
+        assert_eq!(attempts[0].status, AttemptStatus::Filtered, "{attempts:?}");
         let code = &attempts[0].failure.as_ref().expect("a reason").code;
         assert!(
             code == "runtime_cannot_contain_build" || code == "runtime_has_no_toolchain_root",
@@ -570,10 +568,6 @@ fn a_process_candidate_is_realized_verified_and_kept_without_its_side_effects() 
         .expect("the candidate's realization was recorded");
     assert_eq!(realization.executor, "runtime-process");
     assert!(realization.destroyed);
-    assert!(
-        !realization.endpoints["app.http"].ends_with("host 8000"),
-        "the guest port is not assumed to be the host port: {realization:?}"
-    );
 
     // The kept artifact is the build output, not the realization's copy.
     let reference = &verified_routes[0].materialization_ref;
@@ -583,7 +577,7 @@ fn a_process_candidate_is_realized_verified_and_kept_without_its_side_effects() 
         .join(format!("{}.tar", &reference["sha256:".len()..]));
     let entries = tar_entries(&artifact);
     assert!(
-        entries.iter().any(|entry| entry.ends_with("server.py")),
+        entries.iter().any(|entry| entry.ends_with(kept_script)),
         "{entries:?}"
     );
     assert!(
@@ -598,6 +592,36 @@ fn a_process_candidate_is_realized_verified_and_kept_without_its_side_effects() 
         .filter(|path| path.ends_with("realization"))
         .collect();
     assert!(realizations.is_empty(), "{realizations:?}");
+}
+
+#[test]
+fn a_process_candidate_is_realized_verified_and_kept_without_its_side_effects() {
+    form_process_route(
+        &[
+            ("server.py", MARKING_SERVER),
+            ("capsule.toml", AUTHORED_PROCESS),
+        ],
+        "server.py",
+    );
+}
+
+#[test]
+fn a_process_candidate_that_starts_in_a_subdirectory_is_formed() {
+    let authored = AUTHORED_PROCESS.replace(
+        r#"argv = ["/opt/ato/toolchains/python/3.12.7/bin/python3", "-B", "/app/server.py"]"#,
+        r#"argv = ["/opt/ato/toolchains/python/3.12.7/bin/python3", "-B", "app.py"]
+cwd = "server""#,
+    );
+    form_process_route(
+        &[
+            ("server/app.py", MARKING_SERVER),
+            // The Python lane wants a module at the source root; a repository
+            // that serves from a subdirectory usually has one anyway.
+            ("tasks.py", "# repository tooling\n"),
+            ("capsule.toml", &authored),
+        ],
+        "server/app.py",
+    );
 }
 
 fn walk(dir: &Path) -> Vec<PathBuf> {

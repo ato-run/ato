@@ -316,8 +316,9 @@ pub struct ProcessLaunchHost {
     pub shim: PathBuf,
     /// Host-side scratch for the launch: the serialized sandbox policy.
     pub runtime_root: PathBuf,
-    /// Where the workload's stdout/stderr go. `None` inherits.
-    pub output: Option<PathBuf>,
+    /// Where the workload's stdout/stderr go, and at most how many bytes of
+    /// it are kept. `None` inherits.
+    pub output: Option<(PathBuf, u64)>,
 }
 
 /// [`launch_process`] with the host-side inputs named explicitly.
@@ -380,7 +381,7 @@ pub fn launch_process_with(
     })
     .context("sandboxed process spec is unusable")?;
     let adapter = match &host.output {
-        Some(path) => adapter.with_output_file(path),
+        Some((path, max_bytes)) => adapter.with_output_file(path, *max_bytes),
         None => adapter,
     };
     let handle = adapter

@@ -191,6 +191,7 @@ dependencies = [
  "ato-adapter-api",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
 ]
 
@@ -433,6 +434,7 @@ name = "ato-formation-worker"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ato-adapter-process",
  "ato-connected-realization-worker",
  "ato-formation",
  "ato-ipc",
