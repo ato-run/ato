@@ -96,8 +96,8 @@ pub struct RuntimeLaunchLeaseCommand {
     /// request or a coarse control-plane cron sweep.
     #[serde(default)]
     pub max_duration_secs: Option<u64>,
-    /// Renewable Coordinator authority for an Instance whose desired state is
-    /// `always_on`. Mutually exclusive with a bounded one-shot duration.
+    /// Renewable Coordinator authority for execution on delegated or managed
+    /// compute. Independent of an optional maximum-duration policy.
     #[serde(default)]
     pub execution_authorization: Option<ExecutionAuthorization>,
     /// Mutable Instance network grants and stable listener allocations. Like
@@ -408,10 +408,6 @@ pub fn refresh_execution_authorization(
 /// control plane digested onto the Run, the Runner would execute something the
 /// receipt does not describe.
 pub fn verified_spec(command: &RuntimeLaunchLeaseCommand) -> Result<RuntimeLaunchSpec> {
-    ensure!(
-        command.max_duration_secs.is_none() || command.execution_authorization.is_none(),
-        "runtime launch cannot combine max_duration_secs with execution_authorization"
-    );
     if let Some(seconds) = command.max_duration_secs {
         ensure!(
             (1..=RUNTIME_LAUNCH_MAX_DURATION_SECS).contains(&seconds),
@@ -568,16 +564,14 @@ impl ActiveWorkload {
 }
 
 pub fn maximum_lifetime(command: &RuntimeLaunchLeaseCommand) -> Option<Duration> {
-    command.execution_authorization.as_ref().map_or_else(
-        || {
-            Some(Duration::from_secs(
-                command
-                    .max_duration_secs
-                    .unwrap_or(RUNTIME_LAUNCH_MAX_DURATION_SECS),
-            ))
-        },
-        |_| None,
-    )
+    match (
+        command.max_duration_secs,
+        command.execution_authorization.as_ref(),
+    ) {
+        (Some(seconds), _) => Some(Duration::from_secs(seconds)),
+        (None, Some(_)) => None,
+        (None, None) => Some(Duration::from_secs(RUNTIME_LAUNCH_MAX_DURATION_SECS)),
+    }
 }
 
 /// Bind an ephemeral port and keep it only long enough to learn its number.
@@ -1493,14 +1487,14 @@ mod tests {
     }
 
     #[test]
-    fn renewable_authority_and_bounded_duration_are_mutually_exclusive() {
+    fn renewable_authority_and_bounded_duration_are_independent_stop_conditions() {
         let spec = RuntimeLaunchSpecV1::parse(PROCESS_FIXTURE).expect("fixture");
         let digest = spec.canonical_digest().expect("digests");
         let mut command = command_for(&spec, &digest);
         command.max_duration_secs = Some(60);
         command.execution_authorization = Some(execution_authorization());
-        let error = verified_spec(&command).unwrap_err();
-        assert!(error.to_string().contains("cannot combine"), "{error}");
+        verified_spec(&command).expect("the two independent limits may coexist");
+        assert_eq!(maximum_lifetime(&command), Some(Duration::from_secs(60)));
     }
 
     #[test]
