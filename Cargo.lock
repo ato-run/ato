@@ -175,6 +175,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ato-adapter-oci"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "ato-adapter-process"
 version = "0.1.0"
 dependencies = [
@@ -250,6 +260,7 @@ dependencies = [
  "ato-adapter-binding",
  "ato-adapter-browser",
  "ato-adapter-http",
+ "ato-adapter-oci",
  "ato-adapter-process",
  "ato-adapter-pty",
  "ato-adapter-workspace",
@@ -257,6 +268,7 @@ dependencies = [
  "ato-compose",
  "ato-computation",
  "ato-contracts",
+ "ato-formation",
  "ato-ipc",
  "ato-kernel",
  "ato-local-execution",
@@ -266,9 +278,11 @@ dependencies = [
  "ato-materializer-vm-snapshot",
  "ato-objects",
  "ato-player",
+ "ato-portable-application",
  "ato-realization-planner",
  "ato-record-writer",
  "ato-runtime-object-graph",
+ "ato-sandbox",
  "base64 0.22.1",
  "blake3",
  "clap",
@@ -280,6 +294,7 @@ dependencies = [
  "serde_jcs",
  "serde_json",
  "sha2",
+ "signal-hook",
  "tempfile",
  "toml",
  "windows",
@@ -319,6 +334,7 @@ dependencies = [
  "anyhow",
  "ato-adapter-api",
  "ato-adapter-browser",
+ "ato-adapter-oci",
  "ato-adapter-process",
  "ato-adapter-workspace",
  "ato-browser-host",
@@ -338,11 +354,13 @@ dependencies = [
  "ato-sandbox",
  "base64 0.22.1",
  "clap",
+ "fs2",
  "hex",
  "hmac",
  "libc",
  "rand 0.8.6",
  "reqwest",
+ "rustix",
  "serde",
  "serde_jcs",
  "serde_json",
@@ -617,6 +635,28 @@ dependencies = [
  "ato-adapter-api",
  "ato-computation",
  "ato-objects",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ato-portable-application"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ato-computation",
+ "ato-formation",
+ "ato-ipc",
+ "ato-materializer-static-web",
+ "ato-objects",
+ "base64 0.22.1",
+ "clap",
+ "reqwest",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tempfile",
  "thiserror 2.0.18",
 ]
 

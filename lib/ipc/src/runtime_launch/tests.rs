@@ -21,6 +21,16 @@ fn process_and_oci_fixtures_parse_and_validate() {
 }
 
 #[test]
+fn hosted_datasette_oci_spec_parses_and_digests() {
+    let raw = r#"{"protocol":"ato.runtime-launch-spec.v1","context":{"run_id":"run_01M2MEX5VPDXJ1A2JDA1GDR080","compute_id":"cmp_01M2MEX5JAX8VWCWQHJQZ8PW4B","compute_schema_id":"csch_01M2MEX5N37GN60AGTZ4EPVS8D","compute_instance_id":"cinst_01M2MEX5Q8TX4VP45Q2QN32CXM"},"workspace":{"materialization_ref":"sha256:069d07bc4486336a54a9dc8f5949c48a4f28ae73535d0d5f783f8f667121fab4","cwd_relative":""},"realization":{"kind":"oci","image_digest_ref":"sha256:0f57db16cf4eb6cca57f1cedaa0a696bca1c65a1d75b8f7ee372c2dd909a32a0","image_reference":"docker.io/datasetteproject/datasette@sha256:0f57db16cf4eb6cca57f1cedaa0a696bca1c65a1d75b8f7ee372c2dd909a32a0","platform":"linux/amd64","resource_limits":{"memory_bytes":268435456,"cpu_limit_millis":1000,"pids_limit":128},"argv":["datasette","--immutable","/app/catalog.db","--host","0.0.0.0","--port","8000"],"working_dir":"/app"},"public_env":[],"secret_grants":[],"state_attachments":[],"endpoints":[{"name":"app.http","protocol":"http","guest_port":8000,"allocation":"automatic"}],"readiness":{"kind":"http","endpoint_name":"app.http","path":"/","timeout_ms":60000},"lifecycle":{"graceful_shutdown_ms":10000,"force_kill_after_ms":15000}}"#;
+    let spec = RuntimeLaunchSpecV1::parse(raw).expect("hosted OCI spec is valid");
+    assert_eq!(
+        spec.canonical_digest().unwrap(),
+        "sha256:d4ca1c27571efe7e769f2ff5cff4ec1b72c8d5445bdb3279b1714e3b39c99b81"
+    );
+}
+
+#[test]
 fn the_two_realizations_differ_only_in_the_realization_arm() {
     // The contract's central claim. If anything else drifts, Process and OCI
     // have begun to mean different things and P5 cannot reuse P3's model.
@@ -69,8 +79,13 @@ fn an_oci_reference_must_be_content_addressed() {
         let mut spec = RuntimeLaunchSpecV1::parse(OCI_FIXTURE).unwrap();
         spec.realization = LaunchRealizationV1::Oci(OciRealizationV1 {
             image_digest_ref: reference.to_owned(),
+            image_reference: None,
+            platform: None,
+            resource_limits: None,
+            entrypoint: None,
             argv: None,
             working_dir: None,
+            workspace_mount_path: None,
         });
         assert_eq!(
             spec.validate().unwrap_err().code(),
@@ -78,6 +93,42 @@ fn an_oci_reference_must_be_content_addressed() {
             "reference {reference:?} should be refused"
         );
     }
+}
+
+#[test]
+fn an_oci_entrypoint_is_an_absolute_guest_path() {
+    for entrypoint in ["bin/app", "../app", "/usr/../bin/app", "/usr//app", ""] {
+        let mut spec = RuntimeLaunchSpecV1::parse(OCI_FIXTURE).unwrap();
+        let LaunchRealizationV1::Oci(realization) = &mut spec.realization else {
+            unreachable!()
+        };
+        realization.entrypoint = Some(entrypoint.to_owned());
+        assert!(spec.validate().is_err(), "entrypoint {entrypoint:?}");
+    }
+    let mut spec = RuntimeLaunchSpecV1::parse(OCI_FIXTURE).unwrap();
+    let LaunchRealizationV1::Oci(realization) = &mut spec.realization else {
+        unreachable!()
+    };
+    realization.entrypoint = Some("/usr/local/bin/app".to_owned());
+    spec.validate().unwrap();
+}
+
+#[test]
+fn an_oci_workspace_mount_is_an_absolute_guest_path() {
+    for target in ["app", "../app", "/ato/../app", "/ato//app", "/", ""] {
+        let mut spec = RuntimeLaunchSpecV1::parse(OCI_FIXTURE).unwrap();
+        let LaunchRealizationV1::Oci(realization) = &mut spec.realization else {
+            unreachable!()
+        };
+        realization.workspace_mount_path = Some(target.to_owned());
+        assert!(spec.validate().is_err(), "workspace mount {target:?}");
+    }
+    let mut spec = RuntimeLaunchSpecV1::parse(OCI_FIXTURE).unwrap();
+    let LaunchRealizationV1::Oci(realization) = &mut spec.realization else {
+        unreachable!()
+    };
+    realization.workspace_mount_path = Some("/ato/workspace".to_owned());
+    spec.validate().unwrap();
 }
 
 #[test]
@@ -213,7 +264,10 @@ fn an_unsupported_protocol_is_refused_rather_than_guessed() {
 #[test]
 fn empty_argv_is_refused() {
     let mut spec = process_spec();
-    spec.realization = LaunchRealizationV1::Process(ProcessRealizationV1 { argv: vec![] });
+    spec.realization = LaunchRealizationV1::Process(ProcessRealizationV1 {
+        argv: vec![],
+        executable: None,
+    });
     assert_eq!(
         spec.validate().unwrap_err().code(),
         "ATO_ERR_RUNTIME_LAUNCH_SPEC_EMPTY_ARGV"

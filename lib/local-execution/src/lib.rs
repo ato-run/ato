@@ -27,6 +27,7 @@
 #![forbid(unsafe_code)]
 
 pub mod authoring;
+pub mod process;
 pub mod registry;
 pub mod seal;
 pub mod supervisor;
@@ -34,6 +35,7 @@ pub mod supervisor;
 use anyhow::Result;
 use ato_materializer_api::MaterializerRegistry;
 
+pub use process::{OwnedProcessIdentity, configure_detached_process, terminate_owned_process};
 pub use registry::{
     adapter_registry, contract_verifier_registry, core_materializer_registry,
     record_schema_registry,

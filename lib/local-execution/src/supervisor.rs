@@ -12,7 +12,6 @@ use ato_adapter_api::{
     AdapterContext, AdapterError, AdapterObservation, IgnoreObservations, IgnoreRecords,
     ObservationSink, SupportedOperation,
 };
-use ato_adapter_process::terminate_process_tree;
 use ato_adapter_workspace::restore_workspace;
 use ato_computation::{ComputationRef, ContentRef};
 use ato_materializer_api::{
@@ -30,6 +29,7 @@ use crate::MaterializerFactory;
 use crate::authoring::{
     adapter_instances, evolve_observation, load_runtime_state, workspace_policy,
 };
+use crate::process::{OwnedProcessIdentity, configure_detached_process, terminate_owned_process};
 use crate::registry::{adapter_registry, record_schema_registry};
 
 const STOP_REQUEST: &str = "runs/stop.request";
@@ -291,6 +291,7 @@ pub fn worker(
         .lock()
         .map_err(|_| anyhow::anyhow!("Run head lock was poisoned"))?
         .clone();
+    let process = OwnedProcessIdentity::current()?;
     let active = ActiveRun {
         token: token.to_owned(),
         branch: branch.to_owned(),
@@ -300,11 +301,10 @@ pub fn worker(
             .records_for_stream(branch, None)?
             .last()
             .map_or(0, |record| record.id.seq),
-        pid: std::process::id(),
-        process_start_time: process_start_time(std::process::id())
-            .context("worker process start time is unavailable")?,
-        process_group: current_process_group()?,
-        boot_session: boot_session_identity()?,
+        pid: process.pid,
+        process_start_time: process.process_start_time,
+        process_group: process.process_group,
+        boot_session: process.boot_session,
         status: "active".to_owned(),
     };
     repository.activate_run(token, &active)?;
@@ -375,9 +375,13 @@ pub fn stop_active(repository: &LocalCapsuleRepository) -> Result<Option<ActiveR
     if run.status != "active" {
         bail!("Capsule Run is still preparing and cannot be stopped");
     }
-    if boot_session_identity()? != run.boot_session
-        || process_start_time(run.pid).as_deref() != Some(run.process_start_time.as_str())
-    {
+    let process = OwnedProcessIdentity {
+        pid: run.pid,
+        process_start_time: run.process_start_time.clone(),
+        process_group: run.process_group,
+        boot_session: run.boot_session.clone(),
+    };
+    if !process.matches_live_process()? {
         enter(SupervisorState::Failed);
         bail!(
             "active Run process identity no longer matches; refusing to stop PID {}",
@@ -394,7 +398,7 @@ pub fn stop_active(repository: &LocalCapsuleRepository) -> Result<Option<ActiveR
             acknowledged = Some(value);
             break;
         }
-        if process_start_time(run.pid).is_none() {
+        if !process.matches_live_process()? {
             bail!("active Run exited before Adapter quiesce acknowledgement");
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -409,13 +413,7 @@ pub fn stop_active(repository: &LocalCapsuleRepository) -> Result<Option<ActiveR
     if final_run.token != run.token {
         bail!("active Run lease changed while quiescing");
     }
-    terminate_process_tree(run.pid, run.process_group)?;
-    for _ in 0..100 {
-        if process_start_time(run.pid).is_none() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    terminate_owned_process(&process)?;
     let _ = fs::remove_file(request);
     let _ = fs::remove_file(ack);
     enter(SupervisorState::Sealed);
@@ -974,101 +972,4 @@ impl ObservationSink for RepositoryObservationSink {
         }
         Ok(())
     }
-}
-
-#[cfg(unix)]
-fn configure_detached_process(command: &mut Command) {
-    use std::os::unix::process::CommandExt;
-    command.process_group(0);
-}
-
-#[cfg(windows)]
-fn configure_detached_process(command: &mut Command) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    command.creation_flags(CREATE_NEW_PROCESS_GROUP);
-}
-
-#[cfg(target_os = "linux")]
-fn process_start_time(pid: u32) -> Option<String> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let fields = stat
-        .rsplit_once(") ")?
-        .1
-        .split_whitespace()
-        .collect::<Vec<_>>();
-    fields.get(19).map(|value| (*value).to_owned())
-}
-
-#[cfg(all(unix, not(target_os = "linux")))]
-fn process_start_time(pid: u32) -> Option<String> {
-    command_output("ps", &["-o", "lstart=", "-p", &pid.to_string()])
-}
-
-#[cfg(windows)]
-fn process_start_time(pid: u32) -> Option<String> {
-    command_output(
-        "powershell",
-        &[
-            "-NoProfile",
-            "-Command",
-            &format!("(Get-Process -Id {pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks"),
-        ],
-    )
-}
-
-#[cfg(target_os = "linux")]
-fn boot_session_identity() -> Result<String> {
-    Ok(std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?
-        .trim()
-        .to_owned())
-}
-
-#[cfg(target_os = "macos")]
-fn boot_session_identity() -> Result<String> {
-    command_output("sysctl", &["-n", "kern.boottime"])
-        .context("kernel boot identity is unavailable")
-}
-
-#[cfg(windows)]
-fn boot_session_identity() -> Result<String> {
-    command_output(
-        "powershell",
-        &[
-            "-NoProfile",
-            "-Command",
-            "(Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().Ticks",
-        ],
-    )
-    .context("Windows boot identity is unavailable")
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-fn boot_session_identity() -> Result<String> {
-    bail!("boot/session identity is unavailable on this platform")
-}
-
-#[cfg(unix)]
-fn current_process_group() -> Result<u32> {
-    command_output(
-        "ps",
-        &["-o", "pgid=", "-p", &std::process::id().to_string()],
-    )
-    .and_then(|value| value.parse().ok())
-    .context("current process group is unavailable")
-}
-
-#[cfg(windows)]
-fn current_process_group() -> Result<u32> {
-    Ok(std::process::id())
-}
-
-#[cfg(any(unix, windows))]
-fn command_output(program: &str, args: &[&str]) -> Option<String> {
-    let output = Command::new(program).args(args).output().ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-        .filter(|value| !value.is_empty())
 }

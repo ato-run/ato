@@ -20,6 +20,7 @@
 
 use super::{SandboxPolicy, SandboxResult};
 use anyhow::{Context, Result};
+use std::collections::BTreeSet;
 use std::ffi::CString;
 use std::path::Path;
 use tracing::{debug, info, warn};
@@ -179,6 +180,48 @@ pub(crate) fn generate_sbpl_profile(policy: &SandboxPolicy) -> String {
         profile.push_str("(allow network-outbound)\n");
         profile.push_str("(allow network-inbound)\n");
         profile.push_str("(allow system-socket)\n");
+    } else if !policy.allowed_bind_tcp_ports.is_empty()
+        || !policy.allowed_connect_tcp_ports.is_empty()
+    {
+        profile.push_str("\n; Port-scoped network access\n");
+        profile.push_str("(allow system-socket)\n");
+        for port in &policy.allowed_bind_tcp_ports {
+            profile.push_str(&format!(
+                "(allow network-inbound (local tcp \"*:{port}\"))\n"
+            ));
+        }
+        for port in &policy.allowed_connect_tcp_ports {
+            profile.push_str(&format!(
+                "(allow network-outbound (remote tcp \"*:{port}\"))\n"
+            ));
+        }
+    }
+
+    // Seatbelt does not implicitly grant metadata lookup on the parents of
+    // an allowed subpath. Libraries such as SQLite resolve every component
+    // before opening a database, so allow metadata (never file contents) for
+    // ancestors of an explicitly allowed path.
+    let ancestor_paths = policy
+        .read_write_paths
+        .iter()
+        .chain(&policy.read_only_paths)
+        .filter_map(|path| path.canonicalize().ok())
+        .flat_map(|path| {
+            path.ancestors()
+                .skip(1)
+                .filter(|ancestor| ancestor.parent().is_some())
+                .filter_map(escape_path_for_sbpl)
+                .collect::<Vec<_>>()
+        })
+        .collect::<BTreeSet<_>>();
+    if !ancestor_paths.is_empty() {
+        profile.push_str("\n; Metadata-only traversal to allowed paths\n");
+        for ancestor in ancestor_paths {
+            profile.push_str(&format!(
+                "(allow file-read-metadata (literal \"{}\"))\n",
+                ancestor
+            ));
+        }
     }
 
     if !policy.read_write_paths.is_empty() {
@@ -319,6 +362,19 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_sbpl_profile_allows_metadata_only_on_path_ancestors() {
+        let allowed = std::env::current_dir().unwrap();
+        let parent = allowed.parent().unwrap();
+        let parent = escape_path_for_sbpl(parent).unwrap();
+        let profile = generate_sbpl_profile(&SandboxPolicy::new().allow_read_only([allowed]));
+
+        assert!(profile.contains(&format!(
+            "(allow file-read-metadata (literal \"{parent}\"))"
+        )));
+        assert!(!profile.contains(&format!("(allow file-read-data (literal \"{parent}\"))")));
+    }
+
+    #[test]
     fn test_generate_sbpl_profile_denies_keychain() {
         // Production mode should always deny mach-lookup to securityd / authd
         // even though `(allow mach-lookup)` is present, because SBPL evaluates
@@ -349,6 +405,17 @@ mod tests {
         assert!(profile.contains("(deny default)"));
         assert!(!profile.contains("(allow network-outbound)"));
         assert!(!profile.contains("(allow network-inbound)"));
+    }
+
+    #[test]
+    fn test_generate_sbpl_profile_scopes_tcp_without_general_egress() {
+        let policy = SandboxPolicy::new()
+            .with_network(false)
+            .allow_tcp_bind([43123]);
+        let profile = generate_sbpl_profile(&policy);
+
+        assert!(profile.contains("(allow network-inbound (local tcp \"*:43123\"))"));
+        assert!(!profile.contains("(allow network-outbound)"));
     }
 
     #[test]

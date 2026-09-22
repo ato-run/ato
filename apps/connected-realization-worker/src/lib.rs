@@ -10,7 +10,7 @@
 mod activity_controller;
 pub mod runtime_launch;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -91,20 +91,47 @@ use activity_controller::{
 
 const PORTABLE_CAPSULE_LEASE_KIND: &str = "portable_capsule_v2";
 const ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND: &str = "activity_browser_executor_v0";
-const RUNNER_CAPABILITIES: &[&str] = &[
+const BASE_RUNNER_CAPABILITIES: &[&str] = &[
     "execution_abi=process",
     runtime_launch::lease::RUNTIME_LAUNCH_LEASE_KIND,
     "isolation=untrusted-v1",
     "materializer=ato.materialize.vm.snapshot@1",
     "backend=firecracker",
 ];
+
+fn runner_capabilities(
+    oci_available: bool,
+    persistent_volumes: bool,
+    network_controls: bool,
+    fixed_tcp: bool,
+) -> Vec<&'static str> {
+    let mut capabilities = BASE_RUNNER_CAPABILITIES.to_vec();
+    if oci_available {
+        capabilities.push("execution_abi=oci");
+        // A group is a capability of the OCI evaluator, not a separate ABI:
+        // it is offered exactly where single-container OCI is, by a build that
+        // understands ato.runtime-launch-spec.v2.
+        capabilities.push(ato_ipc::oci_service_group::OCI_SERVICE_GROUP_RUNTIME_FEATURE);
+        // Volumes are their own feature: a group Runner is not a volume
+        // Runner until it understands v3 AND has a writable volume store.
+        if persistent_volumes {
+            capabilities.push(runtime_launch::volume::RUNNER_PERSISTENT_VOLUME_FEATURE);
+        }
+        if network_controls {
+            capabilities.push("network=ato.tcp-egress@1");
+        }
+        if network_controls && fixed_tcp {
+            capabilities.push("network=ato.fixed-tcp@1");
+        }
+    }
+    capabilities
+}
 const ACTIVE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
-/// A Run that is never stopped is still not immortal. The cap exists so a lost
-/// control plane cannot leave a workload and its state slot held forever.
-const RUNTIME_LAUNCH_MAX_LIFETIME: Duration = Duration::from_secs(60 * 60);
 const ACTIVITY_FRAME_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 const ACTIVITY_FRAME_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+#[cfg(unix)]
 const GUEST_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+#[cfg(unix)]
 const GUEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const TERMINAL_REPORT_RETRY_DELAYS: [Duration; 3] = [
     Duration::ZERO,
@@ -948,13 +975,40 @@ pub struct WorkerConfig {
     /// a Runner. Required only for Browser-aware Hosted Runs.
     #[arg(long, env = "ATO_RUN_CONTROL_VERIFICATION_KEY", hide_env_values = true)]
     pub run_control_verification_key: Option<String>,
+    /// Host-wide root for Runner-local persistent volumes, shared by every
+    /// slot worker of this Runner. Unset: volume-backed Runs are neither
+    /// advertised nor accepted. Never under a lease or work directory.
+    #[arg(long, env = "ATO_RUNNER_STATE_VOLUME_ROOT")]
+    pub state_volume_root: Option<PathBuf>,
+    /// Enable the isolated raw-TCP broker. Disabled by default; capability is
+    /// advertised only when Docker admission also passes.
+    #[arg(long, env = "ATO_RUNTIME_NETWORK_CONTROLS", default_value_t = false)]
+    pub network_controls: bool,
+    /// Comma-separated exact sockets this slot may own as fixed listeners.
+    #[arg(long, env = "ATO_RUNTIME_FIXED_TCP_ALLOWLIST", default_value = "")]
+    pub fixed_tcp_allowlist: String,
     #[arg(long)]
     pub once: bool,
+}
+
+/// How a runtime launch ended, and whether its workloads are confirmed
+/// stopped (the journal entry may then go).
+struct RuntimeLaunchOutcome {
+    result: Result<()>,
+    stop_confirmed: bool,
+}
+
+struct RuntimeServeControls<'a> {
+    hard_deadline: Option<Instant>,
+    execution_authorization: Option<&'a mut runtime_launch::lease::ExecutionAuthorizationMonitor>,
+    network_authorization: Option<&'a runtime_launch::lease::NetworkAuthorization>,
 }
 
 pub struct ConnectedWorker {
     config: WorkerConfig,
     api: HttpRunnerApi,
+    volume_store: Option<runtime_launch::volume::VolumeStore>,
+    fixed_tcp: runtime_launch::network_broker::FixedTcpRegistry,
 }
 
 impl ConnectedWorker {
@@ -962,13 +1016,90 @@ impl ConnectedWorker {
         resolve_runner_credentials(&mut config)?;
         validate_config(&config)?;
         fs::create_dir_all(&config.work_root)?;
-        let api = HttpRunnerApi::new(&config.api_base, &config.runner_id, &config.runner_token)?;
-        Ok(Self { config, api })
+        let mut api =
+            HttpRunnerApi::new(&config.api_base, &config.runner_id, &config.runner_token)?;
+        if config.network_controls {
+            runtime_launch::network_broker::prepare_egress_firewall().context(
+                "TCP egress controls failed host firewall admission; capability not advertised",
+            )?;
+        }
+        // A store that cannot be opened is not advertised; the worker still
+        // serves everything else.
+        let volume_store = config.state_volume_root.as_deref().and_then(|root| {
+            runtime_launch::volume::VolumeStore::open(root, &config.runner_id)
+                .map_err(|error| {
+                    eprintln!("[runtime-launch] persistent volumes disabled: {error:#}")
+                })
+                .ok()
+        });
+        api.persistent_volumes = volume_store.is_some();
+        let fixed_tcp =
+            runtime_launch::network_broker::FixedTcpRegistry::new(if config.network_controls {
+                &config.fixed_tcp_allowlist
+            } else {
+                ""
+            })?;
+        Ok(Self {
+            config,
+            api,
+            volume_store,
+            fixed_tcp,
+        })
+    }
+
+    /// Stop and report whatever this slot left running before it advertises
+    /// runtime work. A failure leaves the slot unrecovered, not the worker
+    /// dead: other lease kinds keep working and recovery is retried.
+    fn recover_runtime_launch(&self) {
+        if runtime_launch::recovery::slot_recovered()
+            || !runtime_launch::lease::RUNTIME_LAUNCH_SUPPORTED()
+        {
+            return;
+        }
+        let journal = match runtime_launch::recovery::RunJournal::new(
+            &self.config.work_root,
+            &self.config.runner_id,
+            &self.config.slot_id,
+        ) {
+            Ok(journal) => journal,
+            Err(error) => {
+                eprintln!("[runtime-launch-recovery] blocked: {error:#}");
+                runtime_launch::recovery::mark_slot_recovered(false);
+                return;
+            }
+        };
+        let scanner = ato_adapter_oci::OwnedResourceScanner::new(
+            &self.config.runner_id,
+            &self.config.slot_id,
+        )
+        .ok();
+        match runtime_launch::recovery::recover_slot(
+            &journal,
+            scanner.as_ref(),
+            &self.api,
+            ato_adapter_oci::StopBudget::DEFAULT,
+        ) {
+            Ok(result) => {
+                for report in &result.reports {
+                    eprintln!(
+                        "[runtime-launch-recovery] {}",
+                        serde_json::to_string(report).unwrap_or_default()
+                    );
+                }
+                runtime_launch::recovery::mark_slot_recovered(result.clean);
+            }
+            Err(error) => {
+                eprintln!("[runtime-launch-recovery] blocked: {error:#}");
+                runtime_launch::recovery::mark_slot_recovered(false);
+            }
+        }
     }
 
     pub fn run(&self) -> Result<()> {
+        self.recover_runtime_launch();
         self.api.heartbeat(&self.config, 0)?;
         loop {
+            self.recover_runtime_launch();
             let claim = self.api.claim_next()?;
             let Some(lease) = claim.lease else {
                 if self.config.once {
@@ -981,7 +1112,12 @@ impl ConnectedWorker {
             self.api.heartbeat(&self.config, 1)?;
             if let Err(error) = self.execute_lease(&lease) {
                 let message = format!("connected Realization failed: {error:#}");
-                if let Err(report_error) = self.api.report_failed(&lease.id, &message) {
+                let code = if message.contains("execution authorization") {
+                    "execution_authorization_ended"
+                } else {
+                    "realization_failed"
+                };
+                if let Err(report_error) = self.api.report_failed(&lease.id, code, &message) {
                     // Never print credentials or the remote response body. The
                     // lease id and bounded HTTP error are enough to distinguish
                     // a physical failure from a terminal-evidence delivery gap.
@@ -1014,6 +1150,9 @@ impl ConnectedWorker {
             LeaseCommand::RuntimeLaunch(command) => {
                 self.execute_runtime_launch_lease(lease, command, &lease_root)
             }
+            LeaseCommand::VolumeMaintenance(command) => {
+                self.execute_volume_maintenance_lease(lease, command)
+            }
         };
         let cleanup = cleanup_lease_directory(&lease_root);
         match (result, cleanup) {
@@ -1021,6 +1160,78 @@ impl ConnectedWorker {
             (Err(error), _) => Err(error),
             (Ok(()), Err(error)) => Err(error),
         }
+    }
+
+    /// Checkpoint, restore or delete a Runner-local volume. No workload runs:
+    /// the control plane issued this lease only after the previous Run's stop
+    /// was confirmed and this operation took the next writer generation.
+    fn execute_volume_maintenance_lease(
+        &self,
+        lease: &ClaimedLease,
+        command: &runtime_launch::volume_maintenance::VolumeMaintenanceLeaseCommand,
+    ) -> Result<()> {
+        ensure!(
+            runtime_launch::recovery::slot_recovered(),
+            "this Runner slot has not confirmed its previous Runs stopped; refusing volume work"
+        );
+        let store = self
+            .volume_store
+            .as_ref()
+            .context("this Runner has no volume store; refusing a volume operation")?;
+        // Journaled first: a Runner that dies mid-operation is recovered as a
+        // confirmed stop (there is no workload), and the control plane marks
+        // the operation interrupted. Restore and delete swap atomically, so
+        // the volume is consistent either way.
+        let owner = ato_adapter_oci::OciOwner {
+            runner_id: self.config.runner_id.clone(),
+            slot_id: self.config.slot_id.clone(),
+            lease_id: lease.id.clone(),
+            run_id: command.run_id.clone(),
+            incarnation: runtime_launch::recovery::incarnation().to_owned(),
+        };
+        let journal = runtime_launch::recovery::RunJournal::new(
+            &self.config.work_root,
+            &self.config.runner_id,
+            &self.config.slot_id,
+        )?;
+        journal.record(&runtime_launch::recovery::RunJournalEntry::new(&owner))?;
+
+        let transport = runtime_launch::state_artifact::LeaseStateArtifactTransport::new(
+            self.api.client.clone(),
+            self.api.base.clone(),
+            lease.id.clone(),
+            self.api.token.clone(),
+        );
+        let performed = runtime_launch::volume_maintenance::perform(command, store, &transport);
+        let (outcome, error) = match &performed {
+            Ok(()) => (
+                runtime_launch::state_artifact::VolumeOperationOutcome::Succeeded,
+                None,
+            ),
+            Err(error) => (
+                runtime_launch::state_artifact::VolumeOperationOutcome::Failed,
+                Some(format!("{error:#}")),
+            ),
+        };
+        eprintln!(
+            "[volume-operation] {}",
+            serde_json::json!({
+                "operation_id": command.operation_id,
+                "operation": format!("{:?}", command.operation).to_lowercase(),
+                "volume_ref": command.volume_ref,
+                "outcome": if performed.is_ok() { "succeeded" } else { "failed" },
+                "error": error,
+            })
+        );
+        runtime_launch::state_artifact::StateArtifactTransport::complete_volume_operation(
+            &transport,
+            &command.operation_id,
+            outcome,
+            error.as_deref(),
+        )?;
+        // Reported: the control plane has the outcome and released the writer.
+        journal.remove(&lease.id)?;
+        Ok(())
     }
 
     /// One Dynamic Compute Run: contained process, real state, real stop.
@@ -1035,11 +1246,121 @@ impl ConnectedWorker {
         command: &runtime_launch::lease::RuntimeLaunchLeaseCommand,
         lease_root: &Path,
     ) -> Result<()> {
+        // A slot that has not finished recovering may still have a previous
+        // incarnation's workload running; it takes no runtime work.
+        ensure!(
+            runtime_launch::recovery::slot_recovered(),
+            "this Runner slot has not confirmed its previous Runs stopped; refusing runtime launch"
+        );
         // Proven before anything is materialized: if the spec that arrived is
         // not the one the control plane digested onto the Run, the Runner
         // would execute something the receipt does not describe.
         let spec = runtime_launch::lease::verified_spec(command)?;
+        // Arm this before materialization/startup. A public preview's cap owns
+        // the whole allocation, not only the time after readiness.
+        let started = Instant::now();
+        let hard_deadline = runtime_launch::lease::maximum_lifetime(command)
+            .map(|duration| {
+                started
+                    .checked_add(duration)
+                    .context("runtime launch deadline overflowed")
+            })
+            .transpose()?;
+        let mut execution_authorization = command
+            .execution_authorization
+            .as_ref()
+            .map(|authorization| {
+                runtime_launch::lease::ExecutionAuthorizationMonitor::new(authorization, started)
+            })
+            .transpose()?;
 
+        // Journaled before any writer, network or container exists, so a
+        // Runner that dies from here on leaves something recovery can find.
+        let owner = ato_adapter_oci::OciOwner {
+            runner_id: self.config.runner_id.clone(),
+            slot_id: self.config.slot_id.clone(),
+            lease_id: lease.id.clone(),
+            run_id: spec.context().run_id.clone(),
+            incarnation: runtime_launch::recovery::incarnation().to_owned(),
+        };
+        let journal = runtime_launch::recovery::RunJournal::new(
+            &self.config.work_root,
+            &self.config.runner_id,
+            &self.config.slot_id,
+        )?;
+        let mut entry = runtime_launch::recovery::RunJournalEntry::new(&owner);
+        if let Some(network) = command.network_authorization.as_ref() {
+            entry.network_generations.extend(
+                network
+                    .egress
+                    .iter()
+                    .map(|grant| (grant.grant_id.clone(), grant.generation)),
+            );
+            entry.network_generations.extend(
+                network
+                    .fixed_tcp
+                    .iter()
+                    .map(|allocation| (allocation.allocation_id.clone(), allocation.generation)),
+            );
+        }
+        journal.record(&entry)?;
+
+        if let Some(network) = command.network_authorization.as_ref() {
+            ensure!(
+                self.config.network_controls,
+                "this Runner did not enable network controls"
+            );
+            self.fixed_tcp
+                .register_pending(&lease.run_id, &network.fixed_tcp)?;
+        }
+
+        let outcome = self.run_runtime_launch(
+            lease,
+            &spec,
+            hard_deadline,
+            &mut execution_authorization,
+            command.network_authorization.as_ref(),
+            &owner,
+            &journal,
+            &mut entry,
+            lease_root,
+        );
+        if let Some(network) = command.network_authorization.as_ref() {
+            for allocation in &network.fixed_tcp {
+                self.fixed_tcp.deactivate(&lease.run_id, allocation);
+            }
+        }
+        if outcome.stop_confirmed {
+            // Confirmed stopped, or never started: nothing left to recover.
+            journal.remove(&lease.id)?;
+        } else {
+            // Kept for recovery; the slots are quarantined, not released.
+            entry.phase = runtime_launch::recovery::RunPhase::StopUnconfirmed;
+            journal.record(&entry)?;
+        }
+        outcome.result
+    }
+
+    /// One runtime launch, from resolution to a stop. Every path after the
+    /// workload starts goes through `finish`, which stops it before anything
+    /// is committed or released.
+    #[allow(clippy::too_many_arguments)]
+    fn run_runtime_launch(
+        &self,
+        lease: &ClaimedLease,
+        spec: &ato_ipc::runtime_launch_v2::RuntimeLaunchSpec,
+        hard_deadline: Option<Instant>,
+        execution_authorization: &mut Option<runtime_launch::lease::ExecutionAuthorizationMonitor>,
+        network_authorization: Option<&runtime_launch::lease::NetworkAuthorization>,
+        owner: &ato_adapter_oci::OciOwner,
+        journal: &runtime_launch::recovery::RunJournal,
+        entry: &mut runtime_launch::recovery::RunJournalEntry,
+        lease_root: &Path,
+    ) -> RuntimeLaunchOutcome {
+        let not_started = |result: Result<()>| RuntimeLaunchOutcome {
+            result,
+            stop_confirmed: true,
+        };
         let workspace = runtime_launch::workspace::LeaseWorkspaceTransport::new(
             self.api.client.clone(),
             self.api.base.clone(),
@@ -1052,6 +1373,24 @@ impl ConnectedWorker {
             lease.id.clone(),
             self.api.token.clone(),
         );
+        let secrets = match self
+            .api
+            .redeem_runtime_bindings(&lease.id, &spec.secret_grants())
+        {
+            Ok(secrets) => secrets,
+            Err(error) => return not_started(Err(error)),
+        };
+        match self.refresh_execution_authorization(&lease.id, execution_authorization.as_mut()) {
+            Ok(true) => {
+                let execution_id = match spec.canonical_digest() {
+                    Ok(digest) => digest,
+                    Err(error) => return not_started(Err(error.into())),
+                };
+                return not_started(self.api.report_stopped(&lease.id, &execution_id));
+            }
+            Ok(false) => {}
+            Err(error) => return not_started(Err(error)),
+        }
 
         // P4-A: publish the process on this Runner's ingress slot.
         //
@@ -1060,81 +1399,261 @@ impl ConnectedWorker {
         // forwards from. Both are existing Runner configuration — the control
         // plane never picks a host port, because only the Runner knows what is
         // free and the stable URL must not depend on it.
+        let endpoint_name = match runtime_launch::lease::published_endpoint_name(spec) {
+            Ok(name) => name,
+            Err(error) => return not_started(Err(error)),
+        };
         let mut assigned_ports = std::collections::BTreeMap::new();
-        assigned_ports.insert("http".to_owned(), self.config.surface_listen.port());
-        let resolved = runtime_launch::lease::resolve_run(
-            &spec,
+        assigned_ports.insert(endpoint_name.clone(), self.config.surface_listen.port());
+        // `resolve_run` acquires the writers and gives them back itself if it
+        // fails; no workload exists yet.
+        let resolved = match runtime_launch::lease::resolve_run(
+            spec,
             lease_root,
             &workspace,
             &state,
+            secrets,
             &assigned_ports,
-        )?;
+            self.volume_store.as_ref(),
+        ) {
+            Ok(resolved) => resolved,
+            Err(error) => return not_started(Err(error)),
+        };
+        entry.writer_fences = resolved.prepared.writer_fences();
+        entry.phase = runtime_launch::recovery::RunPhase::Launching;
+        if let Err(error) = journal.record(entry) {
+            runtime_launch::session::abort_run(&state, &resolved.prepared);
+            return not_started(Err(error));
+        }
         let probe =
             runtime_launch::process_executor::LoopbackReadinessProbe::new(self.api.client.clone());
-        let active = runtime_launch::lease::start(&spec, resolved, &state, &probe)?;
+        let active = match runtime_launch::lease::start(
+            spec,
+            resolved,
+            &state,
+            &probe,
+            owner,
+            network_authorization,
+        ) {
+            Ok(active) => active,
+            Err(failure) => {
+                return RuntimeLaunchOutcome {
+                    stop_confirmed: failure.stop.is_confirmed(),
+                    result: Err(anyhow::Error::new(failure)),
+                };
+            }
+        };
+        entry.phase = runtime_launch::recovery::RunPhase::Active;
+        if let runtime_launch::lease::ActiveWorkload::Process(process) = &active.launched {
+            entry.process =
+                runtime_launch::recovery::process_start_time(process.pid()).map(|start_time| {
+                    runtime_launch::recovery::ProcessIdentity {
+                        pid: process.pid(),
+                        start_time,
+                    }
+                });
+        }
 
-        let execution_id = spec
-            .canonical_digest()
-            .map_err(|error| anyhow::anyhow!("cannot digest the launch spec: {error}"))?;
-        let port = active
-            .endpoint_port("http")
-            .context("the launch declared no `http` endpoint to report")?;
-        // The ready_url is the ingress slot's public hostname, and the process
-        // is listening on the loopback port that slot forwards to. Before P4
-        // this reported no URL at all, honestly: a process realization was
-        // reachable only on the Runner's own loopback, and synthesizing a
-        // public address would have published a URL that served nothing. It
-        // serves something now.
-        //
-        // The API still validates the hostname against this Runner's active
-        // ingress slots, so a misconfigured `public_base_url` is refused rather
-        // than believed.
-        self.api.report_ready(
-            &lease.id,
-            &execution_id,
-            Some(&self.config.public_base_url),
-            Some(port),
-            None,
-        )?;
-        eprintln!(
-            "[runtime-launch] run={} ready pid={} endpoint=127.0.0.1:{port} public={}",
-            lease.run_id,
-            active.pid(),
-            self.config.public_base_url
-        );
+        // Everything between readiness and the stop request. Any error here
+        // still ends in `finish` below.
+        let serving = journal.record(entry).and_then(|()| {
+            self.serve_runtime_launch(
+                lease,
+                spec,
+                &active,
+                &endpoint_name,
+                RuntimeServeControls {
+                    hard_deadline,
+                    execution_authorization: execution_authorization.as_mut(),
+                    network_authorization,
+                },
+            )
+        });
 
-        // ACTIVE. The control plane decides when this ends.
-        let stop = || -> Result<bool> { Ok(self.api.control(&lease.id)?.stop_requested) };
-        let outcome = runtime_launch::lease::wait_for_stop(
-            &stop,
-            Duration::from_millis(500),
-            Some(Instant::now() + RUNTIME_LAUNCH_MAX_LIFETIME),
-        );
-
-        // Whether the stop was requested or the lifetime ran out, the Run is
-        // finished the same way: stop, prove the subtree is gone, pack, commit,
-        // release. A lifetime overrun must not skip the commit — the App's
-        // users produced that state either way.
-        let committed = runtime_launch::lease::finish(
-            &spec,
+        entry.phase = runtime_launch::recovery::RunPhase::Stopping;
+        let _ = journal.record(entry);
+        // Whether the stop was requested, the lifetime ran out or serving
+        // failed, the Run ends the same way: stop, prove the workloads are
+        // gone, then pack, commit and release — or quarantine if the stop
+        // cannot be confirmed.
+        let (stopped, committed) = runtime_launch::lease::finish(
+            spec,
             active,
             &state,
             &format!("commit_{}", lease.run_id),
         );
-        outcome?;
-        let committed = committed?;
-        for entry in &committed {
-            eprintln!(
-                "[runtime-launch] run={} state={} fence={} {} -> {}",
-                lease.run_id,
-                entry.state_key,
-                entry.writer_fence,
-                entry.parent_revision_ref.as_deref().unwrap_or("<new>"),
-                entry.revision_ref.as_deref().unwrap_or("<unchanged>")
-            );
+        eprintln!(
+            "[runtime-launch] run={} stop={}",
+            lease.run_id,
+            serde_json::json!({
+                "overall": &stopped.overall,
+                "services": stopped
+                    .services
+                    .iter()
+                    .map(|(name, outcome)| serde_json::json!({ "name": name, "outcome": outcome }))
+                    .collect::<Vec<_>>(),
+            })
+        );
+        let stop_confirmed = stopped.overall.is_confirmed();
+        let result = serving.and_then(|execution_id| {
+            let committed = committed?;
+            for entry in &committed {
+                eprintln!(
+                    "[runtime-launch] run={} state={} fence={} {} -> {}",
+                    lease.run_id,
+                    entry.state_key,
+                    entry.writer_fence,
+                    entry.parent_revision_ref.as_deref().unwrap_or("<new>"),
+                    entry.revision_ref.as_deref().unwrap_or("<unchanged>")
+                );
+            }
+            self.api.report_stopped(&lease.id, &execution_id)
+        });
+        RuntimeLaunchOutcome {
+            result,
+            stop_confirmed,
         }
-        self.api.report_stopped(&lease.id, &execution_id)?;
-        Ok(())
+    }
+
+    /// Report readiness and hold the Run ACTIVE until the control plane asks
+    /// it to stop. Returns the execution id to report the stop against.
+    fn serve_runtime_launch(
+        &self,
+        lease: &ClaimedLease,
+        spec: &ato_ipc::runtime_launch_v2::RuntimeLaunchSpec,
+        active: &runtime_launch::lease::ActiveRun,
+        endpoint_name: &str,
+        controls: RuntimeServeControls<'_>,
+    ) -> Result<String> {
+        let RuntimeServeControls {
+            hard_deadline,
+            mut execution_authorization,
+            network_authorization,
+        } = controls;
+        ensure!(
+            hard_deadline.is_none_or(|deadline| Instant::now() < deadline),
+            "runtime launch maximum lifetime elapsed during startup"
+        );
+        let execution_id = spec
+            .canonical_digest()
+            .map_err(|error| anyhow::anyhow!("cannot digest the launch spec: {error}"))?;
+        if self
+            .refresh_execution_authorization(&lease.id, execution_authorization.as_deref_mut())?
+        {
+            return Ok(execution_id);
+        }
+        let port = active.endpoint_port(endpoint_name).with_context(|| {
+            format!("the launch declared no `{endpoint_name}` endpoint to report")
+        })?;
+        let execution_evidence = active.execution_evidence();
+        let oci_port_mapping = active.launched.surface_container().and_then(|container| {
+            let (container_ip, mappings) = container.port_mapping();
+            mappings.first().map(|mapping| OciPortMappingReport {
+                container_ip: container_ip.to_string(),
+                guest_port: mapping.guest_port,
+                runner_forward_port: mapping.host_port,
+            })
+        });
+        // The ready_url is the ingress slot's public hostname, and the process
+        // is listening on the loopback port that slot forwards to. The API
+        // still validates the hostname against this Runner's active ingress
+        // slots, so a misconfigured `public_base_url` is refused rather than
+        // believed.
+        self.api.report_ready(
+            &lease.id,
+            ReadyReport {
+                execution_id: &execution_id,
+                ready_url: Some(&self.config.public_base_url),
+                local_port: Some(port),
+                execution: Some(&execution_evidence),
+                port_mapping: oci_port_mapping.as_ref(),
+                control: None,
+            },
+        )?;
+        if let Some(network) = network_authorization {
+            let runtime_launch::lease::ActiveWorkload::OciServiceGroup(group) = &active.launched
+            else {
+                bail!("network authorization was attached to a non-group workload")
+            };
+            for allocation in &network.fixed_tcp {
+                let (_, container) = group
+                    .services()
+                    .find(|(name, _)| *name == allocation.service_id)
+                    .with_context(|| {
+                        format!(
+                            "fixed TCP allocation names absent service `{}`",
+                            allocation.service_id
+                        )
+                    })?;
+                self.fixed_tcp.activate(
+                    &lease.run_id,
+                    allocation,
+                    SocketAddr::new(container.container_address(), allocation.guest_port),
+                )?;
+            }
+        }
+        if let Some(container) = active.launched.surface_container() {
+            let (container_ip, mappings) = container.port_mapping();
+            for mapping in mappings {
+                eprintln!(
+                    "[runtime-launch-surface] {}",
+                    serde_json::json!({
+                        "run_id": lease.run_id,
+                        "lease_id": lease.id,
+                        "container_id": container.container_id(),
+                        "container_ip": container_ip.to_string(),
+                        "guest_port": mapping.guest_port,
+                        "runner_forward_port": mapping.host_port,
+                        "public_host": self.config.public_base_url,
+                    })
+                );
+            }
+        }
+        eprintln!(
+            "[runtime-launch] run={} ready {} endpoint=127.0.0.1:{port} public={}",
+            lease.run_id,
+            active.execution_subject(),
+            self.config.public_base_url
+        );
+
+        // ACTIVE. The control plane decides when this ends.
+        let mut stop = || -> Result<bool> {
+            // A group is one Application: a service that exits while ACTIVE
+            // fails the whole Run, which is then stopped by `finish`.
+            if let runtime_launch::lease::ActiveWorkload::OciServiceGroup(group) = &active.launched
+                && let Some((name, code)) = group.exited_service()?
+            {
+                bail!("OCI service `{name}` exited while the group was active with code {code}");
+            }
+            poll_runtime_launch_control(
+                || Ok(self.api.control(&lease.id)?.stop_requested),
+                || {
+                    self.refresh_execution_authorization(
+                        &lease.id,
+                        execution_authorization.as_deref_mut(),
+                    )
+                },
+            )
+        };
+        runtime_launch::lease::wait_for_stop(&mut stop, Duration::from_millis(500), hard_deadline)?;
+        Ok(execution_id)
+    }
+
+    fn refresh_execution_authorization(
+        &self,
+        lease_id: &str,
+        monitor: Option<&mut runtime_launch::lease::ExecutionAuthorizationMonitor>,
+    ) -> Result<bool> {
+        let Some(monitor) = monitor else {
+            return Ok(false);
+        };
+        runtime_launch::lease::refresh_execution_authorization(
+            monitor,
+            lease_id,
+            Instant::now,
+            || self.api.renew_execution_authorization(lease_id),
+            std::thread::sleep,
+        )
     }
 
     fn execute_portable_lease(
@@ -1213,12 +1732,20 @@ impl ConnectedWorker {
             evolution.current_head().head.as_str() == command.expected_root_computation_ref,
             "hosted evolution authority root changed before the first operation"
         );
+        let control = browser.as_ref().map(|runtime| runtime.control_capability());
         self.api.report_ready(
             &lease.id,
-            &execution_id,
-            Some(&self.config.public_base_url),
-            Some(ready_local_port(&self.config)),
-            browser.as_ref().map(|runtime| runtime.control_capability()),
+            ReadyReport {
+                execution_id: &execution_id,
+                ready_url: Some(&self.config.public_base_url),
+                local_port: Some(ready_local_port(&self.config)),
+                execution: None,
+                port_mapping: None,
+                control: control.as_ref().map(|capability| BrowserControlReport {
+                    protocol: &capability.protocol,
+                    port: &capability.port,
+                }),
+            },
         )?;
         let mut last_control = Instant::now() - Duration::from_secs(1);
         let mut last_frame = Instant::now();
@@ -1425,6 +1952,22 @@ impl ConnectedWorker {
     }
 }
 
+/// Read the control-plane stop fence before renewing authority to continue.
+///
+/// Setting desired state to stopped revokes the renewable authorization and
+/// requests teardown as one control-plane operation. Reading the stop request
+/// first lets the Runner acknowledge that intentional teardown cleanly. When
+/// no stop was requested, continuation still requires a successful renewal.
+fn poll_runtime_launch_control(
+    mut stop_requested: impl FnMut() -> Result<bool>,
+    mut refresh_execution_authorization: impl FnMut() -> Result<bool>,
+) -> Result<bool> {
+    if stop_requested()? {
+        return Ok(true);
+    }
+    refresh_execution_authorization()
+}
+
 #[derive(Deserialize)]
 struct StoredRunnerCredentials {
     api_base: String,
@@ -1551,6 +2094,13 @@ fn validate_lease(lease: &ClaimedLease, now: SystemTime) -> Result<()> {
             ensure!(
                 valid_sha256_digest(&command.launch_spec_digest),
                 "runtime launch lease spec digest is invalid"
+            );
+        }
+        LeaseCommand::VolumeMaintenance(command) => {
+            command.validate(&lease.run_id)?;
+            ensure!(
+                valid_control_id(&command.compute_instance_id),
+                "volume operation ComputeInstance scope is invalid"
             );
         }
         LeaseCommand::Activity(command) => {
@@ -2762,6 +3312,8 @@ pub(crate) enum LeaseCommand {
     Activity(ActivityLeaseCommand),
     #[serde(rename = "runtime_launch")]
     RuntimeLaunch(runtime_launch::lease::RuntimeLaunchLeaseCommand),
+    #[serde(rename = "state_volume_maintenance")]
+    VolumeMaintenance(runtime_launch::volume_maintenance::VolumeMaintenanceLeaseCommand),
 }
 
 #[derive(Debug, Deserialize)]
@@ -2830,6 +3382,35 @@ struct ControlResponse {
     stop_requested: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutionAuthorizationRenewalResponse {
+    ok: bool,
+    policy_generation: u64,
+    authorization_generation: u64,
+    server_time: String,
+    expires_at: String,
+    renew_after_secs: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutionAuthorizationRefusalResponse {
+    error: String,
+    reason: String,
+    stop_requested: bool,
+    server_time: String,
+    message: String,
+}
+
+use runtime_launch::lease::ExecutionAuthorizationRenewalOutcome;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeBindingsResponse {
+    bindings: BTreeMap<String, String>,
+}
+
 #[derive(Serialize)]
 struct StatusReport<'a> {
     status: &'a str,
@@ -2850,6 +3431,13 @@ struct BrowserControlReport<'a> {
 }
 
 #[derive(Serialize)]
+struct OciPortMappingReport {
+    container_ip: String,
+    guest_port: u16,
+    runner_forward_port: u16,
+}
+
+#[derive(Serialize)]
 struct ReadyReport<'a> {
     execution_id: &'a str,
     /// Omitted when the realization has no externally reachable URL.
@@ -2865,6 +3453,10 @@ struct ReadyReport<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     local_port: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    execution: Option<&'a runtime_launch::lease::RuntimeExecutionEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    port_mapping: Option<&'a OciPortMappingReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     control: Option<BrowserControlReport<'a>>,
 }
 
@@ -2874,6 +3466,8 @@ pub struct HttpRunnerApi {
     base: String,
     runner_id: String,
     token: String,
+    /// Whether this worker has a usable persistent volume store.
+    persistent_volumes: bool,
 }
 
 impl HttpRunnerApi {
@@ -2883,6 +3477,7 @@ impl HttpRunnerApi {
             base: base.trim_end_matches('/').to_owned(),
             runner_id: runner_id.to_owned(),
             token: token.to_owned(),
+            persistent_volumes: false,
         })
     }
 
@@ -2896,8 +3491,13 @@ impl HttpRunnerApi {
             self.base, self.runner_id
         )))
         .json(&serde_json::json!({
-            "capabilities": RUNNER_CAPABILITIES,
-            "supported_lease_kinds": supported_lease_kinds(config),
+            "capabilities": runner_capabilities(
+                ato_adapter_oci::docker_runtime_available(),
+                self.persistent_volumes,
+                config.network_controls,
+                !config.fixed_tcp_allowlist.trim().is_empty(),
+            ),
+            "supported_lease_kinds": supported_lease_kinds(config, self.persistent_volumes),
             "supported_session_surfaces": [{
                 "kind": "web",
                 "profiles": ["ato.web-surface.v1"],
@@ -2937,6 +3537,37 @@ impl HttpRunnerApi {
         Ok(())
     }
 
+    fn redeem_runtime_bindings(
+        &self,
+        lease_id: &str,
+        grants: &[ato_ipc::runtime_launch::SecretGrantV1],
+    ) -> Result<Vec<runtime_launch::resolved::ResolvedSecret>> {
+        if grants.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut response = self
+            .authorized(self.client.post(format!(
+                "{}/v1/runner-leases/{lease_id}/runtime-bindings",
+                self.base
+            )))
+            .send()?
+            .error_for_status()?
+            .json::<RuntimeBindingsResponse>()?;
+        if response.bindings.len() != grants.len() {
+            bail!("runtime Binding grant did not match the launch spec");
+        }
+        grants
+            .iter()
+            .map(|grant| {
+                response
+                    .bindings
+                    .remove(&grant.name)
+                    .map(|value| runtime_launch::resolved::ResolvedSecret::new(&grant.name, value))
+                    .context("runtime Binding grant omitted a declared name")
+            })
+            .collect()
+    }
+
     fn report_activity_ready(&self, lease_id: &str, execution_id: &str) -> Result<()> {
         self.authorized(
             self.client
@@ -2951,7 +3582,7 @@ impl HttpRunnerApi {
         Ok(())
     }
 
-    fn report_failed(&self, lease_id: &str, message: &str) -> Result<()> {
+    fn report_failed(&self, lease_id: &str, code: &str, message: &str) -> Result<()> {
         let message = truncate(message, 2000);
         let mut last_error = None;
         for delay in TERMINAL_REPORT_RETRY_DELAYS {
@@ -2965,7 +3596,7 @@ impl HttpRunnerApi {
                 )
                 .json(&serde_json::json!({
                     "status": "failed",
-                    "error": { "code": "realization_failed", "message": message }
+                    "error": { "code": code, "message": message }
                 }))
                 .send()
                 .and_then(reqwest::blocking::Response::error_for_status)
@@ -2979,27 +3610,12 @@ impl HttpRunnerApi {
             .into())
     }
 
-    fn report_ready(
-        &self,
-        lease_id: &str,
-        execution_id: &str,
-        ready_url: Option<&str>,
-        local_port: Option<u16>,
-        control: Option<BrowserControlCapability>,
-    ) -> Result<()> {
+    fn report_ready(&self, lease_id: &str, report: ReadyReport<'_>) -> Result<()> {
         self.authorized(
             self.client
                 .post(format!("{}/v1/runner-leases/{lease_id}/ready", self.base)),
         )
-        .json(&ReadyReport {
-            execution_id,
-            ready_url,
-            local_port,
-            control: control.as_ref().map(|capability| BrowserControlReport {
-                protocol: &capability.protocol,
-                port: &capability.port,
-            }),
-        })
+        .json(&report)
         .send()?
         .error_for_status()?;
         Ok(())
@@ -3035,6 +3651,50 @@ impl HttpRunnerApi {
             .send()?
             .error_for_status()?
             .json()?)
+    }
+
+    fn renew_execution_authorization(
+        &self,
+        lease_id: &str,
+    ) -> Result<ExecutionAuthorizationRenewalOutcome> {
+        let response = self
+            .authorized(self.client.post(format!(
+                "{}/v1/runner-leases/{lease_id}/execution-authorization/renew",
+                self.base
+            )))
+            .send()?;
+        if response.status() == reqwest::StatusCode::CONFLICT {
+            let refusal = response.json::<ExecutionAuthorizationRefusalResponse>()?;
+            ensure!(
+                refusal.error == "execution_authorization_refused",
+                "unexpected execution authorization refusal: {}",
+                refusal.error
+            );
+            ensure!(
+                !refusal.server_time.is_empty() && !refusal.message.is_empty(),
+                "execution authorization refusal omitted Coordinator evidence"
+            );
+            return Ok(ExecutionAuthorizationRenewalOutcome::Refused {
+                reason: refusal.reason,
+                stop_requested: refusal.stop_requested,
+            });
+        }
+        let renewal = response
+            .error_for_status()?
+            .json::<ExecutionAuthorizationRenewalResponse>()?;
+        ensure!(
+            renewal.ok,
+            "execution authorization renewal was not accepted"
+        );
+        Ok(ExecutionAuthorizationRenewalOutcome::Renewed(
+            runtime_launch::lease::ExecutionAuthorizationRenewal {
+                policy_generation: renewal.policy_generation,
+                authorization_generation: renewal.authorization_generation,
+                server_time: renewal.server_time,
+                expires_at: renewal.expires_at,
+                renew_after_secs: renewal.renew_after_secs,
+            },
+        ))
     }
 
     fn report_stopped(&self, lease_id: &str, execution_id: &str) -> Result<()> {
@@ -3093,13 +3753,47 @@ impl HttpRunnerApi {
     }
 }
 
-fn supported_lease_kinds(config: &WorkerConfig) -> Vec<&'static str> {
+impl runtime_launch::recovery::RecoveryReporter for HttpRunnerApi {
+    /// Tell the control plane what recovery found for one lease. A lease the
+    /// control plane no longer knows has nothing to release: that is an
+    /// acknowledgement, not a failure.
+    fn report_recovery(
+        &self,
+        report: &runtime_launch::recovery::LeaseRecoveryReport,
+    ) -> Result<()> {
+        let response = self
+            .authorized(self.client.post(format!(
+                "{}/v1/runner-leases/{}/recovery",
+                self.base, report.lease_id
+            )))
+            .json(report)
+            .send()?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        response
+            .error_for_status()
+            .context("control plane refused the recovery report")?;
+        Ok(())
+    }
+}
+
+fn supported_lease_kinds(config: &WorkerConfig, persistent_volumes: bool) -> Vec<&'static str> {
     let mut kinds = vec![PORTABLE_CAPSULE_LEASE_KIND];
     // Only advertised where the workload can actually be contained. A Runner
     // that took `runtime_launch` leases it must then refuse would look
     // available to the scheduler and fail every Run it won.
-    if runtime_launch::lease::RUNTIME_LAUNCH_SUPPORTED() {
+    // A slot still holding an unconfirmed previous Run takes no new runtime
+    // work: its old workload may still be writing.
+    if runtime_launch::lease::RUNTIME_LAUNCH_SUPPORTED()
+        && runtime_launch::recovery::slot_recovered()
+    {
         kinds.push(runtime_launch::lease::RUNTIME_LAUNCH_LEASE_KIND);
+        // Volume operations need the volume store, and the same recovered
+        // slot: an unrecovered one may still have a workload writing.
+        if persistent_volumes {
+            kinds.push(runtime_launch::volume_maintenance::STATE_VOLUME_MAINTENANCE_LEASE_KIND);
+        }
     }
     if config.browser_chrome.as_deref().is_some_and(Path::is_file)
         && config
@@ -3493,6 +4187,7 @@ pub fn run_netns_surface_relay(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn connect_tcp_until(target: SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
     let started = Instant::now();
     loop {
@@ -3531,10 +4226,62 @@ fn proxy_unix_tcp_pair(client: &mut UnixStream, mut upstream: TcpStream) {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::io::{Read, Write};
 
     use super::*;
     use tungstenite::client::IntoClientRequest;
+
+    #[test]
+    fn explicit_stop_wins_a_race_with_revoked_continuation_authority() {
+        let refreshed = Cell::new(false);
+
+        let stopped = poll_runtime_launch_control(
+            || Ok(true),
+            || {
+                refreshed.set(true);
+                Ok(false)
+            },
+        )
+        .expect("an explicit stop does not require authority to continue");
+
+        assert!(stopped);
+        assert!(!refreshed.get());
+    }
+
+    #[test]
+    fn renewal_refusal_is_clean_only_when_the_coordinator_confirms_stop() {
+        let stopped = poll_runtime_launch_control(|| Ok(false), || Ok(true))
+            .expect("renewal response confirms the owner stop");
+        assert!(stopped);
+
+        let error = poll_runtime_launch_control(
+            || Ok(false),
+            || anyhow::bail!("execution authorization revoked without stop intent"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("without stop intent"));
+    }
+
+    #[test]
+    fn continuing_run_checks_stop_before_renewing_authority() {
+        let step = Cell::new(0_u8);
+
+        let stopped = poll_runtime_launch_control(
+            || {
+                assert_eq!(step.replace(1), 0);
+                Ok(false)
+            },
+            || {
+                assert_eq!(step.replace(2), 1);
+                Ok(false)
+            },
+        )
+        .expect("continuation authority is current");
+
+        assert!(!stopped);
+        assert_eq!(step.get(), 2);
+    }
 
     #[test]
     fn activity_frame_capture_failure_keeps_the_run_alive_and_backs_off() {
@@ -4333,6 +5080,9 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             max_slots: 1,
             browser_chrome: None,
             run_control_verification_key: None,
+            state_volume_root: None,
+            network_controls: false,
+            fixed_tcp_allowlist: String::new(),
             once: true,
         };
         assert!(validate_config(&config).is_err());
@@ -4355,6 +5105,9 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             max_slots: 0,
             browser_chrome: None,
             run_control_verification_key: None,
+            state_volume_root: None,
+            network_controls: false,
+            fixed_tcp_allowlist: String::new(),
             once: true,
         };
         assert!(validate_config(&config).is_err());
@@ -4388,6 +5141,9 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             max_slots: 1,
             browser_chrome: None,
             run_control_verification_key: None,
+            state_volume_root: None,
+            network_controls: false,
+            fixed_tcp_allowlist: String::new(),
             once: true,
         };
         resolve_runner_credentials(&mut config).unwrap();
@@ -4439,6 +5195,9 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             max_slots: 1,
             browser_chrome: None,
             run_control_verification_key: None,
+            state_volume_root: None,
+            network_controls: false,
+            fixed_tcp_allowlist: String::new(),
             once: true,
         };
         assert_eq!(ready_local_port(&config), 8420);
@@ -4450,10 +5209,26 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
 
     #[test]
     fn heartbeat_advertises_dispatch_and_vm_requirements() {
-        assert!(RUNNER_CAPABILITIES.contains(&"execution_abi=process"));
-        assert!(RUNNER_CAPABILITIES.contains(&"isolation=untrusted-v1"));
-        assert!(RUNNER_CAPABILITIES.contains(&"materializer=ato.materialize.vm.snapshot@1"));
-        assert!(RUNNER_CAPABILITIES.contains(&"backend=firecracker"));
+        let process_only = runner_capabilities(false, true, true, true);
+        assert!(process_only.contains(&"execution_abi=process"));
+        assert!(!process_only.contains(&"execution_abi=oci"));
+        assert!(process_only.contains(&"isolation=untrusted-v1"));
+        assert!(process_only.contains(&"materializer=ato.materialize.vm.snapshot@1"));
+        assert!(process_only.contains(&"backend=firecracker"));
+        assert!(runner_capabilities(true, false, false, false).contains(&"execution_abi=oci"));
+        assert!(
+            runner_capabilities(true, false, false, false)
+                .contains(&"runtime_feature=oci_service_group_v1")
+        );
+        assert!(!process_only.contains(&"runtime_feature=oci_service_group_v1"));
+        // Volumes are advertised only with OCI AND a usable store.
+        let volume = "runtime_feature=runner_persistent_volume_v1";
+        assert!(runner_capabilities(true, true, false, false).contains(&volume));
+        assert!(!runner_capabilities(true, false, false, false).contains(&volume));
+        assert!(!process_only.contains(&volume));
+        let network = runner_capabilities(true, false, true, true);
+        assert!(network.contains(&"network=ato.tcp-egress@1"));
+        assert!(network.contains(&"network=ato.fixed-tcp@1"));
     }
 
     #[test]
@@ -4474,20 +5249,20 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             max_slots: 1,
             browser_chrome: None,
             run_control_verification_key: None,
+            state_volume_root: None,
+            network_controls: false,
+            fixed_tcp_allowlist: String::new(),
             once: true,
         };
-        assert_eq!(
-            supported_lease_kinds(&config),
-            [PORTABLE_CAPSULE_LEASE_KIND]
-        );
+        runtime_launch::recovery::mark_slot_recovered(true);
+        let mut expected = vec![PORTABLE_CAPSULE_LEASE_KIND];
+        if runtime_launch::lease::RUNTIME_LAUNCH_SUPPORTED() {
+            expected.push(runtime_launch::lease::RUNTIME_LAUNCH_LEASE_KIND);
+        }
+        assert_eq!(supported_lease_kinds(&config, false), expected);
         config.browser_chrome = Some(chrome.path().to_owned());
         config.run_control_verification_key = Some("v".repeat(32));
-        assert_eq!(
-            supported_lease_kinds(&config),
-            [
-                PORTABLE_CAPSULE_LEASE_KIND,
-                ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND,
-            ]
-        );
+        expected.push(ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND);
+        assert_eq!(supported_lease_kinds(&config, false), expected);
     }
 }
