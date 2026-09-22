@@ -1,9 +1,15 @@
 //! Local Formation — Phase 1.
 //!
 //! `I -- D on this Runtime --> C`, then `C |= K` observed for real
-//! (ADR-019): candidates are built and, for a process lane, launched
-//! ephemerally so every Contract observation is decided before `Formed` is
-//! reported.
+//! (ADR-019): candidates are built and, for a process lane, realized
+//! temporarily on the local Runtime so every Contract observation is decided
+//! before `Formed` is reported.
+//!
+//! The Initial Condition is frozen once. The directory is snapshotted into
+//! one archive, that archive goes through the same proof-state chain an
+//! uploaded source does, and the tree it materializes is the only thing
+//! detection, planning and building ever read — the measured `I` is the built
+//! `I`, whatever happens to the directory afterwards.
 //!
 //! The driver holds no client for anywhere else. `--runtime local` is the
 //! whole candidate space, so a failed attempt produces evidence and never a
@@ -22,15 +28,15 @@ use ato_formation::failure::{FailureStage, FormationFailure};
 use ato_formation::preset::candidates;
 use ato_formation::request::{
     AttemptFailure, AttemptStatus, ContractSource, FormationAttempt, FormationNetworkPolicy,
-    FormationRequest, FormationResult, InitialCondition, RuntimeConstraint, RuntimeProfile,
-    VerifiedRoute,
+    FormationRequest, FormationResult, InitialCondition, RealizationEvidence, RuntimeConstraint,
+    RuntimeProfile, VerifiedRoute,
 };
-use ato_formation::source::{
-    RESOLVER_CONTRACT_V1, SourceClosureRef, SourceLimits, measure_source_tree,
-};
+use ato_formation::source::{DownloadedArchive, SourceClosureRef, SourceLimits};
 use ato_formation::verify::{RuntimeObservation, verify, verify_runtime};
 
-use crate::ephemeral::{RequiredObservation, observe_process_candidate};
+use crate::ephemeral::{
+    RequiredObservation, RequiredPort, TemporaryRealization, TemporaryRealizationRequest,
+};
 use crate::executor::{AttemptExecution, AttemptExecutor, ExecutedCandidate, LocalAttemptExecutor};
 use crate::job::{PlannedCandidate, copy_tree, digest, observe_candidate, plan_candidate};
 use crate::pack::pack_tree;
@@ -56,6 +62,23 @@ static ATTEMPT_COUNTER: AtomicU64 = AtomicU64::new(1);
 /// does not parse — come back as `Err`. Everything a candidate did or did
 /// not do comes back inside the result's attempts.
 pub fn run(request: &FormationRequest, env: &LocalFormation) -> Result<FormationResult> {
+    let executor = LocalAttemptExecutor {
+        shim: env.shim.clone(),
+        network: network_policy(request.policy.network),
+        limits: env.limits,
+    };
+    run_with_executor(request, env, &executor)
+}
+
+/// [`run`] with the attempt executor supplied by the caller.
+///
+/// The seam a different execution boundary plugs into; the search loop, the
+/// frozen Initial Condition and the verification rules stay the same.
+pub fn run_with_executor(
+    request: &FormationRequest,
+    env: &LocalFormation,
+    executor: &dyn AttemptExecutor,
+) -> Result<FormationResult> {
     let RuntimeConstraint::Exact { runtime_id } = &request.runtime;
     if runtime_id != "local" {
         bail!("Phase 1 admits exactly one Runtime: --runtime local (got {runtime_id:?})");
@@ -63,7 +86,8 @@ pub fn run(request: &FormationRequest, env: &LocalFormation) -> Result<Formation
     let profile = probe_local_runtime();
 
     let InitialCondition::LocalDirectory { path } = &request.initial_condition;
-    let (closure_ref, source_root) = stage_local_source(path, env.source_limits)?;
+    let frozen = freeze_local_source(path, &env.work_root, env.source_limits)?;
+    let (closure_ref, source_root) = (frozen.closure_ref.clone(), frozen.root.clone());
     let evidence = detect(&source_root).context("detection failed")?;
 
     // Candidate Derivations: one authored route, or every preset the source
@@ -89,6 +113,7 @@ pub fn run(request: &FormationRequest, env: &LocalFormation) -> Result<Formation
                                 runtime_id: runtime_id.clone(),
                                 status: AttemptStatus::Filtered,
                                 verification: None,
+                                realization: None,
                                 failure: Some(AttemptFailure {
                                     code: mismatch.code.to_owned(),
                                     stage: FailureStage::Preset.as_str().to_owned(),
@@ -102,15 +127,7 @@ pub fn run(request: &FormationRequest, env: &LocalFormation) -> Result<Formation
         }
     };
 
-    let network = match request.policy.network {
-        FormationNetworkPolicy::Denied => NetworkPolicy::Denied,
-        FormationNetworkPolicy::DependencyResolution => NetworkPolicy::DependencyResolution,
-    };
-    let executor = LocalAttemptExecutor {
-        shim: env.shim.clone(),
-        network,
-        limits: env.limits,
-    };
+    let network = network_policy(request.policy.network);
 
     let mut attempts = Vec::new();
     for draft in drafts.iter().take(request.budget.max_attempts.max(1)) {
@@ -121,7 +138,8 @@ pub fn run(request: &FormationRequest, env: &LocalFormation) -> Result<Formation
             &evidence,
             runtime_id,
             &profile,
-            &executor,
+            executor,
+            network,
             env,
         );
         attempts.push(attempt);
@@ -151,7 +169,8 @@ fn attempt_one(
     evidence: &DetectorEvidence,
     runtime_id: &str,
     profile: &RuntimeProfile,
-    executor: &LocalAttemptExecutor,
+    executor: &dyn AttemptExecutor,
+    network: NetworkPolicy,
     env: &LocalFormation,
 ) -> (FormationAttempt, Option<(String, VerifiedRoute)>) {
     let mut attempt = FormationAttempt {
@@ -164,6 +183,7 @@ fn attempt_one(
         runtime_id: runtime_id.to_owned(),
         status: AttemptStatus::Failed,
         verification: None,
+        realization: None,
         failure: None,
     };
 
@@ -185,7 +205,7 @@ fn attempt_one(
     attempt.contract_ref = Some(planned.contract_ref.clone());
     attempt.derivation_ref = Some(planned.derivation_ref.clone());
 
-    if let Some(failure) = admits(profile, &planned, executor.network) {
+    if let Some(failure) = admits(profile, &planned, network) {
         attempt.status = AttemptStatus::Filtered;
         attempt.failure = Some(failure);
         return (attempt, None);
@@ -214,8 +234,9 @@ fn attempt_one(
     // ── observe ─────────────────────────────────────────────────────────────
     //
     // Static candidates are decided from the artifact they just produced; a
-    // process candidate is launched ephemerally and measured over loopback
-    // HTTP. Either way the Contract sees only what was actually observed.
+    // process candidate is realized temporarily on this Runtime and measured
+    // over loopback HTTP. Either way the Contract sees only what was actually
+    // observed.
     let bundle = match &executed {
         ExecutedCandidate::StaticWeb { output } => Some(&**output),
         ExecutedCandidate::Process { .. } => None,
@@ -227,13 +248,21 @@ fn attempt_one(
         // and stays Deferred — which a local Formation refuses below.
         ExecutedCandidate::StaticWeb { .. } => verify(&planned.contract, &observation),
         ExecutedCandidate::Process { workspace_root } => {
-            let required = required_observations(&planned);
-            match observe_process_candidate(
-                workspace_root,
-                &planned.plan.workspace_guest_root,
-                &planned.intent,
+            let (ports, required) = required_observations(&planned);
+            let measured = realize_and_observe(
+                &TemporaryRealizationRequest {
+                    workspace: workspace_root,
+                    scratch: &attempt_root.join("realization"),
+                    intent: &planned.intent,
+                    ports: &ports,
+                    shim: &env.shim,
+                    attempt_id: &attempt_id,
+                },
                 &required,
-            ) {
+                network,
+                &mut attempt,
+            );
+            match measured {
                 Ok(http) => verify_runtime(
                     &planned.contract,
                     &RuntimeObservation {
@@ -327,6 +356,27 @@ fn admits(
                 .to_owned(),
         });
     }
+    if !planned.plan.steps.is_empty() && profile.get("formation.toolchain_root").is_none() {
+        return Some(AttemptFailure {
+            code: "runtime_has_no_toolchain_root".to_owned(),
+            stage: "admission".to_owned(),
+            message: format!(
+                "this candidate's build provisions toolchains into {TOOLCHAIN_ROOT}, which this \
+                 Runtime does not have; it was not attempted"
+            ),
+        });
+    }
+    if planned.intent.lane == ato_formation::intent::Lane::PythonProcess
+        && profile.get("formation.containment") != Some("bwrap+landlock")
+    {
+        return Some(AttemptFailure {
+            code: "runtime_cannot_contain_candidate".to_owned(),
+            stage: "admission".to_owned(),
+            message: "verifying this candidate means running it, and this Runtime cannot contain \
+                      a process (no bwrap); it was not attempted"
+                .to_owned(),
+        });
+    }
     if planned.plan.steps.iter().any(|step| step.needs_network) && network == NetworkPolicy::Denied
     {
         return Some(AttemptFailure {
@@ -339,39 +389,110 @@ fn admits(
     None
 }
 
-/// The Contract's HTTP observations, resolved to concrete loopback targets.
+/// The Contract's HTTP observations, by logical port, and the ports they
+/// need realized.
 ///
 /// A requirement whose port the Derivation never exports is skipped here and
 /// failed by the verifier — probing it would measure a port nobody claimed.
-fn required_observations(planned: &PlannedCandidate) -> Vec<RequiredObservation> {
-    planned
-        .contract
-        .requirements
-        .iter()
-        .filter(|requirement| requirement.verifier == HTTP_CONTRACT_VERIFIER)
+fn required_observations(
+    planned: &PlannedCandidate,
+) -> (Vec<RequiredPort>, Vec<RequiredObservation>) {
+    let mut ports: Vec<RequiredPort> = Vec::new();
+    let mut required = Vec::new();
+    for requirement in &planned.contract.requirements {
+        if requirement.verifier != HTTP_CONTRACT_VERIFIER {
+            continue;
+        }
         // Only GET is observed; anything else stays for the verifier to
         // refuse rather than be probed with the wrong method.
-        .filter(|requirement| {
-            requirement
-                .method
-                .as_deref()
-                .is_none_or(|method| method == "GET")
-        })
-        .filter_map(|requirement| {
-            let port_id = requirement.port.clone()?;
-            let guest_port = planned
-                .derivation
-                .ports
-                .iter()
-                .find(|port| port.id == port_id)
-                .and_then(|port| port.guest_port)?;
-            Some(RequiredObservation {
-                port_id,
-                port: guest_port,
-                path: requirement.path.clone().unwrap_or_else(|| "/".to_owned()),
+        if requirement
+            .method
+            .as_deref()
+            .is_some_and(|method| method != "GET")
+        {
+            continue;
+        }
+        let Some(port_id) = requirement.port.clone() else {
+            continue;
+        };
+        let Some(guest_port) = planned
+            .derivation
+            .ports
+            .iter()
+            .find(|port| port.id == port_id)
+            .and_then(|port| port.guest_port)
+        else {
+            continue;
+        };
+        if !ports.iter().any(|port| port.port_id == port_id) {
+            ports.push(RequiredPort {
+                port_id: port_id.clone(),
+                guest_port,
+            });
+        }
+        required.push(RequiredObservation {
+            port_id,
+            path: requirement.path.clone().unwrap_or_else(|| "/".to_owned()),
+        });
+    }
+    (ports, required)
+}
+
+/// Realize the candidate, observe it, destroy it — and record how it ran.
+///
+/// The realization is destroyed before this returns on every path: an
+/// explicit `destroy` after observing, `Drop` on any early return.
+fn realize_and_observe(
+    request: &TemporaryRealizationRequest<'_>,
+    required: &[RequiredObservation],
+    build_network: NetworkPolicy,
+    attempt: &mut FormationAttempt,
+) -> Result<Vec<ato_formation::verify::RuntimeHttpObservation>> {
+    let mut evidence = RealizationEvidence {
+        executor: "runtime-process".to_owned(),
+        containment: "bwrap+landlock".to_owned(),
+        workspace: "disposable-copy, read-only at /app; /tmp is tmpfs".to_owned(),
+        // The Runtime's process policy, whatever the build was allowed: no
+        // egress, TCP bind only on the allocated host ports. A
+        // `dependency-resolution` request widens the BUILD, never the run.
+        build_network: match build_network {
+            NetworkPolicy::Denied => "denied",
+            NetworkPolicy::DependencyResolution => "dependency-resolution",
+        }
+        .to_owned(),
+        candidate_network: "no-egress; tcp bind limited to allocated host ports".to_owned(),
+        endpoints: BTreeMap::new(),
+        destroyed: false,
+    };
+    let result = (|| {
+        let realization = TemporaryRealization::launch(request)?;
+        evidence.endpoints = realization
+            .endpoints()
+            .iter()
+            .map(|endpoint| {
+                (
+                    endpoint.port_id.clone(),
+                    format!(
+                        "guest {} -> host {}",
+                        endpoint.guest_port, endpoint.host_port
+                    ),
+                )
             })
-        })
-        .collect()
+            .collect();
+        let observed = realization.observe(required);
+        let destroyed = realization.destroy();
+        evidence.destroyed = destroyed.is_ok();
+        let observed = observed?;
+        destroyed.context("the candidate could not be destroyed")?;
+        Ok(observed)
+    })();
+    if result.is_err() && !evidence.destroyed {
+        // Dropped on the error path: gone unless the Runtime said otherwise,
+        // which it did loudly in the log.
+        evidence.destroyed = !request.scratch.exists();
+    }
+    attempt.realization = Some(evidence);
+    result
 }
 
 /// Keep the artifact of a verified candidate, content-addressed.
@@ -400,41 +521,97 @@ fn store_candidate(executed: &ExecutedCandidate, env: &LocalFormation) -> Result
     }
 }
 
-/// Measure a local directory into the same closure identity an uploaded
-/// archive would get.
+/// The Initial Condition, frozen: one snapshot of the directory, verified
+/// and materialized. Removed when the Formation ends.
+struct FrozenSource {
+    closure_ref: SourceClosureRef,
+    root: PathBuf,
+    scratch: PathBuf,
+}
+
+impl Drop for FrozenSource {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.scratch);
+    }
+}
+
+/// Snapshot a local directory once and turn it into the tree a Formation
+/// builds from.
 ///
-/// The tree is tarred under a `source/` wrapper — the same shape a codeload
-/// tarball has — so `measure_source_tree` strips the wrapper and the digest
-/// describes the directory's contents, not its transport. Symlinks are
-/// skipped, matching what a build would actually receive.
-fn stage_local_source(dir: &Path, limits: SourceLimits) -> Result<(SourceClosureRef, PathBuf)> {
-    let source_root = dir
+/// ```text
+/// directory --tar once--> archive --digest--> DigestVerifiedArchive
+///           --measure--> TreeVerifiedArchive --materialize--> frozen tree
+/// ```
+///
+/// The archive is the codeload shape (a `source/` wrapper, no `.git`), so
+/// the closure ref is the one an upload of the same tree would get and the
+/// source module's rules — refused symlinks, path limits — apply unchanged.
+/// After this returns the directory is never read again.
+fn freeze_local_source(dir: &Path, work_root: &Path, limits: SourceLimits) -> Result<FrozenSource> {
+    let directory = dir
         .canonicalize()
         .with_context(|| format!("cannot read {}", dir.display()))?;
-    if !source_root.is_dir() {
-        bail!("{} is not a directory", source_root.display());
+    if !directory.is_dir() {
+        bail!("{} is not a directory", directory.display());
     }
-    let archive = tar_directory(&source_root)?;
-    let tree_digest =
-        measure_source_tree(&archive, limits).map_err(|error| anyhow::anyhow!("{error}"))?;
-    let closure_ref = SourceClosureRef::derive(&tree_digest, "", RESOLVER_CONTRACT_V1)
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
-    Ok((closure_ref, source_root))
+    let archive = tar_directory(&directory)?;
+    let archive_digest = digest(&archive);
+    let verified = DownloadedArchive::new(archive)
+        .verify_archive_digest(&archive_digest)
+        .and_then(|archive| archive.verify_tree_digest(None, limits))
+        .context("the directory is not a usable source")?;
+    let closure_ref = verified
+        .closure_ref("")
+        .context("the directory is not a usable source")?;
+    let scratch = work_root.join(format!(
+        "source-{}-{}",
+        std::process::id(),
+        ATTEMPT_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&scratch)
+        .with_context(|| format!("cannot create {}", scratch.display()))?;
+    // Owned before materializing, so a failure part-way still removes it.
+    let mut frozen = FrozenSource {
+        closure_ref,
+        root: PathBuf::new(),
+        scratch: scratch.clone(),
+    };
+    frozen.root = verified
+        .materialize(&scratch.join("tree"), "", limits)
+        .context("the directory is not a usable source")?;
+    Ok(frozen)
 }
 
 /// Pack a directory into an in-memory tar under a `source/` wrapper,
-/// deterministically: sorted paths, zeroed metadata, no symlinks, no `.git`.
+/// deterministically: sorted paths, zeroed metadata, no `.git`.
+///
+/// Symlinks are archived AS symlinks, not skipped: whether a link is
+/// acceptable is the source module's decision, and it refuses them for every
+/// source the same way.
 fn tar_directory(root: &Path) -> Result<Vec<u8>> {
-    let mut entries: Vec<(PathBuf, PathBuf, bool)> = Vec::new();
+    let mut entries: Vec<(PathBuf, PathBuf, EntryKind)> = Vec::new();
     collect_tree(root, root, &mut entries)?;
     entries.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut builder = tar::Builder::new(Vec::new());
     append_dir(&mut builder, "source")?;
-    for (relative, absolute, is_dir) in entries {
+    for (relative, absolute, kind) in entries {
         let path = format!("source/{}", relative.to_string_lossy());
-        if is_dir {
+        if kind == EntryKind::Dir {
             append_dir(&mut builder, &path)?;
+        } else if kind == EntryKind::Symlink {
+            let target = std::fs::read_link(&absolute)
+                .with_context(|| format!("cannot read link {}", absolute.display()))?;
+            let mut header = tar::Header::new_gnu();
+            header.set_size(0);
+            header.set_mode(0o777);
+            header.set_mtime(0);
+            header.set_uid(0);
+            header.set_gid(0);
+            header.set_entry_type(tar::EntryType::Symlink);
+            builder
+                .append_link(&mut header, &path, &target)
+                .with_context(|| format!("cannot add {path} to the source archive"))?;
         } else {
             let bytes = std::fs::read(&absolute)
                 .with_context(|| format!("cannot read {}", absolute.display()))?;
@@ -454,10 +631,17 @@ fn tar_directory(root: &Path) -> Result<Vec<u8>> {
     Ok(builder.into_inner()?)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryKind {
+    Dir,
+    File,
+    Symlink,
+}
+
 fn collect_tree(
     root: &Path,
     dir: &Path,
-    entries: &mut Vec<(PathBuf, PathBuf, bool)>,
+    entries: &mut Vec<(PathBuf, PathBuf, EntryKind)>,
 ) -> Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
@@ -469,18 +653,15 @@ fn collect_tree(
         }
         let path = entry.path();
         let metadata = std::fs::symlink_metadata(&path)?;
-        // A link is not followed here either; the source module refuses them
-        // and the build's own copy step skips them, so measuring without them
-        // keeps all three agreeing.
-        if metadata.is_symlink() {
-            continue;
-        }
         let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
-        if metadata.is_dir() {
-            entries.push((relative, path.clone(), true));
+        // A link is recorded, never followed: the source module decides.
+        if metadata.is_symlink() {
+            entries.push((relative, path, EntryKind::Symlink));
+        } else if metadata.is_dir() {
+            entries.push((relative, path.clone(), EntryKind::Dir));
             collect_tree(root, &path, entries)?;
         } else if metadata.is_file() {
-            entries.push((relative, path, false));
+            entries.push((relative, path, EntryKind::File));
         }
     }
     Ok(())
@@ -499,9 +680,17 @@ fn append_dir(builder: &mut tar::Builder<Vec<u8>>, path: &str) -> Result<()> {
     Ok(())
 }
 
+fn network_policy(policy: FormationNetworkPolicy) -> NetworkPolicy {
+    match policy {
+        FormationNetworkPolicy::Denied => NetworkPolicy::Denied,
+        FormationNetworkPolicy::DependencyResolution => NetworkPolicy::DependencyResolution,
+    }
+}
+
 /// This machine as a Runtime: the facts a Formation filter can need.
 ///
-/// Flat key/value — new facts are emitted, not added to a type.
+/// Only what admission reads: platform, containment, and whether the
+/// toolchain root a build provisions into exists. Measured, never assumed.
 pub fn probe_local_runtime() -> RuntimeProfile {
     let mut capabilities = BTreeMap::new();
     capabilities.insert("platform.os".to_owned(), std::env::consts::OS.to_owned());
