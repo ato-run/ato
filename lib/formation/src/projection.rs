@@ -22,21 +22,30 @@
 //! up" drift, and when they drift the Capsule's identity rests on a probe of
 //! some other path.
 //!
-//! ## What is not projected yet
+//! ## Preparation steps
 //!
-//! A preparation step (`ato.process@1` / `exec`). The grammar accepts one
-//! because it is a real thing to write and the model has room for it; this
-//! projection refuses it by name rather than dropping it, because a route step
-//! that is silently not executed is a build that did something other than what
-//! it was told.
+//! A route this worker executes is `exec* serve`: zero or more
+//! `ato.process@1` `exec` steps, in authored order, then exactly one serving
+//! step. The execs are the build — each runs to completion before the next —
+//! and the serve is the realization. An `exec` after the serve is refused:
+//! the model here is build → materialize → realize, and a step after the
+//! realization has started has no place in it that means what it said.
+//!
+//! Each exec becomes one build step carrying its argv as the array the author
+//! wrote (never joined into a command line and split again), its cwd, its env
+//! and its declared network. The steps land AFTER the platform's own
+//! prerequisites (a provisioned interpreter) and REPLACE the application
+//! build the platform would otherwise infer from the source: an author who
+//! wrote the build is the authority on it, and a second, detected install or
+//! `npm run build` beside it is a build that did something nobody wrote.
 
 use std::collections::BTreeMap;
 
 use crate::authoring::{
-    BROWSER_PROTOCOL, BoundContract, BoundDerivation, HTTP_CONTRACT_VERIFIER, PROCESS_PROTOCOL,
-    StateAccess,
+    BROWSER_PROTOCOL, BoundContract, BoundDerivation, BoundStep, HTTP_CONTRACT_VERIFIER,
+    PROCESS_PROTOCOL, StateAccess, StepNetwork,
 };
-use crate::intent::AuthoredOverrides;
+use crate::intent::{AuthoredOverrides, BuildStepV1};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ProjectionError {
@@ -48,6 +57,11 @@ pub enum ProjectionError {
     },
     #[error("a route this build can execute has exactly one serving step; this one has {found}")]
     ServingSteps { found: usize },
+    #[error(
+        "step {step:?} is an `exec` after the serving step; a route this build can execute \
+         prepares first and serves last"
+    )]
+    StepOrder { step: String },
     #[error("{detail}")]
     Unprojectable { detail: String },
 }
@@ -57,6 +71,7 @@ impl ProjectionError {
         match self {
             Self::UnsupportedStep { .. } => "projection_unsupported_step",
             Self::ServingSteps { .. } => "projection_serving_steps",
+            Self::StepOrder { .. } => "projection_step_order",
             Self::Unprojectable { .. } => "projection_unprojectable",
         }
     }
@@ -76,6 +91,9 @@ pub struct DerivationProjection {
     /// Present when the route serves a process. `None` for a browser surface,
     /// which is admitted by being served rather than by being probed.
     pub readiness: Option<ReadinessProjection>,
+    /// The route's `exec` steps, in authored order, as build steps. They run
+    /// after the platform's prerequisites and before materialization.
+    pub build_steps: Vec<BuildStepV1>,
 }
 
 /// Project a bound Derivation, with its Contract, onto today's execution IR.
@@ -91,12 +109,17 @@ pub fn project(
         .filter(|step| step.op == "serve")
         .collect();
     for step in &derivation.steps {
-        if step.op != "serve" {
+        let executable = match step.op.as_str() {
+            "serve" => true,
+            "exec" => step.protocol == PROCESS_PROTOCOL,
+            _ => false,
+        };
+        if !executable {
             return Err(ProjectionError::UnsupportedStep {
                 protocol: step.protocol.clone(),
                 op: step.op.clone(),
-                detail: "a preparation step is not projected onto this worker yet, and a step that \
-                     is silently skipped is a route that did something else",
+                detail: "this worker executes `ato.process@1` `exec` steps and one serving step, \
+                     and a step that is silently skipped is a route that did something else",
             });
         }
     }
@@ -105,6 +128,28 @@ pub fn project(
             found: serving.len(),
         });
     };
+    let serve_at = derivation
+        .steps
+        .iter()
+        .position(|step| step.op == "serve")
+        .expect("exactly one serving step");
+    if let Some(late) = derivation.steps[serve_at + 1..].first() {
+        return Err(ProjectionError::StepOrder {
+            step: late.id.clone(),
+        });
+    }
+    if !serve.network.is_denied() {
+        return Err(ProjectionError::Unprojectable {
+            detail: format!(
+                "serving step {:?} declares a network; only an `exec` step does",
+                serve.id
+            ),
+        });
+    }
+    let build_steps = derivation.steps[..serve_at]
+        .iter()
+        .map(project_exec)
+        .collect::<Result<Vec<_>, _>>()?;
 
     // The Contract's HTTP observation, if it has one. Its path becomes the
     // readiness probe, so the gate and the identity cannot disagree.
@@ -135,7 +180,21 @@ pub fn project(
             // never both: one says Ato owns the toolchain, the other says the
             // package does. Emitting `static.build = required` alongside a
             // compiler would send a one-file upload down `npm ci`.
-            if let Some(compiler) = derivation.workspace_compiler.as_ref() {
+            //
+            // Authored `exec` steps are a third authority, and the most
+            // specific one: the author wrote the build. Nothing is inferred
+            // beside it, and a route that also names another build has not
+            // said which one runs.
+            if !build_steps.is_empty() {
+                if derivation.workspace_compiler.is_some() || derivation.workspace_build.is_some() {
+                    return Err(ProjectionError::Unprojectable {
+                        detail: "this route has authored `exec` steps and also names a platform \
+                                 or package build; one of them is the build"
+                            .to_owned(),
+                    });
+                }
+                overrides.insert("static.build".to_owned(), "none".to_owned());
+            } else if let Some(compiler) = derivation.workspace_compiler.as_ref() {
                 overrides.insert("static.compile".to_owned(), compiler.clone());
             } else {
                 overrides.insert(
@@ -151,6 +210,11 @@ pub fn project(
         }
         PROCESS_PROTOCOL => {
             overrides.insert("lane".to_owned(), "python_process".to_owned());
+            // The author's execs prepare the workspace; no dependency install
+            // is detected and added beside them.
+            if !build_steps.is_empty() {
+                overrides.insert("dependencies".to_owned(), "authored".to_owned());
+            }
             // Re-quoted for the existing splitter. An element carrying a quote
             // would not survive the round trip, so it is refused rather than
             // mangled into a different argv than the author wrote.
@@ -241,7 +305,73 @@ pub fn project(
     Ok(DerivationProjection {
         overrides: AuthoredOverrides(overrides),
         readiness,
+        build_steps,
     })
+}
+
+/// One authored `exec`, as the build step that runs it.
+///
+/// Everything is carried as written. What is refused here is what could not
+/// be run as written: an argv or env a process cannot receive, and a cwd that
+/// names somewhere other than inside the workspace. The cwd is checked again,
+/// against the real directory, immediately before the step runs — an earlier
+/// step can create it, or a link in its place.
+fn project_exec(step: &BoundStep) -> Result<BuildStepV1, ProjectionError> {
+    let refuse = |detail: String| ProjectionError::Unprojectable {
+        detail: format!("exec step {:?}: {detail}", step.id),
+    };
+    if step.argv.is_empty() {
+        return Err(refuse("declares no argv".to_owned()));
+    }
+    if step.argv.iter().any(|word| word.contains('\0')) {
+        return Err(refuse("an argv element contains NUL".to_owned()));
+    }
+    for (name, value) in &step.env {
+        let valid_name = name
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !valid_name {
+            return Err(refuse(format!("env name {name:?} is not a variable name")));
+        }
+        if value.contains('\0') {
+            return Err(refuse(format!("env {name} contains NUL")));
+        }
+    }
+    Ok(BuildStepV1 {
+        name: step.id.clone(),
+        argv: step.argv.clone(),
+        needs_network: step.network == StepNetwork::DependencyResolution,
+        cwd_relative: workspace_relative_cwd(&step.cwd).map_err(refuse)?,
+        env: step.env.clone(),
+    })
+}
+
+/// `""` / `"."` is the workspace root; otherwise plain names only. Absolute
+/// paths and `..` anywhere are refused, even when they would land inside.
+pub fn workspace_relative_cwd(cwd: &str) -> Result<String, String> {
+    if cwd.contains('\0') || cwd.contains('\\') {
+        return Err(format!("cwd {cwd:?} is not a workspace path"));
+    }
+    if cwd.starts_with('/') {
+        return Err(format!(
+            "cwd {cwd:?} is absolute; a step runs inside the workspace"
+        ));
+    }
+    let mut parts = Vec::new();
+    for part in cwd.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                return Err(format!(
+                    "cwd {cwd:?} climbs with `..`; a step runs inside the workspace"
+                ));
+            }
+            name => parts.push(name),
+        }
+    }
+    Ok(parts.join("/"))
 }
 
 #[cfg(test)]
@@ -379,13 +509,26 @@ status = 200
     }
 
     #[test]
-    fn a_preparation_step_is_refused_by_name_rather_than_skipped() {
-        let error = project_text(&FIXTURE.replace(
+    fn a_preparation_step_before_the_serve_becomes_a_build_step() {
+        let projected = project_text(&FIXTURE.replace(
             "[[derive.step]]\nid = \"app\"",
             "[[derive.step]]\nid = \"deps\"\nuse = \"ato.process@1\"\nop = \"exec\"\nargv = [\"uv\", \"sync\"]\n\n[[derive.step]]\nid = \"app\"",
         ))
+        .expect("projects");
+        assert_eq!(projected.build_steps.len(), 1);
+        assert_eq!(projected.build_steps[0].name, "deps");
+        assert_eq!(projected.build_steps[0].argv, ["uv", "sync"]);
+        assert_eq!(projected.overrides.get("dependencies"), Some("authored"));
+    }
+
+    #[test]
+    fn a_preparation_step_after_the_serve_is_refused_by_name() {
+        let error = project_text(&FIXTURE.replace(
+            "[[port]]",
+            "[[derive.step]]\nid = \"late\"\nuse = \"ato.process@1\"\nop = \"exec\"\nargv = [\"true\"]\n\n[[port]]",
+        ))
         .unwrap_err();
-        assert_eq!(error.code(), "projection_unsupported_step");
+        assert_eq!(error.code(), "projection_step_order");
     }
 
     #[test]

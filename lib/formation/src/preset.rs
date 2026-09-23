@@ -454,6 +454,7 @@ pub fn synthesize_authoring(preset: AppPreset) -> AuthoringDraft {
                 root: root.clone(),
                 entry: Some(CANONICAL_ENTRY.to_owned()),
                 spa_fallback: Some(spa_fallback),
+                network: Default::default(),
             }],
             ports: vec![PortDraft {
                 id: PRESET_PORT_ID.to_owned(),
