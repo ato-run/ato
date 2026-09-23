@@ -81,17 +81,44 @@ semantic gain on symlink-free trees.
   a link placed there past the resolver still cannot reach the host (tested:
   absolute and climbing links to a host canary are unreadable from a build).
 
+## Artifacts (amended: P0 unblock 2)
+
+The artifact of a verified process workspace (`pack_tree`) carries contained
+relative symlinks as a third entry kind, so a v2 source can reach a
+VerifiedRoute:
+
+- A link is packed as a link: GNU tar symlink entry, target string verbatim
+  (any length), mode `0777`, uid/gid/mtime `0`; never followed, never
+  flattened into its target's content.
+- A build writes its own links, so each is checked again at pack time — a
+  link being fine in the source says nothing about the built tree — under the
+  **same** rule: `ato_formation::containment::validate_contained_symlink_target`,
+  which the source resolver now calls too. Only the containment rule is
+  shared; the source tree digest and the artifact digest remain separate
+  identities.
+- Absolute links (`/opt/…`, `/etc/…`, `/home/…`) and escaping links are
+  refused. A dependency outside the artifact (a provisioned toolchain, say)
+  is not something an artifact may carry by pointing at the build host; if
+  it is ever needed, it is a separate model.
+- Link entries come after directories and files: a symlink-free tree packs to
+  exactly the bytes it did before (pinned by a golden digest).
+- Failure messages name tree-relative paths only.
+
 ## Consequences and limits
 
-- **Artifact format**: `pack_tree` (the deterministic artifact of a verified
-  process workspace) still has no symlink entry and refuses one. A candidate
-  whose source carries a link can be built, realized and verified, but its
-  artifact cannot yet be stored (`artifact_store_failed`). Extending the
-  artifact format is a separate decision, because Runners consume it.
+- **Hosted Runner**: the Connected Runner's workspace unpacker
+  (`connected-realization-worker`, `state_artifact::unpack_workspace_tree`)
+  accepts only files and directories, so it refuses an artifact that carries
+  a link (fail closed). Formation stores and verifies such artifacts; running
+  them on a hosted Runner needs the unpacker to admit contained links under
+  this rule — a follow-up.
 - **Control plane**: ato-api's submission wizard records
   `resolver_contract_version` as a fixed literal
   (`ato.capsule-program-source-projection/v1`), not the version this crate
-  measured under. Hosted sources with symlinks are therefore not accepted end
-  to end until the control plane carries the measured version; this change
-  does not alter the hosted path for symlink-free trees.
+  measured under. **Hosted / control-plane source projection alignment
+  remains a follow-up**: whether that literal and `ato.source-resolver.v1`
+  name the same semantic contract has to be settled first; it is not renamed
+  to `ato.source-resolver.v2` mechanically. Hosted sources with symlinks are
+  therefore not accepted end to end; the hosted path for symlink-free trees
+  is unchanged.
 - Windows cannot materialize links (refused with a message).
