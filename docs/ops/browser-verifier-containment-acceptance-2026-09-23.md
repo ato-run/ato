@@ -20,7 +20,7 @@ with an empty environment; model keys reach the helper on file descriptor 3.
 | Case | Result |
 |---|---|
 | **D** helper reads the host | canary `~/ato-browser-containment-canary-*.txt`, `$HOME`, `~/.config/ato/formation-browser.env`, `~/.ssh`, the repository's `Cargo.toml`, `/etc/passwd`, `/etc/shadow`, `/root`: every one `ENOENT` — the files do not exist in the namespace |
-| **F** helper writes its own mounts | `/verifier/standin.mjs`, `/verifier/injected.js`, `/runtime/node/bin/injected`, `/runtime/chrome/injected`, `/usr/injected`: refused (`EROFS`/`EACCES`); `/scratch/ok`, `/tmp/ok`: written |
+| **F** helper writes its own mounts | `/verifier/standin.mjs`, `/verifier/injected.js`, `/runtime/node/bin/injected`, `/runtime/chrome/injected`, `/usr/injected`: every write refused; `/scratch/ok`, `/tmp/ok`: written |
 | **E** browser reads the host | in the browser's namespace (the launcher, `/bin/sh` in Chrome's place): `cat <canary>` → No such file or directory; the running Chrome, asked over CDP to open `file://<canary>`, shows `chrome-error://chromewebdata/` and no canary text, while a `data:` control page renders |
 | **G** browser environment and `/proc` | in the browser's namespace: no `JEV_API_KEY`/`DEEPSEEK_API_KEY`, no variable the helper had set, the helper's process not in `/proc`. From the host, during the run: 6 Chrome processes' `/proc/<pid>/environ` read, 0 contain a key name or value |
 | **I** cleanup | a stand-in starts Chrome and a detached Node, then (a) hangs past the wall clock, (b) exits 1, (c) SIGKILLs itself: in each case no process with its marker survives and no scratch directory remains (`pgrep -f -- <marker>`, with a failing pgrep failing the test) |
@@ -93,6 +93,6 @@ renderers non-dumpable.
 
 - The helper's egress is the host network (by design, for its models); only
   the browser's is held to the candidate's origin.
-- x86_64 Linux was not run in this pass (sugamo was offline); the sandbox has
-  no architecture-specific part.
+- x86_64 Linux was not run in this pass (sugamo was not joined); the sandbox
+  has no architecture-specific part.
 - No deploy; migration 0288 still not applied remotely.
