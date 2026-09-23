@@ -502,8 +502,10 @@ fn supervisor_config(plan: &GuestBuildPlan) -> Result<SupervisorConfig> {
 }
 
 fn dockerfile(base_image: &str) -> String {
+    // Alpine links /sbin/init to busybox. Replacing through that symlink
+    // destroys the shell needed by the remaining image construction steps.
     format!(
-        "FROM {base_image}\nCOPY workspace/ /workspace/\nCOPY ato/ato-guest-agent /usr/local/bin/ato-guest-agent\nCOPY ato/supervisor.json /etc/ato/supervisor.json\nCOPY ato/init /sbin/init\nRUN chmod 0755 /usr/local/bin/ato-guest-agent /sbin/init\n"
+        "FROM {base_image}\nCOPY workspace/ /workspace/\nCOPY ato/ato-guest-agent /usr/local/bin/ato-guest-agent\nCOPY ato/supervisor.json /etc/ato/supervisor.json\nRUN rm -f /sbin/init\nCOPY ato/init /sbin/init\nRUN chmod 0755 /usr/local/bin/ato-guest-agent /sbin/init\n"
     )
 }
 
