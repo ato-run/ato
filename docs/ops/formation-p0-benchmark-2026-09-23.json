@@ -1,0 +1,2106 @@
+{
+ "benchmark": "P0 20 Apps Formation Benchmark \u2014 baseline",
+ "date": "2026-09-23",
+ "ato_commit": "973d71e2 (main, includes #1375 sibling browser sandbox \u2014 the pre-benchmark x86 fix)",
+ "ato_api_commit": "25d59663 (main)",
+ "coordinator": "ato-api under `wrangler dev --local`, local D1/R2 (migration 0288 applied locally only)",
+ "runtimes": [
+  {
+   "runtime_id": "rt_sugamo-x86",
+   "platform": "linux/x86_64",
+   "os": "Ubuntu 26.04",
+   "containment": "bwrap+landlock",
+   "browser": "contained, Chrome for Testing 145, chrome-no-sandbox (AppArmor userns restriction)",
+   "toolchains": [
+    "python 3.12.7",
+    "node 20.20.2"
+   ]
+  },
+  {
+   "runtime_id": "rt_oci-arm64",
+   "platform": "linux/aarch64",
+   "os": "Ubuntu 24.04",
+   "containment": "bwrap+landlock",
+   "browser": "contained, Chromium 149, chrome-sandbox",
+   "toolchains": [
+    "python 3.12.7",
+    "node 20.20.2"
+   ]
+  },
+  {
+   "runtime_id": "rt_mac-m1",
+   "platform": "macos/aarch64",
+   "containment": "none",
+   "browser": "none",
+   "toolchains": []
+  }
+ ],
+ "method": {
+  "source": "shallow clone of the default branch head; .git excluded by the snapshot; LFS not smudged (recorded); submodules not initialised (recorded)",
+  "d": "one hand-written route per app from upstream documentation; no source patches; overlay via `--route`",
+  "k": "K0 = source identity + documented health path (if any) + GET / \u2192 200; K1 = one small Browser Contract prompt per process route",
+  "runtime_network": "`ato form --runtime-network --mode all` against three owned Runtimes",
+  "retry": "first honest attempt for all 20; no D description errors were found, so no D retry. searxng got one diagnostic counterfactual (not counted)",
+  "d_gate_probe": "each D submitted once against an intentionally empty Initial Condition to see whether Ato's D grammar/projection accepts it at all \u2014 a probe of D, not of the app; not counted"
+ },
+ "levels": {
+  "0": "source/planning",
+  "1": "build/materialization",
+  "2": "process/static surface up",
+  "3": "typed K PASS",
+  "4": "Browser K PASS",
+  "5": "VerifiedRoute stored"
+ },
+ "aggregate": {
+  "apps": 20,
+  "level5_verified_route": 0,
+  "level4_plus": 0,
+  "level3_plus": 0,
+  "build_success": 0,
+  "planning_success": 0,
+  "reached_coordinator": 0,
+  "primary_failure_counts": {
+   "source_too_large": 12,
+   "unsupported_build_step": 4,
+   "source_layout": 3,
+   "multi_service": 1
+  },
+  "gap_occurrence_counts_primary_or_secondary": {
+   "unsupported_build_step": 16,
+   "source_too_large": 12,
+   "persistent_state": 11,
+   "runtime_capability": 10,
+   "toolchain_missing": 9,
+   "source_layout": 7,
+   "multi_service": 3,
+   "native_dependency": 2,
+   "build_resource_limit": 2,
+   "queue_service": 2,
+   "submodule": 2,
+   "external_service_required": 1,
+   "egress_required": 1,
+   "browser_static_lane_unsupported": 1,
+   "gpu": 1,
+   "database_service": 1,
+   "reverse_proxy": 1,
+   "build_failed": 1,
+   "browser_inconclusive": 1,
+   "migration": 1,
+   "git_lfs": 1,
+   "docker_socket": 1
+  },
+  "d_gate": {
+   "parsed_by_authoring_grammar": 20,
+   "projected": [
+    "searxng/searxng"
+   ],
+   "projection_cannot_project_authored_exec_into_build_plan": 16,
+   "projection_one_serving_step_only": 2,
+   "projection_python_runtime_only": 1
+  }
+ },
+ "missing_primitives": [
+  {
+   "primitive": "Projection of authored preparation/build steps (ato.process@1 op=exec) into an EffectiveBuildPlan \u2014 the grammar already expresses them",
+   "layer": "Derivation projection + build executor",
+   "scope": "large",
+   "blocked_apps": [
+    "coder/code-server",
+    "excalidraw/excalidraw",
+    "gethomepage/homepage",
+    "go-gitea/gitea",
+    "grafana/grafana",
+    "louislam/uptime-kuma",
+    "metabase/metabase",
+    "mickael-kerjean/filestash",
+    "n8n-io/n8n",
+    "navidrome/navidrome",
+    "nocodb/nocodb",
+    "node-red/node-red",
+    "open-webui/open-webui",
+    "paperless-ngx/paperless-ngx",
+    "portainer/portainer",
+    "usememos/memos"
+   ],
+   "blocked_count": 16,
+   "apps_unlocked_alone": 0
+  },
+  {
+   "primitive": "Drain build-step output (fix: run_step leaves stdout/stderr pipes unread; >64 KiB output hangs to the step budget)",
+   "layer": "formation-worker build executor (defect)",
+   "scope": "small",
+   "note": "observed on searxng ARM64; affects every D whose dependency install or build prints more than a pipe buffer \u2014 i.e. effectively every app once builds exist",
+   "blocked_apps": [
+    "searxng/searxng"
+   ],
+   "blocked_count": 1,
+   "apps_unlocked_alone": 0
+  },
+  {
+   "primitive": "Node as a process runtime (not only a build tool)",
+   "layer": "Derivation projection + runtime provisioning",
+   "scope": "medium",
+   "blocked_apps": [
+    "coder/code-server",
+    "gethomepage/homepage",
+    "immich-app/immich",
+    "louislam/uptime-kuma",
+    "n8n-io/n8n",
+    "nocodb/nocodb",
+    "node-red/node-red"
+   ],
+   "blocked_count": 7,
+   "apps_unlocked_alone": 0
+  },
+  {
+   "primitive": "Go / pnpm / yarn build toolchains inside the build sandbox",
+   "layer": "toolchain provisioning",
+   "scope": "medium",
+   "blocked_apps": [
+    "excalidraw/excalidraw",
+    "gethomepage/homepage",
+    "go-gitea/gitea",
+    "grafana/grafana",
+    "mickael-kerjean/filestash",
+    "navidrome/navidrome",
+    "open-webui/open-webui",
+    "portainer/portainer",
+    "usememos/memos"
+   ],
+   "blocked_count": 9,
+   "apps_unlocked_alone": 0
+  },
+  {
+   "primitive": "Source transport beyond the 32 MiB inline SatisfyRequest (content-addressed upload)",
+   "layer": "Runtime Network protocol + Coordinator storage",
+   "scope": "medium",
+   "blocked_apps": [
+    "Stirling-Tools/Stirling-PDF",
+    "excalidraw/excalidraw",
+    "go-gitea/gitea",
+    "grafana/grafana",
+    "immich-app/immich",
+    "metabase/metabase",
+    "mickael-kerjean/filestash",
+    "n8n-io/n8n",
+    "nocodb/nocodb",
+    "node-red/node-red",
+    "open-webui/open-webui",
+    "paperless-ngx/paperless-ngx"
+   ],
+   "blocked_count": 12,
+   "apps_unlocked_alone": 0
+  },
+  {
+   "primitive": "Contained symlinks in the source tree \u2014 a source resolver semantics extension (new resolver contract version, tree identity includes link targets), not a parser fix",
+   "layer": "source resolver / Initial Condition identity",
+   "scope": "medium",
+   "blocked_apps": [
+    "Stirling-Tools/Stirling-PDF",
+    "coder/code-server",
+    "grafana/grafana",
+    "immich-app/immich",
+    "n8n-io/n8n",
+    "navidrome/navidrome",
+    "searxng/searxng"
+   ],
+   "blocked_count": 7,
+   "apps_unlocked_alone": 0
+  },
+  {
+   "primitive": "Multi-service topology (several serving processes, service dependencies)",
+   "layer": "Derivation + realization",
+   "scope": "large",
+   "blocked_apps": [
+    "FreshRSS/FreshRSS",
+    "immich-app/immich",
+    "paperless-ngx/paperless-ngx"
+   ],
+   "blocked_count": 3,
+   "apps_unlocked_alone": 0
+  },
+  {
+   "primitive": "Database / queue service bindings (PostgreSQL, Redis)",
+   "layer": "bindings",
+   "scope": "large",
+   "blocked_apps": [
+    "immich-app/immich",
+    "paperless-ngx/paperless-ngx"
+   ],
+   "blocked_count": 2,
+   "apps_unlocked_alone": 0
+  },
+  {
+   "primitive": "Java / PHP runtimes",
+   "layer": "runtime provisioning",
+   "scope": "medium",
+   "blocked_apps": [
+    "FreshRSS/FreshRSS",
+    "Stirling-Tools/Stirling-PDF",
+    "metabase/metabase"
+   ],
+   "blocked_count": 3,
+   "apps_unlocked_alone": 0
+  },
+  {
+   "primitive": "Browser agent model fallback when the provider refuses content",
+   "layer": "Browser Verifier",
+   "scope": "small",
+   "note": "observed twice on searxng x86_64 (counterfactual)",
+   "blocked_apps": [
+    "searxng/searxng"
+   ],
+   "blocked_count": 1,
+   "apps_unlocked_alone": 0
+  },
+  {
+   "primitive": "Authored static build + static-lane browser realization",
+   "layer": "Derivation + static lane",
+   "scope": "medium",
+   "blocked_apps": [
+    "excalidraw/excalidraw"
+   ],
+   "blocked_count": 1,
+   "apps_unlocked_alone": 0
+  },
+  {
+   "primitive": "Submodules / Git LFS in the Initial Condition",
+   "layer": "source acquisition",
+   "scope": "small",
+   "blocked_apps": [
+    "coder/code-server",
+    "immich-app/immich"
+   ],
+   "blocked_count": 2,
+   "apps_unlocked_alone": 0
+  },
+  {
+   "primitive": "Docker socket binding",
+   "layer": "bindings (security-sensitive)",
+   "scope": "large",
+   "note": "UI may load without it; management does not",
+   "blocked_apps": [
+    "portainer/portainer"
+   ],
+   "blocked_count": 1,
+   "apps_unlocked_alone": 0
+  }
+ ],
+ "unlock_bundles": [
+  {
+   "name": "B1: symlinks + build-output drain (+ agent model fallback)",
+   "unlocks": [
+    "searxng/searxng"
+   ],
+   "evidence": "counterfactual: x86_64 reached Level 3; the two remaining observed blockers are the ARM64 pipe hang and the model refusal",
+   "confidence": "high"
+  },
+  {
+   "name": "B2: B1 + build steps + Node process runtime + pnpm/yarn toolchains",
+   "unlocks": [
+    "searxng/searxng",
+    "louislam/uptime-kuma",
+    "gethomepage/homepage"
+   ],
+   "evidence": "analysis: sources \u2264 32 MiB, no symlink, single process; uptime-kuma needs GitHub egress during build",
+   "confidence": "medium"
+  },
+  {
+   "name": "B3: B2 + Go toolchain",
+   "unlocks": [
+    "searxng/searxng",
+    "louislam/uptime-kuma",
+    "gethomepage/homepage",
+    "usememos/memos",
+    "portainer/portainer",
+    "navidrome/navidrome"
+   ],
+   "evidence": "analysis; navidrome also needs taglib, portainer is only a UI without a Docker socket",
+   "confidence": "low-medium"
+  },
+  {
+   "name": "B4: B3 + source transport > 32 MiB",
+   "unlocks": [
+    "searxng/searxng",
+    "louislam/uptime-kuma",
+    "gethomepage/homepage",
+    "usememos/memos",
+    "portainer/portainer",
+    "navidrome/navidrome",
+    "go-gitea/gitea",
+    "mickael-kerjean/filestash",
+    "node-red/node-red",
+    "open-webui/open-webui",
+    "nocodb/nocodb",
+    "n8n-io/n8n",
+    "grafana/grafana",
+    "excalidraw/excalidraw"
+   ],
+   "evidence": "analysis; grafana/metabase builds are memory-heavy; excalidraw additionally needs an authored static build and has no Browser K",
+   "confidence": "low"
+  },
+  {
+   "name": "Not unlocked by B4",
+   "unlocks": [],
+   "still_blocked": [
+    "immich-app/immich (multi-service + PostgreSQL + Redis)",
+    "paperless-ngx/paperless-ngx (multi-service + Redis)",
+    "FreshRSS/FreshRSS (web server + PHP)",
+    "Stirling-Tools/Stirling-PDF (Java + native tools)",
+    "metabase/metabase (Java/Clojure)",
+    "coder/code-server (submodule + LFS + heavy build)"
+   ],
+   "evidence": "analysis",
+   "confidence": "medium"
+  }
+ ],
+ "defects_found": [
+  {
+   "where": "apps/formation-worker/src/build.rs run_step",
+   "what": "build step stdout/stderr are piped but not read until exit; output beyond one pipe buffer blocks the step until its time budget (15 min)",
+   "evidence": "searxng ARM64 attempt: pip blocked in anon_pipe_write for >9 min; attempt formation_failed after 16 min",
+   "severity": "blocks the Python lane for any non-trivial dependency set"
+  },
+  {
+   "where": "source resolver (RESOLVER_CONTRACT_V1)",
+   "what": "the resolver contract defines no symlink entry, so any symlink refuses the whole source; supporting it is a resolver semantics change, not a parser fix",
+   "evidence": "searxng, navidrome, code-server refused; 4 more repos contain symlinks",
+   "severity": "7/20 repos"
+  }
+ ],
+ "fixed_before_baseline": [
+  {
+   "pr": "ato#1375",
+   "what": "Browser Verifier browser in a sibling sandbox; nested bubblewrap fails on AppArmor-restricted hosts and the preflight did not detect it",
+   "found_by": "the benchmark's x86 browser smoke"
+  }
+ ],
+ "apps": [
+  {
+   "repo": "open-webui/open-webui",
+   "commit_sha": "8bd8b4fac5e059578ac0c74b3c18d11139f88b7d",
+   "category": "AI chat UI",
+   "difficulty": "high",
+   "primary_language": "Python",
+   "source": {
+    "bytes": 43625476,
+    "files": 5065,
+    "git_lfs": false,
+    "submodules": [],
+    "notes": [
+     "exceeds the Runtime Network inline source limit (32 MiB)",
+     "subdirectory as I: not used (no independently documented app subdirectory)"
+    ]
+   },
+   "derivation": {
+    "kind": "normal-build+process",
+    "topology": "single-process (+ optional external model service)",
+    "ref": null,
+    "documented_path": "docs: `npm install && npm run build`, then `cd backend && pip install -r requirements.txt && bash start.sh` (uvicorn open_webui.main:app on 8080)",
+    "declared_runtimes": [
+     "python@3.12.7",
+     "node@22.14.0"
+    ],
+    "route_toml": "schema = \"ato.capsule/1\"\n\n[[input]]\nid = \"workspace\"\nuse = \"ato.workspace@1\"\npath = \".\"\n\n[[runtime]]\nname = \"python\"\nversion = \"3.12.7\"\n\n[[runtime]]\nname = \"node\"\nversion = \"22.14.0\"\n\n[[derive.step]]\nid = \"frontend-deps\"\nuse = \"ato.process@1\"\nop = \"exec\"\nargv = [\"npm\", \"ci\"]\n\n[[derive.step]]\nid = \"frontend-build\"\nuse = \"ato.process@1\"\nop = \"exec\"\nargv = [\"npm\", \"run\", \"build\"]\n\n[[derive.step]]\nid = \"app\"\nuse = \"ato.process@1\"\nop = \"serve\"\nargv = [\"/opt/ato/toolchains/python/3.12.7/bin/python3\", \"-m\", \"uvicorn\", \"open_webui.main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8080\"]\ncwd = \"backend\"\n\n[[port]]\nid = \"app.http\"\nuse = \"ato.http@1\"\nfrom = \"app\"\nguest_port = 8080\n\n[[contract.require]]\nid = \"http-0\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/health\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"http-1\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"source-identity\"\nuse = \"ato.contract.workspace@1\"\ninput = \"workspace\"\n\n[contract.require.expect]\ndigest = \"capture\"\n",
+    "d_gate_probe": "error: projection_unsupported_step: this build cannot execute ato.process@1 `exec` yet: a preparation step is not projected onto this worker yet, and a step that is silently skipped is a route that did something else"
+   },
+   "k": {
+    "k0": "source identity + GET ., GET /health, GET / \u2192 200",
+    "k1_browser_prompt": "Verify that the Open WebUI page loads and shows a sign-in or account creation form."
+   },
+   "contract_ref": null,
+   "runtime_candidates": [],
+   "attempts": [],
+   "verified_routes": [],
+   "highest_level": null,
+   "primary_failure": "source_too_large",
+   "primary_failure_detail": "error: the source is larger than 33554432 bytes",
+   "secondary_gaps": [
+    {
+     "gap": "unsupported_build_step",
+     "evidence": "d_gate_probe",
+     "detail": "npm ci / npm run build before serving"
+    },
+    {
+     "gap": "toolchain_missing",
+     "evidence": "analysis",
+     "detail": "Node as a build tool inside an authored D (only Python is provisioned for a route)"
+    },
+    {
+     "gap": "external_service_required",
+     "evidence": "analysis",
+     "detail": "chat needs an LLM backend (Ollama/OpenAI); UI loads without one"
+    },
+    {
+     "gap": "persistent_state",
+     "evidence": "analysis",
+     "detail": "backend/data (SQLite, uploads)"
+    }
+   ],
+   "timings": {
+    "requester_total_s": 0.53,
+    "source_freeze_and_planning_s": 0.53,
+    "build_s": null,
+    "realization_startup_s": null,
+    "http_verification_s": null,
+    "browser_verification_s": null,
+    "time_bucket": "seconds"
+   },
+   "notes": "Refused by the requester before a SatisfyRequest existed: no candidates, no attempts, no Coordinator evidence."
+  },
+  {
+   "repo": "louislam/uptime-kuma",
+   "commit_sha": "e62702d868a0b072c6e1870e5278762319637f04",
+   "category": "monitoring",
+   "difficulty": "medium",
+   "primary_language": "JavaScript",
+   "source": {
+    "bytes": 8616608,
+    "files": 808,
+    "git_lfs": false,
+    "submodules": [],
+    "notes": [
+     "subdirectory as I: not used (no independently documented app subdirectory)"
+    ]
+   },
+   "derivation": {
+    "kind": "normal-build+process",
+    "topology": "single-process",
+    "ref": null,
+    "documented_path": "README (non-Docker): `npm run setup` (npm ci --omit dev; npm run download-dist), then `node server/server.js` (3001)",
+    "declared_runtimes": [
+     "node@20.20.2"
+    ],
+    "route_toml": "schema = \"ato.capsule/1\"\n\n[[input]]\nid = \"workspace\"\nuse = \"ato.workspace@1\"\npath = \".\"\n\n[[runtime]]\nname = \"node\"\nversion = \"20.20.2\"\n\n[[derive.step]]\nid = \"deps\"\nuse = \"ato.process@1\"\nop = \"exec\"\nargv = [\"npm\", \"ci\", \"--omit\", \"dev\", \"--no-audit\"]\n\n[[derive.step]]\nid = \"dist\"\nuse = \"ato.process@1\"\nop = \"exec\"\nargv = [\"npm\", \"run\", \"download-dist\"]\n\n[[derive.step]]\nid = \"app\"\nuse = \"ato.process@1\"\nop = \"serve\"\nargv = [\"node\", \"server/server.js\"]\n\n[derive.step.env]\nUPTIME_KUMA_HOST = \"0.0.0.0\"\nUPTIME_KUMA_PORT = \"3001\"\n\n[[port]]\nid = \"app.http\"\nuse = \"ato.http@1\"\nfrom = \"app\"\nguest_port = 3001\n\n[[contract.require]]\nid = \"http-0\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"source-identity\"\nuse = \"ato.contract.workspace@1\"\ninput = \"workspace\"\n\n[contract.require.expect]\ndigest = \"capture\"\n",
+    "d_gate_probe": "error: projection_unsupported_step: this build cannot execute ato.process@1 `exec` yet: a preparation step is not projected onto this worker yet, and a step that is silently skipped is a route that did something else"
+   },
+   "k": {
+    "k0": "source identity + GET ., GET / \u2192 200",
+    "k1_browser_prompt": "Verify that the Uptime Kuma setup or login page is shown."
+   },
+   "contract_ref": null,
+   "runtime_candidates": [],
+   "attempts": [],
+   "verified_routes": [],
+   "highest_level": null,
+   "primary_failure": "unsupported_build_step",
+   "primary_failure_detail": "error: projection_unsupported_step: this build cannot execute ato.process@1 `exec` yet: a preparation step is not projected onto this worker yet, and a step that is silently skipped is a route that did something else",
+   "secondary_gaps": [
+    {
+     "gap": "runtime_capability",
+     "evidence": "analysis",
+     "detail": "Node process runtime (Ato provisions only python for a route)"
+    },
+    {
+     "gap": "egress_required",
+     "evidence": "analysis",
+     "detail": "`npm run download-dist` fetches the built frontend from GitHub releases during build"
+    },
+    {
+     "gap": "persistent_state",
+     "evidence": "analysis",
+     "detail": "./data (SQLite)"
+    }
+   ],
+   "timings": {
+    "requester_total_s": 1.6,
+    "source_freeze_and_planning_s": 1.6,
+    "build_s": null,
+    "realization_startup_s": null,
+    "http_verification_s": null,
+    "browser_verification_s": null,
+    "time_bucket": "seconds"
+   },
+   "notes": "Refused by the requester before a SatisfyRequest existed: no candidates, no attempts, no Coordinator evidence."
+  },
+  {
+   "repo": "go-gitea/gitea",
+   "commit_sha": "8164130349836e75d35471fd056cb449310e5548",
+   "category": "git forge",
+   "difficulty": "medium",
+   "primary_language": "Go",
+   "source": {
+    "bytes": 34018730,
+    "files": 6326,
+    "git_lfs": false,
+    "submodules": [],
+    "notes": [
+     "exceeds the Runtime Network inline source limit (32 MiB)",
+     "subdirectory as I: not used (no independently documented app subdirectory)"
+    ]
+   },
+   "derivation": {
+    "kind": "normal-build+process",
+    "topology": "single-process (SQLite)",
+    "ref": null,
+    "documented_path": "docs 'Installation from source': `TAGS=\"bindata sqlite sqlite_unlock_notify\" make build`, then `./gitea web` (3000). Prebuilt release binaries exist but are not built from this commit.",
+    "declared_runtimes": [
+     "go@1.25",
+     "node@22.14.0"
+    ],
+    "route_toml": "schema = \"ato.capsule/1\"\n\n[[input]]\nid = \"workspace\"\nuse = \"ato.workspace@1\"\npath = \".\"\n\n[[runtime]]\nname = \"go\"\nversion = \"1.25\"\n\n[[runtime]]\nname = \"node\"\nversion = \"22.14.0\"\n\n[[derive.step]]\nid = \"build\"\nuse = \"ato.process@1\"\nop = \"exec\"\nargv = [\"make\", \"build\"]\n\n[derive.step.env]\nTAGS = \"bindata sqlite sqlite_unlock_notify\"\n\n[[derive.step]]\nid = \"app\"\nuse = \"ato.process@1\"\nop = \"serve\"\nargv = [\"./gitea\", \"web\", \"--port\", \"3000\"]\n\n[[port]]\nid = \"app.http\"\nuse = \"ato.http@1\"\nfrom = \"app\"\nguest_port = 3000\n\n[[contract.require]]\nid = \"http-0\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/api/healthz\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"http-1\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"source-identity\"\nuse = \"ato.contract.workspace@1\"\ninput = \"workspace\"\n\n[contract.require.expect]\ndigest = \"capture\"\n",
+    "d_gate_probe": "error: projection_unsupported_step: this build cannot execute ato.process@1 `exec` yet: a preparation step is not projected onto this worker yet, and a step that is silently skipped is a route that did something else"
+   },
+   "k": {
+    "k0": "source identity + GET ., GET /api/healthz, GET / \u2192 200",
+    "k1_browser_prompt": "Verify that the Gitea initial configuration page or home page is shown."
+   },
+   "contract_ref": null,
+   "runtime_candidates": [],
+   "attempts": [],
+   "verified_routes": [],
+   "highest_level": null,
+   "primary_failure": "source_too_large",
+   "primary_failure_detail": "error: the source is larger than 33554432 bytes",
+   "secondary_gaps": [
+    {
+     "gap": "unsupported_build_step",
+     "evidence": "d_gate_probe",
+     "detail": "`make build` before serving"
+    },
+    {
+     "gap": "toolchain_missing",
+     "evidence": "analysis",
+     "detail": "Go + Node toolchains for the build"
+    },
+    {
+     "gap": "persistent_state",
+     "evidence": "analysis",
+     "detail": "repositories, SQLite, app.ini written by the install wizard"
+    }
+   ],
+   "timings": {
+    "requester_total_s": 0.69,
+    "source_freeze_and_planning_s": 0.69,
+    "build_s": null,
+    "realization_startup_s": null,
+    "http_verification_s": null,
+    "browser_verification_s": null,
+    "time_bucket": "seconds"
+   },
+   "notes": "Refused by the requester before a SatisfyRequest existed: no candidates, no attempts, no Coordinator evidence."
+  },
+  {
+   "repo": "usememos/memos",
+   "commit_sha": "05a2c6db7a3e926c9142a635f42f7af0f078c81d",
+   "category": "notes",
+   "difficulty": "medium",
+   "primary_language": "Go",
+   "source": {
+    "bytes": 12032591,
+    "files": 1307,
+    "git_lfs": false,
+    "submodules": [],
+    "notes": [
+     "subdirectory as I: not used (no independently documented app subdirectory)"
+    ]
+   },
+   "derivation": {
+    "kind": "normal-build+process",
+    "topology": "single-process (SQLite)",
+    "ref": null,
+    "documented_path": "docs 'Development': build the web UI with pnpm, then `go build ./cmd/memos` and run `memos --port 5230`",
+    "declared_runtimes": [
+     "go@1.25",
+     "node@22.14.0"
+    ],
+    "route_toml": "schema = \"ato.capsule/1\"\n\n[[input]]\nid = \"workspace\"\nuse = \"ato.workspace@1\"\npath = \".\"\n\n[[runtime]]\nname = \"go\"\nversion = \"1.25\"\n\n[[runtime]]\nname = \"node\"\nversion = \"22.14.0\"\n\n[[derive.step]]\nid = \"web\"\nuse = \"ato.process@1\"\nop = \"exec\"\nargv = [\"sh\", \"-c\", \"cd web && pnpm install --frozen-lockfile && pnpm release\"]\n\n[[derive.step]]\nid = \"build\"\nuse = \"ato.process@1\"\nop = \"exec\"\nargv = [\"go\", \"build\", \"-o\", \"memos\", \"./cmd/memos\"]\n\n[[derive.step]]\nid = \"app\"\nuse = \"ato.process@1\"\nop = \"serve\"\nargv = [\"./memos\", \"--port\", \"5230\", \"--addr\", \"0.0.0.0\", \"--data\", \"data\"]\n\n[[port]]\nid = \"app.http\"\nuse = \"ato.http@1\"\nfrom = \"app\"\nguest_port = 5230\n\n[[contract.require]]\nid = \"http-0\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/healthz\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"http-1\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"source-identity\"\nuse = \"ato.contract.workspace@1\"\ninput = \"workspace\"\n\n[contract.require.expect]\ndigest = \"capture\"\n",
+    "d_gate_probe": "error: projection_unsupported_step: this build cannot execute ato.process@1 `exec` yet: a preparation step is not projected onto this worker yet, and a step that is silently skipped is a route that did something else"
+   },
+   "k": {
+    "k0": "source identity + GET ., GET /healthz, GET / \u2192 200",
+    "k1_browser_prompt": "Verify that the Memos sign-up or sign-in page is shown."
+   },
+   "contract_ref": null,
+   "runtime_candidates": [],
+   "attempts": [],
+   "verified_routes": [],
+   "highest_level": null,
+   "primary_failure": "unsupported_build_step",
+   "primary_failure_detail": "error: projection_unsupported_step: this build cannot execute ato.process@1 `exec` yet: a preparation step is not projected onto this worker yet, and a step that is silently skipped is a route that did something else",
+   "secondary_gaps": [
+    {
+     "gap": "toolchain_missing",
+     "evidence": "analysis",
+     "detail": "Go + pnpm for the build"
+    },
+    {
+     "gap": "persistent_state",
+     "evidence": "analysis",
+     "detail": "--data directory (SQLite)"
+    }
+   ],
+   "timings": {
+    "requester_total_s": 2.2,
+    "source_freeze_and_planning_s": 2.2,
+    "build_s": null,
+    "realization_startup_s": null,
+    "http_verification_s": null,
+    "browser_verification_s": null,
+    "time_bucket": "seconds"
+   },
+   "notes": "Refused by the requester before a SatisfyRequest existed: no candidates, no attempts, no Coordinator evidence."
+  },
+  {
+   "repo": "Stirling-Tools/Stirling-PDF",
+   "commit_sha": "455ad987181d54c980ba8310c516d94a87f70041",
+   "category": "PDF tools",
+   "difficulty": "high",
+   "primary_language": "TypeScript",
+   "source": {
+    "bytes": 228756896,
+    "files": 8271,
+    "git_lfs": false,
+    "submodules": [],
+    "notes": [
+     "exceeds the Runtime Network inline source limit (32 MiB)",
+     "symlinks in tree",
+     "subdirectory as I: not used (no independently documented app subdirectory)"
+    ]
+   },
+   "derivation": {
+    "kind": "normal-build+process",
+    "topology": "single-process (+ native tools: LibreOffice, Tesseract, qpdf)",
+    "ref": null,
+    "documented_path": "DeveloperGuide: `./gradlew bootRun` (JDK 21), UI on 8080",
+    "declared_runtimes": [
+     "java@21"
+    ],
+    "route_toml": "schema = \"ato.capsule/1\"\n\n[[input]]\nid = \"workspace\"\nuse = \"ato.workspace@1\"\npath = \".\"\n\n[[runtime]]\nname = \"java\"\nversion = \"21\"\n\n[[derive.step]]\nid = \"app\"\nuse = \"ato.process@1\"\nop = \"serve\"\nargv = [\"./gradlew\", \"bootRun\"]\n\n[[port]]\nid = \"app.http\"\nuse = \"ato.http@1\"\nfrom = \"app\"\nguest_port = 8080\n\n[[contract.require]]\nid = \"http-0\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/api/v1/info/status\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"http-1\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"source-identity\"\nuse = \"ato.contract.workspace@1\"\ninput = \"workspace\"\n\n[contract.require.expect]\ndigest = \"capture\"\n",
+    "d_gate_probe": "error: projection_unprojectable: this build provisions only `python`; \"java\" was declared and would be silently absent at run time"
+   },
+   "k": {
+    "k0": "source identity + GET ., GET /api/v1/info/status, GET / \u2192 200",
+    "k1_browser_prompt": "Open the Merge tool and verify that a file upload area is shown."
+   },
+   "contract_ref": null,
+   "runtime_candidates": [],
+   "attempts": [],
+   "verified_routes": [],
+   "highest_level": null,
+   "primary_failure": "source_too_large",
+   "primary_failure_detail": "error: the source is larger than 33554432 bytes",
+   "secondary_gaps": [
+    {
+     "gap": "runtime_capability",
+     "evidence": "d_gate_probe",
+     "detail": "java declared; only python is provisioned"
+    },
+    {
+     "gap": "source_layout",
+     "evidence": "observed_in_tree",
+     "detail": "1 symlink (CLAUDE.md)"
+    },
+    {
+     "gap": "native_dependency",
+     "evidence": "analysis",
+     "detail": "LibreOffice, Tesseract, qpdf, \u2026 for most tools"
+    }
+   ],
+   "timings": {
+    "requester_total_s": 1.16,
+    "source_freeze_and_planning_s": 1.16,
+    "build_s": null,
+    "realization_startup_s": null,
+    "http_verification_s": null,
+    "browser_verification_s": null,
+    "time_bucket": "seconds"
+   },
+   "notes": "Refused by the requester before a SatisfyRequest existed: no candidates, no attempts, no Coordinator evidence."
+  },
+  {
+   "repo": "excalidraw/excalidraw",
+   "commit_sha": "2b9da9610083254edaec68871d593fb6b08e9072",
+   "category": "whiteboard",
+   "difficulty": "medium",
+   "primary_language": "TypeScript",
+   "source": {
+    "bytes": 56250823,
+    "files": 1291,
+    "git_lfs": false,
+    "submodules": [],
+    "notes": [
+     "exceeds the Runtime Network inline source limit (32 MiB)",
+     "subdirectory as I: not used (no independently documented app subdirectory)"
+    ]
+   },
+   "derivation": {
+    "kind": "static-build",
+    "topology": "static",
+    "ref": null,
+    "documented_path": "README: `yarn` then `yarn build` (excalidraw-app \u2192 excalidraw-app/build), served as static files",
+    "declared_runtimes": [
+     "node@20.20.2"
+    ],
+    "route_toml": "schema = \"ato.capsule/1\"\n\n[[input]]\nid = \"workspace\"\nuse = \"ato.workspace@1\"\npath = \".\"\n\n[[runtime]]\nname = \"node\"\nversion = \"20.20.2\"\n\n[[derive.step]]\nid = \"build\"\nuse = \"ato.process@1\"\nop = \"exec\"\nargv = [\"yarn\", \"build\"]\n\n[[derive.step]]\nid = \"site\"\nuse = \"ato.browser@1\"\nop = \"serve\"\nsource = \"workspace\"\nentry = \"index.html\"\nroot = \"excalidraw-app/build\"\n\n[[port]]\nid = \"app.http\"\nuse = \"ato.http@1\"\nfrom = \"site\"\n\n[[contract.require]]\nid = \"http-0\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"source-identity\"\nuse = \"ato.contract.workspace@1\"\ninput = \"workspace\"\n\n[contract.require.expect]\ndigest = \"capture\"\n",
+    "d_gate_probe": "error: projection_unsupported_step: this build cannot execute ato.process@1 `exec` yet: a preparation step is not projected onto this worker yet, and a step that is silently skipped is a route that did something else"
+   },
+   "k": {
+    "k0": "source identity + GET ., GET / \u2192 200",
+    "k1_browser_prompt": null
+   },
+   "contract_ref": null,
+   "runtime_candidates": [],
+   "attempts": [],
+   "verified_routes": [],
+   "highest_level": null,
+   "primary_failure": "source_too_large",
+   "primary_failure_detail": "error: the source is larger than 33554432 bytes",
+   "secondary_gaps": [
+    {
+     "gap": "unsupported_build_step",
+     "evidence": "d_gate_probe",
+     "detail": "yarn build before static serving; an authored static route cannot declare a build"
+    },
+    {
+     "gap": "browser_static_lane_unsupported",
+     "evidence": "analysis",
+     "detail": "static lane is not realized, so no Browser Contract"
+    }
+   ],
+   "timings": {
+    "requester_total_s": 0.2,
+    "source_freeze_and_planning_s": 0.2,
+    "build_s": null,
+    "realization_startup_s": null,
+    "http_verification_s": null,
+    "browser_verification_s": null,
+    "time_bucket": "seconds"
+   },
+   "notes": "Refused by the requester before a SatisfyRequest existed: no candidates, no attempts, no Coordinator evidence."
+  },
+  {
+   "repo": "nocodb/nocodb",
+   "commit_sha": "9901007c1b3017e6b9e64fdff73ebdf73b8f3b1d",
+   "category": "database UI",
+   "difficulty": "high",
+   "primary_language": "TypeScript",
+   "source": {
+    "bytes": 158654407,
+    "files": 4756,
+    "git_lfs": false,
+    "submodules": [],
+    "notes": [
+     "exceeds the Runtime Network inline source limit (32 MiB)",
+     "subdirectory as I: not used (no independently documented app subdirectory)"
+    ]
+   },
+   "derivation": {
+    "kind": "normal-build+process",
+    "topology": "single-process (SQLite default)",
+    "ref": null,
+    "documented_path": "docs 'Development setup': `pnpm bootstrap`, then start packages/nocodb (8080)",
+    "declared_runtimes": [
+     "node@22.14.0"
+    ],
+    "route_toml": "schema = \"ato.capsule/1\"\n\n[[input]]\nid = \"workspace\"\nuse = \"ato.workspace@1\"\npath = \".\"\n\n[[runtime]]\nname = \"node\"\nversion = \"22.14.0\"\n\n[[derive.step]]\nid = \"bootstrap\"\nuse = \"ato.process@1\"\nop = \"exec\"\nargv = [\"pnpm\", \"run\", \"bootstrap\"]\n\n[[derive.step]]\nid = \"app\"\nuse = \"ato.process@1\"\nop = \"serve\"\nargv = [\"pnpm\", \"--filter\", \"nocodb\", \"start\"]\n\n[[port]]\nid = \"app.http\"\nuse = \"ato.http@1\"\nfrom = \"app\"\nguest_port = 8080\n\n[[contract.require]]\nid = \"http-0\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/api/v1/health\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"http-1\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"source-identity\"\nuse = \"ato.contract.workspace@1\"\ninput = \"workspace\"\n\n[contract.require.expect]\ndigest = \"capture\"\n",
+    "d_gate_probe": "error: projection_unsupported_step: this build cannot execute ato.process@1 `exec` yet: a preparation step is not projected onto this worker yet, and a step that is silently skipped is a route that did something else"
+   },
+   "k": {
+    "k0": "source identity + GET ., GET /api/v1/health, GET / \u2192 200",
+    "k1_browser_prompt": "Verify that the NocoDB sign-up page is shown."
+   },
+   "contract_ref": null,
+   "runtime_candidates": [],
+   "attempts": [],
+   "verified_routes": [],
+   "highest_level": null,
+   "primary_failure": "source_too_large",
+   "primary_failure_detail": "error: the source is larger than 33554432 bytes",
+   "secondary_gaps": [
+    {
+     "gap": "unsupported_build_step",
+     "evidence": "d_gate_probe",
+     "detail": "pnpm bootstrap"
+    },
+    {
+     "gap": "runtime_capability",
+     "evidence": "analysis",
+     "detail": "Node process runtime"
+    },
+    {
+     "gap": "persistent_state",
+     "evidence": "analysis",
+     "detail": "SQLite default"
+    }
+   ],
+   "timings": {
+    "requester_total_s": 0.6,
+    "source_freeze_and_planning_s": 0.6,
+    "build_s": null,
+    "realization_startup_s": null,
+    "http_verification_s": null,
+    "browser_verification_s": null,
+    "time_bucket": "seconds"
+   },
+   "notes": "Refused by the requester before a SatisfyRequest existed: no candidates, no attempts, no Coordinator evidence."
+  },
+  {
+   "repo": "metabase/metabase",
+   "commit_sha": "6ec07f75184dd7f06d84c551d57c58687cf4b859",
+   "category": "BI",
+   "difficulty": "high",
+   "primary_language": "Clojure",
+   "source": {
+    "bytes": 398896295,
+    "files": 22331,
+    "git_lfs": false,
+    "submodules": [],
+    "notes": [
+     "exceeds the Runtime Network inline source limit (32 MiB)",
+     "subdirectory as I: not used (no independently documented app subdirectory)"
+    ]
+   },
+   "derivation": {
+    "kind": "normal-build+process",
+    "topology": "single-process (H2 default)",
+    "ref": null,
+    "documented_path": "docs 'Building Metabase': `./bin/build.sh` \u2192 target/uberjar/metabase.jar, `java -jar metabase.jar` (3000)",
+    "declared_runtimes": [
+     "java@21",
+     "node@22.14.0"
+    ],
+    "route_toml": "schema = \"ato.capsule/1\"\n\n[[input]]\nid = \"workspace\"\nuse = \"ato.workspace@1\"\npath = \".\"\n\n[[runtime]]\nname = \"java\"\nversion = \"21\"\n\n[[runtime]]\nname = \"node\"\nversion = \"22.14.0\"\n\n[[derive.step]]\nid = \"build\"\nuse = \"ato.process@1\"\nop = \"exec\"\nargv = [\"./bin/build.sh\"]\n\n[[derive.step]]\nid = \"app\"\nuse = \"ato.process@1\"\nop = \"serve\"\nargv = [\"java\", \"-jar\", \"target/uberjar/metabase.jar\"]\n\n[derive.step.env]\nMB_JETTY_HOST = \"0.0.0.0\"\nMB_JETTY_PORT = \"3000\"\n\n[[port]]\nid = \"app.http\"\nuse = \"ato.http@1\"\nfrom = \"app\"\nguest_port = 3000\n\n[[contract.require]]\nid = \"http-0\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/api/health\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"http-1\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"source-identity\"\nuse = \"ato.contract.workspace@1\"\ninput = \"workspace\"\n\n[contract.require.expect]\ndigest = \"capture\"\n",
+    "d_gate_probe": "error: projection_unsupported_step: this build cannot execute ato.process@1 `exec` yet: a preparation step is not projected onto this worker yet, and a step that is silently skipped is a route that did something else"
+   },
+   "k": {
+    "k0": "source identity + GET ., GET /api/health, GET / \u2192 200",
+    "k1_browser_prompt": "Verify that the Metabase setup welcome page is shown."
+   },
+   "contract_ref": null,
+   "runtime_candidates": [],
+   "attempts": [],
+   "verified_routes": [],
+   "highest_level": null,
+   "primary_failure": "source_too_large",
+   "primary_failure_detail": "error: the source is larger than 33554432 bytes",
+   "secondary_gaps": [
+    {
+     "gap": "unsupported_build_step",
+     "evidence": "d_gate_probe",
+     "detail": "./bin/build.sh (Clojure + Node)"
+    },
+    {
+     "gap": "runtime_capability",
+     "evidence": "analysis",
+     "detail": "Java runtime"
+    },
+    {
+     "gap": "toolchain_missing",
+     "evidence": "analysis",
+     "detail": "Clojure CLI, JDK, Node for the build"
+    },
+    {
+     "gap": "build_resource_limit",
+     "evidence": "analysis",
+     "detail": "uberjar build is long and memory-heavy"
+    }
+   ],
+   "timings": {
+    "requester_total_s": 2.82,
+    "source_freeze_and_planning_s": 2.82,
+    "build_s": null,
+    "realization_startup_s": null,
+    "http_verification_s": null,
+    "browser_verification_s": null,
+    "time_bucket": "seconds"
+   },
+   "notes": "Refused by the requester before a SatisfyRequest existed: no candidates, no attempts, no Coordinator evidence."
+  },
+  {
+   "repo": "n8n-io/n8n",
+   "commit_sha": "67fadbc64b2256251f6b8a19d5b9e053c730efc0",
+   "category": "automation",
+   "difficulty": "high",
+   "primary_language": "TypeScript",
+   "source": {
+    "bytes": 201922480,
+    "files": 29304,
+    "git_lfs": false,
+    "submodules": [],
+    "notes": [
+     "exceeds the Runtime Network inline source limit (32 MiB)",
+     "symlinks in tree",
+     "subdirectory as I: not used (no independently documented app subdirectory)"
+    ]
+   },
+   "derivation": {
+    "kind": "normal-build+process",
+    "topology": "single-process (SQLite default)",
+    "ref": null,
+    "documented_path": "CONTRIBUTING: `pnpm install && pnpm build`, then `pnpm start` (5678)",
+    "declared_runtimes": [
+     "node@22.14.0"
+    ],
+    "route_toml": "schema = \"ato.capsule/1\"\n\n[[input]]\nid = \"workspace\"\nuse = \"ato.workspace@1\"\npath = \".\"\n\n[[runtime]]\nname = \"node\"\nversion = \"22.14.0\"\n\n[[derive.step]]\nid = \"install\"\nuse = \"ato.process@1\"\nop = \"exec\"\nargv = [\"pnpm\", \"install\", \"--frozen-lockfile\"]\n\n[[derive.step]]\nid = \"build\"\nuse = \"ato.process@1\"\nop = \"exec\"\nargv = [\"pnpm\", \"build\"]\n\n[[derive.step]]\nid = \"app\"\nuse = \"ato.process@1\"\nop = \"serve\"\nargv = [\"pnpm\", \"start\"]\n\n[derive.step.env]\nN8N_LISTEN_ADDRESS = \"0.0.0.0\"\nN8N_PORT = \"5678\"\n\n[[port]]\nid = \"app.http\"\nuse = \"ato.http@1\"\nfrom = \"app\"\nguest_port = 5678\n\n[[contract.require]]\nid = \"http-0\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/healthz\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"http-1\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"source-identity\"\nuse = \"ato.contract.workspace@1\"\ninput = \"workspace\"\n\n[contract.require.expect]\ndigest = \"capture\"\n",
+    "d_gate_probe": "error: projection_unsupported_step: this build cannot execute ato.process@1 `exec` yet: a preparation step is not projected onto this worker yet, and a step that is silently skipped is a route that did something else"
+   },
+   "k": {
+    "k0": "source identity + GET ., GET /healthz, GET / \u2192 200",
+    "k1_browser_prompt": "Verify that the n8n owner account setup page is shown."
+   },
+   "contract_ref": null,
+   "runtime_candidates": [],
+   "attempts": [],
+   "verified_routes": [],
+   "highest_level": null,
+   "primary_failure": "source_too_large",
+   "primary_failure_detail": "error: the source is larger than 33554432 bytes",
+   "secondary_gaps": [
+    {
+     "gap": "unsupported_build_step",
+     "evidence": "d_gate_probe",
+     "detail": "pnpm install + turbo build"
+    },
+    {
+     "gap": "runtime_capability",
+     "evidence": "analysis",
+     "detail": "Node process runtime"
+    },
+    {
+     "gap": "source_layout",
+     "evidence": "observed_in_tree",
+     "detail": "23 symlinks"
+    },
+    {
+     "gap": "persistent_state",
+     "evidence": "analysis",
+     "detail": "~/.n8n (SQLite)"
+    }
+   ],
+   "timings": {
+    "requester_total_s": 3.27,
+    "source_freeze_and_planning_s": 3.27,
+    "build_s": null,
+    "realization_startup_s": null,
+    "http_verification_s": null,
+    "browser_verification_s": null,
+    "time_bucket": "seconds"
+   },
+   "notes": "Refused by the requester before a SatisfyRequest existed: no candidates, no attempts, no Coordinator evidence."
+  },
+  {
+   "repo": "node-red/node-red",
+   "commit_sha": "1e85f1efbc8875ad960400905038154a4e4dd76e",
+   "category": "flow automation",
+   "difficulty": "medium",
+   "primary_language": "JavaScript",
+   "source": {
+    "bytes": 35383564,
+    "files": 1532,
+    "git_lfs": false,
+    "submodules": [],
+    "notes": [
+     "exceeds the Runtime Network inline source limit (32 MiB)",
+     "subdirectory as I: not used (no independently documented app subdirectory)"
+    ]
+   },
+   "derivation": {
+    "kind": "normal-build+process",
+    "topology": "single-process",
+    "ref": null,
+    "documented_path": "README 'Developers': `npm install`, `npm run build`, `npm start` (1880)",
+    "declared_runtimes": [
+     "node@20.20.2"
+    ],
+    "route_toml": "schema = \"ato.capsule/1\"\n\n[[input]]\nid = \"workspace\"\nuse = \"ato.workspace@1\"\npath = \".\"\n\n[[runtime]]\nname = \"node\"\nversion = \"20.20.2\"\n\n[[derive.step]]\nid = \"install\"\nuse = \"ato.process@1\"\nop = \"exec\"\nargv = [\"npm\", \"install\"]\n\n[[derive.step]]\nid = \"build\"\nuse = \"ato.process@1\"\nop = \"exec\"\nargv = [\"npm\", \"run\", \"build\"]\n\n[[derive.step]]\nid = \"app\"\nuse = \"ato.process@1\"\nop = \"serve\"\nargv = [\"npm\", \"start\"]\n\n[[port]]\nid = \"app.http\"\nuse = \"ato.http@1\"\nfrom = \"app\"\nguest_port = 1880\n\n[[contract.require]]\nid = \"http-0\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"source-identity\"\nuse = \"ato.contract.workspace@1\"\ninput = \"workspace\"\n\n[contract.require.expect]\ndigest = \"capture\"\n",
+    "d_gate_probe": "error: projection_unsupported_step: this build cannot execute ato.process@1 `exec` yet: a preparation step is not projected onto this worker yet, and a step that is silently skipped is a route that did something else"
+   },
+   "k": {
+    "k0": "source identity + GET ., GET / \u2192 200",
+    "k1_browser_prompt": "Verify that the Node-RED flow editor is shown with a palette of nodes."
+   },
+   "contract_ref": null,
+   "runtime_candidates": [],
+   "attempts": [],
+   "verified_routes": [],
+   "highest_level": null,
+   "primary_failure": "source_too_large",
+   "primary_failure_detail": "error: the source is larger than 33554432 bytes",
+   "secondary_gaps": [
+    {
+     "gap": "unsupported_build_step",
+     "evidence": "d_gate_probe",
+     "detail": "npm install + npm run build"
+    },
+    {
+     "gap": "runtime_capability",
+     "evidence": "analysis",
+     "detail": "Node process runtime"
+    },
+    {
+     "gap": "persistent_state",
+     "evidence": "analysis",
+     "detail": "user directory (flows)"
+    }
+   ],
+   "timings": {
+    "requester_total_s": 0.27,
+    "source_freeze_and_planning_s": 0.27,
+    "build_s": null,
+    "realization_startup_s": null,
+    "http_verification_s": null,
+    "browser_verification_s": null,
+    "time_bucket": "seconds"
+   },
+   "notes": "Refused by the requester before a SatisfyRequest existed: no candidates, no attempts, no Coordinator evidence."
+  },
+  {
+   "repo": "grafana/grafana",
+   "commit_sha": "533b5986711cd2e78c2057e21c0d68dbc5eea9c7",
+   "category": "observability",
+   "difficulty": "high",
+   "primary_language": "TypeScript",
+   "source": {
+    "bytes": 215874109,
+    "files": 23416,
+    "git_lfs": false,
+    "submodules": [],
+    "notes": [
+     "exceeds the Runtime Network inline source limit (32 MiB)",
+     "symlinks in tree",
+     "subdirectory as I: not used (no independently documented app subdirectory)"
+    ]
+   },
+   "derivation": {
+    "kind": "normal-build+process",
+    "topology": "single-process (SQLite default)",
+    "ref": null,
+    "documented_path": "contribute/developer-guide: `yarn install --immutable && yarn build`, `make build-go`, then `bin/grafana server` (3000)",
+    "declared_runtimes": [
+     "go@1.25",
+     "node@22.14.0"
+    ],
+    "route_toml": "schema = \"ato.capsule/1\"\n\n[[input]]\nid = \"workspace\"\nuse = \"ato.workspace@1\"\npath = \".\"\n\n[[runtime]]\nname = \"go\"\nversion = \"1.25\"\n\n[[runtime]]\nname = \"node\"\nversion = \"22.14.0\"\n\n[[derive.step]]\nid = \"frontend\"\nuse = \"ato.process@1\"\nop = \"exec\"\nargv = [\"sh\", \"-c\", \"yarn install --immutable && yarn build\"]\n\n[[derive.step]]\nid = \"backend\"\nuse = \"ato.process@1\"\nop = \"exec\"\nargv = [\"make\", \"build-go\"]\n\n[[derive.step]]\nid = \"app\"\nuse = \"ato.process@1\"\nop = \"serve\"\nargv = [\"bin/grafana\", \"server\"]\n\n[[port]]\nid = \"app.http\"\nuse = \"ato.http@1\"\nfrom = \"app\"\nguest_port = 3000\n\n[[contract.require]]\nid = \"http-0\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/api/health\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"http-1\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"source-identity\"\nuse = \"ato.contract.workspace@1\"\ninput = \"workspace\"\n\n[contract.require.expect]\ndigest = \"capture\"\n",
+    "d_gate_probe": "error: projection_unsupported_step: this build cannot execute ato.process@1 `exec` yet: a preparation step is not projected onto this worker yet, and a step that is silently skipped is a route that did something else"
+   },
+   "k": {
+    "k0": "source identity + GET ., GET /api/health, GET / \u2192 200",
+    "k1_browser_prompt": "Verify that the Grafana login page is shown."
+   },
+   "contract_ref": null,
+   "runtime_candidates": [],
+   "attempts": [],
+   "verified_routes": [],
+   "highest_level": null,
+   "primary_failure": "source_too_large",
+   "primary_failure_detail": "error: the source is larger than 33554432 bytes",
+   "secondary_gaps": [
+    {
+     "gap": "unsupported_build_step",
+     "evidence": "d_gate_probe",
+     "detail": "yarn build + make build-go"
+    },
+    {
+     "gap": "toolchain_missing",
+     "evidence": "analysis",
+     "detail": "Go + Node"
+    },
+    {
+     "gap": "source_layout",
+     "evidence": "observed_in_tree",
+     "detail": "7 symlinks"
+    },
+    {
+     "gap": "build_resource_limit",
+     "evidence": "analysis",
+     "detail": "frontend build documents an 8 GiB heap"
+    }
+   ],
+   "timings": {
+    "requester_total_s": 2.58,
+    "source_freeze_and_planning_s": 2.58,
+    "build_s": null,
+    "realization_startup_s": null,
+    "http_verification_s": null,
+    "browser_verification_s": null,
+    "time_bucket": "seconds"
+   },
+   "notes": "Refused by the requester before a SatisfyRequest existed: no candidates, no attempts, no Coordinator evidence."
+  },
+  {
+   "repo": "immich-app/immich",
+   "commit_sha": "959d46c6547e82056e8ea4190110dfd5f522873e",
+   "category": "photos",
+   "difficulty": "very high",
+   "primary_language": "TypeScript",
+   "source": {
+    "bytes": 110191768,
+    "files": 3476,
+    "git_lfs": false,
+    "submodules": [
+     "e2e/test-assets"
+    ],
+    "notes": [
+     "exceeds the Runtime Network inline source limit (32 MiB)",
+     "symlinks in tree",
+     "subdirectory as I: not used (no independently documented app subdirectory)"
+    ]
+   },
+   "derivation": {
+    "kind": "documented-multi-service",
+    "topology": "multi-service (server, machine-learning, PostgreSQL + pgvecto, Redis/Valkey)",
+    "ref": null,
+    "documented_path": "docs: Docker Compose only (immich-server, immich-machine-learning, redis, database)",
+    "declared_runtimes": [
+     "node@22.14.0"
+    ],
+    "route_toml": "schema = \"ato.capsule/1\"\n\n[[input]]\nid = \"workspace\"\nuse = \"ato.workspace@1\"\npath = \".\"\n\n[[runtime]]\nname = \"node\"\nversion = \"22.14.0\"\n\n[[derive.step]]\nid = \"server\"\nuse = \"ato.process@1\"\nop = \"serve\"\nargv = [\"node\", \"dist/main\"]\ncwd = \"server\"\n\n[[derive.step]]\nid = \"machine-learning\"\nuse = \"ato.process@1\"\nop = \"serve\"\nargv = [\"/opt/ato/toolchains/python/3.12.7/bin/python3\", \"-m\", \"immich_ml\"]\ncwd = \"machine-learning\"\n\n[[port]]\nid = \"app.http\"\nuse = \"ato.http@1\"\nfrom = \"server\"\nguest_port = 2283\n\n[[contract.require]]\nid = \"http-0\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/api/server/ping\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"http-1\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"source-identity\"\nuse = \"ato.contract.workspace@1\"\ninput = \"workspace\"\n\n[contract.require.expect]\ndigest = \"capture\"\n",
+    "d_gate_probe": "error: projection_serving_steps: a route this build can execute has exactly one serving step; this one has 2"
+   },
+   "k": {
+    "k0": "source identity + GET ., GET /api/server/ping, GET / \u2192 200",
+    "k1_browser_prompt": "Verify that the Immich admin registration page is shown."
+   },
+   "contract_ref": null,
+   "runtime_candidates": [],
+   "attempts": [],
+   "verified_routes": [],
+   "highest_level": null,
+   "primary_failure": "source_too_large",
+   "primary_failure_detail": "error: the source is larger than 33554432 bytes",
+   "secondary_gaps": [
+    {
+     "gap": "multi_service",
+     "evidence": "d_gate_probe",
+     "detail": "server + machine-learning (two serving steps)"
+    },
+    {
+     "gap": "database_service",
+     "evidence": "analysis",
+     "detail": "PostgreSQL with vector extension"
+    },
+    {
+     "gap": "queue_service",
+     "evidence": "analysis",
+     "detail": "Redis/Valkey"
+    },
+    {
+     "gap": "submodule",
+     "evidence": "observed_in_tree",
+     "detail": "1 submodule"
+    },
+    {
+     "gap": "source_layout",
+     "evidence": "observed_in_tree",
+     "detail": "1 symlink"
+    },
+    {
+     "gap": "runtime_capability",
+     "evidence": "analysis",
+     "detail": "Node process runtime"
+    },
+    {
+     "gap": "gpu",
+     "evidence": "analysis",
+     "detail": "machine-learning optional GPU"
+    }
+   ],
+   "timings": {
+    "requester_total_s": 0.44,
+    "source_freeze_and_planning_s": 0.44,
+    "build_s": null,
+    "realization_startup_s": null,
+    "http_verification_s": null,
+    "browser_verification_s": null,
+    "time_bucket": "seconds"
+   },
+   "notes": "Refused by the requester before a SatisfyRequest existed: no candidates, no attempts, no Coordinator evidence."
+  },
+  {
+   "repo": "navidrome/navidrome",
+   "commit_sha": "961ee8c4136fbd18b78de1929ee5f97a1ae37f7c",
+   "category": "music server",
+   "difficulty": "medium",
+   "primary_language": "Go",
+   "source": {
+    "bytes": 19249363,
+    "files": 2180,
+    "git_lfs": false,
+    "submodules": [],
+    "notes": [
+     "symlinks in tree",
+     "subdirectory as I: not used (no independently documented app subdirectory)"
+    ]
+   },
+   "derivation": {
+    "kind": "normal-build+process",
+    "topology": "single-process (+ taglib, optional ffmpeg)",
+    "ref": null,
+    "documented_path": "docs 'Build from sources': `make setup && make build`, then `./navidrome --musicfolder \u2026 --datafolder \u2026` (4533)",
+    "declared_runtimes": [
+     "go@1.25",
+     "node@22.14.0"
+    ],
+    "route_toml": "schema = \"ato.capsule/1\"\n\n[[input]]\nid = \"workspace\"\nuse = \"ato.workspace@1\"\npath = \".\"\n\n[[runtime]]\nname = \"go\"\nversion = \"1.25\"\n\n[[runtime]]\nname = \"node\"\nversion = \"22.14.0\"\n\n[[derive.step]]\nid = \"setup\"\nuse = \"ato.process@1\"\nop = \"exec\"\nargv = [\"make\", \"setup\"]\n\n[[derive.step]]\nid = \"build\"\nuse = \"ato.process@1\"\nop = \"exec\"\nargv = [\"make\", \"build\"]\n\n[[derive.step]]\nid = \"app\"\nuse = \"ato.process@1\"\nop = \"serve\"\nargv = [\"./navidrome\", \"--address\", \"0.0.0.0\", \"--port\", \"4533\", \"--musicfolder\", \"music\", \"--datafolder\", \"data\"]\n\n[[port]]\nid = \"app.http\"\nuse = \"ato.http@1\"\nfrom = \"app\"\nguest_port = 4533\n\n[[contract.require]]\nid = \"http-0\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/ping\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"http-1\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"source-identity\"\nuse = \"ato.contract.workspace@1\"\ninput = \"workspace\"\n\n[contract.require.expect]\ndigest = \"capture\"\n",
+    "d_gate_probe": "error: projection_unsupported_step: this build cannot execute ato.process@1 `exec` yet: a preparation step is not projected onto this worker yet, and a step that is silently skipped is a route that did something else"
+   },
+   "k": {
+    "k0": "source identity + GET ., GET /ping, GET / \u2192 200",
+    "k1_browser_prompt": "Verify that the Navidrome admin user creation page is shown."
+   },
+   "contract_ref": null,
+   "runtime_candidates": [],
+   "attempts": [],
+   "verified_routes": [],
+   "highest_level": null,
+   "primary_failure": "source_layout",
+   "primary_failure_detail": "error: the directory is not a usable source: source archive contains a symlink at source/plugins/testdata/test-storage-plugin-2, which a source tree does not define",
+   "secondary_gaps": [
+    {
+     "gap": "unsupported_build_step",
+     "evidence": "d_gate_probe",
+     "detail": "make setup + make build"
+    },
+    {
+     "gap": "toolchain_missing",
+     "evidence": "analysis",
+     "detail": "Go + Node"
+    },
+    {
+     "gap": "native_dependency",
+     "evidence": "analysis",
+     "detail": "taglib (cgo)"
+    },
+    {
+     "gap": "persistent_state",
+     "evidence": "analysis",
+     "detail": "--datafolder, --musicfolder"
+    }
+   ],
+   "timings": {
+    "requester_total_s": 2.27,
+    "source_freeze_and_planning_s": 2.27,
+    "build_s": null,
+    "realization_startup_s": null,
+    "http_verification_s": null,
+    "browser_verification_s": null,
+    "time_bucket": "seconds"
+   },
+   "notes": "Refused by the requester before a SatisfyRequest existed: no candidates, no attempts, no Coordinator evidence."
+  },
+  {
+   "repo": "FreshRSS/FreshRSS",
+   "commit_sha": "64f7f24c6e2c72968c2e7b7f1983ac0a71186481",
+   "category": "RSS reader",
+   "difficulty": "medium",
+   "primary_language": "PHP",
+   "source": {
+    "bytes": 11338363,
+    "files": 1277,
+    "git_lfs": false,
+    "submodules": [],
+    "notes": [
+     "subdirectory as I: not used (no independently documented app subdirectory)"
+    ]
+   },
+   "derivation": {
+    "kind": "documented-multi-service",
+    "topology": "web server + PHP-FPM (two processes)",
+    "ref": null,
+    "documented_path": "docs 'Installation': a web server (Apache/nginx) serving ./p with PHP (PHP-FPM); data/ writable",
+    "declared_runtimes": [
+     "php@8.3"
+    ],
+    "route_toml": "schema = \"ato.capsule/1\"\n\n[[input]]\nid = \"workspace\"\nuse = \"ato.workspace@1\"\npath = \".\"\n\n[[runtime]]\nname = \"php\"\nversion = \"8.3\"\n\n[[derive.step]]\nid = \"php\"\nuse = \"ato.process@1\"\nop = \"serve\"\nargv = [\"php-fpm\", \"--nodaemonize\"]\n\n[[derive.step]]\nid = \"web\"\nuse = \"ato.process@1\"\nop = \"serve\"\nargv = [\"nginx\", \"-g\", \"daemon off;\"]\n\n[[port]]\nid = \"app.http\"\nuse = \"ato.http@1\"\nfrom = \"web\"\nguest_port = 8080\n\n[[contract.require]]\nid = \"http-0\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"source-identity\"\nuse = \"ato.contract.workspace@1\"\ninput = \"workspace\"\n\n[contract.require.expect]\ndigest = \"capture\"\n",
+    "d_gate_probe": "error: projection_serving_steps: a route this build can execute has exactly one serving step; this one has 2"
+   },
+   "k": {
+    "k0": "source identity + GET ., GET / \u2192 200",
+    "k1_browser_prompt": "Verify that the FreshRSS installation page is shown."
+   },
+   "contract_ref": null,
+   "runtime_candidates": [],
+   "attempts": [],
+   "verified_routes": [],
+   "highest_level": null,
+   "primary_failure": "multi_service",
+   "primary_failure_detail": "error: projection_serving_steps: a route this build can execute has exactly one serving step; this one has 2",
+   "secondary_gaps": [
+    {
+     "gap": "reverse_proxy",
+     "evidence": "analysis",
+     "detail": "a web server in front of PHP-FPM"
+    },
+    {
+     "gap": "runtime_capability",
+     "evidence": "analysis",
+     "detail": "PHP runtime (and a web server) \u2014 not provisionable"
+    },
+    {
+     "gap": "persistent_state",
+     "evidence": "analysis",
+     "detail": "data/ writable"
+    }
+   ],
+   "timings": {
+    "requester_total_s": 2.12,
+    "source_freeze_and_planning_s": 2.12,
+    "build_s": null,
+    "realization_startup_s": null,
+    "http_verification_s": null,
+    "browser_verification_s": null,
+    "time_bucket": "seconds"
+   },
+   "notes": "Refused by the requester before a SatisfyRequest existed: no candidates, no attempts, no Coordinator evidence."
+  },
+  {
+   "repo": "searxng/searxng",
+   "commit_sha": "2ed96e6fcfc96ca1045155fc52a12f5f7b070417",
+   "category": "metasearch",
+   "difficulty": "low",
+   "primary_language": "Python",
+   "source": {
+    "bytes": 20612679,
+    "files": 1003,
+    "git_lfs": false,
+    "submodules": [],
+    "notes": [
+     "symlinks in tree",
+     "subdirectory as I: not used (no independently documented app subdirectory)"
+    ]
+   },
+   "derivation": {
+    "kind": "direct-process",
+    "topology": "single-process",
+    "ref": null,
+    "documented_path": "searx/webapp.py run(): `python -m searx.webapp` (8888); SEARXNG_SECRET, SEARXNG_BIND_ADDRESS, SEARXNG_PORT are documented settings environment variables",
+    "declared_runtimes": [
+     "python@3.12.7"
+    ],
+    "route_toml": "schema = \"ato.capsule/1\"\n\n[[input]]\nid = \"workspace\"\nuse = \"ato.workspace@1\"\npath = \".\"\n\n[[runtime]]\nname = \"python\"\nversion = \"3.12.7\"\n\n[[derive.step]]\nid = \"app\"\nuse = \"ato.process@1\"\nop = \"serve\"\nargv = [\"/opt/ato/toolchains/python/3.12.7/bin/python3\", \"-m\", \"searx.webapp\"]\n\n[derive.step.env]\nSEARXNG_SECRET = \"ato-p0-benchmark-not-secret\"\nSEARXNG_BIND_ADDRESS = \"0.0.0.0\"\nSEARXNG_PORT = \"8888\"\n\n[[port]]\nid = \"app.http\"\nuse = \"ato.http@1\"\nfrom = \"app\"\nguest_port = 8888\n\n[[contract.require]]\nid = \"http-0\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/healthz\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"http-1\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"source-identity\"\nuse = \"ato.contract.workspace@1\"\ninput = \"workspace\"\n\n[contract.require.expect]\ndigest = \"capture\"\n",
+    "d_gate_probe": "error: intent_no_lane: no lane matched this source: the Python lane was authored, but the source root holds no Python                              module and no dependency marker \u2014 there is nothing here to run"
+   },
+   "k": {
+    "k0": "source identity + GET ., GET /healthz, GET / \u2192 200",
+    "k1_browser_prompt": "Open the Preferences page and verify that a list of search engines or engine categories is shown. Do not run a search."
+   },
+   "contract_ref": null,
+   "runtime_candidates": [],
+   "attempts": [],
+   "verified_routes": [],
+   "highest_level": null,
+   "primary_failure": "source_layout",
+   "primary_failure_detail": "error: the directory is not a usable source: source archive contains a symlink at source/utils/templates/etc/apache2, which a source tree does not define",
+   "secondary_gaps": [
+    {
+     "gap": "build_failed",
+     "evidence": "counterfactual",
+     "detail": "ARM64: dependency install hung on a full stdout pipe (Ato build step output not drained) until the 15-min step budget; formation_failed"
+    },
+    {
+     "gap": "browser_inconclusive",
+     "evidence": "counterfactual",
+     "detail": "x86_64: agent model (DeepSeek) refused the page with 'Content Exists Risk', twice \u2014 a model-side failure, not the application's"
+    }
+   ],
+   "timings": {
+    "requester_total_s": 2.15,
+    "source_freeze_and_planning_s": 2.15,
+    "build_s": null,
+    "realization_startup_s": null,
+    "http_verification_s": null,
+    "browser_verification_s": null,
+    "time_bucket": "seconds"
+   },
+   "notes": "Refused by the requester before a SatisfyRequest existed: no candidates, no attempts, no Coordinator evidence.",
+   "counterfactual_probe": {
+    "not_counted_in_baseline": true,
+    "change": "one symlink removed from a copy of the source (utils/templates/etc/apache2 \u2192 httpd, a sample Apache config; no executed code)",
+    "runs": [
+     {
+      "satisfy_id": "01M36CFXFS3AT1XPH0D38EAAPR",
+      "status": "unsatisfied",
+      "contract_ref": "sha256:68c30c286b3d6aa0845b785d6c8948adb9b2e0e7b5e6eeec20d77724739fd6ed",
+      "base_contract_ref": "sha256:67d55fdac9ed89e59da803454a810b1cc959d4d71ee8db83e0478b8a6d6ec959",
+      "candidates": [
+       {
+        "admissible": true,
+        "derivation_ref": "sha256:9825331955a19b364c9831de9032494b8784e8ec9308652eff7aa8bb16d1dd7e",
+        "environment_id": "native",
+        "filter_reasons": [],
+        "rank": 1,
+        "runtime_id": "rt_oci-arm64"
+       },
+       {
+        "admissible": true,
+        "derivation_ref": "sha256:9825331955a19b364c9831de9032494b8784e8ec9308652eff7aa8bb16d1dd7e",
+        "environment_id": "native",
+        "filter_reasons": [],
+        "rank": 2,
+        "runtime_id": "rt_sugamo-x86"
+       },
+       {
+        "admissible": false,
+        "derivation_ref": "sha256:9825331955a19b364c9831de9032494b8784e8ec9308652eff7aa8bb16d1dd7e",
+        "environment_id": "native",
+        "filter_reasons": [
+         {
+          "actual": "false",
+          "code": "requirement_unmet",
+          "expected": [
+           "true"
+          ],
+          "fact": "runtime.process"
+         },
+         {
+          "actual": "none",
+          "code": "requirement_unmet",
+          "expected": [
+           "bwrap+landlock"
+          ],
+          "fact": "containment"
+         },
+         {
+          "actual": null,
+          "code": "requirement_unmet",
+          "expected": "present",
+          "fact": "toolchain.root"
+         },
+         {
+          "code": "verifier_unavailable",
+          "verifier": "browser"
+         }
+        ],
+        "rank": null,
+        "runtime_id": "rt_mac-m1"
+       }
+      ],
+      "attempts": [
+       {
+        "attempt_id": "01M36CFXG0HB1VJKCTQXC9GK6Y",
+        "runtime_id": "rt_oci-arm64",
+        "environment_id": "native",
+        "derivation_ref": "sha256:9825331955a19b364c9831de9032494b8784e8ec9308652eff7aa8bb16d1dd7e",
+        "status": "fail",
+        "capability_profile_ref": "sha256:084a0a06c68042827588d151bd7a107e7fe0afeea5aa5a96483ed1567267823a",
+        "advertised_agent_version": "0.1.0",
+        "failure": {
+         "code": "formation_failed",
+         "message": "the candidate could not be formed from this source",
+         "stage": "build"
+        },
+        "attestation": {
+         "agent_version": "0.1.0",
+         "contract_ref": "sha256:68c30c286b3d6aa0845b785d6c8948adb9b2e0e7b5e6eeec20d77724739fd6ed",
+         "derivation_ref": "sha256:9825331955a19b364c9831de9032494b8784e8ec9308652eff7aa8bb16d1dd7e",
+         "effects": "pure",
+         "environment_id": "native",
+         "execution_started": true,
+         "provisions": [
+          "toolchain.python.3.12.7"
+         ],
+         "requirements": [
+          {
+           "fact": "runtime.process",
+           "one_of": [
+            "true"
+           ]
+          },
+          {
+           "fact": "containment",
+           "one_of": [
+            "bwrap+landlock"
+           ]
+          },
+          {
+           "fact": "toolchain.root"
+          }
+         ]
+        },
+        "claimed_at": "2026-09-23T05:40:52.302Z",
+        "finished_at": "2026-09-23T05:57:02.141Z",
+        "http_k": [],
+        "browser": {
+         "overall": null,
+         "reason": null,
+         "containment": null,
+         "verifier": null
+        }
+       },
+       {
+        "attempt_id": "01M36DDH29XE552BVWN32WN2HR",
+        "runtime_id": "rt_sugamo-x86",
+        "environment_id": "native",
+        "derivation_ref": "sha256:9825331955a19b364c9831de9032494b8784e8ec9308652eff7aa8bb16d1dd7e",
+        "status": "inconclusive",
+        "capability_profile_ref": "sha256:4d756f3b23e1bbcd033836cf39a95eefa0e3fdc35ebd2636843164246ddaa42b",
+        "advertised_agent_version": "0.1.0",
+        "failure": {
+         "code": "browser_contract_inconclusive",
+         "message": "the browser verification did not reach a verdict: browser_failed: AgentFailed: agent_failed: Failed to execute task: Content Exists Risk",
+         "stage": "verification"
+        },
+        "attestation": {
+         "agent_version": "0.1.0",
+         "contract_ref": "sha256:68c30c286b3d6aa0845b785d6c8948adb9b2e0e7b5e6eeec20d77724739fd6ed",
+         "derivation_ref": "sha256:9825331955a19b364c9831de9032494b8784e8ec9308652eff7aa8bb16d1dd7e",
+         "effects": "pure",
+         "environment_id": "native",
+         "execution_started": true,
+         "provisions": [
+          "toolchain.python.3.12.7"
+         ],
+         "requirements": [
+          {
+           "fact": "runtime.process",
+           "one_of": [
+            "true"
+           ]
+          },
+          {
+           "fact": "containment",
+           "one_of": [
+            "bwrap+landlock"
+           ]
+          },
+          {
+           "fact": "toolchain.root"
+          }
+         ]
+        },
+        "claimed_at": "2026-09-23T05:57:04.120Z",
+        "finished_at": "2026-09-23T05:58:09.258Z",
+        "http_k": [
+         [
+          "http-0",
+          {
+           "result": "satisfied"
+          }
+         ],
+         [
+          "http-1",
+          {
+           "result": "satisfied"
+          }
+         ],
+         [
+          "source-identity",
+          {
+           "result": "satisfied"
+          }
+         ]
+        ],
+        "browser": {
+         "overall": "inconclusive",
+         "reason": "browser_failed: AgentFailed: agent_failed: Failed to execute task: Content Exists Risk",
+         "containment": {
+          "browser_process": "separate-sandbox+empty-environment+chrome-no-sandbox",
+          "containment": "bwrap",
+          "filesystem": "allowlisted",
+          "network": "shared-host-net+exact-origin-browser-guard",
+          "secrets": "fd"
+         },
+         "verifier": {
+          "agent_model": "deepseek/deepseek-flash",
+          "browser_version": "Chrome/145.0.7632.6",
+          "judge_model": "jev-1.13.0",
+          "stagehand_version": "3.7.3",
+          "verifier": "formation-browser-verifier/0"
+         }
+        }
+       }
+      ],
+      "verified_routes": []
+     },
+     {
+      "satisfy_id": "01M36DGZ1YQ6V3B6NP6QG5MVDJ",
+      "status": "unsatisfied",
+      "contract_ref": "sha256:68c30c286b3d6aa0845b785d6c8948adb9b2e0e7b5e6eeec20d77724739fd6ed",
+      "base_contract_ref": "sha256:67d55fdac9ed89e59da803454a810b1cc959d4d71ee8db83e0478b8a6d6ec959",
+      "candidates": [
+       {
+        "admissible": true,
+        "derivation_ref": "sha256:9825331955a19b364c9831de9032494b8784e8ec9308652eff7aa8bb16d1dd7e",
+        "environment_id": "native",
+        "filter_reasons": [],
+        "rank": 1,
+        "runtime_id": "rt_sugamo-x86"
+       },
+       {
+        "admissible": false,
+        "derivation_ref": "sha256:9825331955a19b364c9831de9032494b8784e8ec9308652eff7aa8bb16d1dd7e",
+        "environment_id": "native",
+        "filter_reasons": [
+         {
+          "code": "exact_runtime_mismatch"
+         },
+         {
+          "actual": "false",
+          "code": "requirement_unmet",
+          "expected": [
+           "true"
+          ],
+          "fact": "runtime.process"
+         },
+         {
+          "actual": "none",
+          "code": "requirement_unmet",
+          "expected": [
+           "bwrap+landlock"
+          ],
+          "fact": "containment"
+         },
+         {
+          "actual": null,
+          "code": "requirement_unmet",
+          "expected": "present",
+          "fact": "toolchain.root"
+         },
+         {
+          "code": "verifier_unavailable",
+          "verifier": "browser"
+         }
+        ],
+        "rank": null,
+        "runtime_id": "rt_mac-m1"
+       },
+       {
+        "admissible": false,
+        "derivation_ref": "sha256:9825331955a19b364c9831de9032494b8784e8ec9308652eff7aa8bb16d1dd7e",
+        "environment_id": "native",
+        "filter_reasons": [
+         {
+          "code": "exact_runtime_mismatch"
+         }
+        ],
+        "rank": null,
+        "runtime_id": "rt_oci-arm64"
+       }
+      ],
+      "attempts": [
+       {
+        "attempt_id": "01M36DGZ28K79Q6C80SCA1V4ND",
+        "runtime_id": "rt_sugamo-x86",
+        "environment_id": "native",
+        "derivation_ref": "sha256:9825331955a19b364c9831de9032494b8784e8ec9308652eff7aa8bb16d1dd7e",
+        "status": "inconclusive",
+        "capability_profile_ref": "sha256:4d756f3b23e1bbcd033836cf39a95eefa0e3fdc35ebd2636843164246ddaa42b",
+        "advertised_agent_version": "0.1.0",
+        "failure": {
+         "code": "browser_contract_inconclusive",
+         "message": "the browser verification did not reach a verdict: browser_failed: AgentFailed: agent_failed: Failed to execute task: Content Exists Risk",
+         "stage": "verification"
+        },
+        "attestation": {
+         "agent_version": "0.1.0",
+         "contract_ref": "sha256:68c30c286b3d6aa0845b785d6c8948adb9b2e0e7b5e6eeec20d77724739fd6ed",
+         "derivation_ref": "sha256:9825331955a19b364c9831de9032494b8784e8ec9308652eff7aa8bb16d1dd7e",
+         "effects": "pure",
+         "environment_id": "native",
+         "execution_started": true,
+         "provisions": [
+          "toolchain.python.3.12.7"
+         ],
+         "requirements": [
+          {
+           "fact": "runtime.process",
+           "one_of": [
+            "true"
+           ]
+          },
+          {
+           "fact": "containment",
+           "one_of": [
+            "bwrap+landlock"
+           ]
+          },
+          {
+           "fact": "toolchain.root"
+          }
+         ]
+        },
+        "claimed_at": "2026-09-23T05:58:55.111Z",
+        "finished_at": "2026-09-23T05:59:49.048Z",
+        "http_k": [
+         [
+          "http-0",
+          {
+           "result": "satisfied"
+          }
+         ],
+         [
+          "http-1",
+          {
+           "result": "satisfied"
+          }
+         ],
+         [
+          "source-identity",
+          {
+           "result": "satisfied"
+          }
+         ]
+        ],
+        "browser": {
+         "overall": "inconclusive",
+         "reason": "browser_failed: AgentFailed: agent_failed: Failed to execute task: Content Exists Risk",
+         "containment": {
+          "browser_process": "separate-sandbox+empty-environment+chrome-no-sandbox",
+          "containment": "bwrap",
+          "filesystem": "allowlisted",
+          "network": "shared-host-net+exact-origin-browser-guard",
+          "secrets": "fd"
+         },
+         "verifier": {
+          "agent_model": "deepseek/deepseek-flash",
+          "browser_version": "Chrome/145.0.7632.6",
+          "judge_model": "jev-1.13.0",
+          "stagehand_version": "3.7.3",
+          "verifier": "formation-browser-verifier/0"
+         }
+        }
+       }
+      ],
+      "verified_routes": []
+     }
+    ],
+    "highest_level_reached": 3,
+    "summary": "x86_64: dependency install, realization and typed K (/healthz, /, source identity) PASS (Level 3); Browser K inconclusive twice \u2014 the agent model refused the page ('Content Exists Risk'). ARM64: build failed after the 15-min step budget; the dependency install was observed blocked writing to an undrained stdout pipe. macOS: filtered (no process containment, no browser verifier)."
+   }
+  },
+  {
+   "repo": "paperless-ngx/paperless-ngx",
+   "commit_sha": "b11f1f845904301b5bb6239e456f1e1d557cc04e",
+   "category": "documents",
+   "difficulty": "high",
+   "primary_language": "Python",
+   "source": {
+    "bytes": 92800195,
+    "files": 1552,
+    "git_lfs": false,
+    "submodules": [],
+    "notes": [
+     "exceeds the Runtime Network inline source limit (32 MiB)",
+     "subdirectory as I: not used (no independently documented app subdirectory)"
+    ]
+   },
+   "derivation": {
+    "kind": "documented-multi-service",
+    "topology": "multi-service (webserver + consumer/worker + Redis broker)",
+    "ref": null,
+    "documented_path": "docs 'Bare metal': uv sync, build src-ui, `python3 manage.py migrate`, run webserver (granian) + consumer + celery; Redis required",
+    "declared_runtimes": [
+     "python@3.12.7",
+     "node@22.14.0"
+    ],
+    "route_toml": "schema = \"ato.capsule/1\"\n\n[[input]]\nid = \"workspace\"\nuse = \"ato.workspace@1\"\npath = \".\"\n\n[[runtime]]\nname = \"python\"\nversion = \"3.12.7\"\n\n[[runtime]]\nname = \"node\"\nversion = \"22.14.0\"\n\n[[derive.step]]\nid = \"ui\"\nuse = \"ato.process@1\"\nop = \"exec\"\nargv = [\"sh\", \"-c\", \"cd src-ui && npm ci && npx ng build --configuration production\"]\n\n[[derive.step]]\nid = \"migrate\"\nuse = \"ato.process@1\"\nop = \"exec\"\nargv = [\"/opt/ato/toolchains/python/3.12.7/bin/python3\", \"manage.py\", \"migrate\"]\ncwd = \"src\"\n\n[[derive.step]]\nid = \"web\"\nuse = \"ato.process@1\"\nop = \"serve\"\nargv = [\"/opt/ato/toolchains/python/3.12.7/bin/python3\", \"-m\", \"granian\", \"--interface\", \"asginl\", \"--host\", \"0.0.0.0\", \"--port\", \"8000\", \"paperless.asgi:application\"]\ncwd = \"src\"\n\n[[derive.step]]\nid = \"worker\"\nuse = \"ato.process@1\"\nop = \"serve\"\nargv = [\"/opt/ato/toolchains/python/3.12.7/bin/python3\", \"-m\", \"celery\", \"--app\", \"paperless\", \"worker\"]\ncwd = \"src\"\n\n[[port]]\nid = \"app.http\"\nuse = \"ato.http@1\"\nfrom = \"web\"\nguest_port = 8000\n\n[[contract.require]]\nid = \"http-0\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"source-identity\"\nuse = \"ato.contract.workspace@1\"\ninput = \"workspace\"\n\n[contract.require.expect]\ndigest = \"capture\"\n",
+    "d_gate_probe": "error: projection_unsupported_step: this build cannot execute ato.process@1 `exec` yet: a preparation step is not projected onto this worker yet, and a step that is silently skipped is a route that did something else"
+   },
+   "k": {
+    "k0": "source identity + GET ., GET / \u2192 200",
+    "k1_browser_prompt": "Verify that the Paperless-ngx login page is shown."
+   },
+   "contract_ref": null,
+   "runtime_candidates": [],
+   "attempts": [],
+   "verified_routes": [],
+   "highest_level": null,
+   "primary_failure": "source_too_large",
+   "primary_failure_detail": "error: the source is larger than 33554432 bytes",
+   "secondary_gaps": [
+    {
+     "gap": "unsupported_build_step",
+     "evidence": "d_gate_probe",
+     "detail": "UI build + migrate before serving"
+    },
+    {
+     "gap": "multi_service",
+     "evidence": "analysis",
+     "detail": "webserver + consumer + celery worker"
+    },
+    {
+     "gap": "queue_service",
+     "evidence": "analysis",
+     "detail": "Redis broker required"
+    },
+    {
+     "gap": "migration",
+     "evidence": "analysis",
+     "detail": "manage.py migrate"
+    },
+    {
+     "gap": "persistent_state",
+     "evidence": "analysis",
+     "detail": "media, data, consume directories"
+    }
+   ],
+   "timings": {
+    "requester_total_s": 0.28,
+    "source_freeze_and_planning_s": 0.28,
+    "build_s": null,
+    "realization_startup_s": null,
+    "http_verification_s": null,
+    "browser_verification_s": null,
+    "time_bucket": "seconds"
+   },
+   "notes": "Refused by the requester before a SatisfyRequest existed: no candidates, no attempts, no Coordinator evidence."
+  },
+  {
+   "repo": "coder/code-server",
+   "commit_sha": "8a7bf87a4d66914e328d97815e2faa9f25097866",
+   "category": "web IDE",
+   "difficulty": "high",
+   "primary_language": "TypeScript",
+   "source": {
+    "bytes": 1765798,
+    "files": 257,
+    "git_lfs": true,
+    "submodules": [
+     "lib/vscode"
+    ],
+    "notes": [
+     "symlinks in tree",
+     "subdirectory as I: not used (no independently documented app subdirectory)"
+    ]
+   },
+   "derivation": {
+    "kind": "normal-build+process",
+    "topology": "single-process",
+    "ref": null,
+    "documented_path": "docs/CONTRIBUTING: `git submodule update --init`, `npm install`, `npm run build`, `npm run build:vscode`, `npm run release`, then `node release --bind-addr 0.0.0.0:8080 --auth none`",
+    "declared_runtimes": [
+     "node@22.14.0"
+    ],
+    "route_toml": "schema = \"ato.capsule/1\"\n\n[[input]]\nid = \"workspace\"\nuse = \"ato.workspace@1\"\npath = \".\"\n\n[[runtime]]\nname = \"node\"\nversion = \"22.14.0\"\n\n[[derive.step]]\nid = \"install\"\nuse = \"ato.process@1\"\nop = \"exec\"\nargv = [\"npm\", \"install\"]\n\n[[derive.step]]\nid = \"build\"\nuse = \"ato.process@1\"\nop = \"exec\"\nargv = [\"sh\", \"-c\", \"npm run build && npm run build:vscode && npm run release\"]\n\n[[derive.step]]\nid = \"app\"\nuse = \"ato.process@1\"\nop = \"serve\"\nargv = [\"node\", \"release\", \"--bind-addr\", \"0.0.0.0:8080\", \"--auth\", \"none\"]\n\n[[port]]\nid = \"app.http\"\nuse = \"ato.http@1\"\nfrom = \"app\"\nguest_port = 8080\n\n[[contract.require]]\nid = \"http-0\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/healthz\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"http-1\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"source-identity\"\nuse = \"ato.contract.workspace@1\"\ninput = \"workspace\"\n\n[contract.require.expect]\ndigest = \"capture\"\n",
+    "d_gate_probe": "error: projection_unsupported_step: this build cannot execute ato.process@1 `exec` yet: a preparation step is not projected onto this worker yet, and a step that is silently skipped is a route that did something else"
+   },
+   "k": {
+    "k0": "source identity + GET ., GET /healthz, GET / \u2192 200",
+    "k1_browser_prompt": "Verify that the code editor workbench is shown."
+   },
+   "contract_ref": null,
+   "runtime_candidates": [],
+   "attempts": [],
+   "verified_routes": [],
+   "highest_level": null,
+   "primary_failure": "source_layout",
+   "primary_failure_detail": "error: the directory is not a usable source: source archive contains a symlink at source/.nvmrc, which a source tree does not define",
+   "secondary_gaps": [
+    {
+     "gap": "source_layout",
+     "evidence": "observed",
+     "detail": "1 symlink (.nvmrc) refused at freeze"
+    },
+    {
+     "gap": "submodule",
+     "evidence": "observed_in_tree",
+     "detail": "lib/vscode submodule not in a plain checkout"
+    },
+    {
+     "gap": "git_lfs",
+     "evidence": "observed_in_tree",
+     "detail": ".gitattributes uses LFS"
+    },
+    {
+     "gap": "unsupported_build_step",
+     "evidence": "d_gate_probe",
+     "detail": "npm install + build + build:vscode + release"
+    },
+    {
+     "gap": "runtime_capability",
+     "evidence": "analysis",
+     "detail": "Node process runtime"
+    }
+   ],
+   "timings": {
+    "requester_total_s": 0.23,
+    "source_freeze_and_planning_s": 0.23,
+    "build_s": null,
+    "realization_startup_s": null,
+    "http_verification_s": null,
+    "browser_verification_s": null,
+    "time_bucket": "seconds"
+   },
+   "notes": "Refused by the requester before a SatisfyRequest existed: no candidates, no attempts, no Coordinator evidence."
+  },
+  {
+   "repo": "portainer/portainer",
+   "commit_sha": "d661cbc0bbe2fb67dcc320ac8600b127c7f8cb9b",
+   "category": "container management",
+   "difficulty": "high",
+   "primary_language": "TypeScript",
+   "source": {
+    "bytes": 19493676,
+    "files": 5345,
+    "git_lfs": false,
+    "submodules": [],
+    "notes": [
+     "subdirectory as I: not used (no independently documented app subdirectory)"
+    ]
+   },
+   "derivation": {
+    "kind": "normal-build+process",
+    "topology": "single-process (manages a Docker/Kubernetes endpoint)",
+    "ref": null,
+    "documented_path": "CONTRIBUTING: `make build-all` (Go + pnpm), then `dist/portainer --bind :9000 --data \u2026`",
+    "declared_runtimes": [
+     "go@1.25",
+     "node@22.14.0"
+    ],
+    "route_toml": "schema = \"ato.capsule/1\"\n\n[[input]]\nid = \"workspace\"\nuse = \"ato.workspace@1\"\npath = \".\"\n\n[[runtime]]\nname = \"go\"\nversion = \"1.25\"\n\n[[runtime]]\nname = \"node\"\nversion = \"22.14.0\"\n\n[[derive.step]]\nid = \"build\"\nuse = \"ato.process@1\"\nop = \"exec\"\nargv = [\"make\", \"build-all\"]\n\n[[derive.step]]\nid = \"app\"\nuse = \"ato.process@1\"\nop = \"serve\"\nargv = [\"dist/portainer\", \"--bind\", \"0.0.0.0:9000\", \"--data\", \"data\"]\n\n[[port]]\nid = \"app.http\"\nuse = \"ato.http@1\"\nfrom = \"app\"\nguest_port = 9000\n\n[[contract.require]]\nid = \"http-0\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/api/system/status\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"http-1\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"source-identity\"\nuse = \"ato.contract.workspace@1\"\ninput = \"workspace\"\n\n[contract.require.expect]\ndigest = \"capture\"\n",
+    "d_gate_probe": "error: projection_unsupported_step: this build cannot execute ato.process@1 `exec` yet: a preparation step is not projected onto this worker yet, and a step that is silently skipped is a route that did something else"
+   },
+   "k": {
+    "k0": "source identity + GET ., GET /api/system/status, GET / \u2192 200",
+    "k1_browser_prompt": "Verify that the Portainer administrator user creation page is shown."
+   },
+   "contract_ref": null,
+   "runtime_candidates": [],
+   "attempts": [],
+   "verified_routes": [],
+   "highest_level": null,
+   "primary_failure": "unsupported_build_step",
+   "primary_failure_detail": "error: projection_unsupported_step: this build cannot execute ato.process@1 `exec` yet: a preparation step is not projected onto this worker yet, and a step that is silently skipped is a route that did something else",
+   "secondary_gaps": [
+    {
+     "gap": "toolchain_missing",
+     "evidence": "analysis",
+     "detail": "Go + pnpm"
+    },
+    {
+     "gap": "docker_socket",
+     "evidence": "analysis",
+     "detail": "manages a Docker endpoint; useful only with a socket binding (not given)"
+    },
+    {
+     "gap": "persistent_state",
+     "evidence": "analysis",
+     "detail": "--data"
+    }
+   ],
+   "timings": {
+    "requester_total_s": 4.98,
+    "source_freeze_and_planning_s": 4.98,
+    "build_s": null,
+    "realization_startup_s": null,
+    "http_verification_s": null,
+    "browser_verification_s": null,
+    "time_bucket": "seconds"
+   },
+   "notes": "Refused by the requester before a SatisfyRequest existed: no candidates, no attempts, no Coordinator evidence."
+  },
+  {
+   "repo": "gethomepage/homepage",
+   "commit_sha": "d1c1ee7a1ef0ab3d749fa59bed054632f26710dc",
+   "category": "dashboard",
+   "difficulty": "low",
+   "primary_language": "JavaScript",
+   "source": {
+    "bytes": 11085189,
+    "files": 1500,
+    "git_lfs": false,
+    "submodules": [],
+    "notes": [
+     "subdirectory as I: not used (no independently documented app subdirectory)"
+    ]
+   },
+   "derivation": {
+    "kind": "normal-build+process",
+    "topology": "single-process",
+    "ref": null,
+    "documented_path": "docs 'Source': `pnpm install`, `pnpm build`, `pnpm start` (3000)",
+    "declared_runtimes": [
+     "node@22.14.0"
+    ],
+    "route_toml": "schema = \"ato.capsule/1\"\n\n[[input]]\nid = \"workspace\"\nuse = \"ato.workspace@1\"\npath = \".\"\n\n[[runtime]]\nname = \"node\"\nversion = \"22.14.0\"\n\n[[derive.step]]\nid = \"install\"\nuse = \"ato.process@1\"\nop = \"exec\"\nargv = [\"pnpm\", \"install\"]\n\n[[derive.step]]\nid = \"build\"\nuse = \"ato.process@1\"\nop = \"exec\"\nargv = [\"pnpm\", \"build\"]\n\n[[derive.step]]\nid = \"app\"\nuse = \"ato.process@1\"\nop = \"serve\"\nargv = [\"pnpm\", \"start\"]\n\n[derive.step.env]\nHOSTNAME = \"0.0.0.0\"\nPORT = \"3000\"\n\n[[port]]\nid = \"app.http\"\nuse = \"ato.http@1\"\nfrom = \"app\"\nguest_port = 3000\n\n[[contract.require]]\nid = \"http-0\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"source-identity\"\nuse = \"ato.contract.workspace@1\"\ninput = \"workspace\"\n\n[contract.require.expect]\ndigest = \"capture\"\n",
+    "d_gate_probe": "error: projection_unsupported_step: this build cannot execute ato.process@1 `exec` yet: a preparation step is not projected onto this worker yet, and a step that is silently skipped is a route that did something else"
+   },
+   "k": {
+    "k0": "source identity + GET ., GET / \u2192 200",
+    "k1_browser_prompt": "Verify that the homepage dashboard is shown."
+   },
+   "contract_ref": null,
+   "runtime_candidates": [],
+   "attempts": [],
+   "verified_routes": [],
+   "highest_level": null,
+   "primary_failure": "unsupported_build_step",
+   "primary_failure_detail": "error: projection_unsupported_step: this build cannot execute ato.process@1 `exec` yet: a preparation step is not projected onto this worker yet, and a step that is silently skipped is a route that did something else",
+   "secondary_gaps": [
+    {
+     "gap": "runtime_capability",
+     "evidence": "analysis",
+     "detail": "Node process runtime (Next.js server)"
+    },
+    {
+     "gap": "toolchain_missing",
+     "evidence": "analysis",
+     "detail": "pnpm"
+    }
+   ],
+   "timings": {
+    "requester_total_s": 2.29,
+    "source_freeze_and_planning_s": 2.29,
+    "build_s": null,
+    "realization_startup_s": null,
+    "http_verification_s": null,
+    "browser_verification_s": null,
+    "time_bucket": "seconds"
+   },
+   "notes": "Refused by the requester before a SatisfyRequest existed: no candidates, no attempts, no Coordinator evidence."
+  },
+  {
+   "repo": "mickael-kerjean/filestash",
+   "commit_sha": "dd80cc78ca33d26ac07778ca0a6dca6d5c9e4dac",
+   "category": "file manager",
+   "difficulty": "medium",
+   "primary_language": "Go",
+   "source": {
+    "bytes": 34807266,
+    "files": 1530,
+    "git_lfs": false,
+    "submodules": [],
+    "notes": [
+     "exceeds the Runtime Network inline source limit (32 MiB)",
+     "subdirectory as I: not used (no independently documented app subdirectory)"
+    ]
+   },
+   "derivation": {
+    "kind": "normal-build+process",
+    "topology": "single-process",
+    "ref": null,
+    "documented_path": "docs/CONTRIBUTING: `make build_frontend && make build_backend`, then `./dist/filestash` (8334)",
+    "declared_runtimes": [
+     "go@1.25",
+     "node@22.14.0"
+    ],
+    "route_toml": "schema = \"ato.capsule/1\"\n\n[[input]]\nid = \"workspace\"\nuse = \"ato.workspace@1\"\npath = \".\"\n\n[[runtime]]\nname = \"go\"\nversion = \"1.25\"\n\n[[runtime]]\nname = \"node\"\nversion = \"22.14.0\"\n\n[[derive.step]]\nid = \"build\"\nuse = \"ato.process@1\"\nop = \"exec\"\nargv = [\"sh\", \"-c\", \"make build_frontend && make build_backend\"]\n\n[[derive.step]]\nid = \"app\"\nuse = \"ato.process@1\"\nop = \"serve\"\nargv = [\"./dist/filestash\"]\n\n[[port]]\nid = \"app.http\"\nuse = \"ato.http@1\"\nfrom = \"app\"\nguest_port = 8334\n\n[[contract.require]]\nid = \"http-0\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/healthz\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"http-1\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\nmethod = \"GET\"\npath = \"/\"\n\n[contract.require.expect]\nstatus = 200\n\n[[contract.require]]\nid = \"source-identity\"\nuse = \"ato.contract.workspace@1\"\ninput = \"workspace\"\n\n[contract.require.expect]\ndigest = \"capture\"\n",
+    "d_gate_probe": "error: projection_unsupported_step: this build cannot execute ato.process@1 `exec` yet: a preparation step is not projected onto this worker yet, and a step that is silently skipped is a route that did something else"
+   },
+   "k": {
+    "k0": "source identity + GET ., GET /healthz, GET / \u2192 200",
+    "k1_browser_prompt": "Verify that the Filestash admin setup page is shown."
+   },
+   "contract_ref": null,
+   "runtime_candidates": [],
+   "attempts": [],
+   "verified_routes": [],
+   "highest_level": null,
+   "primary_failure": "source_too_large",
+   "primary_failure_detail": "error: the source is larger than 33554432 bytes",
+   "secondary_gaps": [
+    {
+     "gap": "unsupported_build_step",
+     "evidence": "d_gate_probe",
+     "detail": "make build_frontend + build_backend"
+    },
+    {
+     "gap": "toolchain_missing",
+     "evidence": "analysis",
+     "detail": "Go + Node"
+    }
+   ],
+   "timings": {
+    "requester_total_s": 0.21,
+    "source_freeze_and_planning_s": 0.21,
+    "build_s": null,
+    "realization_startup_s": null,
+    "http_verification_s": null,
+    "browser_verification_s": null,
+    "time_bucket": "seconds"
+   },
+   "notes": "Refused by the requester before a SatisfyRequest existed: no candidates, no attempts, no Coordinator evidence."
+  }
+ ]
+}
