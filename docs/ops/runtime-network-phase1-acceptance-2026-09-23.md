@@ -1,5 +1,9 @@
 # Runtime Network Phase 1 — acceptance (2026-09-23)
 
+> The final-hardening re-run (Runtime-authoritative semantics, immutable
+> profiles, idempotent orchestration; cases A–L) at the end of this file
+> supersedes the first run.
+
 `ato form <fixture> --runtime-network …` from a Mac against a coordinator,
 with three owned machines serving as Runtimes (`ato runtime-network serve`).
 ADR-021 describes the design. Fixtures:
@@ -78,3 +82,71 @@ S `01M35VNQZWG10NP14GYAVSQH3X`, G `01M35VXNRP13SAG0825GPGHEQS`.
   the local D1 only.
 - The Browser Verifier helper and Chrome are not OS-contained (ADR-021,
   security follow-up) — a blocker before the 100-app benchmark.
+
+## Final hardening re-run (A–L)
+
+Same three Runtimes, same fixtures, same coordinator setup, with ato
+`feat/runtime-network-phase1` at `60eafa30` on every Runtime and the Mac, and
+ato-api `feat/runtime-network-phase1` at `776a6fa5`. The local D1 was
+recreated so the edited migration 0288 applied from scratch; fresh runner
+tokens (mode 0600). Every profile ref came out identical to the first run
+(content addressing): OCI `c63d5236…`, sugamo `cd6850e2…`, Mac `ffe61216…`.
+
+H and I need a requester that lies. A local proxy
+(`tamper_proxy.py`, scratch only) forwards everything to the coordinator and
+rewrites only the metadata of `POST /satisfy` — never the route text or the
+archive.
+
+| Case | Condition | Result |
+|---|---|---|
+| A | `notes`, `all` | satisfied — OCI pass, sugamo pass, 2 routes; attested `pure`, `execution_started=true`, route `agent_version=0.1.0` |
+| B | `notes-x86-only`, `all` | satisfied — OCI hard-filtered `requirement_unmet: platform`; sugamo pass |
+| C | OCI worker stopped > 60 s | satisfied — OCI `runtime_offline`, identity and profile listed `online=false`; sugamo pass |
+| D | `notes-arch-sensitive`, `first_pass` | satisfied — OCI **fail** `http_status_mismatch` (attested `pure`, started) → fallback → sugamo pass |
+| E | same, `--exact-runtime rt_oci-arm64` | unsatisfied — OCI fail, sugamo `exact_runtime_mismatch`, no second ticket |
+| F | `notes` + browser Contract | satisfied — OCI only (`verifier_unavailable` on sugamo); browser `pass` (judge `complete`); route with `http_contract` + `browser_contract`, receipt `target.runtime_id = rt_oci-arm64` |
+| S | `static-page`, `all` | satisfied — 3 routes: macOS ARM64, Linux ARM64, Linux x86_64 |
+| G | OCI stopped right after its ticket was issued | satisfied — OCI `expired` (never claimed) → sugamo pass |
+| **H** | `notes-x86-only`, `all`; proxy strips the `platform` requirement | satisfied — both admissible to the coordinator; sugamo pass; OCI **refused before execution**: `platform_unsupported` ("this route runs on linux/x86_64; this Runtime is linux/aarch64"), `execution_started=false`; both attempts record `metadata_mismatch: requirements` (claimed without `platform`, attested with it); one route, x86 |
+| **I** | `notes-non-repeatable`; proxy rewrites `effects` to `pure` | unsatisfied — OCI **refused before execution**: `effect_policy`, attested `non-repeatable`, `execution_started=false`, `metadata_mismatch: effects (claimed pure, attested non-repeatable)`; **no fallback** to the admissible sugamo; no route. OCI's log shows the attempt ending `inconclusive` with no build or launch |
+| **J** | `notes`, `all`; OCI worker held stopped so its ticket stays pending; sugamo drained after the candidates were created; OCI restarted | satisfied — 2 candidates admissible at creation; OCI pass; at issue time sugamo re-filtered to `runtime_drained` (rank 2 kept), no ticket |
+| **K** | during G, 1 530 concurrent `GET /satisfy/:id` (each runs expiry + `advance()`) in 30-request bursts every 0.5 s across the expiry moment | exactly 2 attempts for the request: OCI `expired`, one sugamo ticket (then `pass`); every GET 200, no error in the coordinator log |
+| **L** | OCI restarted without the browser verifier | current profile `1d71b686…` (`runtime.browser=false`); `GET /capability-profiles/c63d5236…` still returns the F route's facts (`runtime.browser=true`, first seen 01:44:27Z); the F route still names `c63d5236…`, `agent_version 0.1.0` |
+
+Satisfy ids: A `01M35YZVR0VFDF4PP7XY0C98BE`, B `01M35YZYS9P5B55AC9YFJSBHRW`,
+C `01M35ZA0YNRKQER6RR9WDCV64Z`, D `01M35Z2ZZQXKM2V527BEPTPDD7`,
+E `01M35Z332WGY9EDCY5F3D306PC`, F `01M35Z3J9J54ZHT3RXAVVP25M4`,
+S `01M35Z363R6FPXY6J88DX44A1P`, G/K `01M35Z74W7XJ5QHWNSS24ZDSAV`,
+H `01M35Z51C94RKGCM79ZTYK1ZRR`, I `01M35Z54E9GYHHXNFF95TY5KMJ`,
+J `01M35Z63AQK7JZRXZQ8B3MTYG1`.
+
+### Defect found by the re-run
+
+Right after an attempt, a Runtime still looked full: availability rode only
+the 15 s heartbeat, so the issue-time re-filter skipped it with
+`capacity_exhausted` (D and S when submitted back-to-back). The worker now
+reports availability as soon as it takes or frees a slot, freeing it before
+the result that advances the request (`60eafa30`). D, E and S were re-run
+after the fix.
+
+### Tests
+
+- ato: `runtime_network_v1` (disposable route attested; non-repeatable
+  refused whatever the metadata claimed; another platform refused before
+  execution with the platform requirement attested; environment mismatch;
+  ref mismatch refused before execution), `local_formation_v1`
+  (`[[platform]]` for another host is Filtered under `--runtime local`).
+- ato-api `runtime-network.test.ts`, 26 tests: the earlier cases plus H, I,
+  pass-acceptance rules, claimed-then-silent expiry without fallback, J for
+  drain / facts / browser / capacity, K (six concurrent `advance()` → one
+  ticket; a direct second insert is refused by `UNIQUE`), L, and request
+  validation (repeated D, K ≠ base without browser Contract, malformed or
+  over-wide browser Contract). K was checked against a mutation: without the
+  two uniqueness constraints six concurrent calls issue six tickets.
+
+### Still not covered
+
+Bindings, OCI routes, ato-managed Runtimes, provisioning, several
+environments per Runtime (the worker refuses anything but `native`), staging
+and production (nothing deployed; migration 0288 applied to a local D1 only),
+and OS containment of the Browser Verifier helper and Chrome (next task).
