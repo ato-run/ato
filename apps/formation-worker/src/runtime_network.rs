@@ -602,8 +602,18 @@ pub fn serve(config: &ServeConfig) -> Result<()> {
     );
 
     // Availability is reported on its own clock, so a long attempt does not
-    // make the Runtime look offline.
+    // make the Runtime look offline — and at once whenever a slot is taken or
+    // freed, so the coordinator does not schedule against a stale load.
     let busy = Arc::new(AtomicU32::new(0));
+    let report_now = |client: &Client, slots: u32| {
+        if let Err(error) = client.report_availability(&AvailabilityReport {
+            capacity: 1,
+            current_slots: slots,
+            health: "ok".to_owned(),
+        }) {
+            eprintln!("[runtime-network] availability report failed: {error:#}");
+        }
+    };
     let stop = Arc::new(AtomicBool::new(false));
     let heartbeat = {
         let (client, busy, stop) = (client.clone(), busy.clone(), stop.clone());
@@ -645,6 +655,7 @@ pub fn serve(config: &ServeConfig) -> Result<()> {
                 }
             };
             busy.store(1, Ordering::Relaxed);
+            report_now(&client, 1);
             eprintln!(
                 "[runtime-network] attempt {} — {} on {}",
                 ticket.attempt_id, ticket.derivation_ref, ticket.environment_id
@@ -657,6 +668,10 @@ pub fn serve(config: &ServeConfig) -> Result<()> {
                 "[runtime-network] attempt {} → {}",
                 ticket.attempt_id, report.outcome
             );
+            // Free before the result lands: the result advances the request,
+            // and the next ticket may be this Runtime's.
+            busy.store(0, Ordering::Relaxed);
+            report_now(&client, 0);
             // A result that cannot be delivered is retried; if it never is,
             // the coordinator expires the attempt as inconclusive.
             for retry in 0..5 {
@@ -671,7 +686,6 @@ pub fn serve(config: &ServeConfig) -> Result<()> {
                     }
                 }
             }
-            busy.store(0, Ordering::Relaxed);
             handled += 1;
         }
     })();
