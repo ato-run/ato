@@ -73,7 +73,7 @@ The source is measured under resolver **v2** (it has a symlink).
 | `ato-formation` lib (96, incl. 10 new resolver v2 tests) | pass | pass | pass |
 | `build` unit (7 new: 4.5 MB stdout / stderr / both, failure keeps last words, typed failure after megabytes, never-ending step and its group stopped, descendant holding pipes) | pass | pass | pass |
 | `source_symlinks_v1` (6 new: local = archive v2 closure, symlink-free stays v1, escaping links refused through a local snapshot, staging recreates links, contained build reads through a link, no link reaches a host canary from the build sandbox) | pass (sandbox cases skip: no bwrap) | 6/6 | 6/6 |
-| `local_formation_v1` (+1: verified candidate keeps verdicts when the artifact cannot be stored) | pass | 15/15 | serial 14/14 ¹ |
+| `local_formation_v1` (+1: verified candidate keeps verdicts when the artifact cannot be stored) | pass (new case: Filtered, no bwrap) | 14/14, then the new case alone 1/1 | existing 14: serial 14/14 ¹; new case not run |
 | `runtime_network_v1`, `browser_verifier_protocol_v1`, `browser_verifier_containment_v1`, `temporary_realization_v1`, `static_lane_v1`, `pack_v1`, `authoring/intent/preset` | pass | pass | pass |
 | `sandbox_v1` | pass (skips) | 10/11 ² | 10/11 ² |
 
