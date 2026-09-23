@@ -72,12 +72,18 @@ static ATTEMPT_COUNTER: AtomicU64 = AtomicU64::new(1);
 /// does not parse — come back as `Err`. Everything a candidate did or did
 /// not do comes back inside the result's attempts.
 pub fn run(request: &FormationRequest, env: &LocalFormation) -> Result<FormationResult> {
-    let executor = LocalAttemptExecutor {
+    run_with_executor(request, env, &local_executor(request, env))
+}
+
+pub(crate) fn local_executor(
+    request: &FormationRequest,
+    env: &LocalFormation,
+) -> LocalAttemptExecutor {
+    LocalAttemptExecutor {
         shim: env.shim.clone(),
         network: network_policy(request.policy.network),
         limits: env.limits,
-    };
-    run_with_executor(request, env, &executor)
+    }
 }
 
 /// [`run`] with the attempt executor supplied by the caller.
@@ -93,6 +99,18 @@ pub fn run_with_executor(
     if runtime_id != "local" {
         bail!("Phase 1 admits exactly one Runtime: --runtime local (got {runtime_id:?})");
     }
+    run_as(request, env, executor, runtime_id)
+}
+
+/// [`run_with_executor`] on this machine, recording it in the attempt
+/// evidence under `runtime_id`: the identity a Runtime Network ticket names
+/// this Runtime by, rather than the anonymous `local`.
+pub(crate) fn run_as(
+    request: &FormationRequest,
+    env: &LocalFormation,
+    executor: &dyn AttemptExecutor,
+    runtime_id: &str,
+) -> Result<FormationResult> {
     let profile = probe_local_runtime();
     // Absolute from here on: these paths are bound into sandboxes whose
     // working directory is not this process's.
@@ -114,8 +132,20 @@ pub fn run_with_executor(
             budget: env.browser_budget,
         });
 
-    let InitialCondition::LocalDirectory { path } = &request.initial_condition;
-    let frozen = freeze_local_source(path, &env.work_root, env.source_limits)?;
+    let frozen = match &request.initial_condition {
+        InitialCondition::LocalDirectory { path } => {
+            freeze_local_source(path, &env.work_root, env.source_limits)?
+        }
+        InitialCondition::Archive {
+            bytes,
+            expected_digest,
+        } => freeze_archive(
+            bytes.clone(),
+            expected_digest,
+            &env.work_root,
+            env.source_limits,
+        )?,
+    };
     let (closure_ref, source_root) = (frozen.closure_ref.clone(), frozen.root.clone());
     let evidence = detect(&source_root).context("detection failed")?;
 
@@ -139,7 +169,7 @@ pub fn run_with_executor(
                                 candidate: "detect".to_owned(),
                                 derivation_ref: None,
                                 contract_ref: None,
-                                runtime_id: runtime_id.clone(),
+                                runtime_id: runtime_id.to_owned(),
                                 status: AttemptStatus::Filtered,
                                 verification: None,
                                 base_contract_ref: None,
@@ -250,7 +280,7 @@ fn attempt_one(
     attempt.contract_ref = Some(contract_ref.clone());
     attempt.derivation_ref = Some(planned.derivation_ref.clone());
 
-    if let Some(failure) = admits(profile, &planned, network, browser.is_some()) {
+    if let Some(failure) = admits(profile, &planned, network, browser) {
         attempt.status = AttemptStatus::Filtered;
         attempt.failure = Some(failure);
         return (attempt, None);
@@ -436,9 +466,32 @@ fn admits(
     profile: &RuntimeProfile,
     planned: &PlannedCandidate,
     network: NetworkPolicy,
-    browser: bool,
+    browser: Option<&BrowserVerification>,
 ) -> Option<AttemptFailure> {
-    if browser && planned.intent.lane != ato_formation::intent::Lane::PythonProcess {
+    // The route's own platform statement is part of D, so it binds every
+    // Runtime that is asked to run it — whatever a scheduler believed.
+    let platforms = &planned.derivation.platforms;
+    if !platforms.is_empty()
+        && !platforms.iter().any(|platform| {
+            platform.os == std::env::consts::OS && platform.arch == std::env::consts::ARCH
+        })
+    {
+        return Some(AttemptFailure {
+            code: "platform_unsupported".to_owned(),
+            stage: "admission".to_owned(),
+            message: format!(
+                "this route runs on {}; this Runtime is {}/{}; it was not attempted",
+                platforms
+                    .iter()
+                    .map(|platform| format!("{}/{}", platform.os, platform.arch))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            ),
+        });
+    }
+    if browser.is_some() && planned.intent.lane != ato_formation::intent::Lane::PythonProcess {
         // A browser Contract is verified against a running candidate, and in
         // Phase 1 only a process lane is realized.
         return Some(AttemptFailure {
@@ -446,6 +499,15 @@ fn admits(
             stage: "admission".to_owned(),
             message: "a browser Contract is verified against a running candidate; this \
                       candidate's lane is not realized on this Runtime"
+                .to_owned(),
+        });
+    }
+    if browser.is_some_and(|browser| browser.verifier.is_none()) {
+        return Some(AttemptFailure {
+            code: "browser_verifier_unavailable".to_owned(),
+            stage: "admission".to_owned(),
+            message: "the request carries a browser Contract and this Runtime has no browser \
+                      verifier; it was not attempted"
                 .to_owned(),
         });
     }
@@ -683,9 +745,9 @@ fn store_candidate(executed: &ExecutedCandidate, env: &LocalFormation) -> Result
 
 /// The Initial Condition, frozen: one snapshot of the directory, verified
 /// and materialized. Removed when the Formation ends.
-struct FrozenSource {
-    closure_ref: SourceClosureRef,
-    root: PathBuf,
+pub(crate) struct FrozenSource {
+    pub(crate) closure_ref: SourceClosureRef,
+    pub(crate) root: PathBuf,
     scratch: PathBuf,
 }
 
@@ -708,16 +770,33 @@ impl Drop for FrozenSource {
 /// source module's rules — refused symlinks, path limits — apply unchanged.
 /// After this returns the directory is never read again.
 fn freeze_local_source(dir: &Path, work_root: &Path, limits: SourceLimits) -> Result<FrozenSource> {
+    let archive = snapshot_directory(dir)?;
+    let archive_digest = digest(&archive);
+    freeze_archive(archive, &archive_digest, work_root, limits)
+}
+
+/// Snapshot a directory into the archive a Formation measures: the codeload
+/// shape, no `.git`, symlinks kept for the source rules to decide.
+pub fn snapshot_directory(dir: &Path) -> Result<Vec<u8>> {
     let directory = dir
         .canonicalize()
         .with_context(|| format!("cannot read {}", dir.display()))?;
     if !directory.is_dir() {
         bail!("{} is not a directory", directory.display());
     }
-    let archive = tar_directory(&directory)?;
-    let archive_digest = digest(&archive);
+    tar_directory(&directory)
+}
+
+/// Verify an archive against the digest it was named by, measure its tree and
+/// materialize it: the frozen Initial Condition.
+pub(crate) fn freeze_archive(
+    archive: Vec<u8>,
+    archive_digest: &str,
+    work_root: &Path,
+    limits: SourceLimits,
+) -> Result<FrozenSource> {
     let verified = DownloadedArchive::new(archive)
-        .verify_archive_digest(&archive_digest)
+        .verify_archive_digest(archive_digest)
         .and_then(|archive| archive.verify_tree_digest(None, limits))
         .context("the directory is not a usable source")?;
     let closure_ref = verified
@@ -880,7 +959,7 @@ pub fn probe_local_runtime() -> RuntimeProfile {
 
 /// The triple the local machine builds for. A workspace produced here is
 /// host-native; cross-compiling is a different request.
-fn host_triple() -> String {
+pub(crate) fn host_triple() -> String {
     let arch = std::env::consts::ARCH;
     let os = match std::env::consts::OS {
         "linux" => "unknown-linux-gnu",

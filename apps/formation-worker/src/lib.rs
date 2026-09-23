@@ -13,6 +13,7 @@ pub mod executor;
 pub mod job;
 pub mod local;
 pub mod pack;
+pub mod runtime_network;
 pub mod sandbox;
 pub mod sandbox_exec;
 pub mod static_lane;

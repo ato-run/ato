@@ -994,6 +994,7 @@ pub fn build_multi_derivation_bundle(
         derivation: DerivationDraft {
             inputs: vec![input.clone()],
             runtimes: Vec::new(),
+            platforms: Vec::new(),
             steps: vec![StepDraft {
                 id: static_step_id.clone(),
                 protocol: BROWSER_PROTOCOL.to_owned(),
@@ -1228,6 +1229,7 @@ pub fn build_dynamic_routes_bundle(
         schema: BOUND_DERIVATION_SCHEMA.to_owned(),
         inputs: vec![input.clone()],
         runtimes: route.execution.runtimes.clone(),
+        platforms: Vec::new(),
         steps: if route.realization == PortableRealizationKind::OciServiceGroup {
             route
                 .services
