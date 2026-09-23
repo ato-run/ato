@@ -15,7 +15,7 @@
 //! absent answer into a pass.
 
 use std::io::{Read as _, Write as _};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -24,24 +24,17 @@ use ato_formation::browser::{
     BrowserVerificationReceipt, BrowserVerificationRequest, BrowserVerificationResult,
 };
 
-/// Environment the helper may see. Everything else is cleared: the helper
-/// drives a browser at untrusted content and must not inherit the caller's
-/// ambient credentials.
-const FORWARDED_ENV: &[&str] = &[
-    "PATH",
-    "TMPDIR",
-    "LANG",
-    "LC_ALL",
-    // The judge and the browser agent's model. Read by the helper only.
-    "JEV_API_KEY",
-    "DEEPSEEK_API_KEY",
-    // Explicit overrides for pinned versions and binaries.
-    "ATO_JEV_MODEL",
-    "ATO_BROWSER_AGENT_MODEL",
-    "ATO_BROWSER_CHROME_PATH",
-];
+use crate::browser_sandbox::{
+    BrowserVerifierSandboxSpec, GUEST_SCRATCH, SECRETS_FD, contained_evidence, uncontained_evidence,
+};
 
-/// Secret-bearing variables whose values must never appear in a receipt.
+/// Non-secret settings the helper may see: model names and, for an
+/// uncontained run, which browser to start.
+const FORWARDED_SETTINGS: &[&str] = &["ATO_JEV_MODEL", "ATO_BROWSER_AGENT_MODEL"];
+
+/// The helper's model keys. Never placed in any process environment: they
+/// are written to a pipe the helper inherits as file descriptor 3, so neither
+/// the helper's `/proc/<pid>/environ` nor anything it starts carries them.
 const SECRET_ENV: &[&str] = &["JEV_API_KEY", "DEEPSEEK_API_KEY"];
 
 /// Past the verification's own wall clock, how long the helper gets to shut
@@ -49,19 +42,29 @@ const SECRET_ENV: &[&str] = &["JEV_API_KEY", "DEEPSEEK_API_KEY"];
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(15);
 /// The largest answer read from the helper.
 const MAX_RESULT_BYTES: usize = 4 * 1024 * 1024;
+/// Where verification scratch directories live, one per verification.
+const SCRATCH_PARENT: &str = "ato-browser-verify";
 
 /// How to start the verifier helper.
 #[derive(Debug, Clone)]
-pub struct BrowserVerifierCommand {
-    pub argv: Vec<String>,
-    pub cwd: Option<PathBuf>,
+pub enum BrowserVerifierCommand {
+    /// The helper inside the verifier sandbox (`browser_sandbox`). The only
+    /// form a Runtime Network worker uses or advertises.
+    Contained(BrowserVerifierSandboxSpec),
+    /// A process on the host, as it is: the host filesystem is visible to it
+    /// and to its browser. Development and tests only — never advertised as
+    /// a capability, and recorded as `containment: none` in every receipt.
+    Uncontained {
+        argv: Vec<String>,
+        cwd: Option<PathBuf>,
+    },
 }
 
 impl BrowserVerifierCommand {
-    /// The helper shipped in `apps/formation-browser-verifier`, run with the
-    /// given Node binary.
-    pub fn node_helper(node: impl Into<String>, dir: PathBuf) -> Self {
-        Self {
+    /// The helper shipped in `apps/formation-browser-verifier`, run on the
+    /// host with the given Node binary. Development only.
+    pub fn uncontained_node_helper(node: impl Into<String>, dir: PathBuf) -> Self {
+        Self::Uncontained {
             argv: vec![
                 node.into(),
                 "--import".to_owned(),
@@ -72,8 +75,25 @@ impl BrowserVerifierCommand {
         }
     }
 
-    fn describe(&self) -> String {
-        self.argv.first().cloned().unwrap_or_default()
+    pub fn is_contained(&self) -> bool {
+        matches!(self, Self::Contained(_))
+    }
+
+    /// Can this verifier run here? A contained one only when its sandbox
+    /// starts; an uncontained one was chosen explicitly.
+    pub fn usable(&self) -> bool {
+        match self {
+            Self::Contained(spec) => spec.usable(),
+            Self::Uncontained { .. } => true,
+        }
+    }
+
+    /// What a receipt calls this verifier. No host path.
+    fn describe(&self) -> &'static str {
+        match self {
+            Self::Contained(_) => "contained-node-helper",
+            Self::Uncontained { .. } => "uncontained-helper",
+        }
     }
 }
 
@@ -101,34 +121,54 @@ pub fn verify_in_browser(
             "browser_verifier_unavailable: no browser verifier is configured on this Runtime",
         );
     };
-    let scratch = match tempfile::Builder::new()
-        .prefix("ato-browser-verify-")
-        .tempdir()
-    {
+    let evidence = match command {
+        BrowserVerifierCommand::Contained(_) => contained_evidence(),
+        BrowserVerifierCommand::Uncontained { .. } => uncontained_evidence(),
+    };
+    let unavailable = |target: BrowserTarget, reason: String| {
+        let mut receipt = BrowserVerificationReceipt::unavailable(
+            contract,
+            target,
+            command.describe(),
+            &scrub(&reason),
+        );
+        receipt.containment = Some(evidence.clone());
+        receipt
+    };
+    if !command.usable() {
+        return unavailable(
+            target,
+            "browser_verifier_containment_unavailable: the verifier sandbox cannot run on this \
+             Runtime; refusing to verify outside it"
+                .to_owned(),
+        );
+    }
+    sweep_orphaned_scratch();
+    let scratch = match new_scratch() {
         Ok(scratch) => scratch,
         Err(error) => {
-            return BrowserVerificationReceipt::unavailable(
-                contract,
+            return unavailable(
                 target,
-                &command.describe(),
-                &format!("browser_verifier_unavailable: no scratch directory ({error})"),
+                format!("browser_verifier_unavailable: no scratch directory ({error})"),
             );
         }
+    };
+    let scratch_seen_by_helper = match command {
+        BrowserVerifierCommand::Contained(_) => GUEST_SCRATCH.to_owned(),
+        BrowserVerifierCommand::Uncontained { .. } => scratch.path().to_string_lossy().into_owned(),
     };
     let request = BrowserVerificationRequest {
         protocol: BROWSER_VERIFIER_PROTOCOL.to_owned(),
         contract: contract.clone(),
         url: target.endpoint.clone(),
         budget: verification.budget,
-        scratch_dir: scratch.path().to_string_lossy().into_owned(),
+        scratch_dir: scratch_seen_by_helper,
     };
     let timeout = Duration::from_millis(verification.budget.wall_clock_ms) + SHUTDOWN_GRACE;
-    let unavailable = |target: BrowserTarget, reason: String| {
-        BrowserVerificationReceipt::unavailable(contract, target, &command.describe(), &reason)
-    };
-    let output = run_helper(command, &request, timeout);
-    // A browser launched detached is not in the helper's process group; its
-    // profile path in the scratch directory is how it is found.
+    let output = run_helper(command, &request, scratch.path(), timeout);
+    // An uncontained browser launched detached is not in the helper's process
+    // group; its profile path in the scratch directory is how it is found. A
+    // contained one went down with the sandbox's PID namespace already.
     stop_processes_using(scratch.path());
     drop(scratch);
     let output = match output {
@@ -146,7 +186,7 @@ pub fn verify_in_browser(
             );
         }
     };
-    let receipt = match BrowserVerificationReceipt::new(contract, target.clone(), result) {
+    let mut receipt = match BrowserVerificationReceipt::new(contract, target.clone(), result) {
         Ok(receipt) => receipt,
         Err(error) => {
             return unavailable(target, format!("browser_verifier_result_invalid: {error}"));
@@ -158,47 +198,175 @@ pub fn verify_in_browser(
             format!("browser_verifier_result_invalid: the answer contained the value of {name}"),
         );
     }
+    receipt.containment = Some(evidence);
     receipt
+}
+
+/// A fresh scratch directory, marked with this process's id so a later
+/// verification can tell an orphan (its worker died) from a live one.
+fn new_scratch() -> std::io::Result<tempfile::TempDir> {
+    let parent = std::env::temp_dir().join(SCRATCH_PARENT);
+    std::fs::create_dir_all(&parent)?;
+    let scratch = tempfile::Builder::new().prefix("v-").tempdir_in(&parent)?;
+    std::fs::write(
+        scratch.path().join(".owner"),
+        std::process::id().to_string(),
+    )?;
+    for sub in ["home", "tmp"] {
+        std::fs::create_dir_all(scratch.path().join(sub))?;
+    }
+    Ok(scratch)
+}
+
+/// Remove scratch left behind by a worker that was killed mid-verification.
+/// Its sandbox died with it (`--die-with-parent`); its directory did not.
+fn sweep_orphaned_scratch() {
+    let parent = std::env::temp_dir().join(SCRATCH_PARENT);
+    let Ok(entries) = std::fs::read_dir(&parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let owner = std::fs::read_to_string(path.join(".owner"))
+            .ok()
+            .and_then(|pid| pid.trim().parse::<i32>().ok());
+        let orphaned = match owner {
+            Some(pid) => !process_alive(pid),
+            // Unmarked: either being created right now, or left by a worker
+            // killed before it marked it. Only the second is ever old.
+            None => entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age > Duration::from_secs(600)),
+        };
+        if orphaned {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn process_alive(pid: i32) -> bool {
+    // SAFETY: signal 0 only checks that the process exists.
+    let result = unsafe { libc::kill(pid, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(not(unix))]
+fn process_alive(_pid: i32) -> bool {
+    true
+}
+
+/// The helper's model keys, as the JSON it reads from its secrets pipe.
+fn secrets_payload() -> Vec<u8> {
+    let secrets: serde_json::Map<String, serde_json::Value> = SECRET_ENV
+        .iter()
+        .filter_map(|name| {
+            std::env::var(name)
+                .ok()
+                .map(|value| ((*name).to_owned(), serde_json::Value::String(value)))
+        })
+        .collect();
+    serde_json::to_vec(&secrets).expect("a string map serializes")
+}
+
+/// A pipe whose read end carries `payload` and then end-of-file. Both ends
+/// are created close-on-exec atomically, so no other process this worker
+/// starts concurrently inherits either of them.
+#[cfg(unix)]
+fn secrets_pipe(payload: &[u8]) -> std::io::Result<std::os::fd::OwnedFd> {
+    let (read, mut write) = std::io::pipe()?;
+    // A few hundred bytes: far below any pipe buffer, so this never blocks.
+    write.write_all(payload)?;
+    drop(write);
+    Ok(read.into())
 }
 
 /// Run the helper once: request in, answer out, bounded in time and size.
 fn run_helper(
     command: &BrowserVerifierCommand,
     request: &BrowserVerificationRequest,
+    scratch: &Path,
     timeout: Duration,
 ) -> Result<Vec<u8>, String> {
-    let (program, arguments) = command
-        .argv
-        .split_first()
-        .ok_or_else(|| "browser_verifier_unavailable: the verifier command is empty".to_owned())?;
-    let mut process = Command::new(program);
+    let settings: Vec<(String, String)> = FORWARDED_SETTINGS
+        .iter()
+        .filter_map(|name| {
+            std::env::var(name)
+                .ok()
+                .map(|value| ((*name).to_owned(), value))
+        })
+        .collect();
+    let mut process = match command {
+        BrowserVerifierCommand::Contained(spec) => {
+            let argv = spec.argv(scratch, &settings).map_err(|error| {
+                format!("browser_verifier_unavailable: cannot build the verifier sandbox ({error})")
+            })?;
+            let mut process = Command::new(&argv[0]);
+            process
+                .args(&argv[1..])
+                .env_clear()
+                .env("PATH", "/usr/local/bin:/usr/bin:/bin");
+            process
+        }
+        BrowserVerifierCommand::Uncontained { argv, cwd } => {
+            let (program, arguments) = argv.split_first().ok_or_else(|| {
+                "browser_verifier_unavailable: the verifier command is empty".to_owned()
+            })?;
+            let mut process = Command::new(program);
+            // Only what a helper needs; nothing ambient crosses, and no key.
+            process.args(arguments).env_clear();
+            for name in ["PATH", "LANG", "LC_ALL", "ATO_BROWSER_CHROME_PATH"] {
+                if let Some(value) = std::env::var_os(name) {
+                    process.env(name, value);
+                }
+            }
+            for (name, value) in &settings {
+                process.env(name, value);
+            }
+            process
+                .env("HOME", scratch.join("home"))
+                .env("TMPDIR", scratch.join("tmp"))
+                .env("ATO_VERIFIER_SECRETS_FD", SECRETS_FD.to_string());
+            if let Some(cwd) = cwd {
+                process.current_dir(cwd);
+            }
+            process
+        }
+    };
     process
-        .args(arguments)
-        .env_clear()
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    for name in FORWARDED_ENV {
-        if let Some(value) = std::env::var_os(name) {
-            process.env(name, value);
-        }
-    }
-    if let Some(cwd) = &command.cwd {
-        process.current_dir(cwd);
-    }
-    // The helper and its browser get a home inside the scratch directory:
-    // nothing under the user's HOME is theirs to read or write.
-    let home = std::path::Path::new(&request.scratch_dir).join("home");
-    if std::fs::create_dir_all(&home).is_ok() {
-        process.env("HOME", &home);
-    }
-    // Its own process group: the browser it starts goes down with it.
+    #[cfg(unix)]
+    let secrets = secrets_pipe(&secrets_payload()).map_err(|error| {
+        format!("browser_verifier_unavailable: cannot hand the verifier its keys ({error})")
+    })?;
     #[cfg(unix)]
     {
+        use std::os::fd::AsRawFd as _;
         use std::os::unix::process::CommandExt as _;
+        // Its own process group: what it starts goes down with it.
         process.process_group(0);
+        let fd = secrets.as_raw_fd();
+        // SAFETY: only async-signal-safe calls between fork and exec.
+        unsafe {
+            process.pre_exec(move || {
+                if fd == SECRETS_FD {
+                    libc::fcntl(fd, libc::F_SETFD, 0);
+                } else if libc::dup2(fd, SECRETS_FD) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
     }
-    let mut child = process.spawn().map_err(|error| {
+    let spawned = process.spawn();
+    #[cfg(unix)]
+    drop(secrets);
+    let mut child = spawned.map_err(|error| {
         format!("browser_verifier_unavailable: cannot start the verifier ({error})")
     })?;
     let group = child.id();
@@ -250,7 +418,9 @@ fn run_helper(
             }
         }
     };
-    // Whatever happened, nothing the helper started outlives this call.
+    // Whatever happened, nothing the helper started outlives this call. For
+    // a contained helper, killing bubblewrap tears down its PID namespace —
+    // the helper, the guard and the browser's own namespace with it.
     kill_group(group);
     let Some(status) = status else {
         let _ = child.wait();
@@ -260,7 +430,7 @@ fn run_helper(
         ));
     };
     let output = reader.join().unwrap_or_default();
-    let tail = diagnostics.join().unwrap_or_default();
+    let tail = scrub(&diagnostics.join().unwrap_or_default());
     if output.len() > MAX_RESULT_BYTES {
         return Err(
             "browser_verifier_result_invalid: the answer exceeds its size bound".to_owned(),
@@ -272,6 +442,19 @@ fn run_helper(
         ));
     }
     Ok(output)
+}
+
+/// `text` with every model key's value replaced by its name.
+fn scrub(text: &str) -> String {
+    let mut text = text.to_owned();
+    for name in SECRET_ENV {
+        if let Ok(value) = std::env::var(name)
+            && value.len() >= 8
+        {
+            text = text.replace(&value, &format!("<{name}>"));
+        }
+    }
+    text
 }
 
 #[cfg(unix)]

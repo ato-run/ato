@@ -205,16 +205,15 @@ routes; bindings (every binding is `binding_unavailable`); OCI routes on the
 worker (`runtime.oci = false`); ato-managed Runtimes (refused unless
 `allow_managed`, and none are enrolled).
 
-## Security follow-up (blocker before the 100-app benchmark)
+## Security follow-up (resolved by ADR-022)
 
-The Browser Verifier helper and its Chrome run as the worker's user with the
-host filesystem visible. The origin boundary (ADR-020) constrains the network,
-and the workload itself is contained (bwrap + landlock), but the verifier is
-not. Before the 100-app benchmark, the helper and Chrome must run inside an
-OS-level containment (bwrap: read-only system, private `/tmp`, only the
-scratch/profile directory writable, no home directory) on every Runtime that
-advertises `runtime.browser = true`. Until then, advertise the browser
-verifier only on hosts where the worker's user holds nothing of value.
+The Browser Verifier helper and its Chrome ran as the worker's user with the
+host filesystem visible. ADR-022 contains both (bubblewrap, allowlisted
+filesystem, the browser in its own PID namespace with no inherited
+environment, model keys on a file descriptor). A Runtime advertises
+`runtime.browser = true` together with `verifier.browser.containment = bwrap`
+only when that sandbox starts, and the coordinator gives a browser Contract
+to no other Runtime (`verifier_containment_unavailable`).
 
 ## Known limitations
 
