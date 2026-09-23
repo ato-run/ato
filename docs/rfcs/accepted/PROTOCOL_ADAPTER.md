@@ -31,6 +31,15 @@ HTTP request and response are distinct Records. Binding evidence contains only
 logical and safe provider-reference identity; secret values remain runtime
 inputs and are never persisted.
 
+`ato.browser@1` is not a built-in v1 Adapter and this accepted RFC does not
+grant it a stability commitment. It is currently an experimental Protocol
+Adapter extension governed by
+`docs/rfcs/draft/BROWSER_PROTOCOL_ADAPTER_EXTENSION_V0.md`. A runtime may
+register that extension through `ato-adapter-api`, but must advertise it as
+experimental and must not infer that a registration makes its behavior part of
+the accepted built-in contract. Promotion requires a separate accepted RFC and
+conformance evidence.
+
 HTTP v1 conservatively classifies every inbound request as Evolution and every
 outbound response as evidence. HTTP safe-method vocabulary does not imply a
 semantic no-op. A later ProtocolSemantics implementation may derive a more

@@ -2,6 +2,11 @@
 
 Status: Draft
 
+The Browser Protocol/Adapter contract used by this Activity projection is the
+experimental extension defined in
+`BROWSER_PROTOCOL_ADAPTER_EXTENSION_V0.md`. This RFC does not promote
+`ato.browser@1` to the accepted built-in Adapter set.
+
 ## Decision
 
 Actor, Controller, and Activity are ato.run product-runtime projections. They
@@ -255,6 +260,7 @@ file; it does not become a WebMCP registry or extend `ato-desktop-mcp`.
 - `docs/rfcs/accepted/COMPOSITION.md`
 - `docs/rfcs/accepted/PROTOCOL_ADAPTER.md`
 - `docs/rfcs/accepted/CAPSULE_CLI_LIFECYCLE.md`
+- `docs/rfcs/draft/BROWSER_PROTOCOL_ADAPTER_EXTENSION_V0.md`
 - `docs/rfcs/draft/HOSTED_BROWSER_COMPUTATION_V1.md`
 - `extensions/adapters/browser/src/operation.rs`
 - `extensions/adapters/browser/bridge/webmcp-consumer-bridge.js`

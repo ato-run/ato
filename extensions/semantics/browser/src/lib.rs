@@ -337,6 +337,10 @@ pub trait BrowserHeadPersistence: Send + Sync {
 /// Writer queue or a test probe receives the accepted candidate.
 pub trait BrowserRecordSubmission: Send + Sync {
     fn submit(&self, operation: &AcceptedBrowserOperation) -> Result<(), String>;
+
+    fn record_ref(&self, _operation_id: &str) -> Option<String> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -718,6 +722,10 @@ where
         } else {
             BrowserOperationRetryStage::BeforeApply
         }
+    }
+
+    pub fn record_ref(&self, operation_id: &str) -> Option<String> {
+        self.records.record_ref(operation_id)
     }
 
     fn retry_pending_persistence_inner(&self) -> Result<BrowserPersistenceRetry, EvolutionError> {
