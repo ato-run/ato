@@ -169,12 +169,105 @@ pub fn run_build(
     })
 }
 
+/// How much of each stream a step keeps while it runs: its tail, for the
+/// diagnostic (itself bounded to `MAX_DIAGNOSTIC_BYTES`) and the typed failure
+/// marker a shipped step prints last. The rest is read and dropped.
+const STREAM_TAIL_BYTES: usize = 256 * 1024;
+
+/// After the step's own process exits, how long a descendant that still
+/// holds its output pipes may keep them before this stops reading.
+const PIPE_CLOSE_GRACE: Duration = Duration::from_secs(2);
+
+/// The last `STREAM_TAIL_BYTES` of a stream.
+struct Tail {
+    bytes: Vec<u8>,
+}
+
+impl Tail {
+    fn new() -> Self {
+        Self { bytes: Vec::new() }
+    }
+
+    fn push(&mut self, chunk: &[u8]) {
+        self.bytes.extend_from_slice(chunk);
+        // Trimmed in bulk, so memory stays within twice the bound and the copy
+        // is amortized.
+        if self.bytes.len() > 2 * STREAM_TAIL_BYTES {
+            let excess = self.bytes.len() - STREAM_TAIL_BYTES;
+            self.bytes.drain(..excess);
+        }
+    }
+
+    fn finish(mut self) -> Vec<u8> {
+        if self.bytes.len() > STREAM_TAIL_BYTES {
+            let excess = self.bytes.len() - STREAM_TAIL_BYTES;
+            self.bytes.drain(..excess);
+        }
+        self.bytes
+    }
+}
+
+/// One output pipe, read without ever blocking.
+#[cfg(unix)]
+struct Drain<R: std::io::Read + std::os::fd::AsRawFd> {
+    pipe: Option<R>,
+    tail: Tail,
+}
+
+#[cfg(unix)]
+impl<R: std::io::Read + std::os::fd::AsRawFd> Drain<R> {
+    fn new(pipe: R) -> Self {
+        // SAFETY: flags on a descriptor this function owns.
+        unsafe {
+            let fd = pipe.as_raw_fd();
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+        Self {
+            pipe: Some(pipe),
+            tail: Tail::new(),
+        }
+    }
+
+    fn open(&self) -> bool {
+        self.pipe.is_some()
+    }
+
+    fn poll_fd(&self) -> Option<libc::pollfd> {
+        self.pipe.as_ref().map(|pipe| libc::pollfd {
+            fd: pipe.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        })
+    }
+
+    /// Read everything available now. Closes on end of file or error.
+    fn read_available(&mut self) {
+        let mut buffer = [0_u8; 64 * 1024];
+        while let Some(pipe) = self.pipe.as_mut() {
+            match pipe.read(&mut buffer) {
+                Ok(0) => self.pipe = None,
+                Ok(read) => self.tail.push(&buffer[..read]),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => self.pipe = None,
+            }
+        }
+    }
+}
+
 /// Run one step, and prove its process group is gone before returning.
 ///
 /// Returning while a descendant survives would let it keep writing to the
 /// workspace after the build believed it had finished — and the workspace is
 /// about to be packed and content-addressed, so that corruption becomes
 /// permanent.
+///
+/// Both output streams are drained for as long as the step runs. A step's
+/// output is not bounded — `pip install`, a compiler, a bundler can print
+/// megabytes — and a pipe that nobody reads fills at 64 KiB and blocks its
+/// writer, which then never exits: the step would hang until its budget and
+/// fail as a timeout. Only each stream's tail is kept.
 #[cfg(unix)]
 fn run_step(step: &BuildStepV1, argv: &[String], budget: Duration) -> Result<Vec<u8>> {
     use std::os::unix::process::CommandExt as _;
@@ -193,36 +286,56 @@ fn run_step(step: &BuildStepV1, argv: &[String], budget: Duration) -> Result<Vec
         .spawn()
         .with_context(|| format!("cannot start build step {:?}", step.name))?;
     let pid = child.id();
+    let mut stdout = Drain::new(child.stdout.take().expect("piped"));
+    let mut stderr = Drain::new(child.stderr.take().expect("piped"));
 
     let deadline = Instant::now() + budget;
+    let mut exited: Option<(std::process::ExitStatus, Instant)> = None;
     loop {
-        match child.try_wait().context("cannot poll the build step")? {
-            Some(status) => {
-                let output = child
-                    .wait_with_output()
-                    .unwrap_or_else(|_| std::process::Output {
-                        status,
-                        stdout: Vec::new(),
-                        stderr: Vec::new(),
-                    });
-                let mut combined = output.stdout;
-                combined.extend_from_slice(&output.stderr);
-                if !status.success() {
-                    // A step that KNOWS why it refused says so in a line
-                    // written for the uploader. Without this the typed reason
-                    // is flattened into build output, and build output is
-                    // exactly what must not reach the uploader — so a person
-                    // who imported lodash would be told "the build failed".
-                    if let Some(failure) = typed_step_failure(&combined) {
-                        return Err(anyhow::Error::new(failure));
+        let mut fds: Vec<libc::pollfd> = [stdout.poll_fd(), stderr.poll_fd()]
+            .into_iter()
+            .flatten()
+            .collect();
+        if !fds.is_empty() {
+            // SAFETY: `fds` is a valid array of `fds.len()` pollfd entries.
+            unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, 50) };
+        } else {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        stdout.read_available();
+        stderr.read_available();
+
+        if exited.is_none()
+            && let Some(status) = child.try_wait().context("cannot poll the build step")?
+        {
+            exited = Some((status, Instant::now()));
+        }
+        match exited {
+            Some((status, at)) => {
+                // Done once both pipes are closed — or, if a descendant still
+                // holds them, after a short grace: its output is not the
+                // step's result.
+                if (!stdout.open() && !stderr.open()) || at.elapsed() >= PIPE_CLOSE_GRACE {
+                    let mut combined = stdout.tail.finish();
+                    combined.extend_from_slice(&stderr.tail.finish());
+                    if !status.success() {
+                        // A step that KNOWS why it refused says so in a line
+                        // written for the uploader. Without this the typed
+                        // reason is flattened into build output, and build
+                        // output is exactly what must not reach the uploader —
+                        // so a person who imported lodash would be told "the
+                        // build failed".
+                        if let Some(failure) = typed_step_failure(&combined) {
+                            return Err(anyhow::Error::new(failure));
+                        }
+                        bail!(
+                            "build step {:?} failed ({status}): {}",
+                            step.name,
+                            bounded_diagnostic(&step.name, &combined)
+                        );
                     }
-                    bail!(
-                        "build step {:?} failed ({status}): {}",
-                        step.name,
-                        bounded_diagnostic(&step.name, &combined)
-                    );
+                    return Ok(combined);
                 }
-                return Ok(combined);
             }
             None if Instant::now() >= deadline => {
                 terminate_group(pid);
@@ -230,7 +343,7 @@ fn run_step(step: &BuildStepV1, argv: &[String], budget: Duration) -> Result<Vec
                 ensure_group_gone(pid)?;
                 bail!("build step {:?} exceeded its time budget", step.name);
             }
-            None => std::thread::sleep(Duration::from_millis(50)),
+            None => {}
         }
     }
 }
@@ -343,4 +456,121 @@ pub fn output_root(outcome: &BuildOutcome, plan: &EffectiveBuildPlanV1) -> Resul
 /// The guest path the workspace occupies during a build.
 pub fn guest_workspace_root() -> &'static str {
     GUEST_WORKSPACE_ROOT
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    fn step(script: &str) -> (BuildStepV1, Vec<String>) {
+        let argv = vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()];
+        (
+            BuildStepV1 {
+                name: "test".to_owned(),
+                argv: argv.clone(),
+                needs_network: false,
+            },
+            argv,
+        )
+    }
+
+    fn run(script: &str, budget: Duration) -> Result<Vec<u8>> {
+        let (step, argv) = step(script);
+        run_step(&step, &argv, budget)
+    }
+
+    /// Four MiB and more to one stream: far past any pipe buffer.
+    const CHATTY: &str = "head -c 4500000 /dev/zero | tr '\\0' a";
+
+    #[test]
+    fn megabytes_on_stdout_do_not_block_the_step() {
+        let started = Instant::now();
+        let output = run(CHATTY, Duration::from_secs(60)).expect("the step succeeds");
+        assert!(started.elapsed() < Duration::from_secs(30));
+        assert!(output.len() <= STREAM_TAIL_BYTES);
+        assert!(output.iter().all(|byte| *byte == b'a'));
+    }
+
+    #[test]
+    fn megabytes_on_stderr_do_not_block_the_step() {
+        let output = run(&format!("{CHATTY} >&2"), Duration::from_secs(60)).expect("success");
+        assert!(output.len() <= STREAM_TAIL_BYTES);
+    }
+
+    #[test]
+    fn both_streams_at_once_do_not_block_the_step() {
+        run(
+            &format!("({CHATTY}) & ({CHATTY}) >&2; wait"),
+            Duration::from_secs(60),
+        )
+        .expect("success");
+    }
+
+    #[test]
+    fn a_failure_after_megabytes_keeps_its_last_words() {
+        let error = run(
+            &format!("{CHATTY}; echo; echo 'the actual reason' >&2; exit 3"),
+            Duration::from_secs(60),
+        )
+        .expect_err("the step fails");
+        let message = format!("{error:#}");
+        assert!(message.contains("the actual reason"), "{message}");
+        assert!(
+            message.len() < MAX_DIAGNOSTIC_BYTES + 512,
+            "{}",
+            message.len()
+        );
+    }
+
+    #[test]
+    fn a_typed_failure_after_megabytes_is_still_typed() {
+        let error = run(
+            &format!(
+                "{CHATTY}; echo; echo 'ATO_FORMATION_FAILURE {{\"code\":\"dependency_unavailable\",\"message\":\"no wheel\"}}'; exit 2"
+            ),
+            Duration::from_secs(60),
+        )
+        .expect_err("the step fails");
+        let failure = error
+            .downcast_ref::<FormationFailure>()
+            .expect("a typed failure");
+        assert_eq!(failure.code, "dependency_unavailable");
+    }
+
+    #[test]
+    fn a_step_that_never_ends_is_stopped_with_everything_it_started() {
+        let marker = format!("ato-build-drain-test-{}", std::process::id());
+        let started = Instant::now();
+        let error = run(
+            &format!("sleep 600 {marker} & yes {marker}"),
+            Duration::from_secs(2),
+        )
+        .expect_err("the step times out");
+        assert!(format!("{error:#}").contains("exceeded its time budget"));
+        assert!(started.elapsed() < Duration::from_secs(15));
+        let survivors = std::process::Command::new("pgrep")
+            .args(["-f", "--", &marker])
+            .output()
+            .expect("pgrep");
+        assert!(
+            String::from_utf8_lossy(&survivors.stdout).trim().is_empty(),
+            "processes outlived the step"
+        );
+    }
+
+    #[test]
+    fn a_descendant_holding_the_pipes_does_not_hold_the_step() {
+        // The step exits at once; something it left behind keeps the pipes.
+        let marker = format!("ato-build-holder-test-{}", std::process::id());
+        let started = Instant::now();
+        run(
+            &format!("(sleep 20 {marker} &); echo done"),
+            Duration::from_secs(60),
+        )
+        .expect("success");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let _ = std::process::Command::new("pkill")
+            .args(["-f", "--", &marker])
+            .status();
+    }
 }
