@@ -491,15 +491,6 @@ fn admits(
             ),
         });
     }
-    if browser.is_some_and(|browser| browser.verifier.is_none()) {
-        return Some(AttemptFailure {
-            code: "browser_verifier_unavailable".to_owned(),
-            stage: "admission".to_owned(),
-            message: "the request carries a browser Contract and this Runtime has no browser \
-                      verifier; it was not attempted"
-                .to_owned(),
-        });
-    }
     if browser.is_some() && planned.intent.lane != ato_formation::intent::Lane::PythonProcess {
         // A browser Contract is verified against a running candidate, and in
         // Phase 1 only a process lane is realized.
@@ -508,6 +499,15 @@ fn admits(
             stage: "admission".to_owned(),
             message: "a browser Contract is verified against a running candidate; this \
                       candidate's lane is not realized on this Runtime"
+                .to_owned(),
+        });
+    }
+    if browser.is_some_and(|browser| browser.verifier.is_none()) {
+        return Some(AttemptFailure {
+            code: "browser_verifier_unavailable".to_owned(),
+            stage: "admission".to_owned(),
+            message: "the request carries a browser Contract and this Runtime has no browser \
+                      verifier; it was not attempted"
                 .to_owned(),
         });
     }
