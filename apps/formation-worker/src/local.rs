@@ -204,6 +204,8 @@ pub(crate) fn run_as(
             browser.as_ref(),
             env,
         );
+        let mut attempt = attempt;
+        scrub_host_paths(&mut attempt, env);
         attempts.push(attempt);
         if let Some((contract_ref, route)) = formed {
             return Ok(FormationResult::Formed {
@@ -221,6 +223,35 @@ pub(crate) fn run_as(
             .collect(),
         attempts,
     })
+}
+
+/// Replace this worker's own paths in an attempt's failure message: the
+/// attempt is evidence handed to whoever requested the Formation, and the
+/// worker's scratch layout, home and temp directories are not theirs. The
+/// guest paths a candidate sees (`/app`, `/src`) are kept.
+fn scrub_host_paths(attempt: &mut FormationAttempt, env: &LocalFormation) {
+    let Some(failure) = attempt.failure.as_mut() else {
+        return;
+    };
+    let mut prefixes: Vec<(String, &str)> = vec![
+        (env.work_root.display().to_string(), "<work>"),
+        (env.out_dir.display().to_string(), "<out>"),
+        (std::env::temp_dir().display().to_string(), "<tmp>"),
+    ];
+    if let Some(home) = std::env::var_os("HOME") {
+        prefixes.push((
+            std::path::PathBuf::from(home).display().to_string(),
+            "<home>",
+        ));
+    }
+    // Longest first: the work root usually lives inside the home.
+    prefixes.sort_by_key(|(prefix, _)| std::cmp::Reverse(prefix.len()));
+    for (prefix, placeholder) in prefixes {
+        let prefix = prefix.trim_end_matches('/');
+        if prefix.len() > 1 {
+            failure.message = failure.message.replace(prefix, placeholder);
+        }
+    }
 }
 
 /// One candidate end to end: plan, admit, execute, observe, verify, keep.
