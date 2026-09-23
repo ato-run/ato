@@ -25,7 +25,8 @@ use ato_formation::browser::{
 };
 
 use crate::browser_sandbox::{
-    BrowserVerifierSandboxSpec, GUEST_SCRATCH, SECRETS_FD, contained_evidence, uncontained_evidence,
+    BrowserLauncher, BrowserVerifierSandboxSpec, ChromeSandbox, GUEST_SCRATCH, SECRETS_FD,
+    contained_evidence, uncontained_evidence,
 };
 
 /// Non-secret settings the helper may see: model names and, for an
@@ -121,8 +122,14 @@ pub fn verify_in_browser(
             "browser_verifier_unavailable: no browser verifier is configured on this Runtime",
         );
     };
+    let chrome = match command {
+        BrowserVerifierCommand::Contained(spec) => spec.chrome_sandbox(),
+        BrowserVerifierCommand::Uncontained { .. } => None,
+    };
     let evidence = match command {
-        BrowserVerifierCommand::Contained(_) => contained_evidence(),
+        BrowserVerifierCommand::Contained(_) => {
+            contained_evidence(chrome.unwrap_or(ChromeSandbox::Disabled))
+        }
         BrowserVerifierCommand::Uncontained { .. } => uncontained_evidence(),
     };
     let unavailable = |target: BrowserTarget, reason: String| {
@@ -165,7 +172,23 @@ pub fn verify_in_browser(
         scratch_dir: scratch_seen_by_helper,
     };
     let timeout = Duration::from_millis(verification.budget.wall_clock_ms) + SHUTDOWN_GRACE;
+    // A contained helper's browser is started by this worker, beside the
+    // helper's sandbox, on the helper's request.
+    let launcher = match (command, chrome) {
+        (BrowserVerifierCommand::Contained(spec), Some(chrome)) => {
+            match BrowserLauncher::start(spec, scratch.path(), chrome) {
+                Ok(launcher) => Some(launcher),
+                Err(error) => {
+                    return unavailable(target, format!("browser_verifier_unavailable: {error:#}"));
+                }
+            }
+        }
+        _ => None,
+    };
     let output = run_helper(command, &request, scratch.path(), timeout);
+    if let Some(launcher) = launcher {
+        launcher.stop();
+    }
     // An uncontained browser launched detached is not in the helper's process
     // group; its profile path in the scratch directory is how it is found. A
     // contained one went down with the sandbox's PID namespace already.
