@@ -295,11 +295,18 @@ pub fn launch_process(
         .parent()
         .context("workspace has no lease root")?
         .join("process-runtime");
+    let shim = std::env::current_exe().context("cannot locate this Runner's own binary")?;
+    // The libtest executable has no sandbox-exec command. Linux integration
+    // tests point at the built worker; production always uses its own binary.
+    #[cfg(test)]
+    let shim = std::env::var_os("ATO_TEST_WORKER_BIN")
+        .map(std::path::PathBuf::from)
+        .unwrap_or(shim);
     launch_process_with(
         spec,
         context,
         &ProcessLaunchHost {
-            shim: std::env::current_exe().context("cannot locate this Runner's own binary")?,
+            shim,
             runtime_root,
             output: None,
         },
