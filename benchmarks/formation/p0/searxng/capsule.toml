@@ -1,0 +1,55 @@
+schema = "ato.capsule/1"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[runtime]]
+name = "python"
+version = "3.12.7"
+
+[[derive.step]]
+id = "app"
+use = "ato.process@1"
+op = "serve"
+argv = ["/opt/ato/toolchains/python/3.12.7/bin/python3", "-m", "searx.webapp"]
+
+[derive.step.env]
+SEARXNG_SECRET = "ato-p0-benchmark-not-secret"
+SEARXNG_BIND_ADDRESS = "0.0.0.0"
+SEARXNG_PORT = "8888"
+
+[[port]]
+id = "app.http"
+use = "ato.http@1"
+from = "app"
+guest_port = 8888
+
+[[contract.require]]
+id = "http-0"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/healthz"
+
+[contract.require.expect]
+status = 200
+
+[[contract.require]]
+id = "http-1"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/"
+
+[contract.require.expect]
+status = 200
+
+[[contract.require]]
+id = "source-identity"
+use = "ato.contract.workspace@1"
+input = "workspace"
+
+[contract.require.expect]
+digest = "capture"
