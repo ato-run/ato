@@ -70,7 +70,35 @@ fn decompressed(bytes: &[u8]) -> Result<std::borrow::Cow<'_, [u8]>, SourceError>
 ///
 /// Two digests produced under different projection rules are not comparable,
 /// and a closure ref that omitted the rules would let them look equal.
+///
+/// v1: a source tree is regular files and directories. Nothing else.
 pub const RESOLVER_CONTRACT_V1: &str = "ato.source-resolver.v1";
+
+/// v2: v1, plus contained relative symlinks as entries of their own.
+///
+/// A symlink is measured as what it IS — a path, the kind `symlink`, and its
+/// target string — never flattened into the content it points at: `link -> a`
+/// and `link -> b` are different trees even when `a` and `b` hold the same
+/// bytes. A link is contained when its target is relative, carries no NUL,
+/// and reads as some `..` components followed only by plain names, with no
+/// more `..` than the link has parent directories; and when no entry of the
+/// tree lies *beneath* a symlink. Together these keep every link, and every
+/// chain of links, inside the tree once it is on a disk: a leading `..` walks
+/// up real directories only, and plain names never walk up at all. Absolute
+/// targets, targets that climb out, targets that climb after descending
+/// (`a/../b`), hard links, devices and FIFOs remain refused.
+///
+/// ## Which version a tree is measured under
+///
+/// The lowest version whose entry vocabulary covers the tree: a tree with no
+/// symlink is measured under v1, exactly as before; a tree with one under v2.
+/// The choice is a function of the tree alone — the same files and links give
+/// the same version, whether they arrive as a local directory snapshot or an
+/// uploaded or codeload archive — so it is canonical, not an implicit switch.
+/// It also means no recorded v1 closure changes meaning or needs migrating:
+/// every tree v1 could measure still measures to the same v1 digest, and a
+/// tree v1 refused now has a v2 identity it never had before.
+pub const RESOLVER_CONTRACT_V2: &str = "ato.source-resolver.v2";
 
 #[derive(Debug, thiserror::Error)]
 pub enum SourceError {
@@ -82,6 +110,15 @@ pub enum SourceError {
     PathEscape { path: String },
     #[error("source archive contains {kind} at {path}, which a source tree does not define")]
     UnsupportedEntry { kind: &'static str, path: String },
+    #[error(
+        "source archive contains a symlink at {path} whose target {target:?} is not contained \
+         in the source tree ({reason})"
+    )]
+    SymlinkEscape {
+        path: String,
+        target: String,
+        reason: &'static str,
+    },
     #[error("source archive exceeds its {limit} limit")]
     LimitExceeded { limit: &'static str },
     #[error("source subdirectory {path} is not contained")]
@@ -100,6 +137,7 @@ impl SourceError {
             Self::TreeDigestMismatch { .. } => "source_tree_digest_mismatch",
             Self::PathEscape { .. } => "source_path_escape",
             Self::UnsupportedEntry { .. } => "source_unsupported_entry",
+            Self::SymlinkEscape { .. } => "source_symlink_escape",
             Self::LimitExceeded { .. } => "source_limit_exceeded",
             Self::SubdirectoryEscape { .. } => "source_subdirectory_escape",
             Self::SubdirectoryMissing { .. } => "source_subdirectory_missing",
@@ -156,6 +194,8 @@ pub struct DigestVerifiedArchive {
 pub struct TreeVerifiedArchive {
     bytes: Vec<u8>,
     tree_digest: String,
+    /// The resolver contract the tree was measured under.
+    resolver_contract: &'static str,
 }
 
 impl DownloadedArchive {
@@ -195,7 +235,7 @@ impl DigestVerifiedArchive {
         expected: Option<&str>,
         limits: SourceLimits,
     ) -> Result<TreeVerifiedArchive, SourceError> {
-        let tree_digest = measure_source_tree(&self.bytes, limits)?;
+        let (tree_digest, resolver_contract) = measure_source_tree_contract(&self.bytes, limits)?;
         if let Some(expected) = expected
             && expected != tree_digest
         {
@@ -207,6 +247,7 @@ impl DigestVerifiedArchive {
         Ok(TreeVerifiedArchive {
             bytes: self.bytes,
             tree_digest,
+            resolver_contract,
         })
     }
 }
@@ -221,9 +262,15 @@ impl TreeVerifiedArchive {
         &self.bytes
     }
 
+    /// The resolver contract the tree was measured under (see
+    /// [`RESOLVER_CONTRACT_V2`] for how it is chosen).
+    pub fn resolver_contract(&self) -> &'static str {
+        self.resolver_contract
+    }
+
     /// The closure identity: the tree, plus the rules that measured it.
     pub fn closure_ref(&self, subdirectory: &str) -> Result<SourceClosureRef, SourceError> {
-        SourceClosureRef::derive(&self.tree_digest, subdirectory, RESOLVER_CONTRACT_V1)
+        SourceClosureRef::derive(&self.tree_digest, subdirectory, self.resolver_contract)
     }
 
     /// Expand the tree into `destination`, applying the same containment rules
@@ -361,9 +408,10 @@ fn is_archive_metadata(entry_type: tar::EntryType) -> bool {
     )
 }
 
+/// Entry kinds no resolver version defines. (A symlink is defined by v2 and
+/// checked by [`contained_symlink_target`].)
 fn entry_kind(entry_type: tar::EntryType) -> Option<&'static str> {
     match entry_type {
-        tar::EntryType::Symlink => Some("a symlink"),
         tar::EntryType::Link => Some("a hard link"),
         tar::EntryType::Char | tar::EntryType::Block => Some("a device node"),
         tar::EntryType::Fifo => Some("a FIFO"),
@@ -419,9 +467,58 @@ fn strip_prefix(relative: &Path, prefix: Option<&str>) -> PathBuf {
     }
 }
 
-/// Every entry path in an archive, checked for containment.
+/// The target of a symlink at `link` (a tree-relative path), if it is
+/// contained: relative, no NUL, `..`* then plain names, and no more `..` than
+/// `link` has parent directories. Returned verbatim — the string is the
+/// identity, not its resolution.
+fn contained_symlink_target(link: &Path, target: &[u8]) -> Result<String, SourceError> {
+    let escape = |reason: &'static str| SourceError::SymlinkEscape {
+        path: link.display().to_string(),
+        target: String::from_utf8_lossy(target).into_owned(),
+        reason,
+    };
+    if target.is_empty() {
+        return Err(escape("empty target"));
+    }
+    if target.contains(&0) {
+        return Err(escape("NUL in target"));
+    }
+    let text = std::str::from_utf8(target).map_err(|_| escape("target is not UTF-8"))?;
+    if text.starts_with('/') || text.contains('\\') {
+        return Err(escape("absolute target"));
+    }
+    let parents = link.components().count().saturating_sub(1);
+    let mut climbs = 0usize;
+    let mut descended = false;
+    for segment in text.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." if descended => return Err(escape("climbs after descending")),
+            ".." => {
+                climbs += 1;
+                if climbs > parents {
+                    return Err(escape("climbs out of the source tree"));
+                }
+            }
+            _ => descended = true,
+        }
+    }
+    Ok(text.to_owned())
+}
+
+/// A symlink entry's raw target bytes.
+fn link_target_bytes<R: std::io::Read>(entry: &tar::Entry<'_, R>) -> Vec<u8> {
+    entry
+        .link_name_bytes()
+        .map(|bytes| bytes.into_owned())
+        .unwrap_or_default()
+}
+
+/// Every entry path in an archive, checked for containment. Symlinks are
+/// checked for a contained target, and no entry may lie beneath one.
 fn entry_paths(archive: &[u8], limits: SourceLimits) -> Result<Vec<PathBuf>, SourceError> {
     let mut paths = Vec::new();
+    let mut links: Vec<(PathBuf, Vec<u8>)> = Vec::new();
     let mut tar = tar::Archive::new(Cursor::new(archive));
     for entry in tar
         .entries()
@@ -450,13 +547,51 @@ fn entry_paths(archive: &[u8], limits: SourceLimits) -> Result<Vec<PathBuf>, Sou
             .path()
             .map_err(|error| SourceError::Unusable(format!("entry has no path: {error}")))?
             .into_owned();
-        paths.push(safe_entry_path(&path, limits)?);
+        let safe = safe_entry_path(&path, limits)?;
+        if entry.header().entry_type() == tar::EntryType::Symlink {
+            links.push((safe.clone(), link_target_bytes(&entry)));
+        }
+        paths.push(safe);
+    }
+    // Checked against the tree as it will stand, without a transport wrapper:
+    // a `..` that only climbs out of `<repo>-<sha>/` has climbed out.
+    let prefix = common_prefix(&paths);
+    let link_paths: BTreeSet<PathBuf> = links
+        .iter()
+        .map(|(path, _)| strip_prefix(path, prefix.as_deref()))
+        .collect();
+    for (path, target) in &links {
+        contained_symlink_target(&strip_prefix(path, prefix.as_deref()), target)?;
+    }
+    for path in &paths {
+        let relative = strip_prefix(path, prefix.as_deref());
+        if relative
+            .ancestors()
+            .skip(1)
+            .any(|ancestor| link_paths.contains(ancestor))
+        {
+            return Err(SourceError::SymlinkEscape {
+                path: relative.display().to_string(),
+                target: String::new(),
+                reason: "an entry lies beneath a symlink",
+            });
+        }
     }
     Ok(paths)
 }
 
 pub fn measure_source_tree(archive: &[u8], limits: SourceLimits) -> Result<String, SourceError> {
+    measure_source_tree_contract(archive, limits).map(|(digest, _)| digest)
+}
+
+/// [`measure_source_tree`], with the resolver contract the tree was measured
+/// under: v1 for a tree of files and directories, v2 when it holds a symlink.
+pub fn measure_source_tree_contract(
+    archive: &[u8],
+    limits: SourceLimits,
+) -> Result<(String, &'static str), SourceError> {
     let mut entries: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut has_symlink = false;
     let mut total: u64 = 0;
     let mut count = 0usize;
 
@@ -498,6 +633,18 @@ pub fn measure_source_tree(archive: &[u8], limits: SourceLimits) -> Result<Strin
             entries.insert((format!("{}/", relative.display()), String::new()));
             continue;
         }
+        if entry_type == tar::EntryType::Symlink {
+            // The link itself: kind and target, never the content behind it.
+            // `symlink:` cannot collide with a file's `sha256:` digest.
+            let target = contained_symlink_target(&relative, &link_target_bytes(&entry))?;
+            has_symlink = true;
+            count += 1;
+            if count > limits.max_files {
+                return Err(SourceError::LimitExceeded { limit: "max_files" });
+            }
+            entries.insert((relative.display().to_string(), format!("symlink:{target}")));
+            continue;
+        }
         if !entry_type.is_file() {
             continue;
         }
@@ -520,8 +667,14 @@ pub fn measure_source_tree(archive: &[u8], limits: SourceLimits) -> Result<Strin
         entries.insert((relative.display().to_string(), content_ref(&bytes)));
     }
 
+    // The lowest contract that defines every entry (see RESOLVER_CONTRACT_V2).
+    let contract = if has_symlink {
+        RESOLVER_CONTRACT_V2
+    } else {
+        RESOLVER_CONTRACT_V1
+    };
     let mut hasher = Sha256::new();
-    hasher.update(RESOLVER_CONTRACT_V1.as_bytes());
+    hasher.update(contract.as_bytes());
     hasher.update([0]);
     for (path, digest) in &entries {
         for field in [path.as_str(), digest.as_str()] {
@@ -529,7 +682,7 @@ pub fn measure_source_tree(archive: &[u8], limits: SourceLimits) -> Result<Strin
             hasher.update(field.as_bytes());
         }
     }
-    Ok(format!("sha256:{:x}", hasher.finalize()))
+    Ok((format!("sha256:{:x}", hasher.finalize()), contract))
 }
 
 /// Expand into a staging directory, applying the same rules the measurement did.
@@ -586,6 +739,20 @@ fn expand_archive(
             })?;
             continue;
         }
+        if entry_type == tar::EntryType::Symlink {
+            // Re-checked here as well: expansion must never depend on the
+            // measurement having been run first.
+            let link = contained_symlink_target(&relative, &link_target_bytes(&entry))?;
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).map_err(|error| {
+                    SourceError::Unusable(format!("cannot create {}: {error}", parent.display()))
+                })?;
+            }
+            create_symlink(&link, &target).map_err(|error| {
+                SourceError::Unusable(format!("cannot link {}: {error}", relative.display()))
+            })?;
+            continue;
+        }
         if !entry_type.is_file() {
             continue;
         }
@@ -605,6 +772,24 @@ fn expand_archive(
         })?;
     }
     Ok(destination.to_path_buf())
+}
+
+/// Recreate a link as a link; its target is never read or followed here.
+#[cfg(unix)]
+fn create_symlink(link: &str, at: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(at) {
+        Ok(existing) if existing.is_dir() && !existing.is_symlink() => std::fs::remove_dir_all(at)?,
+        Ok(_) => std::fs::remove_file(at)?,
+        Err(_) => {}
+    }
+    std::os::unix::fs::symlink(link, at)
+}
+
+#[cfg(not(unix))]
+fn create_symlink(_link: &str, _at: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::other(
+        "symlinks in a source tree are materialized on Unix only",
+    ))
 }
 
 /// Narrow an expanded tree to its declared subdirectory.
@@ -818,11 +1003,10 @@ mod tests {
     }
 
     #[test]
-    fn links_devices_and_fifos_are_refused() {
-        // A source tree is files and directories. The rest are ways to reach
-        // outside it once it lands on a disk.
+    fn hard_links_devices_and_fifos_are_refused() {
+        // A source tree is files, directories and contained symlinks. The
+        // rest are ways to reach outside it once it lands on a disk.
         for entry_type in [
-            tar::EntryType::Symlink,
             tar::EntryType::Link,
             tar::EntryType::Char,
             tar::EntryType::Block,
@@ -1116,5 +1300,254 @@ mod tests {
         assert!(root.join("app.py").is_file());
         assert!(root.join("lib/util.py").is_file());
         assert!(!root.join("repo-922b112").exists());
+    }
+
+    // ── resolver v2: contained symlinks ─────────────────────────────────────
+
+    enum E<'a> {
+        File(&'a str, &'a [u8]),
+        Link(&'a str, &'a str),
+        Dir(&'a str),
+    }
+
+    fn tree(entries: &[E<'_>]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut bytes);
+            for entry in entries {
+                let mut header = tar::Header::new_gnu();
+                header.set_mode(0o644);
+                header.set_mtime(0);
+                match entry {
+                    E::File(path, contents) => {
+                        header.set_size(contents.len() as u64);
+                        header.set_entry_type(tar::EntryType::Regular);
+                        builder
+                            .append_data(&mut header, path, Cursor::new(*contents))
+                            .expect("file");
+                    }
+                    E::Link(path, target) => {
+                        header.set_size(0);
+                        header.set_entry_type(tar::EntryType::Symlink);
+                        builder
+                            .append_link(&mut header, path, target)
+                            .expect("link");
+                    }
+                    E::Dir(path) => {
+                        header.set_size(0);
+                        header.set_entry_type(tar::EntryType::Directory);
+                        builder
+                            .append_data(&mut header, path, std::io::empty())
+                            .expect("dir");
+                    }
+                }
+            }
+            builder.finish().expect("finish");
+        }
+        bytes
+    }
+
+    fn contract(bytes: &[u8]) -> Result<(String, &'static str), SourceError> {
+        measure_source_tree_contract(bytes, LIMITS)
+    }
+
+    #[test]
+    fn a_tree_without_symlinks_keeps_its_v1_digest() {
+        // Recomputed here from the v1 definition, independently of the
+        // measuring code: every tree v1 could measure keeps its identity.
+        // (A top-level file, so `safe/` is not taken for a transport wrapper.)
+        let bytes = tree(&[
+            E::File("README", b"r"),
+            E::Dir("safe/"),
+            E::File("safe/file.txt", b"hello"),
+        ]);
+        let (digest, version) = contract(&bytes).expect("measures");
+        assert_eq!(version, RESOLVER_CONTRACT_V1);
+        let mut hasher = Sha256::new();
+        hasher.update(RESOLVER_CONTRACT_V1.as_bytes());
+        hasher.update([0]);
+        let readme = format!("sha256:{:x}", Sha256::digest(b"r"));
+        let file = format!("sha256:{:x}", Sha256::digest(b"hello"));
+        for (path, value) in [
+            ("README", readme.as_str()),
+            ("safe/", ""),
+            ("safe/file.txt", file.as_str()),
+        ] {
+            for field in [path, value] {
+                hasher.update((field.len() as u64).to_be_bytes());
+                hasher.update(field.as_bytes());
+            }
+        }
+        assert_eq!(digest, format!("sha256:{:x}", hasher.finalize()));
+    }
+
+    #[test]
+    fn a_contained_symlink_is_measured_under_v2_as_a_link() {
+        let plain = tree(&[E::Dir("safe/"), E::File("safe/file.txt", b"hello")]);
+        let linked = tree(&[
+            E::Dir("safe/"),
+            E::File("safe/file.txt", b"hello"),
+            E::Link("link", "safe/file.txt"),
+        ]);
+        let (plain_digest, plain_version) = contract(&plain).unwrap();
+        let (linked_digest, linked_version) = contract(&linked).unwrap();
+        assert_eq!(plain_version, RESOLVER_CONTRACT_V1);
+        assert_eq!(linked_version, RESOLVER_CONTRACT_V2);
+        assert_ne!(plain_digest, linked_digest);
+        let verified = DigestVerifiedArchive { bytes: linked }
+            .verify_tree_digest(None, LIMITS)
+            .unwrap();
+        assert_eq!(verified.resolver_contract(), RESOLVER_CONTRACT_V2);
+        assert_eq!(
+            verified.closure_ref("").unwrap(),
+            SourceClosureRef::derive(&linked_digest, "", RESOLVER_CONTRACT_V2).unwrap()
+        );
+    }
+
+    #[test]
+    fn the_link_target_is_the_identity_not_the_content_behind_it() {
+        let to_a = tree(&[
+            E::File("a", b"same"),
+            E::File("b", b"same"),
+            E::Link("link", "a"),
+        ]);
+        let to_b = tree(&[
+            E::File("a", b"same"),
+            E::File("b", b"same"),
+            E::Link("link", "b"),
+        ]);
+        assert_ne!(contract(&to_a).unwrap().0, contract(&to_b).unwrap().0);
+        // And a link is not a copy of its target.
+        let copy = tree(&[
+            E::File("a", b"same"),
+            E::File("b", b"same"),
+            E::File("link", b"same"),
+        ]);
+        assert_ne!(contract(&to_a).unwrap().0, contract(&copy).unwrap().0);
+    }
+
+    #[test]
+    fn contained_targets_are_accepted() {
+        for (link, target) in [
+            ("assets/current", "versions/v1"),
+            ("foo/link", "../shared"),
+            ("a/b/link", "../../c"),
+            ("sub/link", ".."),
+            ("link", "./safe/file.txt"),
+        ] {
+            let bytes = tree(&[E::Link(link, target)]);
+            assert!(contract(&bytes).is_ok(), "{link} -> {target}");
+        }
+    }
+
+    #[test]
+    fn escaping_targets_are_refused() {
+        for (link, target) in [
+            ("link", "/etc/passwd"),
+            ("link", ".."),
+            ("link", "../outside"),
+            ("sub/link", "../../outside"),
+            ("foo/link", "../../../outside"),
+            // Descending first and climbing afterwards passes through a name
+            // that may itself be a link; refused even when it would land inside.
+            ("link", "foo/../../outside"),
+            ("link", "a/../b"),
+        ] {
+            let bytes = tree(&[E::Link(link, target)]);
+            let error = contract(&bytes).expect_err(&format!("{link} -> {target}"));
+            assert_eq!(error.code(), "source_symlink_escape", "{link} -> {target}");
+            // Expansion refuses on its own, too.
+            let destination = tempfile::tempdir().unwrap();
+            let error = expand_archive(&bytes, destination.path(), LIMITS).unwrap_err();
+            assert_eq!(error.code(), "source_symlink_escape");
+        }
+    }
+
+    #[test]
+    fn nothing_may_lie_beneath_a_symlink() {
+        // `dir -> real`, then `dir/file`: extracting it would write through
+        // the link.
+        let bytes = tree(&[
+            E::Dir("real/"),
+            E::Link("dir", "real"),
+            E::File("dir/file", b"x"),
+        ]);
+        assert_eq!(
+            contract(&bytes).unwrap_err().code(),
+            "source_symlink_escape"
+        );
+    }
+
+    #[test]
+    fn a_chain_of_links_cannot_climb_out() {
+        // `s -> .` is contained, and `a -> s/s/../..` would read as contained
+        // lexically but climb out through `s` on a disk: the climb after a
+        // descent is refused.
+        let bytes = tree(&[E::Link("s", "."), E::Link("a", "s/s/../..")]);
+        assert_eq!(
+            contract(&bytes).unwrap_err().code(),
+            "source_symlink_escape"
+        );
+    }
+
+    #[test]
+    fn a_wrapped_archive_with_links_measures_like_the_bare_tree() {
+        let bare = tree(&[
+            E::Dir("safe/"),
+            E::File("safe/file.txt", b"hello"),
+            E::Link("link", "safe/file.txt"),
+        ]);
+        let wrapped = tree(&[
+            E::Dir("repo-abc123/"),
+            E::Dir("repo-abc123/safe/"),
+            E::File("repo-abc123/safe/file.txt", b"hello"),
+            E::Link("repo-abc123/link", "safe/file.txt"),
+        ]);
+        assert_eq!(contract(&bare).unwrap(), contract(&wrapped).unwrap());
+        // A climb that only leaves the wrapper has left the tree.
+        let climbing = tree(&[
+            E::Dir("repo-abc123/"),
+            E::File("repo-abc123/file", b"x"),
+            E::Link("repo-abc123/link", "../repo-abc123/file"),
+        ]);
+        assert_eq!(
+            contract(&climbing).unwrap_err().code(),
+            "source_symlink_escape"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_is_materialized_as_a_link() {
+        let bytes = tree(&[
+            E::Dir("safe/"),
+            E::File("safe/file.txt", b"hello"),
+            E::Link("link", "safe/file.txt"),
+        ]);
+        let verified = DigestVerifiedArchive { bytes }
+            .verify_tree_digest(None, LIMITS)
+            .unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let root = verified
+            .materialize(&destination.path().join("tree"), "", LIMITS)
+            .unwrap();
+        let link = root.join("link");
+        assert!(std::fs::symlink_metadata(&link).unwrap().is_symlink());
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            PathBuf::from("safe/file.txt")
+        );
+        assert_eq!(std::fs::read(&link).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn links_count_against_the_file_limit() {
+        let tiny = SourceLimits {
+            max_files: 1,
+            ..LIMITS
+        };
+        let bytes = tree(&[E::File("a", b"x"), E::Link("b", "a")]);
+        let error = measure_source_tree(&bytes, tiny).unwrap_err();
+        assert_eq!(error.code(), "source_limit_exceeded");
     }
 }

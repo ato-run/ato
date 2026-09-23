@@ -556,12 +556,15 @@ pub fn copy_tree(from: &Path, to: &Path) -> Result<()> {
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;
         let metadata = std::fs::symlink_metadata(entry.path())?;
-        // A link in the source is not followed here either; the source module
-        // already refused them, and this keeps the property local.
+        let target = to.join(entry.file_name());
+        // A link is recreated as the same link — never followed, never copied
+        // as its target's content. The source resolver admitted it only as a
+        // contained, relative link, so the same string stays inside the
+        // staged tree too.
         if metadata.is_symlink() {
+            recreate_symlink(&std::fs::read_link(entry.path())?, &target)?;
             continue;
         }
-        let target = to.join(entry.file_name());
         if metadata.is_dir() {
             std::fs::create_dir_all(&target)?;
             copy_tree(&entry.path(), &target)?;
@@ -570,6 +573,17 @@ pub fn copy_tree(from: &Path, to: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn recreate_symlink(link: &Path, at: &Path) -> Result<()> {
+    std::os::unix::fs::symlink(link, at)
+        .with_context(|| format!("cannot recreate the link {}", at.display()))
+}
+
+#[cfg(not(unix))]
+fn recreate_symlink(_link: &Path, at: &Path) -> Result<()> {
+    bail!("cannot recreate the link {} on this platform", at.display())
 }
 
 #[allow(clippy::too_many_arguments)]

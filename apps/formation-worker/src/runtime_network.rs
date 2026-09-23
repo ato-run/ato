@@ -49,6 +49,9 @@ pub const PROTOCOL: &str = "ato.runtime-network/0";
 pub const NATIVE_ENVIRONMENT: &str = "native";
 /// Largest source archive a request carries inline.
 pub const MAX_SOURCE_BYTES: usize = 32 * 1024 * 1024;
+/// How long a Runtime may take to fetch a ticket's source: MAX_SOURCE_BYTES
+/// at about 40 KB/s.
+const SOURCE_TRANSFER_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 // ─────────────────────────────────────────────────────────────── wire types
 
@@ -548,6 +551,10 @@ impl Client {
             .http
             .get(self.url(&format!("/attempts/{attempt_id}/source")))
             .bearer_auth(&self.token)
+            // The one transfer sized by the source, up to MAX_SOURCE_BYTES:
+            // the client's 60 s would demand more than 0.5 MB/s of every
+            // Runtime's link for a source the protocol admits.
+            .timeout(SOURCE_TRANSFER_TIMEOUT)
             .send()?;
         if !response.status().is_success() {
             bail!(
