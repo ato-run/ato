@@ -1,0 +1,5 @@
+aiohttp==3.14.3
+google-api-python-client==2.200.0
+google-auth-oauthlib==1.4.1
+cryptography==50.0.1
+PySocks==1.7.1
