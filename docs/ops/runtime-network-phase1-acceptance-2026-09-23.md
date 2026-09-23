@@ -143,6 +143,15 @@ after the fix.
   validation (repeated D, K ≠ base without browser Contract, malformed or
   over-wide browser Contract). K was checked against a mutation: without the
   two uniqueness constraints six concurrent calls issue six tickets.
+- Linux (OCI, bwrap): `runtime_network_v1` 5/5, `local_formation_v1` 14/14,
+  `temporary_realization_v1` 6/6, `static_lane_v1` 14/14. `sandbox_v1`
+  `a_step_that_declared_no_network_does_not_get_one` fails there because the
+  test looks for an `ato-formation-worker` binary beside the test binary in
+  `target/debug/deps`; neither that test nor `sandbox.rs` differs from `main`.
+- The Runtimes ran `60eafa30`. Commits after it change fixtures and docs, and
+  reorder two admission refusals (`browser_contract_needs_realization` is
+  reported before `browser_verifier_unavailable`, `5b2657d1`), which no case
+  above reaches.
 
 ### Still not covered
 
