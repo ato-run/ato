@@ -13,9 +13,11 @@
 //! The requester computes every identity (Contract, effective Contract,
 //! Derivation) and every requirement from the Derivation itself, because the
 //! canonical forms live here and nowhere else. The coordinator only matches
-//! typed facts. A Runtime executes the ticket it is handed exactly — the
-//! same archive, the same authored route — and refuses a ticket whose refs its
-//! own planning does not reproduce.
+//! typed facts, and treats the requester's effects and requirements as
+//! scheduling hints. The authority is the Runtime: before anything runs it
+//! plans the ticket's route from the ticket's archive, refuses a ticket whose
+//! refs, environment, effects or platform do not hold, and attests what it
+//! established. The coordinator decides fallback from that attestation.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
