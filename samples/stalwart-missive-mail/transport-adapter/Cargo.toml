@@ -1,0 +1,18 @@
+[package]
+name = "ato-fixed-socks5-tls-adapter"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[dependencies]
+anyhow = "1.0.100"
+rustls-pemfile = "2.2.0"
+tokio = { version = "1.48.0", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-rustls = "0.26.4"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
+url = "2.5.7"
+
+[workspace]
+

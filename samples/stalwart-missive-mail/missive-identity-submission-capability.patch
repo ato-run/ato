@@ -1,0 +1,10 @@
+diff --git a/src/jmap.rs b/src/jmap.rs
+--- a/src/jmap.rs
++++ b/src/jmap.rs
+@@ -592,6 +592,7 @@ pub async fn fetch_identities(client: &Client) -> Result<Vec<IdentityInfo>, Miss
+     trace!("Fetching identities from JMAP server");
+     let mut request = client.build();
++    request.add_capability(jmap_client::URI::Submission);
+     request.get_identity().properties([
+         identity::Property::Id,
+         identity::Property::Name,
