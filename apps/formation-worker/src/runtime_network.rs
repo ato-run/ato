@@ -719,7 +719,13 @@ pub fn execute_ticket(
         browser_verifier: config.browser_verifier.clone(),
         browser_budget: Default::default(),
     };
-    let result = local::run(&request, &env);
+    // Evidence names this Runtime as the ticket does, not as `local`.
+    let result = local::run_as(
+        &request,
+        &env,
+        &local::local_executor(&request, &env),
+        &ticket.runtime_id,
+    );
     let _ = std::fs::remove_dir_all(config.work_root.join(&ticket.attempt_id));
     let result = match result {
         Ok(result) => result,

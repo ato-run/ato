@@ -72,12 +72,18 @@ static ATTEMPT_COUNTER: AtomicU64 = AtomicU64::new(1);
 /// does not parse — come back as `Err`. Everything a candidate did or did
 /// not do comes back inside the result's attempts.
 pub fn run(request: &FormationRequest, env: &LocalFormation) -> Result<FormationResult> {
-    let executor = LocalAttemptExecutor {
+    run_with_executor(request, env, &local_executor(request, env))
+}
+
+pub(crate) fn local_executor(
+    request: &FormationRequest,
+    env: &LocalFormation,
+) -> LocalAttemptExecutor {
+    LocalAttemptExecutor {
         shim: env.shim.clone(),
         network: network_policy(request.policy.network),
         limits: env.limits,
-    };
-    run_with_executor(request, env, &executor)
+    }
 }
 
 /// [`run`] with the attempt executor supplied by the caller.
@@ -93,6 +99,18 @@ pub fn run_with_executor(
     if runtime_id != "local" {
         bail!("Phase 1 admits exactly one Runtime: --runtime local (got {runtime_id:?})");
     }
+    run_as(request, env, executor, runtime_id)
+}
+
+/// [`run_with_executor`] on this machine, recording it in the attempt
+/// evidence under `runtime_id`: the identity a Runtime Network ticket names
+/// this Runtime by, rather than the anonymous `local`.
+pub(crate) fn run_as(
+    request: &FormationRequest,
+    env: &LocalFormation,
+    executor: &dyn AttemptExecutor,
+    runtime_id: &str,
+) -> Result<FormationResult> {
     let profile = probe_local_runtime();
     // Absolute from here on: these paths are bound into sandboxes whose
     // working directory is not this process's.
@@ -151,7 +169,7 @@ pub fn run_with_executor(
                                 candidate: "detect".to_owned(),
                                 derivation_ref: None,
                                 contract_ref: None,
-                                runtime_id: runtime_id.clone(),
+                                runtime_id: runtime_id.to_owned(),
                                 status: AttemptStatus::Filtered,
                                 verification: None,
                                 base_contract_ref: None,
