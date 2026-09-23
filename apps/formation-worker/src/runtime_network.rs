@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use ato_formation::authoring::AuthoringDraft;
+use ato_formation::authoring::{AuthoringDraft, EffectClass};
 use ato_formation::browser::{BrowserContractV0, effective_contract_ref};
 use ato_formation::capsule_toml::parse_capsule_toml;
 use ato_formation::detect::detect;
@@ -182,6 +182,27 @@ pub struct AttemptFailureWire {
     pub message: String,
 }
 
+/// What the Runtime itself established about the ticket, from the archive
+/// and the authored route — never from the request's metadata. The
+/// coordinator decides fallback from this, not from what the requester said.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeAttestation {
+    /// The environment this Runtime executes (or refused to execute) in.
+    pub environment_id: String,
+    pub agent_version: String,
+    /// `None` when the ticket was refused before it could be planned.
+    pub derivation_ref: Option<String>,
+    pub contract_ref: Option<String>,
+    /// The canonical Derivation's effect class.
+    pub effects: Option<String>,
+    pub requirements: Vec<Requirement>,
+    pub provisions: Vec<String>,
+    /// Did anything of the candidate run — a build step, the application?
+    /// `false` for every refusal before execution.
+    pub execution_started: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AttemptResultReport {
@@ -196,6 +217,7 @@ pub struct AttemptResultReport {
     /// realization evidence, browser receipt.
     pub formation_attempt: Option<serde_json::Value>,
     pub verifier_receipts: Vec<serde_json::Value>,
+    pub attestation: RuntimeAttestation,
 }
 
 // ────────────────────────────────────────────────────────────────── facts
@@ -658,7 +680,43 @@ pub fn serve(config: &ServeConfig) -> Result<()> {
     outcome
 }
 
-fn unavailable(ticket: &AttemptTicket, code: &str, message: &str) -> AttemptResultReport {
+/// Effect classes a Runtime executes unattended: an attempt of one of these
+/// can fail and be retried elsewhere without anything leaking out of it.
+pub fn is_disposable(effects: EffectClass) -> bool {
+    matches!(
+        effects,
+        EffectClass::Pure | EffectClass::Idempotent | EffectClass::RecordSubstitutable
+    )
+}
+
+fn effects_name(effects: EffectClass) -> String {
+    serde_json::to_value(effects)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| format!("{effects:?}"))
+}
+
+/// This Runtime's attestation before it has planned anything.
+fn attestation() -> RuntimeAttestation {
+    RuntimeAttestation {
+        environment_id: NATIVE_ENVIRONMENT.to_owned(),
+        agent_version: env!("CARGO_PKG_VERSION").to_owned(),
+        derivation_ref: None,
+        contract_ref: None,
+        effects: None,
+        requirements: Vec::new(),
+        provisions: Vec::new(),
+        execution_started: false,
+    }
+}
+
+/// A ticket this Runtime did not run: nothing of the candidate executed.
+fn refused(
+    ticket: &AttemptTicket,
+    attestation: RuntimeAttestation,
+    code: &str,
+    message: &str,
+) -> AttemptResultReport {
     AttemptResultReport {
         fence: ticket.fence,
         outcome: "inconclusive".to_owned(),
@@ -667,33 +725,145 @@ fn unavailable(ticket: &AttemptTicket, code: &str, message: &str) -> AttemptResu
         materialization_ref: None,
         failure: Some(AttemptFailureWire {
             code: code.to_owned(),
-            stage: "runtime".to_owned(),
+            stage: "admission".to_owned(),
             message: crate::api::bounded_reason(message),
         }),
         formation_attempt: None,
         verifier_receipts: Vec::new(),
+        attestation: RuntimeAttestation {
+            execution_started: false,
+            ..attestation
+        },
     }
+}
+
+fn unavailable(ticket: &AttemptTicket, code: &str, message: &str) -> AttemptResultReport {
+    let mut report = refused(ticket, attestation(), code, message);
+    if let Some(failure) = report.failure.as_mut() {
+        failure.stage = "runtime".to_owned();
+    }
+    report
+}
+
+/// The ticket's route, planned by this Runtime from the ticket's archive:
+/// the canonical Derivation, its identities, effects and requirements. The
+/// same planning a requester does, so the refs must agree.
+fn plan_ticket(
+    ticket: &AttemptTicket,
+    archive: &[u8],
+    work_root: &Path,
+) -> Result<(PlannedCandidate, String)> {
+    std::fs::create_dir_all(work_root)?;
+    let frozen = freeze_archive(
+        archive.to_vec(),
+        &ticket.archive_digest,
+        &std::path::absolute(work_root)?,
+        SourceLimits::default(),
+    )?;
+    let evidence = detect(&frozen.root).context("detection failed")?;
+    let draft: AuthoringDraft = parse_capsule_toml(&ticket.capsule_toml)
+        .map_err(ato_formation::failure::FormationFailure::from)?;
+    let planned = plan_candidate(
+        &draft,
+        &frozen.closure_ref,
+        &evidence,
+        BTreeMap::new(),
+        "/app",
+        &host_triple(),
+    )?;
+    let contract_ref =
+        effective_contract_ref(&planned.contract_ref, ticket.browser_contract.as_ref());
+    Ok((planned, contract_ref))
 }
 
 /// Run one ticket through the local Formation machinery — frozen archive,
 /// the authored route and nothing else, contained build, temporary
 /// realization, typed and browser verification — and report what happened.
+///
+/// Before anything of the candidate runs, this Runtime re-establishes what
+/// the ticket is from the archive and the route alone, and refuses it when:
+/// the environment is not one it executes; it asks for bindings; its own
+/// planning does not reach the ticket's refs; the canonical effect class is
+/// not disposable (nothing here is run unattended that could leave an effect
+/// behind). Platform, containment, process and browser-verifier admission
+/// follow in the local driver, still before execution.
 pub fn execute_ticket(
     config: &ServeConfig,
     ticket: &AttemptTicket,
     archive: Vec<u8>,
 ) -> AttemptResultReport {
-    let network = match ticket.network.as_str() {
-        "dependency-resolution" => FormationNetworkPolicy::DependencyResolution,
-        _ => FormationNetworkPolicy::Denied,
-    };
-    if !ticket.bindings.is_empty() {
-        return unavailable(
+    let mut attested = attestation();
+    if ticket.environment_id != NATIVE_ENVIRONMENT {
+        return refused(
             ticket,
+            attested,
+            "environment_mismatch",
+            &format!(
+                "the ticket names environment {:?}; this Runtime executes only {NATIVE_ENVIRONMENT:?}",
+                ticket.environment_id
+            ),
+        );
+    }
+    if !ticket.bindings.is_empty() {
+        return refused(
+            ticket,
+            attested,
             "bindings_unsupported",
             "this Runtime binds no external state in Phase 1",
         );
     }
+    let attempt_root = config.work_root.join(&ticket.attempt_id);
+    let planned = plan_ticket(ticket, &archive, &attempt_root.join("preflight"));
+    let _ = std::fs::remove_dir_all(attempt_root.join("preflight"));
+    let (planned, contract_ref) = match planned {
+        Ok(planned) => planned,
+        Err(error) => {
+            return refused(
+                ticket,
+                attested,
+                "ticket_unplannable",
+                &format!("{error:#}"),
+            );
+        }
+    };
+    let (requirements, provisions) = derivation_requirements(&planned);
+    attested.derivation_ref = Some(planned.derivation_ref.clone());
+    attested.contract_ref = Some(contract_ref.clone());
+    attested.effects = Some(effects_name(planned.derivation.effects));
+    attested.requirements = requirements;
+    attested.provisions = provisions;
+
+    // The Runtime does not rewrite the ticket: its own planning must reach
+    // the refs the requester computed.
+    if planned.derivation_ref != ticket.derivation_ref || contract_ref != ticket.contract_ref {
+        return refused(
+            ticket,
+            attested,
+            "ticket_mismatch",
+            &format!(
+                "planned {}/{contract_ref}, the ticket names {}/{}",
+                planned.derivation_ref, ticket.derivation_ref, ticket.contract_ref
+            ),
+        );
+    }
+    if !is_disposable(planned.derivation.effects) {
+        return refused(
+            ticket,
+            attested,
+            "effect_policy",
+            &format!(
+                "the route's effect class is {}; a Runtime Network attempt runs unattended and \
+                 may be retried elsewhere, so only pure, idempotent or record-substitutable \
+                 routes are executed",
+                effects_name(planned.derivation.effects)
+            ),
+        );
+    }
+
+    let network = match ticket.network.as_str() {
+        "dependency-resolution" => FormationNetworkPolicy::DependencyResolution,
+        _ => FormationNetworkPolicy::Denied,
+    };
     let request = FormationRequest {
         initial_condition: InitialCondition::Archive {
             bytes: archive,
@@ -711,7 +881,7 @@ pub fn execute_ticket(
         browser_contract: ticket.browser_contract.clone(),
     };
     let env = LocalFormation {
-        work_root: config.work_root.join(&ticket.attempt_id),
+        work_root: attempt_root.clone(),
         out_dir: config.out_dir.clone(),
         shim: config.shim.clone(),
         limits: BuildLimits::default(),
@@ -726,10 +896,15 @@ pub fn execute_ticket(
         &local::local_executor(&request, &env),
         &ticket.runtime_id,
     );
-    let _ = std::fs::remove_dir_all(config.work_root.join(&ticket.attempt_id));
+    let _ = std::fs::remove_dir_all(&attempt_root);
     let result = match result {
         Ok(result) => result,
-        Err(error) => return unavailable(ticket, "formation_error", &format!("{error:#}")),
+        Err(error) => {
+            return AttemptResultReport {
+                attestation: attested,
+                ..unavailable(ticket, "formation_error", &format!("{error:#}"))
+            };
+        }
     };
     let (attempts, materialization_ref) = match &result {
         FormationResult::Formed {
@@ -745,20 +920,27 @@ pub fn execute_ticket(
         FormationResult::NoVerifiedRoute { attempts, .. } => (attempts, None),
     };
     let Some(attempt) = attempts.first() else {
-        return unavailable(
-            ticket,
-            "formation_empty",
-            "the Formation produced no attempt",
-        );
+        return AttemptResultReport {
+            attestation: attested,
+            ..unavailable(
+                ticket,
+                "formation_empty",
+                "the Formation produced no attempt",
+            )
+        };
     };
+    // Admission in the local driver (platform, containment, process,
+    // browser verifier) refuses before anything runs.
+    attested.execution_started = attempt.status != AttemptStatus::Filtered;
 
-    // The Runtime does not rewrite the ticket: its own planning must reach
-    // the refs the requester computed.
+    // Planned twice from the same bytes; still, never report a pass under
+    // refs other than the ticket's.
     if attempt.derivation_ref.as_deref() != Some(ticket.derivation_ref.as_str())
         || attempt.contract_ref.as_deref() != Some(ticket.contract_ref.as_str())
     {
-        let mut report = unavailable(
+        let mut report = refused(
             ticket,
+            attested.clone(),
             "ticket_mismatch",
             &format!(
                 "planned {:?}/{:?}, the ticket names {}/{}",
@@ -768,6 +950,7 @@ pub fn execute_ticket(
                 ticket.contract_ref
             ),
         );
+        report.attestation.execution_started = attested.execution_started;
         report.formation_attempt = serde_json::to_value(attempt).ok();
         return report;
     }
@@ -800,5 +983,6 @@ pub fn execute_ticket(
         }),
         formation_attempt: serde_json::to_value(attempt).ok(),
         verifier_receipts: receipts,
+        attestation: attested,
     }
 }
