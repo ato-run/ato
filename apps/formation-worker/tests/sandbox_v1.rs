@@ -157,6 +157,7 @@ fn a_step_that_declared_no_network_does_not_get_one() {
             toolchain_access: ato_formation::intent::ToolchainAccess::ReadOnly,
         }],
         output_root: String::new(),
+        toolchain_path: Vec::new(),
     };
     // The job's policy allows the network; the step did not ask for it. The
     // narrower of the two wins.
@@ -196,6 +197,7 @@ fn a_networked_step_under_a_denied_policy_is_refused() {
             toolchain_access: ato_formation::intent::ToolchainAccess::ReadOnly,
         }],
         output_root: String::new(),
+        toolchain_path: Vec::new(),
     };
     let binary = worker_binary();
     let error = run_build(
@@ -239,6 +241,7 @@ fn a_declared_output_root_the_build_did_not_produce_is_a_failure() {
         runtime: Default::default(),
         steps: Vec::new(),
         output_root: "dist".to_owned(),
+        toolchain_path: Vec::new(),
     };
     let outcome = BuildOutcome {
         attempt: attempt(1),

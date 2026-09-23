@@ -80,7 +80,7 @@ impl AttemptExecutor for LocalAttemptExecutor {
         )?;
 
         match candidate.intent.lane {
-            ato_formation::intent::Lane::PythonProcess => {
+            ato_formation::intent::Lane::PythonProcess | ato_formation::intent::Lane::Process => {
                 let root = output_root(&built, &candidate.plan)?;
                 Ok(ExecutedCandidate::Process {
                     workspace_root: root,

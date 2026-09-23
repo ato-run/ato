@@ -45,6 +45,7 @@ fn plan_of(steps: Vec<BuildStepV1>) -> EffectiveBuildPlanV1 {
         runtime: BTreeMap::new(),
         steps,
         output_root: String::new(),
+        toolchain_path: Vec::new(),
     }
 }
 
@@ -124,6 +125,7 @@ fn authored_env_is_given_to_the_workload_and_never_to_the_sandbox() {
         &["/bin/true".to_owned()],
         None,
         &env,
+        &[],
         &BuildSandbox {
             source_root: &at.source,
             workspace_root: &at.workspace,

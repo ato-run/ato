@@ -163,6 +163,7 @@ fn build(workspace: &Path, source: &Path, script: &str) -> anyhow::Result<()> {
             toolchain_access: ato_formation::intent::ToolchainAccess::ReadOnly,
         }],
         output_root: String::new(),
+        toolchain_path: Vec::new(),
     };
     let policy = workspace.parent().unwrap().join("policy.json");
     run_build(
