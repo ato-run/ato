@@ -4,7 +4,7 @@ Machine-readable: `formation-p0-benchmark-2026-09-23.json` (same directory).
 
 ## Result in one paragraph
 
-**0 of 20 apps reached any Level.** None produced a SatisfyRequest, so the Coordinator saw no candidate, attempt or route: every app was refused by the requester before submission. The first blocker was source size for 12 apps (Runtime Network inline limit 32 MiB), an `exec` build step in the D for 4, a symlink in the source tree for 3, and a second serving process for 1. Independently of the source, **only 1 of the 20 upstream-documented Ds (searxng) is expressible in what Ato accepts today**: 16 need a preparation/build step, 2 need two serving processes, 1 declares a non-Python runtime. A labeled counterfactual on searxng (one sample-config symlink removed from a copy) reached **Level 3 on x86_64** and then stopped on two further blockers: an Ato build executor defect (undrained stdout pipe hangs dependency installs on ARM64) and the browser agent model refusing the page.
+**0 of 20 apps reached any Level.** None produced a SatisfyRequest, so the Coordinator saw no candidate, attempt or route: every app was refused by the requester before submission. The first blocker was source size for 12 apps (Runtime Network inline limit 32 MiB), an `exec` build step in the D for 4, a symlink in the source tree for 3, and a second serving process for 1. Independently of the source, **only 1 of the 20 upstream-documented Ds (searxng) can be projected onto today's execution plan**. The authoring grammar can write every one of them — including preparation steps (`ato.process@1` `op = "exec"`) — but the current Derivation projection cannot project an authored `exec` step into an EffectiveBuildPlan (16 Ds), projects exactly one serving step (2), and provisions only a Python runtime (1). A labeled counterfactual on searxng (one sample-config symlink removed from a copy) reached **Level 3 on x86_64** and then stopped on two further blockers: an Ato build executor defect (undrained stdout pipe hangs dependency installs on ARM64) and the browser agent model refusing the page.
 
 ## Setup
 
@@ -84,13 +84,13 @@ Every gap an app has (primary or secondary; observed, D-gate probe or analysis �
 | gpu | 1 |
 | database_service | 1 |
 | reverse_proxy | 1 |
-| browser_inconclusive | 1 |
 | build_failed | 1 |
+| browser_inconclusive | 1 |
 | migration | 1 |
 | git_lfs | 1 |
 | docker_socket | 1 |
 
-D-gate probe (each D alone, against an empty Initial Condition): accepted 1 (searxng) · refused for an `exec` step 16 · for two serving steps 2 · for a non-Python runtime 1.
+D-gate probe (each D alone, against an empty Initial Condition): every D parses under the authoring grammar; the Derivation projection accepted 1 (searxng) and refused 16 because it cannot project an authored `exec` step into an EffectiveBuildPlan, 2 because it projects exactly one serving step, 1 because it provisions only Python.
 
 ## searxng counterfactual (not counted)
 
@@ -111,7 +111,7 @@ Change: one symlink removed from a copy of the source (utils/templates/etc/apach
 ## Defects found (not fixed during the baseline)
 
 - **apps/formation-worker/src/build.rs run_step** — build step stdout/stderr are piped but not read until exit; output beyond one pipe buffer blocks the step until its time budget (15 min). Evidence: searxng ARM64 attempt: pip blocked in anon_pipe_write for >9 min; attempt formation_failed after 16 min. Impact: blocks the Python lane for any non-trivial dependency set.
-- **Initial Condition freeze** — any symlink in the tree refuses the whole source. Evidence: searxng, navidrome, code-server refused; 4 more repos contain symlinks. Impact: 7/20 repos.
+- **source resolver (RESOLVER_CONTRACT_V1)** — the resolver contract defines no symlink entry, so any symlink refuses the whole source; supporting it is a resolver semantics change, not a parser fix. Evidence: searxng, navidrome, code-server refused; 4 more repos contain symlinks. Impact: 7/20 repos.
 
 ## What to build next: missing primitives
 
@@ -119,11 +119,11 @@ Change: one symlink removed from a copy of the source (utils/templates/etc/apach
 
 | Primitive | Layer | Scope | Blocked apps |
 |---|---|---|---|
-| Preparation/build steps in an authored D (ato.process@1 op=exec, with declared network) | Derivation projection + build executor | large | 16: code-server, excalidraw, homepage, gitea, grafana, uptime-kuma, metabase, filestash, n8n, navidrome, nocodb, node-red, open-webui, paperless-ngx, portainer, memos |
+| Projection of authored preparation/build steps (ato.process@1 op=exec) into an EffectiveBuildPlan — the grammar already expresses them | Derivation projection + build executor | large | 16: code-server, excalidraw, homepage, gitea, grafana, uptime-kuma, metabase, filestash, n8n, navidrome, nocodb, node-red, open-webui, paperless-ngx, portainer, memos |
 | Source transport beyond the 32 MiB inline SatisfyRequest (content-addressed upload) | Runtime Network protocol + Coordinator storage | medium | 12: Stirling-PDF, excalidraw, gitea, grafana, immich, metabase, filestash, n8n, nocodb, node-red, open-webui, paperless-ngx |
 | Go / pnpm / yarn build toolchains inside the build sandbox | toolchain provisioning | medium | 9: excalidraw, homepage, gitea, grafana, filestash, navidrome, open-webui, portainer, memos |
 | Node as a process runtime (not only a build tool) | Derivation projection + runtime provisioning | medium | 7: code-server, homepage, immich, uptime-kuma, n8n, nocodb, node-red |
-| Symlinks inside the source tree (within-tree, relative) | Initial Condition freeze / source archive | small | 7: Stirling-PDF, code-server, grafana, immich, n8n, navidrome, searxng |
+| Contained symlinks in the source tree — a source resolver semantics extension (new resolver contract version, tree identity includes link targets), not a parser fix | source resolver / Initial Condition identity | medium | 7: Stirling-PDF, code-server, grafana, immich, n8n, navidrome, searxng |
 | Multi-service topology (several serving processes, service dependencies) | Derivation + realization | large | 3: FreshRSS, immich, paperless-ngx |
 | Java / PHP runtimes | runtime provisioning | medium | 3: FreshRSS, Stirling-PDF, metabase |
 | Database / queue service bindings (PostgreSQL, Redis) | bindings | large | 2: immich, paperless-ngx |
@@ -142,6 +142,8 @@ Cumulative bundles (analysis unless stated):
 | B3: B2 + Go toolchain | 6: searxng, uptime-kuma, homepage, memos, portainer, navidrome | low-medium | analysis; navidrome also needs taglib, portainer is only a UI without a Docker socket |
 | B4: B3 + source transport > 32 MiB | 14: searxng, uptime-kuma, homepage, memos, portainer, navidrome, gitea, filestash, node-red, open-webui, nocodb, n8n, grafana, excalidraw | low | analysis; grafana/metabase builds are memory-heavy; excalidraw additionally needs an authored static build and has no Browser K |
 | Not unlocked by B4 | — | medium | still blocked: immich-app/immich (multi-service + PostgreSQL + Redis); paperless-ngx/paperless-ngx (multi-service + Redis); FreshRSS/FreshRSS (web server + PHP); Stirling-Tools/Stirling-PDF (Java + native tools); metabase/metabase (Java/Clojure); coder/code-server (submodule + LFS + heavy build) |
+
+Two of these are not what their size suggests. **Build steps**: the authoring grammar already expresses `exec`; what is missing is its projection into an EffectiveBuildPlan and its execution. **Symlinks**: not a parser fix — accepting them changes the source resolver's semantics (which entries a source tree may contain and how they enter the tree identity), so it needs a new resolver contract version rather than dropping a check.
 
 Reading: the smallest step with measured evidence is B1 (two small fixes + a model fallback → searxng). The largest single lever is **build/preparation steps in an authored D** (16/20 need it), but it only pays off together with non-Python toolchains/runtimes (Node for 7, Go for 6) and, for 12 apps, a source transport beyond 32 MiB. Multi-service and service bindings (3 apps) come last.
 
