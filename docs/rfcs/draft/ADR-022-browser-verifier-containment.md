@@ -1,6 +1,7 @@
 # ADR-022 — Browser Verifier containment
 
-**Status**: proposed
+**Status**: proposed (amended 2026-09-23: the browser runs in a sibling
+sandbox started by the worker, not a nested one — see "Amendment")
 **Context**: The last open trust boundary of Browser Verification v0
 (ADR-020) and the Runtime Network (ADR-021): before a benchmark runs many
 unknown applications, the process that renders them must not see the host.
@@ -104,3 +105,43 @@ worker (host)
 - Chrome's own sandbox runs inside ours where the host allows it; renderer
   processes observed from the host were non-dumpable (their `environ`
   unreadable even to the same user).
+
+## Amendment (2026-09-23): a sibling browser sandbox, not a nested one
+
+The first implementation started Chrome inside the helper's sandbox through a
+nested `bwrap --unshare-pid`. That needs a user namespace inside a user
+namespace. On hosts with AppArmor's `apparmor_restrict_unprivileged_userns = 1`
+— the default on Ubuntu 24.04 and later — bubblewrap itself may create one,
+but a process it starts may not, so the nested launch failed. Worse, the
+preflight checked only that `/usr/bin/bwrap` existed, so such a host
+advertised `runtime.browser = true` and then failed every browser
+verification (`ECONNREFUSED` to a browser that never started). Found on an
+Ubuntu 26.04 x86_64 Runtime before the P0 benchmark; the ARM64 host had the
+restriction off.
+
+Now:
+
+```text
+worker (host)
+  ├─ bwrap helper sandbox   /verifier ro, /runtime/node ro, /scratch rw; keys on fd 3
+  │    └─ bin/chrome-contained.cjs ── /scratch/.browser-launcher.sock ──┐
+  └─ bwrap browser sandbox  /runtime/chrome ro, /scratch rw; empty env ◀┘ (per request)
+```
+
+- The helper sandbox no longer contains Chrome at all. Stagehand starts
+  `bin/chrome-contained.cjs`, a client that sends only Chrome's arguments to
+  the worker's launcher (`BrowserLauncher`) and then stands in for the
+  browser: it exits with the browser's code, and when it is killed the worker
+  kills the browser. The worker chooses the executable and the sandbox; at
+  most four browsers per verification; all are killed when the verification
+  ends.
+- The browser sandbox is a sibling of the helper's, created by the worker, so
+  no nesting is needed: its own PID namespace (the helper does not exist in
+  it), an empty environment plus `HOME`, `TMPDIR`, `PATH`, `LANG`, the Chrome
+  directory read-only and the same scratch for the profile.
+- The preflight starts both sandboxes: the helper's, and Chrome headless in
+  the browser's until it opens its DevTools endpoint — first with Chrome's own
+  sandbox, then with `--no-sandbox` (still inside the browser sandbox). A host
+  where neither starts is not a browser Runtime. The mode is recorded:
+  `browser_process = "separate-sandbox+empty-environment+chrome-sandbox"` or
+  `…+chrome-no-sandbox`.
