@@ -13,6 +13,7 @@
     typeof bootstrap.control_url !== "string" ||
     typeof bootstrap.channel_credential !== "string" ||
     typeof bootstrap.browser_session !== "string" ||
+    !validChannelScope(bootstrap.channel_scope) ||
     !Array.isArray(bootstrap.allowed_non_text_codes) ||
     !["observe_and_apply", "apply_only"].includes(bootstrap.input_mode)
   ) {
@@ -31,6 +32,7 @@
   const socket = new WebSocket(bootstrap.control_url);
   const pointerTargets = new Map();
   let acceptingInput = false;
+  let lastCommandSequence = 0;
 
   socket.addEventListener("open", () => {
     send({
@@ -39,6 +41,7 @@
       channel_credential: bootstrap.channel_credential,
       browser_session: bootstrap.browser_session,
       top_level_origin: globalThis.location.origin,
+      channel_scope: bootstrap.channel_scope,
     });
   });
 
@@ -54,30 +57,54 @@
     if (
       value.type === "hello_ack" &&
       value.protocol === "ato.browser@1" &&
-      value.browser_session === bootstrap.browser_session
+      value.browser_session === bootstrap.browser_session &&
+      Number.isSafeInteger(value.last_sequence) &&
+      value.last_sequence >= 0 &&
+      sameChannelScope(value.channel_scope, bootstrap.channel_scope)
     ) {
+      lastCommandSequence = value.last_sequence;
       acceptingInput = true;
       return;
     }
     if (value.type === "apply" &&
         typeof value.request_id === "string" &&
-        typeof value.operation_id === "string") {
+        typeof value.operation_id === "string" &&
+        acceptCommandSequence(value.sequence)) {
       try {
+        assertChannelActive();
         await validateRealizationGeneration(value.realization_generation, value.operation_id);
         await dispatch(value.event, value.operation_id, value.realization_generation);
-        send({ type: "ack", request_id: value.request_id });
+        send({ type: "ack", request_id: value.request_id, sequence: value.sequence });
       } catch (error) {
         send({
           type: "error",
           request_id: value.request_id,
+          sequence: value.sequence,
           reason: error instanceof Error ? error.message : "apply failed",
         });
       }
       return;
     }
-    if (value.type === "quiesce" && typeof value.request_id === "string") {
+    if (value.type === "quiesce" &&
+        typeof value.request_id === "string" &&
+        acceptCommandSequence(value.sequence)) {
+      try {
+        assertChannelActive();
+      } catch (error) {
+        send({
+          type: "error",
+          request_id: value.request_id,
+          sequence: value.sequence,
+          reason: error instanceof Error ? error.message : "channel expired",
+        });
+        return;
+      }
       acceptingInput = false;
-      send({ type: "quiesced", request_id: value.request_id });
+      send({ type: "quiesced", request_id: value.request_id, sequence: value.sequence });
+      return;
+    }
+    if (value.type === "apply" || value.type === "quiesce") {
+      socket.close(1008, "invalid command sequence");
     }
   });
 
@@ -142,6 +169,21 @@
 
   function canCapture(event) {
     return acceptingInput && event.isTrusted === true && socket.readyState === WebSocket.OPEN;
+  }
+
+  function acceptCommandSequence(value) {
+    if (!Number.isSafeInteger(value) || value <= 0 || value !== lastCommandSequence + 1) {
+      return false;
+    }
+    lastCommandSequence = value;
+    return true;
+  }
+
+  function assertChannelActive() {
+    if (bootstrap.channel_scope !== undefined &&
+        bootstrap.channel_scope.expires_at_unix_seconds <= Math.floor(Date.now() / 1000)) {
+      throw new Error("Browser channel scope expired");
+    }
   }
 
   async function dispatch(event, requestId, realizationGeneration) {
@@ -295,5 +337,24 @@
 
   function isObject(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+
+  function validChannelScope(value) {
+    if (value === undefined) return true;
+    return isObject(value) &&
+      [value.activity_id, value.run_id, value.epoch].every((part) =>
+        typeof part === "string" && part.length > 0 && part.length <= 256 &&
+        /^[A-Za-z0-9_.:-]+$/.test(part)) &&
+      Number.isSafeInteger(value.expires_at_unix_seconds) &&
+      value.expires_at_unix_seconds > Math.floor(Date.now() / 1000);
+  }
+
+  function sameChannelScope(left, right) {
+    if (left === undefined || right === undefined) return left === right;
+    return validChannelScope(left) && validChannelScope(right) &&
+      left.activity_id === right.activity_id &&
+      left.run_id === right.run_id &&
+      left.epoch === right.epoch &&
+      left.expires_at_unix_seconds === right.expires_at_unix_seconds;
   }
 })();

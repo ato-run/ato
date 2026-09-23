@@ -7,7 +7,8 @@
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::Method;
@@ -28,6 +29,8 @@ pub struct ActivityConnectionFile {
     pub actor_id: String,
     #[serde(skip_serializing)]
     controller_key: String,
+    #[serde(default)]
+    trace_id: Option<String>,
 }
 
 impl fmt::Debug for ActivityConnectionFile {
@@ -37,6 +40,7 @@ impl fmt::Debug for ActivityConnectionFile {
             .field("api_url", &self.api_url)
             .field("activity_id", &self.activity_id)
             .field("actor_id", &self.actor_id)
+            .field("trace_id", &self.trace_id)
             .field("controller_key", &"[REDACTED]")
             .finish()
     }
@@ -65,6 +69,10 @@ impl ActivityConnectionFile {
     fn validate(&self) -> Result<()> {
         ensure!(valid_scoped_id(&self.activity_id), "invalid Activity id");
         ensure!(valid_scoped_id(&self.actor_id), "invalid Actor id");
+        ensure!(
+            self.trace_id.as_deref().is_none_or(valid_coop_trace_id),
+            "invalid Coop trace id"
+        );
         ensure!(
             self.controller_key.starts_with("atoc_")
                 && (32..=160).contains(&self.controller_key.len()),
@@ -129,11 +137,20 @@ pub struct ActivityClient {
     http: Client,
     session: ControllerSessionProjection,
     session_token: Option<String>,
+    trace_id: Option<String>,
+    trace_started_at: Instant,
+    first_agent_operation_reported: AtomicBool,
 }
 
 impl ActivityClient {
     pub fn connect(path: &Path) -> Result<Self> {
+        let trace_started_at = Instant::now();
         let connection = ActivityConnectionFile::load(path)?;
+        emit_coop_trace(
+            connection.trace_id.as_deref(),
+            "agent_start_requested",
+            trace_started_at,
+        );
         let base_url = validate_api_url(&connection.api_url)?;
         let http = Client::builder()
             .connect_timeout(Duration::from_secs(10))
@@ -142,7 +159,17 @@ impl ActivityClient {
             .user_agent(concat!("ato-activity-mcp/", env!("CARGO_PKG_VERSION")))
             .build()
             .context("build Activity API client")?;
+        emit_coop_trace(
+            connection.trace_id.as_deref(),
+            "agent_controller_created",
+            trace_started_at,
+        );
         let created = create_controller_session(&http, &base_url, &connection)?;
+        emit_coop_trace(
+            connection.trace_id.as_deref(),
+            "agent_transport_connected",
+            trace_started_at,
+        );
         ensure!(
             created.session.activity_id == connection.activity_id
                 && created.session.actor_id == connection.actor_id
@@ -158,6 +185,9 @@ impl ActivityClient {
             http,
             session: created.session,
             session_token: Some(created.controller_session_token),
+            trace_id: connection.trace_id,
+            trace_started_at,
+            first_agent_operation_reported: AtomicBool::new(false),
         })
     }
 
@@ -169,12 +199,36 @@ impl ActivityClient {
         &self.connection_path
     }
 
+    pub fn mark_agent_operation_applied(&self) {
+        if !self
+            .first_agent_operation_reported
+            .swap(true, Ordering::Relaxed)
+        {
+            emit_coop_trace(
+                self.trace_id.as_deref(),
+                "first_agent_operation_applied",
+                self.trace_started_at,
+            );
+            emit_coop_trace(
+                self.trace_id.as_deref(),
+                "agent_ready",
+                self.trace_started_at,
+            );
+        }
+    }
+
     pub fn get_context(&self) -> Result<Value> {
         self.session_request(Method::GET, "/v1/controller/context", None)
     }
 
     pub fn observe_surfaces(&self) -> Result<Value> {
-        self.session_request(Method::GET, "/v1/controller/surfaces", None)
+        let value = self.session_request(Method::GET, "/v1/controller/surfaces", None)?;
+        emit_coop_trace(
+            self.trace_id.as_deref(),
+            "agent_surface_discovered",
+            self.trace_started_at,
+        );
+        Ok(value)
     }
 
     pub fn list_operations(&self, surface_id: &str) -> Result<Value> {
@@ -215,14 +269,23 @@ impl ActivityClient {
 
     pub fn read_operation(&self, operation_id: &str) -> Result<Value> {
         ensure!(valid_scoped_id(operation_id), "invalid Operation id");
-        self.session_request(
+        let value = self.session_request(
             Method::GET,
             &format!(
                 "/v1/controller/operations/{}",
                 encode_path_segment(operation_id)
             ),
             None,
-        )
+        )?;
+        let applied = value
+            .get("receipt")
+            .and_then(|receipt| receipt.get("result"))
+            .and_then(Value::as_str)
+            == Some("applied");
+        if applied {
+            self.mark_agent_operation_applied();
+        }
+        Ok(value)
     }
 
     pub fn read_memo(&self) -> Result<Value> {
@@ -286,7 +349,15 @@ impl ActivityClient {
             .session_token
             .as_deref()
             .context("Controller session has been released")?;
-        send_json(&self.http, &self.base_url, method, path, token, body)
+        send_json(
+            &self.http,
+            &self.base_url,
+            method,
+            path,
+            token,
+            body,
+            self.trace_id.as_deref(),
+        )
     }
 }
 
@@ -302,6 +373,7 @@ fn create_controller_session(
         "/v1/controller-sessions",
         &connection.controller_key,
         Some(json!({"controller_kind": EXTERNAL_MCP_CONTROLLER_KIND})),
+        connection.trace_id.as_deref(),
     )?;
     serde_json::from_value(value).context("decode Controller session response")
 }
@@ -313,6 +385,7 @@ fn send_json(
     path: &str,
     bearer: &str,
     body: Option<Value>,
+    trace_id: Option<&str>,
 ) -> Result<Value> {
     let url = base_url
         .join(path.trim_start_matches('/'))
@@ -321,11 +394,34 @@ fn send_json(
         .request(method, url)
         .bearer_auth(bearer)
         .header("accept", "application/json");
+    if let Some(trace_id) = trace_id {
+        request = request.header("x-ato-trace-id", trace_id);
+    }
     if let Some(body) = body {
         request = request.json(&body);
     }
     let response = request.send().context("Activity API request failed")?;
     decode_response(response)
+}
+
+fn valid_coop_trace_id(value: &str) -> bool {
+    value.len() == 37
+        && value.starts_with("coop_")
+        && value[5..].bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn emit_coop_trace(trace_id: Option<&str>, stage: &str, started_at: Instant) {
+    let Some(trace_id) = trace_id else { return };
+    eprintln!(
+        "{}",
+        json!({
+            "event":"ato.coop.trace",
+            "trace_id":trace_id,
+            "component":"ato-activity-mcp",
+            "stage":stage,
+            "elapsed_ms":(started_at.elapsed().as_secs_f64() * 10000.0).round() / 10.0,
+        })
+    );
 }
 
 fn decode_response(response: Response) -> Result<Value> {
