@@ -305,7 +305,9 @@ fn run_step(step: &BuildStepV1, argv: &[String], budget: Duration) -> Result<Vec
     let abort = |child: &mut std::process::Child, reason: String| -> Result<Vec<u8>> {
         terminate_group(pid);
         let _ = child.wait();
-        ensure_group_gone(pid)?;
+        if let Err(error) = ensure_group_gone(pid) {
+            bail!("{reason}; {error}")
+        }
         bail!(reason)
     };
     let drains = Drain::new(child.stdout.take().expect("piped")).and_then(|stdout| {
@@ -355,12 +357,34 @@ fn run_step(step: &BuildStepV1, argv: &[String], budget: Duration) -> Result<Vec
         // Seen without reaping: the step's process stays a zombie, so its pid
         // — the process group's id — cannot be reused while the rest of the
         // group is dealt with.
-        if exited_at.is_none() && leader_exited(pid) {
-            exited_at = Some(Instant::now());
+        if exited_at.is_none() {
+            match leader_exited(pid) {
+                Ok(true) => exited_at = Some(Instant::now()),
+                Ok(false) => {}
+                // Not knowing whether the step is still running is not
+                // taken to mean it is.
+                Err(error) => {
+                    return abort(
+                        &mut child,
+                        format!(
+                            "build step {:?}: cannot tell whether it has exited ({error})",
+                            step.name
+                        ),
+                    );
+                }
+            }
         }
         match exited_at {
             Some(at) if (!stdout.open() && !stderr.open()) || at.elapsed() >= PIPE_CLOSE_GRACE => {
-                let status = child.wait().context("cannot reap the build step")?;
+                let status = match child.wait() {
+                    Ok(status) => status,
+                    Err(error) => {
+                        return abort(
+                            &mut child,
+                            format!("build step {:?}: cannot reap it ({error})", step.name),
+                        );
+                    }
+                };
                 // Anything of the step still running is stopped now, before
                 // the workspace is handed on.
                 if group_alive(pid) {
@@ -408,7 +432,7 @@ fn run_step(step: &BuildStepV1, argv: &[String], budget: Duration) -> Result<Vec
 
 /// Has the step's own process exited? Checked without reaping it.
 #[cfg(unix)]
-fn leader_exited(pid: u32) -> bool {
+fn leader_exited(pid: u32) -> std::io::Result<bool> {
     // SAFETY: `info` is a zeroed siginfo the kernel fills; WNOWAIT leaves the
     // child waitable for `Child::wait`.
     unsafe {
@@ -419,15 +443,26 @@ fn leader_exited(pid: u32) -> bool {
             &mut info,
             libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
         );
-        result == 0 && info.si_pid() != 0
+        if result == 0 {
+            return Ok(info.si_pid() != 0);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::Interrupted {
+            return Ok(false);
+        }
+        Err(error)
     }
 }
 
 /// Does any process of the group still exist?
+///
+/// `EPERM` means a process exists that this worker may not signal: alive.
+/// Only `ESRCH` means gone; any other answer is not taken as gone either.
 #[cfg(unix)]
 fn group_alive(pid: u32) -> bool {
     // SAFETY: signal 0 only checks existence.
-    unsafe { libc::kill(-(pid as libc::pid_t), 0) == 0 }
+    let result = unsafe { libc::kill(-(pid as libc::pid_t), 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
 #[cfg(not(unix))]
@@ -483,14 +518,7 @@ fn terminate_group(pid: u32) {
 #[cfg(unix)]
 fn ensure_group_gone(pid: u32) -> Result<()> {
     for _ in 0..50 {
-        let alive = std::process::Command::new("kill")
-            .args(["-0", "--", &format!("-{pid}")])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
-        if !alive {
+        if !group_alive(pid) {
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(20));
