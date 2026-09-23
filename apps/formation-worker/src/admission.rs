@@ -81,7 +81,7 @@ pub fn admit(
             ),
         );
     }
-    if browser.is_some() && planned.intent.lane != ato_formation::intent::Lane::PythonProcess {
+    if browser.is_some() && !planned.intent.lane.is_process() {
         // Browser verification has not moved onto the common observation
         // path for every lane; a request it cannot decide is refused rather
         // than decided some other way.
@@ -130,7 +130,7 @@ pub fn admit(
             ),
         );
     }
-    if planned.intent.lane == ato_formation::intent::Lane::PythonProcess
+    if planned.intent.lane.is_process()
         && profile.get("formation.containment") != Some("bwrap+landlock")
     {
         return refused(
