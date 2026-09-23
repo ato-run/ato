@@ -344,6 +344,28 @@ pub struct BrowserVerificationReceipt {
     /// own overall claim.
     pub overall: BrowserVerdict,
     pub reason: Option<String>,
+    /// How the verifier and its browser were isolated, as the Runtime that
+    /// launched them set it up — never the helper's own claim. No host path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub containment: Option<VerifierContainment>,
+}
+
+/// The isolation a browser verification ran under.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerifierContainment {
+    /// `bwrap`, or `none` for an explicitly uncontained development run.
+    pub containment: String,
+    /// `allowlisted` (only the helper, its runtimes, system libraries and a
+    /// scratch directory exist) or `host`.
+    pub filesystem: String,
+    /// What the verifier may reach, and what the browser may.
+    pub network: String,
+    /// How the browser is kept from the helper: its own PID namespace and
+    /// none of the helper's environment.
+    pub browser_process: String,
+    /// How model keys reach the helper: never in any process environment.
+    pub secrets: String,
 }
 
 /// The overall verdict a Contract's criteria results add up to.
@@ -564,6 +586,7 @@ impl BrowserVerificationReceipt {
             criteria: result.criteria,
             overall,
             reason: result.reason,
+            containment: None,
         })
     }
 
@@ -612,6 +635,7 @@ impl BrowserVerificationReceipt {
                 .collect(),
             overall: BrowserVerdict::Inconclusive,
             reason: Some(reason),
+            containment: None,
         }
     }
 }
