@@ -175,6 +175,7 @@ pub fn run_job(
         &claimed.job,
         compute_id,
         capsule_revision_id,
+        claimed.operation_catalog_required,
     )
 }
 
@@ -190,6 +191,7 @@ pub fn run_claimed_job(
     job: &serde_json::Value,
     compute_id: &str,
     capsule_revision_id: &str,
+    operation_catalog_required: bool,
 ) -> Result<JobOutcome> {
     let attempt = attempt.clone();
 
@@ -215,6 +217,13 @@ pub fn run_claimed_job(
         subdirectory,
         context.source_limits,
     )?;
+
+    if operation_catalog_required {
+        let operations = crate::operations::collect(&source_root)?;
+        context
+            .api
+            .register_operation_source(&attempt.attempt_id, &operations)?;
+    }
 
     // ── authoring ───────────────────────────────────────────────────────────
     //
