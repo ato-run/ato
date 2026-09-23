@@ -426,7 +426,10 @@ fn now_unix_millis() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    };
 
     use http::{
         HeaderValue,
@@ -440,6 +443,16 @@ mod tests {
     use crate::surface_websocket_auth::SURFACE_ASSERTION_HEADER;
 
     const ORIGIN_VALUE: &str = "https://app.ato.run";
+    static NEXT_SOCKET: AtomicU64 = AtomicU64::new(1);
+
+    fn short_socket_path(label: &str) -> PathBuf {
+        std::fs::create_dir_all(".tmp").unwrap();
+        std::env::current_dir().unwrap().join(format!(
+            ".tmp/{label}-{}-{}",
+            std::process::id(),
+            NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
 
     struct TestAuthorizer {
         seen: Mutex<Vec<String>>,
@@ -501,12 +514,7 @@ mod tests {
 
     #[tokio::test]
     async fn gateway_authenticates_and_relays_only_the_terminal_vsock_protocol() {
-        std::fs::create_dir_all(".tmp").unwrap();
-        let temp = tempfile::Builder::new()
-            .prefix("tg-")
-            .tempdir_in(".tmp")
-            .unwrap();
-        let uds_path = temp.path().join("vsock.sock");
+        let uds_path = short_socket_path("tg");
         let listener = UnixListener::bind(&uds_path).unwrap();
         let guest = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
@@ -545,7 +553,10 @@ mod tests {
         let gateway = start_terminal_gateway(
             TerminalGatewayConfig {
                 listen_addr: "127.0.0.1:0".parse().unwrap(),
-                firecracker_vsock_uds: std::fs::canonicalize(&uds_path).unwrap(),
+                // Keep the absolute test socket directly under .tmp: macOS
+                // counts the full path against SUN_LEN, and an extra tempdir
+                // component can otherwise fail before exercising the gateway.
+                firecracker_vsock_uds: uds_path.clone(),
                 guest_connect_timeout: Duration::from_secs(1),
                 scope: SurfaceGatewayScope {
                     session_id: "session-1".into(),
@@ -604,21 +615,17 @@ mod tests {
             .await
             .expect("gateway stop timeout")
             .unwrap();
+        std::fs::remove_file(&uds_path).unwrap();
     }
 
     #[tokio::test]
     async fn gateway_requires_the_terminal_subprotocol_before_guest_connect() {
-        std::fs::create_dir_all(".tmp").unwrap();
-        let temp = tempfile::Builder::new()
-            .prefix("tgs-")
-            .tempdir_in(".tmp")
-            .unwrap();
-        let uds_path = temp.path().join("vsock.sock");
-        let _listener = UnixListener::bind(&uds_path).unwrap();
+        let uds_path = short_socket_path("tgs");
+        let listener = UnixListener::bind(&uds_path).unwrap();
         let gateway = start_terminal_gateway(
             TerminalGatewayConfig {
                 listen_addr: "127.0.0.1:0".parse().unwrap(),
-                firecracker_vsock_uds: std::fs::canonicalize(&uds_path).unwrap(),
+                firecracker_vsock_uds: uds_path.clone(),
                 guest_connect_timeout: Duration::from_millis(100),
                 scope: SurfaceGatewayScope {
                     session_id: "session-1".into(),
@@ -638,5 +645,7 @@ mod tests {
                 .is_err()
         );
         gateway.stop().await.unwrap();
+        drop(listener);
+        std::fs::remove_file(&uds_path).unwrap();
     }
 }

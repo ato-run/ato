@@ -6,7 +6,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use ato_adapter_api::{AdapterRegistry, WorkspaceCapturePolicy};
+use ato_adapter_api::{
+    AdapterRegistry, PresentationAsset, PresentationKeyframeCapture, WorkspaceCapturePolicy,
+};
 use ato_computation::{ComputationRef, ContentRef};
 use ato_objects::{ObjectStore, RecordEnvelope, RecordEnvelopeV2};
 use serde::{Deserialize, Serialize};
@@ -160,6 +162,23 @@ pub trait Realization: Send {
     fn publish(&mut self) -> Result<(), MaterializerError>;
     fn wait(&mut self) -> Result<(), MaterializerError>;
     fn quiesce(&mut self) -> Result<(), MaterializerError>;
+
+    /// Bounded private presentation bytes for the current frontier. These
+    /// never enter ComputationObject, Record payloads, or Bundle identity.
+    fn capture_final_presentation(&mut self) -> Result<Vec<PresentationAsset>, MaterializerError> {
+        Ok(Vec::new())
+    }
+
+    fn capture_presentation_keyframe(
+        &mut self,
+        _sequence: u32,
+    ) -> Result<Vec<PresentationAsset>, MaterializerError> {
+        Ok(Vec::new())
+    }
+
+    fn presentation_keyframe_captures(&self) -> Vec<Arc<dyn PresentationKeyframeCapture>> {
+        Vec::new()
+    }
 
     fn run(mut self: Box<Self>) -> Result<(), MaterializerError> {
         if let Err(error) = self.activate() {

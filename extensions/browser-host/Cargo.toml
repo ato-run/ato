@@ -13,6 +13,7 @@ layer = "app"
 
 [dependencies]
 anyhow = "1"
+ato-adapter-api = { path = "../adapters/api", version = "0.1.0" }
 ato-adapter-browser = { path = "../adapters/browser", version = "0.1.0" }
 base64 = "0.22"
 serde_json = "1"
