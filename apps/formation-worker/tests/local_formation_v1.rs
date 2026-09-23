@@ -705,3 +705,74 @@ fn a_browser_contract_changes_the_verified_k_and_nothing_else_does() {
     );
     assert_eq!(attempted_contract_refs, vec![effective.unwrap()]);
 }
+
+// ── platform ────────────────────────────────────────────────────────────────
+
+/// A route's `[[platform]]` statement is part of D: a Runtime on any other
+/// platform refuses it before anything runs — locally as on a Runtime
+/// Network ticket.
+#[test]
+fn a_route_for_another_platform_is_filtered_before_it_runs() {
+    let platform = if std::env::consts::OS == "windows" {
+        ("linux", "aarch64")
+    } else {
+        ("windows", "x86_64")
+    };
+    let toml = format!(
+        r#"schema = "ato.capsule/1"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[derive.step]]
+id = "site"
+use = "ato.browser@1"
+op = "serve"
+source = "workspace"
+entry = "index.html"
+spa_fallback = false
+
+[[port]]
+id = "app.http"
+use = "ato.http@1"
+from = "site"
+
+[[contract.require]]
+id = "root"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/"
+
+[contract.require.expect]
+status = 200
+
+[[platform]]
+os = "{}"
+arch = "{}"
+"#,
+        platform.0, platform.1
+    );
+    let dir = site(&[
+        ("index.html", "<!doctype html><h1>hello</h1>"),
+        ("capsule.toml", &toml),
+    ]);
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let result = local::run(
+        &request(dir.path(), FormationNetworkPolicy::Denied),
+        &formation(&scratch),
+    )
+    .expect("the driver ran");
+    let FormationResult::NoVerifiedRoute { attempts, .. } = result else {
+        panic!("a route for another platform cannot form here, got {result:?}");
+    };
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].status, AttemptStatus::Filtered);
+    assert_eq!(
+        attempts[0].failure.as_ref().map(|f| f.code.as_str()),
+        Some("platform_unsupported")
+    );
+    assert!(attempts[0].realization.is_none());
+}

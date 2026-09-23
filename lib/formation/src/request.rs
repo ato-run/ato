@@ -27,7 +27,17 @@ use crate::verify::ContractVerification;
 /// closure or a checkpoint are the same slot, later.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InitialCondition {
-    LocalDirectory { path: PathBuf },
+    LocalDirectory {
+        path: PathBuf,
+    },
+    /// A source archive that was already snapshotted elsewhere — a Runtime
+    /// Network attempt is handed the same frozen bytes the requester
+    /// measured, never a live directory. `expected_digest` is the archive
+    /// digest the ticket names; the bytes are refused if they differ.
+    Archive {
+        bytes: Vec<u8>,
+        expected_digest: String,
+    },
 }
 
 /// Where the Contract comes from.
