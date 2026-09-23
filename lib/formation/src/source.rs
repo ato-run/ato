@@ -468,42 +468,16 @@ fn strip_prefix(relative: &Path, prefix: Option<&str>) -> PathBuf {
 }
 
 /// The target of a symlink at `link` (a tree-relative path), if it is
-/// contained: relative, no NUL, `..`* then plain names, and no more `..` than
-/// `link` has parent directories. Returned verbatim — the string is the
-/// identity, not its resolution.
+/// contained — the shared rule in [`crate::containment`]. Returned verbatim:
+/// the string is the identity, not its resolution.
 fn contained_symlink_target(link: &Path, target: &[u8]) -> Result<String, SourceError> {
-    let escape = |reason: &'static str| SourceError::SymlinkEscape {
-        path: link.display().to_string(),
-        target: String::from_utf8_lossy(target).into_owned(),
-        reason,
-    };
-    if target.is_empty() {
-        return Err(escape("empty target"));
-    }
-    if target.contains(&0) {
-        return Err(escape("NUL in target"));
-    }
-    let text = std::str::from_utf8(target).map_err(|_| escape("target is not UTF-8"))?;
-    if text.starts_with('/') || text.contains('\\') {
-        return Err(escape("absolute target"));
-    }
-    let parents = link.components().count().saturating_sub(1);
-    let mut climbs = 0usize;
-    let mut descended = false;
-    for segment in text.split('/') {
-        match segment {
-            "" | "." => {}
-            ".." if descended => return Err(escape("climbs after descending")),
-            ".." => {
-                climbs += 1;
-                if climbs > parents {
-                    return Err(escape("climbs out of the source tree"));
-                }
-            }
-            _ => descended = true,
+    crate::containment::validate_contained_symlink_target(link, target).map_err(|escape| {
+        SourceError::SymlinkEscape {
+            path: link.display().to_string(),
+            target: String::from_utf8_lossy(target).into_owned(),
+            reason: escape.reason,
         }
-    }
-    Ok(text.to_owned())
+    })
 }
 
 /// A symlink entry's raw target bytes.
