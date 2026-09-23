@@ -776,3 +776,45 @@ arch = "{}"
     );
     assert!(attempts[0].realization.is_none());
 }
+
+// ── a verified candidate whose artifact cannot be kept ──────────────────────
+
+/// A source with a contained symlink is formed, built, realized and verified
+/// (resolver v2); only its artifact cannot be stored yet, because the artifact
+/// format has no symlink entry. The verdicts stay in the evidence, so "the
+/// Contract held" is not confused with "the Contract failed".
+#[cfg(unix)]
+#[test]
+fn a_verified_candidate_whose_artifact_cannot_be_kept_keeps_its_verdicts() {
+    let dir = site(&[
+        ("server.py", MARKING_SERVER),
+        ("capsule.toml", AUTHORED_PROCESS),
+        ("docs/readme.txt", "docs"),
+    ]);
+    std::os::unix::fs::symlink("readme.txt", dir.path().join("docs/current")).unwrap();
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let result = local::run(
+        &request(dir.path(), FormationNetworkPolicy::DependencyResolution),
+        &formation(&scratch),
+    )
+    .expect("the driver ran");
+    let FormationResult::NoVerifiedRoute { attempts, .. } = &result else {
+        panic!("the artifact cannot be stored yet, got {result:?}");
+    };
+    let toolchain_root = Path::new(ato_formation_worker::sandbox::TOOLCHAIN_ROOT).is_dir();
+    if !containment_available() || !toolchain_root {
+        assert_eq!(attempts[0].status, AttemptStatus::Filtered, "{attempts:?}");
+        return;
+    }
+    let attempt = &attempts[0];
+    assert_eq!(
+        attempt.failure.as_ref().map(|f| f.code.as_str()),
+        Some("artifact_store_failed"),
+        "{attempt:?}"
+    );
+    let verification = attempt
+        .verification
+        .as_ref()
+        .expect("the verdicts are kept");
+    assert!(verification.fully_satisfied(), "{verification:?}");
+}
