@@ -83,24 +83,25 @@
    "gpu": 1,
    "database_service": 1,
    "reverse_proxy": 1,
-   "browser_inconclusive": 1,
    "build_failed": 1,
+   "browser_inconclusive": 1,
    "migration": 1,
    "git_lfs": 1,
    "docker_socket": 1
   },
   "d_gate": {
-   "accepted_by_ato": [
+   "parsed_by_authoring_grammar": 20,
+   "projected": [
     "searxng/searxng"
    ],
-   "refused_exec_step": 16,
-   "refused_multiple_serving_steps": 2,
-   "refused_non_python_runtime": 1
+   "projection_cannot_project_authored_exec_into_build_plan": 16,
+   "projection_one_serving_step_only": 2,
+   "projection_python_runtime_only": 1
   }
  },
  "missing_primitives": [
   {
-   "primitive": "Preparation/build steps in an authored D (ato.process@1 op=exec, with declared network)",
+   "primitive": "Projection of authored preparation/build steps (ato.process@1 op=exec) into an EffectiveBuildPlan \u2014 the grammar already expresses them",
    "layer": "Derivation projection + build executor",
    "scope": "large",
    "blocked_apps": [
@@ -191,9 +192,9 @@
    "apps_unlocked_alone": 0
   },
   {
-   "primitive": "Symlinks inside the source tree (within-tree, relative)",
-   "layer": "Initial Condition freeze / source archive",
-   "scope": "small",
+   "primitive": "Contained symlinks in the source tree \u2014 a source resolver semantics extension (new resolver contract version, tree identity includes link targets), not a parser fix",
+   "layer": "source resolver / Initial Condition identity",
+   "scope": "medium",
    "blocked_apps": [
     "Stirling-Tools/Stirling-PDF",
     "coder/code-server",
@@ -361,8 +362,8 @@
    "severity": "blocks the Python lane for any non-trivial dependency set"
   },
   {
-   "where": "Initial Condition freeze",
-   "what": "any symlink in the tree refuses the whole source",
+   "where": "source resolver (RESOLVER_CONTRACT_V1)",
+   "what": "the resolver contract defines no symlink entry, so any symlink refuses the whole source; supporting it is a resolver semantics change, not a parser fix",
    "evidence": "searxng, navidrome, code-server refused; 4 more repos contain symlinks",
    "severity": "7/20 repos"
   }

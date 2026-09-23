@@ -8,7 +8,7 @@
 - Benchmark K1 (Browser Contract): "Open the Preferences page and verify that a list of search
   engines or engine categories is shown. Do not run a search."
 - Result (baseline): refused at source freeze — the tree contains a symlink
-  (`utils/templates/etc/apache2`). The only one of the 20 P0 routes Ato's D grammar accepts.
+  (`utils/templates/etc/apache2`). The only one of the 20 P0 routes the current Derivation projection can project.
   A counterfactual copy without that symlink reached Level 3 on x86_64 (typed K PASS); see
   `docs/ops/formation-p0-benchmark-2026-09-23.md`.
 
