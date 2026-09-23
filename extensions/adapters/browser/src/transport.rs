@@ -16,9 +16,12 @@ use tungstenite::{Message, WebSocket, accept_hdr};
 
 use crate::coalescer::ContinuousCoalescer;
 use crate::protocol::{BrowserEvent, encode_event_with_policy, validate_event};
-use crate::{BROWSER_ADAPTER_ID, BROWSER_PROTOCOL_ID, BrowserInputMode, BrowserStylus};
+use crate::{
+    BROWSER_ADAPTER_ID, BROWSER_PROTOCOL_ID, BrowserChannelScope, BrowserInputMode, BrowserStylus,
+};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(2);
+const ACK_HISTORY_LIMIT: usize = 1_024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrowserRuntimeBootstrap {
@@ -26,6 +29,8 @@ pub struct BrowserRuntimeBootstrap {
     pub control_url: String,
     pub channel_credential: String,
     pub browser_session: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_scope: Option<BrowserChannelScope>,
     pub expected_origin: String,
     pub allowed_non_text_codes: BTreeSet<String>,
     pub input_mode: BrowserInputMode,
@@ -54,9 +59,13 @@ enum AdapterMessage<'a> {
     HelloAck {
         protocol: &'a str,
         browser_session: &'a str,
+        last_sequence: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        channel_scope: Option<&'a BrowserChannelScope>,
     },
     Apply {
         request_id: &'a str,
+        sequence: u64,
         operation_id: &'a str,
         #[serde(skip_serializing_if = "Option::is_none")]
         realization_generation: Option<&'a str>,
@@ -64,6 +73,7 @@ enum AdapterMessage<'a> {
     },
     Quiesce {
         request_id: &'a str,
+        sequence: u64,
     },
 }
 
@@ -75,25 +85,32 @@ enum BridgeMessage {
         channel_credential: String,
         browser_session: String,
         top_level_origin: String,
+        #[serde(default)]
+        channel_scope: Option<BrowserChannelScope>,
     },
     Event {
         event: BrowserEvent,
     },
     Ack {
         request_id: String,
+        sequence: u64,
     },
     Quiesced {
         request_id: String,
+        sequence: u64,
     },
     Error {
         #[serde(default)]
         request_id: Option<String>,
+        #[serde(default)]
+        sequence: Option<u64>,
         reason: String,
     },
 }
 
 struct PendingRequest {
     kind: PendingKind,
+    sequence: u64,
     ordered: bool,
     deadline: Option<Instant>,
     result: PendingResult,
@@ -104,10 +121,37 @@ enum PendingResult {
     Quiesce(mpsc::Sender<Result<(), AdapterError>>),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum PendingKind {
     Apply,
     Quiesce,
+}
+
+#[derive(Default)]
+struct AcknowledgementHistory {
+    terminal: BTreeMap<String, (PendingKind, u64)>,
+    insertion_order: VecDeque<String>,
+}
+
+impl AcknowledgementHistory {
+    fn contains(&self, request_id: &str, expected_kind: PendingKind, sequence: u64) -> bool {
+        self.terminal.get(request_id) == Some(&(expected_kind, sequence))
+    }
+
+    fn remember(&mut self, request_id: String, kind: PendingKind, sequence: u64) {
+        if self
+            .terminal
+            .insert(request_id.clone(), (kind, sequence))
+            .is_none()
+        {
+            self.insertion_order.push_back(request_id);
+        }
+        while self.insertion_order.len() > ACK_HISTORY_LIMIT {
+            if let Some(expired) = self.insertion_order.pop_front() {
+                self.terminal.remove(&expired);
+            }
+        }
+    }
 }
 
 pub(crate) struct TransportHandle {
@@ -124,6 +168,7 @@ pub(crate) struct TransportConfig {
     pub allowed_non_text_codes: BTreeSet<String>,
     pub channel_credential: String,
     pub browser_session: String,
+    pub channel_scope: Option<BrowserChannelScope>,
     pub input_mode: BrowserInputMode,
 }
 
@@ -142,6 +187,7 @@ pub(crate) fn start_transport(
         control_url: format!("ws://{address}"),
         channel_credential: config.channel_credential.clone(),
         browser_session: config.browser_session.clone(),
+        channel_scope: config.channel_scope.clone(),
         expected_origin: config.expected_origin.clone(),
         allowed_non_text_codes: config.allowed_non_text_codes.clone(),
         input_mode: config.input_mode,
@@ -189,7 +235,9 @@ fn run_transport(
     let mut coalescer = ContinuousCoalescer::default();
     let mut queued_commands = VecDeque::new();
     let mut pending = BTreeMap::<String, PendingRequest>::new();
+    let mut acknowledgement_history = AcknowledgementHistory::default();
     let mut next_live_settlement_order = 0_u64;
+    let mut next_command_sequence = 0_u64;
     let stopped = AtomicBool::new(false);
 
     macro_rules! transport_try {
@@ -216,7 +264,11 @@ fn run_transport(
         while let Ok(command) = commands.try_recv() {
             queued_commands.push_back(command);
         }
-        transport_try!(expire_pending_deadlines(&mut pending, Instant::now()));
+        transport_try!(expire_pending_deadlines(
+            &mut pending,
+            &mut acknowledgement_history,
+            Instant::now(),
+        ));
 
         while let Some(command) = queued_commands.front() {
             if matches!(command, TransportCommand::Shutdown) {
@@ -255,10 +307,16 @@ fn run_transport(
                     event,
                     result,
                 } => {
+                    transport_try!(validate_channel_not_expired(&config));
+                    next_command_sequence =
+                        transport_try!(next_command_sequence.checked_add(1).ok_or_else(|| {
+                            AdapterError::Operation("Browser command sequence exhausted".to_owned())
+                        }));
                     pending.insert(
                         request_id.clone(),
                         PendingRequest {
                             kind: PendingKind::Apply,
+                            sequence: next_command_sequence,
                             ordered,
                             deadline: Some(deadline),
                             result: PendingResult::Apply(result),
@@ -272,6 +330,7 @@ fn run_transport(
                         bridge,
                         &AdapterMessage::Apply {
                             request_id: &request_id,
+                            sequence: next_command_sequence,
                             operation_id: &correlation_id,
                             realization_generation: realization_generation.as_deref(),
                             event: &event,
@@ -280,10 +339,18 @@ fn run_transport(
                 }
                 TransportCommand::Quiesce { request_id, result } => {
                     if let Some(bridge) = socket.as_mut().filter(|_| authenticated) {
+                        transport_try!(validate_channel_not_expired(&config));
+                        next_command_sequence =
+                            transport_try!(next_command_sequence.checked_add(1).ok_or_else(|| {
+                                AdapterError::Operation(
+                                    "Browser command sequence exhausted".to_owned(),
+                                )
+                            }));
                         pending.insert(
                             request_id.clone(),
                             PendingRequest {
                                 kind: PendingKind::Quiesce,
+                                sequence: next_command_sequence,
                                 ordered: false,
                                 deadline: None,
                                 result: PendingResult::Quiesce(result),
@@ -293,6 +360,7 @@ fn run_transport(
                             bridge,
                             &AdapterMessage::Quiesce {
                                 request_id: &request_id,
+                                sequence: next_command_sequence,
                             },
                         ));
                     } else {
@@ -309,7 +377,11 @@ fn run_transport(
             }
         }
 
-        transport_try!(expire_pending_deadlines(&mut pending, Instant::now()));
+        transport_try!(expire_pending_deadlines(
+            &mut pending,
+            &mut acknowledgement_history,
+            Instant::now(),
+        ));
         if let Some(bridge) = socket.as_mut() {
             match bridge.read() {
                 Ok(Message::Text(text)) => {
@@ -325,6 +397,7 @@ fn run_transport(
                             channel_credential,
                             browser_session,
                             top_level_origin,
+                            channel_scope,
                         } if !authenticated => {
                             transport_try!(validate_hello(
                                 &config,
@@ -332,6 +405,7 @@ fn run_transport(
                                 &channel_credential,
                                 &browser_session,
                                 &top_level_origin,
+                                channel_scope.as_ref(),
                             ));
                             authenticated = true;
                             transport_try!(send_message(
@@ -339,6 +413,8 @@ fn run_transport(
                                 &AdapterMessage::HelloAck {
                                     protocol: BROWSER_PROTOCOL_ID,
                                     browser_session: &config.browser_session,
+                                    last_sequence: next_command_sequence,
+                                    channel_scope: config.channel_scope.as_ref(),
                                 },
                             ));
                             transport_try!(write_owner_only(&readiness_path, b"ready"));
@@ -359,16 +435,26 @@ fn run_transport(
                                 }
                             }
                         }
-                        BridgeMessage::Ack { request_id } if authenticated => {
+                        BridgeMessage::Ack {
+                            request_id,
+                            sequence,
+                        } if authenticated => {
+                            transport_try!(validate_channel_not_expired(&config));
                             transport_try!(complete_pending(
                                 &mut pending,
                                 &request_id,
                                 PendingKind::Apply,
                                 Ok(()),
+                                sequence,
                                 &mut next_live_settlement_order,
+                                &mut acknowledgement_history,
                             ));
                         }
-                        BridgeMessage::Quiesced { request_id } if authenticated => {
+                        BridgeMessage::Quiesced {
+                            request_id,
+                            sequence,
+                        } if authenticated => {
+                            transport_try!(validate_channel_not_expired(&config));
                             accepting_input = false;
                             transport_try!(flush_events(
                                 &mut coalescer,
@@ -381,11 +467,24 @@ fn run_transport(
                                 &request_id,
                                 PendingKind::Quiesce,
                                 Ok(()),
+                                sequence,
                                 &mut next_live_settlement_order,
+                                &mut acknowledgement_history,
                             ));
                         }
-                        BridgeMessage::Error { request_id, reason } if authenticated => {
+                        BridgeMessage::Error {
+                            request_id,
+                            sequence,
+                            reason,
+                        } if authenticated => {
+                            transport_try!(validate_channel_not_expired(&config));
                             if let Some(request_id) = request_id {
+                                let sequence = sequence.ok_or_else(|| {
+                                    AdapterError::Operation(
+                                        "Browser Bridge request error omitted sequence".to_owned(),
+                                    )
+                                });
+                                let sequence = transport_try!(sequence);
                                 let pending_kind = pending
                                     .get(&request_id)
                                     .map_or(PendingKind::Apply, |value| value.kind);
@@ -396,7 +495,9 @@ fn run_transport(
                                     Err(AdapterError::Operation(format!(
                                         "Browser Bridge rejected request: {reason}"
                                     ))),
+                                    sequence,
                                     &mut next_live_settlement_order,
+                                    &mut acknowledgement_history,
                                 ));
                             } else {
                                 return terminate_after_error(
@@ -517,14 +618,31 @@ fn validate_hello(
     channel_credential: &str,
     browser_session: &str,
     top_level_origin: &str,
+    channel_scope: Option<&BrowserChannelScope>,
 ) -> Result<(), AdapterError> {
+    validate_channel_not_expired(config)?;
     if protocol != BROWSER_PROTOCOL_ID
         || channel_credential != config.channel_credential
         || browser_session != config.browser_session
         || top_level_origin != config.expected_origin
+        || channel_scope != config.channel_scope.as_ref()
     {
         return Err(AdapterError::Operation(
             "Browser Bridge handshake identity mismatch".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_channel_not_expired(config: &TransportConfig) -> Result<(), AdapterError> {
+    if config.channel_scope.as_ref().is_some_and(|scope| {
+        scope.expires_at_unix_seconds
+            <= std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |value| value.as_secs().try_into().unwrap_or(i64::MAX))
+    }) {
+        return Err(AdapterError::Operation(
+            "Browser Bridge channel scope expired".to_owned(),
         ));
     }
     Ok(())
@@ -581,9 +699,14 @@ fn complete_pending(
     request_id: &str,
     expected_kind: PendingKind,
     result: Result<(), AdapterError>,
+    sequence: u64,
     next_live_settlement_order: &mut u64,
+    acknowledgement_history: &mut AcknowledgementHistory,
 ) -> Result<(), AdapterError> {
     let Some(request) = pending.get(request_id) else {
+        if acknowledgement_history.contains(request_id, expected_kind, sequence) {
+            return Ok(());
+        }
         return Err(AdapterError::Operation(
             "Browser Bridge acknowledged no pending request".to_owned(),
         ));
@@ -591,6 +714,11 @@ fn complete_pending(
     if std::mem::discriminant(&request.kind) != std::mem::discriminant(&expected_kind) {
         return Err(AdapterError::Operation(
             "Browser Bridge acknowledgement mismatch".to_owned(),
+        ));
+    }
+    if request.sequence != sequence {
+        return Err(AdapterError::Operation(
+            "Browser Bridge acknowledgement sequence mismatch".to_owned(),
         ));
     }
     if request
@@ -606,6 +734,7 @@ fn complete_pending(
     let request = pending
         .remove(request_id)
         .expect("validated pending request remains present");
+    acknowledgement_history.remember(request_id.to_owned(), request.kind, request.sequence);
     match request.result {
         PendingResult::Apply(sender) if request.ordered && result.is_ok() => {
             let next = next_live_settlement_order.checked_add(1).ok_or_else(|| {
@@ -655,6 +784,7 @@ fn terminate_after_error(
 
 fn expire_pending_deadlines(
     pending: &mut BTreeMap<String, PendingRequest>,
+    acknowledgement_history: &mut AcknowledgementHistory,
     now: Instant,
 ) -> Result<(), AdapterError> {
     if pending.values().any(|request| {
@@ -679,6 +809,7 @@ fn expire_pending_deadlines(
         let request = pending
             .remove(&request_id)
             .expect("expired pending request remains present");
+        acknowledgement_history.remember(request_id, request.kind, request.sequence);
         if let PendingResult::Apply(sender) = request.result {
             let _ = sender.send(Err(AdapterError::Operation(
                 "Browser apply acknowledgement timed out".to_owned(),
@@ -789,7 +920,20 @@ mod tests {
             allowed_non_text_codes: BTreeSet::new(),
             channel_credential: "credential".to_owned(),
             browser_session: "session".to_owned(),
+            channel_scope: None,
             input_mode: BrowserInputMode::ObserveAndApply,
+        }
+    }
+
+    fn scoped_config() -> TransportConfig {
+        TransportConfig {
+            channel_scope: Some(BrowserChannelScope {
+                activity_id: "activity-1".to_owned(),
+                run_id: "run-1".to_owned(),
+                epoch: "lease-1".to_owned(),
+                expires_at_unix_seconds: i64::MAX,
+            }),
+            ..config()
         }
     }
 
@@ -802,6 +946,7 @@ mod tests {
         };
         let value = serde_json::to_value(AdapterMessage::Apply {
             request_id: "transport-17",
+            sequence: 17,
             operation_id: "aop_controller_9",
             realization_generation: Some("document_4"),
             event: &event,
@@ -832,6 +977,7 @@ mod tests {
                 "request-first".to_owned(),
                 PendingRequest {
                     kind: PendingKind::Apply,
+                    sequence: 1,
                     ordered: true,
                     deadline: Some(Instant::now() + Duration::from_secs(1)),
                     result: PendingResult::Apply(first_tx),
@@ -841,6 +987,7 @@ mod tests {
                 "request-second".to_owned(),
                 PendingRequest {
                     kind: PendingKind::Apply,
+                    sequence: 2,
                     ordered: true,
                     deadline: Some(Instant::now() + Duration::from_secs(1)),
                     result: PendingResult::Apply(second_tx),
@@ -848,12 +995,15 @@ mod tests {
             ),
         ]);
         let mut next = 0;
+        let mut history = AcknowledgementHistory::default();
         complete_pending(
             &mut pending,
             "request-second",
             PendingKind::Apply,
             Ok(()),
+            2,
             &mut next,
+            &mut history,
         )
         .expect("second request ACK");
         complete_pending(
@@ -861,13 +1011,145 @@ mod tests {
             "request-first",
             PendingKind::Apply,
             Ok(()),
+            1,
             &mut next,
+            &mut history,
         )
         .expect("first request ACK");
 
         assert_eq!(second_rx.recv().expect("second waiter").unwrap(), Some(1));
         assert_eq!(first_rx.recv().expect("first waiter").unwrap(), Some(2));
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn duplicate_ack_is_tolerated_without_publishing_a_second_ticket() {
+        let (sender, receiver) = mpsc::channel();
+        let mut pending = BTreeMap::from([(
+            "request-once".to_owned(),
+            PendingRequest {
+                kind: PendingKind::Apply,
+                sequence: 1,
+                ordered: true,
+                deadline: Some(Instant::now() + Duration::from_secs(1)),
+                result: PendingResult::Apply(sender),
+            },
+        )]);
+        let mut next = 0;
+        let mut history = AcknowledgementHistory::default();
+
+        for _ in 0..2 {
+            complete_pending(
+                &mut pending,
+                "request-once",
+                PendingKind::Apply,
+                Ok(()),
+                1,
+                &mut next,
+                &mut history,
+            )
+            .expect("a repeated ACK for the same terminal request is idempotent");
+        }
+
+        assert_eq!(receiver.recv().expect("first settlement").unwrap(), Some(1));
+        assert_eq!(next, 1, "duplicate ACK must not advance Runner order");
+        assert!(
+            receiver.try_recv().is_err(),
+            "no second result is published"
+        );
+    }
+
+    #[test]
+    fn late_ack_for_timed_out_unordered_apply_is_tolerated_without_reopening_it() {
+        let (sender, receiver) = mpsc::channel();
+        let now = Instant::now();
+        let mut pending = BTreeMap::from([(
+            "request-expired".to_owned(),
+            PendingRequest {
+                kind: PendingKind::Apply,
+                sequence: 1,
+                ordered: false,
+                deadline: Some(now),
+                result: PendingResult::Apply(sender),
+            },
+        )]);
+        let mut next = 0;
+        let mut history = AcknowledgementHistory::default();
+
+        expire_pending_deadlines(&mut pending, &mut history, now)
+            .expect("unordered timeout is a local rejection");
+        complete_pending(
+            &mut pending,
+            "request-expired",
+            PendingKind::Apply,
+            Ok(()),
+            1,
+            &mut next,
+            &mut history,
+        )
+        .expect("late ACK for a known terminal request is ignored");
+
+        let error = receiver
+            .recv()
+            .expect("timeout result")
+            .expect_err("late ACK cannot change a timeout into success");
+        assert!(error.to_string().contains("timed out"));
+        assert_eq!(next, 0);
+    }
+
+    #[test]
+    fn acknowledgement_for_never_issued_request_fails_closed() {
+        let mut pending = BTreeMap::new();
+        let mut next = 0;
+        let mut history = AcknowledgementHistory::default();
+
+        let error = complete_pending(
+            &mut pending,
+            "request-forged",
+            PendingKind::Apply,
+            Ok(()),
+            1,
+            &mut next,
+            &mut history,
+        )
+        .expect_err("unknown ACK is not a duplicate");
+
+        assert!(error.to_string().contains("no pending request"));
+        assert_eq!(next, 0);
+    }
+
+    #[test]
+    fn future_or_replayed_ack_sequence_fails_closed() {
+        for invalid_sequence in [1, 3] {
+            let (sender, _receiver) = mpsc::channel();
+            let mut pending = BTreeMap::from([(
+                "request-sequenced".to_owned(),
+                PendingRequest {
+                    kind: PendingKind::Apply,
+                    sequence: 2,
+                    ordered: true,
+                    deadline: Some(Instant::now() + Duration::from_secs(1)),
+                    result: PendingResult::Apply(sender),
+                },
+            )]);
+            let mut next = 0;
+            let mut history = AcknowledgementHistory::default();
+
+            let error = complete_pending(
+                &mut pending,
+                "request-sequenced",
+                PendingKind::Apply,
+                Ok(()),
+                invalid_sequence,
+                &mut next,
+                &mut history,
+            )
+            .expect_err("ACK sequence must match the issued command exactly");
+
+            assert!(error.to_string().contains("sequence mismatch"));
+            assert_eq!(next, 0);
+            assert!(pending.contains_key("request-sequenced"));
+        }
     }
 
     #[test]
@@ -880,6 +1162,7 @@ mod tests {
                 "request-expired".to_owned(),
                 PendingRequest {
                     kind: PendingKind::Apply,
+                    sequence: 1,
                     ordered: true,
                     deadline: Some(now),
                     result: PendingResult::Apply(first_tx),
@@ -889,6 +1172,7 @@ mod tests {
                 "request-later".to_owned(),
                 PendingRequest {
                     kind: PendingKind::Apply,
+                    sequence: 2,
                     ordered: true,
                     deadline: Some(now + Duration::from_secs(1)),
                     result: PendingResult::Apply(second_tx),
@@ -896,13 +1180,16 @@ mod tests {
             ),
         ]);
         let mut next = 0;
+        let mut history = AcknowledgementHistory::default();
 
         let timeout = complete_pending(
             &mut pending,
             "request-expired",
             PendingKind::Apply,
             Ok(()),
+            1,
             &mut next,
+            &mut history,
         )
         .expect_err("the transport deadline wins over a boundary ACK");
         terminate_after_error(&mut pending, timeout)
@@ -925,6 +1212,7 @@ mod tests {
             "request-ordered".to_owned(),
             PendingRequest {
                 kind: PendingKind::Apply,
+                sequence: 1,
                 ordered: true,
                 deadline: Some(Instant::now() + Duration::from_secs(1)),
                 result: PendingResult::Apply(sender),
@@ -946,6 +1234,7 @@ mod tests {
             "request-ordered".to_owned(),
             PendingRequest {
                 kind: PendingKind::Apply,
+                sequence: 1,
                 ordered: true,
                 deadline: Some(Instant::now() + Duration::from_secs(1)),
                 result: PendingResult::Apply(sender),
@@ -981,19 +1270,23 @@ mod tests {
             "request-ordered".to_owned(),
             PendingRequest {
                 kind: PendingKind::Apply,
+                sequence: 1,
                 ordered: true,
                 deadline: Some(Instant::now() + Duration::from_secs(1)),
                 result: PendingResult::Apply(sender),
             },
         )]);
         let mut next = 0;
+        let mut history = AcknowledgementHistory::default();
 
         let protocol_error = complete_pending(
             &mut pending,
             "request-ordered",
             PendingKind::Quiesce,
             Ok(()),
+            1,
             &mut next,
+            &mut history,
         )
         .expect_err("mismatched acknowledgement is a lifecycle violation");
         terminate_after_error(&mut pending, protocol_error)
@@ -1015,7 +1308,8 @@ mod tests {
                 BROWSER_PROTOCOL_ID,
                 "credential",
                 "session",
-                "http://127.0.0.1:3000"
+                "http://127.0.0.1:3000",
+                None,
             )
             .is_ok()
         );
@@ -1040,7 +1334,69 @@ mod tests {
                 "https://example.test",
             ),
         ] {
-            assert!(validate_hello(&config, values.0, values.1, values.2, values.3).is_err());
+            assert!(validate_hello(&config, values.0, values.1, values.2, values.3, None).is_err());
         }
+    }
+
+    #[test]
+    fn handshake_rejects_cross_activity_cross_run_epoch_and_expired_scope() {
+        let scoped = scoped_config();
+        let expected = scoped.channel_scope.as_ref().expect("test scope");
+        assert!(
+            validate_hello(
+                &scoped,
+                BROWSER_PROTOCOL_ID,
+                "credential",
+                "session",
+                "http://127.0.0.1:3000",
+                Some(expected),
+            )
+            .is_ok()
+        );
+
+        for scope in [
+            BrowserChannelScope {
+                activity_id: "activity-other".to_owned(),
+                ..expected.clone()
+            },
+            BrowserChannelScope {
+                run_id: "run-other".to_owned(),
+                ..expected.clone()
+            },
+            BrowserChannelScope {
+                epoch: "lease-other".to_owned(),
+                ..expected.clone()
+            },
+        ] {
+            assert!(
+                validate_hello(
+                    &scoped,
+                    BROWSER_PROTOCOL_ID,
+                    "credential",
+                    "session",
+                    "http://127.0.0.1:3000",
+                    Some(&scope),
+                )
+                .is_err()
+            );
+        }
+
+        let expired = TransportConfig {
+            channel_scope: Some(BrowserChannelScope {
+                expires_at_unix_seconds: 0,
+                ..expected.clone()
+            }),
+            ..config()
+        };
+        let error = validate_hello(
+            &expired,
+            BROWSER_PROTOCOL_ID,
+            "credential",
+            "session",
+            "http://127.0.0.1:3000",
+            expired.channel_scope.as_ref(),
+        )
+        .expect_err("expired scope must not authenticate");
+        assert!(error.to_string().contains("expired"));
     }
 }
