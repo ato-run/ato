@@ -1006,6 +1006,7 @@ pub fn build_multi_derivation_bundle(
                 root: None,
                 entry: Some("index.html".to_owned()),
                 spa_fallback: Some(false),
+                network: Default::default(),
             }],
             ports: vec![PortDraft {
                 id: process_port.id.clone(),
@@ -1245,6 +1246,7 @@ pub fn build_dynamic_routes_bundle(
                     root: None,
                     entry: None,
                     spa_fallback: None,
+                    network: Default::default(),
                     runtimes: service.execution.runtimes.clone(),
                     state: service.state.clone(),
                     bindings: service.bindings.clone(),
@@ -1267,6 +1269,7 @@ pub fn build_dynamic_routes_bundle(
                 root: None,
                 entry: None,
                 spa_fallback: None,
+                network: Default::default(),
                 runtimes: BTreeMap::new(),
                 state: Vec::new(),
                 bindings: Vec::new(),

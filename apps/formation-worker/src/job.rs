@@ -516,9 +516,13 @@ pub fn plan_candidate(
         .map_err(FormationFailure::from)?;
     // A plan that cannot be compiled is a projection problem, not the author's
     // grammar: it is this worker failing to turn a valid intent into steps.
-    let plan = compile_build_plan(&intent, guest_root, triple).map_err(|error| {
+    let mut plan = compile_build_plan(&intent, guest_root, triple).map_err(|error| {
         FormationFailure::new(error.code(), FailureStage::Projection, error.to_string())
     })?;
+    // The author's `exec` steps, in the order written, after the platform's
+    // prerequisites (a provisioned interpreter). The projection already kept
+    // any inferred application build from being planned beside them.
+    plan.steps.extend(projected.build_steps.iter().cloned());
     // Digest failures are ours, not the author's: nothing they could change
     // would fix one, so they stay anonymous and reach the operator log only.
     let intent_digest = intent

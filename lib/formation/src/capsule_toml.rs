@@ -39,7 +39,7 @@ use crate::authoring::{
     DerivationDraft, EffectClass, HTTP_PROTOCOL, HttpRequirement, InputDraft,
     InputIdentityRequirement, ObservationDraft, Observed, PROCESS_PROTOCOL, PlatformDraft,
     PortDraft, RequirementDraft, RuntimeDraft, STATE_FILESYSTEM_PROTOCOL, StateAccess, StateDraft,
-    StepDraft, WORKSPACE_PROTOCOL, malformed,
+    StepDraft, StepNetwork, WORKSPACE_PROTOCOL, malformed,
 };
 
 /// The file an author writes, at the root of the source they upload.
@@ -338,6 +338,7 @@ fn read_derive(value: &Value) -> Result<Vec<StepDraft>, AuthoringError> {
                     "root",
                     "entry",
                     "spa_fallback",
+                    "network",
                 ],
             )?;
             let id = required_str(step, "id", "derive.step")?;
@@ -376,6 +377,29 @@ fn read_derive(value: &Value) -> Result<Vec<StepDraft>, AuthoringError> {
                     env.insert(name.clone(), text.to_owned());
                 }
             }
+
+            // What network a preparation step needs. Only `exec` states one:
+            // a serving step's network is the Run's business, not the build's,
+            // and v0 has no rule for it — so it is refused rather than ignored.
+            let network = match step.get("network") {
+                None => StepNetwork::Denied,
+                Some(_) if !(protocol == PROCESS_PROTOCOL && op == "exec") => {
+                    return Err(malformed(
+                        format!("{what}.network"),
+                        format!("only a {PROCESS_PROTOCOL} `exec` step declares a network"),
+                    ));
+                }
+                Some(Value::String(value)) if value == "denied" => StepNetwork::Denied,
+                Some(Value::String(value)) if value == "dependency-resolution" => {
+                    StepNetwork::DependencyResolution
+                }
+                Some(_) => {
+                    return Err(malformed(
+                        format!("{what}.network"),
+                        "expected \"denied\" or \"dependency-resolution\"",
+                    ));
+                }
+            };
 
             match protocol.as_str() {
                 PROCESS_PROTOCOL => {
@@ -435,6 +459,7 @@ fn read_derive(value: &Value) -> Result<Vec<StepDraft>, AuthoringError> {
                 root: step.get("root").and_then(Value::as_str).map(str::to_owned),
                 entry: step.get("entry").and_then(Value::as_str).map(str::to_owned),
                 spa_fallback: step.get("spa_fallback").and_then(Value::as_bool),
+                network,
             })
         })
         .collect()
