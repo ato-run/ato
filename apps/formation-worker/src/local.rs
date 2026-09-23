@@ -502,14 +502,30 @@ fn admits(
                 .to_owned(),
         });
     }
-    if browser.is_some_and(|browser| browser.verifier.is_none()) {
-        return Some(AttemptFailure {
-            code: "browser_verifier_unavailable".to_owned(),
-            stage: "admission".to_owned(),
-            message: "the request carries a browser Contract and this Runtime has no browser \
-                      verifier; it was not attempted"
-                .to_owned(),
-        });
+    if let Some(browser) = browser {
+        match &browser.verifier {
+            None => {
+                return Some(AttemptFailure {
+                    code: "browser_verifier_unavailable".to_owned(),
+                    stage: "admission".to_owned(),
+                    message: "the request carries a browser Contract and this Runtime has no \
+                              browser verifier; it was not attempted"
+                        .to_owned(),
+                });
+            }
+            // Never verified outside the verifier sandbox unless a developer
+            // chose an uncontained verifier explicitly.
+            Some(verifier) if !verifier.usable() => {
+                return Some(AttemptFailure {
+                    code: "browser_verifier_containment_unavailable".to_owned(),
+                    stage: "admission".to_owned(),
+                    message: "the request carries a browser Contract and this Runtime cannot run \
+                              its browser verifier contained (bubblewrap); it was not attempted"
+                        .to_owned(),
+                });
+            }
+            Some(_) => {}
+        }
     }
     if !planned.plan.steps.is_empty()
         && profile.get("formation.containment") != Some("bwrap+landlock")

@@ -245,9 +245,17 @@ pub fn probe_facts(browser_verifier: Option<&BrowserVerifierCommand>) -> BTreeMa
     facts.insert("runtime.process".to_owned(), contained.to_string());
     // This worker does not realize OCI routes.
     facts.insert("runtime.oci".to_owned(), "false".to_owned());
-    let browser = browser_verifier
-        .and_then(|command| command.cwd.as_ref())
-        .is_some_and(|dir| dir.join("src/main.ts").is_file() && dir.join("node_modules").is_dir());
+    // A browser verifier is a capability only when it runs contained: the
+    // helper, its runtimes and the sandbox all present, and the sandbox
+    // actually starting here. An uncontained verifier is never advertised.
+    let browser =
+        browser_verifier.is_some_and(|command| command.is_contained() && command.usable());
+    if browser {
+        facts.insert(
+            "verifier.browser.containment".to_owned(),
+            "bwrap".to_owned(),
+        );
+    }
     facts.insert("runtime.browser".to_owned(), browser.to_string());
     let root = Path::new(TOOLCHAIN_ROOT);
     if root.is_dir() {
@@ -902,7 +910,12 @@ pub fn execute_ticket(
         shim: config.shim.clone(),
         limits: BuildLimits::default(),
         source_limits: SourceLimits::default(),
-        browser_verifier: config.browser_verifier.clone(),
+        // A Runtime Network attempt is never verified outside the verifier
+        // sandbox, whatever the worker was started with.
+        browser_verifier: config
+            .browser_verifier
+            .clone()
+            .filter(BrowserVerifierCommand::is_contained),
         browser_budget: Default::default(),
     };
     // Evidence names this Runtime as the ticket does, not as `local`.

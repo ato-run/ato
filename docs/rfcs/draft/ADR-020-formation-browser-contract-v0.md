@@ -42,10 +42,11 @@ original prompt
   `browser_contract_needs_realization`.
 - **Process boundary.** The verifier is a Node helper
   (`apps/formation-browser-verifier`), one JSON request on stdin and one JSON
-  result on stdout. The worker starts it with a cleared environment (an
-  allowlist carrying only the judge and agent keys), its own process group, a
-  wall clock plus grace, and a scratch directory that also holds the browser
-  profile — so a browser the launcher detached is still found and stopped.
+  result on stdout. The worker starts it with a cleared environment, its own
+  process group, a wall clock plus grace, and a scratch directory that also
+  holds the browser profile. Since ADR-022 the helper and its browser run in
+  the verifier sandbox (bubblewrap, allowlisted filesystem, the browser in
+  its own PID namespace with an empty environment).
 - **Browser.** Stagehand 3.7.3 (the last v3 release, pinned) in `LOCAL` mode,
   `disableAPI`, headless Chrome. Navigation to the URL the realization
   reported is deterministic; the task itself is carried out by Stagehand's
@@ -106,9 +107,9 @@ original prompt
   died, an agent that could not operate (model out of credit, for instance)
   — all `inconclusive`. The judge is not asked to rule on a page nobody
   operated.
-- **Secrets.** `JEV_API_KEY` and the agent key come from the environment
-  only. The helper and its browser get a `HOME` inside the verification
-  scratch directory. The receipt carries no cookies, no full DOM (bounded excerpts only),
+- **Secrets.** `JEV_API_KEY` and the agent key reach the helper on file
+  descriptor 3 (ADR-022), never in any process environment. The helper and
+  its browser get a `HOME` inside the verification scratch directory. The receipt carries no cookies, no full DOM (bounded excerpts only),
   and is refused if it contains either key's value.
 
 ## Consequences
