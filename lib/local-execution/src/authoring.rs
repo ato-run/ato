@@ -1316,6 +1316,7 @@ mod tests {
             payload: b"ArrowLeft".to_vec(),
             caused_by: Vec::new(),
             effect: ato_adapter_api::ObservationEffect::Evolution,
+            presentation_hint: ato_adapter_api::PresentationHint::None,
         };
 
         let first = evolve_observation(&objects, &root, &observation, &payload).unwrap();

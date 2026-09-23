@@ -131,6 +131,7 @@ impl AdapterFactory for BindingAdapter {
                 payload,
                 caused_by: Vec::new(),
                 effect: ato_adapter_api::ObservationEffect::Evolution,
+                presentation_hint: ato_adapter_api::PresentationHint::None,
             })?;
         Ok(Box::new(BindingSession {
             instance_id: instance.instance_id.clone(),
