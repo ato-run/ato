@@ -151,6 +151,8 @@ fn a_step_that_declared_no_network_does_not_get_one() {
             name: "offline".to_owned(),
             argv: vec!["/bin/true".to_owned()],
             needs_network: false,
+            cwd_relative: String::new(),
+            env: std::collections::BTreeMap::new(),
         }],
         output_root: String::new(),
     };
@@ -186,6 +188,8 @@ fn a_networked_step_under_a_denied_policy_is_refused() {
             name: "install".to_owned(),
             argv: vec!["/bin/true".to_owned()],
             needs_network: true,
+            cwd_relative: String::new(),
+            env: std::collections::BTreeMap::new(),
         }],
         output_root: String::new(),
     };

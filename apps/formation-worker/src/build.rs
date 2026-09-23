@@ -9,7 +9,7 @@
 //! would overwrite a newer result with older bytes, and nothing downstream
 //! could tell.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -19,7 +19,9 @@ use anyhow::{Context, Result, bail};
 use ato_formation::failure::{FailureStage, FormationFailure};
 use ato_formation::intent::{BuildStepV1, EffectiveBuildPlanV1};
 
-use crate::sandbox::{BuildSandbox, GUEST_WORKSPACE_ROOT, NetworkPolicy, sandboxed_build_command};
+use crate::sandbox::{
+    BuildSandbox, GUEST_WORKSPACE_ROOT, NetworkPolicy, sandboxed_build_step_command,
+};
 
 /// One execution of a job.
 #[derive(Debug, Clone)]
@@ -113,6 +115,20 @@ pub fn run_build(
     let mut diagnostics = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(limits.wall_clock_seconds);
 
+    // A step that needs more network than the policy allows is refused before
+    // ANY step runs: a build that fails at its third step has already spent
+    // the first two, and left their output behind.
+    if let Some(step) = plan
+        .steps
+        .iter()
+        .find(|step| step.needs_network && network == NetworkPolicy::Denied)
+    {
+        bail!(
+            "build step {:?} needs the network and this job's policy denies it",
+            step.name
+        );
+    }
+
     for step in &plan.steps {
         // A step that declared no network must not get one, even when the job's
         // policy would have allowed it. The narrower of the two wins.
@@ -121,15 +137,15 @@ pub fn run_build(
         } else {
             NetworkPolicy::Denied
         };
-        if step.needs_network && network == NetworkPolicy::Denied {
-            bail!(
-                "build step {:?} needs the network and this job's policy denies it",
-                step.name
-            );
-        }
 
-        let command = sandboxed_build_command(
+        // Resolved now, against the workspace as the previous steps left it:
+        // one of them may have created the directory, or a link in its place.
+        let guest_cwd = resolve_step_cwd(workspace_root, step)?;
+
+        let command = sandboxed_build_step_command(
             &step.argv,
+            guest_cwd.as_deref(),
+            &step.env,
             &BuildSandbox {
                 source_root,
                 workspace_root,
@@ -167,6 +183,59 @@ pub fn run_build(
         workspace_root: workspace_root.to_path_buf(),
         diagnostics,
     })
+}
+
+/// The guest directory a step runs in, or `None` for the workspace root.
+///
+/// The authored path was checked when the route was projected (plain names
+/// only). Here the REAL directory is checked: every link on the way is
+/// followed on the host, and the result must be a directory inside the
+/// workspace. The guest path handed to the sandbox is that resolved one, so
+/// the step runs exactly where this check looked — nothing falls back to the
+/// workspace root or to anywhere else.
+fn resolve_step_cwd(workspace_root: &Path, step: &BuildStepV1) -> Result<Option<String>> {
+    if step.cwd_relative.is_empty() {
+        return Ok(None);
+    }
+    let outside = || {
+        #[cfg(unix)]
+        {
+            anyhow::Error::new(FormationFailure::new(
+                "build_cwd_outside_workspace",
+                FailureStage::Build,
+                format!(
+                    "build step {:?}: cwd {:?} is not a directory inside the workspace",
+                    step.name, step.cwd_relative
+                ),
+            ))
+        }
+        #[cfg(not(unix))]
+        {
+            anyhow::anyhow!(
+                "build step {:?}: cwd {:?} is not a directory inside the workspace",
+                step.name,
+                step.cwd_relative
+            )
+        }
+    };
+    let relative = ato_formation::projection::workspace_relative_cwd(&step.cwd_relative)
+        .map_err(|_| outside())?;
+    if relative.is_empty() {
+        return Ok(None);
+    }
+    let root =
+        std::fs::canonicalize(workspace_root).context("cannot resolve the build workspace")?;
+    let resolved = std::fs::canonicalize(root.join(&relative)).map_err(|_| outside())?;
+    let inside = resolved.strip_prefix(&root).map_err(|_| outside())?;
+    if !resolved.is_dir() {
+        return Err(outside());
+    }
+    let inside = inside.to_str().ok_or_else(outside)?;
+    Ok(Some(if inside.is_empty() {
+        GUEST_WORKSPACE_ROOT.to_owned()
+    } else {
+        format!("{GUEST_WORKSPACE_ROOT}/{inside}")
+    }))
 }
 
 /// How much of each stream a step keeps while it runs: its tail, for the
@@ -579,6 +648,8 @@ mod tests {
                 name: "test".to_owned(),
                 argv: argv.clone(),
                 needs_network: false,
+                cwd_relative: String::new(),
+                env: std::collections::BTreeMap::new(),
             },
             argv,
         )

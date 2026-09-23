@@ -135,6 +135,10 @@ pub enum DependencyPlan {
     PipRequirements { reproducibility: String },
     /// Nothing to install.
     None,
+    /// The author's own `exec` steps prepare the workspace, dependencies
+    /// included. The platform adds no install of its own beside them: two
+    /// installs of one graph is a build that did something nobody wrote.
+    Authored,
 }
 
 /// How a generated Static site is built.
@@ -245,6 +249,14 @@ pub struct BuildStepV1 {
     /// say "fetch, then build offline" instead of opening the network for the
     /// whole build.
     pub needs_network: bool,
+    /// Where the step runs, relative to the workspace root. `""` is the root.
+    /// Absent from every generated step, so existing plans digest as before.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cwd_relative: String,
+    /// Environment for the WORKLOAD only, added after the sandbox's own
+    /// restrictions are in force — never to the sandbox that applies them.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1133,6 +1145,12 @@ fn resolve_dependencies(
     overrides: &AuthoredOverrides,
     origins: &mut FieldOrigins,
 ) -> Result<DependencyPlan, IntentError> {
+    // An authored build owns the workspace's preparation, dependencies
+    // included. Nothing is detected beside it.
+    if overrides.get("dependencies") == Some("authored") {
+        origins.insert("dependencies".to_owned(), FieldOrigin::Authored);
+        return Ok(DependencyPlan::Authored);
+    }
     // Two lockfiles are two answers. Picking one silently means the build uses
     // versions the author did not choose.
     let mut found = Vec::new();
@@ -1273,6 +1291,8 @@ pub fn compile_build_plan(
                 ),
             ],
             needs_network: true,
+            cwd_relative: String::new(),
+            env: BTreeMap::new(),
         });
     }
 
@@ -1293,6 +1313,8 @@ pub fn compile_build_plan(
                 ),
             ],
             needs_network: true,
+            cwd_relative: String::new(),
+            env: BTreeMap::new(),
         });
     }
 
@@ -1323,6 +1345,8 @@ Nothing was changed — try again shortly.\"}}' >&2; exit 65; fi; \
             // Nothing is resolved from anywhere. Everything this step reads is
             // either the uploaded file or a platform asset already on disk.
             needs_network: false,
+            cwd_relative: String::new(),
+            env: BTreeMap::new(),
         });
     }
 
@@ -1364,6 +1388,8 @@ Nothing was changed — try again shortly.\"}}' >&2; exit 65; fi; \
                     name: "install-node-dependencies".to_owned(),
                     argv: with_toolchain(install),
                     needs_network: true,
+                    cwd_relative: String::new(),
+                    env: BTreeMap::new(),
                 });
 
                 // Run the package's OWN build script. Reconstructing the
@@ -1381,6 +1407,8 @@ Nothing was changed — try again shortly.\"}}' >&2; exit 65; fi; \
                     // build that reached out here would be fetching something
                     // the install step did not pin.
                     needs_network: false,
+                    cwd_relative: String::new(),
+                    env: BTreeMap::new(),
                 });
             }
         }
@@ -1400,6 +1428,8 @@ Nothing was changed — try again shortly.\"}}' >&2; exit 65; fi; \
                     interpreter.clone().unwrap_or_else(|| "python3".to_owned()),
                 ],
                 needs_network: true,
+                cwd_relative: String::new(),
+                env: BTreeMap::new(),
             });
         }
         (Lane::PythonProcess, DependencyPlan::PipRequirements { .. }) => {
@@ -1429,6 +1459,8 @@ Nothing was changed — try again shortly.\"}}' >&2; exit 65; fi; \
                     ),
                 ],
                 needs_network: false,
+                cwd_relative: String::new(),
+                env: BTreeMap::new(),
             });
             let site_packages = python
                 .as_deref()
@@ -1459,9 +1491,14 @@ Nothing was changed — try again shortly.\"}}' >&2; exit 65; fi; \
                     format!("{root}/requirements.txt"),
                 ],
                 needs_network: true,
+                cwd_relative: String::new(),
+                env: BTreeMap::new(),
             });
         }
         (Lane::PythonProcess, DependencyPlan::None) => {}
+        // The author's `exec` steps install what they install; they follow
+        // these platform steps in the plan, in the order they were written.
+        (Lane::PythonProcess, DependencyPlan::Authored) => {}
     }
 
     Ok(EffectiveBuildPlanV1 {

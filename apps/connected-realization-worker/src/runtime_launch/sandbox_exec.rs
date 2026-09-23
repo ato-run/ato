@@ -30,6 +30,21 @@ use ato_sandbox::{SandboxPolicy, apply_sandbox, is_sandbox_supported};
 ///
 /// Only returns on error; on success the process image is replaced.
 pub fn run(policy_path: &Path, argv: &[String]) -> Result<()> {
+    run_with(policy_path, argv, &[], None)
+}
+
+/// [`run`], with environment and a working directory for the WORKLOAD only.
+///
+/// Both are applied by the `exec` itself, after the policy is in force: this
+/// process never has `workload_env` in its own environment and never runs
+/// from `workload_cwd`, so a variable such as `LD_PRELOAD` or `PATH` reaches
+/// what the workload runs and never the shim that restricts it.
+pub fn run_with(
+    policy_path: &Path,
+    argv: &[String],
+    workload_env: &[(String, String)],
+    workload_cwd: Option<&Path>,
+) -> Result<()> {
     let (program, arguments) = argv
         .split_first()
         .ok_or_else(|| anyhow!("sandbox-exec: no workload to execute"))?;
@@ -71,12 +86,19 @@ pub fn run(policy_path: &Path, argv: &[String]) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
-        let error = std::process::Command::new(program).args(arguments).exec();
+        let mut command = std::process::Command::new(program);
+        command
+            .args(arguments)
+            .envs(workload_env.iter().map(|(name, value)| (name, value)));
+        if let Some(cwd) = workload_cwd {
+            command.current_dir(cwd);
+        }
+        let error = command.exec();
         Err(anyhow!("sandbox-exec: failed to exec {program}: {error}"))
     }
     #[cfg(not(unix))]
     {
-        let _ = (program, arguments);
+        let _ = (program, arguments, workload_env, workload_cwd);
         Err(anyhow!("sandbox-exec is only available on Unix"))
     }
 }
