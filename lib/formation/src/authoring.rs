@@ -285,7 +285,19 @@ pub struct DerivationDraft {
     /// compilers do different things, and a Capsule identity that could not
     /// tell them apart would let one be resumed as the other.
     pub workspace_compiler: Option<String>,
+    /// The platforms this route can run on, when the author restricts them.
+    /// Empty: no restriction stated.
+    pub platforms: Vec<PlatformDraft>,
     pub effects: EffectClass,
+}
+
+/// One platform a route can run on: `os` and `arch` as a Runtime reports
+/// them (`linux`/`macos`/`windows`, `x86_64`/`aarch64`).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlatformDraft {
+    pub os: String,
+    pub arch: String,
 }
 
 /// Where a draft came from. **Never digested.**
@@ -430,6 +442,10 @@ pub struct BoundDerivation {
     // before this existed digests exactly as it did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_compiler: Option<String>,
+    /// The platforms this route can run on. A route that states none digests
+    /// exactly as before this field existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub platforms: Vec<PlatformDraft>,
     pub effects: EffectClass,
 }
 
@@ -627,6 +643,12 @@ fn bind_derivation(
         state,
         workspace_build: draft.workspace_build.clone(),
         workspace_compiler: draft.workspace_compiler.clone(),
+        platforms: {
+            let mut platforms = draft.platforms.clone();
+            platforms.sort();
+            platforms.dedup();
+            platforms
+        },
         effects: draft.effects,
     })
 }
@@ -772,6 +794,7 @@ mod tests {
                     path: ".".to_owned(),
                 }],
                 runtimes: vec![],
+                platforms: vec![],
                 steps: vec![StepDraft {
                     id: "site".to_owned(),
                     protocol: BROWSER_PROTOCOL.to_owned(),
