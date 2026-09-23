@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 
 use ato_adapter_api::{
     AdapterAttachContext, AdapterCapabilities, AdapterContext, AdapterError, AdapterFactory,
-    AdapterInstance, AttachedAdapter, Stylus, SupportedOperation,
+    AdapterInstance, AttachedAdapter, PresentationAsset, PresentationCapture, PresentationKind,
+    Stylus, SupportedOperation,
 };
 use ato_objects::{RecordCandidate, RecordEnvelope, read_exact_object};
 use serde::{Deserialize, Serialize};
@@ -117,6 +118,7 @@ impl AdapterFactory for PtyAdapter {
                 AdapterError::Operation("PTY stdin unavailable".to_owned())
             })?));
         let output = Arc::new(Mutex::new(VecDeque::new()));
+        let transcript = Arc::new(Mutex::new(VecDeque::new()));
         let failure = Arc::new(Mutex::new(None));
         let port_id = ato_computation::PortId::parse(format!("terminal.{}", instance.instance_id))
             .map_err(|error| AdapterError::InvalidConfig(error.to_string()))?;
@@ -126,11 +128,13 @@ impl AdapterFactory for PtyAdapter {
             spawn_output_reader(
                 child.stdout.take().expect("piped stdout"),
                 Arc::clone(&output),
+                Arc::clone(&transcript),
                 Arc::clone(&failure),
             ),
             spawn_output_reader(
                 child.stderr.take().expect("piped stderr"),
                 Arc::clone(&output),
+                Arc::clone(&transcript),
                 Arc::clone(&failure),
             ),
         ];
@@ -155,6 +159,7 @@ impl AdapterFactory for PtyAdapter {
             child,
             writer,
             output,
+            transcript,
             failure,
             readers,
             stylus: Arc::clone(&context.stylus),
@@ -172,6 +177,7 @@ struct PtySession {
     child: Child,
     writer: Arc<Mutex<ChildStdin>>,
     output: Arc<Mutex<VecDeque<u8>>>,
+    transcript: Arc<Mutex<VecDeque<u8>>>,
     failure: Arc<Mutex<Option<String>>>,
     readers: Vec<JoinHandle<()>>,
     stylus: Arc<dyn Stylus>,
@@ -193,6 +199,10 @@ impl AttachedAdapter for PtySession {
 
     fn capabilities(&self) -> AdapterCapabilities {
         AdapterFactory::capabilities(&PtyAdapter)
+    }
+
+    fn presentation_capture(&mut self) -> Option<&mut dyn PresentationCapture> {
+        Some(self)
     }
 
     fn apply(
@@ -328,6 +338,7 @@ fn observation(
             }
             _ => ato_adapter_api::ObservationEffect::Evidence,
         },
+        presentation_hint: ato_adapter_api::PresentationHint::None,
     })
 }
 
@@ -373,6 +384,7 @@ fn observed_now() -> String {
 fn spawn_output_reader(
     mut reader: impl Read + Send + 'static,
     output: Arc<Mutex<VecDeque<u8>>>,
+    transcript: Arc<Mutex<VecDeque<u8>>>,
     failure: Arc<Mutex<Option<String>>>,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
@@ -385,6 +397,12 @@ fn spawn_output_reader(
                     let _ = std::io::stdout().write_all(&bytes);
                     if let Ok(mut queue) = output.lock() {
                         queue.extend(bytes.iter().copied());
+                    }
+                    if let Ok(mut history) = transcript.lock() {
+                        history.extend(bytes.iter().copied());
+                        while history.len() > MAX_TRANSCRIPT_BYTES {
+                            history.pop_front();
+                        }
                     }
                 }
                 Err(error) => {
@@ -478,5 +496,113 @@ mod tests {
             candidate(&port, "pty.main", &PtyEvent::Attach, 3),
             Err(AdapterError::InvalidPayload(_))
         ));
+    }
+}
+
+impl PresentationCapture for PtySession {
+    /// Projects the bounded final terminal screen. Presentation bytes are
+    /// private evidence about the physical realization; they never enter
+    /// Record payloads or Computation identity.
+    fn capture_final(
+        &mut self,
+        _context: &AdapterContext<'_>,
+    ) -> Result<Vec<PresentationAsset>, AdapterError> {
+        let transcript: Vec<u8> = self
+            .transcript
+            .lock()
+            .map_err(|_| AdapterError::Operation("PTY transcript was poisoned".to_owned()))?
+            .iter()
+            .copied()
+            .collect();
+        let bytes = terminal_screen_projection(&transcript)?;
+        Ok(vec![PresentationAsset {
+            kind: PresentationKind::TerminalFinal,
+            content_type: "application/vnd.ato.terminal-screen+json".to_owned(),
+            width: None,
+            height: None,
+            sequence: 0,
+            bytes,
+        }])
+    }
+}
+
+const MAX_TRANSCRIPT_BYTES: usize = 1024 * 1024;
+
+fn terminal_screen_projection(transcript: &[u8]) -> Result<Vec<u8>, AdapterError> {
+    const COLUMNS: usize = 80;
+    const ROWS: usize = 24;
+    const MAX_TEXT_BYTES: usize = 64 * 1024;
+
+    let printable = strip_terminal_controls(&String::from_utf8_lossy(transcript));
+    let lines: Vec<&str> = printable.lines().collect();
+    let start = lines.len().saturating_sub(ROWS);
+    let mut text = lines[start..]
+        .iter()
+        .map(|line| line.chars().take(COLUMNS).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+    while text.len() > MAX_TEXT_BYTES {
+        let next = text
+            .char_indices()
+            .nth(1024)
+            .map_or(text.len(), |(index, _)| index);
+        text.drain(..next);
+    }
+    serde_jcs::to_vec(&serde_json::json!({
+        "schema": "ato.terminal-screen@1",
+        "columns": COLUMNS,
+        "rows": ROWS,
+        "text": text,
+    }))
+    .map_err(AdapterError::from)
+}
+
+fn strip_terminal_controls(input: &str) -> String {
+    let mut result = String::new();
+    let mut characters = input.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '\u{1b}' {
+            if characters.peek() == Some(&'[') {
+                characters.next();
+                for suffix in characters.by_ref() {
+                    if suffix.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        if character == '\r' {
+            continue;
+        }
+        if character.is_control() && character != '\n' && character != '\t' {
+            continue;
+        }
+        result.push(character);
+    }
+    result
+}
+
+#[cfg(test)]
+mod presentation_tests {
+    use super::*;
+
+    #[test]
+    fn terminal_projection_strips_controls_and_bounds_to_the_last_screen() {
+        let mut transcript = b"\x1b[31msecret-looking output\x1b[0m\r\n".to_vec();
+        for index in 0..40 {
+            transcript.extend_from_slice(format!("line-{index:02}\n").as_bytes());
+        }
+        let projection = terminal_screen_projection(&transcript).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&projection).unwrap();
+        assert_eq!(value["schema"], "ato.terminal-screen@1");
+        assert_eq!(value["columns"], 80);
+        assert_eq!(value["rows"], 24);
+        let text = value["text"].as_str().unwrap();
+        assert!(!text.contains('\u{1b}'));
+        assert!(!text.contains("line-00"));
+        assert!(text.contains("line-39"));
+        assert!(text.lines().count() <= 24);
+        assert!(projection.len() < 64 * 1024);
     }
 }
