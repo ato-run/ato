@@ -248,6 +248,51 @@ impl BrowserHost {
         Ok(bytes)
     }
 
+    /// Captures a bounded lossless presentation asset of the attached
+    /// application target for the capture pipeline. The asset describes only
+    /// this Host's exact-origin target; it never enters Record payloads or
+    /// Computation identity.
+    pub fn capture_presentation(
+        &mut self,
+        kind: ato_adapter_api::PresentationKind,
+        sequence: u32,
+    ) -> Result<ato_adapter_api::PresentationAsset> {
+        let metrics = self
+            .cdp
+            .call("Page.getLayoutMetrics", json!({}), Some(&self.session_id))?;
+        let viewport = metrics
+            .get("cssVisualViewport")
+            .or_else(|| metrics.get("visualViewport"))
+            .context("Browser Host CDP returned no visual viewport")?;
+        let width = bounded_viewport_dimension(viewport, "clientWidth")?;
+        let height = bounded_viewport_dimension(viewport, "clientHeight")?;
+        let screenshot = self.cdp.call(
+            "Page.captureScreenshot",
+            json!({
+                "format": "png",
+                "fromSurface": true,
+                "captureBeyondViewport": false
+            }),
+            Some(&self.session_id),
+        )?;
+        let encoded = required_string(&screenshot, "data")?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .context("decode Browser presentation asset")?;
+        ensure!(
+            !bytes.is_empty() && bytes.len() <= MAX_PRESENTATION_FRAME_BYTES,
+            "Browser presentation asset exceeds bound"
+        );
+        Ok(ato_adapter_api::PresentationAsset {
+            kind,
+            content_type: "image/png".to_owned(),
+            width: Some(width),
+            height: Some(height),
+            sequence,
+            bytes,
+        })
+    }
+
     /// Captures only the active target's origin-scoped localStorage through
     /// CDP's DOMStorage domain. Cookies, sessionStorage, IndexedDB, console,
     /// DOM projections, and arbitrary page evaluation are deliberately absent.
@@ -752,6 +797,18 @@ fn required_string<'a>(value: &'a Value, name: &str) -> Result<&'a str> {
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .with_context(|| format!("CDP response missing {name}"))
+}
+
+fn bounded_viewport_dimension(value: &Value, field: &str) -> Result<u32> {
+    let dimension = value
+        .get(field)
+        .and_then(Value::as_f64)
+        .context("Browser Host viewport dimension is missing")?;
+    ensure!(
+        dimension.is_finite() && (1.0..=8192.0).contains(&dimension),
+        "Browser Host viewport dimension is outside bounds"
+    );
+    Ok(dimension.round() as u32)
 }
 
 #[cfg(test)]

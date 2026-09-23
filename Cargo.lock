@@ -152,6 +152,7 @@ dependencies = [
  "ato-computation",
  "ato-objects",
  "ato-record-writer",
+ "base64 0.22.1",
  "blake3",
  "rand 0.8.6",
  "serde",
@@ -226,6 +227,7 @@ name = "ato-browser-host"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ato-adapter-api",
  "ato-adapter-browser",
  "base64 0.22.1",
  "serde",
