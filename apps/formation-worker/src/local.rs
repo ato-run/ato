@@ -280,7 +280,7 @@ fn attempt_one(
     attempt.contract_ref = Some(contract_ref.clone());
     attempt.derivation_ref = Some(planned.derivation_ref.clone());
 
-    if let Some(failure) = admits(profile, &planned, network, browser.is_some()) {
+    if let Some(failure) = admits(profile, &planned, network, browser) {
         attempt.status = AttemptStatus::Filtered;
         attempt.failure = Some(failure);
         return (attempt, None);
@@ -466,9 +466,41 @@ fn admits(
     profile: &RuntimeProfile,
     planned: &PlannedCandidate,
     network: NetworkPolicy,
-    browser: bool,
+    browser: Option<&BrowserVerification>,
 ) -> Option<AttemptFailure> {
-    if browser && planned.intent.lane != ato_formation::intent::Lane::PythonProcess {
+    // The route's own platform statement is part of D, so it binds every
+    // Runtime that is asked to run it — whatever a scheduler believed.
+    let platforms = &planned.derivation.platforms;
+    if !platforms.is_empty()
+        && !platforms.iter().any(|platform| {
+            platform.os == std::env::consts::OS && platform.arch == std::env::consts::ARCH
+        })
+    {
+        return Some(AttemptFailure {
+            code: "platform_unsupported".to_owned(),
+            stage: "admission".to_owned(),
+            message: format!(
+                "this route runs on {}; this Runtime is {}/{}; it was not attempted",
+                platforms
+                    .iter()
+                    .map(|platform| format!("{}/{}", platform.os, platform.arch))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            ),
+        });
+    }
+    if browser.is_some_and(|browser| browser.verifier.is_none()) {
+        return Some(AttemptFailure {
+            code: "browser_verifier_unavailable".to_owned(),
+            stage: "admission".to_owned(),
+            message: "the request carries a browser Contract and this Runtime has no browser \
+                      verifier; it was not attempted"
+                .to_owned(),
+        });
+    }
+    if browser.is_some() && planned.intent.lane != ato_formation::intent::Lane::PythonProcess {
         // A browser Contract is verified against a running candidate, and in
         // Phase 1 only a process lane is realized.
         return Some(AttemptFailure {
