@@ -608,9 +608,19 @@ pub fn serve(config: &ServeConfig) -> Result<()> {
             if config.max_tickets.is_some_and(|max| handled >= max) {
                 return Ok(());
             }
-            let Some(ticket) = client.claim()? else {
-                std::thread::sleep(config.poll);
-                continue;
+            let ticket = match client.claim() {
+                Ok(Some(ticket)) => ticket,
+                Ok(None) => {
+                    std::thread::sleep(config.poll);
+                    continue;
+                }
+                // A coordinator or link that drops a request is not a reason
+                // to leave the network; the next poll tries again.
+                Err(error) => {
+                    eprintln!("[runtime-network] claim failed, retrying: {error:#}");
+                    std::thread::sleep(config.poll * 5);
+                    continue;
+                }
             };
             busy.store(1, Ordering::Relaxed);
             eprintln!(
@@ -625,7 +635,20 @@ pub fn serve(config: &ServeConfig) -> Result<()> {
                 "[runtime-network] attempt {} → {}",
                 ticket.attempt_id, report.outcome
             );
-            client.report(&ticket.attempt_id, &report)?;
+            // A result that cannot be delivered is retried; if it never is,
+            // the coordinator expires the attempt as inconclusive.
+            for retry in 0..5 {
+                match client.report(&ticket.attempt_id, &report) {
+                    Ok(()) => break,
+                    Err(error) => {
+                        eprintln!(
+                            "[runtime-network] report failed (try {}): {error:#}",
+                            retry + 1
+                        );
+                        std::thread::sleep(Duration::from_secs(3));
+                    }
+                }
+            }
             busy.store(0, Ordering::Relaxed);
             handled += 1;
         }
