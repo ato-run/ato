@@ -9,6 +9,7 @@
 
 mod activity_controller;
 pub mod runtime_launch;
+mod slot_state;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -943,14 +944,19 @@ pub struct WorkerConfig {
     pub api_base: String,
     #[arg(long, env = "ATO_RUNNER_ID", default_value = "")]
     pub runner_id: String,
-    #[arg(long, env = "ATO_RUNNER_TOKEN", default_value = "")]
+    #[arg(
+        long,
+        env = "ATO_RUNNER_TOKEN",
+        default_value = "",
+        hide_env_values = true
+    )]
     pub runner_token: String,
     /// Existing canonical runner credential JSON. Explicit CLI/env identity
     /// values, when provided, must exactly match this file.
     #[arg(long, env = "ATO_RUNNER_CREDENTIALS_FILE")]
     pub runner_credentials_file: Option<PathBuf>,
     #[arg(long, env = "ATO_RUNNER_PUBLIC_BASE_URL")]
-    pub public_base_url: String,
+    pub public_base_url: Option<String>,
     #[arg(long, env = "ATO_RUNTIME_WORK_ROOT")]
     pub work_root: PathBuf,
     /// Loopback port consumed by the existing per-slot ingress.
@@ -1115,6 +1121,7 @@ impl ConnectedWorker {
     }
 
     pub fn run(&self) -> Result<()> {
+        let _slot = slot_state::SlotGuard::acquire(&self.config.work_root)?;
         self.recover_runtime_launch();
         self.api.heartbeat(&self.config, 0)?;
         loop {
@@ -1145,6 +1152,9 @@ impl ConnectedWorker {
                         lease.id
                     );
                 }
+                // A failed state commit or physical teardown must not be followed
+                // by a new claim. The retained lease directory fences restarts.
+                return Err(error).context("worker slot requires recovery");
             }
             self.api.heartbeat(&self.config, 0)?;
             if self.config.once {
@@ -1158,7 +1168,7 @@ impl ConnectedWorker {
         self.api.report_status(&lease.id, "preparing")?;
 
         let lease_root = self.config.work_root.join("leases").join(&lease.id);
-        fs::create_dir_all(&lease_root)?;
+        fs::create_dir(&lease_root)?;
         let result = match &lease.command {
             LeaseCommand::Portable(command) => {
                 self.execute_portable_lease(lease, command, &lease_root)
@@ -1173,12 +1183,7 @@ impl ConnectedWorker {
                 self.execute_volume_maintenance_lease(lease, command)
             }
         };
-        let cleanup = cleanup_lease_directory(&lease_root);
-        match (result, cleanup) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(error), _) => Err(error),
-            (Ok(()), Err(error)) => Err(error),
-        }
+        settle_lease_directory(&lease_root, result)
     }
 
     /// Checkpoint, restore or delete a Runner-local volume. No workload runs:
@@ -1605,7 +1610,7 @@ impl ConnectedWorker {
             &lease.id,
             ReadyReport {
                 execution_id: &execution_id,
-                ready_url: Some(&self.config.public_base_url),
+                ready_url: self.config.public_base_url.as_deref(),
                 local_port: Some(port),
                 execution: Some(&execution_evidence),
                 port_mapping: oci_port_mapping.as_ref(),
@@ -1655,10 +1660,14 @@ impl ConnectedWorker {
             "[runtime-launch] run={} ready {} endpoint=127.0.0.1:{port} public={}",
             lease.run_id,
             active.execution_subject(),
-            self.config.public_base_url
+            self.config
+                .public_base_url
+                .as_deref()
+                .unwrap_or("<private>")
         );
 
         // ACTIVE. The control plane decides when this ends.
+        let last_heartbeat = std::cell::Cell::new(Instant::now());
         let mut stop = || -> Result<bool> {
             // A group is one Application: a service that exits while ACTIVE
             // fails the whole Run, which is then stopped by `finish`.
@@ -1666,6 +1675,10 @@ impl ConnectedWorker {
                 && let Some((name, code)) = group.exited_service()?
             {
                 bail!("OCI service `{name}` exited while the group was active with code {code}");
+            }
+            if last_heartbeat.get().elapsed() >= ACTIVE_HEARTBEAT_INTERVAL {
+                self.api.heartbeat(&self.config, 1)?;
+                last_heartbeat.set(Instant::now());
             }
             poll_runtime_launch_control(
                 || Ok(self.api.control(&lease.id)?.stop_requested),
@@ -1783,7 +1796,7 @@ impl ConnectedWorker {
             &lease.id,
             ReadyReport {
                 execution_id: &execution_id,
-                ready_url: Some(&self.config.public_base_url),
+                ready_url: self.config.public_base_url.as_deref(),
                 local_port: Some(ready_local_port(&self.config)),
                 execution: None,
                 port_mapping: None,
@@ -2057,6 +2070,13 @@ fn ready_local_port(config: &WorkerConfig) -> u16 {
     config.surface_listen.port()
 }
 
+fn settle_lease_directory(lease_root: &Path, outcome: Result<()>) -> Result<()> {
+    // The engine may have stopped but failed to commit state or report cleanup.
+    // Preserve all working data until both the outcome and cleanup are proven.
+    outcome?;
+    cleanup_lease_directory(lease_root)
+}
+
 fn cleanup_lease_directory(lease_root: &Path) -> Result<()> {
     fs::remove_dir_all(lease_root)
         .with_context(|| format!("failed to clean lease directory {}", lease_root.display()))
@@ -2110,6 +2130,20 @@ fn validate_config(config: &WorkerConfig) -> Result<()> {
         ensure!(
             !cidr.trim().is_empty() && cidr.contains('/'),
             "TAP host CIDR is invalid"
+        );
+    }
+    if let Some(base) = config.public_base_url.as_deref() {
+        let url = url::Url::parse(base).context("invalid public base URL")?;
+        ensure!(
+            matches!(url.scheme(), "http" | "https") && url.host_str().is_some(),
+            "public base URL must be HTTP(S)"
+        );
+        ensure!(
+            url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none(),
+            "public base URL must not contain credentials, query or fragment"
         );
     }
     Ok(())
@@ -4595,6 +4629,18 @@ mod tests {
     }
 
     #[test]
+    fn failed_state_commit_preserves_the_working_copy_and_blocks_restart() {
+        let temporary = tempfile::tempdir().unwrap();
+        let lease = temporary.path().join("leases/lease-failed");
+        fs::create_dir_all(&lease).unwrap();
+        fs::write(lease.join("state"), b"unsaved work").unwrap();
+        let outcome = settle_lease_directory(&lease, Err(anyhow::anyhow!("state commit failed")));
+        assert!(outcome.is_err());
+        assert_eq!(fs::read(lease.join("state")).unwrap(), b"unsaved work");
+        assert!(slot_state::SlotGuard::acquire(temporary.path()).is_err());
+    }
+
+    #[test]
     fn normal_lease_cleanup_removes_activity_operation_journal() {
         let temporary = tempfile::tempdir().expect("lease tempdir");
         let lease_root = temporary.path().join("leases/lease-cleanup");
@@ -5342,7 +5388,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             runner_id: "runner".to_owned(),
             runner_token: "token".to_owned(),
             runner_credentials_file: None,
-            public_base_url: "https://runner.example".to_owned(),
+            public_base_url: Some("https://runner.example".to_owned()),
             work_root: PathBuf::from(".tmp/worker-test"),
             surface_listen: "0.0.0.0:8420".parse().unwrap(),
             hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
@@ -5367,7 +5413,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             runner_id: "runner".to_owned(),
             runner_token: "token".to_owned(),
             runner_credentials_file: None,
-            public_base_url: "https://runner.example".to_owned(),
+            public_base_url: Some("https://runner.example".to_owned()),
             work_root: PathBuf::from(".tmp/worker-test"),
             surface_listen: "127.0.0.1:8420".parse().unwrap(),
             hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
@@ -5403,7 +5449,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             runner_id: String::new(),
             runner_token: String::new(),
             runner_credentials_file: Some(credentials),
-            public_base_url: "https://runner.example".to_owned(),
+            public_base_url: Some("https://runner.example".to_owned()),
             work_root: directory.path().join("work"),
             surface_listen: "127.0.0.1:8420".parse().unwrap(),
             hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
@@ -5457,7 +5503,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             runner_id: "runner_1".to_owned(),
             runner_token: "token".to_owned(),
             runner_credentials_file: None,
-            public_base_url: "https://runner.example".to_owned(),
+            public_base_url: Some("https://runner.example".to_owned()),
             work_root: PathBuf::from(".tmp/worker"),
             surface_listen: "127.0.0.1:8420".parse().unwrap(),
             hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
@@ -5509,7 +5555,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             runner_id: "runner".to_owned(),
             runner_token: "token".to_owned(),
             runner_credentials_file: None,
-            public_base_url: "https://runner.example".to_owned(),
+            public_base_url: Some("https://runner.example".to_owned()),
             work_root: PathBuf::from(".tmp/worker-test"),
             surface_listen: "127.0.0.1:8420".parse().unwrap(),
             hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
@@ -5590,7 +5636,7 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             runner_id: "runner_1".to_owned(),
             runner_token: "token".to_owned(),
             runner_credentials_file: None,
-            public_base_url: "https://runner.example".to_owned(),
+            public_base_url: Some("https://runner.example".to_owned()),
             work_root: PathBuf::from(".tmp/worker"),
             surface_listen: "127.0.0.1:8420".parse().unwrap(),
             hidden_surface_listen: "127.0.0.1:18420".parse().unwrap(),
