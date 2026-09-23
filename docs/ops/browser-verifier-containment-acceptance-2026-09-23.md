@@ -96,3 +96,21 @@ renderers non-dumpable.
 - x86_64 Linux was not run in this pass (sugamo was not joined); the sandbox
   has no architecture-specific part.
 - No deploy; migration 0288 still not applied remotely.
+
+## Amendment: sibling browser sandbox (x86_64, AppArmor-restricted host)
+
+Before the P0 benchmark, an Ubuntu 26.04 x86_64 Runtime (`rt_sugamo-x86`,
+`apparmor_restrict_unprivileged_userns = 1`, bwrap 0.11.1, Chrome for Testing
+145 via Playwright with `PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64`,
+Node 20.20.2) advertised a browser and then failed the Browser Contract smoke
+with `browser_failed: connect ECONNREFUSED`: the nested bubblewrap cannot
+create a user namespace there. ADR-022's amendment moves the browser to a
+sibling sandbox started by the worker.
+
+| Where | Check | Result |
+|---|---|---|
+| sugamo x86_64 (restricted) | `browser_verifier_containment_v1` | 4/4 — 32 browser processes observed from the host, none with a key, the helper's ambient variable or the secrets descriptor in `environ`, none in the helper's PID namespace; `file://<canary>` over CDP → error page, `data:` control renders |
+| OCI aarch64 (unrestricted) | same | 4/4 (35 browser processes) |
+| sugamo x86_64 | Runtime Network smoke, `notes` Browser Contract, `--exact-runtime rt_sugamo-x86` | satisfied, browser pass, VerifiedRoute; receipt `browser_process = separate-sandbox+empty-environment+chrome-no-sandbox`, `Chrome/145.0.7632.6` |
+| OCI aarch64 | same, `--exact-runtime rt_oci-arm64` | satisfied, browser pass; `…+chrome-sandbox`, `Chrome/149.0.7827.0` |
+| sugamo x86_64 | `notes-exfiltrate` | inconclusive `boundary_violation`; `127.0.0.1:47999`, `localhost:47997`, `[::1]:47996`, `192.168.1.1`, `example.com`, `ws://…` all `blocked_request` |
