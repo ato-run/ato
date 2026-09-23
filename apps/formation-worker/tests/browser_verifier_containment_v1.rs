@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ato_formation::browser::{
     BrowserBudget, BrowserContractV0, BrowserTarget, BrowserVerdict, BrowserVerificationReceipt,
@@ -209,7 +209,7 @@ fn the_helper_cannot_read_the_host() {
     ];
     let body = format!(
         r#"
-import {{ readFileSync, readdirSync }} from "node:fs";
+import {{ readdirSync }} from "node:fs";
 const out = [];
 let leaked = false;
 for (const p of {targets}) {{
@@ -232,7 +232,8 @@ answer(!leaked, out);
     assert_eq!(
         receipt.overall,
         BrowserVerdict::Pass,
-        "{:?}",
+        "{:?} {:?}",
+        receipt.reason,
         facts(&receipt)
     );
     for fact in facts(&receipt) {
@@ -267,7 +268,8 @@ answer(ok, out);
     assert_eq!(
         receipt.overall,
         BrowserVerdict::Pass,
-        "{:?}",
+        "{:?} {:?}",
+        receipt.reason,
         facts(&receipt)
     );
 }
@@ -294,16 +296,46 @@ out.push("env-has-keys " + /JEV_API_KEY|DEEPSEEK_API_KEY/.test(env));
 out.push("env-has-ambient " + env.includes("ATO_TEST_AMBIENT"));
 out.push("sees-helper " + procs.includes("standin.mjs"));
 out.push("canary " + (cat || "").trim());
-const dump = spawnSync("/verifier/bin/chrome-contained",
-  ["--headless=new", "--no-first-run", "--disable-gpu", "--user-data-dir=/scratch/dump",
-   "--dump-dom", "file://{canary}"], {{ encoding: "utf8", timeout: 60000 }});
-out.push("dump-has-canary " + (dump.stdout || "").includes({secret}));
+const started = Date.now();
 const chrome = spawn("/verifier/bin/chrome-contained",
   ["--headless=new", "--no-first-run", "--disable-gpu", "--user-data-dir=/scratch/profile",
-   "--remote-debugging-port=0", {marker}, "about:blank"], {{ stdio: "ignore" }});
-await new Promise((r) => setTimeout(r, 8000));
+   "--remote-debugging-port=0", {marker}, "about:blank"], {{ stdio: ["ignore", "ignore", "pipe"] }});
+let stderr = "";
+chrome.stderr.on("data", (d) => {{ stderr = (stderr + d).slice(-300); }});
+// The running browser is asked, over CDP, to open the host canary as a file
+// URL — and, as a control, a page it can render.
+let port = null;
+for (let i = 0; i < 150 && port === null; i++) {{
+  try {{ port = Number(readFileSync("/scratch/profile/DevToolsActivePort", "utf8").split("\n")[0]) || null; }}
+  catch {{ await new Promise((r) => setTimeout(r, 100)); }}
+}}
+async function pageHtml(url) {{
+  const target = await (await fetch(`http://127.0.0.1:${{port}}/json/new?${{encodeURIComponent(url)}}`, {{ method: "PUT" }})).json();
+  const ws = new WebSocket(target.webSocketDebuggerUrl);
+  await new Promise((r) => (ws.onopen = r));
+  await new Promise((r) => setTimeout(r, 2000));
+  const reply = await new Promise((r) => {{
+    ws.onmessage = (m) => {{ const d = JSON.parse(m.data); if (d.id === 1) r(d); }};
+    ws.send(JSON.stringify({{ id: 1, method: "Runtime.evaluate",
+      params: {{ expression: "location.href + ' ' + document.documentElement.outerHTML", returnByValue: true }} }}));
+  }});
+  ws.close();
+  return String(reply.result?.result?.value ?? JSON.stringify(reply.error ?? reply.result));
+}}
+let control = "", canaryPage = "";
+try {{
+  control = await pageHtml("data:text/html,<p>containment-control</p>");
+  canaryPage = await pageHtml("file://{canary}");
+}} catch (e) {{ control = "cdp-error " + e; }}
+const controlOk = control.includes("containment-control");
+out.push("file-url-has-canary " + canaryPage.includes({secret}));
+await new Promise((r) => setTimeout(r, Math.max(0, 8000 - (Date.now() - started))));
+const alive = chrome.exitCode === null && chrome.signalCode === null;
 chrome.kill("SIGKILL");
-const ok = out.every((f) => /false$|No such file or directory$/.test(f));
+const ok = out.every((f) => /false$|No such file or directory$/.test(f)) && alive && controlOk;
+out.push("control-rendered " + controlOk);
+out.push("file-url-page " + JSON.stringify(canaryPage.replace(/\s+/g, " ").slice(0, 200)));
+out.push("browser-alive " + alive + " " + (alive ? "" : stderr));
 answer(ok, out);
 "#,
         canary = canary.path.display(),
@@ -314,16 +346,13 @@ answer(ok, out);
     // From the host, while the browser is up: every process carrying the
     // marker is read through /proc for the keys.
     let watcher_marker = marker.clone();
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watching = done.clone();
     let watcher = std::thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(60);
         let mut seen = 0;
         let mut leaked = Vec::new();
-        while Instant::now() < deadline {
-            let pids = Command::new("pgrep")
-                .args(["-f", &watcher_marker])
-                .output()
-                .unwrap();
-            for pid in String::from_utf8_lossy(&pids.stdout).split_whitespace() {
+        while !watching.load(std::sync::atomic::Ordering::Relaxed) {
+            for pid in processes_matching(&watcher_marker) {
                 if let Ok(environ) = std::fs::read(format!("/proc/{pid}/environ")) {
                     seen += 1;
                     let environ = String::from_utf8_lossy(&environ);
@@ -341,14 +370,25 @@ answer(ok, out);
         }
         (seen, leaked)
     });
-    let receipt = with_keys(|| verify(command, 90_000));
+    let receipt = with_keys(|| verify(command, 150_000));
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
     let (seen, leaked) = watcher.join().unwrap();
-    assert!(seen > 0, "the browser was never observed from the host");
+    eprintln!(
+        "browser containment facts: {:?}; host observed {seen} browser processes",
+        facts(&receipt)
+    );
+    assert!(
+        seen > 0,
+        "the browser was never observed from the host: {:?} {:?}",
+        receipt.reason,
+        facts(&receipt)
+    );
     assert!(leaked.is_empty(), "{leaked:?}");
     assert_eq!(
         receipt.overall,
         BrowserVerdict::Pass,
-        "{:?}",
+        "{:?} {:?}",
+        receipt.reason,
         facts(&receipt)
     );
     let text = serde_json::to_string(&receipt).unwrap();
@@ -386,13 +426,10 @@ await new Promise((r) => setTimeout(r, 3000));
         let receipt = with_keys(|| verify(command, wall_clock_ms));
         assert_eq!(receipt.overall, BrowserVerdict::Inconclusive, "{case}");
         std::thread::sleep(Duration::from_millis(500));
-        let survivors = Command::new("pgrep")
-            .args(["-f", &marker])
-            .output()
-            .unwrap();
+        let survivors = processes_matching(&marker);
         assert!(
-            String::from_utf8_lossy(&survivors.stdout).trim().is_empty(),
-            "{case}: processes outlived the verification"
+            survivors.is_empty(),
+            "{case}: processes outlived the verification: {survivors:?}"
         );
         let after = scratch_entries();
         assert!(
@@ -406,4 +443,22 @@ fn scratch_entries() -> Vec<PathBuf> {
     std::fs::read_dir(std::env::temp_dir().join("ato-browser-verify"))
         .map(|entries| entries.flatten().map(|e| e.path()).collect())
         .unwrap_or_default()
+}
+
+/// Pids whose command line contains `pattern`. A pgrep that fails (rather
+/// than finding nothing) fails the test: an empty answer must mean "none".
+fn processes_matching(pattern: &str) -> Vec<String> {
+    let output = Command::new("pgrep")
+        .args(["-f", "--", pattern])
+        .output()
+        .expect("pgrep");
+    assert!(
+        matches!(output.status.code(), Some(0 | 1)),
+        "pgrep failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect()
 }
