@@ -777,15 +777,13 @@ arch = "{}"
     assert!(attempts[0].realization.is_none());
 }
 
-// ── a verified candidate whose artifact cannot be kept ──────────────────────
+// ── contained symlinks through to the artifact ──────────────────────────────
 
-/// A source with a contained symlink is formed, built, realized and verified
-/// (resolver v2); only its artifact cannot be stored yet, because the artifact
-/// format has no symlink entry. The verdicts stay in the evidence, so "the
-/// Contract held" is not confused with "the Contract failed".
+/// A source with a contained symlink is formed end to end (resolver v2), and
+/// the stored artifact carries the link as a link.
 #[cfg(unix)]
 #[test]
-fn a_verified_candidate_whose_artifact_cannot_be_kept_keeps_its_verdicts() {
+fn a_candidate_with_a_contained_link_is_formed_and_its_artifact_keeps_the_link() {
     let dir = site(&[
         ("server.py", MARKING_SERVER),
         ("capsule.toml", AUTHORED_PROCESS),
@@ -798,8 +796,63 @@ fn a_verified_candidate_whose_artifact_cannot_be_kept_keeps_its_verdicts() {
         &formation(&scratch),
     )
     .expect("the driver ran");
+    let toolchain_root = Path::new(ato_formation_worker::sandbox::TOOLCHAIN_ROOT).is_dir();
+    if !containment_available() || !toolchain_root {
+        let FormationResult::NoVerifiedRoute { attempts, .. } = &result else {
+            panic!("expected no_verified_route on this host, got {result:?}");
+        };
+        assert_eq!(attempts[0].status, AttemptStatus::Filtered, "{attempts:?}");
+        return;
+    }
+    let FormationResult::Formed {
+        verified_routes, ..
+    } = &result
+    else {
+        panic!("expected formed, got {result:?}");
+    };
+    let reference = &verified_routes[0].materialization_ref;
+    let packed = std::fs::read(
+        scratch
+            .path()
+            .join("out/artifacts")
+            .join(format!("{}.tar", &reference["sha256:".len()..])),
+    )
+    .expect("the artifact is stored");
+    let mut archive = tar::Archive::new(std::io::Cursor::new(packed));
+    let link = archive
+        .entries()
+        .unwrap()
+        .map(Result::unwrap)
+        .find(|entry| entry.path().unwrap() == Path::new("docs/current"))
+        .expect("the link is in the artifact");
+    assert_eq!(link.header().entry_type(), tar::EntryType::Symlink);
+    assert_eq!(
+        link.link_name().unwrap().unwrap().as_ref(),
+        Path::new("readme.txt")
+    );
+}
+
+/// A verified candidate whose artifact cannot be stored keeps its verdicts,
+/// so "the Contract held" is not confused with "the Contract failed" — and the
+/// failure names no path of the worker's.
+#[cfg(unix)]
+#[test]
+fn a_verified_candidate_whose_artifact_cannot_be_kept_keeps_its_verdicts() {
+    let dir = site(&[
+        ("server.py", MARKING_SERVER),
+        ("capsule.toml", AUTHORED_PROCESS),
+    ]);
+    let scratch = tempfile::tempdir().expect("tempdir");
+    // The artifact store cannot be created: a file where its directory goes.
+    std::fs::create_dir_all(scratch.path().join("out")).unwrap();
+    std::fs::write(scratch.path().join("out/artifacts"), "not a directory").unwrap();
+    let result = local::run(
+        &request(dir.path(), FormationNetworkPolicy::DependencyResolution),
+        &formation(&scratch),
+    )
+    .expect("the driver ran");
     let FormationResult::NoVerifiedRoute { attempts, .. } = &result else {
-        panic!("the artifact cannot be stored yet, got {result:?}");
+        panic!("the artifact cannot be stored, got {result:?}");
     };
     let toolchain_root = Path::new(ato_formation_worker::sandbox::TOOLCHAIN_ROOT).is_dir();
     if !containment_available() || !toolchain_root {
@@ -807,10 +860,12 @@ fn a_verified_candidate_whose_artifact_cannot_be_kept_keeps_its_verdicts() {
         return;
     }
     let attempt = &attempts[0];
-    assert_eq!(
-        attempt.failure.as_ref().map(|f| f.code.as_str()),
-        Some("artifact_store_failed"),
-        "{attempt:?}"
+    let failure = attempt.failure.as_ref().expect("a failure");
+    assert_eq!(failure.code, "artifact_store_failed", "{attempt:?}");
+    assert!(
+        !failure.message.contains(&*scratch.path().to_string_lossy()),
+        "host path in {}",
+        failure.message
     );
     let verification = attempt
         .verification
