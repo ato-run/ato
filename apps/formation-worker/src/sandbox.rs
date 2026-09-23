@@ -17,6 +17,7 @@
 //! Run unconfined. A worker that cannot contain a build refuses the job, and
 //! says so, rather than producing an artifact nobody can vouch for.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail, ensure};
@@ -155,6 +156,23 @@ pub fn sandboxed_build_command(
     workload_argv: &[String],
     sandbox: &BuildSandbox<'_>,
 ) -> Result<SandboxedBuildCommand> {
+    sandboxed_build_step_command(workload_argv, None, &BTreeMap::new(), sandbox)
+}
+
+/// [`sandboxed_build_command`] for a step with its own guest cwd and env.
+///
+/// Neither is given to bubblewrap. The sandbox starts from `--clearenv` and
+/// its own fixed environment in `/app`, applies its restrictions, and only
+/// then execs the workload with `workload_env` added and in `guest_cwd` — so
+/// an authored `LD_PRELOAD`, `PATH` or `PYTHONPATH` reaches the workload and
+/// never the shim that restricts it. With neither, the command is exactly
+/// what it was before steps had them.
+pub fn sandboxed_build_step_command(
+    workload_argv: &[String],
+    guest_cwd: Option<&str>,
+    workload_env: &BTreeMap<String, String>,
+    sandbox: &BuildSandbox<'_>,
+) -> Result<SandboxedBuildCommand> {
     let BuildSandbox {
         source_root,
         workspace_root,
@@ -263,8 +281,14 @@ pub fn sandboxed_build_command(
         "/.ato/build-policy.json".to_owned(),
         "--max-processes".to_owned(),
         limits.max_processes.to_string(),
-        "--".to_owned(),
     ]);
+    if let Some(cwd) = guest_cwd {
+        argv.extend(["--cwd".to_owned(), cwd.to_owned()]);
+    }
+    for (name, value) in workload_env {
+        argv.extend(["--env".to_owned(), format!("{name}={value}")]);
+    }
+    argv.push("--".to_owned());
     argv.extend(workload_argv.iter().cloned());
 
     Ok(SandboxedBuildCommand {

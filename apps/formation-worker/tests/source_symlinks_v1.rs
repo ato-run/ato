@@ -158,6 +158,8 @@ fn build(workspace: &Path, source: &Path, script: &str) -> anyhow::Result<()> {
             name: "script".to_owned(),
             argv: vec!["/bin/sh".to_owned(), "-c".to_owned(), script.to_owned()],
             needs_network: false,
+            cwd_relative: String::new(),
+            env: BTreeMap::new(),
         }],
         output_root: String::new(),
     };
