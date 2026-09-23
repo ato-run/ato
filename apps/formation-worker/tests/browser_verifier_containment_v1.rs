@@ -80,7 +80,7 @@ fn setup() -> Option<Setup> {
         node,
         chrome: PathBuf::from(chrome),
         launcher: Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../formation-browser-verifier/bin/chrome-contained"),
+            .join("../formation-browser-verifier/bin/chrome-contained.cjs"),
     })
 }
 
@@ -88,7 +88,11 @@ fn setup() -> Option<Setup> {
 fn stand_in(setup: &Setup, body: &str) -> (tempfile::TempDir, BrowserVerifierCommand) {
     let root = tempfile::tempdir().expect("helper root");
     std::fs::create_dir_all(root.path().join("bin")).expect("bin");
-    std::fs::copy(&setup.launcher, root.path().join("bin/chrome-contained")).expect("launcher");
+    std::fs::copy(
+        &setup.launcher,
+        root.path().join("bin/chrome-contained.cjs"),
+    )
+    .expect("launcher");
     std::fs::write(
         root.path().join("standin.mjs"),
         format!("{ANSWER_JS}\n{body}\n"),
@@ -98,7 +102,11 @@ fn stand_in(setup: &Setup, body: &str) -> (tempfile::TempDir, BrowserVerifierCom
         root.path(),
         &setup.node,
         &setup.chrome,
-        vec!["standin.mjs".to_owned()],
+        // Node 20 has WebSocket behind this flag; Node 22 accepts it as is.
+        vec![
+            "--experimental-websocket".to_owned(),
+            "standin.mjs".to_owned(),
+        ],
     )
     .expect("the sandbox resolves");
     (root, BrowserVerifierCommand::Contained(spec))
@@ -279,25 +287,18 @@ fn the_browser_has_no_key_no_view_of_the_helper_and_no_host() {
     let Some(setup) = setup() else { return };
     let canary = Canary::new();
     let marker = format!("--ato-containment-marker={}", rand_token());
-    // Inside the sandbox: the launcher starts a shell in the browser's place
-    // (same namespace, same environment policy) and reports what it sees;
-    // then it starts the real browser, which reads the canary as a file URL
-    // and stays up long enough to be measured from the host.
+    // Inside the helper's sandbox, with an ambient variable set, the stand-in
+    // asks for the browser as Stagehand does; the browser is asked over CDP to
+    // open the host canary as a file URL, and stays up long enough to be
+    // measured from the host: its environment, and its PID namespace against
+    // the helper's.
     let body = format!(
         r#"
-import {{ spawnSync, spawn }} from "node:child_process";
+import {{ spawn }} from "node:child_process";
 const out = [];
 process.env.ATO_TEST_AMBIENT = "must-not-cross";
-const probe = spawnSync("/verifier/bin/chrome-contained",
-  ["-c", "env; echo ===; for d in /proc/[0-9]*; do tr '\\0' ' ' < $d/cmdline; echo; done; echo ===; cat {canary} 2>&1"],
-  {{ env: {{ ...process.env, ATO_BROWSER_CHROME_REAL: "/bin/sh" }}, encoding: "utf8" }});
-const [env, procs, cat] = (probe.stdout || "").split("===\n");
-out.push("env-has-keys " + /JEV_API_KEY|DEEPSEEK_API_KEY/.test(env));
-out.push("env-has-ambient " + env.includes("ATO_TEST_AMBIENT"));
-out.push("sees-helper " + procs.includes("standin.mjs"));
-out.push("canary " + (cat || "").trim());
 const started = Date.now();
-const chrome = spawn("/verifier/bin/chrome-contained",
+const chrome = spawn("/verifier/bin/chrome-contained.cjs",
   ["--headless=new", "--no-first-run", "--disable-gpu", "--user-data-dir=/scratch/profile",
    "--remote-debugging-port=0", {marker}, "about:blank"], {{ stdio: ["ignore", "ignore", "pipe"] }});
 let stderr = "";
@@ -333,7 +334,7 @@ await new Promise((r) => setTimeout(r, Math.max(0, 8000 - (Date.now() - started)
 const alive = chrome.exitCode === null && chrome.signalCode === null;
 chrome.kill("SIGKILL");
 const ok = out.every((f) => /false$|No such file or directory$/.test(f)) && alive && controlOk;
-out.push("control-rendered " + controlOk);
+out.push("control-rendered " + controlOk + (controlOk ? "" : " " + control.slice(0, 200)));
 out.push("file-url-page " + JSON.stringify(canaryPage.replace(/\s+/g, " ").slice(0, 200)));
 out.push("browser-alive " + alive + " " + (alive ? "" : stderr));
 answer(ok, out);
@@ -348,31 +349,52 @@ answer(ok, out);
     let watcher_marker = marker.clone();
     let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let watching = done.clone();
+    let pid_ns = |pid: &str| std::fs::read_link(format!("/proc/{pid}/ns/pid")).ok();
     let watcher = std::thread::spawn(move || {
         let mut seen = 0;
         let mut leaked = Vec::new();
+        let mut shared_namespace = Vec::new();
         while !watching.load(std::sync::atomic::Ordering::Relaxed) {
+            let helpers: Vec<_> = processes_matching("standin.mjs")
+                .iter()
+                .filter_map(|pid| pid_ns(pid))
+                .collect();
             for pid in processes_matching(&watcher_marker) {
+                // The launcher client carries the marker in its argv too;
+                // only the real browser runs from /runtime/chrome.
+                let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+                if !String::from_utf8_lossy(&cmdline).starts_with("/runtime/chrome/") {
+                    continue;
+                }
                 if let Ok(environ) = std::fs::read(format!("/proc/{pid}/environ")) {
                     seen += 1;
                     let environ = String::from_utf8_lossy(&environ);
-                    for needle in [JEV_KEY, DEEPSEEK_KEY, "JEV_API_KEY", "DEEPSEEK_API_KEY"] {
+                    for needle in [
+                        JEV_KEY,
+                        DEEPSEEK_KEY,
+                        "JEV_API_KEY",
+                        "DEEPSEEK_API_KEY",
+                        "ATO_TEST_AMBIENT",
+                        "ATO_VERIFIER_SECRETS_FD",
+                    ] {
                         if environ.contains(needle) {
                             leaked.push(format!("{pid}: {needle}"));
                         }
                     }
                 }
-            }
-            if seen > 5 {
-                break;
+                if let Some(ns) = pid_ns(&pid)
+                    && helpers.contains(&ns)
+                {
+                    shared_namespace.push(pid.clone());
+                }
             }
             std::thread::sleep(Duration::from_millis(200));
         }
-        (seen, leaked)
+        (seen, leaked, shared_namespace)
     });
     let receipt = with_keys(|| verify(command, 150_000));
     done.store(true, std::sync::atomic::Ordering::Relaxed);
-    let (seen, leaked) = watcher.join().unwrap();
+    let (seen, leaked, shared_namespace) = watcher.join().unwrap();
     eprintln!(
         "browser containment facts: {:?}; host observed {seen} browser processes",
         facts(&receipt)
@@ -384,6 +406,10 @@ answer(ok, out);
         facts(&receipt)
     );
     assert!(leaked.is_empty(), "{leaked:?}");
+    assert!(
+        shared_namespace.is_empty(),
+        "browser processes in the helper's PID namespace: {shared_namespace:?}"
+    );
     assert_eq!(
         receipt.overall,
         BrowserVerdict::Pass,
@@ -411,7 +437,7 @@ fn timeout_crash_and_kill_leave_nothing_behind() {
         let body = format!(
             r#"
 import {{ spawn }} from "node:child_process";
-spawn("/verifier/bin/chrome-contained",
+spawn("/verifier/bin/chrome-contained.cjs",
   ["--headless=new", "--no-first-run", "--disable-gpu", "--user-data-dir=/scratch/profile",
    "--remote-debugging-port=0", {marker}, "about:blank"], {{ stdio: "ignore", detached: true }});
 spawn("/runtime/node/bin/node", ["-e", "setTimeout(() => {{}}, 600000)", {marker}],
