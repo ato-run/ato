@@ -368,6 +368,16 @@ struct FormArgs {
     /// The Node binary that runs the browser verifier.
     #[arg(long, env = "ATO_NODE", default_value = "node")]
     node: String,
+    /// The Chrome/Chromium binary the verifier drives.
+    #[arg(long, env = "ATO_BROWSER_CHROME_PATH")]
+    browser_chrome: Option<PathBuf>,
+    /// Development only: run the browser verifier and its browser directly on
+    /// this host, with the host filesystem visible to them, when the verifier
+    /// sandbox (Linux + bubblewrap) is not available. Recorded as
+    /// `containment: none` in the receipt; never available on a Runtime
+    /// Network Runtime.
+    #[arg(long, requires = "verify_browser")]
+    allow_uncontained_browser_verifier: bool,
     /// Satisfy the Contract on the Runtime Network instead of this machine:
     /// every authorized route × every available owned Runtime, hard-filtered,
     /// executed and verified. `--runtime local` is unaffected.
@@ -415,12 +425,16 @@ struct RuntimeNetworkServeArgs {
     /// Where verified artifacts are written.
     #[arg(long)]
     out: Option<PathBuf>,
-    /// The browser verifier helper (apps/formation-browser-verifier).
+    /// The browser verifier helper (apps/formation-browser-verifier). It is
+    /// advertised only when it runs contained (Linux + bubblewrap).
     #[arg(long, env = "ATO_BROWSER_VERIFIER")]
     browser_verifier: Option<PathBuf>,
     /// The Node binary that runs the browser verifier.
     #[arg(long, env = "ATO_NODE", default_value = "node")]
     node: String,
+    /// The Chrome/Chromium binary the verifier drives.
+    #[arg(long, env = "ATO_BROWSER_CHROME_PATH")]
+    browser_chrome: Option<PathBuf>,
     /// Stop after handling this many attempts.
     #[arg(long)]
     max_attempts: Option<u32>,
@@ -591,21 +605,44 @@ fn read_token(path: &Path) -> Result<String> {
         .to_owned())
 }
 
+/// The browser verifier to use: the helper inside the verifier sandbox, or
+/// — only when a developer asks for it — the helper on the host.
 fn browser_verifier_command(
     dir: Option<PathBuf>,
     node: &str,
+    chrome: Option<PathBuf>,
+    allow_uncontained: bool,
 ) -> Result<Option<ato_formation_worker::browser_verify::BrowserVerifierCommand>> {
-    dir.map(|dir| {
-        dir.canonicalize()
-            .with_context(|| format!("cannot read the browser verifier at {}", dir.display()))
-            .map(|dir| {
-                ato_formation_worker::browser_verify::BrowserVerifierCommand::node_helper(
-                    node.to_owned(),
-                    dir,
-                )
-            })
-    })
-    .transpose()
+    use ato_formation_worker::browser_sandbox::BrowserVerifierSandboxSpec;
+    use ato_formation_worker::browser_verify::BrowserVerifierCommand;
+    let Some(dir) = dir else {
+        return Ok(None);
+    };
+    let dir = dir
+        .canonicalize()
+        .with_context(|| format!("cannot read the browser verifier at {}", dir.display()))?;
+    let contained = chrome
+        .as_deref()
+        .context("the browser verifier needs --browser-chrome (or ATO_BROWSER_CHROME_PATH)")
+        .and_then(|chrome| BrowserVerifierSandboxSpec::node_helper(&dir, node, chrome));
+    match contained {
+        Ok(spec) => {
+            let command = BrowserVerifierCommand::Contained(spec);
+            if command.usable() || !allow_uncontained {
+                return Ok(Some(command));
+            }
+        }
+        Err(error) if !allow_uncontained => return Err(error),
+        Err(_) => {}
+    }
+    eprintln!(
+        "warning: the browser verifier runs UNCONTAINED on this host \
+         (--allow-uncontained-browser-verifier); development only"
+    );
+    Ok(Some(BrowserVerifierCommand::uncontained_node_helper(
+        node.to_owned(),
+        dir,
+    )))
 }
 
 /// Submit a SatisfyRequest and wait for the coordinator to settle it.
@@ -691,7 +728,17 @@ fn runtime_network_serve(args: RuntimeNetworkServeArgs) -> Result<()> {
             work_root: args.work_root.unwrap_or_else(|| base.join("work")),
             out_dir: args.out.unwrap_or_else(|| base.join("out")),
             shim: std::env::current_exe().context("cannot locate this binary")?,
-            browser_verifier: browser_verifier_command(args.browser_verifier, &args.node)?,
+            // Contained or nothing: a Runtime never verifies uncontained.
+            browser_verifier: browser_verifier_command(
+                args.browser_verifier,
+                &args.node,
+                args.browser_chrome,
+                false,
+            )
+            .unwrap_or_else(|error| {
+                eprintln!("[runtime-network] no browser verifier: {error:#}");
+                None
+            }),
             poll: std::time::Duration::from_secs(2),
             max_tickets: args.max_attempts,
         },
@@ -733,19 +780,16 @@ fn form(args: FormArgs) -> Result<()> {
             .transpose()
             .context("--accept is not a usable acceptance prompt")?,
     };
-    let browser_verifier = args
-        .browser_verifier
-        .map(|dir| {
-            dir.canonicalize()
-                .with_context(|| format!("cannot read the browser verifier at {}", dir.display()))
-                .map(|dir| {
-                    ato_formation_worker::browser_verify::BrowserVerifierCommand::node_helper(
-                        args.node.clone(),
-                        dir,
-                    )
-                })
-        })
-        .transpose()?;
+    let browser_verifier = if args.verify_browser {
+        browser_verifier_command(
+            args.browser_verifier,
+            &args.node,
+            args.browser_chrome,
+            args.allow_uncontained_browser_verifier,
+        )?
+    } else {
+        None
+    };
     let env = ato_formation_worker::local::LocalFormation {
         work_root,
         out_dir,
