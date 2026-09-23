@@ -17,6 +17,10 @@ use ato_formation_worker::browser_verify::{
     BrowserVerification, BrowserVerifierCommand, verify_in_browser,
 };
 
+/// Tests that set process environment variables take this first: the test
+/// harness runs tests on parallel threads that share one environment.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 const PROMPT: &str = "Create a note named 'formation-check'. Reload the page and verify that the note is still present.";
 
 /// A stand-in helper: reads the request, then runs `body` (Python) with
@@ -28,7 +32,7 @@ fn helper(dir: &tempfile::TempDir, body: &str) -> BrowserVerifierCommand {
         format!("import json, os, sys, time\nrequest = json.load(sys.stdin)\n{body}\n",),
     )
     .expect("helper");
-    BrowserVerifierCommand {
+    BrowserVerifierCommand::Uncontained {
         argv: vec!["python3".to_owned(), path.to_string_lossy().into_owned()],
         cwd: None,
     }
@@ -195,13 +199,17 @@ fn a_crashing_helper_is_inconclusive_and_reports_its_stderr() {
 
 #[test]
 fn a_helper_that_leaks_a_secret_into_its_answer_is_refused() {
+    let _env = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     // Only this test sets the variable; the value is distinctive.
     let secret = "jev-test-secret-value-0123456789";
     // SAFETY: tests in this file do not read JEV_API_KEY concurrently except
     // through this helper, and the value is test-only.
     unsafe { std::env::set_var("JEV_API_KEY", secret) };
     let receipt = run(
-        r#"answer("pass", "complete", extra=lambda r: r["evidence"][0]["facts"].append(os.environ.get("JEV_API_KEY", "")))"#,
+        r#"keys = json.load(os.fdopen(int(os.environ["ATO_VERIFIER_SECRETS_FD"])))
+answer("pass", "complete", extra=lambda r: r["evidence"][0]["facts"].append(keys.get("JEV_API_KEY", "")))"#,
     );
     unsafe { std::env::remove_var("JEV_API_KEY") };
     assert_eq!(receipt.overall, BrowserVerdict::Inconclusive);
@@ -211,6 +219,9 @@ fn a_helper_that_leaks_a_secret_into_its_answer_is_refused() {
 
 #[test]
 fn only_allowlisted_environment_reaches_the_helper() {
+    let _env = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     // SAFETY: a test-only variable no other test reads.
     unsafe { std::env::set_var("ATO_TEST_AMBIENT_CREDENTIAL", "should-not-cross") };
     let receipt = run(r#"
@@ -286,7 +297,7 @@ fn no_verifier_means_unavailable_not_skipped() {
 fn a_missing_helper_binary_is_unavailable() {
     let receipt = verify_in_browser(
         &verification(
-            BrowserVerifierCommand {
+            BrowserVerifierCommand::Uncontained {
                 argv: vec![
                     PathBuf::from("/nonexistent/node")
                         .to_string_lossy()
@@ -309,4 +320,52 @@ ok = home == request["scratch_dir"] + "/home" and os.path.isdir(home)
 answer("pass" if ok else "fail", "complete" if ok else "incomplete")
 "#);
     assert_eq!(receipt.overall, BrowserVerdict::Pass, "{receipt:?}");
+}
+
+#[test]
+fn the_helper_gets_its_keys_on_a_descriptor_and_never_in_its_environment() {
+    let _env = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let secret = "deepseek-test-secret-value-9876543210";
+    // SAFETY: a test-only value; the only other reader of DEEPSEEK_API_KEY in
+    // this file is the helper this test starts.
+    unsafe { std::env::set_var("DEEPSEEK_API_KEY", secret) };
+    let receipt = run(r#"
+keys = json.load(os.fdopen(int(os.environ["ATO_VERIFIER_SECRETS_FD"])))
+in_env = any(k in os.environ for k in ("JEV_API_KEY", "DEEPSEEK_API_KEY"))
+with open("/proc/self/environ", "rb") if os.path.exists("/proc/self/environ") else open(os.devnull, "rb") as f:
+    in_proc = b"DEEPSEEK_API_KEY" in f.read()
+ok = keys.get("DEEPSEEK_API_KEY") == "deepseek-test-secret-value-9876543210" and not in_env and not in_proc
+answer("pass" if ok else "fail", "complete" if ok else "incomplete")
+"#);
+    unsafe { std::env::remove_var("DEEPSEEK_API_KEY") };
+    assert_eq!(receipt.overall, BrowserVerdict::Pass, "{receipt:?}");
+}
+
+#[test]
+fn a_crash_message_carrying_a_key_is_scrubbed() {
+    let _env = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let secret = "jev-crash-secret-value-5555555555";
+    // SAFETY: test-only value, read only by the helper this test starts.
+    unsafe { std::env::set_var("JEV_API_KEY", secret) };
+    let receipt = run(r#"
+keys = json.load(os.fdopen(int(os.environ["ATO_VERIFIER_SECRETS_FD"])))
+sys.stderr.write("failed with key " + keys["JEV_API_KEY"] + "\n")
+sys.exit(1)
+"#);
+    unsafe { std::env::remove_var("JEV_API_KEY") };
+    let text = serde_json::to_string(&receipt).unwrap();
+    assert!(!text.contains(secret), "{text}");
+    assert!(text.contains("<JEV_API_KEY>"), "{text}");
+}
+
+#[test]
+fn an_uncontained_receipt_says_so() {
+    let receipt = run(r#"answer("pass", "complete")"#);
+    let containment = receipt.containment.expect("containment evidence");
+    assert_eq!(containment.containment, "none");
+    assert_eq!(containment.filesystem, "host");
 }
