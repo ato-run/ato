@@ -3,7 +3,7 @@
 **Status**: proposed
 **Context**: Runtime Network Phase 1, on top of ADR-019 (ephemeral verification)
 and ADR-020 (Browser Contract v0). Coordinator: `ato-api`
-`src/services/runtime_network/`, migration `0286_runtime_network.sql`.
+`src/services/runtime_network/`, migration `0288_runtime_network.sql`.
 
 ## The question
 

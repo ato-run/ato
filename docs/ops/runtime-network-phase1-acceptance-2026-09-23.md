@@ -9,7 +9,7 @@ ADR-021 describes the design. Fixtures:
 
 | | |
 |---|---|
-| Coordinator | `ato-api` `feat/runtime-network-phase1` under `wrangler dev --local` on the Mac; local D1 with migration 0286; local R2. No staging or production resource was touched. |
+| Coordinator | `ato-api` `feat/runtime-network-phase1` under `wrangler dev --local` on the Mac; local D1 with the Runtime Network migration (then numbered 0286, now 0288); local R2. No staging or production resource was touched. |
 | Transport | Remote Runtimes reach the coordinator through `ssh -R 18787:127.0.0.1:8787` |
 | Identity | One account; three `runner_devices` rows (`user_managed`), one runner token each (mode 0600) |
 | Requester | The Mac, with the Mac Runtime's token |
@@ -74,7 +74,7 @@ S `01M35VNQZWG10NP14GYAVSQH3X`, G `01M35VXNRP13SAG0825GPGHEQS`.
 - Bindings (Phase 1 refuses every binding), OCI routes, ato-managed Runtimes,
   provisioning, several environments per Runtime.
 - A Runtime on another account (covered by coordinator tests only).
-- Staging or production: nothing was deployed; migration 0286 was applied to
+- Staging or production: nothing was deployed; the migration was applied to
   the local D1 only.
 - The Browser Verifier helper and Chrome are not OS-contained (ADR-021,
   security follow-up) — a blocker before the 100-app benchmark.
