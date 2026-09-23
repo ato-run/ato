@@ -286,6 +286,14 @@ impl ActivityMcpServer {
                 {
                     self.operations.clear();
                 }
+                let applied = receipt.get("result").and_then(Value::as_str) == Some("applied")
+                    || operation_object(&envelope)
+                        .and_then(|operation| operation.get("status"))
+                        .and_then(Value::as_str)
+                        == Some("applied");
+                if applied {
+                    self.client.mark_agent_operation_applied();
+                }
                 return Ok(receipt);
             }
             ensure!(
