@@ -447,6 +447,9 @@ fn attempt_one(
             )
         }
         Err(error) => {
+            // The Contract WAS satisfied; only keeping the artifact failed.
+            // The verdicts stay in the evidence so the two are not confused.
+            attempt.verification = Some(verification);
             attempt.failure = Some(AttemptFailure {
                 code: "artifact_store_failed".to_owned(),
                 stage: "publish".to_owned(),

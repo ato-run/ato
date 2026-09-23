@@ -448,16 +448,25 @@ await new Promise((r) => setTimeout(r, 3000));
             marker = js_string(&marker),
         );
         let (_root, command) = stand_in(&setup, &body);
-        let before = scratch_entries();
-        let receipt = with_keys(|| verify(command, wall_clock_ms));
+        // Snapshots and verification under the same lock the other tests
+        // verify under: a scratch directory another test is using at that
+        // moment is not this verification's leftover.
+        let (before, receipt, survivors, after) = with_keys(|| {
+            let before = scratch_entries();
+            let receipt = verify(command, wall_clock_ms);
+            std::thread::sleep(Duration::from_millis(500));
+            (
+                before,
+                receipt,
+                processes_matching(&marker),
+                scratch_entries(),
+            )
+        });
         assert_eq!(receipt.overall, BrowserVerdict::Inconclusive, "{case}");
-        std::thread::sleep(Duration::from_millis(500));
-        let survivors = processes_matching(&marker);
         assert!(
             survivors.is_empty(),
             "{case}: processes outlived the verification: {survivors:?}"
         );
-        let after = scratch_entries();
         assert!(
             after.iter().all(|entry| before.contains(entry)),
             "{case}: scratch left behind: {after:?}"
