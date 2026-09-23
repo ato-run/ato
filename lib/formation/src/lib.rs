@@ -32,6 +32,7 @@ pub mod authoring;
 pub mod browser;
 pub mod capsule_toml;
 pub mod capsule_toml_v2;
+pub mod containment;
 pub mod detect;
 pub mod failure;
 pub mod intent;
