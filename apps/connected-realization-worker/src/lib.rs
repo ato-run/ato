@@ -5533,7 +5533,9 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
         assert!(process_only.contains(&"isolation=untrusted-v1"));
         assert!(process_only.contains(&"materializer=ato.materialize.vm.snapshot@1"));
         assert!(process_only.contains(&"backend=firecracker"));
-        assert!(runner_capabilities(false, true, false, false, false).contains(&"execution_abi=oci"));
+        assert!(
+            runner_capabilities(false, true, false, false, false).contains(&"execution_abi=oci")
+        );
         assert!(
             runner_capabilities(false, true, false, false, false)
                 .contains(&"runtime_feature=oci_service_group_v1")

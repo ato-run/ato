@@ -58,6 +58,8 @@ pub struct ClaimedFormationWork {
     pub job_id: String,
     pub attempt_id: String,
     pub attempt_fence: u64,
+    #[serde(default)]
+    pub operation_catalog_required: bool,
     pub compute_id: Option<String>,
     pub capsule_revision_id: Option<String>,
     pub job: serde_json::Value,
@@ -67,6 +69,8 @@ pub struct ClaimedFormationWork {
 pub struct ClaimedFormationJob {
     pub attempt_id: String,
     pub attempt_fence: u64,
+    #[serde(default)]
+    pub operation_catalog_required: bool,
     /// The canonical FormationJobV1, exactly as submitted.
     pub job: serde_json::Value,
 }
@@ -124,6 +128,25 @@ impl FormationApi {
             return Ok(None);
         }
         Ok(Some(serde_json::from_value(response)?))
+    }
+
+    /// Publish only the bounded operation source from a verified closure.
+    pub fn register_operation_source(
+        &self,
+        attempt_id: &str,
+        source: &crate::operations::OperationSource,
+    ) -> Result<()> {
+        self.client
+            .post(format!(
+                "{}/v1/internal/formation/attempts/{attempt_id}/operation-source",
+                self.base
+            ))
+            .bearer_auth(&self.token)
+            .json(source)
+            .send()?
+            .error_for_status()
+            .context("operation source registration rejected")?;
+        Ok(())
     }
 
     /// Say that an attempt produced nothing.
