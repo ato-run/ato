@@ -187,6 +187,31 @@ pub struct StepDraft {
     pub root: Option<String>,
     pub entry: Option<String>,
     pub spa_fallback: Option<bool>,
+    /// `ato.process@1` `exec` — the network this step needs. Declared, never
+    /// inferred from what the argv looks like.
+    pub network: StepNetwork,
+}
+
+/// The network a preparation step needs.
+///
+/// The step states what it NEEDS; the Formation policy states the most any
+/// step may have. The narrower of the two is what the step gets, and a step
+/// that needs more than the policy allows is refused before anything runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StepNetwork {
+    /// No network. The default, and absent from the canonical form, so every
+    /// Derivation formed before this field existed digests as it did.
+    #[default]
+    Denied,
+    /// Resolve dependencies from the network.
+    DependencyResolution,
+}
+
+impl StepNetwork {
+    pub fn is_denied(&self) -> bool {
+        *self == Self::Denied
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -383,6 +408,10 @@ pub struct BoundStep {
     pub entry: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spa_fallback: Option<bool>,
+    /// What network this step needs. `denied` is the default and is never
+    /// written, so a route that states nothing keeps its `DerivationRef`.
+    #[serde(default, skip_serializing_if = "StepNetwork::is_denied")]
+    pub network: StepNetwork,
     // The three step-scoped fields below are absent from every Derivation
     // formed before a route could hold more than one serving step, so those
     // Derivations digest exactly as they did.
@@ -572,6 +601,7 @@ fn bind_derivation(
             root: step.root.clone(),
             entry: step.entry.clone(),
             spa_fallback: step.spa_fallback,
+            network: step.network,
             runtimes: BTreeMap::new(),
             state: Vec::new(),
             bindings: Vec::new(),
@@ -806,6 +836,7 @@ mod tests {
                     root: None,
                     entry: Some("index.html".to_owned()),
                     spa_fallback: Some(true),
+                    network: StepNetwork::Denied,
                 }],
                 ports: vec![PortDraft {
                     id: "app.http".to_owned(),
@@ -982,6 +1013,7 @@ mod tests {
             root: None,
             entry: None,
             spa_fallback: None,
+            network: StepNetwork::Denied,
         };
         draft.derivation.steps.push(second);
         let (_, bound) = bind(&draft, &ctx()).expect("binds");
