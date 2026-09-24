@@ -314,3 +314,41 @@ fn a_handed_off_process_candidate_keeps_running_until_its_new_owner_stops_it() {
     live.stop().expect("stopped");
     assert_eq!(get(&format!("{endpoint}health")), None);
 }
+
+#[test]
+fn dropping_a_handed_off_static_candidate_stops_it() {
+    let site = static_site("/");
+    let outcome = attempt(&site, Continuation::HandOff, NetworkPolicy::Denied);
+    let live = outcome.live.expect("handed off");
+    let endpoint = live.endpoint().expect("an endpoint");
+    assert_eq!(get(&endpoint), Some(200));
+    drop(live);
+    assert_eq!(get(&endpoint), None, "gone once its owner drops it");
+}
+
+#[test]
+fn dropping_a_handed_off_process_candidate_stops_it() {
+    if !containment_available()
+        || !Path::new(TOOLCHAIN_ROOT)
+            .join("python/3.12.7/bin/python3")
+            .is_file()
+    {
+        eprintln!("skipping: no bwrap or no provisioned Python 3.12.7");
+        return;
+    }
+    let app = fixture(&[("server.py", SERVER)], PROCESS_ROUTE);
+    let outcome = attempt(
+        &app,
+        Continuation::HandOff,
+        NetworkPolicy::DependencyResolution,
+    );
+    let live = outcome.live.expect("handed off");
+    let endpoint = live.endpoint().expect("an endpoint");
+    assert_eq!(get(&format!("{endpoint}health")), Some(200));
+    drop(live);
+    assert_eq!(get(&format!("{endpoint}health")), None);
+    assert!(
+        !app.scratch.path().join("attempt/realization").exists(),
+        "the realization scratch went with it"
+    );
+}

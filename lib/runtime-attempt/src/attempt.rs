@@ -360,6 +360,36 @@ fn execute_and_verify(
         verification_failure(&verification).or_else(|| browser_failure(request.browser, &attempt));
     attempt.verification = Some(verification);
     attempt.receipt = Some(receipt);
+    let (verified, live) = after_verification(
+        &mut attempt,
+        failure,
+        live,
+        request.continuation,
+        LiveCandidate::stop,
+    );
+    AttemptOutcome {
+        attempt,
+        execution_started: true,
+        verified: verified.then_some(executed),
+        live,
+    }
+}
+
+/// Everything after the verification point: record what K's verdicts
+/// established, then stop or hand off the candidate and record that
+/// separately. Nothing here touches the receipt.
+///
+/// Returns whether the candidate counts as verified-and-kept (the legacy
+/// `AttemptStatus::Verified`), and the candidate when it was handed off.
+/// `stop` is how the candidate is stopped — a parameter so the independence
+/// of the outcomes can be tested with a stop that fails.
+fn after_verification<L>(
+    attempt: &mut FormationAttempt,
+    failure: Option<AttemptFailure>,
+    live: L,
+    continuation: Continuation,
+    stop: impl FnOnce(L) -> Result<()>,
+) -> (bool, Option<L>) {
     attempt.outcomes.runtime_verification = match &failure {
         None => Outcome::succeeded(),
         Some(failure) => Outcome::failed(&failure.code),
@@ -367,16 +397,13 @@ fn execute_and_verify(
     // A Formation attempt on a Runtime seals only what it fully verified.
     attempt.outcomes.seal = attempt.outcomes.runtime_verification.clone();
 
-    // ── after the verification point ────────────────────────────────────────
-    //
-    // Handed off only when verified and asked for; otherwise stopped. The
-    // receipt above is final either way.
-    let hand_off = failure.is_none() && request.continuation == Continuation::HandOff;
+    // Handed off only when verified and asked for; otherwise stopped.
+    let hand_off = failure.is_none() && continuation == Continuation::HandOff;
     let (live, stopped) = if hand_off {
         attempt.outcomes.cleanup = Outcome::not_attempted("handed_off");
         (Some(live), Ok(()))
     } else {
-        let stopped = live.stop();
+        let stopped = stop(live);
         attempt.outcomes.cleanup = match &stopped {
             Ok(()) => Outcome::succeeded(),
             Err(error) => Outcome::failed(&bounded(&format!("{error:#}"))),
@@ -389,36 +416,21 @@ fn execute_and_verify(
 
     if let Some(failure) = failure {
         attempt.failure = Some(failure);
-        return AttemptOutcome {
-            attempt,
-            execution_started: true,
-            verified: None,
-            live: None,
-        };
+        return (false, None);
     }
     // K was satisfied at the verification point; a candidate that could not
-    // be stopped afterwards is still not one to keep, and the receipt still
-    // says what was observed.
+    // be stopped afterwards is still not one to keep. The receipt and
+    // `runtime_verification` still say what was observed.
     if let Err(error) = stopped {
         attempt.failure = Some(AttemptFailure {
             code: "candidate_cleanup_failed".to_owned(),
             stage: "cleanup".to_owned(),
             message: bounded(&format!("{error:#}")),
         });
-        return AttemptOutcome {
-            attempt,
-            execution_started: true,
-            verified: None,
-            live: None,
-        };
+        return (false, None);
     }
     attempt.status = AttemptStatus::Verified;
-    AttemptOutcome {
-        attempt,
-        execution_started: true,
-        verified: Some(executed),
-        live,
-    }
+    (true, live)
 }
 
 /// Every Contract observation must be Satisfied by this attempt. A verdict
@@ -821,4 +833,130 @@ pub fn failure_of(error: &anyhow::Error) -> AttemptFailure {
 /// carries a sentence.
 pub fn bounded(reason: &str) -> String {
     crate::text::bounded_reason(reason)
+}
+
+#[cfg(test)]
+mod tests {
+    use ato_formation::authoring::{BoundContract, BoundRequirement, HTTP_CONTRACT_VERIFIER};
+    use ato_formation::request::OutcomeState;
+
+    use super::*;
+
+    /// An attempt whose K was fully satisfied: one HTTP observation, its
+    /// receipt, and a realization that has not been stopped yet.
+    fn verified_attempt() -> FormationAttempt {
+        let contract = BoundContract {
+            schema: "ato.contract/1".to_owned(),
+            requirements: vec![BoundRequirement {
+                id: "root".to_owned(),
+                verifier: HTTP_CONTRACT_VERIFIER.to_owned(),
+                port: Some("app.http".to_owned()),
+                method: Some("GET".to_owned()),
+                path: Some("/".to_owned()),
+                status: Some(200),
+                body_digest: None,
+                input: None,
+                digest: None,
+            }],
+        };
+        let runtime = RuntimeObservation {
+            input_refs: BTreeMap::new(),
+            http: vec![RuntimeHttpObservation::from_response(
+                "app.http", "GET", "/", 200, b"ok",
+            )],
+            instance_snapshot_ref: None,
+        };
+        let verification = verify_runtime(&contract, &runtime);
+        let receipt = ContractVerificationReceipt::from_attempt(
+            "sha256:k",
+            "sha256:d",
+            &contract,
+            &runtime,
+            verification.clone(),
+        );
+        assert!(receipt.fully_satisfied);
+        FormationAttempt {
+            candidate: "authored".to_owned(),
+            attempt_id: Some("att".to_owned()),
+            derivation_ref: Some("sha256:d".to_owned()),
+            contract_ref: Some("sha256:k".to_owned()),
+            base_contract_ref: None,
+            runtime_id: "local".to_owned(),
+            status: AttemptStatus::Failed,
+            verification: Some(verification),
+            realization: Some(RealizationEvidence {
+                executor: "runtime-process".to_owned(),
+                containment: "bwrap+landlock".to_owned(),
+                workspace: "disposable-copy".to_owned(),
+                build_network: "denied".to_owned(),
+                candidate_network: "no-egress".to_owned(),
+                endpoints: BTreeMap::new(),
+                destroyed: false,
+            }),
+            browser_verification: None,
+            receipt: Some(receipt),
+            outcomes: AttemptOutcomes::not_run("not started"),
+            failure: None,
+        }
+    }
+
+    #[test]
+    fn a_cleanup_failure_does_not_unverify_what_was_verified() {
+        let mut attempt = verified_attempt();
+        let receipt = attempt.receipt.clone();
+        let (kept, live) = after_verification(&mut attempt, None, (), Continuation::Stop, |()| {
+            Err(anyhow::anyhow!(
+                "the realization scratch could not be removed"
+            ))
+        });
+        // K was satisfied, and still is on record.
+        assert_eq!(
+            attempt.outcomes.runtime_verification.state,
+            OutcomeState::Succeeded
+        );
+        assert_eq!(attempt.outcomes.seal.state, OutcomeState::Succeeded);
+        assert_eq!(attempt.receipt, receipt, "the receipt is untouched");
+        assert!(attempt.receipt.as_ref().unwrap().fully_satisfied);
+        // Cleanup failed, on its own field.
+        assert_eq!(attempt.outcomes.cleanup.state, OutcomeState::Failed);
+        assert!(
+            attempt
+                .outcomes
+                .cleanup
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("scratch could not be removed")
+        );
+        assert!(!attempt.realization.as_ref().unwrap().destroyed);
+        // The legacy status may say Failed: a candidate that could not be
+        // stopped is not one to keep. The outcomes keep the two apart.
+        assert!(!kept);
+        assert!(live.is_none());
+        assert_eq!(attempt.status, AttemptStatus::Failed);
+        assert_eq!(
+            attempt.failure.as_ref().unwrap().code,
+            "candidate_cleanup_failed"
+        );
+    }
+
+    #[test]
+    fn a_hand_off_never_stops_and_is_not_a_cleanup_failure() {
+        let mut attempt = verified_attempt();
+        let (kept, live) = after_verification(
+            &mut attempt,
+            None,
+            "the running candidate",
+            Continuation::HandOff,
+            |_| panic!("a handed-off candidate is not stopped here"),
+        );
+        assert!(kept);
+        assert_eq!(live, Some("the running candidate"));
+        assert_eq!(attempt.outcomes.cleanup.state, OutcomeState::NotAttempted);
+        assert_eq!(
+            attempt.outcomes.cleanup.reason.as_deref(),
+            Some("handed_off")
+        );
+        assert_eq!(attempt.status, AttemptStatus::Verified);
+    }
 }
