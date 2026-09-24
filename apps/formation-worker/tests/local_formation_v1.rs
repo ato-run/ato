@@ -1,9 +1,9 @@
 //! Local Formation — Phase 1 (ADR-019).
 //!
 //! 'I -- D on this Runtime --> C', then 'C |= K' observed for real: a static
-//! candidate is decided from the artifact it produced, a process candidate is
-//! realized temporarily on the local Runtime and measured over loopback HTTP,
-//! and nothing deferred reaches 'Formed'.
+//! candidate is served from the bundle it produced and requested over loopback
+//! HTTP, a process candidate is realized temporarily on the local Runtime and
+//! measured the same way, and nothing deferred reaches 'Formed'.
 //!
 //! What runs where: the static lane needs no sandbox, so it is exercised on
 //! every host. A candidate whose build plan has steps, or that must be run to
@@ -872,4 +872,175 @@ fn a_verified_candidate_whose_artifact_cannot_be_kept_keeps_its_verdicts() {
         .as_ref()
         .expect("the verdicts are kept");
     assert!(verification.fully_satisfied(), "{verification:?}");
+}
+
+// ── one attempt entry: admission, observation, receipt ──────────────────────
+
+fn static_route(requirements: &str, extra: &str) -> String {
+    format!(
+        r#"schema = "ato.capsule/1"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[derive.step]]
+id = "site"
+use = "ato.browser@1"
+op = "serve"
+source = "workspace"
+entry = "index.html"
+
+[[port]]
+id = "app.http"
+use = "ato.http@1"
+from = "site"
+
+{requirements}
+{extra}
+"#
+    )
+}
+
+fn http_requirement(id: &str, path: &str, expect: &str) -> String {
+    format!(
+        "[[contract.require]]\nid = \"{id}\"\nuse = \"ato.contract.http@1\"\nport = \"app.http\"\n\
+         path = \"{path}\"\n\n[contract.require.expect]\n{expect}\n"
+    )
+}
+
+fn authored(path: &Path, toml: String) -> FormationRequest {
+    FormationRequest {
+        contract: ContractSource::Authored { toml },
+        ..request(path, FormationNetworkPolicy::Denied)
+    }
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    format!("sha256:{:x}", sha2::Sha256::digest(bytes))
+}
+
+/// Never executes anything: records that it was asked to.
+struct MustNotRun(std::sync::atomic::AtomicBool);
+
+impl AttemptExecutor for MustNotRun {
+    fn execute(&self, _: &AttemptExecution<'_>) -> anyhow::Result<ExecutedCandidate> {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        anyhow::bail!("the executor was reached")
+    }
+}
+
+#[test]
+fn a_route_whose_effects_are_not_authorized_never_reaches_the_executor() {
+    for effect in ["requires-confirmation", "non-repeatable"] {
+        let dir = site(&[("index.html", "<!doctype html><h1>hi</h1>")]);
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let executor = MustNotRun(Default::default());
+        let result = local::run_with_executor(
+            &authored(
+                dir.path(),
+                static_route(
+                    &http_requirement("root", "/", "status = 200"),
+                    &format!("[effects]\ndefault = \"{effect}\"\n"),
+                ),
+            ),
+            &formation(&scratch),
+            &executor,
+        )
+        .expect("the driver ran");
+        assert!(
+            !executor.0.load(std::sync::atomic::Ordering::SeqCst),
+            "{effect}"
+        );
+        let FormationResult::NoVerifiedRoute { attempts, .. } = result else {
+            panic!("{effect}: expected no verified route");
+        };
+        assert_eq!(attempts[0].status, AttemptStatus::Filtered);
+        assert_eq!(attempts[0].failure.as_ref().unwrap().code, "effect_policy");
+    }
+}
+
+#[test]
+fn a_static_candidate_is_verified_by_requesting_it_not_by_its_file_list() {
+    let proof = b"proof of the served bytes\n";
+    let dir = site(&[
+        ("index.html", "<!doctype html><h1>hi</h1>"),
+        ("proof.txt", std::str::from_utf8(proof).unwrap()),
+    ]);
+    let body = |digest: &str| {
+        http_requirement(
+            "proof",
+            "/proof.txt",
+            &format!("status = 200\nbody_digest = \"{digest}\""),
+        )
+    };
+
+    // The served body is what the Contract states: decided here, over HTTP —
+    // no longer deferred to a gate a local Formation does not run.
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let formed = local::run(
+        &authored(dir.path(), static_route(&body(&sha256(proof)), "")),
+        &formation(&scratch),
+    )
+    .expect("the driver ran");
+    let FormationResult::Formed {
+        verified_routes,
+        attempts,
+        ..
+    } = formed
+    else {
+        panic!("expected formed, got {formed:?}");
+    };
+    let attempt = &attempts[0];
+    let receipt = attempt.receipt.as_ref().expect("a receipt");
+    assert!(receipt.fully_satisfied);
+    assert_eq!(
+        receipt.observations[0].evidence.as_ref().unwrap().status,
+        Some(200)
+    );
+    assert_eq!(
+        verified_routes[0].attempt_id,
+        attempt.attempt_id.clone().unwrap(),
+        "the route is derived from this attempt's receipt"
+    );
+
+    // Different bytes are observed as different, and nothing is kept.
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let refused = local::run(
+        &authored(dir.path(), static_route(&body(&sha256(b"other")), "")),
+        &formation(&scratch),
+    )
+    .expect("the driver ran");
+    let FormationResult::NoVerifiedRoute { attempts, .. } = refused else {
+        panic!("expected no verified route");
+    };
+    assert_eq!(
+        attempts[0].failure.as_ref().unwrap().code,
+        "http_body_digest_mismatch"
+    );
+    assert!(!attempts[0].receipt.as_ref().unwrap().fully_satisfied);
+    assert!(!scratch.path().join("out/bundles").exists());
+
+    // A path the bundle does not serve answers 404 over HTTP.
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let missing = local::run(
+        &authored(
+            dir.path(),
+            static_route(
+                &http_requirement("gone", "/missing.txt", "status = 200"),
+                "",
+            ),
+        ),
+        &formation(&scratch),
+    )
+    .expect("the driver ran");
+    let FormationResult::NoVerifiedRoute { attempts, .. } = missing else {
+        panic!("expected no verified route");
+    };
+    assert_eq!(
+        attempts[0].failure.as_ref().unwrap().code,
+        "http_status_mismatch"
+    );
 }
