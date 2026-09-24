@@ -162,7 +162,7 @@ pub fn sandboxed_build_command(
     workload_argv: &[String],
     sandbox: &BuildSandbox<'_>,
 ) -> Result<SandboxedBuildCommand> {
-    sandboxed_build_step_command(workload_argv, None, &BTreeMap::new(), sandbox)
+    sandboxed_build_step_command(workload_argv, None, &BTreeMap::new(), &[], sandbox)
 }
 
 /// [`sandboxed_build_command`] for a step with its own guest cwd and env.
@@ -173,10 +173,15 @@ pub fn sandboxed_build_command(
 /// an authored `LD_PRELOAD`, `PATH` or `PYTHONPATH` reaches the workload and
 /// never the shim that restricts it. With neither, the command is exactly
 /// what it was before steps had them.
+///
+/// `toolchain_path` — the plan's provisioned toolchains' `bin` directories —
+/// heads the sandbox's own PATH, so a shell a step starts finds the declared
+/// `node` / `npm` / `pnpm` rather than anything on the host.
 pub fn sandboxed_build_step_command(
     workload_argv: &[String],
     guest_cwd: Option<&str>,
     workload_env: &BTreeMap<String, String>,
+    toolchain_path: &[String],
     sandbox: &BuildSandbox<'_>,
 ) -> Result<SandboxedBuildCommand> {
     let BuildSandbox {
@@ -282,7 +287,7 @@ pub fn sandboxed_build_step_command(
     // ambient token in the worker's environment is exactly what an untrusted
     // build would go looking for.
     argv.push("--clearenv".to_owned());
-    for (name, value) in build_environment(network) {
+    for (name, value) in build_environment(network, toolchain_path) {
         argv.extend(["--setenv".to_owned(), name, value]);
     }
 
@@ -312,9 +317,15 @@ pub fn sandboxed_build_step_command(
 }
 
 /// The env a build sees. Everything else is cleared.
-fn build_environment(network: NetworkPolicy) -> Vec<(String, String)> {
+fn build_environment(network: NetworkPolicy, toolchain_path: &[String]) -> Vec<(String, String)> {
+    let path = toolchain_path
+        .iter()
+        .map(String::as_str)
+        .chain(["/usr/local/bin:/usr/bin:/bin"])
+        .collect::<Vec<_>>()
+        .join(":");
     let mut env = vec![
-        ("PATH".to_owned(), "/usr/local/bin:/usr/bin:/bin".to_owned()),
+        ("PATH".to_owned(), path),
         ("HOME".to_owned(), GUEST_WORKSPACE_ROOT.to_owned()),
         ("TMPDIR".to_owned(), "/tmp".to_owned()),
         // Byte-code writing off: `/src` is read-only, and CPython dies trying
@@ -325,6 +336,29 @@ fn build_environment(network: NetworkPolicy) -> Vec<(String, String)> {
         ("PYTHONNOUSERSITE".to_owned(), "1".to_owned()),
         ("LANG".to_owned(), "C.UTF-8".to_owned()),
     ];
+    // Package managers keep caches and stores under `$HOME` by default, and
+    // `$HOME` here IS the workspace — which becomes the artifact. Every one of
+    // them is pointed elsewhere: the cache mount when this step may fill it,
+    // the step's own /tmp when it may not.
+    let cache = if network == NetworkPolicy::DependencyResolution {
+        GUEST_CACHE_ROOT.to_owned()
+    } else {
+        "/tmp/.ato-cache".to_owned()
+    };
+    env.push(("npm_config_update_notifier".to_owned(), "false".to_owned()));
+    env.push(("XDG_CACHE_HOME".to_owned(), format!("{cache}/xdg")));
+    env.push((
+        "npm_config_store_dir".to_owned(),
+        format!("{cache}/pnpm-store"),
+    ));
+    env.push(("YARN_CACHE_FOLDER".to_owned(), format!("{cache}/yarn")));
+    env.push((
+        "YARN_GLOBAL_FOLDER".to_owned(),
+        format!("{cache}/yarn-global"),
+    ));
+    if network != NetworkPolicy::DependencyResolution {
+        env.push(("npm_config_cache".to_owned(), format!("{cache}/npm")));
+    }
     if network == NetworkPolicy::DependencyResolution {
         env.push(("UV_CACHE_DIR".to_owned(), GUEST_CACHE_ROOT.to_owned()));
         env.push(("PIP_CACHE_DIR".to_owned(), GUEST_CACHE_ROOT.to_owned()));
