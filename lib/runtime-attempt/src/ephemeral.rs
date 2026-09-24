@@ -29,15 +29,13 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
-use ato_connected_realization_worker::runtime_launch::process_executor::{
+use crate::launch::process_executor::{
     LaunchedProcess, LoopbackReadinessProbe, ProcessLaunchHost, launch_process_with,
     wait_until_ready,
 };
-use ato_connected_realization_worker::runtime_launch::resolved::{
-    ResolvedEndpoint, ResolvedRuntimeLaunchContext,
-};
-use ato_connected_realization_worker::runtime_launch::sandbox::endpoint_port_env_name;
+use crate::launch::resolved::{ResolvedEndpoint, ResolvedRuntimeLaunchContext};
+use crate::launch::sandbox::endpoint_port_env_name;
+use anyhow::{Context, Result, bail};
 use ato_formation::intent::ProgramIntentV1;
 use ato_formation::verify::RuntimeHttpObservation;
 use ato_ipc::runtime_launch::{
@@ -46,7 +44,7 @@ use ato_ipc::runtime_launch::{
     RuntimeLaunchSpecV1,
 };
 
-use crate::job::copy_tree;
+use crate::plan::copy_tree;
 
 /// How long a candidate gets to come up before the attempt is failed.
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
