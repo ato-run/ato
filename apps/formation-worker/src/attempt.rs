@@ -633,6 +633,27 @@ pub(crate) fn network_name(network: NetworkPolicy) -> &'static str {
 /// rule the hosted reporter follows: untyped errors stay anonymous because
 /// their chains can carry paths and credentials.
 pub(crate) fn failure_of(error: &anyhow::Error) -> AttemptFailure {
+    // The requester gets a typed code and one sentence; the operator of this
+    // Runtime gets the cause, bounded, on the worker's own log.
+    // Head and tail: what failed is named first, and why is at the end.
+    let detail = format!("{error:#}");
+    let floor = |mut at: usize| {
+        while !detail.is_char_boundary(at) {
+            at -= 1;
+        }
+        at
+    };
+    if detail.len() <= 4000 {
+        eprintln!("[formation] attempt failed: {detail}");
+    } else {
+        let head = floor(1000);
+        let tail = floor(detail.len() - 3000);
+        eprintln!(
+            "[formation] attempt failed: {} … {}",
+            &detail[..head],
+            &detail[tail..]
+        );
+    }
     match error.downcast_ref::<FormationFailure>() {
         Some(failure) => AttemptFailure {
             code: failure.code.clone(),

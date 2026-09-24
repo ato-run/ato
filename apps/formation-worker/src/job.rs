@@ -356,7 +356,7 @@ pub fn run_claimed_job(
     let output_root = crate::build::output_root(&built, &plan)?;
     let mut static_bundle: Option<crate::static_lane::StaticFormationOutput> = None;
     let packed = match intent.lane {
-        Lane::PythonProcess => context.packer.pack(&output_root)?,
+        Lane::PythonProcess | Lane::Process => context.packer.pack(&output_root)?,
         Lane::StaticWeb => {
             let produced = crate::static_lane::materialize_static(
                 &intent,
@@ -625,7 +625,7 @@ fn compose_result(
     verification: &ContractVerification,
 ) -> Result<serde_json::Value> {
     let (kind, candidate) = match intent.lane {
-        Lane::PythonProcess => (
+        Lane::PythonProcess | Lane::Process => (
             "process_workspace",
             serde_json::json!({
                 "kind": "process",
@@ -681,7 +681,7 @@ fn compose_result(
             // Per lane: a consumer that reached for the wrong reader would
             // find a tar where it expected a bundle, and say so unhelpfully.
             "media_type": match intent.lane {
-                Lane::PythonProcess => "application/vnd.ato.process-workspace.v1+tar",
+                Lane::PythonProcess | Lane::Process => "application/vnd.ato.process-workspace.v1+tar",
                 Lane::StaticWeb => "application/vnd.ato.static-web-bundle.v1+tar",
             },
             "digest": materialization_ref,

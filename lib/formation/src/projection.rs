@@ -47,6 +47,9 @@ use crate::authoring::{
 };
 use crate::intent::{AuthoredOverrides, BuildStepV1};
 
+/// The runtimes a Derivation may declare for this worker to provision.
+pub const PROVISIONED_RUNTIMES: &[&str] = &["python", "node", "pnpm", "yarn"];
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ProjectionError {
     #[error("this build cannot execute {protocol} `{op}` yet: {detail}")]
@@ -158,6 +161,19 @@ pub fn project(
         .iter()
         .find(|requirement| requirement.verifier == HTTP_CONTRACT_VERIFIER);
 
+    for name in derivation.runtimes.keys() {
+        if !PROVISIONED_RUNTIMES.contains(&name.as_str()) {
+            return Err(ProjectionError::Unprojectable {
+                detail: format!(
+                    "this build provisions {}; {name:?} was declared and would be silently \
+                     absent at run time",
+                    PROVISIONED_RUNTIMES.join(", ")
+                ),
+            });
+        }
+    }
+    let python_only = derivation.runtimes.keys().all(|name| name == "python");
+
     let readiness = match serve.protocol.as_str() {
         BROWSER_PROTOCOL => {
             overrides.insert("lane".to_owned(), "static_web".to_owned());
@@ -209,7 +225,19 @@ pub fn project(
             None
         }
         PROCESS_PROTOCOL => {
-            overrides.insert("lane".to_owned(), "python_process".to_owned());
+            // A route that declares no runtime but Python is the v1 Python
+            // lane, unchanged: same intent, same plan, same formation key.
+            // Anything else is a generic process whose runtimes are exactly
+            // the ones declared — never ones read off the argv.
+            overrides.insert(
+                "lane".to_owned(),
+                if python_only {
+                    "python_process"
+                } else {
+                    "process"
+                }
+                .to_owned(),
+            );
             // The author's execs prepare the workspace; no dependency install
             // is detected and added beside them.
             if !build_steps.is_empty() {
@@ -278,16 +306,27 @@ pub fn project(
         }
     };
 
+    // Where the declared runtimes go. The v1 keys for the v1 lanes; the
+    // declared-toolchain keys for a generic process, and for a static route
+    // whose authored build runs on them.
+    let declared_toolchains = match serve.protocol.as_str() {
+        PROCESS_PROTOCOL => !python_only,
+        _ => !build_steps.is_empty() && !derivation.runtimes.is_empty(),
+    };
+    if !declared_toolchains && !python_only {
+        return Err(ProjectionError::Unprojectable {
+            detail: "a runtime on a static route is a build toolchain: declare the build as \
+                     `exec` steps that use it"
+                .to_owned(),
+        });
+    }
     for (name, version) in &derivation.runtimes {
-        if name != "python" {
-            return Err(ProjectionError::Unprojectable {
-                detail: format!(
-                    "this build provisions only `python`; {name:?} was declared and would be \
-                     silently absent at run time"
-                ),
-            });
-        }
-        overrides.insert("runtime.python".to_owned(), version.clone());
+        let key = if declared_toolchains {
+            format!("toolchain.{name}")
+        } else {
+            format!("runtime.{name}")
+        };
+        overrides.insert(key, version.clone());
     }
 
     for slot in &derivation.state {

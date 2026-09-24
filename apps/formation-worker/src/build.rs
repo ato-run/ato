@@ -155,6 +155,7 @@ pub fn run_build(
             &step.argv,
             guest_cwd.as_deref(),
             &step.env,
+            &plan.toolchain_path,
             &BuildSandbox {
                 source_root,
                 workspace_root,

@@ -30,7 +30,6 @@ use ato_formation::authoring::AuthoringDraft;
 use ato_formation::browser::{BrowserContractV0, effective_contract_ref};
 use ato_formation::capsule_toml::parse_capsule_toml;
 use ato_formation::detect::detect;
-use ato_formation::intent::Lane;
 use ato_formation::request::AttemptStatus;
 use ato_formation::source::SourceLimits;
 use base64::Engine as _;
@@ -263,7 +262,7 @@ pub fn probe_facts(browser_verifier: Option<&BrowserVerifierCommand>) -> BTreeMa
     let root = Path::new(TOOLCHAIN_ROOT);
     if root.is_dir() {
         facts.insert("toolchain.root".to_owned(), TOOLCHAIN_ROOT.to_owned());
-        for language in ["python", "node"] {
+        for language in ["python", "node", "pnpm", "yarn"] {
             let Ok(entries) = std::fs::read_dir(root.join(language)) else {
                 continue;
             };
@@ -361,7 +360,7 @@ pub fn derivation_requirements(planned: &PlannedCandidate) -> (Vec<Requirement>,
             ),
         });
     }
-    if planned.intent.lane == Lane::PythonProcess {
+    if planned.intent.lane.is_process() {
         requirements.push(Requirement {
             fact: "runtime.process".to_owned(),
             one_of: Some(vec!["true".to_owned()]),
@@ -383,6 +382,13 @@ pub fn derivation_requirements(planned: &PlannedCandidate) -> (Vec<Requirement>,
         .iter()
         .chain(planned.intent.runtime.iter())
         .map(|(name, version)| format!("toolchain.{name}.{version}"))
+        .chain(
+            planned
+                .intent
+                .package_manager
+                .iter()
+                .map(|manager| format!("toolchain.{}.{}", manager.name, manager.version)),
+        )
         .collect();
     provisions.sort();
     provisions.dedup();

@@ -1,8 +1,9 @@
 //! Routes without `exec` keep their identities bit for bit.
 //!
-//! The values below were measured with the code from before routes could
-//! hold `exec` steps (feb839e6: main c0de5efb plus #1387, which does not
-//! touch planning). Adding step networks, step cwd/env on build steps and
+//! The first three were measured with the code from before routes could hold
+//! `exec` steps (feb839e6: main c0de5efb plus #1387, which does not touch
+//! planning); the two routes with `exec` steps on main 7824422e, before the
+//! generic process lane and declared toolchains existed. Adding step networks, step cwd/env on build steps and
 //! the projection of preparation steps must not move any of them: a changed
 //! `DerivationRef` would re-identify every recorded route, and a changed plan
 //! digest every formation key.
@@ -178,4 +179,143 @@ const STATIC_IDS: (&str, &str, &str) = (
     "sha256:5204635270982e40d53fc851cdf017b2254b334535e09b37e308cae66237c4cf",
     "sha256:cec9b08b5aac8693e7fd69a567a790f11a389624a21c404db1d9c7fbdc998f86",
     "sha256:262fbdd19e64e92f21d70027c3d8cc2597b9cdf73c322fc623c5c3f514fc5660",
+);
+
+const PYTHON_EXEC: &str = r#"
+schema = "ato.capsule/1"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[runtime]]
+name = "python"
+version = "3.12.7"
+
+[[derive.step]]
+id = "install"
+use = "ato.process@1"
+op = "exec"
+argv = ["/opt/ato/toolchains/python/3.12.7/bin/python3", "-m", "pip", "install", "--target", "deps", "-r", "requirements.txt"]
+network = "dependency-resolution"
+
+[[derive.step]]
+id = "generate"
+use = "ato.process@1"
+op = "exec"
+argv = ["/opt/ato/toolchains/python/3.12.7/bin/python3", "gen.py", "a b"]
+cwd = "tools"
+
+[derive.step.env]
+EXPECTED = "x y"
+
+[[derive.step]]
+id = "app"
+use = "ato.process@1"
+op = "serve"
+argv = ["/opt/ato/toolchains/python/3.12.7/bin/python3", "-B", "app.py"]
+
+[[port]]
+id = "app.http"
+use = "ato.http@1"
+from = "app"
+guest_port = 8000
+
+[[contract.require]]
+id = "app-responds"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/health"
+
+[contract.require.expect]
+status = 200
+"#;
+
+const STATIC_EXEC: &str = r#"
+schema = "ato.capsule/1"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[derive.step]]
+id = "build"
+use = "ato.process@1"
+op = "exec"
+argv = ["/bin/sh", "-c", "mkdir -p dist && cp page.html dist/index.html"]
+
+[[derive.step]]
+id = "site"
+use = "ato.browser@1"
+op = "serve"
+source = "workspace"
+root = "dist"
+entry = "index.html"
+
+[[port]]
+id = "app.http"
+use = "ato.http@1"
+from = "site"
+
+[[contract.require]]
+id = "root"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/"
+
+[contract.require.expect]
+status = 200
+"#;
+
+#[test]
+fn a_python_route_with_exec_steps_keeps_its_identities() {
+    let got = identities(&[
+        ("capsule.toml", PYTHON_EXEC),
+        ("requirements.txt", "flask==3.0.0\n"),
+        ("app.py", "print('x')\n"),
+        ("tools/gen.py", "print('g')\n"),
+    ]);
+    assert_eq!(
+        got,
+        (
+            PY_EXEC.0.to_owned(),
+            PY_EXEC.1.to_owned(),
+            PY_EXEC.2.to_owned()
+        )
+    );
+}
+
+#[test]
+fn a_static_route_with_an_exec_build_keeps_its_identities() {
+    let got = identities(&[
+        ("capsule.toml", STATIC_EXEC),
+        ("page.html", "<!doctype html>"),
+        (
+            "package.json",
+            r#"{"name":"s","private":true,"scripts":{"build":"vite build"}}"#,
+        ),
+    ]);
+    assert_eq!(
+        got,
+        (
+            ST_EXEC.0.to_owned(),
+            ST_EXEC.1.to_owned(),
+            ST_EXEC.2.to_owned()
+        )
+    );
+}
+
+const PY_EXEC: (&str, &str, &str) = (
+    "sha256:4a5c378acedd40745260989ba0c8ce3f274c238173f1fb0dcb4b452ea2ff5fbc",
+    "sha256:c145512f49241cbfd1d0fc503ce2eb6392458d9acfb9970f604aebabf08726c2",
+    "sha256:3fbed32418e7cfdb27b669cc2267cc7e4bba668dbcfa559d3fcf02314ec97138",
+);
+const ST_EXEC: (&str, &str, &str) = (
+    "sha256:ebb6813b2a3981dbb97fa1cb15c98a7c8edf810fde0d3239008480b947d2bea9",
+    "sha256:0e7c08096da65243ebadc5b26a85fd0843aeed5446eaf101d5d79cdc244c8c2c",
+    "sha256:8887896a684153728f2bde2cf4ae6ec99b02911e56b0445fdfb32e1ad45078b0",
 );
