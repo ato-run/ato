@@ -141,8 +141,14 @@ fn marker(name: &str) -> String {
 }
 
 fn processes_matching(marker: &str) -> Vec<String> {
+    // `[a]to-…` matches the marker but not a command line that contains the
+    // pattern itself. pgrep leaves out only its own process; a pgrep another
+    // test is running at the same moment carries the marker in its argv and
+    // would otherwise be reported as a surviving candidate.
+    let (first, rest) = marker.split_at(1);
+    let pattern = format!("[{first}]{rest}");
     let output = std::process::Command::new("pgrep")
-        .args(["-f", marker])
+        .args(["-f", &pattern])
         .output()
         .expect("pgrep");
     String::from_utf8_lossy(&output.stdout)
@@ -233,13 +239,19 @@ fn refused_here() -> bool {
     if containment_available() {
         return false;
     }
-    let launch = Launch::new(server_argv(&marker("refused"), free_port()), 8080);
+    // One marker per call: every test runs this, concurrently.
+    static CALLS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let marker = marker(&format!(
+        "refused{}",
+        CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let launch = Launch::new(server_argv(&marker, free_port()), 8080);
     let error = launch
         .launch()
         .err()
         .expect("an uncontainable candidate is refused, not run on the host");
     assert!(format!("{error:#}").contains("contain"), "{error:#}");
-    assert_gone(&marker("refused"));
+    assert_gone(&marker);
     true
 }
 
