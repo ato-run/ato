@@ -485,7 +485,12 @@ fn observe_process(
             instance_snapshot_ref: None,
         };
         if verify_runtime(&planned.contract, &runtime).fully_satisfied() {
-            attempt.browser_verification = Some(browse(&realization, browser, request.runtime_id));
+            attempt.browser_verification = Some(browse(
+                &realization,
+                browser,
+                request.runtime_id,
+                request.attempt_id,
+            ));
         }
     }
     let destroyed = realization
@@ -591,11 +596,13 @@ fn browse(
     realization: &TemporaryRealization,
     browser: &BrowserVerification,
     runtime_id: &str,
+    attempt_id: &str,
 ) -> BrowserVerificationReceipt {
     let endpoints = realization.endpoints();
     let target = |endpoint: String| BrowserTarget {
         runtime_id: runtime_id.to_owned(),
         endpoint,
+        attempt_id: Some(attempt_id.to_owned()),
     };
     match endpoints {
         [endpoint] => verify_in_browser(
