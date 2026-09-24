@@ -224,3 +224,79 @@ fn a_ticket_whose_refs_the_route_does_not_reach_is_refused_before_it_runs() {
     assert_eq!(failure_code(&report), "ticket_mismatch");
     assert!(!report.attestation.execution_started);
 }
+
+#[test]
+fn a_redelivered_ticket_is_never_executed_twice() {
+    let dir = site("");
+    let scratch = tempfile::tempdir().expect("scratch");
+    let (ticket, archive) = ticket(&submit(dir.path(), scratch.path()));
+    let first = run(&ticket, archive.clone(), scratch.path());
+    assert_eq!(first.outcome, "pass", "{:?}", first.failure);
+
+    // The same attempt, delivered again (a lost result, a retried claim):
+    // it started once, so it is reported as started and not run again.
+    let again = run(&ticket, archive, scratch.path());
+    assert_eq!(failure_code(&again), "attempt_already_started");
+    assert!(again.attestation.execution_started);
+    assert_eq!(again.outcome, "inconclusive");
+    assert!(again.materialization_ref.is_none());
+}
+
+#[test]
+fn an_unfinished_attempt_holds_every_later_attempt_of_its_request() {
+    use ato_formation_worker::journal::{AttemptJournal, StartIdentity};
+
+    let dir = site("");
+    let scratch = tempfile::tempdir().expect("scratch");
+    let (ticket, archive) = ticket(&submit(dir.path(), scratch.path()));
+    // An earlier attempt of the same request started and its process died
+    // before recording how it ended.
+    let journal = AttemptJournal::new(scratch.path().join("out").join("attempt-records"));
+    let unfinished = journal
+        .begin(
+            &ticket.satisfy_id,
+            "att_earlier",
+            StartIdentity {
+                contract_ref: ticket.contract_ref.clone(),
+                derivation_ref: ticket.derivation_ref.clone(),
+                runtime_id: ticket.runtime_id.clone(),
+                effects: "pure".to_owned(),
+                network: "denied".to_owned(),
+            },
+        )
+        .expect("begun");
+    drop(unfinished);
+
+    let report = run(&ticket, archive, scratch.path());
+    assert_eq!(failure_code(&report), "request_effect_unknown");
+    assert!(
+        !report.attestation.execution_started,
+        "this attempt did not start"
+    );
+    assert!(report.materialization_ref.is_none());
+}
+
+#[test]
+fn a_passing_attempt_carries_a_receipt_bound_to_its_attempt() {
+    let dir = site("");
+    let scratch = tempfile::tempdir().expect("scratch");
+    let (ticket, archive) = ticket(&submit(dir.path(), scratch.path()));
+    let report = run(&ticket, archive, scratch.path());
+    assert_eq!(report.outcome, "pass", "{:?}", report.failure);
+    assert!(report.attestation.execution_started);
+    let receipt = report
+        .verifier_receipts
+        .iter()
+        .find(|receipt| receipt["kind"] == "contract_verification")
+        .expect("a contract verification receipt")["receipt"]
+        .clone();
+    assert_eq!(receipt["fully_satisfied"], true);
+    assert_eq!(receipt["derivation_ref"], ticket.derivation_ref.as_str());
+    assert_eq!(receipt["execution"]["attempt_id"], "att_test");
+    assert_eq!(receipt["execution"]["request_id"], "sat_test");
+    assert_eq!(receipt["target"]["kind"], "formation-runtime");
+    // No transport existed; none is invented.
+    assert!(receipt.get("bundle_sha256").is_none());
+    // Observed over HTTP, not decided from the artifact's file list.
+    assert_eq!(receipt["observations"][0]["evidence"]["status"], 200);
+}

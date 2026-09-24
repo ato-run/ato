@@ -191,6 +191,8 @@ pub struct RuntimeObservation {
 pub enum VerificationTargetKind {
     CliLocal,
     AtoRunHosted,
+    /// A Formation attempt on a Runtime: local, or a Runtime Network ticket.
+    FormationRuntime,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -263,6 +265,10 @@ pub struct VerificationExecutionEvidence {
     pub lease_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt_id: Option<String>,
+    /// The request this attempt spent budget for. Retries, other Derivations
+    /// and redeliveries of the same request carry the same id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
     /// Immutable objects fetched from outside the bundle for this attempt.
     /// Only emitted with receipt schema /2; never part of K or D identity.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -291,7 +297,11 @@ pub struct VerificationServiceEvidence {
 #[serde(deny_unknown_fields)]
 pub struct ContractVerificationReceipt {
     pub schema: String,
-    pub bundle_sha256: String,
+    /// The transport the verified bytes arrived in, when there was one. A
+    /// Formation attempt runs from a frozen source and has no `.capsule`
+    /// yet; it names none rather than inventing a digest. Never identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_sha256: Option<String>,
     pub contract_ref: String,
     pub derivation_ref: String,
     pub target: VerificationTarget,
@@ -317,7 +327,7 @@ impl ContractVerificationReceipt {
             .collect();
         Self {
             schema: CONTRACT_VERIFICATION_RECEIPT_SCHEMA.to_owned(),
-            bundle_sha256: bundle_sha256.into(),
+            bundle_sha256: Some(bundle_sha256.into()),
             contract_ref: contract_ref.into(),
             derivation_ref: derivation_ref.into(),
             target: VerificationTarget { kind: target },
@@ -396,13 +406,37 @@ impl ContractVerificationReceipt {
             .collect();
         Self {
             schema: CONTRACT_VERIFICATION_RECEIPT_SCHEMA.to_owned(),
-            bundle_sha256: bundle_sha256.into(),
+            bundle_sha256: Some(bundle_sha256.into()),
             contract_ref: contract_ref.into(),
             derivation_ref: derivation_ref.into(),
             target: VerificationTarget { kind: target },
             execution: None,
             observations,
             fully_satisfied,
+        }
+    }
+
+    /// A receipt for an attempt that verified a candidate before any
+    /// transport existed: the same schema and the same evidence rules as
+    /// [`Self::from_runtime`], with no bundle digest.
+    pub fn from_attempt(
+        contract_ref: impl Into<String>,
+        derivation_ref: impl Into<String>,
+        contract: &BoundContract,
+        runtime: &RuntimeObservation,
+        verification: ContractVerification,
+    ) -> Self {
+        Self {
+            bundle_sha256: None,
+            ..Self::from_runtime(
+                String::new(),
+                contract_ref,
+                derivation_ref,
+                VerificationTargetKind::FormationRuntime,
+                contract,
+                runtime,
+                verification,
+            )
         }
     }
 

@@ -217,6 +217,7 @@ impl ValidatorAgent {
                     run_id: None,
                     lease_id: None,
                     attempt_id: None,
+                    request_id: None,
                     dependency_fetches: Vec::new(),
                     portability_profile: None,
                     embedded_oci_image_loaded: None,

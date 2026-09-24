@@ -72,7 +72,7 @@ impl AttemptExecutor for LocalAttemptExecutor {
                 workspace_root: &workspace_root,
                 cache_root: Some(&cache_root),
                 shim: &self.shim,
-                policy_host_path: &control_policy_path(&attempt_root)?,
+                policy_host_path: &control_policy_path(attempt_root)?,
                 network: self.network,
                 limits: self.limits,
                 toolchain: crate::sandbox::ToolchainAccess::ReadOnly,
