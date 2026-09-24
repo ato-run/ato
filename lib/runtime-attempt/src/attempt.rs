@@ -329,13 +329,6 @@ fn realize_and_verify(
         verification.clone(),
     );
     let mut execution = realized.execution;
-    execution.platform = execution.platform.or_else(|| {
-        Some(format!(
-            "{}/{}",
-            std::env::consts::OS,
-            std::env::consts::ARCH
-        ))
-    });
     execution.attempt_id = Some(request.attempt_id.to_owned());
     execution.request_id = Some(request.request_id.to_owned());
     execution.run_id = request.receipt.run_id.map(str::to_owned);
@@ -708,6 +701,8 @@ pub fn bounded(reason: &str) -> String {
 #[cfg(test)]
 mod tests {
     use ato_formation::authoring::{BoundContract, BoundRequirement, HTTP_CONTRACT_VERIFIER};
+
+    use crate::journal::AttemptJournal;
     use ato_formation::request::{OutcomeState, RealizationEvidence};
 
     use super::*;
@@ -808,6 +803,88 @@ mod tests {
             attempt.failure.as_ref().unwrap().code,
             "candidate_cleanup_failed"
         );
+    }
+
+    /// A realizer that only counts how often it was asked to run something.
+    struct CountingRealizer(std::cell::Cell<u32>);
+
+    impl CandidateRealizer for CountingRealizer {
+        fn admit(&self, _profile: &RuntimeProfile) -> Option<AttemptFailure> {
+            None
+        }
+
+        fn realize(
+            &self,
+            _attempt_id: &str,
+            _attempt_root: &Path,
+        ) -> Result<crate::realize::Realized, RealizeFailure> {
+            self.0.set(self.0.get() + 1);
+            Err(RealizeFailure::Execution(anyhow::anyhow!("nothing to run")))
+        }
+    }
+
+    #[test]
+    fn a_restarted_or_redelivered_attempt_is_never_realized_twice() {
+        let contract = BoundContract {
+            schema: "ato.contract/1".to_owned(),
+            requirements: Vec::new(),
+        };
+        let derivation: ato_formation::authoring::BoundDerivation =
+            serde_json::from_value(serde_json::json!({
+                "schema": "ato.derivation/1",
+                "inputs": [], "runtimes": {}, "steps": [], "ports": [], "state": [],
+                "effects": "pure"
+            }))
+            .unwrap();
+        let spec = AttemptSpec {
+            contract: &contract,
+            contract_ref: "sha256:k",
+            derivation: &derivation,
+            derivation_ref: "sha256:d",
+            shape: crate::spec::CandidateShape::Process,
+            input_refs: BTreeMap::new(),
+            instance_snapshot_ref: None,
+        };
+        let scratch = tempfile::tempdir().unwrap();
+        // One journal directory, read again as a restarted process would.
+        let records = scratch.path().join("records");
+        let realizer = CountingRealizer(std::cell::Cell::new(0));
+        let attempt = |attempt_id: &str| {
+            run_attempt(
+                &AttemptRequest {
+                    request_id: "run-1",
+                    attempt_id,
+                    label: "portable",
+                    spec: &spec,
+                    contract_ref: "sha256:k",
+                    runtime_id: "local",
+                    profile: &RuntimeProfile::default(),
+                    authorization: EffectAuthorization::UserInvoked {
+                        derivation_ref: "sha256:d",
+                    },
+                    network: NetworkPolicy::Denied,
+                    browser: None,
+                    attempt_root: scratch.path(),
+                    continuation: Continuation::HandOff,
+                    receipt: ReceiptContext::formation(),
+                    interrupt: None,
+                },
+                &realizer,
+                &AttemptJournal::new(&records),
+            )
+        };
+        let first = attempt("run-1");
+        assert!(first.execution_started);
+        assert_eq!(realizer.0.get(), 1);
+
+        let again = attempt("run-1");
+        assert_eq!(realizer.0.get(), 1, "the same attempt was realized twice");
+        assert!(again.execution_started, "it did start — the first time");
+        assert_eq!(
+            again.attempt.failure.as_ref().unwrap().code,
+            "attempt_already_started"
+        );
+        assert!(again.live.is_none());
     }
 
     #[test]

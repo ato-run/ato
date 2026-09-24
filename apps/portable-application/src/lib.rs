@@ -201,6 +201,42 @@ pub enum PortableRealizationKind {
     OciServiceGroup,
 }
 
+impl ValidatedPortableApplication {
+    /// What a Run of this validated route verifies: the bundle's own
+    /// canonical K and D, the tree it runs from, and the Instance snapshot
+    /// restored before it starts. Nothing is rebuilt or re-derived; a
+    /// `.capsule` is not a source to form again.
+    pub fn attempt_spec(
+        &self,
+        restored_snapshot_ref: Option<&str>,
+    ) -> ato_runtime_attempt::spec::AttemptSpec<'_> {
+        ato_runtime_attempt::spec::AttemptSpec {
+            contract: &self.contract,
+            contract_ref: self.contract_ref.as_str(),
+            derivation: &self.derivation,
+            derivation_ref: self.derivation_ref.as_str(),
+            shape: match self.realization {
+                PortableRealizationKind::StaticWeb => {
+                    ato_runtime_attempt::spec::CandidateShape::StaticWeb
+                }
+                PortableRealizationKind::LocalProcess
+                | PortableRealizationKind::OciContainer
+                | PortableRealizationKind::OciServiceGroup => {
+                    ato_runtime_attempt::spec::CandidateShape::Process
+                }
+            },
+            input_refs: self
+                .derivation
+                .inputs
+                .iter()
+                .filter(|input| input.protocol == ato_formation::authoring::WORKSPACE_PROTOCOL)
+                .map(|input| (input.id.clone(), self.tree_ref.to_string()))
+                .collect(),
+            instance_snapshot_ref: restored_snapshot_ref.map(str::to_owned),
+        }
+    }
+}
+
 impl PortableRealizationKind {
     pub fn label(self) -> &'static str {
         match self {
