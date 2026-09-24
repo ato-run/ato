@@ -241,6 +241,188 @@ fn check_observation(
     Ok(())
 }
 
+/// What a requester froze for one satisfy request: the K a verified route
+/// must prove, completely.
+pub struct VerifiedRouteAssignment<'a> {
+    /// The request id the coordinator assigned.
+    pub request_id: &'a str,
+    /// The effective K: the base Contract's ref, or — with a browser
+    /// Contract — the effective ref naming both.
+    pub effective_contract_ref: &'a str,
+    pub base_contract_ref: &'a str,
+    /// The frozen base K of each authorized route, by DerivationRef.
+    pub contracts: &'a std::collections::BTreeMap<String, BoundContract>,
+    pub browser_contract: Option<&'a crate::browser::BrowserContractV0>,
+}
+
+fn field<'v>(
+    value: &'v serde_json::Value,
+    name: &'static str,
+) -> Result<&'v str, ReceiptRejection> {
+    value[name]
+        .as_str()
+        .ok_or_else(|| reject("route_malformed", format!("{name} is missing")))
+}
+
+/// Accept a verified route reported for a satisfy request only when its
+/// receipts prove the complete effective K for exactly the attempt that
+/// reported it.
+///
+/// `route` and `attempts` are the coordinator's view. A pass label is never
+/// enough: the base Contract receipt must be accepted AND fully satisfied,
+/// and a browser Contract needs its own receipt from the same attempt,
+/// re-validated to a PASS. [`accept_receipt`] alone decides only whether a
+/// receipt is well-formed for its assignment — a well-formed FAILED receipt
+/// is still a failure.
+pub fn accept_verified_route(
+    assignment: &VerifiedRouteAssignment<'_>,
+    route: &serde_json::Value,
+    attempts: &[serde_json::Value],
+) -> Result<(), ReceiptRejection> {
+    // The effective K is what the request froze: base alone, or base plus
+    // exactly this browser Contract.
+    let expected = crate::browser::effective_contract_ref(
+        assignment.base_contract_ref,
+        assignment.browser_contract,
+    );
+    if expected != assignment.effective_contract_ref {
+        return Err(reject(
+            "request_effective_contract_inconsistent",
+            "the request's effective Contract does not follow from its base and browser Contracts",
+        ));
+    }
+    let effective = field(route, "effective_contract_ref")?;
+    if effective != assignment.effective_contract_ref {
+        return Err(reject(
+            "route_contract_mismatch",
+            format!(
+                "the route proves {effective}, not {}",
+                assignment.effective_contract_ref
+            ),
+        ));
+    }
+    let derivation_ref = field(route, "derivation_ref")?;
+    let runtime_id = field(route, "runtime_id")?;
+    let environment_id = field(route, "environment_id")?;
+    let contract = assignment.contracts.get(derivation_ref).ok_or_else(|| {
+        reject(
+            "route_derivation_unauthorized",
+            format!("{derivation_ref} is not a route this request authorized"),
+        )
+    })?;
+
+    // Exactly the attempt that reported the route: by id when the view names
+    // it, otherwise by the whole (D, Runtime, environment) placement — and
+    // then only when exactly one passing attempt matches.
+    let same_placement = |attempt: &&serde_json::Value| {
+        attempt["derivation_ref"] == derivation_ref
+            && attempt["runtime_id"] == runtime_id
+            && attempt["environment_id"] == environment_id
+    };
+    let attempt = match route["attempt_id"].as_str() {
+        Some(attempt_id) => {
+            let attempt = attempts
+                .iter()
+                .find(|attempt| attempt["attempt_id"] == attempt_id)
+                .ok_or_else(|| reject("route_attempt_missing", attempt_id.to_owned()))?;
+            if !same_placement(&attempt) {
+                return Err(reject(
+                    "route_attempt_mismatch",
+                    format!("attempt {attempt_id} is not this route's D, Runtime and environment"),
+                ));
+            }
+            attempt
+        }
+        None => {
+            let mut matching = attempts
+                .iter()
+                .filter(same_placement)
+                .filter(|attempt| attempt["status"] == "pass");
+            let attempt = matching.next().ok_or_else(|| {
+                reject(
+                    "route_attempt_missing",
+                    "no passing attempt reported this route",
+                )
+            })?;
+            if matching.next().is_some() {
+                return Err(reject(
+                    "route_attempt_ambiguous",
+                    "several passing attempts match this route; the view must name one",
+                ));
+            }
+            attempt
+        }
+    };
+    if attempt["status"] != "pass" {
+        return Err(reject(
+            "route_attempt_not_passed",
+            "the attempt did not pass",
+        ));
+    }
+    let attempt_id = field(attempt, "attempt_id")?;
+
+    let receipts = route["verifier_receipts"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let of_kind = |kind: &str| -> Result<Option<&serde_json::Value>, ReceiptRejection> {
+        let mut found = receipts.iter().filter(|receipt| receipt["kind"] == kind);
+        let first = found.next();
+        if found.next().is_some() {
+            return Err(reject("route_receipt_duplicate", kind.to_owned()));
+        }
+        Ok(first.map(|receipt| &receipt["receipt"]))
+    };
+
+    // The base K: well-formed for this attempt, and actually satisfied.
+    let base = of_kind("contract_verification")?.ok_or_else(|| {
+        reject(
+            "route_receipt_missing",
+            "the route carries no contract verification receipt",
+        )
+    })?;
+    let base = accept_receipt_json(
+        &ReceiptAssignment {
+            contract,
+            contract_ref: assignment.base_contract_ref,
+            derivation_ref,
+            attempt_id,
+            request_id: Some(assignment.request_id),
+        },
+        base,
+    )?;
+    if !base.fully_satisfied {
+        return Err(reject(
+            "receipt_contract_not_satisfied",
+            "the receipt does not satisfy every observation of the base Contract",
+        ));
+    }
+
+    // The browser part of the effective K, when there is one; none otherwise.
+    let browser = of_kind("browser_contract")?;
+    match (assignment.browser_contract, browser) {
+        (None, None) => {}
+        (None, Some(_)) => {
+            return Err(reject(
+                "route_receipt_unexpected",
+                "a browser receipt for a request with no browser Contract",
+            ));
+        }
+        (Some(_), None) => {
+            return Err(reject(
+                "browser_receipt_missing",
+                "the effective Contract includes a browser Contract and the route carries no \
+                 browser receipt",
+            ));
+        }
+        (Some(contract), Some(receipt)) => {
+            crate::browser::accept_browser_receipt(contract, runtime_id, attempt_id, receipt)
+                .map_err(|rejection| reject("browser_receipt_rejected", rejection.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
