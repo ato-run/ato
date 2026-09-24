@@ -100,6 +100,14 @@ pub enum IntentError {
     UnsupportedNode { requested: String },
     #[error("{field} is malformed: {detail}")]
     Malformed { field: &'static str, detail: String },
+    #[error("runtime {name} {version} is not one this build provisions exactly ({supported})")]
+    UnsupportedRuntime {
+        name: String,
+        version: String,
+        supported: String,
+    },
+    #[error("the {manager} version cannot be resolved exactly: {detail}")]
+    PackageManagerVersionUnresolved { manager: String, detail: String },
 }
 
 impl IntentError {
@@ -111,6 +119,8 @@ impl IntentError {
             Self::UnsupportedPython { .. } => "intent_unsupported_python",
             Self::UnsupportedNode { .. } => "intent_unsupported_node",
             Self::Malformed { .. } => "intent_malformed",
+            Self::UnsupportedRuntime { .. } => "intent_unsupported_runtime",
+            Self::PackageManagerVersionUnresolved { .. } => "package_manager_version_unresolved",
         }
     }
 }
@@ -120,7 +130,21 @@ impl IntentError {
 #[serde(rename_all = "snake_case")]
 pub enum Lane {
     StaticWeb,
+    /// The v1 Python process lane. Kept under its own wire name so every
+    /// Python route formed before the generic lane existed keeps its intent,
+    /// its plan and its formation key.
     PythonProcess,
+    /// A process, whatever it runs. The runtimes and package manager it
+    /// needs come from the Derivation's `[[runtime]]` declarations and the
+    /// source's own `packageManager` — never from the argv.
+    Process,
+}
+
+impl Lane {
+    /// Realized as a process (rather than served as files).
+    pub fn is_process(self) -> bool {
+        matches!(self, Self::PythonProcess | Self::Process)
+    }
 }
 
 /// How dependencies are resolved, and how strong the reproducibility is.
@@ -225,6 +249,19 @@ pub struct ProgramIntentV1 {
     /// Omitted otherwise, so existing intents digest exactly as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub static_compile: Option<StaticCompileProfileV1>,
+    /// The exact pnpm or yarn a route with declared toolchains uses, resolved
+    /// from the source's `packageManager` (or the Derivation's own
+    /// `[[runtime]]`). Omitted otherwise, so existing intents are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_manager: Option<ResolvedPackageManager>,
+}
+
+/// A package manager pinned to one exact version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolvedPackageManager {
+    pub name: String,
+    pub version: String,
 }
 
 pub const PROGRAM_INTENT_V1_SCHEMA: &str = "ato.program-intent.v1";
@@ -294,6 +331,11 @@ pub struct EffectiveBuildPlanV1 {
     /// `""` is the whole workspace.
     #[serde(default)]
     pub output_root: String,
+    /// The provisioned toolchains' `bin` directories, in the order they head
+    /// every build step's PATH (before the system directories). Empty — and
+    /// absent from the canonical form — for plans without declared toolchains.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub toolchain_path: Vec<String>,
 }
 
 pub const EFFECTIVE_BUILD_PLAN_V1_SCHEMA: &str = "ato.effective-build-plan.v1";
@@ -364,6 +406,7 @@ pub fn compile_intent(
     match lane {
         Lane::StaticWeb => compile_static(evidence, overrides, origins),
         Lane::PythonProcess => compile_python(evidence, overrides, workspace_guest_root, origins),
+        Lane::Process => compile_process(evidence, overrides, workspace_guest_root, origins),
     }
 }
 
@@ -377,6 +420,7 @@ fn choose_lane(
         return match declared {
             "static_web" => Ok(Lane::StaticWeb),
             "python_process" => Ok(Lane::PythonProcess),
+            "process" => Ok(Lane::Process),
             other => Err(IntentError::Malformed {
                 field: "lane",
                 detail: format!("unknown lane {other:?}"),
@@ -919,6 +963,24 @@ fn compile_static(
         runtime.insert("node".to_owned(), compile.node_version.clone());
         runtime.insert("react".to_owned(), compile.react_version.clone());
     }
+    // Toolchains the Derivation declares for its own `exec` build. Only an
+    // authored build declares them (the projection refuses one beside a
+    // platform compiler or a package build), and they are provisioned and put
+    // on the build's PATH exactly as a process route's are.
+    let mut package_manager = None;
+    if declared_runtimes(overrides).next().is_some() {
+        if static_build.is_some() || static_compile.is_some() {
+            return Err(IntentError::Malformed {
+                field: "runtime",
+                detail: "declared runtimes belong to an authored build, and this static site \
+                         names a platform or package build"
+                    .to_owned(),
+            });
+        }
+        let (declared, manager) = resolve_declared_toolchains(evidence, overrides, origins)?;
+        runtime.extend(declared);
+        package_manager = manager;
+    }
     let dependencies = match static_build.as_ref() {
         None => DependencyPlan::None,
         Some(build) if build.lockfile_pinned => DependencyPlan::UvFrozen,
@@ -949,7 +1011,273 @@ fn compile_static(
         static_spa_fallback: spa_fallback,
         static_build,
         static_compile,
+        package_manager,
     })
+}
+
+/// Node versions a Derivation may declare as a `[[runtime]]`, exactly.
+///
+/// Exact, not a ladder: the Derivation names the Node it runs on, and a
+/// route that ran on another one would be a different route.
+pub const SUPPORTED_NODE_RUNTIME: &[&str] = &["20.20.2", "22.14.0"];
+
+/// Where a pinned package manager is provisioned, shared by every build and
+/// Run on the host, read-only at run time.
+pub fn package_manager_home(name: &str, version: &str) -> String {
+    format!("{TOOLCHAIN_ROOT}/{name}/{version}")
+}
+
+/// `toolchain.<name>` overrides — the Derivation's `[[runtime]]`s on a route
+/// that provisions them as declared — as `(name, version)`. A different key
+/// from the v1 lane's `runtime.python`, which keeps its own resolution.
+fn declared_runtimes(overrides: &AuthoredOverrides) -> impl Iterator<Item = (&str, &str)> {
+    overrides.0.iter().filter_map(|(key, value)| {
+        key.strip_prefix("toolchain.")
+            .map(|name| (name, value.as_str()))
+    })
+}
+
+/// `1.2.3` or `1.2.3-rc.1`, and nothing looser.
+fn is_exact_version(version: &str) -> bool {
+    let core = version.split_once('-').map_or(version, |(core, _)| core);
+    let parts: Vec<_> = core.split('.').collect();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// The runtimes a Derivation declares, each exact, and the package manager
+/// its Node uses.
+///
+/// Authority, in order:
+/// - the Derivation's `[[runtime]]` for Python and Node — never the argv;
+/// - for pnpm / yarn, the source's `packageManager` when it pins an exact
+///   version, else a `[[runtime]]` pnpm / yarn the Derivation declares; a
+///   source whose lockfile or `packageManager` names pnpm / yarn with neither
+///   is refused rather than given a version nobody chose. npm is the one the
+///   declared Node ships with.
+fn resolve_declared_toolchains(
+    evidence: &DetectorEvidence,
+    overrides: &AuthoredOverrides,
+    origins: &mut FieldOrigins,
+) -> Result<(BTreeMap<String, String>, Option<ResolvedPackageManager>), IntentError> {
+    let mut runtime = BTreeMap::new();
+    let mut declared_manager: Option<ResolvedPackageManager> = None;
+    for (name, version) in declared_runtimes(overrides) {
+        origins.insert(format!("toolchain.{name}"), FieldOrigin::Authored);
+        let supported: &[&str] = match name {
+            "python" => SUPPORTED_PYTHON,
+            "node" => SUPPORTED_NODE_RUNTIME,
+            "pnpm" | "yarn" => {
+                if !is_exact_version(version) {
+                    return Err(IntentError::PackageManagerVersionUnresolved {
+                        manager: name.to_owned(),
+                        detail: format!(
+                            "the Derivation declares {name} {version:?}, not an exact version"
+                        ),
+                    });
+                }
+                declared_manager = Some(ResolvedPackageManager {
+                    name: name.to_owned(),
+                    version: version.to_owned(),
+                });
+                continue;
+            }
+            _ => &[],
+        };
+        if !supported.contains(&version) {
+            return Err(IntentError::UnsupportedRuntime {
+                name: name.to_owned(),
+                version: version.to_owned(),
+                supported: if supported.is_empty() {
+                    "none".to_owned()
+                } else {
+                    supported.join(", ")
+                },
+            });
+        }
+        runtime.insert(name.to_owned(), version.to_owned());
+    }
+
+    if !runtime.contains_key("node") {
+        if let Some(manager) = declared_manager {
+            return Err(IntentError::Malformed {
+                field: "runtime",
+                detail: format!(
+                    "{} runs on Node, and the Derivation declares no node runtime",
+                    manager.name
+                ),
+            });
+        }
+        return Ok((runtime, None));
+    }
+
+    let node = evidence.node.as_ref();
+    let source = node.and_then(|node| node.package_manager.as_deref());
+    let manager = match source {
+        Some(declared) => {
+            let (name, rest) = declared.split_once('@').unwrap_or((declared, ""));
+            // `pnpm@9.1.0+sha512.…`: the hash is Corepack's integrity pin.
+            let version = rest.split_once('+').map_or(rest, |(version, _)| version);
+            match name {
+                "npm" => None,
+                "pnpm" | "yarn" if is_exact_version(version) => {
+                    let pinned = ResolvedPackageManager {
+                        name: name.to_owned(),
+                        version: version.to_owned(),
+                    };
+                    if let Some(declared) = &declared_manager
+                        && declared != &pinned
+                    {
+                        return Err(IntentError::Malformed {
+                            field: "runtime",
+                            detail: format!(
+                                "the Derivation declares {} {} and the source pins {declared:?}",
+                                declared.name, declared.version
+                            ),
+                        });
+                    }
+                    Some(pinned)
+                }
+                "pnpm" | "yarn" => match declared_manager {
+                    Some(pinned) if pinned.name == name => Some(pinned),
+                    _ => {
+                        return Err(IntentError::PackageManagerVersionUnresolved {
+                            manager: name.to_owned(),
+                            detail: format!("package.json packageManager is {declared:?}"),
+                        });
+                    }
+                },
+                other => {
+                    return Err(IntentError::Malformed {
+                        field: "package.json packageManager",
+                        detail: format!("{other:?} is not a package manager this build provisions"),
+                    });
+                }
+            }
+        }
+        None => match declared_manager {
+            Some(pinned) => Some(pinned),
+            None => {
+                let locked = node.and_then(|node| {
+                    if node.has_pnpm_lock {
+                        Some("pnpm")
+                    } else if node.has_yarn_lock {
+                        Some("yarn")
+                    } else {
+                        None
+                    }
+                });
+                if let Some(name) = locked {
+                    return Err(IntentError::PackageManagerVersionUnresolved {
+                        manager: name.to_owned(),
+                        detail: format!(
+                            "the source carries a {name} lockfile and package.json declares no \
+                             packageManager; declare an exact one, or a [[runtime]] {name}"
+                        ),
+                    });
+                }
+                None
+            }
+        },
+    };
+    Ok((runtime, manager))
+}
+
+/// The provisioned toolchains' `bin` directories, in PATH order.
+pub fn toolchain_bin_dirs(
+    runtime: &BTreeMap<String, String>,
+    package_manager: Option<&ResolvedPackageManager>,
+) -> Vec<String> {
+    let mut dirs = Vec::new();
+    if let Some(manager) = package_manager {
+        dirs.push(format!(
+            "{}/bin",
+            package_manager_home(&manager.name, &manager.version)
+        ));
+    }
+    if let Some(version) = runtime.get("node") {
+        dirs.push(format!("{}/bin", node_home(version)));
+    }
+    if let Some(version) = runtime.get("python") {
+        dirs.push(format!("{}/bin", python_home(version)));
+    }
+    dirs
+}
+
+/// The system directories that follow the toolchains on every PATH.
+pub const SYSTEM_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
+
+/// A process route that is not the v1 Python lane: whatever runtimes the
+/// Derivation declares, provisioned exactly, and its authored launch.
+fn compile_process(
+    evidence: &DetectorEvidence,
+    overrides: &AuthoredOverrides,
+    workspace_guest_root: &str,
+    origins: &mut FieldOrigins,
+) -> Result<ProgramIntentV1, IntentError> {
+    let (runtime, package_manager) = resolve_declared_toolchains(evidence, overrides, origins)?;
+    let dependencies = if overrides.get("dependencies") == Some("authored") {
+        origins.insert("dependencies".to_owned(), FieldOrigin::Authored);
+        DependencyPlan::Authored
+    } else {
+        DependencyPlan::None
+    };
+    let AuthoredProcess {
+        launch_argv,
+        port,
+        readiness,
+        state_slots,
+        mut public_env,
+    } = authored_process(overrides, origins)?;
+
+    // The Run finds the same toolchains the build did, first, and never a
+    // host installation. An authored PATH is the author's, and stays.
+    let mut defaults = vec![(
+        "PATH",
+        toolchain_bin_dirs(&runtime, package_manager.as_ref())
+            .into_iter()
+            .chain([SYSTEM_PATH.to_owned()])
+            .collect::<Vec<_>>()
+            .join(":"),
+    )];
+    // The Run has no home of its own (HOME is unset and its uid has no
+    // passwd entry), and a tool that asks for one — npm, pnpm and yarn all
+    // do, before running anything — dies on `os.homedir()`. Its /tmp is the
+    // Run's own writable scratch.
+    defaults.push(("HOME", "/tmp".to_owned()));
+    if runtime.contains_key("node") {
+        // npm writes a cache and logs even for `npm start`.
+        defaults.push(("npm_config_cache", "/tmp/.npm".to_owned()));
+        defaults.push(("npm_config_update_notifier", "false".to_owned()));
+    }
+    for (name, value) in defaults {
+        if !public_env.contains_key(name) {
+            public_env.insert(name.to_owned(), value);
+            origins.insert(format!("env.{name}"), FieldOrigin::PolicyDefault);
+        }
+    }
+
+    ProgramIntentV1 {
+        schema: PROGRAM_INTENT_V1_SCHEMA.to_owned(),
+        lane: Lane::Process,
+        runtime,
+        dependencies,
+        launch_argv,
+        cwd_relative: overrides.get("launch.cwd").unwrap_or("").to_owned(),
+        public_env,
+        exported_ports: vec![("http".to_owned(), port)],
+        readiness_http_path: readiness,
+        state_slots,
+        static_output_root: None,
+        static_entry_path: None,
+        static_spa_fallback: false,
+        static_build: None,
+        static_compile: None,
+        package_manager,
+    }
+    .with_guest_root_checked(workspace_guest_root)
 }
 
 fn compile_python(
@@ -1024,6 +1352,73 @@ fn compile_python(
     // ── dependencies ────────────────────────────────────────────────────────
     let dependencies = resolve_dependencies(python, overrides, origins)?;
 
+    let AuthoredProcess {
+        launch_argv,
+        port,
+        readiness,
+        state_slots,
+        mut public_env,
+    } = authored_process(overrides, origins)?;
+
+    // Where the workspace's installed dependencies are. The interpreter comes
+    // from the provisioned toolchain and knows nothing about this workspace, so
+    // it is told rather than expected to guess.
+    let minor = resolved
+        .rsplit_once('.')
+        .map(|(head, _)| head)
+        .unwrap_or(resolved.as_str());
+    public_env.insert(
+        "PYTHONPATH".to_owned(),
+        format!(
+            "{}/.venv/lib/python{minor}/site-packages",
+            workspace_guest_root.trim_end_matches('/')
+        ),
+    );
+    origins.insert("env.PYTHONPATH".to_owned(), FieldOrigin::PolicyDefault);
+
+    let mut runtime = BTreeMap::new();
+    runtime.insert("python".to_owned(), resolved);
+
+    ProgramIntentV1 {
+        schema: PROGRAM_INTENT_V1_SCHEMA.to_owned(),
+        lane: Lane::PythonProcess,
+        runtime,
+        dependencies,
+        launch_argv,
+        cwd_relative: overrides.get("launch.cwd").unwrap_or("").to_owned(),
+        public_env,
+        exported_ports: vec![("http".to_owned(), port)],
+        readiness_http_path: readiness,
+        state_slots,
+        static_output_root: None,
+        static_entry_path: None,
+        static_spa_fallback: false,
+        // A Python process is never a built static site.
+        static_build: None,
+        static_compile: None,
+        package_manager: None,
+        // `workspace_guest_root` shapes the build plan, not the intent: the
+        // intent says WHAT to run, the plan says where. It is still checked
+        // here, because an argv that cannot resolve under it is not a launch.
+    }
+    .with_guest_root_checked(workspace_guest_root)
+}
+
+/// What an authored process route states about its launch, for every
+/// process lane alike: argv, port, readiness, state and public env. Nothing
+/// here is inferred.
+struct AuthoredProcess {
+    launch_argv: Vec<String>,
+    port: u16,
+    readiness: Option<String>,
+    state_slots: Vec<(String, String)>,
+    public_env: BTreeMap<String, String>,
+}
+
+fn authored_process(
+    overrides: &AuthoredOverrides,
+    origins: &mut FieldOrigins,
+) -> Result<AuthoredProcess, IntentError> {
     // ── launch ──────────────────────────────────────────────────────────────
     // Not inferred, at all. A guessed entrypoint launches something the author
     // never asked to launch, and the failure looks like the app's fault.
@@ -1090,47 +1485,13 @@ fn compile_python(
             origins.insert(format!("env.{name}"), FieldOrigin::Authored);
         }
     }
-    // Where the workspace's installed dependencies are. The interpreter comes
-    // from the provisioned toolchain and knows nothing about this workspace, so
-    // it is told rather than expected to guess.
-    let minor = resolved
-        .rsplit_once('.')
-        .map(|(head, _)| head)
-        .unwrap_or(resolved.as_str());
-    public_env.insert(
-        "PYTHONPATH".to_owned(),
-        format!(
-            "{}/.venv/lib/python{minor}/site-packages",
-            workspace_guest_root.trim_end_matches('/')
-        ),
-    );
-    origins.insert("env.PYTHONPATH".to_owned(), FieldOrigin::PolicyDefault);
-
-    let mut runtime = BTreeMap::new();
-    runtime.insert("python".to_owned(), resolved);
-
-    ProgramIntentV1 {
-        schema: PROGRAM_INTENT_V1_SCHEMA.to_owned(),
-        lane: Lane::PythonProcess,
-        runtime,
-        dependencies,
+    Ok(AuthoredProcess {
         launch_argv,
-        cwd_relative: overrides.get("launch.cwd").unwrap_or("").to_owned(),
-        public_env,
-        exported_ports: vec![("http".to_owned(), port)],
-        readiness_http_path: readiness,
+        port,
+        readiness,
         state_slots,
-        static_output_root: None,
-        static_entry_path: None,
-        static_spa_fallback: false,
-        // A Python process is never a built static site.
-        static_build: None,
-        static_compile: None,
-        // `workspace_guest_root` shapes the build plan, not the intent: the
-        // intent says WHAT to run, the plan says where. It is still checked
-        // here, because an argv that cannot resolve under it is not a launch.
-    }
-    .with_guest_root_checked(workspace_guest_root)
+        public_env,
+    })
 }
 
 impl ProgramIntentV1 {
@@ -1297,47 +1658,38 @@ pub fn compile_build_plan(
     // happens to have, and which Node built an artifact must be a property of
     // the source. `node` and `npm` both live under `{home}/bin`.
     if let (Some(build), Lane::StaticWeb) = (intent.static_build.as_ref(), intent.lane) {
-        let home = node_home(&build.node_version);
-        steps.push(BuildStepV1 {
-            name: "provision-node".to_owned(),
-            argv: vec![
-                "/bin/sh".to_owned(),
-                "-euc".to_owned(),
-                format!(
-                    "if [ ! -x {home}/bin/node ]; then mkdir -p {home} && \
-                     curl -fsSL '{url}' | tar -xz --strip-components=1 -C {home}; fi; \
-                     {home}/bin/node -v",
-                    url = node_download_url(&build.node_version, node_triple(target_triple)),
-                ),
-            ],
-            needs_network: true,
-            cwd_relative: String::new(),
-            env: BTreeMap::new(),
-            toolchain_access: ToolchainAccess::Provision,
-        });
+        steps.push(provision_node_step(&build.node_version, target_triple));
     }
 
     if let (Some(version), Lane::PythonProcess) = (python.as_deref(), intent.lane) {
-        let home = python_home(version);
-        steps.push(BuildStepV1 {
-            name: "provision-python".to_owned(),
-            // Idempotent: an already-provisioned toolchain is reused, so a
-            // second build on the same host does not re-download it.
-            argv: vec![
-                "/bin/sh".to_owned(),
-                "-euc".to_owned(),
-                format!(
-                    "if [ ! -x {home}/bin/python3 ]; then mkdir -p {home} && \
-                     curl -fsSL '{url}' | tar -xz --strip-components=1 -C {home}; fi; \
-                     {home}/bin/python3 -V",
-                    url = python_download_url(version, &python_triple(target_triple)),
-                ),
-            ],
-            needs_network: true,
-            cwd_relative: String::new(),
-            env: BTreeMap::new(),
-            toolchain_access: ToolchainAccess::Provision,
-        });
+        steps.push(provision_python_step(version, target_triple));
+    }
+
+    // Toolchains a Derivation declares — a generic process route, or a static
+    // route with an authored build. Each is provisioned exactly, in a fixed
+    // order, and heads every step's PATH. A platform prerequisite: part of
+    // the plan, never of the Derivation.
+    let declared_toolchains = match intent.lane {
+        Lane::Process => true,
+        Lane::StaticWeb => {
+            intent.static_build.is_none()
+                && intent.static_compile.is_none()
+                && !intent.runtime.is_empty()
+        }
+        Lane::PythonProcess => false,
+    };
+    let mut toolchain_path = Vec::new();
+    if declared_toolchains {
+        if let Some(version) = intent.runtime.get("python") {
+            steps.push(provision_python_step(version, target_triple));
+        }
+        if let Some(version) = intent.runtime.get("node") {
+            steps.push(provision_node_step(version, target_triple));
+            if let Some(manager) = intent.package_manager.as_ref() {
+                steps.push(provision_package_manager_step(manager, version));
+            }
+        }
+        toolchain_path = toolchain_bin_dirs(&intent.runtime, intent.package_manager.as_ref());
     }
 
     // The platform compiler. No provision step above it on purpose: it and its
@@ -1527,6 +1879,8 @@ Nothing was changed — try again shortly.\"}}' >&2; exit 65; fi; \
         // The author's `exec` steps install what they install; they follow
         // these platform steps in the plan, in the order they were written.
         (Lane::PythonProcess, DependencyPlan::Authored) => {}
+        // A generic process installs nothing the Derivation did not write.
+        (Lane::Process, _) => {}
     }
 
     Ok(EffectiveBuildPlanV1 {
@@ -1536,7 +1890,90 @@ Nothing was changed — try again shortly.\"}}' >&2; exit 65; fi; \
         runtime: intent.runtime.clone(),
         steps,
         output_root: intent.static_output_root.clone().unwrap_or_default(),
+        toolchain_path,
     })
+}
+
+/// Provision one exact Python, idempotently: an already-provisioned
+/// toolchain is reused, so a second build on the same host does not
+/// re-download it.
+fn provision_python_step(version: &str, target_triple: &str) -> BuildStepV1 {
+    let home = python_home(version);
+    BuildStepV1 {
+        name: "provision-python".to_owned(),
+        argv: vec![
+            "/bin/sh".to_owned(),
+            "-euc".to_owned(),
+            format!(
+                "if [ ! -x {home}/bin/python3 ]; then mkdir -p {home} && \
+                 curl -fsSL '{url}' | tar -xz --strip-components=1 -C {home}; fi; \
+                 {home}/bin/python3 -V",
+                url = python_download_url(version, &python_triple(target_triple)),
+            ),
+        ],
+        needs_network: true,
+        cwd_relative: String::new(),
+        env: BTreeMap::new(),
+        toolchain_access: ToolchainAccess::Provision,
+    }
+}
+
+/// Provision one exact Node (with the npm it ships), idempotently.
+fn provision_node_step(version: &str, target_triple: &str) -> BuildStepV1 {
+    let home = node_home(version);
+    BuildStepV1 {
+        name: "provision-node".to_owned(),
+        argv: vec![
+            "/bin/sh".to_owned(),
+            "-euc".to_owned(),
+            format!(
+                "if [ ! -x {home}/bin/node ]; then mkdir -p {home} && \
+                 curl -fsSL '{url}' | tar -xz --strip-components=1 -C {home}; fi; \
+                 {home}/bin/node -v",
+                url = node_download_url(version, node_triple(target_triple)),
+            ),
+        ],
+        needs_network: true,
+        cwd_relative: String::new(),
+        env: BTreeMap::new(),
+        toolchain_access: ToolchainAccess::Provision,
+    }
+}
+
+/// Provision one exact pnpm or yarn into its own shared prefix, with the
+/// declared Node's npm, and check the version it reports.
+///
+/// A prefix of its own rather than Corepack's cache: the same binary must be
+/// there when the Run starts, and a per-attempt cache is gone by then.
+/// yarn 1 is the `yarn` package; yarn 2+ is `@yarnpkg/cli-dist`.
+fn provision_package_manager_step(
+    manager: &ResolvedPackageManager,
+    node_version: &str,
+) -> BuildStepV1 {
+    let home = package_manager_home(&manager.name, &manager.version);
+    let node = node_home(node_version);
+    let (package, program) = match manager.name.as_str() {
+        "yarn" if !manager.version.starts_with("1.") => ("@yarnpkg/cli-dist", "yarn"),
+        name => (name, name),
+    };
+    let version = &manager.version;
+    BuildStepV1 {
+        name: format!("provision-{}", manager.name),
+        argv: vec![
+            "/bin/sh".to_owned(),
+            "-euc".to_owned(),
+            format!(
+                "export PATH={node}/bin:{SYSTEM_PATH}; \
+                 if [ ! -x {home}/bin/{program} ]; then mkdir -p {home} && \
+                 npm install --global --prefix {home} --no-audit --no-fund {package}@{version}; fi; \
+                 test \"$({home}/bin/{program} --version)\" = {version}"
+            ),
+        ],
+        needs_network: true,
+        cwd_relative: String::new(),
+        env: BTreeMap::new(),
+        toolchain_access: ToolchainAccess::Provision,
+    }
 }
 
 /// The python-build-standalone triple for an Ato target triple.

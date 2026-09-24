@@ -110,6 +110,7 @@ fn intent(argv: Vec<String>, guest_port: u16) -> ProgramIntentV1 {
         static_spa_fallback: false,
         static_build: None,
         static_compile: None,
+        package_manager: None,
     }
 }
 
