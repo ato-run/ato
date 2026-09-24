@@ -268,6 +268,7 @@ fn an_unfinished_attempt_holds_every_later_attempt_of_its_request() {
                 runtime_id: ticket.runtime_id.clone(),
                 effects: "pure".to_owned(),
                 network: "denied".to_owned(),
+                authorization: "unattended".to_owned(),
             },
         )
         .expect("begun");

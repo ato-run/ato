@@ -4,6 +4,7 @@
 
 mod desktop_control;
 mod object_transport;
+mod portable_attempt;
 mod portable_dependency;
 
 pub mod activity_client;
@@ -29,7 +30,7 @@ use ato_adapter_oci::{
     DockerOciAdapter, OciEndpoint, OciHandle, OciMount, OciNetwork, OciResourceLimits,
     OciServiceGroup, OciSpec,
 };
-use ato_adapter_process::{ProcessAdapter, ProcessHandle, ProcessSpec, terminate_process_tree};
+use ato_adapter_process::terminate_process_tree;
 use ato_adapter_workspace::restore_workspace;
 use ato_computation::{ComputationRef, ContentRef};
 use ato_formation::authoring::{
@@ -61,8 +62,7 @@ use ato_portable_application::portability_export::repack_portable_dependencies_w
 use ato_portable_application::portability_plan::{PortableExportProfile, plan_portable_export};
 use ato_portable_application::{
     OCI_CPU_MILLIS_RUNTIME, OCI_IMAGE_RUNTIME, OCI_MEMORY_BYTES_RUNTIME, OCI_PIDS_LIMIT_RUNTIME,
-    OCI_PLATFORM_RUNTIME, PYTHON_RUNTIME, PortableRealizationKind, StaticApplicationAsset,
-    StaticApplicationServer, StaticApplicationServerExt, StaticApplicationState,
+    OCI_PLATFORM_RUNTIME, PortableRealizationKind, StaticApplicationAsset, StaticApplicationState,
     ValidatedPortableApplication, build_authored_bundle_v2, bundle_sha256, materialize_tree,
     resolve_application_bindings, validate_bundle_for_derivation,
 };
@@ -1515,6 +1515,7 @@ fn portable_instance_worker_claimed(
             static_state,
             filesystem_state: Some(&filesystem_state),
             bindings: Some(bindings),
+            run_id: Some(&claimed.run_id),
         },
     )?;
     if started.receipt.bundle_sha256.as_deref() != Some(instance.bundle_sha256.as_str())
@@ -1523,7 +1524,12 @@ fn portable_instance_worker_claimed(
     {
         bail!("local Instance verification receipt does not match imported metadata");
     }
-    if let Some(execution) = &mut started.receipt.execution {
+    // OCI routes still start on the CLI's own path, whose receipt does not
+    // know the Run yet; the common attempt names it from the start and its
+    // receipt is never rewritten.
+    if !matches!(started.runtime, PortableLocalRuntime::Live { .. })
+        && let Some(execution) = &mut started.receipt.execution
+    {
         execution.run_id = Some(claimed.run_id.clone());
         execution.attempt_id = Some(claimed.run_id.clone());
     }
@@ -1545,7 +1551,7 @@ fn portable_instance_worker_claimed(
     loop {
         if request.exists() {
             let local_storage = started.runtime.local_storage()?;
-            drop(started.runtime);
+            started.runtime.stop_recorded(Some(&run_root));
             if let Some(local_storage) = local_storage {
                 store.save_browser_state_for_run(
                     &active.instance_id,
@@ -1562,7 +1568,7 @@ fn portable_instance_worker_claimed(
             .is_some_and(|flag| flag.load(Ordering::Relaxed))
         {
             let local_storage = started.runtime.local_storage()?;
-            drop(started.runtime);
+            started.runtime.stop_recorded(Some(&run_root));
             if let Some(local_storage) = local_storage {
                 store.save_browser_state_for_run(
                     &active.instance_id,
@@ -1953,7 +1959,8 @@ fn run_portable_application(
             .as_deref()
             .is_some_and(|flag| flag.load(Ordering::Relaxed))
         {
-            break;
+            runtime.stop_recorded(None);
+            return Ok(());
         }
         // A service group is one Application: when any service exits, the
         // whole group is stopped (by dropping the runtime) and the run fails.
@@ -1974,6 +1981,136 @@ struct StartedPortableApplication {
     receipt: ContractVerificationReceipt,
 }
 
+/// A LocalProcess or StaticWeb route, through the Runtime's common attempt:
+/// admission, the start record, the HTTP observation, K's verdicts and the
+/// receipt are the Runtime's; this only supplies what to run and keeps the
+/// verified candidate that is handed off.
+fn start_portable_attempt(
+    bundle_bytes: &[u8],
+    bundle: &ato_objects::PortableApplicationBundle,
+    validated: &ValidatedPortableApplication,
+    runtime_root: &Path,
+    shutdown: Option<&AtomicBool>,
+    runtime_state: PortableRuntimeState<'_>,
+    binding_environment: &BTreeMap<String, String>,
+) -> Result<StartedPortableApplication> {
+    use ato_runtime_attempt::admission::EffectAuthorization;
+    use ato_runtime_attempt::attempt::{AttemptRequest, Continuation, ReceiptContext, run_attempt};
+    use ato_runtime_attempt::build_sandbox::NetworkPolicy;
+    use ato_runtime_attempt::journal::AttemptJournal;
+
+    let spec = validated.attempt_spec(runtime_state.restored_snapshot_ref);
+    // A local Instance's Run is the attempt; `ato run` starts a new one.
+    let fresh = format!(
+        "run-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default()
+    );
+    let attempt_id = runtime_state.run_id.unwrap_or(&fresh);
+    let transport = bundle_sha256(bundle_bytes);
+    let portability_profile =
+        bundle
+            .portability
+            .as_ref()
+            .map(|portability| match portability.profile {
+                PortableDependencyProfile::Thin => "thin",
+                PortableDependencyProfile::Cached => "cached",
+                PortableDependencyProfile::Offline => "offline",
+            });
+    let outcome = run_attempt(
+        &AttemptRequest {
+            request_id: attempt_id,
+            attempt_id,
+            label: "portable",
+            spec: &spec,
+            contract_ref: validated.contract_ref.as_str(),
+            runtime_id: "local",
+            profile: &ato_formation::request::RuntimeProfile::default(),
+            // The person ran exactly this Derivation. That authorizes running
+            // it; it confirms no effect beyond the disposable ones, and the
+            // validator admits only pure single-step routes here.
+            authorization: EffectAuthorization::UserInvoked {
+                derivation_ref: validated.derivation_ref.as_str(),
+            },
+            // A Run builds nothing.
+            network: NetworkPolicy::Denied,
+            browser: None,
+            attempt_root: runtime_root,
+            continuation: Continuation::HandOff,
+            receipt: ReceiptContext {
+                target: VerificationTargetKind::CliLocal,
+                bundle_sha256: Some(&transport),
+                portability_profile,
+                run_id: runtime_state.run_id,
+            },
+            interrupt: shutdown,
+        },
+        &portable_attempt::PortableBundleExecutor {
+            bundle,
+            validated,
+            runtime_root,
+            static_state: runtime_state.static_state,
+            filesystem_state: runtime_state.filesystem_state,
+            binding_environment,
+        },
+        &AttemptJournal::new(ato_home()?.join("attempt-records")),
+    );
+    let Some(live) = outcome.live else {
+        // Not verified, so nothing was handed off: the candidate is already
+        // stopped and its scratch removed.
+        if let Some(receipt) = &outcome.attempt.receipt
+            && !receipt.fully_satisfied
+        {
+            let failure = receipt
+                .observations
+                .iter()
+                .find(|observation| {
+                    !matches!(
+                        observation.outcome,
+                        ato_formation::verify::ReceiptOutcome::Satisfied
+                    )
+                })
+                .map(|observation| observation.id.as_str())
+                .unwrap_or("unknown");
+            bail!("runtime Contract verification did not fully satisfy observation {failure}");
+        }
+        return Err(outcome.error.unwrap_or_else(|| {
+            anyhow::anyhow!(
+                "the Run did not start: {}",
+                outcome
+                    .attempt
+                    .failure
+                    .as_ref()
+                    .map(|failure| failure.message.as_str())
+                    .unwrap_or("no reason recorded")
+            )
+        }));
+    };
+    let receipt = outcome
+        .attempt
+        .receipt
+        .context("a verified Run carries its receipt")?;
+    let label = match validated.realization {
+        PortableRealizationKind::StaticWeb => "static web",
+        _ => "local process",
+    };
+    let base_url = live
+        .endpoint()
+        .map(|endpoint| endpoint.trim_end_matches('/').to_owned())
+        .context("the verified candidate answers nowhere")?;
+    Ok(StartedPortableApplication {
+        runtime: PortableLocalRuntime::Live {
+            live,
+            base_url,
+            label,
+        },
+        receipt,
+    })
+}
+
 #[derive(Debug, Clone)]
 struct PortableStateMount {
     id: String,
@@ -1987,6 +2124,9 @@ struct PortableRuntimeState<'a> {
     static_state: Option<StaticApplicationState>,
     filesystem_state: Option<&'a BTreeMap<String, PathBuf>>,
     bindings: Option<&'a BTreeMap<String, String>>,
+    /// The Run this start belongs to, when the caller keeps one (a local
+    /// Instance). The receipt names it from the start.
+    run_id: Option<&'a str>,
 }
 
 fn start_and_verify_portable_application(
@@ -2003,6 +2143,22 @@ fn start_and_verify_portable_application(
         &validated.application,
         runtime_state.bindings.unwrap_or(&empty_bindings),
     )?;
+    if matches!(
+        validated.realization,
+        PortableRealizationKind::LocalProcess | PortableRealizationKind::StaticWeb
+    ) {
+        return start_portable_attempt(
+            bundle_bytes,
+            &bundle,
+            &validated,
+            runtime_root,
+            shutdown,
+            runtime_state,
+            &binding_environment,
+        );
+    }
+    // OCI and OCI service groups stay on this path until they move onto the
+    // common attempt (roadmap stage 2e).
     fs::create_dir_all(runtime_root)?;
     let workspace = runtime_root.join("workspace");
     let (hydrated, dependency_fetches) = portable_dependency::hydrate_external_objects(&bundle)?;
@@ -2124,15 +2280,12 @@ fn start_and_verify_portable_application(
 }
 
 enum PortableLocalRuntime {
-    Static {
-        _server: StaticApplicationServer,
+    /// A LocalProcess or StaticWeb candidate the common attempt verified and
+    /// handed off. Dropping it stops it and removes its runtime scratch.
+    Live {
+        live: ato_runtime_attempt::realize::LiveCandidate,
         base_url: String,
-    },
-    Process {
-        handle: ProcessHandle,
-        base_url: String,
-        executable: String,
-        version: String,
+        label: &'static str,
     },
     Oci {
         handle: OciHandle,
@@ -2165,110 +2318,14 @@ impl PortableLocalRuntime {
                 &state_mounts,
                 binding_environment,
             ),
-            PortableRealizationKind::StaticWeb => {
-                let server =
-                    StaticApplicationServer::start_with_state(workspace, route, static_state)?;
-                Ok(Self::Static {
-                    base_url: server.base_url(),
-                    _server: server,
-                })
-            }
-            PortableRealizationKind::LocalProcess => {
-                let step = &route.derivation.steps[0];
-                let guest_port = route.derivation.ports[0]
-                    .guest_port
-                    .context("process derivation omitted guest_port")?;
-                let listener = TcpListener::bind("127.0.0.1:0")?;
-                let host_port = listener.local_addr()?.port();
-                drop(listener);
-                let guest_port = guest_port.to_string();
-                let host_port = host_port.to_string();
-                let mut command = step.argv.clone();
-                let (executable, version) = if let Some(python_version) =
-                    route.derivation.runtimes.get(PYTHON_RUNTIME)
-                {
-                    if !matches!(command[0].as_str(), "python" | "python3") {
-                        bail!(
-                            "Python process derivation must use a logical python executable in argv[0]"
-                        );
-                    }
-                    resolve_pinned_python(python_version)?
-                } else {
-                    (command[0].clone(), "unconstrained".to_owned())
-                };
-                command[0] = executable.clone();
-                let mut replaced = 0;
-                for argument in &mut command {
-                    if argument == &guest_port {
-                        *argument = host_port.clone();
-                        replaced += 1;
-                    }
-                }
-                if replaced > 1 {
-                    bail!(
-                        "process derivation names its declared guest port more than once in argv"
-                    );
-                }
-                let endpoint_name = endpoint_port_env_name(&route.derivation.ports[0].id);
-                let mut environment = step.env.clone();
-                environment.extend(binding_environment.clone());
-                environment.insert(endpoint_name, host_port.clone());
-                for state in &state_mounts {
-                    environment.insert(state_path_env_name(&state.id), state.guest_path.clone());
-                }
-                let process_runtime = runtime_root.join("process");
-                fs::create_dir_all(&process_runtime).with_context(|| {
-                    format!(
-                        "create portable process runtime {}",
-                        process_runtime.display()
-                    )
-                })?;
-                let process_tmp = process_runtime.join("tmp");
-                let process_home = process_runtime.join("home");
-                fs::create_dir_all(&process_tmp)?;
-                fs::create_dir_all(&process_home)?;
-                if state_mounts.is_empty() {
-                    environment.insert(
-                        "ATO_RUNTIME_DIR".to_owned(),
-                        process_runtime.display().to_string(),
-                    );
-                    for name in ["TMPDIR", "TMP", "TEMP"] {
-                        environment.insert(name.to_owned(), process_tmp.display().to_string());
-                    }
-                    environment.insert("HOME".to_owned(), process_home.display().to_string());
-                    environment.insert(
-                        "XDG_CACHE_HOME".to_owned(),
-                        process_home.join(".cache").display().to_string(),
-                    );
-                } else {
-                    for name in ["ATO_RUNTIME_DIR", "TMPDIR", "TMP", "TEMP", "HOME"] {
-                        environment.insert(name.to_owned(), "/tmp".to_owned());
-                    }
-                    environment.insert("XDG_CACHE_HOME".to_owned(), "/tmp/.cache".to_owned());
-                }
-                command = portable_process_sandbox_command(
-                    workspace,
-                    &process_runtime,
-                    &executable,
-                    &command,
-                    host_port.parse()?,
-                    &step.cwd,
-                    &state_mounts,
-                )?;
-                let adapter = ProcessAdapter::new(ProcessSpec {
-                    id: step.id.clone(),
-                    command,
-                    cwd: PathBuf::from(&step.cwd),
-                    environment,
-                    isolated_group: true,
-                })?;
-                let handle = adapter.spawn(workspace)?;
-                Ok(Self::Process {
-                    handle,
-                    base_url: format!("http://127.0.0.1:{host_port}"),
-                    executable,
-                    version,
-                })
+            PortableRealizationKind::StaticWeb | PortableRealizationKind::LocalProcess => {
+                // These run through the common attempt
+                // (`start_portable_attempt`), never through here.
+                let _ = (static_state, binding_environment);
+                bail!(
+                    "{} routes run through the Runtime's common attempt",
+                    route.realization.label()
+                )
             }
             PortableRealizationKind::OciContainer => {
                 let step = &route.derivation.steps[0];
@@ -2335,10 +2392,51 @@ impl PortableLocalRuntime {
         }
     }
 
+    /// Stop the Run and record how that went — the Run owner's lifecycle
+    /// record, separate from the attempt, whose cleanup stays
+    /// `not_attempted (handed_off)`. Written beside the Run when it has a
+    /// directory of its own (a local Instance), reported otherwise.
+    fn stop_recorded(self, run_root: Option<&Path>) {
+        let requested_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or_default();
+        let stopped = match self {
+            Self::Live { live, .. } => live.stop(),
+            // Their handles stop the containers when dropped.
+            other => {
+                drop(other);
+                Ok(())
+            }
+        };
+        let record = serde_json::json!({
+            "schema": "ato.local-run-lifecycle/1",
+            "stop_requested_at": requested_at,
+            // For a Live Run a successful stop also removed the runtime
+            // scratch its realization owned; a failure says which part.
+            "stop": match &stopped { Ok(()) => "succeeded", Err(_) => "failed" },
+            "reason": stopped.as_ref().err().map(|error| format!("{error:#}")),
+        });
+        match run_root {
+            Some(root) => {
+                if let Err(error) = fs::write(
+                    root.join("lifecycle.json"),
+                    serde_json::to_vec_pretty(&record).unwrap_or_default(),
+                ) {
+                    eprintln!("[ato run] cannot record the Run's stop: {error}");
+                }
+            }
+            None => {
+                if let Err(error) = &stopped {
+                    eprintln!("[ato run] the Run did not stop cleanly: {error:#}");
+                }
+            }
+        }
+    }
+
     fn base_url(&self) -> &str {
         match self {
-            Self::Static { base_url, .. } => base_url,
-            Self::Process { base_url, .. } => base_url,
+            Self::Live { base_url, .. } => base_url,
             Self::Oci { base_url, .. } => base_url,
             Self::OciServiceGroup { base_url, .. } => base_url,
         }
@@ -2346,15 +2444,19 @@ impl PortableLocalRuntime {
 
     fn local_storage(&self) -> Result<Option<BTreeMap<String, String>>> {
         match self {
-            Self::Static { _server, .. } => Ok(_server.local_storage()?),
-            Self::Process { .. } | Self::Oci { .. } | Self::OciServiceGroup { .. } => Ok(None),
+            Self::Live { live, .. } => {
+                match live.downcast_ref::<portable_attempt::PortableStaticCandidate>() {
+                    Some(candidate) => candidate.local_storage(),
+                    None => Ok(None),
+                }
+            }
+            Self::Oci { .. } | Self::OciServiceGroup { .. } => Ok(None),
         }
     }
 
     fn label(&self) -> &'static str {
         match self {
-            Self::Static { .. } => "static web",
-            Self::Process { .. } => "local process",
+            Self::Live { label, .. } => label,
             Self::Oci { .. } => "OCI container",
             Self::OciServiceGroup { .. } => "OCI service group",
         }
@@ -2362,34 +2464,13 @@ impl PortableLocalRuntime {
 
     fn execution_evidence(&self) -> VerificationExecutionEvidence {
         match self {
-            Self::Static { base_url, .. } => VerificationExecutionEvidence {
-                realization: "static_web".to_owned(),
+            // The common attempt wrote this Run's receipt, execution evidence
+            // included; the CLI never builds one for it.
+            Self::Live { base_url, .. } => VerificationExecutionEvidence {
+                realization: "live".to_owned(),
                 runtime_executable: None,
                 runtime_version: None,
                 pid: None,
-                container_id: None,
-                image: None,
-                platform: None,
-                endpoint: Some(base_url.clone()),
-                run_id: None,
-                lease_id: None,
-                attempt_id: None,
-                request_id: None,
-                dependency_fetches: Vec::new(),
-                portability_profile: None,
-                embedded_oci_image_loaded: None,
-                services: Vec::new(),
-            },
-            Self::Process {
-                handle,
-                base_url,
-                executable,
-                version,
-            } => VerificationExecutionEvidence {
-                realization: "process".to_owned(),
-                runtime_executable: Some(executable.clone()),
-                runtime_version: Some(version.clone()),
-                pid: Some(handle.pid()),
                 container_id: None,
                 image: None,
                 platform: None,
@@ -2463,8 +2544,10 @@ impl PortableLocalRuntime {
 
     fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>> {
         match self {
-            Self::Static { .. } => Ok(None),
-            Self::Process { handle, .. } => Ok(handle.try_wait()?),
+            Self::Live { live, .. } => match live.exited()? {
+                Some(exit) => bail!("{exit}"),
+                None => Ok(None),
+            },
             Self::Oci { handle, .. } => match handle.exit_code()? {
                 Some(code) => bail!("selected OCI derivation exited before verification: {code}"),
                 None => Ok(None),
