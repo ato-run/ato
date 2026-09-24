@@ -39,6 +39,10 @@ pub struct StartIdentity {
     pub effects: String,
     /// The network the build was allowed.
     pub network: String,
+    /// Who authorized the Derivation's effects: `unattended` or
+    /// `user_invoked`. Absent from records written before it was kept.
+    #[serde(default)]
+    pub authorization: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -287,6 +291,7 @@ mod tests {
             runtime_id: "local".to_owned(),
             effects: "pure".to_owned(),
             network: "denied".to_owned(),
+            authorization: "unattended".to_owned(),
         }
     }
 
