@@ -2,7 +2,7 @@
 //! effect, and the rule that record enforces.
 //!
 //! ```text
-//! admission ──▶ begin (durable: written, synced, renamed)  ──▶ execute ...
+//! reserve + history ──▶ admission ──▶ durable start ──▶ execute ...
 //!                  │                                              │
 //!                  └── refuses: an earlier attempt of this        ▼
 //!                      request never finished (UNKNOWN), or   finish
@@ -16,14 +16,16 @@
 //! — not a retry, not another Derivation, not a redelivery.
 //!
 //! Local and small on purpose: one directory per request, one file per
-//! attempt, an exclusive lock around the check-and-write. Hosted jobs keep
+//! attempt, an exclusive lock held through source/preflight and final outcome.
+//! The NotStarted reservation is also a tombstone: an early refusal cannot
+//! later be retried under the same attempt id. Hosted jobs keep
 //! their own durable attempt rows and fences; this is the Runtime's record.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -48,6 +50,7 @@ pub struct StartIdentity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttemptState {
+    NotStarted,
     Started,
     Finished,
 }
@@ -59,7 +62,8 @@ pub struct AttemptRecord {
     pub request_id: String,
     pub attempt_id: String,
     pub state: AttemptState,
-    pub identity: StartIdentity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<StartIdentity>,
     /// How it ended, once it did: `verified`, `failed`, `cleanup_failed`, …
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
@@ -69,12 +73,11 @@ pub const ATTEMPT_RECORD_SCHEMA: &str = "ato.formation.attempt-record/1";
 
 /// What the Runtime's durable record says about one attempt — the fact a
 /// coordinator decides UNKNOWN from, rather than from how the attempt ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum AttemptRecordState {
-    /// No start record: the attempt was refused before it began (admission,
-    /// an UNKNOWN sibling, a record that could not be written). Nothing of
-    /// the candidate ran.
+    /// A durable refusal/reservation inspected under the delivery lock.
+    /// Nothing ran and this id can never start on a later delivery.
     NotStarted,
     /// The start and the finish are both durable: the attempt ran and its
     /// result is the one reported.
@@ -82,23 +85,35 @@ pub enum AttemptRecordState {
     /// The start is durable and the finish is not: the attempt ran, and what
     /// it did is not known from this Runtime's record.
     StartedUnfinished,
+    /// History could not be read or a reservation/start could not be persisted.
+    HistoryUnavailable,
+    /// A sibling has unresolved history. The barrier must reach the Coordinator.
+    BlockedByUnknown { attempt_id: String },
 }
 
 impl AttemptRecordState {
     /// Whether anything of the candidate may have run.
-    pub fn execution_started(self) -> bool {
-        self != Self::NotStarted
+    pub fn execution_started(&self) -> bool {
+        self != &Self::NotStarted
     }
 }
 
 /// Where an attempt's start and finish are made durable. [`AttemptJournal`]
 /// is the Runtime's; a test substitutes one whose writes fail.
 pub trait AttemptLedger {
-    /// Durably record that the attempt is starting, or refuse.
-    fn start(
+    /// Reserve one delivery under the request lock, before even fetching source.
+    fn acquire(
         &self,
         request_id: &str,
         attempt_id: &str,
+    ) -> std::result::Result<Box<dyn AttemptPermit>, BeginRefusal>;
+}
+
+/// Held through preflight, admission, execution and finish. Dropping a permit
+/// before start leaves a durable NotStarted tombstone: that id never runs later.
+pub trait AttemptPermit {
+    fn start(
+        &mut self,
         identity: StartIdentity,
     ) -> std::result::Result<Box<dyn StartedRecord>, BeginRefusal>;
 }
@@ -118,14 +133,40 @@ pub enum BeginRefusal {
     AlreadyStarted { state: AttemptState },
     /// The record could not be made durable, so nothing may start.
     NotDurable { reason: String },
+    /// History/locking failed; absence of execution cannot be established.
+    HistoryUnavailable { reason: String },
 }
 
 impl BeginRefusal {
+    pub fn record_state(&self) -> AttemptRecordState {
+        match self {
+            Self::Unknown { attempt_id } => AttemptRecordState::BlockedByUnknown {
+                attempt_id: attempt_id.clone(),
+            },
+            Self::AlreadyStarted {
+                state: AttemptState::NotStarted,
+            } => AttemptRecordState::NotStarted,
+            Self::AlreadyStarted {
+                state: AttemptState::Started,
+            } => AttemptRecordState::StartedUnfinished,
+            Self::AlreadyStarted {
+                state: AttemptState::Finished,
+            } => AttemptRecordState::Finished,
+            Self::HistoryUnavailable { .. } | Self::NotDurable { .. } => {
+                AttemptRecordState::HistoryUnavailable
+            }
+        }
+    }
+
     pub fn code(&self) -> &'static str {
         match self {
             Self::Unknown { .. } => "request_effect_unknown",
+            Self::AlreadyStarted {
+                state: AttemptState::NotStarted,
+            } => "attempt_already_refused",
             Self::AlreadyStarted { .. } => "attempt_already_started",
             Self::NotDurable { .. } => "start_record_unavailable",
+            Self::HistoryUnavailable { .. } => "attempt_history_unavailable",
         }
     }
 
@@ -138,10 +179,14 @@ impl BeginRefusal {
             Self::AlreadyStarted { state } => format!(
                 "this attempt was already started ({}); it is never executed twice",
                 match state {
+                    AttemptState::NotStarted => "refused before start",
                     AttemptState::Started => "unfinished",
                     AttemptState::Finished => "finished",
                 }
             ),
+            Self::HistoryUnavailable { reason } => {
+                format!("attempt history cannot be established: {reason}")
+            }
             Self::NotDurable { reason } => {
                 format!("the attempt could not be recorded before it started: {reason}")
             }
@@ -180,38 +225,53 @@ impl AttemptJournal {
         attempt_id: &str,
         identity: StartIdentity,
     ) -> std::result::Result<StartedAttempt, BeginRefusal> {
-        let not_durable = |error: anyhow::Error| BeginRefusal::NotDurable {
+        let mut permit = self.reserve(request_id, attempt_id)?;
+        permit.start_record(identity)
+    }
+
+    fn reserve(
+        &self,
+        request_id: &str,
+        attempt_id: &str,
+    ) -> std::result::Result<ReservedAttempt, BeginRefusal> {
+        let unavailable = |error: anyhow::Error| BeginRefusal::HistoryUnavailable {
             reason: format!("{error:#}"),
         };
         let dir = self.request_dir(request_id);
         std::fs::create_dir_all(&dir)
-            .with_context(|| format!("cannot create {}", dir.display()))
-            .map_err(not_durable)?;
-        let _lock = lock(&dir.join(".lock")).map_err(not_durable)?;
-
-        let path = dir.join(format!("{}.json", name_for(attempt_id)));
-        for existing in read_records(&dir).map_err(not_durable)? {
-            if existing.attempt_id == attempt_id {
-                return Err(BeginRefusal::AlreadyStarted {
-                    state: existing.state,
-                });
-            }
-            if existing.state == AttemptState::Started {
-                return Err(BeginRefusal::Unknown {
-                    attempt_id: existing.attempt_id,
-                });
-            }
+            .map_err(anyhow::Error::from)
+            .map_err(unavailable)?;
+        let lock = lock(&dir.join(".lock")).map_err(unavailable)?;
+        let records = read_records(&dir).map_err(unavailable)?;
+        // Exact history takes precedence over any sibling, independent of directory order.
+        if let Some(existing) = records.iter().find(|r| r.attempt_id == attempt_id) {
+            return Err(BeginRefusal::AlreadyStarted {
+                state: existing.state,
+            });
         }
+        if let Some(existing) = records.iter().find(|r| r.state == AttemptState::Started) {
+            return Err(BeginRefusal::Unknown {
+                attempt_id: existing.attempt_id.clone(),
+            });
+        }
+        let path = dir.join(format!("{}.json", name_for(attempt_id)));
         let record = AttemptRecord {
             schema: ATTEMPT_RECORD_SCHEMA.to_owned(),
             request_id: request_id.to_owned(),
             attempt_id: attempt_id.to_owned(),
-            state: AttemptState::Started,
-            identity,
+            state: AttemptState::NotStarted,
+            identity: None,
             outcome: None,
         };
-        write_durably(&path, &record).map_err(not_durable)?;
-        Ok(StartedAttempt { path, record })
+        write_durably(&path, &record).map_err(|e| BeginRefusal::NotDurable {
+            reason: format!("{e:#}"),
+        })?;
+        Ok(ReservedAttempt {
+            _lock: lock,
+            path,
+            record,
+            start_attempted: false,
+        })
     }
 
     /// Every record of a request, as written.
@@ -225,14 +285,51 @@ impl AttemptJournal {
 }
 
 impl AttemptLedger for AttemptJournal {
-    fn start(
+    fn acquire(
         &self,
         request_id: &str,
         attempt_id: &str,
+    ) -> std::result::Result<Box<dyn AttemptPermit>, BeginRefusal> {
+        Ok(Box::new(self.reserve(request_id, attempt_id)?))
+    }
+}
+
+struct ReservedAttempt {
+    _lock: File,
+    path: PathBuf,
+    record: AttemptRecord,
+    start_attempted: bool,
+}
+
+impl ReservedAttempt {
+    fn start_record(
+        &mut self,
+        identity: StartIdentity,
+    ) -> std::result::Result<StartedAttempt, BeginRefusal> {
+        if self.start_attempted {
+            return Err(BeginRefusal::AlreadyStarted {
+                state: AttemptState::Started,
+            });
+        }
+        self.start_attempted = true;
+        self.record.state = AttemptState::Started;
+        self.record.identity = Some(identity);
+        write_durably(&self.path, &self.record).map_err(|e| BeginRefusal::NotDurable {
+            reason: format!("{e:#}"),
+        })?;
+        Ok(StartedAttempt {
+            path: self.path.clone(),
+            record: self.record.clone(),
+        })
+    }
+}
+
+impl AttemptPermit for ReservedAttempt {
+    fn start(
+        &mut self,
         identity: StartIdentity,
     ) -> std::result::Result<Box<dyn StartedRecord>, BeginRefusal> {
-        let started = self.begin(request_id, attempt_id, identity)?;
-        Ok(Box::new(started))
+        Ok(Box::new(self.start_record(identity)?))
     }
 }
 
@@ -286,6 +383,26 @@ fn read_records(dir: &Path) -> Result<Vec<AttemptRecord>> {
         // treat it as "nothing started".
         let record: AttemptRecord = serde_json::from_slice(&bytes)
             .with_context(|| format!("{} is not an attempt record", path.display()))?;
+        ensure!(
+            record.schema == ATTEMPT_RECORD_SCHEMA,
+            "unsupported journal schema"
+        );
+        ensure!(
+            path == dir.join(format!("{}.json", name_for(&record.attempt_id))),
+            "journal attempt identity mismatch"
+        );
+        ensure!(
+            dir.file_name().and_then(|n| n.to_str()) == Some(name_for(&record.request_id).as_str()),
+            "journal request identity mismatch"
+        );
+        ensure!(
+            record.identity.is_some() == (record.state != AttemptState::NotStarted),
+            "invalid journal identity"
+        );
+        ensure!(
+            record.outcome.is_some() == (record.state == AttemptState::Finished),
+            "invalid journal finish"
+        );
         records.push(record);
     }
     Ok(records)
@@ -411,7 +528,7 @@ mod tests {
         let journal = AttemptJournal::new(&blocked);
         assert!(matches!(
             journal.begin("req", "a1", identity()).unwrap_err(),
-            BeginRefusal::NotDurable { .. }
+            BeginRefusal::HistoryUnavailable { .. }
         ));
     }
 
@@ -428,7 +545,27 @@ mod tests {
         std::fs::write(request.join("garbage.json"), "{").unwrap();
         assert!(matches!(
             journal.begin("req", "a2", identity()).unwrap_err(),
-            BeginRefusal::NotDurable { .. }
+            BeginRefusal::HistoryUnavailable { .. }
         ));
+    }
+    #[test]
+    fn a_new_start_write_failure_is_distinct_from_unreadable_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = AttemptJournal::new(dir.path());
+        let mut permit = journal.reserve("req", "a1").unwrap();
+        let path = &permit.path;
+        let temporary = path.parent().unwrap().join(format!(
+            ".{}.tmp",
+            path.file_name().unwrap().to_str().unwrap()
+        ));
+        std::fs::create_dir(&temporary).unwrap();
+        let error = permit.start_record(identity()).unwrap_err();
+        assert!(matches!(error, BeginRefusal::NotDurable { .. }));
+        assert_eq!(error.record_state(), AttemptRecordState::HistoryUnavailable);
+        drop(permit);
+        assert_eq!(
+            journal.records("req").unwrap()[0].state,
+            AttemptState::NotStarted
+        );
     }
 }

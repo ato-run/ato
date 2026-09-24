@@ -35,11 +35,11 @@ use ato_formation::source::SourceLimits;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
-use crate::attempt::{AttemptRequest, Continuation, ReceiptContext, run_attempt};
+use crate::attempt::{AttemptRequest, Continuation, ReceiptContext, run_reserved_attempt};
 use crate::browser_verify::{BrowserVerification, BrowserVerifierCommand};
 use crate::executor::LocalAttemptExecutor;
 use crate::job::{PlannedCandidate, digest, plan_candidate};
-use crate::journal::{AttemptJournal, AttemptRecordState};
+use crate::journal::{AttemptJournal, AttemptLedger, AttemptPermit, AttemptRecordState};
 use crate::local::{self, freeze_archive, host_triple, snapshot_directory};
 use crate::sandbox::{BuildLimits, NetworkPolicy, TOOLCHAIN_ROOT, containment_available};
 use ato_runtime_attempt::admission::EffectAuthorization;
@@ -518,6 +518,38 @@ pub fn prepare_submission(
     })
 }
 
+/// Owner-session resolution wire; it does not stop a Runtime by itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum UnknownResolution {
+    Resolve {
+        resolution: EffectResolution,
+        note: String,
+        execution_stop: ExecutionStop,
+    },
+    TerminateSearch {
+        note: String,
+    },
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectResolution {
+    NoEffectConfirmed,
+    EffectReconciled,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionStop {
+    pub kind: ExecutionStopKind,
+    pub evidence: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionStopKind {
+    RuntimeTerminated,
+    ExecutionDisabled,
+}
+
 /// Where a satisfy request stands, read from the coordinator's status.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Settlement {
@@ -851,10 +883,8 @@ pub fn serve(config: &ServeConfig) -> Result<()> {
                 "[runtime-network] attempt {} — {} on {}",
                 ticket.attempt_id, ticket.derivation_ref, ticket.environment_id
             );
-            let report = match client.source(&ticket.attempt_id) {
-                Ok(archive) => execute_ticket(config, &ticket, archive),
-                Err(error) => unavailable(&ticket, "source_unavailable", &format!("{error:#}")),
-            };
+            let report =
+                execute_ticket_with_source(config, &ticket, || client.source(&ticket.attempt_id));
             eprintln!(
                 "[runtime-network] attempt {} → {}",
                 ticket.attempt_id, report.outcome
@@ -924,20 +954,8 @@ fn refused(
         }),
         formation_attempt: None,
         verifier_receipts: Vec::new(),
-        attestation: RuntimeAttestation {
-            execution_started: false,
-            attempt_record: AttemptRecordState::NotStarted,
-            ..attestation
-        },
+        attestation,
     }
-}
-
-fn unavailable(ticket: &AttemptTicket, code: &str, message: &str) -> AttemptResultReport {
-    let mut report = refused(ticket, attestation(), code, message);
-    if let Some(failure) = report.failure.as_mut() {
-        failure.stage = "runtime".to_owned();
-    }
-    report
 }
 
 /// Run one ticket through the common attempt entry — the ticket's frozen
@@ -956,7 +974,38 @@ pub fn execute_ticket(
     ticket: &AttemptTicket,
     archive: Vec<u8>,
 ) -> AttemptResultReport {
+    execute_ticket_with_source(config, ticket, || Ok(archive))
+}
+
+/// Source acquisition is inside the durable delivery reservation too. An old
+/// ticket's historical state always takes precedence over early preflight errors.
+pub fn execute_ticket_with_source(
+    config: &ServeConfig,
+    ticket: &AttemptTicket,
+    source: impl FnOnce() -> Result<Vec<u8>>,
+) -> AttemptResultReport {
     let mut attested = attestation();
+    let permit = match AttemptJournal::new(config.out_dir.join("attempt-records"))
+        .acquire(&ticket.satisfy_id, &ticket.attempt_id)
+    {
+        Ok(permit) => permit,
+        Err(refusal) => {
+            attested.attempt_record = refusal.record_state();
+            attested.execution_started = attested.attempt_record.execution_started();
+            return refused(ticket, attested, refusal.code(), &refusal.message());
+        }
+    };
+    let archive = match source() {
+        Ok(archive) => archive,
+        Err(error) => {
+            return refused(
+                ticket,
+                attested,
+                "source_unavailable",
+                &format!("{error:#}"),
+            );
+        }
+    };
     if ticket.environment_id != NATIVE_ENVIRONMENT {
         return refused(
             ticket,
@@ -977,7 +1026,14 @@ pub fn execute_ticket(
         );
     }
     let attempt_root = config.work_root.join(&ticket.attempt_id);
-    let report = execute_planned_ticket(config, ticket, archive, &attempt_root, &mut attested);
+    let report = execute_planned_ticket(
+        config,
+        ticket,
+        archive,
+        &attempt_root,
+        &mut attested,
+        permit,
+    );
     let _ = std::fs::remove_dir_all(&attempt_root);
     report
 }
@@ -988,6 +1044,7 @@ fn execute_planned_ticket(
     archive: Vec<u8>,
     attempt_root: &Path,
     attested: &mut RuntimeAttestation,
+    permit: Box<dyn AttemptPermit>,
 ) -> AttemptResultReport {
     let planned = (|| -> Result<_> {
         std::fs::create_dir_all(attempt_root)?;
@@ -1062,7 +1119,7 @@ fn execute_planned_ticket(
             budget: Default::default(),
         });
     let spec = planned.attempt_spec();
-    let outcome = run_attempt(
+    let outcome = run_reserved_attempt(
         &AttemptRequest {
             // Every attempt of one satisfy request spends from it: a
             // redelivered ticket, or another route after an UNKNOWN one, is
@@ -1096,7 +1153,7 @@ fn execute_planned_ticket(
             shim: &config.shim,
             network,
         },
-        &AttemptJournal::new(config.out_dir.join("attempt-records")),
+        Ok(permit),
     );
     attested.execution_started = outcome.execution_started();
     attested.attempt_record = outcome.attempt_record;

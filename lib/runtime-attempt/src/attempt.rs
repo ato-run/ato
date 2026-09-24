@@ -39,7 +39,7 @@ use crate::browser_verify::{BrowserVerification, verify_in_browser};
 use crate::build_sandbox::NetworkPolicy;
 use crate::executor::ExecutedCandidate;
 use crate::journal::{
-    AttemptLedger, AttemptRecordState, AttemptState, BeginRefusal, StartIdentity,
+    AttemptLedger, AttemptPermit, AttemptRecordState, BeginRefusal, StartIdentity,
 };
 use crate::realize::{CandidateRealizer, LiveCandidate, RealizeFailure, RunningCandidate};
 use crate::spec::AttemptSpec;
@@ -144,8 +144,8 @@ pub struct AttemptOutcome {
 }
 
 impl AttemptOutcome {
-    /// Whether anything of the candidate may have run: true from the moment
-    /// the start record was written.
+    /// Conservative compatibility bit: historical execution or a search
+    /// barrier cannot be ruled out. The typed record is the authority.
     pub fn execution_started(&self) -> bool {
         self.attempt_record.execution_started()
     }
@@ -157,6 +157,20 @@ pub fn run_attempt(
     request: &AttemptRequest<'_>,
     realizer: &dyn CandidateRealizer,
     journal: &dyn AttemptLedger,
+) -> AttemptOutcome {
+    run_reserved_attempt(
+        request,
+        realizer,
+        journal.acquire(request.request_id, request.attempt_id),
+    )
+}
+
+/// Consume the permit acquired before source/planning. It remains held until
+/// every refusal or execution result is final, so another delivery cannot race it.
+pub fn run_reserved_attempt(
+    request: &AttemptRequest<'_>,
+    realizer: &dyn CandidateRealizer,
+    permit: std::result::Result<Box<dyn AttemptPermit>, BeginRefusal>,
 ) -> AttemptOutcome {
     let spec = request.spec;
     let mut attempt = FormationAttempt {
@@ -183,8 +197,8 @@ pub fn run_attempt(
             .unwrap_or_default();
         attempt.outcomes = AttemptOutcomes::not_run(&reason);
         if record.execution_started() {
-            // It started once, before this delivery: whatever became of that
-            // candidate is not known here.
+            // Historical activity or the blocking sibling cannot be ruled
+            // out here; this delivery cannot claim cleanup.
             attempt.outcomes.cleanup = Outcome::not_attempted(&reason);
         }
         AttemptOutcome {
@@ -193,6 +207,18 @@ pub fn run_attempt(
             verified: None,
             live: None,
             error: None,
+        }
+    };
+
+    let mut permit = match permit {
+        Ok(permit) => permit,
+        Err(refusal) => {
+            attempt.failure = Some(AttemptFailure {
+                code: refusal.code().to_owned(),
+                stage: "record".to_owned(),
+                message: bounded(&refusal.message()),
+            });
+            return not_run(attempt, refusal.record_state());
         }
     };
 
@@ -207,33 +233,17 @@ pub fn run_attempt(
     //
     // Before the first thing that could have an effect: staging, a build
     // step, a dependency fetch, a launch. No record, no start.
-    let started = match journal.start(
-        request.request_id,
-        request.attempt_id,
-        StartIdentity {
-            contract_ref: request.contract_ref.to_owned(),
-            derivation_ref: spec.derivation_ref.to_owned(),
-            runtime_id: request.runtime_id.to_owned(),
-            effects: effects_name(spec.derivation.effects),
-            network: network_name(request.network).to_owned(),
-            authorization: request.authorization.name().to_owned(),
-        },
-    ) {
+    let started = match permit.start(StartIdentity {
+        contract_ref: request.contract_ref.to_owned(),
+        derivation_ref: spec.derivation_ref.to_owned(),
+        runtime_id: request.runtime_id.to_owned(),
+        effects: effects_name(spec.derivation.effects),
+        network: network_name(request.network).to_owned(),
+        authorization: request.authorization.name().to_owned(),
+    }) {
         Ok(started) => started,
         Err(refusal) => {
-            // A redelivered attempt did start — the first time — and its
-            // record says how far. Any other refusal started nothing.
-            let record = match &refusal {
-                BeginRefusal::AlreadyStarted {
-                    state: AttemptState::Finished,
-                } => AttemptRecordState::Finished,
-                BeginRefusal::AlreadyStarted {
-                    state: AttemptState::Started,
-                } => AttemptRecordState::StartedUnfinished,
-                BeginRefusal::Unknown { .. } | BeginRefusal::NotDurable { .. } => {
-                    AttemptRecordState::NotStarted
-                }
-            };
+            let record = refusal.record_state();
             attempt.failure = Some(AttemptFailure {
                 code: refusal.code().to_owned(),
                 stage: "admission".to_owned(),
@@ -1055,17 +1065,25 @@ mod tests {
         }
     }
 
-    impl AttemptLedger for FinishFails {
+    struct FinishFailsPermit(Box<dyn AttemptPermit>);
+    impl AttemptPermit for FinishFailsPermit {
         fn start(
+            &mut self,
+            identity: StartIdentity,
+        ) -> std::result::Result<Box<dyn crate::journal::StartedRecord>, BeginRefusal> {
+            drop(self.0.start(identity)?);
+            Ok(Box::new(UnfinishableRecord))
+        }
+    }
+    impl AttemptLedger for FinishFails {
+        fn acquire(
             &self,
             request_id: &str,
             attempt_id: &str,
-            identity: StartIdentity,
-        ) -> std::result::Result<Box<dyn crate::journal::StartedRecord>, BeginRefusal> {
-            // The start really is durable; only the finish is lost.
-            let started = self.0.begin(request_id, attempt_id, identity)?;
-            drop(started);
-            Ok(Box::new(UnfinishableRecord))
+        ) -> std::result::Result<Box<dyn AttemptPermit>, BeginRefusal> {
+            Ok(Box::new(FinishFailsPermit(
+                self.0.acquire(request_id, attempt_id)?,
+            )))
         }
     }
 
@@ -1130,7 +1148,10 @@ mod tests {
             outcome.attempt.failure.as_ref().unwrap().code,
             "authorization_mismatch"
         );
-        assert!(journal.records("satisfy-1").unwrap().is_empty());
+        assert_eq!(
+            journal.records("satisfy-1").unwrap()[0].state,
+            crate::journal::AttemptState::NotStarted
+        );
     }
 
     #[test]
@@ -1148,7 +1169,7 @@ mod tests {
         assert_eq!(outcome.attempt.status, AttemptStatus::Verified);
         assert_eq!(outcome.attempt_record, AttemptRecordState::Finished);
         let recorded = journal.records("satisfy-1").unwrap();
-        assert_eq!(recorded[0].state, AttemptState::Finished);
+        assert_eq!(recorded[0].state, crate::journal::AttemptState::Finished);
         assert_eq!(recorded[0].outcome.as_deref(), Some("verified"));
     }
 
@@ -1194,7 +1215,7 @@ mod tests {
         assert!(realizer.stopped.load(Ordering::SeqCst));
         // The durable record agrees: begun, never finished.
         let recorded = journal.0.records("satisfy-1").unwrap();
-        assert_eq!(recorded[0].state, AttemptState::Started);
+        assert_eq!(recorded[0].state, crate::journal::AttemptState::Started);
         // And the next attempt of the request is held by it.
         let next = served_attempt(
             200,
@@ -1228,5 +1249,35 @@ mod tests {
             Some("handed_off")
         );
         assert_eq!(attempt.status, AttemptStatus::Verified);
+    }
+    #[test]
+    fn old_start_precedes_new_admission_refusal() {
+        let records = tempfile::tempdir().unwrap();
+        let journal = FinishFails(AttemptJournal::new(records.path()));
+        let first = served_attempt(
+            200,
+            EffectAuthorization::Unattended,
+            Continuation::Stop,
+            &AnsweringRealizer::default(),
+            &journal,
+        );
+        assert_eq!(first.attempt_record, AttemptRecordState::StartedUnfinished);
+        let repeated = served_attempt(
+            200,
+            EffectAuthorization::UserInvoked {
+                derivation_ref: "sha256:wrong",
+            },
+            Continuation::Stop,
+            &AnsweringRealizer::default(),
+            &journal,
+        );
+        assert_eq!(
+            repeated.attempt_record,
+            AttemptRecordState::StartedUnfinished
+        );
+        assert_eq!(
+            repeated.attempt.failure.unwrap().code,
+            "attempt_already_started"
+        );
     }
 }
