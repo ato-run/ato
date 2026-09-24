@@ -648,7 +648,8 @@ fn browser_verifier_command(
 /// Submit a SatisfyRequest and wait for the coordinator to settle it.
 fn form_on_runtime_network(args: FormArgs) -> Result<()> {
     use ato_formation_worker::runtime_network::{
-        Client, RuntimeConstraintWire, SatisfyBudget, SatisfyPolicy, prepare_submission,
+        Client, RuntimeConstraintWire, SatisfyBudget, SatisfyPolicy, Settlement, new_search_id,
+        prepare_submission,
     };
     let api = args.api.context("--runtime-network needs --api")?;
     let token = read_token(
@@ -667,6 +668,12 @@ fn form_on_runtime_network(args: FormArgs) -> Result<()> {
             .unwrap_or_else(std::env::temp_dir)
             .join("ato/runtime-network/submit")
     });
+    // One invocation is one search. Every request of it would carry this id;
+    // today an invocation makes one request.
+    let mut entropy = [0_u8; 16];
+    getrandom::fill(&mut entropy)
+        .map_err(|error| anyhow::anyhow!("cannot draw a search id: {error}"))?;
+    let search_id = new_search_id(entropy);
     let submission = prepare_submission(
         &args.path,
         &args.routes,
@@ -687,6 +694,7 @@ fn form_on_runtime_network(args: FormArgs) -> Result<()> {
             max_attempts: args.max_attempts as u32,
             mode: args.mode.clone(),
         },
+        &search_id,
     )?;
     let client = Client::new(&api, &token)?;
     let accepted = client.satisfy(&submission.request)?;
@@ -695,17 +703,19 @@ fn form_on_runtime_network(args: FormArgs) -> Result<()> {
         .context("the coordinator returned no satisfy_id")?
         .to_owned();
     eprintln!(
-        "satisfy {id}: {} candidate(s) admissible",
+        "satisfy {id} (search {search_id}): {} candidate(s) admissible",
         accepted["admissible"]
     );
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60 * 30);
     loop {
         let status = client.satisfy_status(&id)?;
-        let state = status["status"].as_str().unwrap_or("");
-        if matches!(state, "satisfied" | "unsatisfied" | "exhausted") {
+        let settlement = Settlement::of(&status)?;
+        if settlement != Settlement::Running {
             println!("{}", serde_json::to_string_pretty(&status)?);
-            if state != "satisfied" {
-                bail!("the Runtime Network produced no verified route ({state})");
+            if settlement.terminal_reason().is_some() {
+                // UNKNOWN is its own reason: an attempt may have run, so it
+                // is never shown as a failure or as inconclusive.
+                bail!("the Runtime Network produced no verified route — {settlement}");
             }
             // A route counts only when its receipt is acceptable as the
             // result of the attempt that reported it, checked here against

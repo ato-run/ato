@@ -38,7 +38,9 @@ use crate::admission::{EffectAuthorization, admit, effects_name};
 use crate::browser_verify::{BrowserVerification, verify_in_browser};
 use crate::build_sandbox::NetworkPolicy;
 use crate::executor::ExecutedCandidate;
-use crate::journal::{AttemptJournal, BeginRefusal, StartIdentity};
+use crate::journal::{
+    AttemptLedger, AttemptPermit, AttemptRecordState, BeginRefusal, StartIdentity,
+};
 use crate::realize::{CandidateRealizer, LiveCandidate, RealizeFailure, RunningCandidate};
 use crate::spec::AttemptSpec;
 
@@ -124,9 +126,10 @@ pub enum Continuation {
 pub struct AttemptOutcome {
     /// The evidence, as the caller reports it.
     pub attempt: FormationAttempt,
-    /// Whether anything of the candidate may have run: true from the moment
-    /// the start record was written, never inferred afterwards.
-    pub execution_started: bool,
+    /// What this Runtime's durable record says about the attempt: not
+    /// started, finished, or started and never finished (UNKNOWN). Read from
+    /// the record, never inferred from how the attempt ended.
+    pub attempt_record: AttemptRecordState,
     /// What a Formation keeps, only when every observation of K was
     /// satisfied here and, under [`Continuation::Stop`], the candidate was
     /// stopped and cleaned up.
@@ -140,12 +143,34 @@ pub struct AttemptOutcome {
     pub error: Option<anyhow::Error>,
 }
 
+impl AttemptOutcome {
+    /// Conservative compatibility bit: historical execution or a search
+    /// barrier cannot be ruled out. The typed record is the authority.
+    pub fn execution_started(&self) -> bool {
+        self.attempt_record.execution_started()
+    }
+}
+
 /// Run one attempt through admission, the start record, realization,
 /// observation and verification.
 pub fn run_attempt(
     request: &AttemptRequest<'_>,
     realizer: &dyn CandidateRealizer,
-    journal: &AttemptJournal,
+    journal: &dyn AttemptLedger,
+) -> AttemptOutcome {
+    run_reserved_attempt(
+        request,
+        realizer,
+        journal.acquire(request.request_id, request.attempt_id),
+    )
+}
+
+/// Consume the permit acquired before source/planning. It remains held until
+/// every refusal or execution result is final, so another delivery cannot race it.
+pub fn run_reserved_attempt(
+    request: &AttemptRequest<'_>,
+    realizer: &dyn CandidateRealizer,
+    permit: std::result::Result<Box<dyn AttemptPermit>, BeginRefusal>,
 ) -> AttemptOutcome {
     let spec = request.spec;
     let mut attempt = FormationAttempt {
@@ -164,24 +189,36 @@ pub fn run_attempt(
         outcomes: AttemptOutcomes::not_run("not started"),
         failure: None,
     };
-    let not_run = |mut attempt: FormationAttempt, started: bool| {
+    let not_run = |mut attempt: FormationAttempt, record: AttemptRecordState| {
         let reason = attempt
             .failure
             .as_ref()
             .map(|failure| failure.code.clone())
             .unwrap_or_default();
         attempt.outcomes = AttemptOutcomes::not_run(&reason);
-        if started {
-            // It started once, before this delivery: whatever became of that
-            // candidate is not known here.
+        if record.execution_started() {
+            // Historical activity or the blocking sibling cannot be ruled
+            // out here; this delivery cannot claim cleanup.
             attempt.outcomes.cleanup = Outcome::not_attempted(&reason);
         }
         AttemptOutcome {
             attempt,
-            execution_started: started,
+            attempt_record: record,
             verified: None,
             live: None,
             error: None,
+        }
+    };
+
+    let mut permit = match permit {
+        Ok(permit) => permit,
+        Err(refusal) => {
+            attempt.failure = Some(AttemptFailure {
+                code: refusal.code().to_owned(),
+                stage: "record".to_owned(),
+                message: bounded(&refusal.message()),
+            });
+            return not_run(attempt, refusal.record_state());
         }
     };
 
@@ -189,35 +226,30 @@ pub fn run_attempt(
         .or_else(|| realizer.admit(request.profile))
     {
         attempt.failure = Some(failure);
-        return not_run(attempt, false);
+        return not_run(attempt, AttemptRecordState::NotStarted);
     }
 
     // ── start record ────────────────────────────────────────────────────────
     //
     // Before the first thing that could have an effect: staging, a build
     // step, a dependency fetch, a launch. No record, no start.
-    let started = match journal.begin(
-        request.request_id,
-        request.attempt_id,
-        StartIdentity {
-            contract_ref: request.contract_ref.to_owned(),
-            derivation_ref: spec.derivation_ref.to_owned(),
-            runtime_id: request.runtime_id.to_owned(),
-            effects: effects_name(spec.derivation.effects),
-            network: network_name(request.network).to_owned(),
-            authorization: request.authorization.name().to_owned(),
-        },
-    ) {
+    let started = match permit.start(StartIdentity {
+        contract_ref: request.contract_ref.to_owned(),
+        derivation_ref: spec.derivation_ref.to_owned(),
+        runtime_id: request.runtime_id.to_owned(),
+        effects: effects_name(spec.derivation.effects),
+        network: network_name(request.network).to_owned(),
+        authorization: request.authorization.name().to_owned(),
+    }) {
         Ok(started) => started,
         Err(refusal) => {
-            let already = matches!(refusal, BeginRefusal::AlreadyStarted { .. });
+            let record = refusal.record_state();
             attempt.failure = Some(AttemptFailure {
                 code: refusal.code().to_owned(),
                 stage: "admission".to_owned(),
                 message: bounded(&refusal.message()),
             });
-            // A redelivered attempt did start — the first time.
-            return not_run(attempt, already);
+            return not_run(attempt, record);
         }
     };
     attempt.status = AttemptStatus::Failed;
@@ -228,31 +260,37 @@ pub fn run_attempt(
         (_, Some(failure)) => failure.code.clone(),
         (_, None) => "failed".to_owned(),
     };
-    if let Err(error) = started.finish(&recorded) {
-        // The attempt ran, but its end is not durable: the next attempt of
-        // this request will read it as UNKNOWN, which is the safe reading.
-        eprintln!(
-            "[formation] cannot record the end of attempt {}: {error:#}",
-            request.attempt_id
-        );
-        outcome.verified = None;
-        if let Some(live) = outcome.live.take() {
-            // Not handed off: an attempt whose end is not durable keeps
-            // nothing running.
-            outcome.attempt.outcomes.cleanup = match live.stop() {
-                Ok(()) => Outcome::succeeded(),
-                Err(error) => Outcome::failed(&bounded(&format!("{error:#}"))),
-            };
-        }
-        outcome.attempt.status = AttemptStatus::Failed;
-        outcome.attempt.failure = Some(AttemptFailure {
-            code: "attempt_record_unfinished".to_owned(),
-            stage: "record".to_owned(),
-            message: "the attempt ran and its end could not be recorded".to_owned(),
-        });
-        outcome.error = Some(error.context("the attempt ran and its end could not be recorded"));
+    match started.finish(&recorded) {
+        Ok(()) => outcome.attempt_record = AttemptRecordState::Finished,
+        Err(error) => unfinished(request, &mut outcome, error),
     }
     outcome
+}
+
+/// The attempt ran, but its end is not durable: the next attempt of this
+/// request will read it as UNKNOWN, which is the safe reading, and so does
+/// whoever reads this outcome (`attempt_record` stays `StartedUnfinished`).
+fn unfinished(request: &AttemptRequest<'_>, outcome: &mut AttemptOutcome, error: anyhow::Error) {
+    eprintln!(
+        "[formation] cannot record the end of attempt {}: {error:#}",
+        request.attempt_id
+    );
+    outcome.verified = None;
+    if let Some(live) = outcome.live.take() {
+        // Not handed off: an attempt whose end is not durable keeps nothing
+        // running.
+        outcome.attempt.outcomes.cleanup = match live.stop() {
+            Ok(()) => Outcome::succeeded(),
+            Err(error) => Outcome::failed(&bounded(&format!("{error:#}"))),
+        };
+    }
+    outcome.attempt.status = AttemptStatus::Failed;
+    outcome.attempt.failure = Some(AttemptFailure {
+        code: "attempt_record_unfinished".to_owned(),
+        stage: "record".to_owned(),
+        message: "the attempt ran and its end could not be recorded".to_owned(),
+    });
+    outcome.error = Some(error.context("the attempt ran and its end could not be recorded"));
 }
 
 fn realize_and_verify(
@@ -263,7 +301,8 @@ fn realize_and_verify(
     let spec = request.spec;
     let failed = |attempt: FormationAttempt, error: anyhow::Error| AttemptOutcome {
         attempt,
-        execution_started: true,
+        // The start is durable; run_attempt records the finish.
+        attempt_record: AttemptRecordState::StartedUnfinished,
         verified: None,
         live: None,
         error: Some(error),
@@ -373,7 +412,8 @@ fn realize_and_verify(
             (None, _) => None,
         },
         attempt,
-        execution_started: true,
+        // The start is durable; run_attempt records the finish.
+        attempt_record: AttemptRecordState::StartedUnfinished,
         verified: if verified { realized.kept } else { None },
         live: live.map(LiveCandidate::new),
     }
@@ -397,7 +437,8 @@ fn not_observable(mut attempt: FormationAttempt, error: anyhow::Error) -> Attemp
     });
     AttemptOutcome {
         attempt,
-        execution_started: true,
+        // The start is durable; run_attempt records the finish.
+        attempt_record: AttemptRecordState::StartedUnfinished,
         verified: None,
         live: None,
         error: Some(error),
@@ -874,17 +915,320 @@ mod tests {
             )
         };
         let first = attempt("run-1");
-        assert!(first.execution_started);
+        assert!(first.execution_started());
+        assert_eq!(first.attempt_record, AttemptRecordState::Finished);
         assert_eq!(realizer.0.get(), 1);
 
         let again = attempt("run-1");
         assert_eq!(realizer.0.get(), 1, "the same attempt was realized twice");
-        assert!(again.execution_started, "it did start — the first time");
+        assert!(again.execution_started(), "it did start — the first time");
+        // Its record says the first run finished; this delivery ran nothing.
+        assert_eq!(again.attempt_record, AttemptRecordState::Finished);
         assert_eq!(
             again.attempt.failure.as_ref().unwrap().code,
             "attempt_already_started"
         );
         assert!(again.live.is_none());
+    }
+
+    // ── what the durable record says, as the attempt reports it ─────────────
+
+    /// K: `GET /` on `app.http` answers `status`.
+    fn served_route(status: u16) -> (BoundContract, ato_formation::authoring::BoundDerivation) {
+        let contract = BoundContract {
+            schema: "ato.contract/1".to_owned(),
+            requirements: vec![BoundRequirement {
+                id: "root".to_owned(),
+                verifier: HTTP_CONTRACT_VERIFIER.to_owned(),
+                port: Some("app.http".to_owned()),
+                method: Some("GET".to_owned()),
+                path: Some("/".to_owned()),
+                status: Some(status),
+                body_digest: None,
+                input: None,
+                digest: None,
+            }],
+        };
+        let derivation = serde_json::from_value(serde_json::json!({
+            "schema": "ato.derivation/1",
+            "inputs": [], "runtimes": {}, "steps": [],
+            "ports": [{ "id": "app.http", "protocol": "http", "from": "process" }],
+            "state": [],
+            "effects": "pure"
+        }))
+        .unwrap();
+        (contract, derivation)
+    }
+
+    /// A candidate that answers every request `200 ok` until it is stopped.
+    struct Answering {
+        endpoints: BTreeMap<String, String>,
+        stopped: std::sync::Arc<AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Drop for Answering {
+        fn drop(&mut self) {
+            self.stopped.store(true, Ordering::SeqCst);
+            if let Some(thread) = self.thread.take() {
+                thread.join().expect("test HTTP server stopped");
+            }
+        }
+    }
+
+    impl RunningCandidate for Answering {
+        fn endpoints(&self) -> &BTreeMap<String, String> {
+            &self.endpoints
+        }
+        fn exited(&mut self) -> Result<Option<String>> {
+            Ok(None)
+        }
+        fn stop(self: Box<Self>) -> Result<()> {
+            self.stopped.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    /// Realizes an [`Answering`] candidate, and says whether it was stopped.
+    #[derive(Default)]
+    struct AnsweringRealizer {
+        stopped: std::sync::Arc<AtomicBool>,
+    }
+
+    impl CandidateRealizer for AnsweringRealizer {
+        fn admit(&self, _profile: &RuntimeProfile) -> Option<AttemptFailure> {
+            None
+        }
+
+        fn realize(
+            &self,
+            _attempt_id: &str,
+            _attempt_root: &Path,
+        ) -> Result<crate::realize::Realized, RealizeFailure> {
+            let listener =
+                std::net::TcpListener::bind("127.0.0.1:0").map_err(anyhow::Error::from)?;
+            let port = listener.local_addr().map_err(anyhow::Error::from)?.port();
+            listener
+                .set_nonblocking(true)
+                .map_err(anyhow::Error::from)?;
+            let stopped = self.stopped.clone();
+            let thread = std::thread::spawn(move || {
+                use std::io::{Read as _, Write as _};
+                while !stopped.load(Ordering::SeqCst) {
+                    let mut stream = match listener.accept() {
+                        Ok((stream, _)) => stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(5));
+                            continue;
+                        }
+                        Err(_) => return,
+                    };
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(1)))
+                        .unwrap();
+                    let mut request = [0_u8; 1024];
+                    let _ = stream.read(&mut request);
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
+                    );
+                }
+            });
+            Ok(crate::realize::Realized {
+                candidate: Box::new(Answering {
+                    endpoints: BTreeMap::from([(
+                        "app.http".to_owned(),
+                        format!("http://127.0.0.1:{port}"),
+                    )]),
+                    stopped: self.stopped.clone(),
+                    thread: Some(thread),
+                }),
+                evidence: None,
+                execution: serde_json::from_value(serde_json::json!({ "realization": "test" }))
+                    .unwrap(),
+                kept: None,
+            })
+        }
+    }
+
+    /// A ledger that makes the start durable and cannot make the finish so —
+    /// the failure a full disk or a lost mount leaves behind.
+    struct FinishFails(AttemptJournal);
+
+    struct UnfinishableRecord;
+
+    impl crate::journal::StartedRecord for UnfinishableRecord {
+        fn finish(self: Box<Self>, _outcome: &str) -> Result<()> {
+            Err(anyhow::anyhow!("no space left on device"))
+        }
+    }
+
+    struct FinishFailsPermit(Box<dyn AttemptPermit>);
+    impl AttemptPermit for FinishFailsPermit {
+        fn start(
+            &mut self,
+            identity: StartIdentity,
+        ) -> std::result::Result<Box<dyn crate::journal::StartedRecord>, BeginRefusal> {
+            drop(self.0.start(identity)?);
+            Ok(Box::new(UnfinishableRecord))
+        }
+    }
+    impl AttemptLedger for FinishFails {
+        fn acquire(
+            &self,
+            request_id: &str,
+            attempt_id: &str,
+        ) -> std::result::Result<Box<dyn AttemptPermit>, BeginRefusal> {
+            Ok(Box::new(FinishFailsPermit(
+                self.0.acquire(request_id, attempt_id)?,
+            )))
+        }
+    }
+
+    fn served_attempt(
+        status: u16,
+        authorization: EffectAuthorization<'_>,
+        continuation: Continuation,
+        realizer: &dyn CandidateRealizer,
+        journal: &dyn AttemptLedger,
+    ) -> AttemptOutcome {
+        let (contract, derivation) = served_route(status);
+        let spec = AttemptSpec {
+            contract: &contract,
+            contract_ref: "sha256:k",
+            derivation: &derivation,
+            derivation_ref: "sha256:d",
+            shape: crate::spec::CandidateShape::Process,
+            input_refs: BTreeMap::new(),
+            instance_snapshot_ref: None,
+        };
+        let scratch = tempfile::tempdir().unwrap();
+        run_attempt(
+            &AttemptRequest {
+                request_id: "satisfy-1",
+                attempt_id: "attempt-1",
+                label: "authored",
+                spec: &spec,
+                contract_ref: "sha256:k",
+                runtime_id: "local",
+                profile: &RuntimeProfile::default(),
+                authorization,
+                network: NetworkPolicy::Denied,
+                browser: None,
+                attempt_root: scratch.path(),
+                continuation,
+                receipt: ReceiptContext::formation(),
+                interrupt: None,
+            },
+            realizer,
+            journal,
+        )
+    }
+
+    #[test]
+    fn a_refusal_at_admission_reports_that_the_attempt_never_started() {
+        let records = tempfile::tempdir().unwrap();
+        let realizer = AnsweringRealizer::default();
+        let journal = AttemptJournal::new(records.path());
+        let outcome = served_attempt(
+            200,
+            // A Run started for another Derivation does not authorize this one.
+            EffectAuthorization::UserInvoked {
+                derivation_ref: "sha256:another",
+            },
+            Continuation::Stop,
+            &realizer,
+            &journal,
+        );
+        assert_eq!(outcome.attempt_record, AttemptRecordState::NotStarted);
+        assert!(!outcome.execution_started());
+        assert_eq!(
+            outcome.attempt.failure.as_ref().unwrap().code,
+            "authorization_mismatch"
+        );
+        assert_eq!(
+            journal.records("satisfy-1").unwrap()[0].state,
+            crate::journal::AttemptState::NotStarted
+        );
+    }
+
+    #[test]
+    fn a_verified_attempt_reports_a_finished_record() {
+        let records = tempfile::tempdir().unwrap();
+        let realizer = AnsweringRealizer::default();
+        let journal = AttemptJournal::new(records.path());
+        let outcome = served_attempt(
+            200,
+            EffectAuthorization::Unattended,
+            Continuation::Stop,
+            &realizer,
+            &journal,
+        );
+        assert_eq!(outcome.attempt.status, AttemptStatus::Verified);
+        assert_eq!(outcome.attempt_record, AttemptRecordState::Finished);
+        let recorded = journal.records("satisfy-1").unwrap();
+        assert_eq!(recorded[0].state, crate::journal::AttemptState::Finished);
+        assert_eq!(recorded[0].outcome.as_deref(), Some("verified"));
+    }
+
+    #[test]
+    fn an_attempt_that_ran_and_failed_its_contract_reports_a_finished_record() {
+        let records = tempfile::tempdir().unwrap();
+        let realizer = AnsweringRealizer::default();
+        let journal = AttemptJournal::new(records.path());
+        // K wants 404; the candidate answers 200.
+        let outcome = served_attempt(
+            404,
+            EffectAuthorization::Unattended,
+            Continuation::Stop,
+            &realizer,
+            &journal,
+        );
+        assert_eq!(outcome.attempt.status, AttemptStatus::Failed);
+        assert_eq!(outcome.attempt_record, AttemptRecordState::Finished);
+        assert!(realizer.stopped.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn an_attempt_whose_finish_is_not_durable_reports_started_unfinished() {
+        let records = tempfile::tempdir().unwrap();
+        let realizer = AnsweringRealizer::default();
+        let journal = FinishFails(AttemptJournal::new(records.path()));
+        let outcome = served_attempt(
+            200,
+            EffectAuthorization::Unattended,
+            Continuation::HandOff,
+            &realizer,
+            &journal,
+        );
+        // It ran and satisfied K here, and that is still not a known result.
+        assert_eq!(
+            outcome.attempt_record,
+            AttemptRecordState::StartedUnfinished
+        );
+        assert!(outcome.execution_started());
+        assert_eq!(outcome.attempt.status, AttemptStatus::Failed);
+        assert!(outcome.verified.is_none());
+        assert!(outcome.live.is_none(), "nothing is handed off");
+        assert!(realizer.stopped.load(Ordering::SeqCst));
+        // The durable record agrees: begun, never finished.
+        let recorded = journal.0.records("satisfy-1").unwrap();
+        assert_eq!(recorded[0].state, crate::journal::AttemptState::Started);
+        // And the next attempt of the request is held by it.
+        let next = served_attempt(
+            200,
+            EffectAuthorization::Unattended,
+            Continuation::Stop,
+            &realizer,
+            &AttemptJournal::new(records.path()),
+        );
+        assert_eq!(
+            next.attempt.failure.as_ref().unwrap().code,
+            "attempt_already_started"
+        );
+        assert_eq!(next.attempt_record, AttemptRecordState::StartedUnfinished);
     }
 
     #[test]
@@ -905,5 +1249,35 @@ mod tests {
             Some("handed_off")
         );
         assert_eq!(attempt.status, AttemptStatus::Verified);
+    }
+    #[test]
+    fn old_start_precedes_new_admission_refusal() {
+        let records = tempfile::tempdir().unwrap();
+        let journal = FinishFails(AttemptJournal::new(records.path()));
+        let first = served_attempt(
+            200,
+            EffectAuthorization::Unattended,
+            Continuation::Stop,
+            &AnsweringRealizer::default(),
+            &journal,
+        );
+        assert_eq!(first.attempt_record, AttemptRecordState::StartedUnfinished);
+        let repeated = served_attempt(
+            200,
+            EffectAuthorization::UserInvoked {
+                derivation_ref: "sha256:wrong",
+            },
+            Continuation::Stop,
+            &AnsweringRealizer::default(),
+            &journal,
+        );
+        assert_eq!(
+            repeated.attempt_record,
+            AttemptRecordState::StartedUnfinished
+        );
+        assert_eq!(
+            repeated.attempt.failure.unwrap().code,
+            "attempt_already_started"
+        );
     }
 }

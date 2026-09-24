@@ -15,9 +15,11 @@ use ato_formation::browser::{
     EVENT_NAVIGATION, EVIDENCE_BROWSER_SNAPSHOT, JudgeDecision, PRIMARY_CRITERION_ID,
     VerifierContainment, VerifierIdentity, effective_contract_ref,
 };
+use ato_formation_worker::journal::AttemptRecordState;
 use ato_formation_worker::runtime_network::{
     AttemptResultReport, AttemptTicket, NATIVE_ENVIRONMENT, RuntimeConstraintWire, SatisfyBudget,
-    SatisfyPolicy, ServeConfig, Submission, execute_ticket, prepare_submission,
+    SatisfyPolicy, SatisfyRequest, ServeConfig, Settlement, Submission, UnknownAttempt,
+    execute_ticket, new_search_id, prepare_submission,
 };
 use base64::Engine as _;
 
@@ -79,6 +81,7 @@ fn submit(dir: &Path, scratch: &Path) -> Submission {
             max_attempts: 4,
             mode: "first_pass".to_owned(),
         },
+        "search_test",
     )
     .expect("the requester plans the route")
 }
@@ -144,6 +147,8 @@ fn a_disposable_route_runs_and_is_attested() {
     assert_eq!(report.outcome, "pass", "{report:?}");
     let attested = &report.attestation;
     assert!(attested.execution_started);
+    // Its start and its finish are both durable.
+    assert_eq!(attested.attempt_record, AttemptRecordState::Finished);
     assert_eq!(attested.environment_id, NATIVE_ENVIRONMENT);
     assert_eq!(attested.effects.as_deref(), Some("pure"));
     assert_eq!(
@@ -173,6 +178,10 @@ fn a_non_repeatable_route_is_refused_whatever_the_request_claimed() {
         Some("non-repeatable")
     );
     assert!(!report.attestation.execution_started);
+    assert_eq!(
+        report.attestation.attempt_record,
+        AttemptRecordState::NotStarted
+    );
     assert!(report.verifier_receipts.is_empty());
 }
 
@@ -216,6 +225,10 @@ fn a_ticket_for_another_environment_is_refused() {
     assert_eq!(report.outcome, "inconclusive");
     assert_eq!(failure_code(&report), "environment_mismatch");
     assert!(!report.attestation.execution_started);
+    assert_eq!(
+        report.attestation.attempt_record,
+        AttemptRecordState::NotStarted
+    );
     assert_eq!(report.attestation.environment_id, NATIVE_ENVIRONMENT);
 }
 
@@ -244,6 +257,11 @@ fn a_redelivered_ticket_is_never_executed_twice() {
     let again = run(&ticket, archive, scratch.path());
     assert_eq!(failure_code(&again), "attempt_already_started");
     assert!(again.attestation.execution_started);
+    // Its record says the first delivery finished.
+    assert_eq!(
+        again.attestation.attempt_record,
+        AttemptRecordState::Finished
+    );
     assert_eq!(again.outcome, "inconclusive");
     assert!(again.materialization_ref.is_none());
 }
@@ -277,8 +295,14 @@ fn an_unfinished_attempt_holds_every_later_attempt_of_its_request() {
     let report = run(&ticket, archive, scratch.path());
     assert_eq!(failure_code(&report), "request_effect_unknown");
     assert!(
-        !report.attestation.execution_started,
-        "this attempt did not start"
+        report.attestation.execution_started,
+        "compatibility bit is conservative for a search barrier"
+    );
+    assert_eq!(
+        report.attestation.attempt_record,
+        AttemptRecordState::BlockedByUnknown {
+            attempt_id: "att_earlier".into()
+        }
     );
     assert!(report.materialization_ref.is_none());
 }
@@ -623,4 +647,362 @@ fn a_browser_contract_route_needs_a_passing_browser_receipt_from_the_same_attemp
     );
     let refused = accepts(&submission, &ticket.satisfy_id, &base_only).unwrap_err();
     assert!(refused.contains("route_contract_mismatch"), "{refused}");
+}
+
+// ── the wire both sides read (ato-api keeps the same files) ───────────────
+
+const FIXTURES: [(&str, &str); 7] = [
+    (
+        "satisfy-request",
+        include_str!("fixtures/runtime-network-v0/satisfy-request.json"),
+    ),
+    (
+        "attempt-result-not-started",
+        include_str!("fixtures/runtime-network-v0/attempt-result-not-started.json"),
+    ),
+    (
+        "attempt-result-finished",
+        include_str!("fixtures/runtime-network-v0/attempt-result-finished.json"),
+    ),
+    (
+        "attempt-result-started-unfinished",
+        include_str!("fixtures/runtime-network-v0/attempt-result-started-unfinished.json"),
+    ),
+    (
+        "attempt-result-history-unavailable",
+        include_str!("fixtures/runtime-network-v0/attempt-result-history-unavailable.json"),
+    ),
+    (
+        "attempt-result-blocked-by-unknown",
+        include_str!("fixtures/runtime-network-v0/attempt-result-blocked-by-unknown.json"),
+    ),
+    (
+        "unknown-resolution",
+        include_str!("fixtures/runtime-network-v0/unknown-resolution.json"),
+    ),
+];
+
+/// The fixtures are byte-identical to `ato-api`'s
+/// `src/tests/fixtures/runtime-network-v0/`: both repos check the same
+/// recorded digests, so a change on one side fails until the other follows.
+#[test]
+fn the_wire_fixtures_are_the_recorded_bytes() {
+    use sha2::{Digest as _, Sha256};
+    let recorded: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/runtime-network-v0/expected-digests.json"
+    ))
+    .expect("recorded digests");
+    for (name, text) in FIXTURES {
+        assert_eq!(
+            recorded[name].as_str(),
+            Some(format!("sha256:{:x}", Sha256::digest(text.as_bytes())).as_str()),
+            "{name} is not the recorded fixture"
+        );
+    }
+}
+
+#[test]
+fn the_wire_fixtures_round_trip_through_the_runtime_types() {
+    for (name, text) in FIXTURES {
+        let value: serde_json::Value = serde_json::from_str(text).expect(name);
+        let reserialized = if name == "satisfy-request" {
+            let request: SatisfyRequest = serde_json::from_value(value.clone()).expect(name);
+            assert!(request.search_id.starts_with("search_"));
+            serde_json::to_value(&request)
+        } else if name == "unknown-resolution" {
+            let resolution: ato_formation_worker::runtime_network::UnknownResolution =
+                serde_json::from_value(value.clone()).expect(name);
+            serde_json::to_value(resolution)
+        } else {
+            let report: AttemptResultReport = serde_json::from_value(value.clone()).expect(name);
+            let expected = match name {
+                "attempt-result-not-started" => AttemptRecordState::NotStarted,
+                "attempt-result-finished" => AttemptRecordState::Finished,
+                "attempt-result-history-unavailable" => AttemptRecordState::HistoryUnavailable,
+                "attempt-result-blocked-by-unknown" => AttemptRecordState::BlockedByUnknown {
+                    attempt_id: "att_historical".into(),
+                },
+                _ => AttemptRecordState::StartedUnfinished,
+            };
+            assert_eq!(report.attestation.attempt_record, expected, "{name}");
+            serde_json::to_value(&report)
+        }
+        .expect(name);
+        assert_eq!(reserialized, value, "{name} does not round-trip");
+    }
+    // The record state is a closed set of names, spelled as the fixtures do.
+    for (state, name) in [
+        (AttemptRecordState::NotStarted, "not_started"),
+        (AttemptRecordState::Finished, "finished"),
+        (AttemptRecordState::StartedUnfinished, "started_unfinished"),
+    ] {
+        assert_eq!(serde_json::to_value(state).unwrap(), name);
+    }
+    // A report without it is not a report this Runtime reads or writes.
+    let mut missing: serde_json::Value = serde_json::from_str(FIXTURES[2].1).unwrap();
+    missing["attestation"]
+        .as_object_mut()
+        .unwrap()
+        .remove("attempt_record");
+    assert!(serde_json::from_value::<AttemptResultReport>(missing).is_err());
+}
+
+#[test]
+fn a_search_id_is_opaque_and_new_each_time() {
+    let one = new_search_id([0x0f; 16]);
+    assert_eq!(one, format!("search_{}", "0f".repeat(16)));
+    assert_ne!(new_search_id([1; 16]), new_search_id([2; 16]));
+    let dir = site("");
+    let scratch = tempfile::tempdir().expect("scratch");
+    assert_eq!(
+        submit(dir.path(), scratch.path()).request.search_id,
+        "search_test"
+    );
+}
+
+#[test]
+fn an_unknown_request_is_its_own_terminal_reason_never_a_failure() {
+    let status = serde_json::json!({
+        "satisfy_id": "sat_1",
+        "search_id": "search_1",
+        "status": "unknown",
+        "unknown_attempts": [
+            {
+                "attempt_id": "att_resolved", "runtime_id": "rnr_a",
+                "unknown_reason": "result_not_received",
+                "resolution": { "kind": "no_effect_confirmed" }
+            },
+            {
+                "attempt_id": "att_open", "runtime_id": "rnr_b",
+                "unknown_reason": "attempt_record_unfinished",
+                "resolution": null
+            }
+        ]
+    });
+    let settlement = Settlement::of(&status).expect("a known status");
+    assert_eq!(
+        settlement,
+        Settlement::EffectUnknown(vec![UnknownAttempt {
+            attempt_id: "att_open".to_owned(),
+            runtime_id: "rnr_b".to_owned(),
+            reason: "attempt_record_unfinished".to_owned(),
+        }])
+    );
+    assert_eq!(settlement.terminal_reason(), Some("effect_unknown"));
+    let shown = settlement.to_string();
+    assert!(shown.starts_with("effect_unknown: attempt att_open on Runtime rnr_b"));
+    assert!(!shown.contains("unsatisfied") && !shown.contains("inconclusive"));
+
+    for (status, reason) in [
+        ("unsatisfied", Some("unsatisfied")),
+        ("exhausted", Some("budget_exhausted")),
+        ("stopped", Some("search_stopped")),
+        ("satisfied", None),
+        ("running", None),
+    ] {
+        let settlement = Settlement::of(&serde_json::json!({ "status": status })).unwrap();
+        assert_eq!(settlement.terminal_reason(), reason, "{status}");
+    }
+    // A status this requester does not know is not read as one it does.
+    assert!(Settlement::of(&serde_json::json!({ "status": "paused" })).is_err());
+}
+
+fn leave_started(ticket: &AttemptTicket, scratch: &Path) {
+    use ato_formation_worker::journal::{AttemptJournal, StartIdentity};
+    let journal = AttemptJournal::new(scratch.join("out/attempt-records"));
+    drop(
+        journal
+            .begin(
+                &ticket.satisfy_id,
+                &ticket.attempt_id,
+                StartIdentity {
+                    contract_ref: ticket.contract_ref.clone(),
+                    derivation_ref: ticket.derivation_ref.clone(),
+                    runtime_id: ticket.runtime_id.clone(),
+                    effects: "pure".into(),
+                    network: "denied".into(),
+                    authorization: "unattended".into(),
+                },
+            )
+            .unwrap(),
+    );
+}
+
+#[test]
+fn historical_start_precedes_source_planning_and_environment_refusals() {
+    use ato_formation_worker::runtime_network::execute_ticket_with_source;
+    let dir = site("");
+    let scratch = tempfile::tempdir().unwrap();
+    let (mut ticket, archive) = ticket(&submit(dir.path(), scratch.path()));
+    leave_started(&ticket, scratch.path());
+    ticket.environment_id = "capability-removed".into();
+    ticket.capsule_toml = "not valid TOML".into();
+    let report = execute_ticket_with_source(&serve_config(scratch.path()), &ticket, || {
+        anyhow::bail!("source fetch failed")
+    });
+    assert_eq!(
+        report.attestation.attempt_record,
+        AttemptRecordState::StartedUnfinished
+    );
+    let report = run(&ticket, archive, scratch.path());
+    assert_eq!(
+        report.attestation.attempt_record,
+        AttemptRecordState::StartedUnfinished
+    );
+    assert_eq!(failure_code(&report), "attempt_already_started");
+}
+
+#[test]
+fn unreadable_history_is_unknown_even_when_source_would_fail() {
+    use ato_formation_worker::runtime_network::execute_ticket_with_source;
+    let dir = site("");
+    let scratch = tempfile::tempdir().unwrap();
+    let (ticket, _) = ticket(&submit(dir.path(), scratch.path()));
+    leave_started(&ticket, scratch.path());
+    let root = scratch.path().join("out/attempt-records");
+    let request_dir = std::fs::read_dir(root)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    std::fs::write(request_dir.join("corrupt.json"), "{").unwrap();
+    let report = execute_ticket_with_source(&serve_config(scratch.path()), &ticket, || {
+        anyhow::bail!("offline")
+    });
+    assert_eq!(
+        report.attestation.attempt_record,
+        AttemptRecordState::HistoryUnavailable
+    );
+    assert_eq!(failure_code(&report), "attempt_history_unavailable");
+}
+
+#[test]
+fn a_finished_delivery_is_not_downgraded_by_a_new_source_error() {
+    use ato_formation_worker::runtime_network::execute_ticket_with_source;
+    let dir = site("");
+    let scratch = tempfile::tempdir().unwrap();
+    let (ticket, archive) = ticket(&submit(dir.path(), scratch.path()));
+    assert_eq!(run(&ticket, archive, scratch.path()).outcome, "pass");
+    let report = execute_ticket_with_source(&serve_config(scratch.path()), &ticket, || {
+        anyhow::bail!("offline")
+    });
+    assert_eq!(
+        report.attestation.attempt_record,
+        AttemptRecordState::Finished
+    );
+}
+
+// Test-binary-only fault injection: the real worker entry owns its reservation,
+// fetched the bytes, and is paused before planning/execution. No production flag.
+#[test]
+fn paused_worker_child() {
+    let Some(root) = std::env::var_os("ATO_3B_TEST_PAUSED_CHILD") else {
+        return;
+    };
+    let root = PathBuf::from(root);
+    let ticket: AttemptTicket =
+        serde_json::from_slice(&std::fs::read(root.join("ticket.json")).unwrap()).unwrap();
+    let archive = std::fs::read(root.join("archive.tar")).unwrap();
+    ato_formation_worker::runtime_network::execute_ticket_with_source(
+        &serve_config(&root),
+        &ticket,
+        || {
+            std::fs::write(root.join("source-fetched"), archive.len().to_string()).unwrap();
+            loop {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        },
+    );
+}
+
+#[test]
+fn terminating_a_worker_after_source_fetch_fences_its_old_attempt_forever() {
+    let dir = site("");
+    let scratch = tempfile::tempdir().unwrap();
+    let (ticket, archive) = ticket(&submit(dir.path(), scratch.path()));
+    std::fs::write(
+        scratch.path().join("ticket.json"),
+        serde_json::to_vec(&ticket).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(scratch.path().join("archive.tar"), &archive).unwrap();
+    struct Child(std::process::Child);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut child = Child(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "paused_worker_child", "--nocapture"])
+            .env("ATO_3B_TEST_PAUSED_CHILD", scratch.path())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !scratch.path().join("source-fetched").exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "worker never reached pause"
+        );
+        assert!(child.0.try_wait().unwrap().is_none(), "worker exited early");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !scratch.path().join("work").exists(),
+        "execution has not started"
+    );
+    child.0.kill().unwrap();
+    child.0.wait().unwrap(); // physical termination, not timeout or a fence number
+    let report = run(&ticket, archive, scratch.path());
+    assert_eq!(
+        report.attestation.attempt_record,
+        AttemptRecordState::NotStarted
+    );
+    assert_eq!(failure_code(&report), "attempt_already_refused");
+    assert!(
+        !scratch.path().join("work").exists(),
+        "old id was not re-executed"
+    );
+}
+
+#[test]
+fn concurrent_deliveries_cannot_start_after_a_not_started_refusal() {
+    use ato_formation_worker::runtime_network::execute_ticket_with_source;
+    let dir = site("");
+    let scratch = tempfile::tempdir().unwrap();
+    let (ticket, _) = ticket(&submit(dir.path(), scratch.path()));
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let config = serve_config(scratch.path());
+    let first_ticket = ticket.clone();
+    let first = std::thread::spawn(move || {
+        execute_ticket_with_source(&config, &first_ticket, || {
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            anyhow::bail!("source unavailable")
+        })
+    });
+    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let config = serve_config(scratch.path());
+    let second = std::thread::spawn(move || {
+        execute_ticket_with_source(&config, &ticket, || {
+            panic!("a concurrent delivery must not refetch or execute after the refusal")
+        })
+    });
+    release_tx.send(()).unwrap();
+    let first = first.join().unwrap();
+    let second = second.join().unwrap();
+    assert_eq!(
+        first.attestation.attempt_record,
+        AttemptRecordState::NotStarted
+    );
+    assert_eq!(failure_code(&first), "source_unavailable");
+    assert_eq!(
+        second.attestation.attempt_record,
+        AttemptRecordState::NotStarted
+    );
+    assert_eq!(failure_code(&second), "attempt_already_refused");
 }

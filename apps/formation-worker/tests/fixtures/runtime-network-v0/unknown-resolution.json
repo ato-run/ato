@@ -1,0 +1,9 @@
+{
+  "action": "resolve",
+  "resolution": "effect_reconciled",
+  "note": "Owner reconciled the possible external effect",
+  "execution_stop": {
+    "kind": "runtime_terminated",
+    "evidence": "Owner terminated old worker and workload; cached ticket cannot resume"
+  }
+}
