@@ -219,8 +219,10 @@ impl Outcome {
 /// - `seal`: the profile's sealing rule holds.
 /// - `runtime_verification`: every observation of the frozen K was
 ///   Satisfied by this attempt; the receipt is the evidence.
-/// - `cleanup`: the candidate was stopped and its scratch removed —
-///   `not_attempted` with `handed_off` when a Run kept it.
+/// - `cleanup`: the candidate's runtime was stopped and the runtime scratch
+///   its realization owns was removed — `not_attempted` with `handed_off`
+///   when a Run kept it. Not the build workspace, caches or an unpublished
+///   artifact.
 /// - `publication`: the artifact was kept.
 ///
 /// A later outcome never rewrites an earlier one.
