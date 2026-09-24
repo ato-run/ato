@@ -300,3 +300,70 @@ fn a_passing_attempt_carries_a_receipt_bound_to_its_attempt() {
     // Observed over HTTP, not decided from the artifact's file list.
     assert_eq!(receipt["observations"][0]["evidence"]["status"], 200);
 }
+
+/// The status a coordinator returns once a route passed, built from the
+/// Runtime's own report.
+fn settled(ticket: &AttemptTicket, report: &AttemptResultReport) -> serde_json::Value {
+    serde_json::json!({
+        "satisfy_id": ticket.satisfy_id,
+        "status": "satisfied",
+        "attempts": [{
+            "attempt_id": ticket.attempt_id,
+            "runtime_id": ticket.runtime_id,
+            "derivation_ref": ticket.derivation_ref,
+            "status": report.outcome,
+        }],
+        "verified_routes": [{
+            "derivation_ref": ticket.derivation_ref,
+            "runtime_id": ticket.runtime_id,
+            "verifier_receipts": report.verifier_receipts,
+        }],
+    })
+}
+
+#[test]
+fn the_requester_counts_a_route_only_with_an_acceptable_receipt() {
+    use ato_formation_worker::runtime_network::accept_verified_routes;
+
+    let dir = site("");
+    let scratch = tempfile::tempdir().expect("scratch");
+    let submission = submit(dir.path(), scratch.path());
+    let (ticket, archive) = ticket(&submission);
+    let report = run(&ticket, archive, scratch.path());
+    assert_eq!(report.outcome, "pass", "{:?}", report.failure);
+
+    let status = settled(&ticket, &report);
+    let (accepted, refused) = accept_verified_routes(&submission, &ticket.satisfy_id, &status);
+    assert_eq!((accepted.len(), refused.len()), (1, 0), "{refused:?}");
+
+    // Another request's receipt, replayed under this one.
+    let (accepted, refused) = accept_verified_routes(&submission, "sat_other", &status);
+    assert!(accepted.is_empty());
+    assert!(
+        refused[0].contains("receipt_request_mismatch"),
+        "{refused:?}"
+    );
+
+    // A verdict whose evidence was edited in transit.
+    let mut forged = status.clone();
+    for receipt in forged["verified_routes"][0]["verifier_receipts"]
+        .as_array_mut()
+        .unwrap()
+    {
+        if receipt["kind"] == "contract_verification" {
+            receipt["receipt"]["observations"][0]["evidence"]["status"] = 500.into();
+        }
+    }
+    let (accepted, refused) = accept_verified_routes(&submission, &ticket.satisfy_id, &forged);
+    assert!(accepted.is_empty());
+    assert!(
+        refused[0].contains("receipt_evidence_inconsistent"),
+        "{refused:?}"
+    );
+
+    // A route no passing attempt reported.
+    let mut orphan = status;
+    orphan["attempts"][0]["status"] = "fail".into();
+    let (accepted, _) = accept_verified_routes(&submission, &ticket.satisfy_id, &orphan);
+    assert!(accepted.is_empty());
+}

@@ -393,6 +393,9 @@ pub fn derivation_requirements(planned: &PlannedCandidate) -> (Vec<Requirement>,
 
 pub struct Submission {
     pub request: SatisfyRequest,
+    /// The frozen K each authorized route was planned against, by
+    /// DerivationRef — what a returned receipt is checked against.
+    pub contracts: BTreeMap<String, ato_formation::authoring::BoundContract>,
 }
 
 /// Freeze `dir`, plan every authorized route against it, and assemble the
@@ -428,6 +431,7 @@ pub fn prepare_submission(
     };
     let mut base_contract_ref: Option<String> = None;
     let mut authorized = Vec::new();
+    let mut contracts = BTreeMap::new();
     for file in &route_files {
         let text = std::fs::read_to_string(file)
             .with_context(|| format!("cannot read the route {}", file.display()))?;
@@ -451,6 +455,7 @@ pub fn prepare_submission(
             Some(_) => {}
         }
         let (requirements, provisions) = derivation_requirements(&planned);
+        contracts.insert(planned.derivation_ref.clone(), planned.contract.clone());
         authorized.push(AuthorizedDerivation {
             derivation_ref: planned.derivation_ref.clone(),
             capsule_toml: text,
@@ -481,7 +486,72 @@ pub fn prepare_submission(
             policy,
             budget,
         },
+        contracts,
     })
+}
+
+/// The verified routes of a settled satisfy request whose receipts are
+/// acceptable as the result of exactly the attempt that reported them.
+///
+/// The coordinator authenticates the Runtime and holds the fence; this
+/// checks the claim itself against the K the requester froze: the right K,
+/// D, attempt and request, the exact observation set, and verdicts that
+/// follow from their evidence. A route without an acceptable receipt is
+/// returned as a refusal, never as verified.
+pub fn accept_verified_routes(
+    submission: &Submission,
+    satisfy_id: &str,
+    status: &serde_json::Value,
+) -> (Vec<serde_json::Value>, Vec<String>) {
+    use ato_formation::receipt::{ReceiptAssignment, accept_receipt_json};
+    let empty = Vec::new();
+    let attempts = status["attempts"].as_array().unwrap_or(&empty);
+    let mut accepted = Vec::new();
+    let mut refused = Vec::new();
+    for route in status["verified_routes"].as_array().unwrap_or(&empty) {
+        let derivation_ref = route["derivation_ref"].as_str().unwrap_or_default();
+        let runtime_id = route["runtime_id"].as_str().unwrap_or_default();
+        let outcome = (|| -> std::result::Result<(), String> {
+            let contract = submission
+                .contracts
+                .get(derivation_ref)
+                .ok_or("the route names a Derivation this request did not authorize")?;
+            let attempt_id = attempts
+                .iter()
+                .find(|attempt| {
+                    attempt["derivation_ref"] == derivation_ref
+                        && attempt["runtime_id"] == runtime_id
+                        && attempt["status"] == "pass"
+                })
+                .and_then(|attempt| attempt["attempt_id"].as_str())
+                .ok_or("no passing attempt reported this route")?;
+            let receipt = route["verifier_receipts"]
+                .as_array()
+                .and_then(|receipts| {
+                    receipts
+                        .iter()
+                        .find(|receipt| receipt["kind"] == "contract_verification")
+                })
+                .ok_or("the route carries no contract verification receipt")?;
+            accept_receipt_json(
+                &ReceiptAssignment {
+                    contract,
+                    contract_ref: &submission.request.base_contract_ref,
+                    derivation_ref,
+                    attempt_id,
+                    request_id: Some(satisfy_id),
+                },
+                &receipt["receipt"],
+            )
+            .map_err(|rejection| format!("{}: {}", rejection.code, rejection.detail))?;
+            Ok(())
+        })();
+        match outcome {
+            Ok(()) => accepted.push(route.clone()),
+            Err(reason) => refused.push(format!("{derivation_ref} on {runtime_id}: {reason}")),
+        }
+    }
+    (accepted, refused)
 }
 
 // ──────────────────────────────────────────────────────────────── client
