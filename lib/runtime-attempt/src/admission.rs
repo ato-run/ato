@@ -10,8 +10,8 @@ use ato_formation::authoring::EffectClass;
 use ato_formation::request::{AttemptFailure, RuntimeProfile};
 
 use crate::browser_verify::BrowserVerification;
-use crate::job::PlannedCandidate;
-use crate::sandbox::{NetworkPolicy, TOOLCHAIN_ROOT};
+use crate::build_sandbox::{NetworkPolicy, TOOLCHAIN_ROOT};
+use crate::plan::PlannedCandidate;
 
 /// Effect classes a Runtime executes without a confirmed authorization: an
 /// attempt of one of these can fail and be retried without anything leaking

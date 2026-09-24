@@ -57,7 +57,7 @@ pub fn sandbox_exec(args: &[String]) -> Result<()> {
     // exec a workload whose network isolation was asked for and could not be
     // enforced. A build and a Formation candidate are contained by exactly
     // the rules a Run is.
-    ato_connected_realization_worker::runtime_launch::sandbox_exec::run_with(
+    crate::launch::sandbox_exec::run_with(
         Path::new(policy_path),
         &workload,
         &workload_env,

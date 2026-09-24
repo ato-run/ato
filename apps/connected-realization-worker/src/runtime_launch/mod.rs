@@ -5,13 +5,13 @@
 //! secret or a real host path from becoming reachable to the guest agent, the
 //! CLI or netd, all of which link the contract crate.
 
+// Process launch lives in the shared Runtime crate; the Runner uses it
+// through these paths.
+pub use ato_runtime_attempt::launch::{process_executor, resolved, sandbox, sandbox_exec};
+
 pub mod lease;
 pub mod network_broker;
-pub mod process_executor;
 pub mod recovery;
-pub mod resolved;
-pub mod sandbox;
-pub mod sandbox_exec;
 pub mod service_group;
 pub mod session;
 pub mod state_artifact;

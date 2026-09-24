@@ -1,8 +1,8 @@
 [package]
-name = "ato-formation-worker"
+name = "ato-runtime-attempt"
 version = "0.1.0"
 edition = "2024"
-description = "Executes Formation jobs in an isolated build sandbox"
+description = "The Runtime's attempt: admission, start record, execution, observation, verification and receipt"
 license = "Apache-2.0 OR MPL-2.0"
 repository = "https://github.com/ato-run/ato"
 
@@ -10,31 +10,25 @@ repository = "https://github.com/ato-run/ato"
 dist = false
 
 [package.metadata.ato-architecture]
-layer = "app"
-
-[[bin]]
-name = "ato-formation-worker"
-path = "src/bin/ato-formation-worker.rs"
+layer = "runtime"
 
 [dependencies]
 anyhow = "1"
 ato-adapter-process = { path = "../../extensions/adapters/process", version = "0.1.0" }
-ato-formation = { path = "../../lib/formation", version = "0.1.0" }
-ato-ipc = { path = "../../lib/ipc", version = "0.1.0" }
+ato-formation = { path = "../formation", version = "0.1.0" }
+ato-ipc = { path = "../ipc", version = "0.1.0" }
 ato-materializer-static-web = { path = "../../extensions/materializers/static-web", version = "0.1.0" }
-ato-runtime-attempt = { path = "../../lib/runtime-attempt", version = "0.1.0" }
-ato-sandbox = { path = "../../lib/sandbox", version = "0.1.0" }
-clap = { version = "4.5", features = ["derive", "env"] }
+ato-sandbox = { path = "../sandbox", version = "0.1.0" }
+base64 = "0.22"
 libc = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_jcs = "0.1"
-base64 = "0.22"
 sha2 = "0.10"
 tar = "0.4"
 tempfile = "3"
+thiserror = "2"
 
 [dev-dependencies]
-tar = "0.4"
 tempfile = "3"

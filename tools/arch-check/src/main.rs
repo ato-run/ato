@@ -123,6 +123,20 @@ fn allowed(source: &str, target: &str) -> bool {
             "adapter-api" | "materializer-api" | "player" | "computation" | "objects"
         ),
         "service" => matches!(target, "computation" | "objects" | "ipc"),
+        // The Runtime's shared attempt (admission, launch, observation,
+        // receipt): used by every app that executes a Derivation, so it may
+        // use the layers below it and never an app.
+        "runtime" => matches!(
+            target,
+            "lib"
+                | "ipc"
+                | "computation"
+                | "objects"
+                | "adapter"
+                | "adapter-api"
+                | "materializer"
+                | "materializer-api"
+        ),
         "app" | "tool" => true,
         _ => false,
     }
