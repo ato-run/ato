@@ -704,11 +704,24 @@ fn form_on_runtime_network(args: FormArgs) -> Result<()> {
         let state = status["status"].as_str().unwrap_or("");
         if matches!(state, "satisfied" | "unsatisfied" | "exhausted") {
             println!("{}", serde_json::to_string_pretty(&status)?);
-            return if state == "satisfied" {
-                Ok(())
-            } else {
-                bail!("the Runtime Network produced no verified route ({state})")
-            };
+            if state != "satisfied" {
+                bail!("the Runtime Network produced no verified route ({state})");
+            }
+            // A route counts only when its receipt is acceptable as the
+            // result of the attempt that reported it, checked here against
+            // the K this requester froze.
+            let (accepted, refused) = ato_formation_worker::runtime_network::accept_verified_routes(
+                &submission,
+                &id,
+                &status,
+            );
+            for reason in &refused {
+                eprintln!("verified route refused: {reason}");
+            }
+            if accepted.is_empty() {
+                bail!("no verified route carries an acceptable receipt");
+            }
+            return Ok(());
         }
         if std::time::Instant::now() > deadline {
             bail!("satisfy {id} did not settle within 30 minutes");
