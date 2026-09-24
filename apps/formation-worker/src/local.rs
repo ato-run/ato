@@ -28,13 +28,13 @@ use ato_formation::detect::{DetectorEvidence, detect};
 use ato_formation::failure::{FailureStage, FormationFailure};
 use ato_formation::preset::candidates;
 use ato_formation::request::{
-    AttemptFailure, AttemptStatus, ContractSource, FormationAttempt, FormationNetworkPolicy,
-    FormationRequest, FormationResult, InitialCondition, RuntimeConstraint, RuntimeProfile,
-    VerifiedRoute,
+    AttemptFailure, AttemptOutcomes, AttemptStatus, ContractSource, FormationAttempt,
+    FormationNetworkPolicy, FormationRequest, FormationResult, InitialCondition, Outcome,
+    RuntimeConstraint, RuntimeProfile, VerifiedRoute,
 };
 use ato_formation::source::{DownloadedArchive, SourceClosureRef, SourceLimits};
 
-use crate::attempt::{AttemptRequest, bounded, failure_of, run_attempt};
+use crate::attempt::{AttemptRequest, Continuation, bounded, failure_of, run_attempt};
 use crate::browser_verify::{BrowserVerification, BrowserVerifierCommand};
 use crate::executor::{AttemptExecutor, ExecutedCandidate, LocalAttemptExecutor};
 use crate::job::{copy_tree, digest, plan_candidate};
@@ -168,6 +168,7 @@ fn run_as(
                                 realization: None,
                                 browser_verification: None,
                                 receipt: None,
+                                outcomes: AttemptOutcomes::not_run(mismatch.code),
                                 failure: Some(AttemptFailure {
                                     code: mismatch.code.to_owned(),
                                     stage: FailureStage::Preset.as_str().to_owned(),
@@ -305,6 +306,7 @@ fn attempt_one(
     ) {
         Ok(planned) => planned,
         Err(error) => {
+            let failure = failure_of(&error);
             return (
                 FormationAttempt {
                     candidate: label,
@@ -318,7 +320,8 @@ fn attempt_one(
                     realization: None,
                     browser_verification: None,
                     receipt: None,
-                    failure: Some(failure_of(&error)),
+                    outcomes: AttemptOutcomes::not_run(&failure.code),
+                    failure: Some(failure),
                 },
                 None,
             );
@@ -345,6 +348,8 @@ fn attempt_one(
             browser,
             attempt_root: &attempt_root,
             shim: &env.shim,
+            // A Formation keeps the artifact, not the running candidate.
+            continuation: Continuation::Stop,
         },
         executor,
         journal,
@@ -359,7 +364,10 @@ fn attempt_one(
     // and its verdicts exactly as they were.
     match store_candidate(&executed, &env.out_dir) {
         Ok(materialization_ref) => (
-            attempt,
+            {
+                attempt.outcomes.publication = Outcome::succeeded();
+                attempt
+            },
             Some((
                 contract_ref,
                 VerifiedRoute {
@@ -372,6 +380,7 @@ fn attempt_one(
         ),
         Err(error) => {
             attempt.status = AttemptStatus::Failed;
+            attempt.outcomes.publication = Outcome::failed("artifact_store_failed");
             attempt.failure = Some(AttemptFailure {
                 code: "artifact_store_failed".to_owned(),
                 stage: "publish".to_owned(),
@@ -628,7 +637,7 @@ pub fn probe_local_runtime() -> RuntimeProfile {
 
 /// The triple the local machine builds for. A workspace produced here is
 /// host-native; cross-compiling is a different request.
-pub(crate) fn host_triple() -> String {
+pub fn host_triple() -> String {
     let arch = std::env::consts::ARCH;
     let os = match std::env::consts::OS {
         "linux" => "unknown-linux-gnu",

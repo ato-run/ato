@@ -162,8 +162,88 @@ pub struct FormationAttempt {
     /// stopping the candidate — changes it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub receipt: Option<ContractVerificationReceipt>,
+    /// What the attempt established, one outcome each (ADR-026): never
+    /// folded into one success flag.
+    pub outcomes: AttemptOutcomes,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure: Option<AttemptFailure>,
+}
+
+/// Where one of an attempt's outcomes stands. Not a boolean: something that
+/// was never tried is not something that failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutcomeState {
+    NotAttempted,
+    Succeeded,
+    Failed,
+    NotApplicable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Outcome {
+    pub state: OutcomeState,
+    /// Why, when the state alone does not say: a failure code,
+    /// `handed_off`, the refusal that meant nothing ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl Outcome {
+    pub fn new(state: OutcomeState, reason: Option<&str>) -> Self {
+        Self {
+            state,
+            reason: reason.map(str::to_owned),
+        }
+    }
+
+    pub fn succeeded() -> Self {
+        Self::new(OutcomeState::Succeeded, None)
+    }
+
+    pub fn failed(reason: &str) -> Self {
+        Self::new(OutcomeState::Failed, Some(reason))
+    }
+
+    pub fn not_attempted(reason: &str) -> Self {
+        Self::new(OutcomeState::NotAttempted, Some(reason))
+    }
+
+    pub fn not_applicable(reason: &str) -> Self {
+        Self::new(OutcomeState::NotApplicable, Some(reason))
+    }
+}
+
+/// The four things an attempt may establish, reported separately (ADR-026).
+///
+/// - `seal`: the profile's sealing rule holds.
+/// - `runtime_verification`: every observation of the frozen K was
+///   Satisfied by this attempt; the receipt is the evidence.
+/// - `cleanup`: the candidate's runtime was stopped and the runtime scratch
+///   its realization owns was removed — `not_attempted` with `handed_off`
+///   when a Run kept it. Not the build workspace, caches or an unpublished
+///   artifact.
+/// - `publication`: the artifact was kept.
+///
+/// A later outcome never rewrites an earlier one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AttemptOutcomes {
+    pub seal: Outcome,
+    pub runtime_verification: Outcome,
+    pub cleanup: Outcome,
+    pub publication: Outcome,
+}
+
+impl AttemptOutcomes {
+    /// An attempt nothing of which ran: `reason` is why.
+    pub fn not_run(reason: &str) -> Self {
+        Self {
+            seal: Outcome::not_attempted(reason),
+            runtime_verification: Outcome::not_attempted(reason),
+            cleanup: Outcome::not_applicable("nothing ran"),
+            publication: Outcome::not_attempted(reason),
+        }
+    }
 }
 
 /// The conditions a candidate was observed under.
