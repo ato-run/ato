@@ -126,6 +126,7 @@ fn verify(command: BrowserVerifierCommand, wall_clock_ms: u64) -> BrowserVerific
         BrowserTarget {
             runtime_id: "local".to_owned(),
             endpoint: "http://127.0.0.1:9/".to_owned(),
+            attempt_id: None,
         },
     )
 }

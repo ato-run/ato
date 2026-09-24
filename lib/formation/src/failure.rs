@@ -44,6 +44,8 @@ pub enum FailureStage {
     Preset,
     /// Turning a bound draft into something executable.
     Projection,
+    /// Deciding, before anything runs, whether this Runtime may run it.
+    Admission,
     /// Running the build itself.
     Build,
     /// Checking the result satisfies the Contract it claims.
@@ -56,6 +58,7 @@ impl FailureStage {
             Self::Authoring => "authoring",
             Self::Preset => "preset",
             Self::Projection => "projection",
+            Self::Admission => "admission",
             Self::Build => "build",
             Self::Verification => "verification",
         }

@@ -160,6 +160,7 @@ fn build(workspace: &Path, source: &Path, script: &str) -> anyhow::Result<()> {
             needs_network: false,
             cwd_relative: String::new(),
             env: BTreeMap::new(),
+            toolchain_access: ato_formation::intent::ToolchainAccess::ReadOnly,
         }],
         output_root: String::new(),
     };
@@ -179,6 +180,7 @@ fn build(workspace: &Path, source: &Path, script: &str) -> anyhow::Result<()> {
             policy_host_path: &policy,
             network: NetworkPolicy::Denied,
             limits: BuildLimits::default(),
+            toolchain: ato_formation_worker::sandbox::ToolchainAccess::ReadOnly,
         },
     )
     .map(|_| ())

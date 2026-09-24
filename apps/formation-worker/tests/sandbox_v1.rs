@@ -41,6 +41,7 @@ fn command(
             policy_host_path: Path::new("/tmp/policy.json"),
             network,
             limits: BuildLimits::default(),
+            toolchain: ToolchainAccess::ReadOnly,
         },
     )
 }
@@ -153,6 +154,7 @@ fn a_step_that_declared_no_network_does_not_get_one() {
             needs_network: false,
             cwd_relative: String::new(),
             env: std::collections::BTreeMap::new(),
+            toolchain_access: ato_formation::intent::ToolchainAccess::ReadOnly,
         }],
         output_root: String::new(),
     };
@@ -167,9 +169,10 @@ fn a_step_that_declared_no_network_does_not_get_one() {
             workspace_root: &workspace,
             cache_root: None,
             shim: Path::new(&binary),
-            policy_host_path: Path::new("/tmp/policy.json"),
+            policy_host_path: &root.path().join("policy.json"),
             network: NetworkPolicy::DependencyResolution,
             limits: BuildLimits::default(),
+            toolchain: ToolchainAccess::ReadOnly,
         },
     );
     assert!(outcome.is_ok(), "{outcome:?}");
@@ -178,7 +181,7 @@ fn a_step_that_declared_no_network_does_not_get_one() {
 
 #[test]
 fn a_networked_step_under_a_denied_policy_is_refused() {
-    let (_root, source, workspace) = dirs();
+    let (root, source, workspace) = dirs();
     let plan = EffectiveBuildPlanV1 {
         schema: EFFECTIVE_BUILD_PLAN_V1_SCHEMA.to_owned(),
         lane: Lane::PythonProcess,
@@ -190,6 +193,7 @@ fn a_networked_step_under_a_denied_policy_is_refused() {
             needs_network: true,
             cwd_relative: String::new(),
             env: std::collections::BTreeMap::new(),
+            toolchain_access: ato_formation::intent::ToolchainAccess::ReadOnly,
         }],
         output_root: String::new(),
     };
@@ -202,9 +206,10 @@ fn a_networked_step_under_a_denied_policy_is_refused() {
             workspace_root: &workspace,
             cache_root: None,
             shim: Path::new(&binary),
-            policy_host_path: Path::new("/tmp/policy.json"),
+            policy_host_path: &root.path().join("policy.json"),
             network: NetworkPolicy::Denied,
             limits: BuildLimits::default(),
+            toolchain: ToolchainAccess::ReadOnly,
         },
     )
     .unwrap_err();
@@ -271,11 +276,9 @@ fn attempt(fence: u64) -> BuildAttempt {
 
 /// This test binary's sibling worker binary, for the shim path.
 fn worker_binary() -> String {
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(|dir| dir.join("ato-formation-worker")))
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "/nonexistent".to_owned())
+    // The package's own binary, which cargo builds for integration tests.
+    // A test executable lives in `deps/`, which holds no such binary.
+    env!("CARGO_BIN_EXE_ato-formation-worker").to_owned()
 }
 
 #[test]
@@ -329,4 +332,42 @@ fn the_landlock_policy_covers_every_path_the_binds_provide() {
         !writable.iter().any(|path| path == "/src"),
         "the source must never be writable"
     );
+}
+
+#[test]
+fn only_a_provisioning_step_may_write_the_toolchain_root() {
+    if !containment_available() {
+        eprintln!("skipping: bwrap is unavailable");
+        return;
+    }
+    let (root, source, workspace) = dirs();
+    let with = |toolchain| {
+        sandboxed_build_command(
+            &["true".to_owned()],
+            &BuildSandbox {
+                source_root: &source,
+                workspace_root: &workspace,
+                cache_root: None,
+                shim: Path::new("/usr/local/bin/ato-formation-worker"),
+                policy_host_path: &root.path().join("policy.json"),
+                network: NetworkPolicy::Denied,
+                limits: BuildLimits::default(),
+                toolchain,
+            },
+        )
+        .expect("command")
+    };
+    let toolchain = PathBuf::from(TOOLCHAIN_ROOT);
+
+    let authored = with(ToolchainAccess::ReadOnly);
+    let argv = authored.argv.join(" ");
+    assert!(argv.contains(&format!("--ro-bind {TOOLCHAIN_ROOT} {TOOLCHAIN_ROOT}")));
+    assert!(!argv.contains(&format!("--bind {TOOLCHAIN_ROOT} ")));
+    assert!(!authored.policy.read_write_paths.contains(&toolchain));
+    assert!(authored.policy.read_only_paths.contains(&toolchain));
+
+    let provisioning = with(ToolchainAccess::Provision);
+    let argv = provisioning.argv.join(" ");
+    assert!(argv.contains(&format!("--bind {TOOLCHAIN_ROOT} {TOOLCHAIN_ROOT}")));
+    assert!(provisioning.policy.read_write_paths.contains(&toolchain));
 }

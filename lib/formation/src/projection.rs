@@ -345,6 +345,7 @@ fn project_exec(step: &BoundStep) -> Result<BuildStepV1, ProjectionError> {
         needs_network: step.network == StepNetwork::DependencyResolution,
         cwd_relative: workspace_relative_cwd(&step.cwd).map_err(refuse)?,
         env: step.env.clone(),
+        toolchain_access: crate::intent::ToolchainAccess::ReadOnly,
     })
 }
 

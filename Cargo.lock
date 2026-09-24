@@ -441,6 +441,7 @@ dependencies = [
  "ato-formation",
  "ato-ipc",
  "ato-materializer-static-web",
+ "ato-portable-application",
  "ato-sandbox",
  "base64 0.22.1",
  "clap",

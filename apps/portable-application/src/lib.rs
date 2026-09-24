@@ -405,17 +405,6 @@ impl StaticApplicationServer {
             return Err(profile("static server requires a static-web derivation"));
         }
         verify_materialized_tree(validated, root)?;
-        let listener =
-            TcpListener::bind("127.0.0.1:0").map_err(|source| PortableApplicationError::Io {
-                path: root.to_path_buf(),
-                source,
-            })?;
-        let address = listener
-            .local_addr()
-            .map_err(|source| PortableApplicationError::Io {
-                path: root.to_path_buf(),
-                source,
-            })?;
         let routes = validated
             .tree
             .entries
@@ -434,6 +423,39 @@ impl StaticApplicationServer {
             .ok_or_else(|| profile("static surface omitted its entry"))?;
         let entry_route = format!("/{entry}");
         let spa_fallback = surface.spa_fallback.unwrap_or(false);
+        Self::listen(root, routes, entry_route, spa_fallback, state)
+    }
+
+    /// Serve an already-verified route table: request path to file and media
+    /// type. The caller vouches for every file; this only answers requests.
+    /// Used by Formation to observe a Static candidate over real HTTP without
+    /// a `.capsule` around it.
+    pub fn serve_routes(
+        routes: BTreeMap<String, (PathBuf, String)>,
+        entry_route: String,
+        spa_fallback: bool,
+    ) -> Result<Self, PortableApplicationError> {
+        Self::listen(Path::new("."), routes, entry_route, spa_fallback, None)
+    }
+
+    fn listen(
+        root: &Path,
+        routes: BTreeMap<String, (PathBuf, String)>,
+        entry_route: String,
+        spa_fallback: bool,
+        state: Option<StaticApplicationState>,
+    ) -> Result<Self, PortableApplicationError> {
+        let listener =
+            TcpListener::bind("127.0.0.1:0").map_err(|source| PortableApplicationError::Io {
+                path: root.to_path_buf(),
+                source,
+            })?;
+        let address = listener
+            .local_addr()
+            .map_err(|source| PortableApplicationError::Io {
+                path: root.to_path_buf(),
+                source,
+            })?;
         let state = state.map(|state| {
             let local_storage = Arc::new(Mutex::new(state.local_storage));
             let assets = state
