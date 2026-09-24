@@ -186,7 +186,7 @@ pub struct RuntimeObservation {
     pub instance_snapshot_ref: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum VerificationTargetKind {
     CliLocal,
@@ -195,13 +195,13 @@ pub enum VerificationTargetKind {
     FormationRuntime,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VerificationTarget {
     pub kind: VerificationTargetKind,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReceiptOutcome {
     Satisfied,
@@ -209,7 +209,7 @@ pub enum ReceiptOutcome {
     Failed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VerificationEvidence {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -226,7 +226,7 @@ pub struct VerificationEvidence {
     pub digest: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReceiptObservation {
     pub id: String,
@@ -293,7 +293,7 @@ pub struct VerificationServiceEvidence {
 }
 
 /// Shared proof emitted by both local and hosted execution paths.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContractVerificationReceipt {
     pub schema: String,
