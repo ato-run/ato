@@ -30,7 +30,6 @@ use ato_formation::authoring::AuthoringDraft;
 use ato_formation::browser::{BrowserContractV0, effective_contract_ref};
 use ato_formation::capsule_toml::parse_capsule_toml;
 use ato_formation::detect::detect;
-use ato_formation::intent::Lane;
 use ato_formation::request::AttemptStatus;
 use ato_formation::source::SourceLimits;
 use base64::Engine as _;
