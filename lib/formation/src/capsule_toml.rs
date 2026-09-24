@@ -255,7 +255,10 @@ fn optional_bool(
     match table.get(field) {
         None => Ok(None),
         Some(Value::Boolean(value)) => Ok(Some(*value)),
-        Some(_) => Err(malformed(format!("{what}.{field}"), "expected true or false")),
+        Some(_) => Err(malformed(
+            format!("{what}.{field}"),
+            "expected true or false",
+        )),
     }
 }
 
@@ -802,8 +805,10 @@ mod tests {
     #[test]
     fn a_declared_optional_field_of_the_wrong_type_is_refused_not_defaulted() {
         let schema = "schema = \"ato.capsule/1\"\n";
-        let exec = "[[derive.step]]\nid=\"a\"\nuse=\"ato.process@1\"\nop=\"exec\"\nargv=[\"true\"]\n";
-        let serve = "[[derive.step]]\nid=\"s\"\nuse=\"ato.browser@1\"\nop=\"serve\"\nsource=\"w\"\n";
+        let exec =
+            "[[derive.step]]\nid=\"a\"\nuse=\"ato.process@1\"\nop=\"exec\"\nargv=[\"true\"]\n";
+        let serve =
+            "[[derive.step]]\nid=\"s\"\nuse=\"ato.browser@1\"\nop=\"serve\"\nsource=\"w\"\n";
         let http = "[[contract.require]]\nid=\"r\"\nuse=\"ato.contract.http@1\"\nport=\"p\"\n";
         let mut cases: Vec<String> = ["false", "7", "[]"]
             .iter()

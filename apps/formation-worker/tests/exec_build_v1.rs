@@ -441,7 +441,10 @@ fn an_authored_step_cannot_write_the_shared_toolchain_root() {
         return;
     }
     let at = scratch();
-    let probe = format!("{TOOLCHAIN_ROOT}/.ato-authored-write-{}", std::process::id());
+    let probe = format!(
+        "{TOOLCHAIN_ROOT}/.ato-authored-write-{}",
+        std::process::id()
+    );
     let plan = plan_of(vec![step("write", &format!("touch {probe}"))]);
     let outcome = build(&at, &plan, NetworkPolicy::Denied);
     let written = Path::new(&probe).exists();
