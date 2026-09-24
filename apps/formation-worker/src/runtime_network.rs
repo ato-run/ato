@@ -35,7 +35,7 @@ use ato_formation::source::SourceLimits;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
-use crate::attempt::{AttemptRequest, run_attempt};
+use crate::attempt::{AttemptRequest, Continuation, run_attempt};
 use crate::browser_verify::{BrowserVerification, BrowserVerifierCommand};
 use crate::executor::LocalAttemptExecutor;
 use crate::job::{PlannedCandidate, digest, plan_candidate};
@@ -954,6 +954,9 @@ fn execute_planned_ticket(
             browser: browser.as_ref(),
             attempt_root,
             shim: &config.shim,
+            // The Runtime keeps the artifact for the coordinator, not the
+            // running candidate.
+            continuation: Continuation::Stop,
         },
         &LocalAttemptExecutor {
             shim: config.shim.clone(),
@@ -966,9 +969,14 @@ fn execute_planned_ticket(
     let mut attempt = outcome.attempt;
     let materialization_ref = match &outcome.verified {
         Some(executed) => match local::store_candidate(executed, &config.out_dir) {
-            Ok(reference) => Some(reference),
+            Ok(reference) => {
+                attempt.outcomes.publication = ato_formation::request::Outcome::succeeded();
+                Some(reference)
+            }
             Err(error) => {
                 attempt.status = AttemptStatus::Failed;
+                attempt.outcomes.publication =
+                    ato_formation::request::Outcome::failed("artifact_store_failed");
                 attempt.failure = Some(ato_formation::request::AttemptFailure {
                     code: "artifact_store_failed".to_owned(),
                     stage: "publish".to_owned(),

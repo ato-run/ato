@@ -18,7 +18,7 @@ reported as four fields, never folded into one success flag.
 |---|---|---|
 | `seal` | The profile's sealing rule holds: no observation Failed, and every Deferred observation names the concrete gate that will decide it. | That any Run observation was verified. |
 | `runtime_verification` | Every observation of the frozen K was Satisfied by this attempt, and the attempt's receipt is the evidence. | That another Runtime, or a later attempt, will satisfy K. |
-| `cleanup` | The candidate was stopped and its scratch removed. | Anything about K. |
+| `cleanup` | The candidate's runtime was stopped and the runtime scratch its realization owns was removed. | Anything about K; the build workspace, caches or an unpublished artifact, which are not this field's to clean. |
 | `publication` | The artifact was kept (content-addressed store, bundle, upload). | Anything about K. |
 
 Rules:

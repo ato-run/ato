@@ -833,42 +833,9 @@ mod tests {
             .expect("stops");
     }
 
-    #[test]
-    fn a_launched_workload_actually_runs_and_stops() {
-        if !super::super::sandbox::containment_available() {
-            // Not a skip worth hiding: this Runner cannot contain a workload,
-            // so it must not launch one. The behaviour under test only exists
-            // on a host that can (see the staging acceptance).
-            eprintln!("skipping: `bwrap` is not available, so no workload may be launched here");
-            return;
-        }
-        let fixture = context_with_state(StateAccessV1::ReadWrite);
-        let mut spec = spec(PROCESS_FIXTURE);
-        spec.realization =
-            LaunchRealizationV1::Process(ato_ipc::runtime_launch::ProcessRealizationV1 {
-                argv: vec!["/bin/sh".to_owned(), "-c".to_owned(), "sleep 30".to_owned()],
-                executable: None,
-            });
-        let launched = launch_process(&spec, &fixture.context).expect("launches");
-        assert!(launched.pid() > 0);
-        // The attachment directory exists BEFORE the workload starts, so an
-        // app cannot mistake a missing path for an empty one.
-        assert!(state_working_copy(fixture.context.workspace_root(), "app_data").is_dir());
-
-        let observed = observed_launch(&spec, &fixture.context, &launched);
-        assert_eq!(
-            observed.get("state").map(String::as_str),
-            Some("app_data@<new>")
-        );
-        assert!(!format!("{observed:?}").contains("hunter2"));
-
-        launched
-            .stop(&LifecycleV1 {
-                graceful_shutdown_ms: 2_000,
-                force_kill_after_ms: 4_000,
-            })
-            .expect("stops");
-    }
+    // `a_launched_workload_actually_runs_and_stops` lives in
+    // apps/formation-worker/tests/process_launch_v1.rs: it needs a real
+    // `sandbox-exec` shim, and a libtest binary is not one.
 
     #[test]
     fn an_oci_spec_is_refused_before_anything_is_spawned() {
