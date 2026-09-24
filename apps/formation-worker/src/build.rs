@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 #[cfg(unix)]
 use ato_formation::failure::{FailureStage, FormationFailure};
 use ato_formation::intent::{BuildStepV1, EffectiveBuildPlanV1};
@@ -111,7 +111,16 @@ pub fn run_build(
     std::fs::create_dir_all(workspace_root)
         .with_context(|| format!("cannot create {}", workspace_root.display()))?;
 
-    let policy_path = workspace_root.join(".ato-build-policy.json");
+    // The host writes the policy before every step, so it must live where no
+    // step can reach: a link planted there by one step would carry the next
+    // write outside the sandbox.
+    let policy_path = sandbox.policy_host_path;
+    ensure!(
+        !path_is_within(policy_path, workspace_root)?
+            && cache_root.is_none_or(|cache| !path_is_within(policy_path, cache).unwrap_or(true))
+            && !path_is_within(policy_path, source_root)?,
+        "the build sandbox policy must live outside every path the build can reach"
+    );
     let mut diagnostics = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(limits.wall_clock_seconds);
 
@@ -151,13 +160,14 @@ pub fn run_build(
                 workspace_root,
                 cache_root,
                 shim,
-                policy_host_path: &policy_path,
+                policy_host_path: policy_path,
                 network: step_network,
                 limits,
+                toolchain: step.toolchain_access,
             },
         )?;
         std::fs::write(
-            &policy_path,
+            policy_path,
             serde_json::to_vec_pretty(&command.policy)
                 .context("cannot serialize the build sandbox policy")?,
         )
@@ -174,15 +184,45 @@ pub fn run_build(
         diagnostics.push(bounded_diagnostic(&step.name, &output));
     }
 
-    // The policy file is scaffolding, not output. Leaving it would put it in
-    // the materialization and change its digest.
-    let _ = std::fs::remove_file(&policy_path);
-
     Ok(BuildOutcome {
         attempt,
         workspace_root: workspace_root.to_path_buf(),
         diagnostics,
     })
+}
+
+/// Where an attempt's build policy lives: a control directory beside the
+/// workspace, never inside anything the build binds.
+pub fn control_policy_path(attempt_root: &Path) -> Result<PathBuf> {
+    let control = attempt_root.join("control");
+    std::fs::create_dir_all(&control)
+        .with_context(|| format!("cannot create {}", control.display()))?;
+    Ok(control.join("build-policy.json"))
+}
+
+/// Is `path` at or below `root`, comparing the real locations? A path that
+/// does not exist yet is judged by its nearest existing ancestor.
+fn path_is_within(path: &Path, root: &Path) -> Result<bool> {
+    let root = std::fs::canonicalize(root)
+        .with_context(|| format!("cannot resolve {}", root.display()))?;
+    let mut probe = std::path::absolute(path).context("cannot resolve the policy path")?;
+    let mut rest = Vec::new();
+    let resolved = loop {
+        match std::fs::canonicalize(&probe) {
+            Ok(real) => break real,
+            Err(_) => {
+                let Some(name) = probe.file_name().map(ToOwned::to_owned) else {
+                    return Ok(false);
+                };
+                rest.push(name);
+                if !probe.pop() {
+                    return Ok(false);
+                }
+            }
+        }
+    };
+    let full = rest.iter().rev().fold(resolved, |at, name| at.join(name));
+    Ok(full.starts_with(&root))
 }
 
 /// The guest directory a step runs in, or `None` for the workspace root.
@@ -650,6 +690,7 @@ mod tests {
                 needs_network: false,
                 cwd_relative: String::new(),
                 env: std::collections::BTreeMap::new(),
+                toolchain_access: ato_formation::intent::ToolchainAccess::ReadOnly,
             },
             argv,
         )

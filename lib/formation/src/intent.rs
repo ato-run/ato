@@ -257,6 +257,26 @@ pub struct BuildStepV1 {
     /// restrictions are in force — never to the sandbox that applies them.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+    /// Whether this step may write the shared toolchain root. Set only by the
+    /// plan compiler for the platform's own provisioning steps, never from
+    /// anything a source or an author wrote — a step name is authored and
+    /// cannot carry a privilege. Not serialized: it is how this worker runs a
+    /// step, not what the step is, so it never enters the plan digest, and a
+    /// plan read back from bytes gets the least privilege.
+    #[serde(skip)]
+    pub toolchain_access: ToolchainAccess,
+}
+
+/// What a build step may do to the shared toolchain root.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ToolchainAccess {
+    /// Read and execute. Every step that runs source-controlled or authored
+    /// code: a build backend, an install hook, an authored `exec`.
+    #[default]
+    ReadOnly,
+    /// Install a toolchain. Only the platform's provisioning steps, which run
+    /// before any source-controlled step.
+    Provision,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1293,6 +1313,7 @@ pub fn compile_build_plan(
             needs_network: true,
             cwd_relative: String::new(),
             env: BTreeMap::new(),
+            toolchain_access: ToolchainAccess::Provision,
         });
     }
 
@@ -1315,6 +1336,7 @@ pub fn compile_build_plan(
             needs_network: true,
             cwd_relative: String::new(),
             env: BTreeMap::new(),
+            toolchain_access: ToolchainAccess::Provision,
         });
     }
 
@@ -1347,6 +1369,7 @@ Nothing was changed — try again shortly.\"}}' >&2; exit 65; fi; \
             needs_network: false,
             cwd_relative: String::new(),
             env: BTreeMap::new(),
+            toolchain_access: ToolchainAccess::ReadOnly,
         });
     }
 
@@ -1390,6 +1413,7 @@ Nothing was changed — try again shortly.\"}}' >&2; exit 65; fi; \
                     needs_network: true,
                     cwd_relative: String::new(),
                     env: BTreeMap::new(),
+                    toolchain_access: ToolchainAccess::ReadOnly,
                 });
 
                 // Run the package's OWN build script. Reconstructing the
@@ -1409,6 +1433,7 @@ Nothing was changed — try again shortly.\"}}' >&2; exit 65; fi; \
                     needs_network: false,
                     cwd_relative: String::new(),
                     env: BTreeMap::new(),
+                    toolchain_access: ToolchainAccess::ReadOnly,
                 });
             }
         }
@@ -1430,6 +1455,7 @@ Nothing was changed — try again shortly.\"}}' >&2; exit 65; fi; \
                 needs_network: true,
                 cwd_relative: String::new(),
                 env: BTreeMap::new(),
+                toolchain_access: ToolchainAccess::ReadOnly,
             });
         }
         (Lane::PythonProcess, DependencyPlan::PipRequirements { .. }) => {
@@ -1461,6 +1487,7 @@ Nothing was changed — try again shortly.\"}}' >&2; exit 65; fi; \
                 needs_network: false,
                 cwd_relative: String::new(),
                 env: BTreeMap::new(),
+                toolchain_access: ToolchainAccess::ReadOnly,
             });
             let site_packages = python
                 .as_deref()
@@ -1493,6 +1520,7 @@ Nothing was changed — try again shortly.\"}}' >&2; exit 65; fi; \
                 needs_network: true,
                 cwd_relative: String::new(),
                 env: BTreeMap::new(),
+                toolchain_access: ToolchainAccess::ReadOnly,
             });
         }
         (Lane::PythonProcess, DependencyPlan::None) => {}
