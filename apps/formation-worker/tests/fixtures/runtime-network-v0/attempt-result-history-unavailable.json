@@ -1,0 +1,43 @@
+{
+  "fence": 1,
+  "outcome": "fail",
+  "contract_ref": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "derivation_ref": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "materialization_ref": null,
+  "failure": {
+    "code": "attempt_history_unavailable",
+    "stage": "record",
+    "message": "Execution history cannot be established"
+  },
+  "formation_attempt": {
+    "status": "failed"
+  },
+  "verifier_receipts": [
+    {
+      "kind": "http_contract",
+      "verification": {
+        "verdicts": []
+      }
+    }
+  ],
+  "attestation": {
+    "environment_id": "native",
+    "agent_version": "0.0.0-fixture",
+    "derivation_ref": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "contract_ref": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "effects": "pure",
+    "requirements": [
+      {
+        "fact": "runtime.process",
+        "one_of": [
+          "true"
+        ]
+      }
+    ],
+    "provisions": [
+      "toolchain.python.3.12.7"
+    ],
+    "execution_started": true,
+    "attempt_record": "history_unavailable"
+  }
+}
