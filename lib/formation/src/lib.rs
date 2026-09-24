@@ -38,6 +38,7 @@ pub mod failure;
 pub mod intent;
 pub mod preset;
 pub mod projection;
+pub mod receipt;
 pub mod request;
 pub mod source;
 pub mod verify;

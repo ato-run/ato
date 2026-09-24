@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use serde::Serialize;
 
 use crate::browser::{BrowserContractV0, BrowserVerificationReceipt};
-use crate::verify::ContractVerification;
+use crate::verify::{ContractVerification, ContractVerificationReceipt};
 
 /// What the Formation starts from. 'I' in the model.
 ///
@@ -132,6 +132,10 @@ pub enum AttemptStatus {
 pub struct FormationAttempt {
     /// Which candidate this was: '"authored"' or a preset id.
     pub candidate: String,
+    /// The attempt this evidence belongs to. Absent only for a candidate
+    /// that was never planned (detection found nothing to try).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub derivation_ref: Option<String>,
     /// The K this attempt verified: the base Contract, or — when a browser
@@ -153,6 +157,11 @@ pub struct FormationAttempt {
     /// was asked for and the candidate got that far.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub browser_verification: Option<BrowserVerificationReceipt>,
+    /// The receipt for this attempt's verification point, when the candidate
+    /// was observed. Immutable: nothing after it — keeping the artifact,
+    /// stopping the candidate — changes it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<ContractVerificationReceipt>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure: Option<AttemptFailure>,
 }
@@ -182,6 +191,8 @@ pub struct RealizationEvidence {
 /// A route that was observed satisfying the Contract on a concrete Runtime.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct VerifiedRoute {
+    /// The attempt whose receipt this route is derived from.
+    pub attempt_id: String,
     pub derivation_ref: String,
     pub runtime_id: String,
     pub materialization_ref: String,

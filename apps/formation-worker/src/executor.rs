@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::build::{BuildAttempt, output_root, run_build};
+use crate::build::{BuildAttempt, control_policy_path, output_root, run_build};
 use crate::job::{PlannedCandidate, stage_workspace};
 use crate::sandbox::{BuildSandbox, NetworkPolicy};
 use crate::static_lane::StaticFormationOutput;
@@ -72,9 +72,10 @@ impl AttemptExecutor for LocalAttemptExecutor {
                 workspace_root: &workspace_root,
                 cache_root: Some(&cache_root),
                 shim: &self.shim,
-                policy_host_path: &workspace_root.join(".ato-build-policy.json"),
+                policy_host_path: &control_policy_path(attempt_root)?,
                 network: self.network,
                 limits: self.limits,
+                toolchain: crate::sandbox::ToolchainAccess::ReadOnly,
             },
         )?;
 
