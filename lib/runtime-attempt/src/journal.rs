@@ -67,6 +67,48 @@ pub struct AttemptRecord {
 
 pub const ATTEMPT_RECORD_SCHEMA: &str = "ato.formation.attempt-record/1";
 
+/// What the Runtime's durable record says about one attempt — the fact a
+/// coordinator decides UNKNOWN from, rather than from how the attempt ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttemptRecordState {
+    /// No start record: the attempt was refused before it began (admission,
+    /// an UNKNOWN sibling, a record that could not be written). Nothing of
+    /// the candidate ran.
+    NotStarted,
+    /// The start and the finish are both durable: the attempt ran and its
+    /// result is the one reported.
+    Finished,
+    /// The start is durable and the finish is not: the attempt ran, and what
+    /// it did is not known from this Runtime's record.
+    StartedUnfinished,
+}
+
+impl AttemptRecordState {
+    /// Whether anything of the candidate may have run.
+    pub fn execution_started(self) -> bool {
+        self != Self::NotStarted
+    }
+}
+
+/// Where an attempt's start and finish are made durable. [`AttemptJournal`]
+/// is the Runtime's; a test substitutes one whose writes fail.
+pub trait AttemptLedger {
+    /// Durably record that the attempt is starting, or refuse.
+    fn start(
+        &self,
+        request_id: &str,
+        attempt_id: &str,
+        identity: StartIdentity,
+    ) -> std::result::Result<Box<dyn StartedRecord>, BeginRefusal>;
+}
+
+/// A durable start, waiting for its finish.
+pub trait StartedRecord {
+    /// Record how the attempt ended.
+    fn finish(self: Box<Self>, outcome: &str) -> Result<()>;
+}
+
 /// Why an attempt was not begun.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BeginRefusal {
@@ -179,6 +221,24 @@ impl AttemptJournal {
             return Ok(Vec::new());
         }
         read_records(&dir)
+    }
+}
+
+impl AttemptLedger for AttemptJournal {
+    fn start(
+        &self,
+        request_id: &str,
+        attempt_id: &str,
+        identity: StartIdentity,
+    ) -> std::result::Result<Box<dyn StartedRecord>, BeginRefusal> {
+        let started = self.begin(request_id, attempt_id, identity)?;
+        Ok(Box::new(started))
+    }
+}
+
+impl StartedRecord for StartedAttempt {
+    fn finish(self: Box<Self>, outcome: &str) -> Result<()> {
+        StartedAttempt::finish(*self, outcome)
     }
 }
 

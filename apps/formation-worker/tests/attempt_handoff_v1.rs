@@ -279,7 +279,7 @@ fn nothing_that_did_not_run_reports_a_cleanup() {
         ),
     );
     let outcome = attempt(&site, Continuation::HandOff, NetworkPolicy::Denied);
-    assert!(!outcome.execution_started);
+    assert!(!outcome.execution_started());
     let outcomes = &outcome.attempt.outcomes;
     assert_eq!(
         outcomes.runtime_verification.state,
