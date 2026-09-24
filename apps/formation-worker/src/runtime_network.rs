@@ -156,6 +156,8 @@ pub struct SatisfyRequest {
     /// is part of it, else the base Contract.
     pub contract_ref: String,
     pub base_contract_ref: String,
+    /// Canonical K frozen before any attempt; the Coordinator checks this digest.
+    pub base_contract: ato_formation::authoring::BoundContract,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_contract: Option<BrowserContractV0>,
     pub source: SourceInline,
@@ -502,6 +504,11 @@ pub fn prepare_submission(
             search_id: search_id.to_owned(),
             contract_ref,
             base_contract_ref,
+            base_contract: contracts
+                .values()
+                .next()
+                .context("no frozen Contract")?
+                .clone(),
             browser_contract,
             source: SourceInline {
                 archive_base64: base64::engine::general_purpose::STANDARD.encode(&archive),
