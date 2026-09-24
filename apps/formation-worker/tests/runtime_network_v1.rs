@@ -15,9 +15,11 @@ use ato_formation::browser::{
     EVENT_NAVIGATION, EVIDENCE_BROWSER_SNAPSHOT, JudgeDecision, PRIMARY_CRITERION_ID,
     VerifierContainment, VerifierIdentity, effective_contract_ref,
 };
+use ato_formation_worker::journal::AttemptRecordState;
 use ato_formation_worker::runtime_network::{
     AttemptResultReport, AttemptTicket, NATIVE_ENVIRONMENT, RuntimeConstraintWire, SatisfyBudget,
-    SatisfyPolicy, ServeConfig, Submission, execute_ticket, prepare_submission,
+    SatisfyPolicy, SatisfyRequest, ServeConfig, Settlement, Submission, UnknownAttempt,
+    execute_ticket, new_search_id, prepare_submission,
 };
 use base64::Engine as _;
 
@@ -79,6 +81,7 @@ fn submit(dir: &Path, scratch: &Path) -> Submission {
             max_attempts: 4,
             mode: "first_pass".to_owned(),
         },
+        "search_test",
     )
     .expect("the requester plans the route")
 }
@@ -144,6 +147,8 @@ fn a_disposable_route_runs_and_is_attested() {
     assert_eq!(report.outcome, "pass", "{report:?}");
     let attested = &report.attestation;
     assert!(attested.execution_started);
+    // Its start and its finish are both durable.
+    assert_eq!(attested.attempt_record, AttemptRecordState::Finished);
     assert_eq!(attested.environment_id, NATIVE_ENVIRONMENT);
     assert_eq!(attested.effects.as_deref(), Some("pure"));
     assert_eq!(
@@ -173,6 +178,10 @@ fn a_non_repeatable_route_is_refused_whatever_the_request_claimed() {
         Some("non-repeatable")
     );
     assert!(!report.attestation.execution_started);
+    assert_eq!(
+        report.attestation.attempt_record,
+        AttemptRecordState::NotStarted
+    );
     assert!(report.verifier_receipts.is_empty());
 }
 
@@ -216,6 +225,10 @@ fn a_ticket_for_another_environment_is_refused() {
     assert_eq!(report.outcome, "inconclusive");
     assert_eq!(failure_code(&report), "environment_mismatch");
     assert!(!report.attestation.execution_started);
+    assert_eq!(
+        report.attestation.attempt_record,
+        AttemptRecordState::NotStarted
+    );
     assert_eq!(report.attestation.environment_id, NATIVE_ENVIRONMENT);
 }
 
@@ -244,6 +257,11 @@ fn a_redelivered_ticket_is_never_executed_twice() {
     let again = run(&ticket, archive, scratch.path());
     assert_eq!(failure_code(&again), "attempt_already_started");
     assert!(again.attestation.execution_started);
+    // Its record says the first delivery finished.
+    assert_eq!(
+        again.attestation.attempt_record,
+        AttemptRecordState::Finished
+    );
     assert_eq!(again.outcome, "inconclusive");
     assert!(again.materialization_ref.is_none());
 }
@@ -279,6 +297,10 @@ fn an_unfinished_attempt_holds_every_later_attempt_of_its_request() {
     assert!(
         !report.attestation.execution_started,
         "this attempt did not start"
+    );
+    assert_eq!(
+        report.attestation.attempt_record,
+        AttemptRecordState::NotStarted
     );
     assert!(report.materialization_ref.is_none());
 }
@@ -623,4 +645,142 @@ fn a_browser_contract_route_needs_a_passing_browser_receipt_from_the_same_attemp
     );
     let refused = accepts(&submission, &ticket.satisfy_id, &base_only).unwrap_err();
     assert!(refused.contains("route_contract_mismatch"), "{refused}");
+}
+
+// ── the wire both sides read (ato-api keeps the same files) ───────────────
+
+const FIXTURES: [(&str, &str); 4] = [
+    (
+        "satisfy-request",
+        include_str!("fixtures/runtime-network-v0/satisfy-request.json"),
+    ),
+    (
+        "attempt-result-not-started",
+        include_str!("fixtures/runtime-network-v0/attempt-result-not-started.json"),
+    ),
+    (
+        "attempt-result-finished",
+        include_str!("fixtures/runtime-network-v0/attempt-result-finished.json"),
+    ),
+    (
+        "attempt-result-started-unfinished",
+        include_str!("fixtures/runtime-network-v0/attempt-result-started-unfinished.json"),
+    ),
+];
+
+/// The fixtures are byte-identical to `ato-api`'s
+/// `src/tests/fixtures/runtime-network-v0/`: both repos check the same
+/// recorded digests, so a change on one side fails until the other follows.
+#[test]
+fn the_wire_fixtures_are_the_recorded_bytes() {
+    use sha2::{Digest as _, Sha256};
+    let recorded: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/runtime-network-v0/expected-digests.json"
+    ))
+    .expect("recorded digests");
+    for (name, text) in FIXTURES {
+        assert_eq!(
+            recorded[name].as_str(),
+            Some(format!("sha256:{:x}", Sha256::digest(text.as_bytes())).as_str()),
+            "{name} is not the recorded fixture"
+        );
+    }
+}
+
+#[test]
+fn the_wire_fixtures_round_trip_through_the_runtime_types() {
+    for (name, text) in FIXTURES {
+        let value: serde_json::Value = serde_json::from_str(text).expect(name);
+        let reserialized = if name == "satisfy-request" {
+            let request: SatisfyRequest = serde_json::from_value(value.clone()).expect(name);
+            assert!(request.search_id.starts_with("search_"));
+            serde_json::to_value(&request)
+        } else {
+            let report: AttemptResultReport = serde_json::from_value(value.clone()).expect(name);
+            let expected = match name {
+                "attempt-result-not-started" => AttemptRecordState::NotStarted,
+                "attempt-result-finished" => AttemptRecordState::Finished,
+                _ => AttemptRecordState::StartedUnfinished,
+            };
+            assert_eq!(report.attestation.attempt_record, expected, "{name}");
+            serde_json::to_value(&report)
+        }
+        .expect(name);
+        assert_eq!(reserialized, value, "{name} does not round-trip");
+    }
+    // The record state is a closed set of names, spelled as the fixtures do.
+    for (state, name) in [
+        (AttemptRecordState::NotStarted, "not_started"),
+        (AttemptRecordState::Finished, "finished"),
+        (AttemptRecordState::StartedUnfinished, "started_unfinished"),
+    ] {
+        assert_eq!(serde_json::to_value(state).unwrap(), name);
+    }
+    // A report without it is not a report this Runtime reads or writes.
+    let mut missing: serde_json::Value = serde_json::from_str(FIXTURES[2].1).unwrap();
+    missing["attestation"]
+        .as_object_mut()
+        .unwrap()
+        .remove("attempt_record");
+    assert!(serde_json::from_value::<AttemptResultReport>(missing).is_err());
+}
+
+#[test]
+fn a_search_id_is_opaque_and_new_each_time() {
+    let one = new_search_id([0x0f; 16]);
+    assert_eq!(one, format!("search_{}", "0f".repeat(16)));
+    assert_ne!(new_search_id([1; 16]), new_search_id([2; 16]));
+    let dir = site("");
+    let scratch = tempfile::tempdir().expect("scratch");
+    assert_eq!(
+        submit(dir.path(), scratch.path()).request.search_id,
+        "search_test"
+    );
+}
+
+#[test]
+fn an_unknown_request_is_its_own_terminal_reason_never_a_failure() {
+    let status = serde_json::json!({
+        "satisfy_id": "sat_1",
+        "search_id": "search_1",
+        "status": "unknown",
+        "unknown_attempts": [
+            {
+                "attempt_id": "att_resolved", "runtime_id": "rnr_a",
+                "unknown_reason": "result_not_received",
+                "resolution": { "kind": "no_effect_confirmed" }
+            },
+            {
+                "attempt_id": "att_open", "runtime_id": "rnr_b",
+                "unknown_reason": "attempt_record_unfinished",
+                "resolution": null
+            }
+        ]
+    });
+    let settlement = Settlement::of(&status).expect("a known status");
+    assert_eq!(
+        settlement,
+        Settlement::EffectUnknown(vec![UnknownAttempt {
+            attempt_id: "att_open".to_owned(),
+            runtime_id: "rnr_b".to_owned(),
+            reason: "attempt_record_unfinished".to_owned(),
+        }])
+    );
+    assert_eq!(settlement.terminal_reason(), Some("effect_unknown"));
+    let shown = settlement.to_string();
+    assert!(shown.starts_with("effect_unknown: attempt att_open on Runtime rnr_b"));
+    assert!(!shown.contains("unsatisfied") && !shown.contains("inconclusive"));
+
+    for (status, reason) in [
+        ("unsatisfied", Some("unsatisfied")),
+        ("exhausted", Some("budget_exhausted")),
+        ("stopped", Some("search_stopped")),
+        ("satisfied", None),
+        ("running", None),
+    ] {
+        let settlement = Settlement::of(&serde_json::json!({ "status": status })).unwrap();
+        assert_eq!(settlement.terminal_reason(), reason, "{status}");
+    }
+    // A status this requester does not know is not read as one it does.
+    assert!(Settlement::of(&serde_json::json!({ "status": "paused" })).is_err());
 }

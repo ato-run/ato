@@ -1,0 +1,34 @@
+{
+  "fence": 1,
+  "outcome": "inconclusive",
+  "contract_ref": null,
+  "derivation_ref": null,
+  "materialization_ref": null,
+  "failure": {
+    "code": "platform_unsupported",
+    "stage": "admission",
+    "message": "the route does not run on this platform"
+  },
+  "formation_attempt": null,
+  "verifier_receipts": [],
+  "attestation": {
+    "environment_id": "native",
+    "agent_version": "0.0.0-fixture",
+    "derivation_ref": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "contract_ref": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "effects": "pure",
+    "requirements": [
+      {
+        "fact": "runtime.process",
+        "one_of": [
+          "true"
+        ]
+      }
+    ],
+    "provisions": [
+      "toolchain.python.3.12.7"
+    ],
+    "execution_started": false,
+    "attempt_record": "not_started"
+  }
+}
