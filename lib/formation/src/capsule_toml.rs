@@ -231,6 +231,34 @@ fn required_str(
         .ok_or_else(|| malformed(format!("{what}.{field}"), "is required"))
 }
 
+/// An optional string field: absent is `None`, present-but-not-a-string is
+/// malformed. Never coerced to a default — a declared value of the wrong type
+/// is a statement nobody can read, not an omission.
+fn optional_str<'a>(
+    table: &'a toml::map::Map<String, Value>,
+    field: &str,
+    what: &str,
+) -> Result<Option<&'a str>, AuthoringError> {
+    match table.get(field) {
+        None => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.as_str())),
+        Some(_) => Err(malformed(format!("{what}.{field}"), "expected a string")),
+    }
+}
+
+/// [`optional_str`] for a boolean field.
+fn optional_bool(
+    table: &toml::map::Map<String, Value>,
+    field: &str,
+    what: &str,
+) -> Result<Option<bool>, AuthoringError> {
+    match table.get(field) {
+        None => Ok(None),
+        Some(Value::Boolean(value)) => Ok(Some(*value)),
+        Some(_) => Err(malformed(format!("{what}.{field}"), "expected true or false")),
+    }
+}
+
 /// Refuse a key nobody reads.
 fn only(
     table: &toml::map::Map<String, Value>,
@@ -261,15 +289,10 @@ fn read_inputs(value: &Value) -> Result<Vec<InputDraft>, AuthoringError> {
                     format!("{protocol:?} is not a protocol this build resolves; use {WORKSPACE_PROTOCOL}"),
                 ));
             }
-            Ok(InputDraft {
-                id,
-                protocol,
-                path: table
-                    .get("path")
-                    .and_then(Value::as_str)
-                    .unwrap_or(".")
-                    .to_owned(),
-            })
+            let path = optional_str(table, "path", &format!("input.{id}"))?
+                .unwrap_or(".")
+                .to_owned();
+            Ok(InputDraft { id, protocol, path })
         })
         .collect()
 }
@@ -446,19 +469,12 @@ fn read_derive(value: &Value) -> Result<Vec<StepDraft>, AuthoringError> {
                 protocol,
                 op,
                 argv,
-                cwd: step
-                    .get("cwd")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_owned(),
+                cwd: optional_str(step, "cwd", &what)?.unwrap_or("").to_owned(),
                 env,
-                source: step
-                    .get("source")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                root: step.get("root").and_then(Value::as_str).map(str::to_owned),
-                entry: step.get("entry").and_then(Value::as_str).map(str::to_owned),
-                spa_fallback: step.get("spa_fallback").and_then(Value::as_bool),
+                source: optional_str(step, "source", &what)?.map(str::to_owned),
+                root: optional_str(step, "root", &what)?.map(str::to_owned),
+                entry: optional_str(step, "entry", &what)?.map(str::to_owned),
+                spa_fallback: optional_bool(step, "spa_fallback", &what)?,
                 network,
             })
         })
@@ -481,7 +497,7 @@ fn read_ports(value: &Value) -> Result<Vec<PortDraft>, AuthoringError> {
             // Checked rather than ignored: a workload bound to loopback cannot
             // be reached from outside its sandbox, and the failure arrives as a
             // readiness timeout that says nothing about why.
-            if let Some(bind) = table.get("bind").and_then(Value::as_str)
+            if let Some(bind) = optional_str(table, "bind", &format!("port.{id}"))?
                 && bind != REQUIRED_BIND
             {
                 return Err(malformed(
@@ -529,7 +545,7 @@ fn read_state(value: &Value) -> Result<Vec<StateDraft>, AuthoringError> {
                     format!("{protocol:?} is not a state protocol this build carries; use {STATE_FILESYSTEM_PROTOCOL}"),
                 ));
             }
-            let access = match table.get("access").and_then(Value::as_str) {
+            let access = match optional_str(table, "access", &format!("state.{id}"))? {
                 None | Some("read-write") => StateAccess::ReadWrite,
                 Some("read-only") => StateAccess::ReadOnly,
                 Some(other) => {
@@ -583,9 +599,7 @@ fn read_contract(value: &Value) -> Result<Vec<ObservationDraft>, AuthoringError>
                         &format!("{what}.expect"),
                         &["status", "body_digest"],
                     )?;
-                    let method = require
-                        .get("method")
-                        .and_then(Value::as_str)
+                    let method = optional_str(require, "method", &what)?
                         .unwrap_or("GET")
                         .to_owned();
                     if method != "GET" {
@@ -595,9 +609,7 @@ fn read_contract(value: &Value) -> Result<Vec<ObservationDraft>, AuthoringError>
                              continuation it claims to be observing",
                         ));
                     }
-                    let path = require
-                        .get("path")
-                        .and_then(Value::as_str)
+                    let path = optional_str(require, "path", &what)?
                         .unwrap_or("/")
                         .to_owned();
                     if !path.starts_with('/') {
@@ -674,7 +686,7 @@ fn read_effects(value: &Value) -> Result<EffectClass, AuthoringError> {
         .as_table()
         .ok_or_else(|| malformed("effects", "expected a table"))?;
     only(table, "effects", &["default"])?;
-    match table.get("default").and_then(Value::as_str) {
+    match optional_str(table, "default", "effects")? {
         None => Ok(EffectClass::Pure),
         Some("pure") => Ok(EffectClass::Pure),
         Some("idempotent") => Ok(EffectClass::Idempotent),
@@ -785,6 +797,37 @@ mod tests {
                 .unwrap();
         assert_eq!(declared.derivation.effects, EffectClass::NonRepeatable);
         assert!(parse_capsule_toml(&format!("{base}[effects]\ndefault = \"safe\"\n")).is_err());
+    }
+
+    #[test]
+    fn a_declared_optional_field_of_the_wrong_type_is_refused_not_defaulted() {
+        let schema = "schema = \"ato.capsule/1\"\n";
+        let exec = "[[derive.step]]\nid=\"a\"\nuse=\"ato.process@1\"\nop=\"exec\"\nargv=[\"true\"]\n";
+        let serve = "[[derive.step]]\nid=\"s\"\nuse=\"ato.browser@1\"\nop=\"serve\"\nsource=\"w\"\n";
+        let http = "[[contract.require]]\nid=\"r\"\nuse=\"ato.contract.http@1\"\nport=\"p\"\n";
+        let mut cases: Vec<String> = ["false", "7", "[]"]
+            .iter()
+            .map(|value| format!("{schema}{exec}cwd={value}\n"))
+            .collect();
+        cases.extend([
+            format!("{schema}[effects]\ndefault = 7\n"),
+            format!("{schema}[[input]]\nid=\"w\"\nuse=\"ato.workspace@1\"\npath=1\n"),
+            format!("{schema}{serve}root=1\n"),
+            format!("{schema}{serve}entry=[]\n"),
+            format!("{schema}{serve}spa_fallback=\"yes\"\n"),
+            format!("{schema}[[derive.step]]\nid=\"s\"\nuse=\"ato.browser@1\"\nop=\"serve\"\nsource=1\n"),
+            format!("{schema}[[port]]\nid=\"p\"\nuse=\"ato.http@1\"\nfrom=\"a\"\nbind=0\n"),
+            format!("{schema}[[state]]\nid=\"d\"\nuse=\"ato.state.filesystem@1\"\nmount=\"/d\"\naccess=true\n"),
+            format!("{schema}{http}method=1\n[contract.require.expect]\nstatus=200\n"),
+            format!("{schema}{http}path=false\n[contract.require.expect]\nstatus=200\n"),
+        ]);
+        for text in cases {
+            let error = parse_capsule_toml(&text).unwrap_err();
+            assert_eq!(error.code(), "authoring_malformed", "{text}");
+        }
+        // Omission keeps its default.
+        let omitted = parse_capsule_toml(&format!("{schema}{exec}")).unwrap();
+        assert_eq!(omitted.derivation.steps[0].cwd, "");
     }
 
     #[test]
