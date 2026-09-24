@@ -152,3 +152,73 @@ pub fn admit(
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use ato_formation::authoring::{BoundContract, BoundDerivation};
+
+    use super::*;
+
+    fn derivation(effects: EffectClass) -> BoundDerivation {
+        let mut derivation: BoundDerivation = serde_json::from_value(serde_json::json!({
+            "schema": "ato.derivation/1",
+            "inputs": [], "runtimes": {}, "steps": [], "ports": [], "state": [],
+            "effects": "pure"
+        }))
+        .expect("a minimal derivation");
+        derivation.effects = effects;
+        derivation
+    }
+
+    fn check(effects: EffectClass, authorization: EffectAuthorization<'_>) -> Option<String> {
+        let contract = BoundContract {
+            schema: "ato.contract/1".to_owned(),
+            requirements: Vec::new(),
+        };
+        let derivation = derivation(effects);
+        let spec = AttemptSpec {
+            contract: &contract,
+            contract_ref: "sha256:k",
+            derivation: &derivation,
+            derivation_ref: "sha256:d",
+            shape: CandidateShape::Process,
+            input_refs: Default::default(),
+            instance_snapshot_ref: None,
+        };
+        admit(&spec, authorization, None).map(|failure| failure.code)
+    }
+
+    #[test]
+    fn a_started_run_authorizes_running_its_derivation_and_nothing_more() {
+        let user = EffectAuthorization::UserInvoked {
+            derivation_ref: "sha256:d",
+        };
+        for effects in [
+            EffectClass::Pure,
+            EffectClass::Idempotent,
+            EffectClass::RecordSubstitutable,
+        ] {
+            assert_eq!(check(effects, EffectAuthorization::Unattended), None);
+            assert_eq!(check(effects, user), None);
+        }
+        // Starting a Run is not a confirmation of what it may leave behind.
+        for effects in [
+            EffectClass::RequiresConfirmation,
+            EffectClass::NonRepeatable,
+        ] {
+            assert_eq!(
+                check(effects, EffectAuthorization::Unattended).as_deref(),
+                Some("effect_policy")
+            );
+            assert_eq!(check(effects, user).as_deref(), Some("effect_policy"));
+        }
+        // A Run started for another Derivation authorizes nothing here.
+        let other = EffectAuthorization::UserInvoked {
+            derivation_ref: "sha256:other",
+        };
+        assert_eq!(
+            check(EffectClass::Pure, other).as_deref(),
+            Some("authorization_mismatch")
+        );
+    }
+}

@@ -285,6 +285,7 @@ dependencies = [
  "ato-portable-application",
  "ato-realization-planner",
  "ato-record-writer",
+ "ato-runtime-attempt",
  "ato-runtime-object-graph",
  "ato-sandbox",
  "base64 0.22.1",

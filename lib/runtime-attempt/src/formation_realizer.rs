@@ -336,7 +336,12 @@ fn execution_evidence(
         pid: None,
         container_id: None,
         image: None,
-        platform: None,
+        // A Formation attempt names the platform it verified on.
+        platform: Some(format!(
+            "{}/{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )),
         endpoint,
         run_id: None,
         lease_id: None,
