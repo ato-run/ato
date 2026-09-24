@@ -1504,7 +1504,7 @@ fn portable_instance_worker_claimed(
             bindings: Some(bindings),
         },
     )?;
-    if started.receipt.bundle_sha256 != instance.bundle_sha256
+    if started.receipt.bundle_sha256.as_deref() != Some(instance.bundle_sha256.as_str())
         || started.receipt.contract_ref != instance.contract_ref
         || started.receipt.derivation_ref != instance.selected_derivation_ref
     {
@@ -1912,7 +1912,9 @@ fn run_portable_application(
     println!("Capsule: {}", receipt.contract_ref);
     println!("Route: {}", receipt.derivation_ref);
     println!("Runtime: {}", runtime.label());
-    println!("Bundle: {}", receipt.bundle_sha256);
+    if let Some(bundle) = &receipt.bundle_sha256 {
+        println!("Bundle: {bundle}");
+    }
     println!("URL: {}", runtime.base_url());
     if !receipt.fully_satisfied {
         let failure = receipt
@@ -2359,6 +2361,7 @@ impl PortableLocalRuntime {
                 run_id: None,
                 lease_id: None,
                 attempt_id: None,
+                request_id: None,
                 dependency_fetches: Vec::new(),
                 portability_profile: None,
                 embedded_oci_image_loaded: None,
@@ -2381,6 +2384,7 @@ impl PortableLocalRuntime {
                 run_id: None,
                 lease_id: None,
                 attempt_id: None,
+                request_id: None,
                 dependency_fetches: Vec::new(),
                 portability_profile: None,
                 embedded_oci_image_loaded: None,
@@ -2407,6 +2411,7 @@ impl PortableLocalRuntime {
                     run_id: None,
                     lease_id: None,
                     attempt_id: None,
+                    request_id: None,
                     dependency_fetches: Vec::new(),
                     portability_profile: None,
                     embedded_oci_image_loaded: None,
@@ -2434,6 +2439,7 @@ impl PortableLocalRuntime {
                 run_id: None,
                 lease_id: None,
                 attempt_id: None,
+                request_id: None,
                 dependency_fetches: Vec::new(),
                 portability_profile: None,
                 embedded_oci_image_loaded: None,

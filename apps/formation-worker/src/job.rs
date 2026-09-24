@@ -304,6 +304,22 @@ pub fn run_claimed_job(
         triple,
     )?;
 
+    // A declared effect is a request, not an authorization, and a hosted job
+    // carries no confirmed authorization: the same rule every other entry
+    // applies, before anything of the candidate runs.
+    if !crate::admission::is_disposable(derivation.effects) {
+        return Err(FormationFailure::new(
+            "effect_policy",
+            FailureStage::Admission,
+            format!(
+                "this route declares the effect class {}; a build job runs unattended and \
+                 carries no confirmed authorization for it",
+                crate::admission::effects_name(derivation.effects)
+            ),
+        )
+        .into());
+    }
+
     // ── build ───────────────────────────────────────────────────────────────
     let workspace_root = attempt_root.join("workspace");
     stage_workspace(&source_root, &workspace_root)?;

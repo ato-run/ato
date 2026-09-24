@@ -26,23 +26,23 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use ato_formation::authoring::{AuthoringDraft, EffectClass};
+use ato_formation::authoring::AuthoringDraft;
 use ato_formation::browser::{BrowserContractV0, effective_contract_ref};
 use ato_formation::capsule_toml::parse_capsule_toml;
 use ato_formation::detect::detect;
 use ato_formation::intent::Lane;
-use ato_formation::request::{
-    AttemptStatus, ContractSource, FormationNetworkPolicy, FormationPolicy, FormationRequest,
-    FormationResult, InitialCondition, RuntimeConstraint, SearchBudget,
-};
+use ato_formation::request::AttemptStatus;
 use ato_formation::source::SourceLimits;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
-use crate::browser_verify::BrowserVerifierCommand;
+use crate::attempt::{AttemptRequest, run_attempt};
+use crate::browser_verify::{BrowserVerification, BrowserVerifierCommand};
+use crate::executor::LocalAttemptExecutor;
 use crate::job::{PlannedCandidate, digest, plan_candidate};
-use crate::local::{self, LocalFormation, freeze_archive, host_triple, snapshot_directory};
-use crate::sandbox::{BuildLimits, TOOLCHAIN_ROOT, containment_available};
+use crate::journal::AttemptJournal;
+use crate::local::{self, freeze_archive, host_triple, snapshot_directory};
+use crate::sandbox::{BuildLimits, NetworkPolicy, TOOLCHAIN_ROOT, containment_available};
 
 pub const PROTOCOL: &str = "ato.runtime-network/0";
 /// The one execution environment a host advertises in Phase 1: itself.
@@ -711,21 +711,8 @@ pub fn serve(config: &ServeConfig) -> Result<()> {
     outcome
 }
 
-/// Effect classes a Runtime executes unattended: an attempt of one of these
-/// can fail and be retried elsewhere without anything leaking out of it.
-pub fn is_disposable(effects: EffectClass) -> bool {
-    matches!(
-        effects,
-        EffectClass::Pure | EffectClass::Idempotent | EffectClass::RecordSubstitutable
-    )
-}
-
-fn effects_name(effects: EffectClass) -> String {
-    serde_json::to_value(effects)
-        .ok()
-        .and_then(|value| value.as_str().map(str::to_owned))
-        .unwrap_or_else(|| format!("{effects:?}"))
-}
+use crate::admission::effects_name;
+pub use crate::admission::is_disposable;
 
 /// This Runtime's attestation before it has planned anything.
 fn attestation() -> RuntimeAttestation {
@@ -776,48 +763,17 @@ fn unavailable(ticket: &AttemptTicket, code: &str, message: &str) -> AttemptResu
     report
 }
 
-/// The ticket's route, planned by this Runtime from the ticket's archive:
-/// the canonical Derivation, its identities, effects and requirements. The
-/// same planning a requester does, so the refs must agree.
-fn plan_ticket(
-    ticket: &AttemptTicket,
-    archive: &[u8],
-    work_root: &Path,
-) -> Result<(PlannedCandidate, String)> {
-    std::fs::create_dir_all(work_root)?;
-    let frozen = freeze_archive(
-        archive.to_vec(),
-        &ticket.archive_digest,
-        &std::path::absolute(work_root)?,
-        SourceLimits::default(),
-    )?;
-    let evidence = detect(&frozen.root).context("detection failed")?;
-    let draft: AuthoringDraft = parse_capsule_toml(&ticket.capsule_toml)
-        .map_err(ato_formation::failure::FormationFailure::from)?;
-    let planned = plan_candidate(
-        &draft,
-        &frozen.closure_ref,
-        &evidence,
-        BTreeMap::new(),
-        "/app",
-        &host_triple(),
-    )?;
-    let contract_ref =
-        effective_contract_ref(&planned.contract_ref, ticket.browser_contract.as_ref());
-    Ok((planned, contract_ref))
-}
-
-/// Run one ticket through the local Formation machinery — frozen archive,
-/// the authored route and nothing else, contained build, temporary
-/// realization, typed and browser verification — and report what happened.
+/// Run one ticket through the common attempt entry — the ticket's frozen
+/// archive, the route it names and nothing else — and report what happened.
 ///
 /// Before anything of the candidate runs, this Runtime re-establishes what
-/// the ticket is from the archive and the route alone, and refuses it when:
-/// the environment is not one it executes; it asks for bindings; its own
-/// planning does not reach the ticket's refs; the canonical effect class is
-/// not disposable (nothing here is run unattended that could leave an effect
-/// behind). Platform, containment, process and browser-verifier admission
-/// follow in the local driver, still before execution.
+/// the ticket is from the archive and the route alone — planned ONCE, and
+/// that plan is the one executed — and refuses it when the environment is
+/// not one it executes, it asks for bindings, or its own planning does not
+/// reach the ticket's refs. Effects, platform, containment and verifier
+/// admission are the common admission's, still before execution. Whether
+/// anything ran is read from the attempt's start record, never inferred
+/// from how the attempt ended.
 pub fn execute_ticket(
     config: &ServeConfig,
     ticket: &AttemptTicket,
@@ -844,14 +800,47 @@ pub fn execute_ticket(
         );
     }
     let attempt_root = config.work_root.join(&ticket.attempt_id);
-    let planned = plan_ticket(ticket, &archive, &attempt_root.join("preflight"));
-    let _ = std::fs::remove_dir_all(attempt_root.join("preflight"));
-    let (planned, contract_ref) = match planned {
+    let report = execute_planned_ticket(config, ticket, archive, &attempt_root, &mut attested);
+    let _ = std::fs::remove_dir_all(&attempt_root);
+    report
+}
+
+fn execute_planned_ticket(
+    config: &ServeConfig,
+    ticket: &AttemptTicket,
+    archive: Vec<u8>,
+    attempt_root: &Path,
+    attested: &mut RuntimeAttestation,
+) -> AttemptResultReport {
+    let planned = (|| -> Result<_> {
+        std::fs::create_dir_all(attempt_root)?;
+        let frozen = freeze_archive(
+            archive,
+            &ticket.archive_digest,
+            &std::path::absolute(attempt_root)?,
+            SourceLimits::default(),
+        )?;
+        let evidence = detect(&frozen.root).context("detection failed")?;
+        let draft: AuthoringDraft = parse_capsule_toml(&ticket.capsule_toml)
+            .map_err(ato_formation::failure::FormationFailure::from)?;
+        let planned = plan_candidate(
+            &draft,
+            &frozen.closure_ref,
+            &evidence,
+            BTreeMap::new(),
+            "/app",
+            &host_triple(),
+        )?;
+        let contract_ref =
+            effective_contract_ref(&planned.contract_ref, ticket.browser_contract.as_ref());
+        Ok((frozen, planned, contract_ref))
+    })();
+    let (frozen, planned, contract_ref) = match planned {
         Ok(planned) => planned,
         Err(error) => {
             return refused(
                 ticket,
-                attested,
+                attested.clone(),
                 "ticket_unplannable",
                 &format!("{error:#}"),
             );
@@ -869,7 +858,7 @@ pub fn execute_ticket(
     if planned.derivation_ref != ticket.derivation_ref || contract_ref != ticket.contract_ref {
         return refused(
             ticket,
-            attested,
+            attested.clone(),
             "ticket_mismatch",
             &format!(
                 "planned {}/{contract_ref}, the ticket names {}/{}",
@@ -877,119 +866,66 @@ pub fn execute_ticket(
             ),
         );
     }
-    if !is_disposable(planned.derivation.effects) {
-        return refused(
-            ticket,
-            attested,
-            "effect_policy",
-            &format!(
-                "the route's effect class is {}; a Runtime Network attempt runs unattended and \
-                 may be retried elsewhere, so only pure, idempotent or record-substitutable \
-                 routes are executed",
-                effects_name(planned.derivation.effects)
-            ),
-        );
-    }
 
     let network = match ticket.network.as_str() {
-        "dependency-resolution" => FormationNetworkPolicy::DependencyResolution,
-        _ => FormationNetworkPolicy::Denied,
+        "dependency-resolution" => NetworkPolicy::DependencyResolution,
+        _ => NetworkPolicy::Denied,
     };
-    let request = FormationRequest {
-        initial_condition: InitialCondition::Archive {
-            bytes: archive,
-            expected_digest: ticket.archive_digest.clone(),
+    // A Runtime Network attempt is never verified outside the verifier
+    // sandbox, whatever the worker was started with.
+    let browser = ticket
+        .browser_contract
+        .as_ref()
+        .map(|contract| BrowserVerification {
+            contract: contract.clone(),
+            verifier: config
+                .browser_verifier
+                .clone()
+                .filter(BrowserVerifierCommand::is_contained),
+            budget: Default::default(),
+        });
+    let outcome = run_attempt(
+        &AttemptRequest {
+            // Every attempt of one satisfy request spends from it: a
+            // redelivered ticket, or another route after an UNKNOWN one, is
+            // held by the same record.
+            request_id: &ticket.satisfy_id,
+            attempt_id: &ticket.attempt_id,
+            label: "authored",
+            candidate: &planned,
+            contract_ref: &contract_ref,
+            source_root: &frozen.root,
+            runtime_id: &ticket.runtime_id,
+            profile: &local::probe_local_runtime(),
+            network,
+            browser: browser.as_ref(),
+            attempt_root,
+            shim: &config.shim,
         },
-        // The route the ticket names, verbatim. No preset, no other route.
-        contract: ContractSource::Authored {
-            toml: ticket.capsule_toml.clone(),
+        &LocalAttemptExecutor {
+            shim: config.shim.clone(),
+            network,
+            limits: BuildLimits::default(),
         },
-        runtime: RuntimeConstraint::Exact {
-            runtime_id: "local".to_owned(),
-        },
-        policy: FormationPolicy { network },
-        budget: SearchBudget { max_attempts: 1 },
-        browser_contract: ticket.browser_contract.clone(),
-    };
-    let env = LocalFormation {
-        work_root: attempt_root.clone(),
-        out_dir: config.out_dir.clone(),
-        shim: config.shim.clone(),
-        limits: BuildLimits::default(),
-        source_limits: SourceLimits::default(),
-        // A Runtime Network attempt is never verified outside the verifier
-        // sandbox, whatever the worker was started with.
-        browser_verifier: config
-            .browser_verifier
-            .clone()
-            .filter(BrowserVerifierCommand::is_contained),
-        browser_budget: Default::default(),
-    };
-    // Evidence names this Runtime as the ticket does, not as `local`.
-    let result = local::run_as(
-        &request,
-        &env,
-        &local::local_executor(&request, &env),
-        &ticket.runtime_id,
+        &AttemptJournal::new(config.out_dir.join("attempt-records")),
     );
-    let _ = std::fs::remove_dir_all(&attempt_root);
-    let result = match result {
-        Ok(result) => result,
-        Err(error) => {
-            return AttemptResultReport {
-                attestation: attested,
-                ..unavailable(ticket, "formation_error", &format!("{error:#}"))
-            };
-        }
+    attested.execution_started = outcome.execution_started;
+    let mut attempt = outcome.attempt;
+    let materialization_ref = match &outcome.verified {
+        Some(executed) => match local::store_candidate(executed, &config.out_dir) {
+            Ok(reference) => Some(reference),
+            Err(error) => {
+                attempt.status = AttemptStatus::Failed;
+                attempt.failure = Some(ato_formation::request::AttemptFailure {
+                    code: "artifact_store_failed".to_owned(),
+                    stage: "publish".to_owned(),
+                    message: crate::api::bounded_reason(&format!("{error:#}")),
+                });
+                None
+            }
+        },
+        None => None,
     };
-    let (attempts, materialization_ref) = match &result {
-        FormationResult::Formed {
-            attempts,
-            verified_routes,
-            ..
-        } => (
-            attempts,
-            verified_routes
-                .first()
-                .map(|r| r.materialization_ref.clone()),
-        ),
-        FormationResult::NoVerifiedRoute { attempts, .. } => (attempts, None),
-    };
-    let Some(attempt) = attempts.first() else {
-        return AttemptResultReport {
-            attestation: attested,
-            ..unavailable(
-                ticket,
-                "formation_empty",
-                "the Formation produced no attempt",
-            )
-        };
-    };
-    // Admission in the local driver (platform, containment, process,
-    // browser verifier) refuses before anything runs.
-    attested.execution_started = attempt.status != AttemptStatus::Filtered;
-
-    // Planned twice from the same bytes; still, never report a pass under
-    // refs other than the ticket's.
-    if attempt.derivation_ref.as_deref() != Some(ticket.derivation_ref.as_str())
-        || attempt.contract_ref.as_deref() != Some(ticket.contract_ref.as_str())
-    {
-        let mut report = refused(
-            ticket,
-            attested.clone(),
-            "ticket_mismatch",
-            &format!(
-                "planned {:?}/{:?}, the ticket names {}/{}",
-                attempt.derivation_ref,
-                attempt.contract_ref,
-                ticket.derivation_ref,
-                ticket.contract_ref
-            ),
-        );
-        report.attestation.execution_started = attested.execution_started;
-        report.formation_attempt = serde_json::to_value(attempt).ok();
-        return report;
-    }
 
     let failure_code = attempt.failure.as_ref().map(|f| f.code.as_str());
     let outcome = match (attempt.status, failure_code) {
@@ -1002,6 +938,9 @@ pub fn execute_ticket(
     let mut receipts = Vec::new();
     if let Some(verification) = &attempt.verification {
         receipts.push(serde_json::json!({ "kind": "http_contract", "verification": verification }));
+    }
+    if let Some(receipt) = &attempt.receipt {
+        receipts.push(serde_json::json!({ "kind": "contract_verification", "receipt": receipt }));
     }
     if let Some(browser) = &attempt.browser_verification {
         receipts.push(serde_json::json!({ "kind": "browser_contract", "receipt": browser }));
@@ -1017,8 +956,8 @@ pub fn execute_ticket(
             stage: f.stage.clone(),
             message: f.message.clone(),
         }),
-        formation_attempt: serde_json::to_value(attempt).ok(),
+        formation_attempt: serde_json::to_value(&attempt).ok(),
         verifier_receipts: receipts,
-        attestation: attested,
+        attestation: attested.clone(),
     }
 }
