@@ -86,6 +86,7 @@ fn target() -> BrowserTarget {
     BrowserTarget {
         runtime_id: "local".to_owned(),
         endpoint: "http://127.0.0.1:41234/".to_owned(),
+        attempt_id: None,
     }
 }
 

@@ -9,6 +9,12 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use ato_formation::browser::{
+    BROWSER_VERIFIER_PROTOCOL, BrowserContractV0, BrowserEvent, BrowserEvidence, BrowserTarget,
+    BrowserVerdict, BrowserVerificationReceipt, BrowserVerificationResult, CriterionResult,
+    EVENT_NAVIGATION, EVIDENCE_BROWSER_SNAPSHOT, JudgeDecision, PRIMARY_CRITERION_ID,
+    VerifierContainment, VerifierIdentity, effective_contract_ref,
+};
 use ato_formation_worker::runtime_network::{
     AttemptResultReport, AttemptTicket, NATIVE_ENVIRONMENT, RuntimeConstraintWire, SatisfyBudget,
     SatisfyPolicy, ServeConfig, Submission, execute_ticket, prepare_submission,
@@ -301,69 +307,319 @@ fn a_passing_attempt_carries_a_receipt_bound_to_its_attempt() {
     assert_eq!(receipt["observations"][0]["evidence"]["status"], 200);
 }
 
+// ── the requester accepts a route only with evidence for the whole K ──────
+
 /// The status a coordinator returns once a route passed, built from the
-/// Runtime's own report.
-fn settled(ticket: &AttemptTicket, report: &AttemptResultReport) -> serde_json::Value {
+/// Runtime's own report: the shape of `satisfyView` / `routeView`.
+fn settled(
+    ticket: &AttemptTicket,
+    effective_contract_ref: &str,
+    receipts: Vec<serde_json::Value>,
+) -> serde_json::Value {
     serde_json::json!({
         "satisfy_id": ticket.satisfy_id,
         "status": "satisfied",
         "attempts": [{
             "attempt_id": ticket.attempt_id,
             "runtime_id": ticket.runtime_id,
+            "environment_id": ticket.environment_id,
             "derivation_ref": ticket.derivation_ref,
-            "status": report.outcome,
+            "status": "pass",
         }],
         "verified_routes": [{
+            "attempt_id": ticket.attempt_id,
+            "effective_contract_ref": effective_contract_ref,
             "derivation_ref": ticket.derivation_ref,
             "runtime_id": ticket.runtime_id,
-            "verifier_receipts": report.verifier_receipts,
+            "environment_id": ticket.environment_id,
+            "verifier_receipts": receipts,
         }],
     })
 }
 
-#[test]
-fn the_requester_counts_a_route_only_with_an_acceptable_receipt() {
-    use ato_formation_worker::runtime_network::accept_verified_routes;
+fn base_receipt(report: &AttemptResultReport) -> serde_json::Value {
+    report
+        .verifier_receipts
+        .iter()
+        .find(|receipt| receipt["kind"] == "contract_verification")
+        .expect("a contract verification receipt")
+        .clone()
+}
 
+fn accepts(
+    submission: &Submission,
+    satisfy_id: &str,
+    status: &serde_json::Value,
+) -> Result<(), String> {
+    let (accepted, refused) = ato_formation_worker::runtime_network::accept_verified_routes(
+        submission, satisfy_id, status,
+    );
+    match (accepted.len(), refused.first()) {
+        (1, None) => Ok(()),
+        (0, Some(reason)) => Err(reason.clone()),
+        other => panic!("unexpected split {other:?}"),
+    }
+}
+
+/// A browser receipt as a Runtime writes it for `attempt_id`.
+fn browser_receipt(
+    contract: &BrowserContractV0,
+    verdict: BrowserVerdict,
+    attempt_id: &str,
+) -> serde_json::Value {
+    let choice = match verdict {
+        BrowserVerdict::Pass => Some("complete"),
+        BrowserVerdict::Fail => Some("incomplete"),
+        BrowserVerdict::Inconclusive => None,
+    };
+    let result = BrowserVerificationResult {
+        protocol: BROWSER_VERIFIER_PROTOCOL.to_owned(),
+        verdict,
+        criteria: vec![CriterionResult {
+            id: PRIMARY_CRITERION_ID.to_owned(),
+            verdict,
+            decision: choice.map(|choice| JudgeDecision {
+                choice: choice.to_owned(),
+                confidence: 0.9,
+                probabilities: [(choice.to_owned(), 0.95)].into(),
+                model: "jev-1.13.0".to_owned(),
+            }),
+            rounds: 1,
+            evidence_refs: vec!["e1".to_owned()],
+            reason: None,
+        }],
+        evidence: vec![BrowserEvidence {
+            id: "e1".to_owned(),
+            kind: EVIDENCE_BROWSER_SNAPSHOT.to_owned(),
+            sequence: 1,
+            url: Some("http://127.0.0.1:41234/".to_owned()),
+            title: Some("hi".to_owned()),
+            facts: vec!["the page says hi".to_owned()],
+            text_excerpt: None,
+        }],
+        observed_events: vec![BrowserEvent {
+            sequence: 1,
+            kind: EVENT_NAVIGATION.to_owned(),
+            url: Some("http://127.0.0.1:41234/".to_owned()),
+        }],
+        action_trace: Vec::new(),
+        verifier: VerifierIdentity {
+            verifier: "formation-browser-verifier/0".to_owned(),
+            stagehand_version: None,
+            browser_version: None,
+            agent_model: None,
+            judge_model: Some("jev-1.13.0".to_owned()),
+        },
+        reason: None,
+    };
+    let mut receipt = BrowserVerificationReceipt::new(
+        contract,
+        BrowserTarget {
+            runtime_id: "rt_test".to_owned(),
+            endpoint: "http://127.0.0.1:41234/".to_owned(),
+            attempt_id: Some(attempt_id.to_owned()),
+        },
+        result,
+    )
+    .expect("a valid result");
+    receipt.containment = Some(VerifierContainment {
+        containment: "bwrap".to_owned(),
+        filesystem: "allowlisted".to_owned(),
+        network: "loopback candidate only".to_owned(),
+        browser_process: "own pid namespace".to_owned(),
+        secrets: "fd".to_owned(),
+    });
+    serde_json::json!({ "kind": "browser_contract", "receipt": receipt })
+}
+
+/// One real pass of the base route, then the request as it looks with and
+/// without a browser Contract on top.
+fn passed_base() -> (
+    tempfile::TempDir,
+    Submission,
+    AttemptTicket,
+    AttemptResultReport,
+) {
     let dir = site("");
     let scratch = tempfile::tempdir().expect("scratch");
     let submission = submit(dir.path(), scratch.path());
     let (ticket, archive) = ticket(&submission);
     let report = run(&ticket, archive, scratch.path());
     assert_eq!(report.outcome, "pass", "{:?}", report.failure);
+    drop(dir);
+    (scratch, submission, ticket, report)
+}
 
-    let status = settled(&ticket, &report);
-    let (accepted, refused) = accept_verified_routes(&submission, &ticket.satisfy_id, &status);
-    assert_eq!((accepted.len(), refused.len()), (1, 0), "{refused:?}");
+fn with_browser(mut submission: Submission, contract: &BrowserContractV0) -> Submission {
+    submission.request.contract_ref =
+        effective_contract_ref(&submission.request.base_contract_ref, Some(contract));
+    submission.request.browser_contract = Some(contract.clone());
+    submission
+}
+
+#[test]
+fn a_base_route_is_accepted_only_with_a_satisfied_receipt_for_its_exact_attempt() {
+    let (_scratch, submission, ticket, report) = passed_base();
+    let effective = submission.request.contract_ref.clone();
+    let status = settled(&ticket, &effective, vec![base_receipt(&report)]);
+    assert_eq!(accepts(&submission, &ticket.satisfy_id, &status), Ok(()));
 
     // Another request's receipt, replayed under this one.
-    let (accepted, refused) = accept_verified_routes(&submission, "sat_other", &status);
-    assert!(accepted.is_empty());
+    let replayed = accepts(&submission, "sat_other", &status).unwrap_err();
+    assert!(replayed.contains("receipt_request_mismatch"), "{replayed}");
+
+    // A: a pass label over a well-formed FAILED receipt.
+    let mut failing = base_receipt(&report);
+    let observation = &mut failing["receipt"]["observations"][0];
+    observation["outcome"] = "failed".into();
+    observation["failure"] = "http_status_mismatch: GET / returned 500".into();
+    observation["evidence"]["status"] = 500.into();
+    failing["receipt"]["fully_satisfied"] = false.into();
+    let refused = accepts(
+        &submission,
+        &ticket.satisfy_id,
+        &settled(&ticket, &effective, vec![failing]),
+    )
+    .unwrap_err();
     assert!(
-        refused[0].contains("receipt_request_mismatch"),
-        "{refused:?}"
+        refused.contains("receipt_contract_not_satisfied"),
+        "{refused}"
     );
 
     // A verdict whose evidence was edited in transit.
-    let mut forged = status.clone();
-    for receipt in forged["verified_routes"][0]["verifier_receipts"]
-        .as_array_mut()
-        .unwrap()
-    {
-        if receipt["kind"] == "contract_verification" {
-            receipt["receipt"]["observations"][0]["evidence"]["status"] = 500.into();
-        }
-    }
-    let (accepted, refused) = accept_verified_routes(&submission, &ticket.satisfy_id, &forged);
-    assert!(accepted.is_empty());
+    let mut forged = base_receipt(&report);
+    forged["receipt"]["observations"][0]["evidence"]["status"] = 500.into();
+    let refused = accepts(
+        &submission,
+        &ticket.satisfy_id,
+        &settled(&ticket, &effective, vec![forged]),
+    )
+    .unwrap_err();
     assert!(
-        refused[0].contains("receipt_evidence_inconsistent"),
-        "{refused:?}"
+        refused.contains("receipt_evidence_inconsistent"),
+        "{refused}"
     );
 
-    // A route no passing attempt reported.
-    let mut orphan = status;
+    // F: the route claims a different effective K.
+    let other = settled(&ticket, "sha256:other", vec![base_receipt(&report)]);
+    let refused = accepts(&submission, &ticket.satisfy_id, &other).unwrap_err();
+    assert!(refused.contains("route_contract_mismatch"), "{refused}");
+
+    // A route whose named attempt did not pass.
+    let mut orphan = status.clone();
     orphan["attempts"][0]["status"] = "fail".into();
-    let (accepted, _) = accept_verified_routes(&submission, &ticket.satisfy_id, &orphan);
-    assert!(accepted.is_empty());
+    let refused = accepts(&submission, &ticket.satisfy_id, &orphan).unwrap_err();
+    assert!(refused.contains("route_attempt_not_passed"), "{refused}");
+}
+
+#[test]
+fn an_attempt_is_matched_by_its_environment_not_only_its_runtime() {
+    let (_scratch, submission, ticket, report) = passed_base();
+    let effective = submission.request.contract_ref.clone();
+    // G: the same Runtime also passed the same D in another environment.
+    let other_env = serde_json::json!({
+        "attempt_id": "att_other_env",
+        "runtime_id": ticket.runtime_id,
+        "environment_id": "container",
+        "derivation_ref": ticket.derivation_ref,
+        "status": "pass",
+    });
+
+    // A view without attempt ids: the native route resolves to the native
+    // attempt, whose receipt it carries.
+    let mut status = settled(&ticket, &effective, vec![base_receipt(&report)]);
+    status["attempts"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, other_env.clone());
+    status["verified_routes"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("attempt_id");
+    assert_eq!(accepts(&submission, &ticket.satisfy_id, &status), Ok(()));
+
+    // Named attempt in another environment: refused, never re-matched.
+    status["verified_routes"][0]["attempt_id"] = "att_other_env".into();
+    let refused = accepts(&submission, &ticket.satisfy_id, &status).unwrap_err();
+    assert!(refused.contains("route_attempt_mismatch"), "{refused}");
+
+    // The receipt of the other environment's attempt, under this route.
+    let mut status = settled(&ticket, &effective, vec![base_receipt(&report)]);
+    status["attempts"].as_array_mut().unwrap().push(other_env);
+    status["verified_routes"][0]["environment_id"] = "container".into();
+    status["verified_routes"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("attempt_id");
+    let refused = accepts(&submission, &ticket.satisfy_id, &status).unwrap_err();
+    assert!(refused.contains("receipt_attempt_mismatch"), "{refused}");
+}
+
+#[test]
+fn a_browser_contract_route_needs_a_passing_browser_receipt_from_the_same_attempt() {
+    let (_scratch, submission, ticket, report) = passed_base();
+    let contract = BrowserContractV0::from_prompt("The page greets the visitor.").unwrap();
+    let submission = with_browser(submission, &contract);
+    let effective = submission.request.contract_ref.clone();
+    assert_ne!(effective, submission.request.base_contract_ref);
+    let with = |browser: Option<serde_json::Value>| {
+        let mut receipts = vec![base_receipt(&report)];
+        receipts.extend(browser);
+        settled(&ticket, &effective, receipts)
+    };
+
+    // H: base PASS, browser PASS, exact route and attempt.
+    let passing = browser_receipt(&contract, BrowserVerdict::Pass, &ticket.attempt_id);
+    assert_eq!(
+        accepts(
+            &submission,
+            &ticket.satisfy_id,
+            &with(Some(passing.clone()))
+        ),
+        Ok(())
+    );
+
+    // B: base PASS and no browser receipt.
+    let refused = accepts(&submission, &ticket.satisfy_id, &with(None)).unwrap_err();
+    assert!(refused.contains("browser_receipt_missing"), "{refused}");
+
+    // C / D: a browser verdict that is not a pass.
+    for verdict in [BrowserVerdict::Fail, BrowserVerdict::Inconclusive] {
+        let receipt = browser_receipt(&contract, verdict, &ticket.attempt_id);
+        let refused = accepts(&submission, &ticket.satisfy_id, &with(Some(receipt))).unwrap_err();
+        assert!(refused.contains("not pass"), "{verdict:?}: {refused}");
+    }
+
+    // E: a PASS from another attempt.
+    let elsewhere = browser_receipt(&contract, BrowserVerdict::Pass, "att_other");
+    let refused = accepts(&submission, &ticket.satisfy_id, &with(Some(elsewhere))).unwrap_err();
+    assert!(refused.contains("browser_receipt_rejected"), "{refused}");
+
+    // A PASS label over criteria that do not add up to one.
+    let mut relabelled =
+        browser_receipt(&contract, BrowserVerdict::Inconclusive, &ticket.attempt_id);
+    relabelled["receipt"]["overall"] = "pass".into();
+    let refused = accepts(&submission, &ticket.satisfy_id, &with(Some(relabelled))).unwrap_err();
+    assert!(refused.contains("browser_receipt_rejected"), "{refused}");
+
+    // A PASS for a different browser Contract.
+    let other = BrowserContractV0::from_prompt("Something else entirely.").unwrap();
+    let foreign = browser_receipt(&other, BrowserVerdict::Pass, &ticket.attempt_id);
+    let refused = accepts(&submission, &ticket.satisfy_id, &with(Some(foreign))).unwrap_err();
+    assert!(refused.contains("another browser Contract"), "{refused}");
+
+    // An uncontained verifier's PASS.
+    let mut uncontained = passing;
+    uncontained["receipt"]["containment"]["containment"] = "none".into();
+    let refused = accepts(&submission, &ticket.satisfy_id, &with(Some(uncontained))).unwrap_err();
+    assert!(refused.contains("contained"), "{refused}");
+
+    // The base-only effective ref does not stand in for base + browser.
+    let base_only = settled(
+        &ticket,
+        &submission.request.base_contract_ref,
+        vec![base_receipt(&report)],
+    );
+    let refused = accepts(&submission, &ticket.satisfy_id, &base_only).unwrap_err();
+    assert!(refused.contains("route_contract_mismatch"), "{refused}");
 }

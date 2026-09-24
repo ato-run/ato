@@ -490,65 +490,42 @@ pub fn prepare_submission(
     })
 }
 
-/// The verified routes of a settled satisfy request whose receipts are
-/// acceptable as the result of exactly the attempt that reported them.
+/// The verified routes of a settled satisfy request that prove the complete
+/// effective K, split from those that do not (with the reason).
 ///
-/// The coordinator authenticates the Runtime and holds the fence; this
-/// checks the claim itself against the K the requester froze: the right K,
-/// D, attempt and request, the exact observation set, and verdicts that
-/// follow from their evidence. A route without an acceptable receipt is
-/// returned as a refusal, never as verified.
+/// The coordinator authenticates the Runtime and holds the fence; the
+/// judgement of what the receipts prove is
+/// [`ato_formation::receipt::accept_verified_route`], against the K this
+/// requester froze.
 pub fn accept_verified_routes(
     submission: &Submission,
     satisfy_id: &str,
     status: &serde_json::Value,
 ) -> (Vec<serde_json::Value>, Vec<String>) {
-    use ato_formation::receipt::{ReceiptAssignment, accept_receipt_json};
+    use ato_formation::receipt::{VerifiedRouteAssignment, accept_verified_route};
+    let request = &submission.request;
+    let assignment = VerifiedRouteAssignment {
+        request_id: satisfy_id,
+        effective_contract_ref: &request.contract_ref,
+        base_contract_ref: &request.base_contract_ref,
+        contracts: &submission.contracts,
+        browser_contract: request.browser_contract.as_ref(),
+    };
     let empty = Vec::new();
     let attempts = status["attempts"].as_array().unwrap_or(&empty);
     let mut accepted = Vec::new();
     let mut refused = Vec::new();
     for route in status["verified_routes"].as_array().unwrap_or(&empty) {
-        let derivation_ref = route["derivation_ref"].as_str().unwrap_or_default();
-        let runtime_id = route["runtime_id"].as_str().unwrap_or_default();
-        let outcome = (|| -> std::result::Result<(), String> {
-            let contract = submission
-                .contracts
-                .get(derivation_ref)
-                .ok_or("the route names a Derivation this request did not authorize")?;
-            let attempt_id = attempts
-                .iter()
-                .find(|attempt| {
-                    attempt["derivation_ref"] == derivation_ref
-                        && attempt["runtime_id"] == runtime_id
-                        && attempt["status"] == "pass"
-                })
-                .and_then(|attempt| attempt["attempt_id"].as_str())
-                .ok_or("no passing attempt reported this route")?;
-            let receipt = route["verifier_receipts"]
-                .as_array()
-                .and_then(|receipts| {
-                    receipts
-                        .iter()
-                        .find(|receipt| receipt["kind"] == "contract_verification")
-                })
-                .ok_or("the route carries no contract verification receipt")?;
-            accept_receipt_json(
-                &ReceiptAssignment {
-                    contract,
-                    contract_ref: &submission.request.base_contract_ref,
-                    derivation_ref,
-                    attempt_id,
-                    request_id: Some(satisfy_id),
-                },
-                &receipt["receipt"],
-            )
-            .map_err(|rejection| format!("{}: {}", rejection.code, rejection.detail))?;
-            Ok(())
-        })();
-        match outcome {
+        match accept_verified_route(&assignment, route, attempts) {
             Ok(()) => accepted.push(route.clone()),
-            Err(reason) => refused.push(format!("{derivation_ref} on {runtime_id}: {reason}")),
+            Err(rejection) => refused.push(format!(
+                "{} on {}/{}: {}: {}",
+                route["derivation_ref"].as_str().unwrap_or("?"),
+                route["runtime_id"].as_str().unwrap_or("?"),
+                route["environment_id"].as_str().unwrap_or("?"),
+                rejection.code,
+                rejection.detail
+            )),
         }
     }
     (accepted, refused)

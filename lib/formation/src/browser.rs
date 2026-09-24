@@ -321,14 +321,21 @@ pub struct BrowserVerificationResult {
     pub reason: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BrowserTarget {
     pub runtime_id: String,
     pub endpoint: String,
+    /// The attempt whose candidate was browsed, so a receipt cannot be
+    /// replayed under another attempt. Absent from receipts written before
+    /// attempts were named.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
 }
 
 /// The record of one browser verification, bound to its Contract and target.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BrowserVerificationReceipt {
     /// The browser Contract's own ref. The K the Formation verified is the
     /// effective ref, which names this one.
@@ -346,7 +353,7 @@ pub struct BrowserVerificationReceipt {
     pub reason: Option<String>,
     /// How the verifier and its browser were isolated, as the Runtime that
     /// launched them set it up — never the helper's own claim. No host path.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub containment: Option<VerifierContainment>,
 }
 
@@ -565,6 +572,84 @@ pub fn validate_result(
         });
     }
     Ok(actual)
+}
+
+/// Why a received browser receipt cannot count as a PASS of its Contract
+/// for one attempt.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum BrowserReceiptRejection {
+    #[error("the browser receipt is not a receipt: {0}")]
+    Malformed(String),
+    #[error("the browser receipt is about another browser Contract")]
+    ContractMismatch,
+    #[error("the browser receipt is about attempt {found:?} on {runtime:?}, not {expected}")]
+    AttemptMismatch {
+        expected: String,
+        found: Option<String>,
+        runtime: String,
+    },
+    #[error("the browser verifier did not run contained")]
+    Uncontained,
+    #[error("the browser verification does not hold: {0}")]
+    Invalid(BrowserResultError),
+    #[error("the browser verification is {0:?}, not pass")]
+    NotPassed(BrowserVerdict),
+}
+
+/// Accept a browser receipt that arrived from elsewhere as a PASS of
+/// `contract` by exactly `attempt_id` on `runtime_id`.
+///
+/// The verdict is not taken from the receipt: its criteria, evidence and
+/// events are put back through [`validate_result`], the same rules the
+/// Runtime applied when it wrote the receipt, and the overall verdict is
+/// recomputed from them.
+pub fn accept_browser_receipt(
+    contract: &BrowserContractV0,
+    runtime_id: &str,
+    attempt_id: &str,
+    receipt: &serde_json::Value,
+) -> Result<BrowserVerificationReceipt, BrowserReceiptRejection> {
+    let receipt: BrowserVerificationReceipt = serde_json::from_value(receipt.clone())
+        .map_err(|error| BrowserReceiptRejection::Malformed(error.to_string()))?;
+    if receipt.browser_contract_ref != contract.contract_ref()
+        || receipt.original_prompt_digest != contract.original_prompt_digest()
+    {
+        return Err(BrowserReceiptRejection::ContractMismatch);
+    }
+    if receipt.target.attempt_id.as_deref() != Some(attempt_id)
+        || receipt.target.runtime_id != runtime_id
+    {
+        return Err(BrowserReceiptRejection::AttemptMismatch {
+            expected: attempt_id.to_owned(),
+            found: receipt.target.attempt_id.clone(),
+            runtime: receipt.target.runtime_id.clone(),
+        });
+    }
+    if receipt
+        .containment
+        .as_ref()
+        .is_none_or(|containment| containment.containment == "none")
+    {
+        return Err(BrowserReceiptRejection::Uncontained);
+    }
+    let verdict = validate_result(
+        contract,
+        &BrowserVerificationResult {
+            protocol: BROWSER_VERIFIER_PROTOCOL.to_owned(),
+            verdict: receipt.overall,
+            criteria: receipt.criteria.clone(),
+            evidence: receipt.evidence.clone(),
+            observed_events: receipt.observed_events.clone(),
+            action_trace: receipt.actions.clone(),
+            verifier: receipt.verifier.clone(),
+            reason: receipt.reason.clone(),
+        },
+    )
+    .map_err(BrowserReceiptRejection::Invalid)?;
+    if verdict != BrowserVerdict::Pass {
+        return Err(BrowserReceiptRejection::NotPassed(verdict));
+    }
+    Ok(receipt)
 }
 
 impl BrowserVerificationReceipt {
@@ -830,6 +915,7 @@ mod tests {
             BrowserTarget {
                 runtime_id: "local".to_owned(),
                 endpoint: "http://127.0.0.1:1/".to_owned(),
+                attempt_id: None,
             },
             "none",
             "browser_verifier_unavailable",
