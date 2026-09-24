@@ -62,9 +62,9 @@ use ato_portable_application::portability_plan::{PortableExportProfile, plan_por
 use ato_portable_application::{
     OCI_CPU_MILLIS_RUNTIME, OCI_IMAGE_RUNTIME, OCI_MEMORY_BYTES_RUNTIME, OCI_PIDS_LIMIT_RUNTIME,
     OCI_PLATFORM_RUNTIME, PYTHON_RUNTIME, PortableRealizationKind, StaticApplicationAsset,
-    StaticApplicationServer, StaticApplicationState, ValidatedPortableApplication,
-    build_authored_bundle_v2, bundle_sha256, materialize_tree, resolve_application_bindings,
-    validate_bundle_for_derivation,
+    StaticApplicationServer, StaticApplicationServerExt, StaticApplicationState,
+    ValidatedPortableApplication, build_authored_bundle_v2, bundle_sha256, materialize_tree,
+    resolve_application_bindings, validate_bundle_for_derivation,
 };
 use ato_realization_planner::{
     MaterializationCandidate, Placement, PlannerPolicy, RealizationPlanner, TargetEnvironment,

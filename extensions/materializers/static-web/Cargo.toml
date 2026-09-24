@@ -9,7 +9,9 @@ description = "Deterministic immutable Static Web Bundle materialization"
 dist = false
 
 [package.metadata.ato-architecture]
-layer = "app"
+# A materializer with no workspace dependencies, like replay and snapshot;
+# the shared Runtime crate serves and observes what it produces.
+layer = "materializer"
 
 [dependencies]
 anyhow = "1"

@@ -12,6 +12,7 @@ members = [
     "lib/kernel",
     "lib/local-execution",
     "lib/formation",
+    "lib/runtime-attempt",
     "lib/objects",
     "lib/sandbox",
     "extensions/adapters/api",

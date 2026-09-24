@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::build::{BuildAttempt, control_policy_path, output_root, run_build};
-use crate::job::{PlannedCandidate, stage_workspace};
-use crate::sandbox::{BuildSandbox, NetworkPolicy};
+use crate::build_sandbox::{BuildSandbox, NetworkPolicy};
+use crate::plan::{PlannedCandidate, stage_workspace};
 use crate::static_lane::StaticFormationOutput;
 
 /// Everything one attempt needs, already decided: the bound route, the
@@ -42,7 +42,7 @@ pub struct LocalAttemptExecutor {
     /// Any host that runs a contained build must expose that entry point.
     pub shim: PathBuf,
     pub network: NetworkPolicy,
-    pub limits: crate::sandbox::BuildLimits,
+    pub limits: crate::build_sandbox::BuildLimits,
 }
 
 impl AttemptExecutor for LocalAttemptExecutor {
@@ -75,7 +75,7 @@ impl AttemptExecutor for LocalAttemptExecutor {
                 policy_host_path: &control_policy_path(attempt_root)?,
                 network: self.network,
                 limits: self.limits,
-                toolchain: crate::sandbox::ToolchainAccess::ReadOnly,
+                toolchain: crate::build_sandbox::ToolchainAccess::ReadOnly,
             },
         )?;
 
