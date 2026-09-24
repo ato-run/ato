@@ -1,0 +1,70 @@
+{
+  "attempt": {
+    "attempt_id": "att_test",
+    "derivation_ref": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "environment_id": "native",
+    "runtime_id": "rt_test",
+    "status": "pass"
+  },
+  "authorized_derivations": [
+    "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  ],
+  "frozen": {
+    "base_contract": {
+      "requirements": [
+        {
+          "id": "root",
+          "method": "GET",
+          "path": "/",
+          "port": "app.http",
+          "status": 200,
+          "verifier": "ato.contract.http@1"
+        }
+      ],
+      "schema": "ato.contract/1"
+    },
+    "base_contract_ref": "sha256:9bf1dde591e75171e28f258321116dff9a877d190d8ddad3da524c08b42227e5",
+    "browser_contract": null,
+    "effective_contract_ref": "sha256:9bf1dde591e75171e28f258321116dff9a877d190d8ddad3da524c08b42227e5"
+  },
+  "operation": "accept_route",
+  "request_id": "sat_test",
+  "route": {
+    "attempt_id": "att_test",
+    "derivation_ref": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "effective_contract_ref": "sha256:9bf1dde591e75171e28f258321116dff9a877d190d8ddad3da524c08b42227e5",
+    "environment_id": "native",
+    "runtime_id": "rt_test",
+    "verifier_receipts": [
+      {
+        "kind": "contract_verification",
+        "receipt": {
+          "contract_ref": "sha256:9bf1dde591e75171e28f258321116dff9a877d190d8ddad3da524c08b42227e5",
+          "derivation_ref": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "execution": {
+            "attempt_id": "att_test",
+            "realization": "process",
+            "request_id": "sat_test"
+          },
+          "fully_satisfied": true,
+          "observations": [
+            {
+              "evidence": {
+                "body_sha256": "sha256:8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4",
+                "method": "GET",
+                "path": "/",
+                "status": 200
+              },
+              "id": "root",
+              "outcome": "satisfied"
+            }
+          ],
+          "schema": "ato.contract-verification-receipt/1",
+          "target": {
+            "kind": "formation-runtime"
+          }
+        }
+      }
+    ]
+  }
+}
