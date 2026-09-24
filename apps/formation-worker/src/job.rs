@@ -323,9 +323,10 @@ pub fn run_claimed_job(
             workspace_root: &workspace_root,
             cache_root: Some(&cache_root),
             shim: context.shim,
-            policy_host_path: &workspace_root.join(".ato-build-policy.json"),
+            policy_host_path: &crate::build::control_policy_path(&attempt_root)?,
             network,
             limits: context.limits,
+            toolchain: crate::sandbox::ToolchainAccess::ReadOnly,
         },
     )?;
 

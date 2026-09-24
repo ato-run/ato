@@ -33,6 +33,7 @@ fn step(name: &str, script: &str) -> BuildStepV1 {
         needs_network: false,
         cwd_relative: String::new(),
         env: BTreeMap::new(),
+        toolchain_access: ato_formation::intent::ToolchainAccess::ReadOnly,
     }
 }
 
@@ -84,6 +85,7 @@ fn build(at: &Scratch, plan: &EffectiveBuildPlanV1, network: NetworkPolicy) -> a
             policy_host_path: &at.policy,
             network,
             limits: BuildLimits::default(),
+            toolchain: ato_formation_worker::sandbox::ToolchainAccess::ReadOnly,
         },
     )
     .map(|_| ())
@@ -130,6 +132,7 @@ fn authored_env_is_given_to_the_workload_and_never_to_the_sandbox() {
             policy_host_path: &at.policy,
             network: NetworkPolicy::Denied,
             limits: BuildLimits::default(),
+            toolchain: ato_formation_worker::sandbox::ToolchainAccess::ReadOnly,
         },
     )
     .expect("a command");
@@ -367,4 +370,82 @@ fn a_step_that_needs_the_network_gets_it_when_the_policy_allows_it() {
         "{}",
         read(&at, "dial.err")
     );
+}
+
+// ── host-side writes and shared toolchains ──────────────────────────────────
+
+/// The host rewrites the build policy before every step. A step that plants a
+/// link where the policy used to be written must not redirect that write: the
+/// policy now lives in a control directory no step can reach.
+#[test]
+fn a_link_planted_by_one_step_does_not_redirect_the_hosts_next_write() {
+    if !contained() {
+        return;
+    }
+    let at = scratch();
+    let canary = at._dir.path().join("canary");
+    std::fs::write(&canary, "untouched").unwrap();
+    let plan = plan_of(vec![
+        step(
+            "plant",
+            &format!(
+                "ln -s {} /app/.ato-build-policy.json; ln -s {} /app/build-policy.json",
+                canary.display(),
+                canary.display()
+            ),
+        ),
+        step("next", "true"),
+    ]);
+    build(&at, &plan, NetworkPolicy::Denied).expect("both steps run");
+    assert_eq!(std::fs::read_to_string(&canary).unwrap(), "untouched");
+}
+
+#[test]
+fn a_policy_inside_the_workspace_is_refused_before_any_step_runs() {
+    let at = scratch();
+    let marker = at.workspace.join("ran");
+    let plan = plan_of(vec![step("mark", "touch /app/ran")]);
+    let error = run_build(
+        &plan,
+        BuildAttempt {
+            job_id: "job".to_owned(),
+            attempt_id: "attempt".to_owned(),
+            attempt_fence: 1,
+        },
+        &BuildSandbox {
+            source_root: &at.source,
+            workspace_root: &at.workspace,
+            cache_root: None,
+            shim: Path::new(env!("CARGO_BIN_EXE_ato-formation-worker")),
+            policy_host_path: &at.workspace.join(".ato-build-policy.json"),
+            network: NetworkPolicy::Denied,
+            limits: BuildLimits::default(),
+            toolchain: ato_formation_worker::sandbox::ToolchainAccess::ReadOnly,
+        },
+    )
+    .unwrap_err();
+    assert!(format!("{error}").contains("outside every path"), "{error}");
+    assert!(!marker.exists());
+}
+
+/// An authored step runs source-controlled code, and the toolchain root is
+/// shared by every later build and attempt on this host.
+#[test]
+fn an_authored_step_cannot_write_the_shared_toolchain_root() {
+    use ato_formation_worker::sandbox::TOOLCHAIN_ROOT;
+    if !contained() {
+        return;
+    }
+    if !Path::new(TOOLCHAIN_ROOT).is_dir() {
+        eprintln!("skipping: {TOOLCHAIN_ROOT} is absent on this host");
+        return;
+    }
+    let at = scratch();
+    let probe = format!("{TOOLCHAIN_ROOT}/.ato-authored-write-{}", std::process::id());
+    let plan = plan_of(vec![step("write", &format!("touch {probe}"))]);
+    let outcome = build(&at, &plan, NetworkPolicy::Denied);
+    let written = Path::new(&probe).exists();
+    let _ = std::fs::remove_file(&probe);
+    assert!(outcome.is_err(), "the write was allowed");
+    assert!(!written, "an authored step wrote {probe}");
 }
