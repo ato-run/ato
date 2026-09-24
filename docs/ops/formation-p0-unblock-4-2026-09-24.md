@@ -162,3 +162,42 @@ change that crate.
   - Node 22.14.0
   - pnpm 9.15.4
   - yarn 1.22.22
+
+## Re-run after rebasing onto #1390 (2026-09-24)
+
+Rebased onto `main` `2d89fb74` (ato#1390: common attempt entry, build policy
+outside the workspace, `ToolchainAccess`). Conflicts resolved:
+
+- Local admission now lives in the common `admission.rs`; its process checks
+  use `lane.is_process()`, so the generic `process` lane is contained and
+  realized exactly like `python_process`.
+- `provision-node` and `provision-<pnpm|yarn>` carry
+  `ToolchainAccess::Provision`; every install, build, lifecycle and authored
+  step stays `ReadOnly` (bind and Landlock), including an authored step that
+  borrows a platform step's name (`process_toolchains_v1::only_the_platforms_provisioning_steps_may_write_the_shared_toolchains`).
+  The plan's `toolchain_path` still heads the build PATH.
+- The operator-log change moved with `failure_of` into `attempt.rs`.
+
+| | OCI aarch64 | sugamo x86_64 |
+|---|---|---|
+| `ato-formation` + `ato-formation-worker`, 2 runs | 340 / 0 failed, twice | 340 / 0 failed, twice |
+| `node_formation_v1` (node, npm, pnpm 9.15.4, yarn 1.22.22; not skipped) | 4/4 ×2 | 4/4 ×2 |
+
+The pre-existing `sandbox_v1` shim-path failure and the parallel port race
+recorded above are fixed on main by #1390 and no longer occur.
+
+Synthetic Node app on the Runtime Network (local coordinator: ato-api#683
+under `wrangler dev --local`, local D1 only), `--mode all`:
+
+- Satisfy `01M39BYG6AWA26X6GYE3EJ7HKK` → **satisfied**; K
+  `sha256:cfbd1972725da419d7de9731e42af0ca86e1171dc890f03070854e4dcdb34b9f`,
+  D `sha256:d3754f7bd681893c4061b47020561f8e4bb77bb183b6084e56b840b7a66ac0c3`.
+- ARM64 attempt `01M39BYG6R678MXSTDE92NRPM9` pass; x86_64 attempt
+  `01M39BYJ2D823X83J5F6V48BEW` pass. Two VerifiedRoutes, each naming its
+  attempt; the requester accepted both only after checking each route's
+  receipt against the frozen K (#1390 `accept_verified_route`).
+- Artifact `sha256:e35d13d9…` on both; `out/build.json` records `v22.14.0`
+  from `/opt/ato/toolchains/node/22.14.0/bin/node` on each host.
+
+Tokens, runtime work/out directories and the coordinator were removed after
+the run; the shared toolchains are kept.
