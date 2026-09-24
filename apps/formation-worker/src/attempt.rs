@@ -517,12 +517,28 @@ fn observe_static(
         let location: PathBuf = blobs.join(algorithm).join(hex);
         routes.insert(format!("/{path}"), (location, file.media_type.clone()));
     }
-    let server = StaticApplicationServer::serve_routes(
-        routes,
-        format!("/{}", manifest.entry_path),
-        manifest.routing.spa_fallback,
-    )
-    .map_err(|error| anyhow::anyhow!("cannot serve the static candidate: {error}"))?;
+    // Never a port a process realization chose and has not bound yet: a
+    // server holding it would make that candidate fail to bind.
+    let entry_route = format!("/{}", manifest.entry_path);
+    let mut server = None;
+    for _ in 0..64 {
+        let candidate = StaticApplicationServer::serve_routes(
+            routes.clone(),
+            entry_route.clone(),
+            manifest.routing.spa_fallback,
+        )
+        .map_err(|error| anyhow::anyhow!("cannot serve the static candidate: {error}"))?;
+        let port = candidate
+            .base_url()
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse::<u16>().ok());
+        if port.is_some_and(|port| !crate::ephemeral::port_is_pending(port)) {
+            server = Some(candidate);
+            break;
+        }
+    }
+    let server = server.context("cannot find a loopback port for the static candidate")?;
     let base = server.base_url();
     let mut evidence = RealizationEvidence {
         executor: "runtime-static-loopback".to_owned(),

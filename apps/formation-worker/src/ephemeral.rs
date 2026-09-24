@@ -81,6 +81,53 @@ pub struct RequiredObservation {
     pub path: String,
 }
 
+/// Ports a realization in this worker has chosen and its candidate has not
+/// bound yet.
+///
+/// A process realization releases the port it chose before the candidate
+/// binds it. Another realization, or a verifier's own loopback server, could
+/// otherwise be handed that port in the window. Every port chooser in this
+/// worker skips the ports listed here; nothing waits on anybody. Other
+/// processes on the host are not covered — a collision with them still fails
+/// readiness visibly.
+static PENDING_PORTS: std::sync::Mutex<std::collections::BTreeSet<u16>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+fn pending_ports() -> std::sync::MutexGuard<'static, std::collections::BTreeSet<u16>> {
+    PENDING_PORTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Is `port` chosen by a realization that has not bound it yet?
+pub(crate) fn port_is_pending(port: u16) -> bool {
+    pending_ports().contains(&port)
+}
+
+/// The ports one realization chose, released from the list when it is
+/// dropped — after readiness, or on any failure path.
+struct PendingClaim(Vec<u16>);
+
+impl PendingClaim {
+    /// Claim `port` unless another realization already has.
+    fn claim(&mut self, port: u16) -> bool {
+        let claimed = pending_ports().insert(port);
+        if claimed {
+            self.0.push(port);
+        }
+        claimed
+    }
+}
+
+impl Drop for PendingClaim {
+    fn drop(&mut self) {
+        let mut pending = pending_ports();
+        for port in &self.0 {
+            pending.remove(port);
+        }
+    }
+}
+
 /// What to realize, temporarily.
 pub struct TemporaryRealizationRequest<'a> {
     /// The immutable build output. Copied, never mounted: the copy is what
@@ -154,6 +201,8 @@ impl TemporaryRealization {
         // Derivation that reads the endpoint variable runs either way; one
         // that binds its guest port literally runs when that port is free and
         // fails, visibly, when it is not.
+        // Listed until every port the candidate needs accepts connections.
+        let mut claim = PendingClaim(Vec::new());
         let mut endpoints = Vec::new();
         let mut resolved = Vec::new();
         let mut declared = Vec::new();
@@ -164,13 +213,19 @@ impl TemporaryRealization {
             {
                 continue;
             }
-            let (host_port, allocation, preferred_port) = match reserve_port(port.guest_port) {
+            let preferred =
+                reserve_port(port.guest_port).filter(|&host_port| claim.claim(host_port));
+            let (host_port, allocation, preferred_port) = match preferred {
                 Some(host_port) => (
                     host_port,
                     EndpointAllocationV1::Preferred,
                     Some(port.guest_port),
                 ),
-                None => (allocate_host_port()?, EndpointAllocationV1::Automatic, None),
+                None => (
+                    allocate_unclaimed_host_port(&mut claim)?,
+                    EndpointAllocationV1::Automatic,
+                    None,
+                ),
             };
             let name = endpoint_name(&port.port_id);
             declared.push(EndpointV1 {
@@ -415,6 +470,18 @@ fn allocate_host_port() -> Result<u16> {
     let listener = TcpListener::bind("127.0.0.1:0")
         .context("cannot allocate a loopback port for the candidate")?;
     Ok(listener.local_addr()?.port())
+}
+
+/// [`allocate_host_port`], skipping ports another realization in this
+/// worker chose and has not bound yet.
+fn allocate_unclaimed_host_port(claim: &mut PendingClaim) -> Result<u16> {
+    for _ in 0..64 {
+        let port = allocate_host_port()?;
+        if claim.claim(port) {
+            return Ok(port);
+        }
+    }
+    bail!("cannot allocate a loopback port no other candidate is about to bind")
 }
 
 fn http_client() -> Result<reqwest::blocking::Client> {
