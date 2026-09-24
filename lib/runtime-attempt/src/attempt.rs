@@ -1,51 +1,53 @@
 //! One attempt of one fixed Derivation against one fixed Contract, on this
-//! Runtime — the single entry every Formation caller executes through.
+//! Runtime — the single entry every caller that executes a Derivation goes
+//! through: a Formation attempt, a Runtime Network ticket, a Run.
 //!
 //! ```text
-//! admission ──▶ start record (durable) ──▶ execute D ──▶ observe C over HTTP
-//!                                                              │
-//!            receipt (immutable, this attempt's evidence) ◀── C ⊨ K
-//!                                                              │
-//!                                     stop + cleanup, recorded separately
+//! admission ──▶ start record (durable) ──▶ realize ──▶ observe C over HTTP
+//!                                                            │
+//!          receipt (immutable, this attempt's evidence) ◀── C ⊨ K
+//!                                                            │
+//!                               stop, or hand off to the caller; recorded
 //! ```
 //!
 //! The caller decides WHICH candidate to try and what to do with a verified
-//! one; it cannot decide whether the candidate satisfied K. Verification is
-//! always from runtime observations of this attempt — a static candidate is
-//! served and requested exactly like a process candidate is — and the
-//! receipt states what was observed, whatever happens to the candidate
-//! afterwards. Stopping and cleaning up are recorded beside the receipt, never
-//! folded into it.
+//! one; it cannot decide whether the candidate satisfied K. How the
+//! candidate comes to be running is the realizer's (build from source,
+//! unpack a `.capsule`). Verification is always from runtime observations of
+//! this attempt, and the receipt states what was observed, whatever happens
+//! to the candidate afterwards.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
-use crate::static_server::StaticApplicationServer;
 use anyhow::{Context, Result};
 use ato_formation::authoring::HTTP_CONTRACT_VERIFIER;
 use ato_formation::browser::{BrowserTarget, BrowserVerdict, BrowserVerificationReceipt};
 use ato_formation::failure::{FailureStage, FormationFailure};
 use ato_formation::request::{
-    AttemptFailure, AttemptOutcomes, AttemptStatus, FormationAttempt, Outcome, RealizationEvidence,
-    RuntimeProfile,
+    AttemptFailure, AttemptOutcomes, AttemptStatus, FormationAttempt, Outcome, RuntimeProfile,
 };
 use ato_formation::verify::{
-    ContractVerification, ContractVerificationReceipt, RuntimeHttpObservation, RuntimeObservation,
-    VerificationExecutionEvidence, verify_runtime,
+    CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V2, ContractVerification, ContractVerificationReceipt,
+    RuntimeHttpObservation, RuntimeObservation, VerificationTargetKind, verify_runtime,
 };
 
-use crate::admission::{admit, effects_name};
+use crate::admission::{EffectAuthorization, admit, effects_name};
 use crate::browser_verify::{BrowserVerification, verify_in_browser};
 use crate::build_sandbox::NetworkPolicy;
-use crate::ephemeral::{
-    RequiredObservation, RequiredPort, TemporaryRealization, TemporaryRealizationRequest,
-};
-use crate::executor::{AttemptExecution, AttemptExecutor, ExecutedCandidate};
+use crate::executor::ExecutedCandidate;
 use crate::journal::{AttemptJournal, BeginRefusal, StartIdentity};
-use crate::plan::{PlannedCandidate, observe_candidate};
+use crate::realize::{CandidateRealizer, LiveCandidate, RealizeFailure, RunningCandidate};
+use crate::spec::AttemptSpec;
 
 /// Bodies larger than this are not hashed into evidence.
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+/// How long a candidate has to answer its first observation.
+const OBSERVATION_DEADLINE: Duration = Duration::from_secs(60);
+/// Per-request budget once it answers.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Everything one attempt needs, already decided by the caller.
 pub struct AttemptRequest<'a> {
@@ -53,24 +55,56 @@ pub struct AttemptRequest<'a> {
     /// request — retry, other Derivation, redelivery — carries the same id.
     pub request_id: &'a str,
     pub attempt_id: &'a str,
-    /// How the caller names this candidate in evidence: `authored` or a
-    /// preset id.
+    /// How the caller names this candidate in evidence: `authored`, a
+    /// preset id, `portable`.
     pub label: &'a str,
     /// K and D, bound and frozen before this attempt.
-    pub candidate: &'a PlannedCandidate,
-    /// The K this attempt is recorded under.
+    pub spec: &'a AttemptSpec<'a>,
+    /// The K this attempt is recorded under (the effective K when a browser
+    /// Contract is part of it).
     pub contract_ref: &'a str,
-    pub source_root: &'a Path,
     pub runtime_id: &'a str,
     pub profile: &'a RuntimeProfile,
+    /// Who authorized the Derivation's effects.
+    pub authorization: EffectAuthorization<'a>,
+    /// What a build may reach, recorded with the start. A Run builds nothing.
     pub network: NetworkPolicy,
     pub browser: Option<&'a BrowserVerification>,
     /// Scratch this attempt owns.
     pub attempt_root: &'a Path,
-    /// The binary bwrap re-enters as `sandbox-exec`.
-    pub shim: &'a Path,
     /// What happens to a verified candidate after the receipt.
     pub continuation: Continuation,
+    /// What the receipt names besides K, D and this attempt.
+    pub receipt: ReceiptContext<'a>,
+    /// Set when the caller is being stopped: observation gives up instead of
+    /// waiting out its deadline.
+    pub interrupt: Option<&'a AtomicBool>,
+}
+
+/// What the receipt records about where the verified bytes came from.
+#[derive(Debug, Clone, Copy)]
+pub struct ReceiptContext<'a> {
+    pub target: VerificationTargetKind,
+    /// The `.capsule` the candidate was unpacked from, when there is one. A
+    /// Formation candidate has none and names none.
+    pub bundle_sha256: Option<&'a str>,
+    /// The transport's dependency profile, when it declares one (receipt
+    /// schema /2).
+    pub portability_profile: Option<&'a str>,
+    /// The Run this attempt starts, when the caller keeps one.
+    pub run_id: Option<&'a str>,
+}
+
+impl ReceiptContext<'_> {
+    /// A Formation attempt: no transport, no Run.
+    pub fn formation() -> Self {
+        Self {
+            target: VerificationTargetKind::FormationRuntime,
+            bundle_sha256: None,
+            portability_profile: None,
+            run_id: None,
+        }
+    }
 }
 
 /// What happens to the running candidate once it has been verified.
@@ -79,45 +113,11 @@ pub struct AttemptRequest<'a> {
 /// decides who owns the candidate afterwards.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Continuation {
-    /// Stop it and remove its scratch (a Formation attempt).
+    /// Stop it and remove its runtime scratch (a Formation attempt).
     Stop,
     /// Keep it running and hand it to the caller (a Run). A candidate that
     /// was not verified is stopped regardless: there is nothing to hand off.
     HandOff,
-}
-
-/// A verified candidate still running, owned by whoever holds this value.
-/// Dropping it stops it; [`LiveCandidate::stop`] does so and reports how
-/// that went.
-pub enum LiveCandidate {
-    Process(TemporaryRealization),
-    Static(StaticApplicationServer),
-}
-
-impl LiveCandidate {
-    /// Where the candidate answers, for the first observed port.
-    pub fn endpoint(&self) -> Option<String> {
-        match self {
-            Self::Process(realization) => realization
-                .endpoints()
-                .first()
-                .map(|endpoint| format!("http://127.0.0.1:{}/", endpoint.host_port)),
-            Self::Static(server) => Some(format!("{}/", server.base_url())),
-        }
-    }
-
-    /// Stop the candidate and remove what it touched.
-    pub fn stop(self) -> Result<()> {
-        match self {
-            Self::Process(realization) => realization
-                .destroy()
-                .context("the candidate could not be destroyed"),
-            Self::Static(server) => {
-                drop(server);
-                Ok(())
-            }
-        }
-    }
 }
 
 /// What an attempt established.
@@ -127,32 +127,37 @@ pub struct AttemptOutcome {
     /// Whether anything of the candidate may have run: true from the moment
     /// the start record was written, never inferred afterwards.
     pub execution_started: bool,
-    /// The candidate, only when every observation of K was satisfied here
-    /// and, under [`Continuation::Stop`], it was stopped and cleaned up.
+    /// What a Formation keeps, only when every observation of K was
+    /// satisfied here and, under [`Continuation::Stop`], the candidate was
+    /// stopped and cleaned up.
     pub verified: Option<ExecutedCandidate>,
     /// The running candidate, only under [`Continuation::HandOff`] and only
     /// when it was verified.
     pub live: Option<LiveCandidate>,
+    /// The error behind a failure, for a caller that reports it in full to
+    /// the person who asked (a Run). Never serialized: the attempt record
+    /// carries the bounded sentence.
+    pub error: Option<anyhow::Error>,
 }
 
-/// Run one attempt through admission, the start record, execution,
+/// Run one attempt through admission, the start record, realization,
 /// observation and verification.
 pub fn run_attempt(
     request: &AttemptRequest<'_>,
-    executor: &dyn AttemptExecutor,
+    realizer: &dyn CandidateRealizer,
     journal: &AttemptJournal,
 ) -> AttemptOutcome {
-    let planned = request.candidate;
+    let spec = request.spec;
     let mut attempt = FormationAttempt {
         candidate: request.label.to_owned(),
         attempt_id: Some(request.attempt_id.to_owned()),
-        derivation_ref: Some(planned.derivation_ref.clone()),
+        derivation_ref: Some(spec.derivation_ref.to_owned()),
         contract_ref: Some(request.contract_ref.to_owned()),
         runtime_id: request.runtime_id.to_owned(),
         status: AttemptStatus::Filtered,
         verification: None,
-        base_contract_ref: (request.contract_ref != planned.contract_ref)
-            .then(|| planned.contract_ref.clone()),
+        base_contract_ref: (request.contract_ref != spec.contract_ref)
+            .then(|| spec.contract_ref.to_owned()),
         realization: None,
         browser_verification: None,
         receipt: None,
@@ -176,10 +181,13 @@ pub fn run_attempt(
             execution_started: started,
             verified: None,
             live: None,
+            error: None,
         }
     };
 
-    if let Some(failure) = admit(request.profile, planned, request.network, request.browser) {
+    if let Some(failure) = admit(spec, request.authorization, request.browser)
+        .or_else(|| realizer.admit(request.profile))
+    {
         attempt.failure = Some(failure);
         return not_run(attempt, false);
     }
@@ -193,10 +201,11 @@ pub fn run_attempt(
         request.attempt_id,
         StartIdentity {
             contract_ref: request.contract_ref.to_owned(),
-            derivation_ref: planned.derivation_ref.clone(),
+            derivation_ref: spec.derivation_ref.to_owned(),
             runtime_id: request.runtime_id.to_owned(),
-            effects: effects_name(planned.derivation.effects),
+            effects: effects_name(spec.derivation.effects),
             network: network_name(request.network).to_owned(),
+            authorization: request.authorization.name().to_owned(),
         },
     ) {
         Ok(started) => started,
@@ -213,11 +222,11 @@ pub fn run_attempt(
     };
     attempt.status = AttemptStatus::Failed;
 
-    let mut outcome = execute_and_verify(request, executor, attempt);
-    let recorded = match (&outcome.verified, &outcome.attempt.failure) {
-        (Some(_), _) => "verified".to_owned(),
-        (None, Some(failure)) => failure.code.clone(),
-        (None, None) => "failed".to_owned(),
+    let mut outcome = realize_and_verify(request, realizer, attempt);
+    let recorded = match (outcome.attempt.status, &outcome.attempt.failure) {
+        (AttemptStatus::Verified, _) => "verified".to_owned(),
+        (_, Some(failure)) => failure.code.clone(),
+        (_, None) => "failed".to_owned(),
     };
     if let Err(error) = started.finish(&recorded) {
         // The attempt ran, but its end is not durable: the next attempt of
@@ -241,138 +250,251 @@ pub fn run_attempt(
             stage: "record".to_owned(),
             message: "the attempt ran and its end could not be recorded".to_owned(),
         });
+        outcome.error = Some(error.context("the attempt ran and its end could not be recorded"));
     }
     outcome
 }
 
-fn execute_and_verify(
+fn realize_and_verify(
     request: &AttemptRequest<'_>,
-    executor: &dyn AttemptExecutor,
+    realizer: &dyn CandidateRealizer,
     mut attempt: FormationAttempt,
 ) -> AttemptOutcome {
-    let planned = request.candidate;
-    // Execution started; publication is the caller's, after this returns.
-    attempt.outcomes.publication = Outcome::not_attempted("decided by the caller");
-    let failed = |mut attempt: FormationAttempt, receipt| {
-        attempt.receipt = receipt;
-        AttemptOutcome {
-            attempt,
-            execution_started: true,
-            verified: None,
-            live: None,
-        }
+    let spec = request.spec;
+    let failed = |attempt: FormationAttempt, error: anyhow::Error| AttemptOutcome {
+        attempt,
+        execution_started: true,
+        verified: None,
+        live: None,
+        error: Some(error),
     };
 
-    let executed = match executor.execute(&AttemptExecution {
-        attempt_id: request.attempt_id,
-        candidate: planned,
-        source_root: request.source_root,
-        attempt_root: request.attempt_root,
-    }) {
-        Ok(executed) => executed,
-        Err(error) => {
+    let realized = match realizer.realize(request.attempt_id, request.attempt_root) {
+        Ok(realized) => realized,
+        Err(RealizeFailure::Execution(error)) => {
             let failure = failure_of(&error);
             attempt.outcomes.seal = Outcome::not_attempted(&failure.code);
             attempt.outcomes.runtime_verification = Outcome::not_attempted(&failure.code);
             attempt.outcomes.cleanup = Outcome::not_applicable("no candidate was realized");
+            attempt.outcomes.publication = Outcome::not_attempted(&failure.code);
             attempt.failure = Some(failure);
-            return failed(attempt, None);
+            return failed(attempt, error);
+        }
+        Err(RealizeFailure::Launch { error, evidence }) => {
+            attempt.outcomes.publication = Outcome::not_attempted("candidate_not_observable");
+            attempt.realization = evidence.map(|evidence| *evidence);
+            return not_observable(attempt, error);
         }
     };
+    // Publication is the caller's for what a Formation keeps; a candidate
+    // that runs an existing artifact publishes nothing.
+    attempt.outcomes.publication = match realized.kept {
+        Some(_) => Outcome::not_attempted("decided by the caller"),
+        None => Outcome::not_applicable("running an existing published bundle"),
+    };
+    attempt.realization = realized.evidence;
+    let mut candidate = realized.candidate;
 
     // ── observe ─────────────────────────────────────────────────────────────
-    let input_refs = observe_candidate(&planned.derivation, &planned.projected, None).input_refs;
-    let observed = match &executed {
-        ExecutedCandidate::Process { workspace_root } => {
-            observe_process(request, workspace_root, &mut attempt)
-        }
-        ExecutedCandidate::StaticWeb { output } => observe_static(output, planned, &mut attempt),
-    };
-    let Observed {
-        http,
-        endpoint,
-        live,
-    } = match observed {
-        Ok(observed) => observed,
+    let http = match observe_http(
+        candidate.as_mut(),
+        &http_requirements(spec),
+        request.interrupt,
+    ) {
+        Ok(http) => http,
         Err(error) => {
-            // The candidate could not be observed at all: nothing is
-            // verified, and guessing verdicts would invent evidence. Whatever
-            // was realized is gone with the error (see `evidence.destroyed`).
-            attempt.outcomes.seal = Outcome::failed("candidate_not_observable");
-            attempt.outcomes.runtime_verification = Outcome::failed("candidate_not_observable");
-            attempt.outcomes.cleanup = match &attempt.realization {
-                Some(evidence) if evidence.destroyed => Outcome::succeeded(),
-                Some(_) => Outcome::failed("the realization was not confirmed gone"),
-                None => Outcome::not_applicable("no candidate was realized"),
-            };
-            attempt.failure = Some(AttemptFailure {
-                code: "candidate_not_observable".to_owned(),
-                stage: FailureStage::Verification.as_str().to_owned(),
-                message: bounded(&format!("{error:#}")),
-            });
-            return failed(attempt, None);
+            let stopped = candidate.stop();
+            if let Some(evidence) = attempt.realization.as_mut() {
+                evidence.destroyed = stopped.is_ok();
+            }
+            return not_observable(attempt, error);
         }
     };
     let runtime = RuntimeObservation {
-        input_refs,
+        input_refs: spec.input_refs.clone(),
         http,
-        instance_snapshot_ref: None,
+        instance_snapshot_ref: spec.instance_snapshot_ref.clone(),
     };
-    let verification = verify_runtime(&planned.contract, &runtime);
+    let verification = verify_runtime(spec.contract, &runtime);
 
     // The receipt covers the Contract's observations at this verification
     // point, and nothing that happens after it.
-    let mut receipt = ContractVerificationReceipt::from_attempt(
-        planned.contract_ref.clone(),
-        planned.derivation_ref.clone(),
-        &planned.contract,
+    let mut receipt = ContractVerificationReceipt::for_attempt(
+        request.receipt.target,
+        request.receipt.bundle_sha256.map(str::to_owned),
+        spec.contract_ref,
+        spec.derivation_ref,
+        spec.contract,
         &runtime,
         verification.clone(),
     );
-    receipt.execution = Some(VerificationExecutionEvidence {
-        realization: match &executed {
-            ExecutedCandidate::Process { .. } => "process",
-            ExecutedCandidate::StaticWeb { .. } => "static_web",
-        }
-        .to_owned(),
-        runtime_executable: None,
-        runtime_version: None,
-        pid: None,
-        container_id: None,
-        image: None,
-        platform: Some(format!(
-            "{}/{}",
-            std::env::consts::OS,
-            std::env::consts::ARCH
-        )),
-        endpoint,
-        run_id: None,
-        lease_id: None,
-        attempt_id: Some(request.attempt_id.to_owned()),
-        request_id: Some(request.request_id.to_owned()),
-        dependency_fetches: Vec::new(),
-        portability_profile: None,
-        embedded_oci_image_loaded: None,
-        services: Vec::new(),
-    });
+    let mut execution = realized.execution;
+    execution.attempt_id = Some(request.attempt_id.to_owned());
+    execution.request_id = Some(request.request_id.to_owned());
+    execution.run_id = request.receipt.run_id.map(str::to_owned);
+    if let Some(profile) = request.receipt.portability_profile {
+        receipt.schema = CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V2.to_owned();
+        execution.portability_profile = Some(profile.to_owned());
+    }
+    receipt.execution = Some(execution);
+
+    // The browser drives the SAME candidate, and only one that already
+    // satisfies the typed observations: a candidate that fails its HTTP
+    // Contract has nothing to show a browser.
+    if let Some(browser) = request.browser
+        && verification.fully_satisfied()
+    {
+        attempt.browser_verification = Some(browse(
+            candidate.endpoints(),
+            browser,
+            request.runtime_id,
+            request.attempt_id,
+        ));
+    }
 
     let failure =
         verification_failure(&verification).or_else(|| browser_failure(request.browser, &attempt));
+    let error = failure
+        .as_ref()
+        .map(|failure| anyhow::anyhow!("{}: {}", failure.code, failure.message));
     attempt.verification = Some(verification);
     attempt.receipt = Some(receipt);
     let (verified, live) = after_verification(
         &mut attempt,
         failure,
-        live,
+        candidate,
         request.continuation,
-        LiveCandidate::stop,
+        |candidate| candidate.stop(),
     );
+    AttemptOutcome {
+        error: match (&attempt.failure, error) {
+            (Some(_), Some(error)) => Some(error),
+            (Some(failure), None) => Some(anyhow::anyhow!("{}: {}", failure.code, failure.message)),
+            (None, _) => None,
+        },
+        attempt,
+        execution_started: true,
+        verified: if verified { realized.kept } else { None },
+        live: live.map(LiveCandidate::new),
+    }
+}
+
+/// The candidate could not be observed at all: nothing is verified, and
+/// guessing verdicts would invent evidence. Whatever was realized is gone
+/// (see `evidence.destroyed`).
+fn not_observable(mut attempt: FormationAttempt, error: anyhow::Error) -> AttemptOutcome {
+    attempt.outcomes.seal = Outcome::failed("candidate_not_observable");
+    attempt.outcomes.runtime_verification = Outcome::failed("candidate_not_observable");
+    attempt.outcomes.cleanup = match &attempt.realization {
+        Some(evidence) if evidence.destroyed => Outcome::succeeded(),
+        Some(_) => Outcome::failed("the realization was not confirmed gone"),
+        None => Outcome::not_applicable("no candidate was realized"),
+    };
+    attempt.failure = Some(AttemptFailure {
+        code: "candidate_not_observable".to_owned(),
+        stage: FailureStage::Verification.as_str().to_owned(),
+        message: bounded(&format!("{error:#}")),
+    });
     AttemptOutcome {
         attempt,
         execution_started: true,
-        verified: verified.then_some(executed),
-        live,
+        verified: None,
+        live: None,
+        error: Some(error),
     }
+}
+
+/// An HTTP observation the Contract needs, by logical port.
+struct RequiredObservation {
+    port_id: String,
+    path: String,
+}
+
+/// The Contract's HTTP observations the Derivation exports a port for.
+///
+/// A requirement on a port the Derivation never exports is not probed — it
+/// would measure a port nobody claimed — and the verifier fails it as
+/// unobserved. Only GET is observed; anything else is left for the verifier
+/// to refuse rather than be probed with the wrong method.
+fn http_requirements(spec: &AttemptSpec<'_>) -> Vec<RequiredObservation> {
+    spec.contract
+        .requirements
+        .iter()
+        .filter(|requirement| requirement.verifier == HTTP_CONTRACT_VERIFIER)
+        .filter(|requirement| requirement.method.as_deref().is_none_or(|m| m == "GET"))
+        .filter_map(|requirement| {
+            let port_id = requirement.port.clone()?;
+            spec.derivation
+                .ports
+                .iter()
+                .any(|port| port.id == port_id)
+                .then(|| RequiredObservation {
+                    port_id,
+                    path: requirement.path.clone().unwrap_or_else(|| "/".to_owned()),
+                })
+        })
+        .collect()
+}
+
+/// GET every required path through the endpoint its logical port answers
+/// on, waiting for the candidate to accept connections — and giving up as
+/// soon as it exits, the caller is interrupted, or the deadline passes. A
+/// port the candidate did not realize is not observed; the verifier fails
+/// that observation as missing.
+fn observe_http(
+    candidate: &mut dyn RunningCandidate,
+    required: &[RequiredObservation],
+    interrupt: Option<&AtomicBool>,
+) -> Result<Vec<RuntimeHttpObservation>> {
+    let client = reqwest::blocking::Client::builder()
+        // A candidate has no business redirecting its Contract observation
+        // somewhere else; what it answers directly is what is measured.
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(REQUEST_TIMEOUT)
+        .build()?;
+    let deadline = Instant::now() + OBSERVATION_DEADLINE;
+    let mut observed = Vec::with_capacity(required.len());
+    for observation in required {
+        let Some(base) = candidate.endpoints().get(&observation.port_id).cloned() else {
+            continue;
+        };
+        let url = format!("{base}{}", observation.path);
+        let response = loop {
+            if interrupt.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+                anyhow::bail!("interrupted before the Contract observations completed");
+            }
+            match client.get(&url).send() {
+                Ok(response) => break response,
+                Err(error) => {
+                    if let Some(exit) = candidate.exited()? {
+                        anyhow::bail!("the candidate exited before it could be observed: {exit}");
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(error).with_context(|| {
+                            format!("the candidate did not become reachable at {url}")
+                        });
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        };
+        let status = response.status().as_u16();
+        let body = response.bytes().context("cannot read the response body")?;
+        if body.len() > MAX_BODY_BYTES {
+            anyhow::bail!(
+                "GET {} returned more than {MAX_BODY_BYTES} bytes",
+                observation.path
+            );
+        }
+        observed.push(RuntimeHttpObservation::from_response(
+            observation.port_id.clone(),
+            "GET",
+            observation.path.clone(),
+            status,
+            &body,
+        ));
+    }
+    Ok(observed)
 }
 
 /// Everything after the verification point: record what K's verdicts
@@ -496,288 +618,29 @@ fn browser_failure(
     })
 }
 
-/// The Contract's HTTP observations the Derivation exports a port for.
-///
-/// A requirement on a port the Derivation never exports is not probed — it
-/// would measure a port nobody claimed — and the verifier fails it as
-/// unobserved. Only GET is observed; anything else is left for the verifier
-/// to refuse rather than be probed with the wrong method.
-fn http_requirements(planned: &PlannedCandidate) -> Vec<RequiredObservation> {
-    planned
-        .contract
-        .requirements
-        .iter()
-        .filter(|requirement| requirement.verifier == HTTP_CONTRACT_VERIFIER)
-        .filter(|requirement| requirement.method.as_deref().is_none_or(|m| m == "GET"))
-        .filter_map(|requirement| {
-            let port_id = requirement.port.clone()?;
-            planned
-                .derivation
-                .ports
-                .iter()
-                .any(|port| port.id == port_id)
-                .then(|| RequiredObservation {
-                    port_id,
-                    path: requirement.path.clone().unwrap_or_else(|| "/".to_owned()),
-                })
-        })
-        .collect()
-}
-
-/// What observing a candidate produced: its HTTP evidence, where it
-/// answered, and the candidate itself, still running.
-struct Observed {
-    http: Vec<RuntimeHttpObservation>,
-    endpoint: Option<String>,
-    live: LiveCandidate,
-}
-
-/// Realize a process candidate on this Runtime and observe it. It keeps
-/// running until the caller of this function stops or hands it off.
-fn observe_process(
-    request: &AttemptRequest<'_>,
-    workspace_root: &Path,
-    attempt: &mut FormationAttempt,
-) -> Result<Observed> {
-    let planned = request.candidate;
-    let required: Vec<RequiredObservation> = http_requirements(planned);
-    let mut ports: Vec<RequiredPort> = Vec::new();
-    for observation in &required {
-        let Some(guest_port) = planned
-            .derivation
-            .ports
-            .iter()
-            .find(|port| port.id == observation.port_id)
-            .and_then(|port| port.guest_port)
-        else {
-            continue;
-        };
-        if !ports.iter().any(|port| port.port_id == observation.port_id) {
-            ports.push(RequiredPort {
-                port_id: observation.port_id.clone(),
-                guest_port,
-            });
-        }
-    }
-    let required: Vec<RequiredObservation> = required
-        .into_iter()
-        .filter(|observation| ports.iter().any(|port| port.port_id == observation.port_id))
-        .collect();
-
-    let scratch = request.attempt_root.join("realization");
-    let mut evidence = RealizationEvidence {
-        executor: "runtime-process".to_owned(),
-        containment: "bwrap+landlock".to_owned(),
-        workspace: "disposable-copy, read-only at /app; /tmp is tmpfs".to_owned(),
-        // The Runtime's process policy, whatever the build was allowed: no
-        // egress, TCP bind only on the allocated host ports. A
-        // `dependency-resolution` request widens the BUILD, never the run.
-        build_network: network_name(request.network).to_owned(),
-        candidate_network: "no-egress; tcp bind limited to allocated host ports".to_owned(),
-        endpoints: BTreeMap::new(),
-        destroyed: false,
-    };
-    let launched = TemporaryRealization::launch(&TemporaryRealizationRequest {
-        workspace: workspace_root,
-        scratch: &scratch,
-        intent: &planned.intent,
-        ports: &ports,
-        shim: request.shim,
-        attempt_id: request.attempt_id,
-    });
-    let realization = match launched {
-        Ok(realization) => realization,
-        Err(error) => {
-            // Dropped on the error path: gone unless the Runtime said
-            // otherwise, which it did loudly in the log.
-            evidence.destroyed = !scratch.exists();
-            attempt.realization = Some(evidence);
-            return Err(error);
-        }
-    };
-    evidence.endpoints = realization
-        .endpoints()
-        .iter()
-        .map(|endpoint| {
-            (
-                endpoint.port_id.clone(),
-                if endpoint.host_port == endpoint.guest_port {
-                    format!(
-                        "guest {} -> host {}",
-                        endpoint.guest_port, endpoint.host_port
-                    )
-                } else {
-                    format!(
-                        "guest {} -> host {} (guest port in use; carried by {})",
-                        endpoint.guest_port,
-                        endpoint.host_port,
-                        crate::ephemeral::endpoint_env_name(&endpoint.port_id)
-                    )
-                },
-            )
-        })
-        .collect();
-    let endpoint = realization
-        .endpoints()
-        .first()
-        .map(|endpoint| format!("http://127.0.0.1:{}/", endpoint.host_port));
-    let http = realization.observe(&required);
-    // The browser drives the SAME realization, and only one that already
-    // satisfies the typed observations: a candidate that fails its HTTP
-    // Contract has nothing to show a browser.
-    if let (Ok(http), Some(browser)) = (&http, request.browser) {
-        let runtime = RuntimeObservation {
-            input_refs: observe_candidate(&planned.derivation, &planned.projected, None).input_refs,
-            http: http.clone(),
-            instance_snapshot_ref: None,
-        };
-        if verify_runtime(&planned.contract, &runtime).fully_satisfied() {
-            attempt.browser_verification = Some(browse(
-                &realization,
-                browser,
-                request.runtime_id,
-                request.attempt_id,
-            ));
-        }
-    }
-    attempt.realization = Some(evidence);
-    // On an observation error the realization is dropped here, which stops
-    // it; `destroyed` then says whether its scratch is gone.
-    let http = match http {
-        Ok(http) => http,
-        Err(error) => {
-            let stopped = realization.destroy();
-            if let Some(evidence) = attempt.realization.as_mut() {
-                evidence.destroyed = stopped.is_ok();
-            }
-            return Err(error);
-        }
-    };
-    Ok(Observed {
-        http,
-        endpoint,
-        live: LiveCandidate::Process(realization),
-    })
-}
-
-/// Serve a static candidate's produced bundle on loopback and request it —
-/// the same observation a process candidate gets, from the bytes that would
-/// be kept. The server keeps serving until the caller stops or hands it off.
-fn observe_static(
-    output: &crate::static_lane::StaticFormationOutput,
-    planned: &PlannedCandidate,
-    attempt: &mut FormationAttempt,
-) -> Result<Observed> {
-    let manifest: ato_materializer_static_web::StaticWebManifestV1 =
-        serde_json::from_slice(&output.bundle.manifest_bytes)
-            .context("read the produced static web manifest")?;
-    let blobs = output.bundle.bundle_root.join("blobs");
-    let mut routes = BTreeMap::new();
-    for (path, file) in &manifest.files {
-        let (algorithm, hex) = file
-            .blob
-            .split_once(':')
-            .with_context(|| format!("{path}: blob {} is not a digest", file.blob))?;
-        let location: PathBuf = blobs.join(algorithm).join(hex);
-        routes.insert(format!("/{path}"), (location, file.media_type.clone()));
-    }
-    // Never a port a process realization chose and has not bound yet: a
-    // server holding it would make that candidate fail to bind.
-    let entry_route = format!("/{}", manifest.entry_path);
-    let mut server = None;
-    for _ in 0..64 {
-        let candidate = StaticApplicationServer::serve_routes(
-            routes.clone(),
-            entry_route.clone(),
-            manifest.routing.spa_fallback,
-        )
-        .map_err(|error| anyhow::anyhow!("cannot serve the static candidate: {error}"))?;
-        let port = candidate
-            .base_url()
-            .rsplit(':')
-            .next()
-            .and_then(|p| p.parse::<u16>().ok());
-        if port.is_some_and(|port| !crate::ephemeral::port_is_pending(port)) {
-            server = Some(candidate);
-            break;
-        }
-    }
-    let server = server.context("cannot find a loopback port for the static candidate")?;
-    let base = server.base_url();
-    let mut evidence = RealizationEvidence {
-        executor: "runtime-static-loopback".to_owned(),
-        containment: "none; serves the produced bundle's files, runs nothing".to_owned(),
-        workspace: "the produced static web bundle, read-only".to_owned(),
-        build_network: "n/a".to_owned(),
-        candidate_network: "loopback only".to_owned(),
-        endpoints: BTreeMap::new(),
-        destroyed: false,
-    };
-    let client = reqwest::blocking::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(10))
-        .build()?;
-    let mut http = Vec::new();
-    for observation in http_requirements(planned) {
-        evidence.endpoints.insert(
-            observation.port_id.clone(),
-            "loopback static server".to_owned(),
-        );
-        let response = client
-            .get(format!("{base}{}", observation.path))
-            .send()
-            .with_context(|| format!("GET {} failed", observation.path))?;
-        let status = response.status().as_u16();
-        let body = response.bytes().context("cannot read the response body")?;
-        if body.len() > MAX_BODY_BYTES {
-            anyhow::bail!(
-                "GET {} returned more than {MAX_BODY_BYTES} bytes",
-                observation.path
-            );
-        }
-        http.push(RuntimeHttpObservation::from_response(
-            observation.port_id,
-            "GET",
-            observation.path,
-            status,
-            &body,
-        ));
-    }
-    attempt.realization = Some(evidence);
-    Ok(Observed {
-        http,
-        endpoint: Some(format!("{base}/")),
-        live: LiveCandidate::Static(server),
-    })
-}
-
 /// Verify the running candidate against the browser Contract, through the
 /// endpoint the realization reports — never a guessed guest port.
 fn browse(
-    realization: &TemporaryRealization,
+    endpoints: &BTreeMap<String, String>,
     browser: &BrowserVerification,
     runtime_id: &str,
     attempt_id: &str,
 ) -> BrowserVerificationReceipt {
-    let endpoints = realization.endpoints();
     let target = |endpoint: String| BrowserTarget {
         runtime_id: runtime_id.to_owned(),
         endpoint,
         attempt_id: Some(attempt_id.to_owned()),
     };
-    match endpoints {
-        [endpoint] => verify_in_browser(
-            browser,
-            target(format!("http://127.0.0.1:{}/", endpoint.host_port)),
-        ),
-        _ => BrowserVerificationReceipt::unavailable(
+    match endpoints.values().collect::<Vec<_>>().as_slice() {
+        [base] => verify_in_browser(browser, target(format!("{base}/"))),
+        all => BrowserVerificationReceipt::unavailable(
             &browser.contract,
             target(String::new()),
             "none",
             &format!(
                 "browser_endpoint_ambiguous: the candidate exposes {} observed ports; v0 \
                  verifies a candidate with exactly one",
-                endpoints.len()
+                all.len()
             ),
         ),
     }
@@ -838,7 +701,9 @@ pub fn bounded(reason: &str) -> String {
 #[cfg(test)]
 mod tests {
     use ato_formation::authoring::{BoundContract, BoundRequirement, HTTP_CONTRACT_VERIFIER};
-    use ato_formation::request::OutcomeState;
+
+    use crate::journal::AttemptJournal;
+    use ato_formation::request::{OutcomeState, RealizationEvidence};
 
     use super::*;
 
@@ -938,6 +803,88 @@ mod tests {
             attempt.failure.as_ref().unwrap().code,
             "candidate_cleanup_failed"
         );
+    }
+
+    /// A realizer that only counts how often it was asked to run something.
+    struct CountingRealizer(std::cell::Cell<u32>);
+
+    impl CandidateRealizer for CountingRealizer {
+        fn admit(&self, _profile: &RuntimeProfile) -> Option<AttemptFailure> {
+            None
+        }
+
+        fn realize(
+            &self,
+            _attempt_id: &str,
+            _attempt_root: &Path,
+        ) -> Result<crate::realize::Realized, RealizeFailure> {
+            self.0.set(self.0.get() + 1);
+            Err(RealizeFailure::Execution(anyhow::anyhow!("nothing to run")))
+        }
+    }
+
+    #[test]
+    fn a_restarted_or_redelivered_attempt_is_never_realized_twice() {
+        let contract = BoundContract {
+            schema: "ato.contract/1".to_owned(),
+            requirements: Vec::new(),
+        };
+        let derivation: ato_formation::authoring::BoundDerivation =
+            serde_json::from_value(serde_json::json!({
+                "schema": "ato.derivation/1",
+                "inputs": [], "runtimes": {}, "steps": [], "ports": [], "state": [],
+                "effects": "pure"
+            }))
+            .unwrap();
+        let spec = AttemptSpec {
+            contract: &contract,
+            contract_ref: "sha256:k",
+            derivation: &derivation,
+            derivation_ref: "sha256:d",
+            shape: crate::spec::CandidateShape::Process,
+            input_refs: BTreeMap::new(),
+            instance_snapshot_ref: None,
+        };
+        let scratch = tempfile::tempdir().unwrap();
+        // One journal directory, read again as a restarted process would.
+        let records = scratch.path().join("records");
+        let realizer = CountingRealizer(std::cell::Cell::new(0));
+        let attempt = |attempt_id: &str| {
+            run_attempt(
+                &AttemptRequest {
+                    request_id: "run-1",
+                    attempt_id,
+                    label: "portable",
+                    spec: &spec,
+                    contract_ref: "sha256:k",
+                    runtime_id: "local",
+                    profile: &RuntimeProfile::default(),
+                    authorization: EffectAuthorization::UserInvoked {
+                        derivation_ref: "sha256:d",
+                    },
+                    network: NetworkPolicy::Denied,
+                    browser: None,
+                    attempt_root: scratch.path(),
+                    continuation: Continuation::HandOff,
+                    receipt: ReceiptContext::formation(),
+                    interrupt: None,
+                },
+                &realizer,
+                &AttemptJournal::new(&records),
+            )
+        };
+        let first = attempt("run-1");
+        assert!(first.execution_started);
+        assert_eq!(realizer.0.get(), 1);
+
+        let again = attempt("run-1");
+        assert_eq!(realizer.0.get(), 1, "the same attempt was realized twice");
+        assert!(again.execution_started, "it did start — the first time");
+        assert_eq!(
+            again.attempt.failure.as_ref().unwrap().code,
+            "attempt_already_started"
+        );
+        assert!(again.live.is_none());
     }
 
     #[test]

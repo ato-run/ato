@@ -426,13 +426,36 @@ impl ContractVerificationReceipt {
         runtime: &RuntimeObservation,
         verification: ContractVerification,
     ) -> Self {
+        Self::for_attempt(
+            VerificationTargetKind::FormationRuntime,
+            None,
+            contract_ref,
+            derivation_ref,
+            contract,
+            runtime,
+            verification,
+        )
+    }
+
+    /// A receipt for one attempt on `target`. `bundle_sha256` names the
+    /// transport the verified bytes arrived in when there was one (a Run of
+    /// a `.capsule`), and is absent — never invented — when there was not.
+    pub fn for_attempt(
+        target: VerificationTargetKind,
+        bundle_sha256: Option<String>,
+        contract_ref: impl Into<String>,
+        derivation_ref: impl Into<String>,
+        contract: &BoundContract,
+        runtime: &RuntimeObservation,
+        verification: ContractVerification,
+    ) -> Self {
         Self {
-            bundle_sha256: None,
+            bundle_sha256,
             ..Self::from_runtime(
                 String::new(),
                 contract_ref,
                 derivation_ref,
-                VerificationTargetKind::FormationRuntime,
+                target,
                 contract,
                 runtime,
                 verification,

@@ -637,3 +637,180 @@ fn process_snapshot_start_fails_before_claiming_a_restore() {
         "local dynamic Instance snapshot restore supports only its declared filesystem state"
     ));
 }
+
+// ── stage 2c: process and static Runs through the common attempt ───────────
+
+/// GET `path` on `base`; `None` when nothing answers.
+fn http_status(base: &str, path: &str) -> Option<u16> {
+    use std::io::{Read, Write};
+    let address = base.trim_start_matches("http://");
+    let mut stream = std::net::TcpStream::connect(address).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
+    )
+    .ok()?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response).ok()?;
+    response.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// Import `capsule` (selecting `derivation`), start it, and check the handed
+/// off Run answers until it is stopped — then that it stopped, its
+/// runtime-owned tree is gone and the Run's own record says how the stop went.
+fn a_started_run_is_owned_until_stopped(capsule: &Path, derivation: Option<&str>, path: &str) {
+    let root = tempfile::tempdir().unwrap();
+    let mut import = ato_with_home(root.path());
+    import.args(["app", "import"]).arg(capsule);
+    if let Some(derivation) = derivation {
+        import.args(["--derivation", derivation]);
+    }
+    let imported = import.output().unwrap();
+    assert!(
+        imported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&imported.stderr)
+    );
+    let instance: Value = serde_json::from_slice(&imported.stdout).unwrap();
+    let instance_id = instance["instance_id"].as_str().unwrap();
+
+    let receipt_path = root.path().join("receipt.json");
+    let started = ato_with_home(root.path())
+        .args(["app", "start", instance_id, "--no-open"])
+        .arg("--verification-receipt")
+        .arg(&receipt_path)
+        .output()
+        .unwrap();
+    if !succeeded_or_rejected_by_runtime_admission(&started, &receipt_path) {
+        return;
+    }
+    let inspected = ato_with_home(root.path())
+        .args(["app", "inspect", instance_id])
+        .output()
+        .unwrap();
+    let active: Value = serde_json::from_slice(&inspected.stdout).unwrap();
+    let active = &active["active_run"];
+    let url = active["url"].as_str().unwrap().to_owned();
+    let run_dir = root
+        .path()
+        .join("instances")
+        .join(instance_id)
+        .join("runs")
+        .join(active["run_id"].as_str().unwrap());
+
+    // Handed off: the attempt returned long ago, and the Run still answers
+    // from the tree it owns.
+    assert_eq!(http_status(&url, path), Some(200));
+    assert!(run_dir.join("workspace").is_dir());
+    // The receipt names this Run from the start, and its bundle.
+    let receipt: Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+    assert_eq!(receipt["fully_satisfied"], true);
+    assert_eq!(receipt["bundle_sha256"], instance["bundle_sha256"]);
+    assert_eq!(receipt["execution"]["run_id"], active["run_id"]);
+    assert_eq!(receipt["execution"]["attempt_id"], active["run_id"]);
+
+    ato_with_home(root.path())
+        .args(["app", "stop", instance_id])
+        .assert()
+        .success();
+    assert_eq!(http_status(&url, path), None, "the Run stopped");
+    assert!(
+        !run_dir.join("workspace").exists(),
+        "the runtime-owned tree went with the Run"
+    );
+    let lifecycle: Value =
+        serde_json::from_slice(&fs::read(run_dir.join("lifecycle.json")).unwrap()).unwrap();
+    assert_eq!(lifecycle["stop"], "succeeded", "{lifecycle}");
+}
+
+#[test]
+fn a_static_run_is_owned_by_its_run_until_stopped() {
+    a_started_run_is_owned_until_stopped(&fixture(), None, "/proof.txt");
+}
+
+#[test]
+fn a_process_run_is_owned_by_its_run_until_stopped() {
+    a_started_run_is_owned_until_stopped(
+        &multi_fixture(),
+        Some("sha256:5d1ec4660745130f196102c1bd81828993ab75d69130f0fdf2e1e2598fd9f3cc"),
+        "/",
+    );
+}
+
+#[test]
+fn a_run_whose_contract_fails_keeps_nothing_running() {
+    let work = tempfile::tempdir().unwrap();
+    let source = work.path().join("app");
+    fs::create_dir_all(&source).unwrap();
+    let authored = authored_multi_process_fixture();
+    fs::copy(authored.join("app.py"), source.join("app.py")).unwrap();
+    // Same application, a K its bytes cannot satisfy.
+    let toml = fs::read_to_string(authored.join("capsule.toml"))
+        .unwrap()
+        .replace(
+            "sha256:ef1f781ce1776a53a072bcaf7630be1affca3326a980a03af3942217fd273d30",
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        );
+    fs::write(source.join("capsule.toml"), toml).unwrap();
+    let bundle_path = work.path().join("failing.capsule");
+    ato()
+        .arg("pack")
+        .arg(&source)
+        .arg("--output")
+        .arg(&bundle_path)
+        .assert()
+        .success();
+    let bundle = match decode_capsule_bundle_document(&fs::read(&bundle_path).unwrap()).unwrap() {
+        CapsuleBundleDocument::PortableApplicationV3(bundle) => bundle,
+        other => panic!("pack must emit a portable Application, got {other:?}"),
+    };
+
+    let home = tempfile::tempdir().unwrap();
+    let receipt_path = work.path().join("receipt.json");
+    let run = ato_with_home(home.path())
+        .arg("run")
+        .arg(&bundle_path)
+        .arg("--derivation")
+        .arg(&bundle.index.derivations[0])
+        .arg("--no-open")
+        .arg("--verification-receipt")
+        .arg(&receipt_path)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    if stderr.contains("selected derivation requires Python 3.12")
+        || stderr.contains("portable process sandbox admission failed")
+    {
+        return;
+    }
+    assert!(!run.status.success());
+    assert!(
+        stderr.contains("did not fully satisfy observation root"),
+        "{stderr}"
+    );
+    // A failed Run hands nothing off: no receipt is published for it, and
+    // the attempt's own record says it failed K — it did not stop halfway.
+    assert!(!receipt_path.exists());
+    let records = home.path().join("attempt-records");
+    let mut outcomes = Vec::new();
+    for request in fs::read_dir(&records).unwrap() {
+        for record in fs::read_dir(request.unwrap().path()).unwrap() {
+            let path = record.unwrap().path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "json")
+            {
+                let record: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+                outcomes.push((record["state"].clone(), record["outcome"].clone()));
+            }
+        }
+    }
+    assert_eq!(
+        outcomes,
+        vec![(
+            Value::from("finished"),
+            Value::from("http_body_digest_mismatch")
+        )]
+    );
+}
