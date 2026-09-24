@@ -1,0 +1,6 @@
+{
+  "attempt-result-finished": "sha256:8aeeaf0ecd783641fa5293e3aa8f9935ba8a3ed4f8675fcadd182d0bc2be94ec",
+  "attempt-result-not-started": "sha256:9445375d2bff265c8723d685ff2eca70963efc315b811d4cc14e229ede6c067b",
+  "attempt-result-started-unfinished": "sha256:006a360db38f6971cce3ac4dfd745059bbf66ce89719dd889e434d893c474c1f",
+  "satisfy-request": "sha256:997f81680ba821bd1c6bf58317e9dc560fbf448afba3c7fae2d5443a3b8c274e"
+}
