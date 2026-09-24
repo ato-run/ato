@@ -20,6 +20,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::static_server::StaticApplicationServer;
 use anyhow::{Context, Result};
 use ato_formation::authoring::HTTP_CONTRACT_VERIFIER;
 use ato_formation::browser::{BrowserTarget, BrowserVerdict, BrowserVerificationReceipt};
@@ -31,17 +32,16 @@ use ato_formation::verify::{
     ContractVerification, ContractVerificationReceipt, RuntimeHttpObservation, RuntimeObservation,
     VerificationExecutionEvidence, verify_runtime,
 };
-use ato_portable_application::StaticApplicationServer;
 
 use crate::admission::{admit, effects_name};
 use crate::browser_verify::{BrowserVerification, verify_in_browser};
+use crate::build_sandbox::NetworkPolicy;
 use crate::ephemeral::{
     RequiredObservation, RequiredPort, TemporaryRealization, TemporaryRealizationRequest,
 };
 use crate::executor::{AttemptExecution, AttemptExecutor, ExecutedCandidate};
-use crate::job::{PlannedCandidate, observe_candidate};
 use crate::journal::{AttemptJournal, BeginRefusal, StartIdentity};
-use crate::sandbox::NetworkPolicy;
+use crate::plan::{PlannedCandidate, observe_candidate};
 
 /// Bodies larger than this are not hashed into evidence.
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
@@ -622,7 +622,7 @@ fn browse(
     }
 }
 
-pub(crate) fn network_name(network: NetworkPolicy) -> &'static str {
+pub fn network_name(network: NetworkPolicy) -> &'static str {
     match network {
         NetworkPolicy::Denied => "denied",
         NetworkPolicy::DependencyResolution => "dependency-resolution",
@@ -632,7 +632,7 @@ pub(crate) fn network_name(network: NetworkPolicy) -> &'static str {
 /// A failure a person can act on, recovered from the error's TYPE — the same
 /// rule the hosted reporter follows: untyped errors stay anonymous because
 /// their chains can carry paths and credentials.
-pub(crate) fn failure_of(error: &anyhow::Error) -> AttemptFailure {
+pub fn failure_of(error: &anyhow::Error) -> AttemptFailure {
     // The requester gets a typed code and one sentence; the operator of this
     // Runtime gets the cause, bounded, on the worker's own log.
     // Head and tail: what failed is named first, and why is at the end.
@@ -658,7 +658,7 @@ pub(crate) fn failure_of(error: &anyhow::Error) -> AttemptFailure {
         Some(failure) => AttemptFailure {
             code: failure.code.clone(),
             stage: failure.stage.as_str().to_owned(),
-            message: failure.bounded_message(crate::api::FAILURE_REASON_LIMIT),
+            message: failure.bounded_message(crate::text::FAILURE_REASON_LIMIT),
         },
         None => AttemptFailure {
             code: "formation_failed".to_owned(),
@@ -670,6 +670,6 @@ pub(crate) fn failure_of(error: &anyhow::Error) -> AttemptFailure {
 
 /// One bounded line. Internal context stays in the log; the attempt record
 /// carries a sentence.
-pub(crate) fn bounded(reason: &str) -> String {
-    crate::api::bounded_reason(reason)
+pub fn bounded(reason: &str) -> String {
+    crate::text::bounded_reason(reason)
 }

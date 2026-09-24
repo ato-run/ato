@@ -36,6 +36,7 @@ ato-materializer-api = { path = "../../extensions/materializers/api", version = 
 ato-materializer-vm-snapshot = { path = "../../extensions/materializers/vm-snapshot", version = "0.1.0" }
 ato-materializer-replay = { path = "../../extensions/materializers/replay", version = "0.1.0" }
 ato-objects = { path = "../../lib/objects", version = "0.1.0" }
+ato-runtime-attempt = { path = "../../lib/runtime-attempt", version = "0.1.0" }
 ato-planner = { package = "ato-realization-planner", path = "../../extensions/planner", version = "0.1.0" }
 ato-record-writer = { path = "../../extensions/record-writer", version = "0.1.0" }
 ato-runtime-object-graph = { path = "../runtime-object-graph", version = "0.1.0" }
