@@ -35,13 +35,15 @@ use ato_formation::source::SourceLimits;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
-use crate::attempt::{AttemptRequest, Continuation, run_attempt};
+use crate::attempt::{AttemptRequest, Continuation, ReceiptContext, run_attempt};
 use crate::browser_verify::{BrowserVerification, BrowserVerifierCommand};
 use crate::executor::LocalAttemptExecutor;
 use crate::job::{PlannedCandidate, digest, plan_candidate};
 use crate::journal::AttemptJournal;
 use crate::local::{self, freeze_archive, host_triple, snapshot_directory};
 use crate::sandbox::{BuildLimits, NetworkPolicy, TOOLCHAIN_ROOT, containment_available};
+use ato_runtime_attempt::admission::EffectAuthorization;
+use ato_runtime_attempt::formation_realizer::FormationRealizer;
 
 pub const PROTOCOL: &str = "ato.runtime-network/0";
 /// The one execution environment a host advertises in Phase 1: itself.
@@ -937,6 +939,7 @@ fn execute_planned_ticket(
                 .filter(BrowserVerifierCommand::is_contained),
             budget: Default::default(),
         });
+    let spec = planned.attempt_spec();
     let outcome = run_attempt(
         &AttemptRequest {
             // Every attempt of one satisfy request spends from it: a
@@ -945,23 +948,31 @@ fn execute_planned_ticket(
             request_id: &ticket.satisfy_id,
             attempt_id: &ticket.attempt_id,
             label: "authored",
-            candidate: &planned,
+            spec: &spec,
             contract_ref: &contract_ref,
-            source_root: &frozen.root,
             runtime_id: &ticket.runtime_id,
             profile: &local::probe_local_runtime(),
+            // A ticket runs unattended, and may be retried elsewhere.
+            authorization: EffectAuthorization::Unattended,
             network,
             browser: browser.as_ref(),
             attempt_root,
-            shim: &config.shim,
             // The Runtime keeps the artifact for the coordinator, not the
             // running candidate.
             continuation: Continuation::Stop,
+            receipt: ReceiptContext::formation(),
+            interrupt: None,
         },
-        &LocalAttemptExecutor {
-            shim: config.shim.clone(),
+        &FormationRealizer {
+            planned: &planned,
+            source_root: &frozen.root,
+            builder: &LocalAttemptExecutor {
+                shim: config.shim.clone(),
+                network,
+                limits: BuildLimits::default(),
+            },
+            shim: &config.shim,
             network,
-            limits: BuildLimits::default(),
         },
         &AttemptJournal::new(config.out_dir.join("attempt-records")),
     );
