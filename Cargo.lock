@@ -684,6 +684,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ato-receipt-authority"
+version = "0.1.0"
+dependencies = [
+ "ato-formation",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ato-record-writer"
 version = "0.1.0"
 dependencies = [

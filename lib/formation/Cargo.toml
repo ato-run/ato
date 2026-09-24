@@ -12,6 +12,11 @@ dist = false
 [package.metadata.ato-architecture]
 layer = "lib"
 
+[features]
+default = ["planning"]
+# Receipt authority can be built without archive decoders or source planning.
+planning = ["dep:flate2", "dep:tar", "dep:zstd"]
+
 [dependencies]
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
@@ -19,9 +24,9 @@ serde_jcs = "0.1"
 semver = "1"
 serde_json = "1"
 sha2 = "0.10"
-flate2 = "1"
-tar = "0.4"
-zstd = "0.13"
+flate2 = { version = "1", optional = true }
+tar = { version = "0.4", optional = true }
+zstd = { version = "0.13", optional = true }
 thiserror = "2"
 toml = "0.8"
 
