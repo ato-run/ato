@@ -330,6 +330,37 @@ fn the_build_plan_pins_what_it_installs() {
 }
 
 #[test]
+fn only_the_platforms_provisioning_step_may_write_the_toolchain_root() {
+    let dir = tree(NOTES);
+    let intent = compile(dir.path(), &notes_overrides()).0.expect("compiles");
+    let plan = compile_build_plan(&intent, "/app", "x86_64-linux-gnu").expect("plans");
+    for step in &plan.steps {
+        let expected = if step.name == "provision-python" {
+            ToolchainAccess::Provision
+        } else {
+            // `uv sync` runs build-backend hooks from the source.
+            ToolchainAccess::ReadOnly
+        };
+        assert_eq!(step.toolchain_access, expected, "{}", step.name);
+    }
+    // How a step runs is not what it is: the digest does not see it, and a
+    // plan read back from bytes gets the least privilege.
+    let bytes = serde_json::to_vec(&plan).unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains("toolchain_access"));
+    let read_back: EffectiveBuildPlanV1 = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        read_back
+            .steps
+            .iter()
+            .all(|step| step.toolchain_access == ToolchainAccess::ReadOnly)
+    );
+    assert_eq!(
+        read_back.canonical_digest().unwrap(),
+        plan.canonical_digest().unwrap()
+    );
+}
+
+#[test]
 fn the_artifact_carries_dependencies_and_not_the_interpreter() {
     let dir = tree(&[("requirements.txt", "fastapi==0.115.6\n"), ("app.py", "\n")]);
     let intent = compile(dir.path(), &notes_overrides()).0.expect("compiles");

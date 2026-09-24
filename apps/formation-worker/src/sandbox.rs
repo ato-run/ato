@@ -21,6 +21,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail, ensure};
+pub use ato_formation::intent::ToolchainAccess;
 use ato_sandbox::{SandboxPolicy, filter_sensitive_paths, sensitive_paths};
 
 /// Where the source appears inside the build sandbox. Read-only.
@@ -147,9 +148,14 @@ pub struct BuildSandbox<'a> {
     pub cache_root: Option<&'a Path>,
     /// This worker's own binary, re-entered as the Landlock shim.
     pub shim: &'a Path,
+    /// Where the host writes the Landlock policy before each step. Must be
+    /// outside every path the build can write: a step that could replace it
+    /// with a link would redirect the host's next write.
     pub policy_host_path: &'a Path,
     pub network: NetworkPolicy,
     pub limits: BuildLimits,
+    /// Read-only unless this step is the platform provisioning a toolchain.
+    pub toolchain: ToolchainAccess,
 }
 
 pub fn sandboxed_build_command(
@@ -181,6 +187,7 @@ pub fn sandboxed_build_step_command(
         policy_host_path,
         network,
         limits,
+        toolchain,
     } = *sandbox;
     ensure!(!workload_argv.is_empty(), "build step has no argv");
     require_containment()?;
@@ -208,10 +215,16 @@ pub fn sandboxed_build_step_command(
             (*path).to_owned(),
         ]);
     }
-    // Toolchains are provisioned into a shared root and reused across builds,
-    // so this one is writable.
+    // Toolchains are provisioned into a shared root and reused across builds
+    // and attempts. Only the platform's provisioning step may write it; a step
+    // running source-controlled or authored code could otherwise replace an
+    // interpreter every later build and attempt executes.
     argv.extend([
-        "--bind".to_owned(),
+        match toolchain {
+            ToolchainAccess::Provision => "--bind",
+            ToolchainAccess::ReadOnly => "--ro-bind",
+        }
+        .to_owned(),
         TOOLCHAIN_ROOT.to_owned(),
         TOOLCHAIN_ROOT.to_owned(),
     ]);
@@ -293,7 +306,7 @@ pub fn sandboxed_build_step_command(
 
     Ok(SandboxedBuildCommand {
         argv,
-        policy: landlock_policy(cache_root.is_some()),
+        policy: landlock_policy(cache_root.is_some(), toolchain),
         network,
     })
 }
@@ -344,14 +357,12 @@ fn build_environment(network: NetworkPolicy) -> Vec<(String, String)> {
 }
 
 /// The Landlock policy the shim applies, in GUEST paths.
-fn landlock_policy(with_cache: bool) -> SandboxPolicy {
-    let mut writable = vec![
-        PathBuf::from(GUEST_WORKSPACE_ROOT),
-        PathBuf::from("/tmp"),
-        // Provisioning writes here on a first build and reads on every later
-        // one.
-        PathBuf::from(TOOLCHAIN_ROOT),
-    ];
+fn landlock_policy(with_cache: bool, toolchain: ToolchainAccess) -> SandboxPolicy {
+    let mut writable = vec![PathBuf::from(GUEST_WORKSPACE_ROOT), PathBuf::from("/tmp")];
+    // Provisioning writes here on a first build; every other step only reads.
+    if toolchain == ToolchainAccess::Provision {
+        writable.push(PathBuf::from(TOOLCHAIN_ROOT));
+    }
     if with_cache {
         writable.push(PathBuf::from(GUEST_CACHE_ROOT));
     }
@@ -366,6 +377,9 @@ fn landlock_policy(with_cache: bool) -> SandboxPolicy {
         .map(PathBuf::from)
         .collect();
     readable.push(PathBuf::from(GUEST_SOURCE_ROOT));
+    if toolchain == ToolchainAccess::ReadOnly {
+        readable.push(PathBuf::from(TOOLCHAIN_ROOT));
+    }
     // Read-only on purpose: a build that could edit the compiler could change
     // what every later build produces.
     readable.push(PathBuf::from(BUILD_ASSET_ROOT));
