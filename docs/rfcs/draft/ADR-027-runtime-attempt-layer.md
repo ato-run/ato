@@ -61,3 +61,24 @@ now carries the same `materializer` label as `replay` and `snapshot`.
 - One crate executes and verifies a Derivation for every entry that moves
   onto it; the next PRs move callers, not code.
 - The layer rule is checked by `tools/arch-check`.
+
+## Migration status (updated with stage 2c)
+
+Which entries execute and verify through `run_attempt`, and which still
+build their own observation and receipt:
+
+| Entry | Realizer | Status |
+|---|---|---|
+| Local Formation (`ato form`) | `FormationRealizer` (build from source) | on the common attempt (2a/2b) |
+| Runtime Network ticket | `FormationRealizer` | on the common attempt (2a/2b) |
+| CLI Run, LocalProcess `.capsule` (`ato run`, `ato app start`) | `PortableBundleExecutor` (unpack, no build) | on the common attempt (2c) |
+| CLI Run, StaticWeb `.capsule` | `PortableBundleExecutor` | on the common attempt (2c) |
+| CLI Run, OCI and OCI service group | — | previous CLI path; moves in 2e |
+| Hosted Formation job (`run_claimed_job`) | — | previous path, artifact-only `verify()`; moves in 2d |
+| Hosted `.capsule` validation (`validator_agent`) | — | previous path; moves in 2e |
+| Hosted Run (connected-realization-worker leases) | — | previous path; moves in 2e |
+
+Since 2c, `run_attempt` takes an `AttemptSpec` (frozen K and D, shape,
+input identities, restored snapshot) and a `CandidateRealizer` (how the
+candidate comes to be running). A Formation adapts its `PlannedCandidate`;
+a Run adapts its validated `.capsule`. Neither is converted into the other.
