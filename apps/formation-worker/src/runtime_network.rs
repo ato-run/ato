@@ -35,11 +35,11 @@ use ato_formation::source::SourceLimits;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
-use crate::attempt::{AttemptRequest, Continuation, ReceiptContext, run_attempt};
+use crate::attempt::{AttemptRequest, Continuation, ReceiptContext, run_reserved_attempt};
 use crate::browser_verify::{BrowserVerification, BrowserVerifierCommand};
 use crate::executor::LocalAttemptExecutor;
 use crate::job::{PlannedCandidate, digest, plan_candidate};
-use crate::journal::AttemptJournal;
+use crate::journal::{AttemptJournal, AttemptLedger, AttemptPermit, AttemptRecordState};
 use crate::local::{self, freeze_archive, host_triple, snapshot_directory};
 use crate::sandbox::{BuildLimits, NetworkPolicy, TOOLCHAIN_ROOT, containment_available};
 use ato_runtime_attempt::admission::EffectAuthorization;
@@ -147,6 +147,11 @@ pub struct SatisfyBudget {
 #[serde(deny_unknown_fields)]
 pub struct SatisfyRequest {
     pub protocol: String,
+    /// The Formation search this request belongs to: an opaque id, shared by
+    /// every request of one search and nothing else. It carries no K, no
+    /// source and nothing about the requester. While an attempt of the
+    /// search is UNKNOWN, the coordinator starts nothing more for it.
+    pub search_id: String,
     /// The K being satisfied: the effective Contract when a browser Contract
     /// is part of it, else the base Contract.
     pub contract_ref: String,
@@ -205,8 +210,13 @@ pub struct RuntimeAttestation {
     pub requirements: Vec<Requirement>,
     pub provisions: Vec<String>,
     /// Did anything of the candidate run — a build step, the application?
-    /// `false` for every refusal before execution.
+    /// `false` for every refusal before execution. Kept for compatibility;
+    /// `attempt_record` is what UNKNOWN is decided from.
     pub execution_started: bool,
+    /// What this Runtime's durable attempt record says: `not_started`,
+    /// `finished`, or `started_unfinished` — the attempt ran and its end is
+    /// not durable, so what it did is UNKNOWN whatever the outcome says.
+    pub attempt_record: AttemptRecordState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -406,8 +416,16 @@ pub struct Submission {
     pub contracts: BTreeMap<String, ato_formation::authoring::BoundContract>,
 }
 
+/// A new, opaque search id: 128 random bits, nothing derived from the
+/// request or the requester.
+pub fn new_search_id(entropy: [u8; 16]) -> String {
+    let hex: String = entropy.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("search_{hex}")
+}
+
 /// Freeze `dir`, plan every authorized route against it, and assemble the
-/// request. Every route must bind to the same Contract: one K, several Ds.
+/// request for the search `search_id`. Every route must bind to the same
+/// Contract: one K, several Ds.
 #[allow(clippy::too_many_arguments)]
 pub fn prepare_submission(
     dir: &Path,
@@ -417,6 +435,7 @@ pub fn prepare_submission(
     constraint: RuntimeConstraintWire,
     policy: SatisfyPolicy,
     budget: SatisfyBudget,
+    search_id: &str,
 ) -> Result<Submission> {
     let archive = snapshot_directory(dir)?;
     if archive.len() > MAX_SOURCE_BYTES {
@@ -480,6 +499,7 @@ pub fn prepare_submission(
     Ok(Submission {
         request: SatisfyRequest {
             protocol: PROTOCOL.to_owned(),
+            search_id: search_id.to_owned(),
             contract_ref,
             base_contract_ref,
             browser_contract,
@@ -496,6 +516,137 @@ pub fn prepare_submission(
         },
         contracts,
     })
+}
+
+/// Owner-session resolution wire; it does not stop a Runtime by itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum UnknownResolution {
+    Resolve {
+        resolution: EffectResolution,
+        note: String,
+        execution_stop: ExecutionStop,
+    },
+    TerminateSearch {
+        note: String,
+    },
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectResolution {
+    NoEffectConfirmed,
+    EffectReconciled,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionStop {
+    pub kind: ExecutionStopKind,
+    pub evidence: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionStopKind {
+    RuntimeTerminated,
+    ExecutionDisabled,
+}
+
+/// Where a satisfy request stands, read from the coordinator's status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Settlement {
+    /// Still being worked on.
+    Running,
+    Satisfied,
+    /// Every admissible candidate was tried, or none may follow a failure.
+    Unsatisfied,
+    /// The budget ran out with candidates left.
+    Exhausted,
+    /// An attempt may have run and what it did is not known. Not a failure
+    /// and not inconclusive: nothing further runs for the search until its
+    /// owner resolves the attempt.
+    EffectUnknown(Vec<UnknownAttempt>),
+    /// The owner stopped the search after an UNKNOWN attempt.
+    Stopped,
+}
+
+/// An attempt whose result is not known, as the requester is shown it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownAttempt {
+    pub attempt_id: String,
+    pub runtime_id: String,
+    pub reason: String,
+}
+
+impl Settlement {
+    /// Read the coordinator's `status`. A status this requester does not
+    /// know is an error, never read as a settlement it does.
+    pub fn of(status: &serde_json::Value) -> Result<Self> {
+        let field =
+            |value: &serde_json::Value, name: &str| value[name].as_str().unwrap_or("?").to_owned();
+        Ok(match status["status"].as_str().unwrap_or("") {
+            "running" => Self::Running,
+            "satisfied" => Self::Satisfied,
+            "unsatisfied" => Self::Unsatisfied,
+            "exhausted" => Self::Exhausted,
+            "unknown" => Self::EffectUnknown(
+                status["unknown_attempts"]
+                    .as_array()
+                    .map(Vec::as_slice)
+                    .unwrap_or_default()
+                    .iter()
+                    .filter(|attempt| attempt["resolution"].is_null())
+                    .map(|attempt| UnknownAttempt {
+                        attempt_id: field(attempt, "attempt_id"),
+                        runtime_id: field(attempt, "runtime_id"),
+                        reason: field(attempt, "unknown_reason"),
+                    })
+                    .collect(),
+            ),
+            "stopped" => Self::Stopped,
+            other => {
+                bail!("the coordinator reports a status this requester does not know: {other:?}")
+            }
+        })
+    }
+
+    /// The typed reason a request ended without a verified route.
+    pub fn terminal_reason(&self) -> Option<&'static str> {
+        match self {
+            Self::Running | Self::Satisfied => None,
+            Self::Unsatisfied => Some("unsatisfied"),
+            Self::Exhausted => Some("budget_exhausted"),
+            Self::EffectUnknown(_) => Some("effect_unknown"),
+            Self::Stopped => Some("search_stopped"),
+        }
+    }
+}
+
+impl std::fmt::Display for Settlement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Running => write!(f, "running"),
+            Self::Satisfied => write!(f, "satisfied"),
+            Self::Unsatisfied => write!(f, "unsatisfied: no admissible candidate passed"),
+            Self::Exhausted => write!(f, "budget_exhausted: candidates remain"),
+            Self::EffectUnknown(attempts) => {
+                write!(f, "effect_unknown: ")?;
+                for (index, attempt) in attempts.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, "; ")?;
+                    }
+                    write!(
+                        f,
+                        "attempt {} on Runtime {} may have run and its result is not known ({})",
+                        attempt.attempt_id, attempt.runtime_id, attempt.reason
+                    )?;
+                }
+                write!(
+                    f,
+                    ". Nothing further runs for this search until its owner resolves it"
+                )
+            }
+            Self::Stopped => write!(f, "search_stopped: the owner stopped this search"),
+        }
+    }
 }
 
 /// The verified routes of a settled satisfy request that prove the complete
@@ -732,10 +883,8 @@ pub fn serve(config: &ServeConfig) -> Result<()> {
                 "[runtime-network] attempt {} — {} on {}",
                 ticket.attempt_id, ticket.derivation_ref, ticket.environment_id
             );
-            let report = match client.source(&ticket.attempt_id) {
-                Ok(archive) => execute_ticket(config, &ticket, archive),
-                Err(error) => unavailable(&ticket, "source_unavailable", &format!("{error:#}")),
-            };
+            let report =
+                execute_ticket_with_source(config, &ticket, || client.source(&ticket.attempt_id));
             eprintln!(
                 "[runtime-network] attempt {} → {}",
                 ticket.attempt_id, report.outcome
@@ -745,7 +894,8 @@ pub fn serve(config: &ServeConfig) -> Result<()> {
             busy.store(0, Ordering::Relaxed);
             report_now(&client, 0);
             // A result that cannot be delivered is retried; if it never is,
-            // the coordinator expires the attempt as inconclusive.
+            // the coordinator records the attempt as UNKNOWN: it was claimed,
+            // and nobody can say what it did.
             for retry in 0..5 {
                 match client.report(&ticket.attempt_id, &report) {
                     Ok(()) => break,
@@ -780,6 +930,7 @@ fn attestation() -> RuntimeAttestation {
         requirements: Vec::new(),
         provisions: Vec::new(),
         execution_started: false,
+        attempt_record: AttemptRecordState::NotStarted,
     }
 }
 
@@ -803,19 +954,8 @@ fn refused(
         }),
         formation_attempt: None,
         verifier_receipts: Vec::new(),
-        attestation: RuntimeAttestation {
-            execution_started: false,
-            ..attestation
-        },
+        attestation,
     }
-}
-
-fn unavailable(ticket: &AttemptTicket, code: &str, message: &str) -> AttemptResultReport {
-    let mut report = refused(ticket, attestation(), code, message);
-    if let Some(failure) = report.failure.as_mut() {
-        failure.stage = "runtime".to_owned();
-    }
-    report
 }
 
 /// Run one ticket through the common attempt entry — the ticket's frozen
@@ -834,7 +974,38 @@ pub fn execute_ticket(
     ticket: &AttemptTicket,
     archive: Vec<u8>,
 ) -> AttemptResultReport {
+    execute_ticket_with_source(config, ticket, || Ok(archive))
+}
+
+/// Source acquisition is inside the durable delivery reservation too. An old
+/// ticket's historical state always takes precedence over early preflight errors.
+pub fn execute_ticket_with_source(
+    config: &ServeConfig,
+    ticket: &AttemptTicket,
+    source: impl FnOnce() -> Result<Vec<u8>>,
+) -> AttemptResultReport {
     let mut attested = attestation();
+    let permit = match AttemptJournal::new(config.out_dir.join("attempt-records"))
+        .acquire(&ticket.satisfy_id, &ticket.attempt_id)
+    {
+        Ok(permit) => permit,
+        Err(refusal) => {
+            attested.attempt_record = refusal.record_state();
+            attested.execution_started = attested.attempt_record.execution_started();
+            return refused(ticket, attested, refusal.code(), &refusal.message());
+        }
+    };
+    let archive = match source() {
+        Ok(archive) => archive,
+        Err(error) => {
+            return refused(
+                ticket,
+                attested,
+                "source_unavailable",
+                &format!("{error:#}"),
+            );
+        }
+    };
     if ticket.environment_id != NATIVE_ENVIRONMENT {
         return refused(
             ticket,
@@ -855,7 +1026,14 @@ pub fn execute_ticket(
         );
     }
     let attempt_root = config.work_root.join(&ticket.attempt_id);
-    let report = execute_planned_ticket(config, ticket, archive, &attempt_root, &mut attested);
+    let report = execute_planned_ticket(
+        config,
+        ticket,
+        archive,
+        &attempt_root,
+        &mut attested,
+        permit,
+    );
     let _ = std::fs::remove_dir_all(&attempt_root);
     report
 }
@@ -866,6 +1044,7 @@ fn execute_planned_ticket(
     archive: Vec<u8>,
     attempt_root: &Path,
     attested: &mut RuntimeAttestation,
+    permit: Box<dyn AttemptPermit>,
 ) -> AttemptResultReport {
     let planned = (|| -> Result<_> {
         std::fs::create_dir_all(attempt_root)?;
@@ -940,7 +1119,7 @@ fn execute_planned_ticket(
             budget: Default::default(),
         });
     let spec = planned.attempt_spec();
-    let outcome = run_attempt(
+    let outcome = run_reserved_attempt(
         &AttemptRequest {
             // Every attempt of one satisfy request spends from it: a
             // redelivered ticket, or another route after an UNKNOWN one, is
@@ -974,9 +1153,10 @@ fn execute_planned_ticket(
             shim: &config.shim,
             network,
         },
-        &AttemptJournal::new(config.out_dir.join("attempt-records")),
+        Ok(permit),
     );
-    attested.execution_started = outcome.execution_started;
+    attested.execution_started = outcome.execution_started();
+    attested.attempt_record = outcome.attempt_record;
     let mut attempt = outcome.attempt;
     let materialization_ref = match &outcome.verified {
         Some(executed) => match local::store_candidate(executed, &config.out_dir) {

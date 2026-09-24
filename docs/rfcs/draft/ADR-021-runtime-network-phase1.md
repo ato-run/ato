@@ -5,6 +5,10 @@
 and ADR-020 (Browser Contract v0). Coordinator: `ato-api`
 `src/services/runtime_network/`, migration `0288_runtime_network.sql`.
 
+Stage 3b extends this design with durable search-level UNKNOWN; see
+[ADR-028](ADR-028-runtime-network-search-unknown.md). The original Phase 1
+timeout and attestation rules below are superseded by that decision.
+
 ## The question
 
 `ato form --runtime local` realizes and verifies a candidate on the machine it
