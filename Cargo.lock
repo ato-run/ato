@@ -354,6 +354,7 @@ dependencies = [
  "ato-objects",
  "ato-realization-planner",
  "ato-record-writer",
+ "ato-runtime-attempt",
  "ato-runtime-object-graph",
  "ato-sandbox",
  "base64 0.22.1",
@@ -437,11 +438,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "ato-adapter-process",
- "ato-connected-realization-worker",
  "ato-formation",
  "ato-ipc",
  "ato-materializer-static-web",
- "ato-portable-application",
+ "ato-runtime-attempt",
  "ato-sandbox",
  "base64 0.22.1",
  "clap",
@@ -657,6 +657,7 @@ dependencies = [
  "ato-ipc",
  "ato-materializer-static-web",
  "ato-objects",
+ "ato-runtime-attempt",
  "base64 0.22.1",
  "clap",
  "reqwest",
@@ -691,6 +692,28 @@ dependencies = [
  "serde",
  "serde_jcs",
  "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ato-runtime-attempt"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ato-adapter-process",
+ "ato-formation",
+ "ato-ipc",
+ "ato-materializer-static-web",
+ "ato-sandbox",
+ "base64 0.22.1",
+ "libc",
+ "reqwest",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "sha2",
+ "tar",
  "tempfile",
  "thiserror 2.0.18",
 ]

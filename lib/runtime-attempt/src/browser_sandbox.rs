@@ -48,7 +48,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail, ensure};
 use ato_formation::browser::VerifierContainment;
 
-use crate::sandbox::containment_available;
+use crate::build_sandbox::containment_available;
 
 pub const GUEST_VERIFIER_ROOT: &str = "/verifier";
 pub const GUEST_NODE_ROOT: &str = "/runtime/node";

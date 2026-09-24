@@ -19,7 +19,7 @@ use anyhow::{Context, Result, bail, ensure};
 use ato_formation::failure::{FailureStage, FormationFailure};
 use ato_formation::intent::{BuildStepV1, EffectiveBuildPlanV1};
 
-use crate::sandbox::{
+use crate::build_sandbox::{
     BuildSandbox, GUEST_WORKSPACE_ROOT, NetworkPolicy, sandboxed_build_step_command,
 };
 
