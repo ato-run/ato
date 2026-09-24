@@ -19,8 +19,8 @@ This is an implementation plan; pending rows are not shipped functionality.
 | 1, S1/S2 | Common Local/Network attempts, generic process/Node; four independent result states and separate Browser judge semantics | Merged |
 | 2a–2c | Runtime layer; Stop/HandOff ownership; portable CLI process/static without rebuilding | Merged through #1395 |
 | 3b | Durable UNKNOWN across Runtimes/requests; historical attestation, owner effect finding plus physical cessation evidence, crash-consistent settlement | Merged: ato #1396 `722f0761`, API #686 `c0f2682e`; not deployed |
-| 3a | Coordinator uses frozen K and Rust receipt authority via bounded WASM; fail closed and keep Requester recheck | Implemented for review; local verification |
-| 2d | Hosted Formation actual observation/common attempt; API v1/v2 receiver first, then v2 worker | Next, independent of 3a |
+| 3a | Coordinator uses frozen K and Rust receipt authority via bounded WASM; fail closed and keep Requester recheck | Implemented: ato #1397 / API #687; real local Coordinator/worker/Requester acceptance; not merged/deployed |
+| 2d | Hosted Formation actual observation/common attempt; API v1/v2 receiver first, then v2 worker | Implemented: API #688 receiver first → ato #1398 sender; Static/Python/Node actual execution; not merged/deployed |
 | 2e | Hosted Run/validator and existing OCI/service group through common execution and handle ownership | Pending |
 | 2f | Remove duplicated D→projection→string→intent→build-plan interpretations and unused re-exports | Pending |
 | 3c | Search budget reservations/accounting, then streaming content-addressed source transport | Pending |
