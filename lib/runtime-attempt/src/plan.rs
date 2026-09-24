@@ -218,3 +218,24 @@ pub fn observe_candidate(
         instance_snapshot_ref: None,
     }
 }
+
+impl PlannedCandidate {
+    /// What an attempt of this candidate verifies: its frozen K and D, with
+    /// the input identities it resolved. The intent and build plan stay with
+    /// the Formation realizer that builds it.
+    pub fn attempt_spec(&self) -> crate::spec::AttemptSpec<'_> {
+        crate::spec::AttemptSpec {
+            contract: &self.contract,
+            contract_ref: &self.contract_ref,
+            derivation: &self.derivation,
+            derivation_ref: &self.derivation_ref,
+            shape: if self.intent.lane.is_process() {
+                crate::spec::CandidateShape::Process
+            } else {
+                crate::spec::CandidateShape::StaticWeb
+            },
+            input_refs: observe_candidate(&self.derivation, &self.projected, None).input_refs,
+            instance_snapshot_ref: None,
+        }
+    }
+}

@@ -15,7 +15,9 @@ use ato_formation::capsule_toml::parse_capsule_toml;
 use ato_formation::detect::detect;
 use ato_formation::request::{AttemptStatus, OutcomeState};
 use ato_formation::source::{DownloadedArchive, SourceLimits};
-use ato_formation_worker::attempt::{AttemptOutcome, AttemptRequest, Continuation, run_attempt};
+use ato_formation_worker::attempt::{
+    AttemptOutcome, AttemptRequest, Continuation, ReceiptContext, run_attempt,
+};
 use ato_formation_worker::executor::LocalAttemptExecutor;
 use ato_formation_worker::job::{PlannedCandidate, digest, plan_candidate};
 use ato_formation_worker::journal::AttemptJournal;
@@ -23,6 +25,8 @@ use ato_formation_worker::local::{host_triple, probe_local_runtime, snapshot_dir
 use ato_formation_worker::sandbox::{
     BuildLimits, NetworkPolicy, TOOLCHAIN_ROOT, containment_available,
 };
+use ato_runtime_attempt::admission::EffectAuthorization;
+use ato_runtime_attempt::formation_realizer::FormationRealizer;
 
 const STATIC_ROUTE: &str = r#"
 schema = "ato.capsule/1"
@@ -152,26 +156,34 @@ fn attempt(
 ) -> AttemptOutcome {
     let shim = PathBuf::from(env!("CARGO_BIN_EXE_ato-formation-worker"));
     let attempt_root = fixture.scratch.path().join("attempt");
+    let spec = fixture.planned.attempt_spec();
     run_attempt(
         &AttemptRequest {
             request_id: "req-handoff",
             attempt_id: "att-handoff",
             label: "authored",
-            candidate: &fixture.planned,
+            spec: &spec,
             contract_ref: &fixture.planned.contract_ref,
-            source_root: &fixture.source_root,
             runtime_id: "local",
             profile: &probe_local_runtime(),
+            authorization: EffectAuthorization::Unattended,
             network,
             browser: None,
             attempt_root: &attempt_root,
-            shim: &shim,
             continuation,
+            receipt: ReceiptContext::formation(),
+            interrupt: None,
         },
-        &LocalAttemptExecutor {
-            shim: shim.clone(),
+        &FormationRealizer {
+            planned: &fixture.planned,
+            source_root: &fixture.source_root,
+            builder: &LocalAttemptExecutor {
+                shim: shim.clone(),
+                network,
+                limits: BuildLimits::default(),
+            },
+            shim: &shim,
             network,
-            limits: BuildLimits::default(),
         },
         &AttemptJournal::new(fixture.scratch.path().join("records")),
     )
