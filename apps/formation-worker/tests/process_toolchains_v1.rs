@@ -435,3 +435,31 @@ fn the_same_route_plans_its_own_node_per_target_and_keeps_one_derivation() {
     assert_ne!(x86.plan_digest, arm.plan_digest);
     assert_eq!(x86.derivation_ref, arm.derivation_ref);
 }
+
+#[test]
+fn only_the_platforms_provisioning_steps_may_write_the_shared_toolchains() {
+    use ato_formation::intent::ToolchainAccess;
+    let planned = plan_pm(
+        r#","packageManager":"pnpm@10.4.1+sha512.c753b6c3ad7afa13af388fa6d808035a008e30ea9993f58c6663e2bc5ff21679aa834db094987129aa4d488b86df57f7b634981b2f827cdcacc698cc0cfb88af""#,
+        Some("pnpm"),
+        // An authored step that borrows a platform step's name gets no
+        // privilege from it.
+        &exec("provision-node", &["node", "-e", "1"], false),
+    )
+    .expect("plans");
+    let access: Vec<(&str, ToolchainAccess)> = planned
+        .plan
+        .steps
+        .iter()
+        .map(|step| (step.name.as_str(), step.toolchain_access))
+        .collect();
+    assert_eq!(
+        access,
+        [
+            ("provision-node", ToolchainAccess::Provision),
+            ("provision-pnpm", ToolchainAccess::Provision),
+            ("provision-node", ToolchainAccess::ReadOnly),
+            ("install", ToolchainAccess::ReadOnly),
+        ]
+    );
+}
