@@ -156,8 +156,10 @@ stops, for both surfaces:
 - the container a v1 launch spec asks for and its readiness wait, and the
   v2 service-group launcher (moved unchanged from the Hosted Runner);
 - `start_service_group`: services in authored order, each ready before the
-  next; on failure everything started is stopped in reverse and every
-  network removed, and services not yet started never start;
+  next; on failure explicitly attempts stop in reverse order and returns the
+  original error plus each stop outcome. Confirmed stops permit reclamation;
+  unconfirmed stops retain container/network identities and scratch for
+  recovery. Services not yet started never start;
 - `LaunchedOci` / `OciStop`: one container or one group, stopped with an
   outcome confirmed per container;
 - `OciCandidate`: the `RunningCandidate` for the common attempt, which
@@ -179,6 +181,16 @@ Behavior that changed deliberately: a local Instance's OCI receipt names its
 Run from the start instead of being rewritten, a stop reports success only
 when every container is confirmed stopped and then removes the unpacked
 workspace and OCI scratch, and a non-Linux host is refused at admission.
+An unconfirmed CLI stop fences filesystem/browser state save, successful ack,
+Run release and the next Run of that Instance. A pre-launch pending marker
+also fences release after worker death; worker death and Drop are not Docker
+stop evidence. Launch identities are written before Docker can create a
+container. Activation, receipt persistence, observation and service-exit
+errors must explicitly stop and retain uncertain results. Confirmed cessation
+with scratch-removal failure is a distinct lifecycle error. K receipts remain
+historical verification evidence, unchanged by these lifecycle outcomes.
+Hosted partial-start uncertainty feeds the existing quarantine/recovery path;
+no new distributed recovery protocol or automatic CLI recovery is introduced.
 
 Not changed: image identity/offline archive rules, the adapter's isolation
 (internal network, readonly workspace, limits), new multi-service
