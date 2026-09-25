@@ -62,7 +62,7 @@ now carries the same `materializer` label as `replay` and `snapshot`.
   onto it; the next PRs move callers, not code.
 - The layer rule is checked by `tools/arch-check`.
 
-## Migration status (updated with stage 2e-a)
+## Migration status (updated with stage 2e-b)
 
 Which entries execute and verify through `run_attempt`, which only verify
 through its verification point, and which still build their own observation
@@ -77,7 +77,8 @@ and receipt:
 | CLI Run, OCI and OCI service group | — | previous CLI path; moves in 2e |
 | Hosted Formation job (`run_claimed_job`) | — | previous path, artifact-only `verify()`; moves in 2d |
 | Hosted `.capsule` verification (`validator_agent::verify_hosted`) | none — it observes a Run it does not own | common verification and receipt (2e-a); observation through the existing API `observe_url` relay; not on the common attempt |
-| Hosted Run (connected-realization-worker leases) | — | previous path: starts and owns the candidate the Hosted verifier observes; moves in 2e-b/2e-c |
+| Hosted LocalProcess Run | `LaunchedProcess` | common launch, live handle, confirmed group stop and Drop cleanup (2e-b); Hosted retains lease, authorization, readiness, state and recovery |
+| Hosted OCI/service group | — | previous path; moves in 2e-c |
 
 Since 2c, `run_attempt` takes an `AttemptSpec` (frozen K and D, shape,
 input identities, restored snapshot) and a `CandidateRealizer` (how the
@@ -121,5 +122,28 @@ K, D and the workspace identity come from the validated bundle; the job only
 selects a declared D and reports the Instance snapshot the Hosted Run
 restored, which K's snapshot observation is decided against.
 
-Moving the Hosted Run itself — launch, lease and fence, state ownership,
-OCI and service groups — onto the common attempt is 2e-b/2e-c.
+### Hosted LocalProcess ownership (2e-b)
+
+The Hosted ACTIVE session already held the common `LaunchedProcess` since
+2a. 2e-b completes that handle's group cleanup instead of wrapping it in
+another candidate or synthesizing an `AttemptSpec`. Its explicit stop and
+Drop now use the same bounded group termination, including surviving children
+after leader exit. Only confirmed cessation permits Hosted state commit and
+writer release. An unconfirmed stop remains quarantined and journaled with
+its process identity; recovery checks the group as well as the leader.
+
+The unused parallel `session::start_run/finish_run` production entry points
+are removed. The stateful tests now exercise `lease::start/finish`, the same
+path the worker serves. The caller explicitly supplies the existing
+`ProcessLaunchHost` (worker shim and lease scratch); argv/cwd/env, toolchain,
+workspace/state mounts and route selection are unchanged.
+
+Lease/fence/slot, execution authorization renewal, owner stop, bindings,
+network grants, readiness and state acquire/restore/commit/release stay in
+Hosted. The common handle never commits/releases state. Static Hosted is
+unchanged; OCI/service groups remain 2e-c. K is still judged by the 2e-a
+verification helper after readiness and ACTIVE, with the existing receipt
+schema and actual restored snapshot evidence.
+
+See `docs/ops/formation-2e-b-ownership-2026-09-25.md` for verification and
+review status; this is not deployment or completion of 2e-c.
