@@ -1,6 +1,9 @@
 # ADR-024 — Authored `exec` steps in the EffectiveBuildPlan
 
 **Status**: proposed
+
+> **Current status (appended 2026-09-26).** Historical record of how authored `exec` steps first reached execution through the `EffectiveBuildPlan`. Since 2f (ato #1406, unmerged foundation stack) the active path lowers canonical D directly to `execution::ExecutionPlan`; authored steps are indexes into D (`BuildAction::Authored`), and `ProgramIntentV1` / `EffectiveBuildPlanV1` remain only as historical codecs for fixtures and diagnostics. The step semantics recorded here are unchanged.
+
 **Context**: P0 Formation benchmark (`docs/ops/formation-p0-benchmark-2026-09-23.md`):
 16 of 20 hand-written upstream Derivations use `ato.process@1` `op = "exec"`,
 which the grammar has always accepted and the projection refused
