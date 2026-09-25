@@ -131,7 +131,7 @@ enum Commands {
     Upload(UploadArgs),
     /// Form a local directory into a Capsule: build each candidate, observe it
     /// satisfying its Contract, and keep the verified artifact.
-    Form(FormArgs),
+    Form(Box<FormArgs>),
     /// Take part in the Runtime Network: advertise this host's execution
     /// environments and run the Formation attempts addressed to it.
     #[command(subcommand)]
@@ -403,6 +403,27 @@ struct FormArgs {
     /// May control-plane-managed Runtimes be used?
     #[arg(long)]
     allow_managed: bool,
+    /// Continue this Runtime Network search instead of starting a new one.
+    /// The search keeps the budget its first request stated: every budget
+    /// option, `--max-attempts` and `--mode` included, must state it exactly,
+    /// and what earlier requests spent stays spent.
+    #[arg(long)]
+    search_id: Option<String>,
+    /// The search's lifetime from its first request, in seconds (at most
+    /// 7 days). Never extended.
+    #[arg(long, default_value_t = 24 * 60 * 60)]
+    deadline_seconds: u64,
+    /// Logical source bytes the search may hand to Runtimes, over all of its
+    /// attempts (at most 10 GiB).
+    #[arg(long, default_value_t = ato_formation_worker::runtime_network::MAX_SEARCH_TRANSFER_BYTES)]
+    max_transfer_bytes: u64,
+    /// Logical bytes the search may expand on Runtimes (at most 10 GiB).
+    #[arg(long, default_value_t = ato_formation_worker::runtime_network::MAX_SEARCH_EXPANDED_BYTES)]
+    max_expanded_bytes: u64,
+    /// Logical artifact bytes the search may have Runtimes keep (at most
+    /// 10 GiB).
+    #[arg(long, default_value_t = ato_formation_worker::runtime_network::MAX_SEARCH_STORED_BYTES)]
+    max_stored_bytes: u64,
 }
 
 #[derive(Debug, Subcommand)]
@@ -514,8 +535,8 @@ pub fn run() -> Result<()> {
         Commands::ExportPlan(args) => export_plan(args),
         Commands::Export(args) => export_portable(args),
         Commands::Upload(args) => upload(args),
-        Commands::Form(args) if args.runtime_network => form_on_runtime_network(args),
-        Commands::Form(args) => form(args),
+        Commands::Form(args) if args.runtime_network => form_on_runtime_network(*args),
+        Commands::Form(args) => form(*args),
         Commands::RuntimeNetwork(RuntimeNetworkCommand::Serve(args)) => runtime_network_serve(args),
         Commands::Worker {
             project,
@@ -668,12 +689,18 @@ fn form_on_runtime_network(args: FormArgs) -> Result<()> {
             .unwrap_or_else(std::env::temp_dir)
             .join("ato/runtime-network/submit")
     });
-    // One invocation is one search. Every request of it would carry this id;
-    // today an invocation makes one request.
-    let mut entropy = [0_u8; 16];
-    getrandom::fill(&mut entropy)
-        .map_err(|error| anyhow::anyhow!("cannot draw a search id: {error}"))?;
-    let search_id = new_search_id(entropy);
+    // An invocation starts a new search unless told to continue one. Either
+    // way it makes one request of that search, which spends from the
+    // search's budget, not from a budget of its own.
+    let search_id = match args.search_id.clone() {
+        Some(search_id) => search_id,
+        None => {
+            let mut entropy = [0_u8; 16];
+            getrandom::fill(&mut entropy)
+                .map_err(|error| anyhow::anyhow!("cannot draw a search id: {error}"))?;
+            new_search_id(entropy)
+        }
+    };
     let submission = prepare_submission(
         &args.path,
         &args.routes,
@@ -691,8 +718,13 @@ fn form_on_runtime_network(args: FormArgs) -> Result<()> {
             allow_managed: args.allow_managed,
         },
         SatisfyBudget {
-            max_attempts: args.max_attempts as u32,
+            max_attempts: u32::try_from(args.max_attempts)
+                .context("--max-attempts is too large")?,
             mode: args.mode.clone(),
+            deadline_seconds: args.deadline_seconds,
+            max_transfer_bytes: args.max_transfer_bytes,
+            max_expanded_bytes: args.max_expanded_bytes,
+            max_stored_bytes: args.max_stored_bytes,
         },
         &search_id,
     )?;

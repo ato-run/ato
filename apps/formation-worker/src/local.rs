@@ -32,7 +32,9 @@ use ato_formation::request::{
     FormationNetworkPolicy, FormationRequest, FormationResult, InitialCondition, Outcome,
     RuntimeConstraint, RuntimeProfile, VerifiedRoute,
 };
-use ato_formation::source::{DownloadedArchive, SourceClosureRef, SourceLimits};
+use ato_formation::source::{
+    DownloadedArchive, SourceClosureRef, SourceLimits, TreeVerifiedArchive,
+};
 
 use crate::attempt::{
     AttemptRequest, Continuation, ReceiptContext, bounded, failure_of, run_attempt,
@@ -406,32 +408,90 @@ fn attempt_one(
 
 /// Keep the artifact of a verified candidate, content-addressed.
 pub(crate) fn store_candidate(executed: &ExecutedCandidate, out_dir: &Path) -> Result<String> {
-    match executed {
-        ExecutedCandidate::Process { workspace_root } => {
-            let packed = pack_tree(workspace_root)?;
-            let reference = digest(&packed);
-            let dir = out_dir.join("artifacts");
-            std::fs::create_dir_all(&dir)?;
-            std::fs::write(
-                dir.join(format!("{}.tar", &reference["sha256:".len()..])),
-                &packed,
-            )?;
-            Ok(reference)
-        }
-        ExecutedCandidate::StaticWeb { output } => {
-            let dir = out_dir.join("bundles");
-            std::fs::create_dir_all(&dir)?;
-            let destination = dir.join(&output.manifest_digest["sha256:".len()..]);
-            if !destination.exists() {
-                // copy_tree fills an existing directory; it does not create
-                // the root, and whether a file or a directory is listed first
-                // is up to the filesystem.
-                std::fs::create_dir_all(&destination)?;
-                copy_tree(&output.bundle.bundle_root, &destination)?;
-            }
-            Ok(output.manifest_digest.clone())
+    prepare_artifact(executed)?.store(out_dir)
+}
+
+/// A verified candidate's artifact, packed or measured but not yet kept:
+/// what keeping it would cost is known before anything is written.
+pub(crate) enum PreparedArtifact<'a> {
+    Process {
+        packed: Vec<u8>,
+    },
+    StaticWeb {
+        output: &'a ato_runtime_attempt::static_lane::StaticFormationOutput,
+        bytes: u64,
+    },
+}
+
+pub(crate) fn prepare_artifact(executed: &ExecutedCandidate) -> Result<PreparedArtifact<'_>> {
+    Ok(match executed {
+        ExecutedCandidate::Process { workspace_root } => PreparedArtifact::Process {
+            packed: pack_tree(workspace_root)?,
+        },
+        ExecutedCandidate::StaticWeb { output } => PreparedArtifact::StaticWeb {
+            output,
+            bytes: file_bytes(&output.bundle.bundle_root)?,
+        },
+    })
+}
+
+impl PreparedArtifact<'_> {
+    /// The logical bytes keeping this artifact retains: the packed tar of a
+    /// process workspace, the regular-file bytes of a static bundle. The same
+    /// whether or not this Runtime already holds identical bytes.
+    pub(crate) fn logical_bytes(&self) -> u64 {
+        match self {
+            Self::Process { packed } => packed.len() as u64,
+            Self::StaticWeb { bytes, .. } => *bytes,
         }
     }
+
+    pub(crate) fn store(self, out_dir: &Path) -> Result<String> {
+        match self {
+            Self::Process { packed } => {
+                let reference = digest(&packed);
+                let dir = out_dir.join("artifacts");
+                std::fs::create_dir_all(&dir)?;
+                std::fs::write(
+                    dir.join(format!("{}.tar", &reference["sha256:".len()..])),
+                    &packed,
+                )?;
+                Ok(reference)
+            }
+            Self::StaticWeb { output, .. } => {
+                let dir = out_dir.join("bundles");
+                std::fs::create_dir_all(&dir)?;
+                let destination = dir.join(&output.manifest_digest["sha256:".len()..]);
+                if !destination.exists() {
+                    // copy_tree fills an existing directory; it does not create
+                    // the root, and whether a file or a directory is listed first
+                    // is up to the filesystem.
+                    std::fs::create_dir_all(&destination)?;
+                    copy_tree(&output.bundle.bundle_root, &destination)?;
+                }
+                Ok(output.manifest_digest.clone())
+            }
+        }
+    }
+}
+
+/// The content bytes of the regular files under `root`; links are not
+/// followed and count as zero, as `copy_tree` recreates rather than copies
+/// them.
+fn file_bytes(root: &Path) -> Result<u64> {
+    let mut total = 0_u64;
+    for entry in
+        std::fs::read_dir(root).with_context(|| format!("cannot read {}", root.display()))?
+    {
+        let entry = entry?;
+        let metadata = std::fs::symlink_metadata(entry.path())?;
+        if metadata.is_dir() {
+            total = total.saturating_add(file_bytes(&entry.path())?);
+        } else if metadata.is_file() {
+            total = total.saturating_add(metadata.len());
+        }
+    }
+    Ok(total)
 }
 
 /// The Initial Condition, frozen: one snapshot of the directory, verified
@@ -486,10 +546,32 @@ pub(crate) fn freeze_archive(
     work_root: &Path,
     limits: SourceLimits,
 ) -> Result<FrozenSource> {
-    let verified = DownloadedArchive::new(archive)
+    freeze_verified(
+        verify_archive(archive, archive_digest, limits)?,
+        work_root,
+        limits,
+    )
+}
+
+/// Verify an archive's bytes and measure its tree under `limits`. Nothing is
+/// written: a tree over the limits is refused here, before expansion.
+pub(crate) fn verify_archive(
+    archive: Vec<u8>,
+    archive_digest: &str,
+    limits: SourceLimits,
+) -> Result<TreeVerifiedArchive> {
+    DownloadedArchive::new(archive)
         .verify_archive_digest(archive_digest)
         .and_then(|archive| archive.verify_tree_digest(None, limits))
-        .context("the directory is not a usable source")?;
+        .context("the directory is not a usable source")
+}
+
+/// Materialize a measured tree: the frozen Initial Condition.
+pub(crate) fn freeze_verified(
+    verified: TreeVerifiedArchive,
+    work_root: &Path,
+    limits: SourceLimits,
+) -> Result<FrozenSource> {
     let closure_ref = verified
         .closure_ref("")
         .context("the directory is not a usable source")?;

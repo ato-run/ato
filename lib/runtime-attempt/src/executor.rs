@@ -47,6 +47,29 @@ pub struct LocalAttemptExecutor {
 
 impl AttemptExecutor for LocalAttemptExecutor {
     fn execute(&self, execution: &AttemptExecution<'_>) -> Result<ExecutedCandidate> {
+        self.execute_with_identity(
+            execution,
+            BuildAttempt {
+                job_id: "local".to_owned(),
+                attempt_id: execution.attempt_id.to_owned(),
+                attempt_fence: 1,
+            },
+        )
+    }
+}
+
+impl LocalAttemptExecutor {
+    /// Hosted callers retain their job/fence identity while sharing the same
+    /// build, materialization and containment implementation.
+    pub fn execute_with_identity(
+        &self,
+        execution: &AttemptExecution<'_>,
+        build_attempt: BuildAttempt,
+    ) -> Result<ExecutedCandidate> {
+        anyhow::ensure!(
+            build_attempt.attempt_id == execution.attempt_id,
+            "build attempt identity mismatch"
+        );
         let AttemptExecution {
             attempt_id,
             candidate,
@@ -60,13 +83,7 @@ impl AttemptExecutor for LocalAttemptExecutor {
 
         let built = run_build(
             &candidate.plan,
-            BuildAttempt {
-                job_id: "local".to_owned(),
-                attempt_id: (*attempt_id).to_owned(),
-                // Local attempts are serial and owned by this process; there
-                // is no newer attempt to fence against.
-                attempt_fence: 1,
-            },
+            build_attempt,
             &BuildSandbox {
                 source_root,
                 workspace_root: &workspace_root,
