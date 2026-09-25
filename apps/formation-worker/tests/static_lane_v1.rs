@@ -12,7 +12,7 @@ use std::path::Path;
 
 use ato_formation::detect::{FieldOrigins, detect};
 use ato_formation::intent::{AuthoredOverrides, Lane, compile_build_plan, compile_intent};
-use ato_formation_worker::static_lane::{materialize_static, needs_build};
+use legacy_execution::{materialize_static, needs_build};
 
 fn site(files: &[(&str, &str)]) -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -221,3 +221,6 @@ fn an_immutable_bundle_is_never_overwritten() {
         .is_err()
     );
 }
+
+#[path = "support/legacy_execution.rs"]
+mod legacy_execution;

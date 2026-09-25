@@ -20,11 +20,12 @@ use ato_formation::intent::{
     BuildStepV1, EFFECTIVE_BUILD_PLAN_V1_SCHEMA, EffectiveBuildPlanV1, Lane,
 };
 use ato_formation::source::{RESOLVER_CONTRACT_V1, SourceClosureRef};
-use ato_formation_worker::build::{BuildAttempt, run_build};
+use ato_formation_worker::build::BuildAttempt;
 use ato_formation_worker::job::plan_candidate;
 use ato_formation_worker::sandbox::{
     BuildLimits, BuildSandbox, NetworkPolicy, containment_available, sandboxed_build_step_command,
 };
+use legacy_execution::run_build;
 
 fn step(name: &str, script: &str) -> BuildStepV1 {
     BuildStepV1 {
@@ -306,7 +307,7 @@ status = 200
         RESOLVER_CONTRACT_V1,
     )
     .unwrap();
-    plan_candidate(
+    let planned = plan_candidate(
         &draft,
         &closure,
         &detect(dir.path()).unwrap(),
@@ -314,8 +315,22 @@ status = 200
         "/app",
         "x86_64-linux-gnu",
     )
-    .expect("plans")
-    .plan
+    .expect("plans");
+    EffectiveBuildPlanV1 {
+        schema: EFFECTIVE_BUILD_PLAN_V1_SCHEMA.into(),
+        lane: planned.plan.lane,
+        workspace_guest_root: planned.plan.workspace_guest_root.clone(),
+        runtime: planned.plan.toolchains.clone(),
+        steps: planned
+            .plan
+            .steps(&planned.derivation)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.into_owned())
+            .collect(),
+        output_root: String::new(),
+        toolchain_path: planned.plan.toolchain_path.clone(),
+    }
 }
 
 #[test]
@@ -454,3 +469,6 @@ fn an_authored_step_cannot_write_the_shared_toolchain_root() {
     assert!(outcome.is_err(), "the write was allowed");
     assert!(!written, "an authored step wrote {probe}");
 }
+
+#[path = "support/legacy_execution.rs"]
+mod legacy_execution;

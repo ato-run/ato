@@ -1,3 +1,13 @@
+//! Historical v1 intent/plan codecs and shared physical provisioning helpers.
+//!
+//! `ProgramIntentV1`, `EffectiveBuildPlanV1` and their compilers are retained
+//! for historical fixtures/diagnostics only. Active Formation binds canonical
+//! D and calls `execution::lower_execution`; it never generates these IRs or
+//! uses their digests as execution identity. The typed toolchain/dependency
+//! resolution and provisioning helpers below are shared physical bindings.
+//!
+//! The following describes the compatibility compiler, not the active flow:
+//!
 //! Evidence + authored intent → Program Intent → Effective Build Plan.
 //!
 //! Pure. Given the same evidence and the same overrides it produces the same
@@ -676,7 +686,7 @@ fn resolve_node_version(node: &NodeEvidence) -> Result<String, IntentError> {
 /// Note what is NOT consulted: whether a `dist/` exists. Fixture B ships a
 /// checked-in `dist/` that is a DIFFERENT VERSION of the app from its source,
 /// so "the output directory is already here" is evidence of nothing.
-fn detect_static_build(
+pub(crate) fn detect_static_build(
     evidence: &DetectorEvidence,
 ) -> Result<Option<StaticBuildProfileV1>, IntentError> {
     let Some(node) = evidence.node.as_ref() else {
@@ -746,7 +756,7 @@ fn detect_static_build(
 /// Exactly one `.jsx`, found rather than guessed at: with two there is no
 /// non-arbitrary way to pick, and with none this preset was selected for a
 /// source it does not describe.
-fn single_jsx_entry(evidence: &DetectorEvidence) -> Result<String, IntentError> {
+pub(crate) fn single_jsx_entry(evidence: &DetectorEvidence) -> Result<String, IntentError> {
     let mut found: Vec<&String> = evidence
         .present_files
         .iter()
@@ -766,7 +776,7 @@ fn single_jsx_entry(evidence: &DetectorEvidence) -> Result<String, IntentError> 
     }
 }
 
-fn fixed_node_static_build(
+pub(crate) fn fixed_node_static_build(
     evidence: &DetectorEvidence,
 ) -> Result<StaticBuildProfileV1, IntentError> {
     let node = evidence
@@ -1062,10 +1072,24 @@ fn resolve_declared_toolchains(
     overrides: &AuthoredOverrides,
     origins: &mut FieldOrigins,
 ) -> Result<(BTreeMap<String, String>, Option<ResolvedPackageManager>), IntentError> {
+    let declared: BTreeMap<String, String> = declared_runtimes(overrides)
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect();
+    for key in declared.keys() {
+        origins.insert(format!("toolchain.{key}"), FieldOrigin::Authored);
+    }
+    resolve_toolchains(evidence.node.as_ref(), &declared)
+}
+
+/// Bind declared runtime requirements against the provisioned catalog and
+/// immutable source package metadata. No string override vocabulary.
+pub fn resolve_toolchains(
+    node: Option<&NodeEvidence>,
+    declared: &BTreeMap<String, String>,
+) -> Result<(BTreeMap<String, String>, Option<ResolvedPackageManager>), IntentError> {
     let mut runtime = BTreeMap::new();
     let mut declared_manager: Option<ResolvedPackageManager> = None;
-    for (name, version) in declared_runtimes(overrides) {
-        origins.insert(format!("toolchain.{name}"), FieldOrigin::Authored);
+    for (name, version) in declared.iter().map(|(k, v)| (k.as_str(), v.as_str())) {
         let supported: &[&str] = match name {
             "python" => SUPPORTED_PYTHON,
             "node" => SUPPORTED_NODE_RUNTIME,
@@ -1113,7 +1137,6 @@ fn resolve_declared_toolchains(
         return Ok((runtime, None));
     }
 
-    let node = evidence.node.as_ref();
     let source = node.and_then(|node| node.package_manager.as_deref());
     let manager = match source {
         Some(declared) => {
@@ -1521,7 +1544,7 @@ impl ProgramIntentV1 {
     }
 }
 
-fn resolve_dependencies(
+pub(crate) fn resolve_dependencies(
     python: &crate::detect::PythonEvidence,
     overrides: &AuthoredOverrides,
     origins: &mut FieldOrigins,
@@ -1577,7 +1600,7 @@ fn resolve_dependencies(
 }
 
 /// Resolve a requested version — exact or a range — to a catalog version.
-fn resolve_python(requested: &str) -> Result<String, IntentError> {
+pub(crate) fn resolve_python(requested: &str) -> Result<String, IntentError> {
     let trimmed = requested.trim();
     if SUPPORTED_PYTHON.contains(&trimmed) {
         return Ok(trimmed.to_owned());
@@ -1633,11 +1656,22 @@ fn split_argv(raw: &str) -> Result<Vec<String>, IntentError> {
 }
 
 /// Lower a normalized intent into the steps a worker executes.
-pub fn compile_build_plan(
-    intent: &ProgramIntentV1,
+/// Physical prerequisites shared by current lowering and historical fixtures.
+/// No launch argv/cwd/env, ports, state or effect semantics are carried here.
+pub struct Provisioning<'a> {
+    pub lane: Lane,
+    pub runtime: &'a BTreeMap<String, String>,
+    pub dependencies: &'a DependencyPlan,
+    pub static_build: Option<&'a StaticBuildProfileV1>,
+    pub static_compile: Option<&'a StaticCompileProfileV1>,
+    pub package_manager: Option<&'a ResolvedPackageManager>,
+}
+
+pub fn provision_steps(
+    binding: &Provisioning<'_>,
     workspace_guest_root: &str,
     target_triple: &str,
-) -> Result<EffectiveBuildPlanV1, IntentError> {
+) -> Result<(Vec<BuildStepV1>, Vec<String>), IntentError> {
     let root = workspace_guest_root.trim_end_matches('/');
     // The interpreter is PROVISIONED, never taken from the host.
     //
@@ -1646,7 +1680,7 @@ pub fn compile_build_plan(
     // back to building a Rust extension from source and failed on a missing
     // linker. Which interpreter a build uses cannot be a property of whichever
     // machine claimed the job.
-    let python = intent.runtime.get("python").cloned();
+    let python = binding.runtime.get("python").cloned();
     let interpreter = python
         .as_deref()
         .map(|version| format!("{}/bin/python3", python_home(version)));
@@ -1657,11 +1691,11 @@ pub fn compile_build_plan(
     // for exactly the same reason: the host's `node` is whatever the host
     // happens to have, and which Node built an artifact must be a property of
     // the source. `node` and `npm` both live under `{home}/bin`.
-    if let (Some(build), Lane::StaticWeb) = (intent.static_build.as_ref(), intent.lane) {
+    if let (Some(build), Lane::StaticWeb) = (binding.static_build, binding.lane) {
         steps.push(provision_node_step(&build.node_version, target_triple));
     }
 
-    if let (Some(version), Lane::PythonProcess) = (python.as_deref(), intent.lane) {
+    if let (Some(version), Lane::PythonProcess) = (python.as_deref(), binding.lane) {
         steps.push(provision_python_step(version, target_triple));
     }
 
@@ -1669,34 +1703,34 @@ pub fn compile_build_plan(
     // route with an authored build. Each is provisioned exactly, in a fixed
     // order, and heads every step's PATH. A platform prerequisite: part of
     // the plan, never of the Derivation.
-    let declared_toolchains = match intent.lane {
+    let declared_toolchains = match binding.lane {
         Lane::Process => true,
         Lane::StaticWeb => {
-            intent.static_build.is_none()
-                && intent.static_compile.is_none()
-                && !intent.runtime.is_empty()
+            binding.static_build.is_none()
+                && binding.static_compile.is_none()
+                && !binding.runtime.is_empty()
         }
         Lane::PythonProcess => false,
     };
     let mut toolchain_path = Vec::new();
     if declared_toolchains {
-        if let Some(version) = intent.runtime.get("python") {
+        if let Some(version) = binding.runtime.get("python") {
             steps.push(provision_python_step(version, target_triple));
         }
-        if let Some(version) = intent.runtime.get("node") {
+        if let Some(version) = binding.runtime.get("node") {
             steps.push(provision_node_step(version, target_triple));
-            if let Some(manager) = intent.package_manager.as_ref() {
+            if let Some(manager) = binding.package_manager {
                 steps.push(provision_package_manager_step(manager, version));
             }
         }
-        toolchain_path = toolchain_bin_dirs(&intent.runtime, intent.package_manager.as_ref());
+        toolchain_path = toolchain_bin_dirs(binding.runtime, binding.package_manager);
     }
 
     // The platform compiler. No provision step above it on purpose: it and its
     // Node are shipped with the builder, and a build that downloaded its own
     // compiler would need a network — which is the one thing this preset
     // promises an untrusted upload does not get.
-    if let (Some(compile), Lane::StaticWeb) = (intent.static_compile.as_ref(), intent.lane) {
+    if let (Some(compile), Lane::StaticWeb) = (binding.static_compile, binding.lane) {
         let home = node_home(&compile.node_version);
         let compiler = compiler_home(&compile.compiler);
         let entry = &compile.entry_source;
@@ -1725,9 +1759,9 @@ Nothing was changed — try again shortly.\"}}' >&2; exit 65; fi; \
         });
     }
 
-    match (&intent.lane, &intent.dependencies) {
+    match (&binding.lane, binding.dependencies) {
         (Lane::StaticWeb, _) => {
-            if let Some(build) = intent.static_build.as_ref() {
+            if let Some(build) = binding.static_build {
                 let home = node_home(&build.node_version);
                 let manager = build.package_manager;
                 // Every command runs through the provisioned toolchain's own
@@ -1883,6 +1917,28 @@ Nothing was changed — try again shortly.\"}}' >&2; exit 65; fi; \
         (Lane::Process, _) => {}
     }
 
+    Ok((steps, toolchain_path))
+}
+
+/// Compatibility compiler for old IR fixtures. Active execution lowers D.
+pub fn compile_build_plan(
+    intent: &ProgramIntentV1,
+    workspace_guest_root: &str,
+    target_triple: &str,
+) -> Result<EffectiveBuildPlanV1, IntentError> {
+    let (steps, toolchain_path) = provision_steps(
+        &Provisioning {
+            lane: intent.lane,
+            runtime: &intent.runtime,
+            dependencies: &intent.dependencies,
+            static_build: intent.static_build.as_ref(),
+            static_compile: intent.static_compile.as_ref(),
+            package_manager: intent.package_manager.as_ref(),
+        },
+        workspace_guest_root,
+        target_triple,
+    )?;
+    let root = workspace_guest_root.trim_end_matches('/');
     Ok(EffectiveBuildPlanV1 {
         schema: EFFECTIVE_BUILD_PLAN_V1_SCHEMA.to_owned(),
         lane: intent.lane,
