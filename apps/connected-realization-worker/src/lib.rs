@@ -1654,7 +1654,9 @@ impl ConnectedWorker {
             },
         )?;
         if let Some(network) = network_authorization {
-            let runtime_launch::lease::ActiveWorkload::OciServiceGroup(group) = &active.launched
+            let runtime_launch::lease::ActiveWorkload::Oci(
+                ato_runtime_attempt::launch::oci::LaunchedOci::Group(group),
+            ) = &active.launched
             else {
                 bail!("network authorization was attached to a non-group workload")
             };
@@ -1707,7 +1709,9 @@ impl ConnectedWorker {
         let mut stop = || -> Result<bool> {
             // A group is one Application: a service that exits while ACTIVE
             // fails the whole Run, which is then stopped by `finish`.
-            if let runtime_launch::lease::ActiveWorkload::OciServiceGroup(group) = &active.launched
+            if let runtime_launch::lease::ActiveWorkload::Oci(
+                ato_runtime_attempt::launch::oci::LaunchedOci::Group(group),
+            ) = &active.launched
                 && let Some((name, code)) = group.exited_service()?
             {
                 bail!("OCI service `{name}` exited while the group was active with code {code}");
