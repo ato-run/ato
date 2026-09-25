@@ -43,5 +43,9 @@
         "attempt_id": "att_historical"
       }
     }
+  },
+  "resource_usage": {
+    "expanded_bytes": 0,
+    "stored_bytes": 0
   }
 }
