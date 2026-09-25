@@ -1234,6 +1234,7 @@ while True:
         attachments: &[StateAttachmentV1],
         surface_port: u16,
         path: &str,
+        network: Option<&super::super::lease::NetworkAuthorization>,
     ) -> serde_json::Value {
         let plane = FakeControlPlane::default();
         let prepared = prepare_run(attachments, &context, &plane, &BTreeMap::new()).unwrap();
@@ -1261,7 +1262,7 @@ while True:
                 reqwest::blocking::Client::new(),
             ),
             &owner,
-            None,
+            network,
             &host,
         )
         .expect("the OCI Run starts");
@@ -1275,6 +1276,36 @@ while True:
             .unwrap()
             .scan()
             .unwrap();
+        // Which environment names and how many networks each container got.
+        let containers = running
+            .containers
+            .iter()
+            .map(|container| {
+                let inspected = std::process::Command::new("docker")
+                    .args([
+                        "inspect",
+                        "--format",
+                        "{{json .Config.Env}}|{{len .NetworkSettings.Networks}}",
+                        &container.id,
+                    ])
+                    .output()
+                    .unwrap();
+                let text = String::from_utf8(inspected.stdout).unwrap();
+                let (env, networks) = text.trim().split_once('|').unwrap();
+                let mut names = serde_json::from_str::<Vec<String>>(env)
+                    .unwrap()
+                    .into_iter()
+                    .filter_map(|entry| entry.split_once('=').map(|(name, _)| name.to_owned()))
+                    .filter(|name| name.starts_with("ATO_") || name == "MODE")
+                    .collect::<Vec<_>>();
+                names.sort();
+                serde_json::json!({
+                    "service": container.service(),
+                    "environment": names,
+                    "networks": networks.parse::<u32>().unwrap(),
+                })
+            })
+            .collect::<Vec<_>>();
         let (stop, committed) =
             super::super::lease::finish(&spec, active, &plane, &format!("commit_{case}"));
         let committed = committed.expect("the confirmed stop commits");
@@ -1291,6 +1322,7 @@ while True:
             "subject_parts": subject.split(',').count(),
             "served_status": served,
             "running_containers": running.containers.len(),
+            "containers": containers,
             "running_networks": running.networks.len(),
             "stop": stop
                 .services
@@ -1368,20 +1400,22 @@ while True:
             &attachments,
             port,
             "/",
+            None,
         );
         assert_eq!(document["evidence"]["realization"], "oci");
         assert_eq!(document["served_status"], 200);
         assert_eq!(document["running_containers"], 1);
     }
 
-    #[test]
-    #[ignore = "needs a native Linux Docker host"]
-    fn a_hosted_oci_service_group_starts_serves_stops_and_commits() {
+    fn group_run(
+        case: &str,
+        network: Option<&super::super::lease::NetworkAuthorization>,
+    ) -> serde_json::Value {
         let mut raw: serde_json::Value = serde_json::from_str(include_str!(
             "../../../../lib/ipc/tests/fixtures/runtime-launch-spec-v2/service-group.json"
         ))
         .unwrap();
-        raw["context"]["run_id"] = serde_json::json!("run_2ec_group");
+        raw["context"]["run_id"] = serde_json::json!(format!("run_2ec_{case}"));
         let services = raw["realization"]["services"].as_array_mut().unwrap();
         for (service, image) in services.iter_mut().zip([WHOAMI, NGINX]) {
             service["image_reference"] = serde_json::json!(image);
@@ -1433,10 +1467,63 @@ while True:
             access: StateAccessV1::ReadWrite,
             writer_fence: Some(1),
         }];
-        let document = oci_run("group", spec, context, &attachments, port, "/");
+        oci_run(case, spec, context, &attachments, port, "/", network)
+    }
+
+    #[test]
+    #[ignore = "needs a native Linux Docker host"]
+    fn a_hosted_oci_service_group_starts_serves_stops_and_commits() {
+        let document = group_run("group", None);
         assert_eq!(document["evidence"]["realization"], "oci_service_group");
         assert_eq!(document["served_status"], 200);
         assert_eq!(document["running_containers"], 2);
         assert_eq!(document["subject_parts"], 2);
+    }
+
+    /// Only the granted service reaches its egress network and broker, and
+    /// the group removes that network with the rest.
+    #[test]
+    #[ignore = "needs a native Linux Docker host"]
+    fn a_hosted_oci_service_group_egress_reaches_only_its_service() {
+        let authorization = super::super::lease::NetworkAuthorization {
+            egress: vec![super::super::lease::TcpEgressGrant {
+                grant_id: "grant-1".to_owned(),
+                binding_id: "upstream".to_owned(),
+                environment: "ATO_BINDING_UPSTREAM".to_owned(),
+                service_id: "backend".to_owned(),
+                destination_cidr: "1.1.1.1/32".to_owned(),
+                ports: vec![443],
+                generation: 1,
+            }],
+            fixed_tcp: Vec::new(),
+        };
+        let document = group_run("group_egress", Some(&authorization));
+        assert_eq!(document["served_status"], 200);
+        assert_eq!(document["running_networks"], 2);
+        let service = |name: &str| {
+            document["containers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|container| container["service"] == name)
+                .unwrap()
+                .clone()
+        };
+        let backend = service("backend");
+        assert_eq!(backend["networks"], 2);
+        assert!(
+            backend["environment"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("ATO_BINDING_UPSTREAM"))
+        );
+        let web = service("web");
+        assert_eq!(web["networks"], 1);
+        assert!(
+            !web["environment"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("ATO_BINDING_UPSTREAM"))
+        );
     }
 }
