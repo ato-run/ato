@@ -28,6 +28,86 @@ pub use ownership::{
 };
 pub use stop::{StopBudget, StopOutcome};
 
+/// A launch that failed after Docker may already have created its container,
+/// and whose removal could not be confirmed. The container — and the network
+/// it is attached to — are left for recovery: nothing may treat them as gone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpawnCleanupUnconfirmed {
+    /// Why the launch failed.
+    pub launch_error: String,
+    /// The container id, or its name when Docker returned no id.
+    pub container: String,
+    /// Networks kept because the container may still be attached.
+    pub networks: Vec<String>,
+    /// Why its removal is not confirmed.
+    pub reason: String,
+}
+
+impl std::fmt::Display for SpawnCleanupUnconfirmed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{}; the container {} it may have created is not confirmed removed ({}); kept \
+             for recovery",
+            self.launch_error, self.container, self.reason
+        )
+    }
+}
+
+impl std::error::Error for SpawnCleanupUnconfirmed {}
+
+/// Remove a container a failed launch may have left, and confirm it is gone.
+fn discard_failed_launch(docker: &Path, container: &str) -> std::result::Result<(), String> {
+    let removed = stop::docker_output(
+        docker,
+        ["rm", "--force", container],
+        stop::DOCKER_CALL_TIMEOUT,
+    );
+    let inspected = stop::docker_output(
+        docker,
+        ["container", "inspect", "--format", "{{.Id}}", container],
+        stop::DOCKER_CALL_TIMEOUT,
+    );
+    match inspected {
+        Ok(output)
+            if !output.status.success()
+                && String::from_utf8_lossy(&output.stderr)
+                    .to_ascii_lowercase()
+                    .contains("no such container:") =>
+        {
+            Ok(())
+        }
+        Ok(output) if output.status.success() => Err(format!(
+            "it still exists after removal{}",
+            match removed {
+                Ok(removed) if !removed.status.success() =>
+                    format!(": {}", bounded_stderr(&removed)),
+                Err(error) => format!(": {error:#}"),
+                _ => String::new(),
+            }
+        )),
+        Ok(output) => Err(format!(
+            "inspect after removal failed: {}",
+            bounded_stderr(&output)
+        )),
+        Err(error) => Err(format!("{error:#}")),
+    }
+}
+
+/// The launch error, or — when the container it may have created cannot be
+/// confirmed removed — [`SpawnCleanupUnconfirmed`] carrying both.
+fn failed_launch(docker: &Path, container: &str, error: anyhow::Error) -> anyhow::Error {
+    match discard_failed_launch(docker, container) {
+        Ok(()) => error,
+        Err(reason) => anyhow::Error::new(SpawnCleanupUnconfirmed {
+            launch_error: format!("{error:#}"),
+            container: container.to_owned(),
+            networks: Vec::new(),
+            reason,
+        }),
+    }
+}
+
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,9 +252,21 @@ impl DockerOciAdapter {
     pub fn spawn(&self, workspace: &Path, runtime_root: &Path) -> Result<OciHandle> {
         let network =
             OciNetwork::create_with(&self.docker, &self.spec.id, &self.spec.labels, "ator")?;
-        let mut handle = self.spawn_in_network(workspace, runtime_root, &network, None)?;
-        handle.network = Some(network);
-        Ok(handle)
+        match self.spawn_in_network(workspace, runtime_root, &network, None) {
+            Ok(mut handle) => {
+                handle.network = Some(network);
+                Ok(handle)
+            }
+            Err(error) => match error.downcast::<SpawnCleanupUnconfirmed>() {
+                // The container may still be attached: keep its network too.
+                Ok(mut unconfirmed) => {
+                    unconfirmed.networks.push(network.name().to_owned());
+                    network.forget();
+                    Err(anyhow::Error::new(unconfirmed))
+                }
+                Err(error) => Err(error),
+            },
+        }
     }
 
     /// Launch into a network the caller owns, optionally under a network
@@ -250,6 +342,15 @@ impl DockerOciAdapter {
             alias,
             &image_for_run,
         )?;
+        // Persist the chosen name before Docker can create it. A worker crash
+        // must not erase the identity needed to inspect an external workload.
+        fs::write(
+            runtime_root.join("ownership.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "container": container_name, "network": network.name(),
+            }))?,
+        )
+        .context("record OCI launch identity")?;
         let launched = Command::new(&self.docker).args(&argv).output();
         // Docker has consumed the file once `docker run` returns. It may hold
         // runtime Binding values, so it must not become part of a durable Run
@@ -258,44 +359,49 @@ impl DockerOciAdapter {
         let launched = match launched {
             Ok(launched) => launched,
             Err(error) => {
-                return Err(error).context("start OCI container");
+                return Err(failed_launch(
+                    &self.docker,
+                    &container_name,
+                    anyhow::Error::from(error).context("start OCI container"),
+                ));
             }
         };
+        // From here on Docker may have created the container. Every failure
+        // removes it and confirms it is gone, or reports that it could not.
+        let launched_id = String::from_utf8(launched.stdout.clone())
+            .ok()
+            .map(|id| id.trim().to_owned())
+            .filter(|id| launched.status.success() && !id.is_empty());
+        let created = launched_id
+            .clone()
+            .unwrap_or_else(|| container_name.clone());
         if let Err(error) = removed_environment {
-            if launched.status.success()
-                && let Ok(container_id) = String::from_utf8(launched.stdout.clone())
-            {
-                let _ = Command::new(&self.docker)
-                    .args(["rm", "--force", container_id.trim()])
-                    .output();
-            }
-            return Err(error).context("remove OCI environment file after launch");
+            return Err(failed_launch(
+                &self.docker,
+                &created,
+                anyhow::Error::new(error).context("remove OCI environment file after launch"),
+            ));
         }
         if !launched.status.success() {
             // `docker run` may create the named container before runc rejects
             // its process. Remove by the Runner-owned name because no stdout
             // container ID is available on this failure path.
-            let _ = Command::new(&self.docker)
-                .args(["rm", "--force", &container_name])
-                .output();
-            bail!("start OCI container failed: {}", bounded_stderr(&launched));
+            return Err(failed_launch(
+                &self.docker,
+                &container_name,
+                anyhow::anyhow!("start OCI container failed: {}", bounded_stderr(&launched)),
+            ));
         }
-        let container_id = String::from_utf8(launched.stdout)
-            .context("Docker returned a non-UTF-8 container id")?
-            .trim()
-            .to_owned();
-        ensure!(
-            !container_id.is_empty(),
-            "Docker returned an empty container id"
-        );
+        let Some(container_id) = launched_id else {
+            return Err(failed_launch(
+                &self.docker,
+                &container_name,
+                anyhow::anyhow!("Docker returned no container id"),
+            ));
+        };
         let container_address = match inspect_container_address(&self.docker, &container_id) {
             Ok(address) => address,
-            Err(error) => {
-                let _ = Command::new(&self.docker)
-                    .args(["rm", "--force", &container_id])
-                    .output();
-                return Err(error);
-            }
+            Err(error) => return Err(failed_launch(&self.docker, &container_id, error)),
         };
         let mut forwarders = Vec::with_capacity(self.spec.endpoints.len());
         for endpoint in &self.spec.endpoints {
@@ -303,10 +409,11 @@ impl DockerOciAdapter {
                 Ok(forwarder) => forwarders.push(forwarder),
                 Err(error) => {
                     drop(forwarders);
-                    let _ = Command::new(&self.docker)
-                        .args(["rm", "--force", &container_id])
-                        .output();
-                    return Err(error).context("start OCI loopback Port forwarder");
+                    return Err(failed_launch(
+                        &self.docker,
+                        &container_id,
+                        error.context("start OCI loopback Port forwarder"),
+                    ));
                 }
             }
         }
@@ -630,6 +737,26 @@ impl OciServiceGroup {
         self.retained_resources.push(resource);
     }
 
+    /// Every network this group owns: its own, then the auxiliary ones.
+    pub fn network_names(&self) -> Vec<String> {
+        self.network
+            .iter()
+            .chain(&self.auxiliary_networks)
+            .map(|network| network.name().to_owned())
+            .collect()
+    }
+
+    /// Preserve network identities when a failed Docker run may have attached
+    /// an endpoint for which no live handle was returned.
+    pub fn retain_networks_for_recovery(&mut self) {
+        if let Some(network) = self.network.take() {
+            network.forget();
+        }
+        for network in self.auxiliary_networks.drain(..) {
+            network.forget();
+        }
+    }
+
     pub fn services(&self) -> impl Iterator<Item = (&str, &OciHandle)> {
         self.services
             .iter()
@@ -736,6 +863,10 @@ pub struct OciHandle {
 }
 
 impl OciHandle {
+    pub fn network_name(&self) -> Option<&str> {
+        self.network.as_ref().map(OciNetwork::name)
+    }
+
     pub fn container_id(&self) -> &str {
         &self.container_id
     }
@@ -1601,5 +1732,59 @@ mod tests {
                 .to_string()
                 .contains("more than once")
         );
+    }
+
+    #[cfg(unix)]
+    fn fake_docker(script: &str) -> (tempfile::TempDir, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("docker");
+        std::fs::write(&fake, script).unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (dir, fake)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_launch_whose_container_is_gone_reports_only_the_launch_error() {
+        let (_dir, docker) = fake_docker(
+            "#!/bin/sh\ncase \"$1\" in container) echo 'Error: No such container: c1' >&2; exit 1;; *) exit 0;; esac\n",
+        );
+        let error = failed_launch(&docker, "c1", anyhow::anyhow!("forwarder failed"));
+        assert!(error.downcast_ref::<SpawnCleanupUnconfirmed>().is_none());
+        assert_eq!(format!("{error:#}"), "forwarder failed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_launch_whose_container_survives_removal_is_kept_for_recovery() {
+        // `rm` is refused and the container is still there afterwards.
+        let (_dir, docker) = fake_docker(
+            "#!/bin/sh\ncase \"$1\" in rm) echo 'daemon refused' >&2; exit 1;; container) echo abc; exit 0;; *) exit 0;; esac\n",
+        );
+        let error = failed_launch(&docker, "c1", anyhow::anyhow!("forwarder failed"));
+        let unconfirmed = error
+            .downcast_ref::<SpawnCleanupUnconfirmed>()
+            .expect("the leftover is reported, not dropped");
+        assert_eq!(unconfirmed.container, "c1");
+        assert_eq!(unconfirmed.launch_error, "forwarder failed");
+        assert!(
+            unconfirmed.reason.contains("still exists"),
+            "{unconfirmed:?}"
+        );
+        assert!(
+            unconfirmed.reason.contains("daemon refused"),
+            "{unconfirmed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_daemon_that_cannot_answer_after_a_failed_launch_is_not_a_removal() {
+        let (_dir, docker) = fake_docker(
+            "#!/bin/sh\ncase \"$1\" in container) echo 'Cannot connect to the Docker daemon' >&2; exit 1;; *) exit 0;; esac\n",
+        );
+        let error = failed_launch(&docker, "c1", anyhow::anyhow!("inspect failed"));
+        assert!(error.downcast_ref::<SpawnCleanupUnconfirmed>().is_some());
     }
 }

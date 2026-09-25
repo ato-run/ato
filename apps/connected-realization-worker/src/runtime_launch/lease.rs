@@ -26,17 +26,13 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
-use ato_adapter_oci::{
-    DockerOciAdapter, OciEndpoint, OciHandle, OciMount, OciOwner, OciResourceLimits,
-    OciServiceGroup, OciSpec, StopOutcome,
-};
-use ato_ipc::runtime_launch::{
-    LaunchRealizationV1, ReadinessV1, RuntimeLaunchSpecV1, StateAccessV1,
-};
+use ato_adapter_oci::{OciHandle, OciOwner, SpawnCleanupUnconfirmed, StopOutcome};
+use ato_ipc::runtime_launch::{LaunchRealizationV1, RuntimeLaunchSpecV1, StateAccessV1};
 use ato_ipc::runtime_launch_v2::{EndpointExposureV2, RuntimeLaunchSpec};
+use ato_runtime_attempt::launch::oci::{self as oci_launch, LaunchedOci, OciStartFailure};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-use super::process_executor::{ReadinessProbe, state_path_env_name, state_working_copy};
+use super::process_executor::{ReadinessProbe, state_working_copy};
 use super::recovery::{settle_lease, stop_budget};
 use super::resolved::{
     ResolvedRuntimeLaunchContext, ResolvedSecret, ResolvedStateAttachment, allocate_endpoint,
@@ -554,9 +550,9 @@ impl ActiveWorkload {
     pub fn surface_container(&self) -> Option<&OciHandle> {
         match self {
             ActiveWorkload::Process(_) => None,
-            ActiveWorkload::Oci(container) => Some(container),
-            ActiveWorkload::OciServiceGroup(group) => group
-                .services()
+            ActiveWorkload::Oci(launched) => launched
+                .containers()
+                .into_iter()
                 .map(|(_, container)| container)
                 .find(|container| !container.port_mapping().1.is_empty()),
         }
@@ -735,11 +731,11 @@ pub fn resolve_run(
     })
 }
 
-/// A Run that is up and serving.
+/// A Run that is up and serving. Both handles are the Runtime's common ones;
+/// the lease, state and recovery around them stay here.
 pub enum ActiveWorkload {
     Process(super::process_executor::LaunchedProcess),
-    Oci(OciHandle),
-    OciServiceGroup(OciServiceGroup),
+    Oci(LaunchedOci),
 }
 
 pub struct ActiveRun {
@@ -778,10 +774,10 @@ impl ActiveRun {
     pub fn execution_subject(&self) -> String {
         match &self.launched {
             ActiveWorkload::Process(process) => format!("pid={}", process.pid()),
-            ActiveWorkload::Oci(container) => {
+            ActiveWorkload::Oci(LaunchedOci::Container(container)) => {
                 format!("container_id={}", container.container_id())
             }
-            ActiveWorkload::OciServiceGroup(group) => group
+            ActiveWorkload::Oci(LaunchedOci::Group(group)) => group
                 .services()
                 .map(|(name, container)| format!("{name}={}", container.container_id()))
                 .collect::<Vec<_>>()
@@ -805,7 +801,7 @@ impl ActiveRun {
                 platform: None,
                 services: Vec::new(),
             },
-            ActiveWorkload::Oci(container) => RuntimeExecutionEvidence {
+            ActiveWorkload::Oci(LaunchedOci::Container(container)) => RuntimeExecutionEvidence {
                 realization: "oci",
                 runtime_executable: Some("docker".to_owned()),
                 runtime_version: None,
@@ -815,7 +811,7 @@ impl ActiveRun {
                 platform: Some(container.platform().to_owned()),
                 services: Vec::new(),
             },
-            ActiveWorkload::OciServiceGroup(group) => RuntimeExecutionEvidence {
+            ActiveWorkload::Oci(LaunchedOci::Group(group)) => RuntimeExecutionEvidence {
                 realization: "oci_service_group",
                 runtime_executable: Some("docker".to_owned()),
                 runtime_version: None,
@@ -839,6 +835,29 @@ impl ActiveRun {
     }
 }
 
+/// How a failed OCI start left things: the labels' own sweep of this lease,
+/// and — never overridden by it — what the start itself established about
+/// what it had started. A cleanup the start could not confirm keeps the Run
+/// quarantined even if a later sweep finds nothing.
+fn settle_failed_oci_start(
+    owner: &OciOwner,
+    budget: ato_adapter_oci::StopBudget,
+    error: &anyhow::Error,
+) -> StopOutcome {
+    let swept = settle_lease(owner, budget);
+    let started = error
+        .downcast_ref::<OciStartFailure>()
+        .map(|failure| failure.cleanup.overall())
+        .or_else(|| {
+            error
+                .downcast_ref::<SpawnCleanupUnconfirmed>()
+                .map(|left| StopOutcome::Unconfirmed {
+                    reason: left.to_string(),
+                })
+        });
+    StopOutcome::worst(std::iter::once(&swept).chain(started.as_ref())).unwrap_or(swept)
+}
+
 /// After a start failed part-way: give the slots back only if every workload
 /// the start may have created is confirmed stopped; otherwise quarantine them.
 fn settle_failed_start(
@@ -850,10 +869,12 @@ fn settle_failed_start(
     if stop.is_confirmed() {
         abort_run(state, prepared);
     } else {
+        // The start's error names what it left (container ids, networks).
+        let reason = format!("start failed; stop unconfirmed: {stop:?}; {error:#}");
         quarantine_run(
             state,
             prepared,
-            &format!("start failed; stop unconfirmed: {stop:?}"),
+            &reason.chars().take(1024).collect::<String>(),
         );
     }
     StartFailure {
@@ -918,12 +939,12 @@ pub fn start(
                 Err(error) => {
                     // The group stopped what it had started on its way out;
                     // the labels confirm nothing of this lease survived.
-                    let stop = settle_lease(owner, budget);
+                    let stop = settle_failed_oci_start(owner, budget, &error);
                     return Err(settle_failed_start(state, &resolved.prepared, &stop, error));
                 }
             };
             return Ok(ActiveRun {
-                launched: ActiveWorkload::OciServiceGroup(group),
+                launched: ActiveWorkload::Oci(LaunchedOci::Group(group)),
                 resolved,
             });
         }
@@ -961,137 +982,32 @@ pub fn start(
             ActiveWorkload::Process(launched)
         }
         LaunchRealizationV1::Oci(oci) => {
-            let image = oci
-                .image_reference
-                .clone()
-                .context("OCI execution requires a pullable image_reference")?;
-            let platform = oci
-                .platform
-                .clone()
-                .context("OCI execution requires a platform")?;
-            let limits = oci
-                .resource_limits
-                .clone()
-                .context("OCI execution requires resource_limits")?;
-            let endpoints = resolved
-                .context
-                .endpoints()
-                .iter()
-                .map(|endpoint| {
-                    Ok(OciEndpoint {
-                        host_port: endpoint.host_port,
-                        guest_port: endpoint.guest_port.context(
-                            "OCI endpoint requires a guest port for container port mapping",
-                        )?,
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
-            let mounts = resolved
-                .context
-                .state_attachments()
-                .iter()
-                .map(|attachment| OciMount {
-                    host_path: attachment.working_copy_for_mount().to_path_buf(),
-                    guest_path: attachment.guest_target().to_owned(),
-                    writable: attachment.access() == StateAccessV1::ReadWrite,
-                })
-                .collect();
-            let mut environment = resolved.context.environment_for_spawn();
-            for attachment in resolved.context.state_attachments() {
-                environment.insert(
-                    state_path_env_name(attachment.state_key()),
-                    attachment.guest_target().to_owned(),
-                );
-            }
-            let adapter = DockerOciAdapter::new(OciSpec {
-                id: spec.context.run_id.clone(),
-                image,
-                platform,
-                entrypoint: oci.entrypoint.clone(),
-                argv: oci.argv.clone().unwrap_or_default(),
-                working_dir: oci.working_dir.clone().unwrap_or_else(|| "/app".to_owned()),
-                workspace_mount_path: oci
-                    .workspace_mount_path
-                    .clone()
-                    .unwrap_or_else(|| "/app".to_owned()),
-                environment,
-                endpoints,
-                mounts,
-                limits: OciResourceLimits {
-                    memory_bytes: limits.memory_bytes,
-                    cpu_limit_millis: limits.cpu_limit_millis,
-                    pids_limit: limits.pids_limit,
-                },
-                stop_timeout_seconds: spec.lifecycle.graceful_shutdown_ms.div_ceil(1000).max(1),
-                labels: owner.labels(None)?,
-            })?;
-            let runtime_root = resolved
-                .context
-                .workspace_root()
-                .parent()
-                .context("workspace has no lease root")?
-                .join("oci-runtime");
+            let adapter =
+                oci_launch::container_adapter(spec, oci, &resolved.context, owner.labels(None)?)?;
+            let runtime_root = oci_launch::lease_runtime_root(&resolved.context)?;
             let mut launched = match adapter.spawn(resolved.context.workspace_root(), &runtime_root)
             {
                 Ok(launched) => launched,
                 Err(error) => {
                     // A spawn can fail after `docker run` created the
                     // container; only the labels can tell.
-                    let stop = settle_lease(owner, budget);
+                    let stop = settle_failed_oci_start(owner, budget, &error);
                     return Err(settle_failed_start(state, &resolved.prepared, &stop, error));
                 }
             };
-            if let Err(error) = wait_until_oci_ready(spec, &resolved.context, &mut launched, probe)
-            {
+            if let Err(error) = oci_launch::wait_until_container_ready(
+                spec,
+                &resolved.context,
+                &mut launched,
+                probe,
+            ) {
                 let stop = launched.stop_gracefully(budget);
                 return Err(settle_failed_start(state, &resolved.prepared, &stop, error));
             }
-            ActiveWorkload::Oci(launched)
+            ActiveWorkload::Oci(LaunchedOci::Container(launched))
         }
     };
     Ok(ActiveRun { launched, resolved })
-}
-
-fn wait_until_oci_ready(
-    spec: &RuntimeLaunchSpecV1,
-    context: &ResolvedRuntimeLaunchContext,
-    launched: &mut OciHandle,
-    probe: &dyn ReadinessProbe,
-) -> Result<()> {
-    let (timeout_ms, target) = match &spec.readiness {
-        ReadinessV1::Http {
-            endpoint_name,
-            path,
-            timeout_ms,
-        } => (*timeout_ms, Some((endpoint_name, path.as_str()))),
-        ReadinessV1::Tcp {
-            endpoint_name,
-            timeout_ms,
-        } => (*timeout_ms, Some((endpoint_name, ""))),
-        ReadinessV1::Process { timeout_ms } => (*timeout_ms, None),
-    };
-    let Some((endpoint_name, path)) = target else {
-        return Ok(());
-    };
-    let host_port = context
-        .endpoints()
-        .iter()
-        .find(|endpoint| endpoint.name == *endpoint_name)
-        .map(|endpoint| endpoint.host_port)
-        .with_context(|| format!("readiness names missing endpoint `{endpoint_name}`"))?;
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-    loop {
-        if let Some(code) = launched.exit_code()? {
-            bail!("OCI container exited before readiness with code {code}");
-        }
-        match probe.probe(host_port, path) {
-            Ok(()) => return Ok(()),
-            Err(error) if Instant::now() >= deadline => {
-                bail!("OCI container did not become ready within {timeout_ms}ms: {error}")
-            }
-            Err(_) => std::thread::sleep(Duration::from_millis(50)),
-        }
-    }
 }
 
 /// Hold the Run ACTIVE until the control plane asks it to stop.
@@ -1164,11 +1080,9 @@ pub fn finish(
             "process".to_owned(),
             process_stop_outcome(process.stop(spec.lifecycle())),
         )],
-        ActiveWorkload::Oci(container) => {
-            vec![("container".to_owned(), container.stop_gracefully(budget))]
-        }
-        // Reverse start order; the network goes only after every service.
-        ActiveWorkload::OciServiceGroup(group) => group.stop_gracefully(budget).services,
+        // Reverse start order for a group; its networks go only after every
+        // service is confirmed stopped.
+        ActiveWorkload::Oci(launched) => launched.stop(budget).services,
     };
     let stop = FinishedStop {
         overall: StopOutcome::worst(services.iter().map(|(_, outcome)| outcome))
