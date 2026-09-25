@@ -287,3 +287,14 @@ the Runtimes.
 - Hosted Formation budgets
 - a scheduler or ranking change
 - cleanup of old searches
+
+## Retained replay extension (3d, unmerged foundation stack)
+
+A replay consumes a fresh attempt and logical artifact transfer bytes even when
+R2/cache already holds the object. Extraction consumes expanded bytes. Source
+upload accounting remains source-specific. New retained publication consumes the
+transport archive's logical stored bytes (including Static manifest/blob archive
+framing), rather than treating an out_dir manifest as durable storage. A replay
+that references the existing ready object charges zero additional stored bytes;
+it does not publish a duplicate object. The existing cumulative reservation,
+settlement, deadline and UNKNOWN non-refund rules remain authoritative.

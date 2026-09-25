@@ -43,3 +43,33 @@ only actually executes Static; process cases skip without containment.
 Durable object publication/authorization and typed ticket transport are still
 being connected. Stage 4, restart acceptance, final P0 remeasurement and final
 documentation cleanup are not complete. No foundation completion claim is made.
+
+### 3d durable acceptance (subsequent evidence)
+
+The preceding local-only description records the earlier checkpoint. Subsequently,
+actual isolated Miniflare D1/R2 Coordinator and native Linux arm64 Rust Runtime
+completed the durable path. The Coordinator was restarted, all three test source
+objects were deleted, and fresh Runtime work/out directories were used. Owner
+requester acceptance called the common Rust receipt authority. Each case retained
+same K/D, new attempt/receipt, positive transfer/extraction, and stored charge 0.
+
+| case | source attempt | fresh replay attempt | retained ref |
+|---|---|---|---|
+| Static | `01M3C1GB9XWZMMXG4PS1KP287P` | `01M3C1SXT997HK7KFE0ZTRV1GY` | `sha256:de069a1cede5eaed44ca9045775de8b0adca03304dc564f64f9062ca8e94a8b9` |
+| Python | `01M3C1GHE1NY9Q9W8VZF498QRP` | `01M3C1T0EGRWAKBXPDA3XP2XWD` | `sha256:39724eaa407f3c08b080ce78d3e39dfe52a2681586b941e4775264b597480a96` |
+| Node | `01M3C1GQK3603BBKJ28Q7QD0RE` | `01M3C1T34YRMSQQHX3TB4SHC9Y` | `sha256:22460097456b1e7ea0dedc80d483a785e3747b147846ec46d21620e3b8680104` |
+
+Source removal marker: `removed=3`, `2026-09-25T10:28:24.932Z`. Logs retained in
+`.tmp/3d-actual/replay` and the isolated host `formation-foundation/3d` directory.
+This is real HTTP/execution/storage acceptance, not Browser full E2E. Browser
+baseline limitations remain open; no fresh Chrome success is claimed.
+
+Worker regression: 30 Runtime Network tests passed, one explicitly ignored
+harness test; typed ticket roundtrip separately passed. Native authority 7 passed.
+API Coordinator 67, source object 6, historical wire 11 passed, including new
+retained ownership/fence, immutable ready, concurrent finalize, corrupt/missing
+artifact, old receipt and unfinished execution refusals. Sandbox socket denial
+on an earlier test invocation is not a product failure; the permitted run passed.
+
+Stage 4, final stack regressions/P0 and final docs cleanup remain pending.
+All of this is implemented/local integration evidence, not merged or deployed.
