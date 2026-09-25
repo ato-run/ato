@@ -426,6 +426,16 @@ placement-specific semantic roots.
 
 ## Release Notes
 
+> Status as of 2026-09-26: the steps below and
+> `.claude/skills/ato-release/SKILL.md` are unverified against the current repo
+> layout. Known mismatches: there is no `release-plz.yml` in
+> `.github/workflows/` (step 2 below instructs dispatching it); the skill's
+> `crates/ato-cli`, `crates/ato-desktop`, and `crates/nacelle` paths do not
+> exist (the CLI lives under `apps/cli`, nacelle under
+> `extensions/providers/nacelle`); and no `Security Audit` workflow file exists
+> under that name (step 6). Do not treat either as the current authoritative
+> checklist. Confirming the release flow is a separate task.
+
 ### ato-cli release flow
 
 1. Push/merge changes to `main` (directly or via PR from `dev`).
@@ -449,7 +459,7 @@ placement-specific semantic roots.
 8. The tag push triggers `release.yml`, which builds 4-platform artifacts and publishes the GitHub Release.
 9. Verify: `gh release view vX.Y.Z --json name,isDraft,publishedAt,assets`
 
-See `.claude/skills/ato-release/SKILL.md` for the full checklist.
+`.claude/skills/ato-release/SKILL.md` is also unverified; see the status note above before using it.
 
 ## Temp Files
 
