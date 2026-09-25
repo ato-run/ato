@@ -1,0 +1,118 @@
+{
+  "attempt_fence": 1,
+  "attempt_id": "hosted_attempt",
+  "binding_requirements": [],
+  "compute_schema_ref": "sha256:5a59f7ec6a38a920968270b2fe775bddce49930d959a58993f2751e67683cff5",
+  "contract_ref": "sha256:d491ec6af19d21096dd7c2f5399bc844b1f277210051795cd28bfe82c251295e",
+  "contract_verification": {
+    "observations": [
+      {
+        "detail": "",
+        "id": "root",
+        "result": "satisfied"
+      },
+      {
+        "detail": "",
+        "id": "source-identity",
+        "result": "satisfied"
+      }
+    ],
+    "summary": "2 satisfied, 0 deferred, 0 failed"
+  },
+  "derivation_ref": "sha256:0c17640c9dbd8f8edbe7c49ac425167fb15d8c404ae61999037e7fe7aecb809e",
+  "deterministic_inputs_digest": "sha256:e19743d3c2a257cff8941ea2f25a914291a13eb8139876674a1a97a50cf42360",
+  "diagnostics": [],
+  "exported_ports": [],
+  "formation_key": "v2:sha256:e19743d3c2a257cff8941ea2f25a914291a13eb8139876674a1a97a50cf42360",
+  "job_id": "hosted_job",
+  "materializations": [
+    {
+      "compatibility": {
+        "evaluator": "browser"
+      },
+      "content_ref": "sha256:dcba8274e7af513cda4e6fe96077afeac4553cbaf488802d63d7231e72c4e20e",
+      "digest": "sha256:dcba8274e7af513cda4e6fe96077afeac4553cbaf488802d63d7231e72c4e20e",
+      "kind": "static_web",
+      "media_type": "application/vnd.ato.static-web-bundle.v1",
+      "producer": "ato-formation-worker/0.1.0",
+      "size_bytes": 48099,
+      "target": {
+        "triple": "wasm32-browser",
+        "workspace_guest_root": "/app"
+      }
+    }
+  ],
+  "outcomes": {
+    "cleanup": {
+      "state": "succeeded"
+    },
+    "publication": {
+      "state": "succeeded"
+    },
+    "runtime_verification": {
+      "state": "succeeded"
+    },
+    "seal": {
+      "state": "succeeded"
+    }
+  },
+  "protocol": "ato.formation-result.v2",
+  "provenance": {
+    "builder_catalog_version": "catalog-2026-09",
+    "field_origins": {},
+    "formation_service_version": "0.1.0",
+    "isolation": "static-loopback;no-build",
+    "network_policy": "denied",
+    "policy_version": "formation-policy-v1"
+  },
+  "readiness_contracts": [],
+  "realization_candidates": [
+    {
+      "entry_path": "index.html",
+      "kind": "static_browser",
+      "materialization_ref": "sha256:dcba8274e7af513cda4e6fe96077afeac4553cbaf488802d63d7231e72c4e20e",
+      "spa_fallback": false
+    }
+  ],
+  "runtime_requirements": [],
+  "source_closure_ref": "sha256:bb2c774078a8bb35873fc7989d43a81a94b71f8e9564597dc4dc8c71d8ae44e4",
+  "source_revision_ref": "srev_bb2c774078a8bb35",
+  "state_slot_declarations": [],
+  "status": "succeeded",
+  "verification_receipt": {
+    "contract_ref": "sha256:d491ec6af19d21096dd7c2f5399bc844b1f277210051795cd28bfe82c251295e",
+    "derivation_ref": "sha256:0c17640c9dbd8f8edbe7c49ac425167fb15d8c404ae61999037e7fe7aecb809e",
+    "execution": {
+      "attempt_id": "hosted_attempt",
+      "endpoint": "http://127.0.0.1:64226/",
+      "platform": "macos/aarch64",
+      "realization": "static_web",
+      "request_id": "hosted_job"
+    },
+    "fully_satisfied": true,
+    "observations": [
+      {
+        "evidence": {
+          "body_sha256": "sha256:ea080747b5946205c3ffd4ddb4838f3db348eafe293e2f06068c2bcaf436bb6f",
+          "method": "GET",
+          "path": "/",
+          "status": 200
+        },
+        "id": "root",
+        "outcome": "satisfied"
+      },
+      {
+        "evidence": {
+          "digest": "sha256:bb2c774078a8bb35873fc7989d43a81a94b71f8e9564597dc4dc8c71d8ae44e4",
+          "input": "workspace"
+        },
+        "id": "source-identity",
+        "outcome": "satisfied"
+      }
+    ],
+    "schema": "ato.contract-verification-receipt/1",
+    "target": {
+      "kind": "formation-runtime"
+    }
+  }
+}

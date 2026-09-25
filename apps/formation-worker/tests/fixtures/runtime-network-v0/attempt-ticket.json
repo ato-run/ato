@@ -1,0 +1,20 @@
+{
+  "attempt_id": "att_fixture",
+  "fence": 1,
+  "satisfy_id": "sat_fixture",
+  "runtime_id": "rnr_fixture",
+  "environment_id": "native",
+  "contract_ref": "sha256:9bf1dde591e75171e28f258321116dff9a877d190d8ddad3da524c08b42227e5",
+  "base_contract_ref": "sha256:9bf1dde591e75171e28f258321116dff9a877d190d8ddad3da524c08b42227e5",
+  "derivation_ref": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "capsule_toml": "# route fixture\n",
+  "browser_contract": null,
+  "archive_digest": "sha256:4d9379a27a59854452956e359fa163a2e44d3e06ee6d82635c7c3171d3453fce",
+  "bindings": {},
+  "network": "denied",
+  "resource_budget": {
+    "transfer_bytes": 24,
+    "expanded_bytes": 536870912,
+    "stored_bytes": 536870912
+  }
+}

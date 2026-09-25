@@ -36,7 +36,11 @@
   },
   "budget": {
     "max_attempts": 4,
-    "mode": "first_pass"
+    "mode": "first_pass",
+    "deadline_seconds": 86400,
+    "max_transfer_bytes": 1073741824,
+    "max_expanded_bytes": 2147483648,
+    "max_stored_bytes": 10737418240
   },
   "base_contract": {
     "requirements": [

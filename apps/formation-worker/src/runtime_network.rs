@@ -31,7 +31,7 @@ use ato_formation::browser::{BrowserContractV0, effective_contract_ref};
 use ato_formation::capsule_toml::parse_capsule_toml;
 use ato_formation::detect::detect;
 use ato_formation::request::AttemptStatus;
-use ato_formation::source::SourceLimits;
+use ato_formation::source::{SourceError, SourceLimits};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
@@ -50,6 +50,24 @@ pub const PROTOCOL: &str = "ato.runtime-network/0";
 pub const NATIVE_ENVIRONMENT: &str = "native";
 /// Largest source archive a request carries inline.
 pub const MAX_SOURCE_BYTES: usize = 32 * 1024 * 1024;
+
+/// Search budget ceilings (ADR-031). Each is a limit on a whole search, spent
+/// across all of its requests — not on one HTTP request, one artifact or one
+/// Runtime's disk. The Coordinator holds the same values; both repos check
+/// them against `search-budget-ceilings.json`.
+pub const MAX_SEARCH_ATTEMPTS: u32 = 32;
+pub const MAX_SEARCH_DEADLINE_SECONDS: u64 = 7 * 24 * 60 * 60;
+pub const MAX_SEARCH_TRANSFER_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+pub const MAX_SEARCH_EXPANDED_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+pub const MAX_SEARCH_STORED_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+/// The most one attempt expands of its source: this Runtime's own source
+/// ceiling, `SourceLimits::default().max_total_bytes`. The Coordinator never
+/// reserves more than this for an attempt.
+pub const MAX_ATTEMPT_EXPANDED_BYTES: u64 = 512 * 1024 * 1024;
+/// The most one attempt keeps: the ceiling of one capsule bundle. An
+/// UNKNOWN attempt is charged its full caps, so an attempt's share is
+/// bounded here rather than by everything the search has left.
+pub const MAX_ATTEMPT_STORED_BYTES: u64 = 512 * 1024 * 1024;
 /// How long a Runtime may take to fetch a ticket's source: MAX_SOURCE_BYTES
 /// at about 40 KB/s.
 const SOURCE_TRANSFER_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -134,13 +152,100 @@ pub struct SatisfyPolicy {
     pub allow_managed: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The budget of the whole search the request belongs to (ADR-031). The
+/// search's first request freezes it; every later request of the search must
+/// state it exactly, and spends from what the earlier ones left. The
+/// Coordinator owns what remains.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SatisfyBudget {
+    /// Attempts the search may claim, over all of its requests.
     pub max_attempts: u32,
     /// `first_pass`: stop at the first verified route. `all`: attempt every
-    /// admissible candidate (still within `max_attempts`).
+    /// admissible candidate (still within the budget). A search objective,
+    /// frozen with the budget.
     pub mode: String,
+    /// The search's lifetime, from its first request. Never extended.
+    pub deadline_seconds: u64,
+    /// Logical source bytes the search may hand to Runtimes.
+    pub max_transfer_bytes: u64,
+    /// Logical bytes the search may expand on Runtimes.
+    pub max_expanded_bytes: u64,
+    /// Logical artifact bytes the search may have Runtimes keep.
+    pub max_stored_bytes: u64,
+}
+
+impl SatisfyBudget {
+    /// The largest budget a search may have: every ceiling.
+    pub fn ceilings(max_attempts: u32, mode: &str) -> Self {
+        Self {
+            max_attempts,
+            mode: mode.to_owned(),
+            deadline_seconds: MAX_SEARCH_DEADLINE_SECONDS,
+            max_transfer_bytes: MAX_SEARCH_TRANSFER_BYTES,
+            max_expanded_bytes: MAX_SEARCH_EXPANDED_BYTES,
+            max_stored_bytes: MAX_SEARCH_STORED_BYTES,
+        }
+    }
+
+    /// Refuse a budget the Coordinator would refuse: above a ceiling, or
+    /// with no attempt or no time at all.
+    pub fn validate(&self) -> Result<()> {
+        if !(1..=MAX_SEARCH_ATTEMPTS).contains(&self.max_attempts) {
+            bail!("max_attempts must be 1..={MAX_SEARCH_ATTEMPTS}");
+        }
+        if !matches!(self.mode.as_str(), "first_pass" | "all") {
+            bail!("mode must be first_pass or all");
+        }
+        if !(1..=MAX_SEARCH_DEADLINE_SECONDS).contains(&self.deadline_seconds) {
+            bail!("deadline_seconds must be 1..={MAX_SEARCH_DEADLINE_SECONDS}");
+        }
+        for (name, value, ceiling) in [
+            (
+                "max_transfer_bytes",
+                self.max_transfer_bytes,
+                MAX_SEARCH_TRANSFER_BYTES,
+            ),
+            (
+                "max_expanded_bytes",
+                self.max_expanded_bytes,
+                MAX_SEARCH_EXPANDED_BYTES,
+            ),
+            (
+                "max_stored_bytes",
+                self.max_stored_bytes,
+                MAX_SEARCH_STORED_BYTES,
+            ),
+        ] {
+            if value > ceiling {
+                bail!("{name} is above the search ceiling of {ceiling} bytes");
+            }
+        }
+        Ok(())
+    }
+}
+
+/// An attempt's share of its search's budget, fixed when the ticket was
+/// issued. Hard limits: this Runtime never goes past them, whatever it
+/// believes the search has left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TicketResourceBudget {
+    /// The source's logical bytes: the most this attempt may receive.
+    pub transfer_bytes: u64,
+    /// The most this attempt may expand of its source.
+    pub expanded_bytes: u64,
+    /// The most artifact bytes this attempt may keep.
+    pub stored_bytes: u64,
+}
+
+/// What an attempt used of its caps, in the budget's logical units. Transfer
+/// is not reported: the Coordinator charges it when it authorizes the source.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceUsage {
+    pub expanded_bytes: u64,
+    pub stored_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,6 +290,9 @@ pub struct AttemptTicket {
     pub archive_digest: String,
     pub bindings: BTreeMap<String, String>,
     pub network: String,
+    /// This attempt's caps. A ticket without them is not one this Runtime
+    /// runs: it would have nothing to hold the attempt to.
+    pub resource_budget: TicketResourceBudget,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -236,6 +344,8 @@ pub struct AttemptResultReport {
     pub formation_attempt: Option<serde_json::Value>,
     pub verifier_receipts: Vec<serde_json::Value>,
     pub attestation: RuntimeAttestation,
+    /// What the attempt used of the ticket's caps.
+    pub resource_usage: ResourceUsage,
 }
 
 // ────────────────────────────────────────────────────────────────── facts
@@ -439,6 +549,7 @@ pub fn prepare_submission(
     budget: SatisfyBudget,
     search_id: &str,
 ) -> Result<Submission> {
+    budget.validate()?;
     let archive = snapshot_directory(dir)?;
     if archive.len() > MAX_SOURCE_BYTES {
         bail!("the source is larger than {MAX_SOURCE_BYTES} bytes");
@@ -759,7 +870,11 @@ impl Client {
         self.send(self.http.post(self.url("/attempts/claim")))
     }
 
-    pub fn source(&self, attempt_id: &str) -> Result<Vec<u8>> {
+    /// The ticket's source, read up to `max_bytes` (the ticket's transfer
+    /// cap) and one byte more: a longer source is returned as such, never
+    /// read to its end.
+    pub fn source(&self, attempt_id: &str, max_bytes: u64) -> Result<Vec<u8>> {
+        use std::io::Read as _;
         let response = self
             .http
             .get(self.url(&format!("/attempts/{attempt_id}/source")))
@@ -775,7 +890,11 @@ impl Client {
                 response.status()
             );
         }
-        Ok(response.bytes()?.to_vec())
+        let mut bytes = Vec::new();
+        response
+            .take(max_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        Ok(bytes)
     }
 
     pub fn report(&self, attempt_id: &str, result: &AttemptResultReport) -> Result<()> {
@@ -890,8 +1009,9 @@ pub fn serve(config: &ServeConfig) -> Result<()> {
                 "[runtime-network] attempt {} — {} on {}",
                 ticket.attempt_id, ticket.derivation_ref, ticket.environment_id
             );
-            let report =
-                execute_ticket_with_source(config, &ticket, || client.source(&ticket.attempt_id));
+            let report = execute_ticket_with_source(config, &ticket, || {
+                client.source(&ticket.attempt_id, ticket.resource_budget.transfer_bytes)
+            });
             eprintln!(
                 "[runtime-network] attempt {} → {}",
                 ticket.attempt_id, report.outcome
@@ -962,6 +1082,7 @@ fn refused(
         formation_attempt: None,
         verifier_receipts: Vec::new(),
         attestation,
+        resource_usage: ResourceUsage::default(),
     }
 }
 
@@ -1013,6 +1134,19 @@ pub fn execute_ticket_with_source(
             );
         }
     };
+    // The ticket's transfer cap is the source's own size; a longer source is
+    // not the one the search paid for.
+    if archive.len() as u64 > ticket.resource_budget.transfer_bytes {
+        return refused(
+            ticket,
+            attested,
+            "search_transfer_budget_exceeded",
+            &format!(
+                "the source is longer than the ticket's transfer budget of {} bytes",
+                ticket.resource_budget.transfer_bytes
+            ),
+        );
+    }
     if ticket.environment_id != NATIVE_ENVIRONMENT {
         return refused(
             ticket,
@@ -1053,14 +1187,54 @@ fn execute_planned_ticket(
     attested: &mut RuntimeAttestation,
     permit: Box<dyn AttemptPermit>,
 ) -> AttemptResultReport {
+    // The ticket's expanded cap, under this Runtime's own source ceiling. The
+    // tree is measured against it before anything is written, and expansion
+    // enforces it again.
+    let ceiling = SourceLimits::default();
+    let limits = SourceLimits {
+        max_total_bytes: ceiling
+            .max_total_bytes
+            .min(ticket.resource_budget.expanded_bytes),
+        ..ceiling
+    };
+    let verified = match local::verify_archive(archive, &ticket.archive_digest, limits) {
+        Ok(verified) => verified,
+        Err(error) => {
+            let over_cap = ticket.resource_budget.expanded_bytes <= ceiling.max_total_bytes
+                && error.chain().any(|cause| {
+                    matches!(
+                        cause.downcast_ref::<SourceError>(),
+                        Some(SourceError::LimitExceeded {
+                            limit: "max_total_bytes"
+                        })
+                    )
+                });
+            return refused(
+                ticket,
+                attested.clone(),
+                if over_cap {
+                    "search_expanded_budget_exceeded"
+                } else {
+                    "ticket_unplannable"
+                },
+                &format!("{error:#}"),
+            );
+        }
+    };
+    // From here the tree may be written: its measured bytes are what this
+    // attempt expanded, whatever happens next.
+    let mut usage = ResourceUsage {
+        expanded_bytes: verified.expanded_bytes(),
+        stored_bytes: 0,
+    };
+    let refused_after_expansion =
+        |attested: RuntimeAttestation, code: &str, message: &str| AttemptResultReport {
+            resource_usage: usage,
+            ..refused(ticket, attested, code, message)
+        };
     let planned = (|| -> Result<_> {
         std::fs::create_dir_all(attempt_root)?;
-        let frozen = freeze_archive(
-            archive,
-            &ticket.archive_digest,
-            &std::path::absolute(attempt_root)?,
-            SourceLimits::default(),
-        )?;
+        let frozen = local::freeze_verified(verified, &std::path::absolute(attempt_root)?, limits)?;
         let evidence = detect(&frozen.root).context("detection failed")?;
         let draft: AuthoringDraft = parse_capsule_toml(&ticket.capsule_toml)
             .map_err(ato_formation::failure::FormationFailure::from)?;
@@ -1079,8 +1253,7 @@ fn execute_planned_ticket(
     let (frozen, planned, contract_ref) = match planned {
         Ok(planned) => planned,
         Err(error) => {
-            return refused(
-                ticket,
+            return refused_after_expansion(
                 attested.clone(),
                 "ticket_unplannable",
                 &format!("{error:#}"),
@@ -1097,8 +1270,7 @@ fn execute_planned_ticket(
     // The Runtime does not rewrite the ticket: its own planning must reach
     // the refs the requester computed.
     if planned.derivation_ref != ticket.derivation_ref || contract_ref != ticket.contract_ref {
-        return refused(
-            ticket,
+        return refused_after_expansion(
             attested.clone(),
             "ticket_mismatch",
             &format!(
@@ -1165,22 +1337,50 @@ fn execute_planned_ticket(
     attested.execution_started = outcome.execution_started();
     attested.attempt_record = outcome.attempt_record;
     let mut attempt = outcome.attempt;
+    // Keeping the artifact is publication, not verification: a publication
+    // that fails — or that the ticket's stored cap does not allow — leaves
+    // the receipt and `runtime_verification` exactly as they were.
+    let publication_failed =
+        |attempt: &mut ato_formation::request::FormationAttempt, code: &str, message: String| {
+            attempt.status = AttemptStatus::Failed;
+            attempt.outcomes.publication = ato_formation::request::Outcome::failed(code);
+            attempt.failure = Some(ato_formation::request::AttemptFailure {
+                code: code.to_owned(),
+                stage: "publish".to_owned(),
+                message: crate::api::bounded_reason(&message),
+            });
+            None
+        };
     let materialization_ref = match &outcome.verified {
-        Some(executed) => match local::store_candidate(executed, &config.out_dir) {
-            Ok(reference) => {
-                attempt.outcomes.publication = ato_formation::request::Outcome::succeeded();
-                Some(reference)
+        Some(executed) => match local::prepare_artifact(executed) {
+            Ok(prepared) if prepared.logical_bytes() > ticket.resource_budget.stored_bytes => {
+                publication_failed(
+                    &mut attempt,
+                    "search_stored_budget_exceeded",
+                    format!(
+                        "the artifact is {} bytes; the ticket's stored budget is {} bytes",
+                        prepared.logical_bytes(),
+                        ticket.resource_budget.stored_bytes
+                    ),
+                )
+            }
+            Ok(prepared) => {
+                // Keeping it was attempted: charged even if the write fails.
+                usage.stored_bytes = prepared.logical_bytes();
+                match prepared.store(&config.out_dir) {
+                    Ok(reference) => {
+                        attempt.outcomes.publication = ato_formation::request::Outcome::succeeded();
+                        Some(reference)
+                    }
+                    Err(error) => publication_failed(
+                        &mut attempt,
+                        "artifact_store_failed",
+                        format!("{error:#}"),
+                    ),
+                }
             }
             Err(error) => {
-                attempt.status = AttemptStatus::Failed;
-                attempt.outcomes.publication =
-                    ato_formation::request::Outcome::failed("artifact_store_failed");
-                attempt.failure = Some(ato_formation::request::AttemptFailure {
-                    code: "artifact_store_failed".to_owned(),
-                    stage: "publish".to_owned(),
-                    message: crate::api::bounded_reason(&format!("{error:#}")),
-                });
-                None
+                publication_failed(&mut attempt, "artifact_store_failed", format!("{error:#}"))
             }
         },
         None => None,
@@ -1218,5 +1418,6 @@ fn execute_planned_ticket(
         formation_attempt: serde_json::to_value(&attempt).ok(),
         verifier_receipts: receipts,
         attestation: attested.clone(),
+        resource_usage: usage,
     }
 }

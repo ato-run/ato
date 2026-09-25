@@ -7,17 +7,21 @@
 //! untrusted build could reach through it.
 
 use anyhow::{Context, Result};
+use ato_runtime_attempt::journal::AttemptRecordState;
 use serde::Deserialize;
 
 pub use ato_runtime_attempt::text::{FAILURE_REASON_LIMIT, bounded_reason};
 
 /// A failure as the control plane receives it: a code to branch on, the stage
 /// that refused it, and one sentence written for the uploader.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct FailureReport {
     pub code: String,
     pub stage: String,
     pub message: String,
+    pub attempt_record: Option<AttemptRecordState>,
+    pub receipt: Option<serde_json::Value>,
+    pub outcomes: Option<serde_json::Value>,
 }
 
 impl FailureReport {
@@ -29,6 +33,9 @@ impl FailureReport {
             code: code.to_owned(),
             stage: "publish".to_owned(),
             message: bounded_reason(&message),
+            attempt_record: None,
+            receipt: None,
+            outcomes: None,
         }
     }
 }
@@ -144,9 +151,16 @@ impl FormationApi {
     /// reads only `reason` behaves exactly as it did, and a code it does not
     /// recognise is dropped there rather than rendered.
     pub fn report_failure(&self, attempt_id: &str, failure: &FailureReport) -> Result<()> {
+        // A new endpoint makes an old receiver fail closed rather than silently
+        // dropping journal uncertainty from an additive JSON field.
+        let endpoint = if failure.attempt_record.is_some() {
+            "outcome"
+        } else {
+            "failure"
+        };
         self.client
             .post(format!(
-                "{}/v1/internal/formation/attempts/{attempt_id}/failure",
+                "{}/v1/internal/formation/attempts/{attempt_id}/{endpoint}",
                 self.base
             ))
             .bearer_auth(&self.token)
@@ -154,6 +168,9 @@ impl FormationApi {
                 "reason": failure.message,
                 "code": failure.code,
                 "stage": failure.stage,
+                "attempt_record": failure.attempt_record,
+                "receipt": failure.receipt,
+                "outcomes": failure.outcomes,
             }))
             .send()?
             .error_for_status()
@@ -426,5 +443,30 @@ impl PublishOutcome {
                     | "formation_result_invalid"
             ),
         }
+    }
+}
+
+/// Both daemon and one-shot use this classification and the same reporter.
+pub fn classify_failure(error: &anyhow::Error) -> FailureReport {
+    if let Some(failure) = error.downcast_ref::<crate::job::HostedAttemptFailure>() {
+        return failure.report.clone();
+    }
+    if let Some(failure) = error.downcast_ref::<ato_formation::failure::FormationFailure>() {
+        return FailureReport {
+            code: failure.code.clone(),
+            stage: failure.stage.as_str().to_owned(),
+            message: failure.bounded_message(FAILURE_REASON_LIMIT),
+            attempt_record: None,
+            receipt: None,
+            outcomes: None,
+        };
+    }
+    FailureReport {
+        code: "build_failed".into(),
+        stage: "build".into(),
+        message: "the app could not be built from this source".into(),
+        attempt_record: None,
+        receipt: None,
+        outcomes: None,
     }
 }

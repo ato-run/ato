@@ -39,5 +39,9 @@
     ],
     "execution_started": true,
     "attempt_record": "started_unfinished"
+  },
+  "resource_usage": {
+    "expanded_bytes": 25,
+    "stored_bytes": 0
   }
 }
