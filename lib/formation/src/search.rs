@@ -405,9 +405,6 @@ pub fn decide_next(
             .iter()
             .filter(|a| a.derivation_ref == d.derivation_ref)
             .collect();
-        if history.iter().any(|a| a.route_accepted) {
-            continue;
-        }
         if !safe(&d.effects) {
             continue;
         }
