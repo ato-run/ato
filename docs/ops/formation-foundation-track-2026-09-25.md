@@ -123,3 +123,60 @@ Network suites 119 (including Stage 4 D1→D2 restart, frozen identity,
 WaitForRuntime, CAS, presence-only requirement) and the shared canonical
 SearchState fixtures byte-identical in the real WASM. Browser full E2E is not
 claimed.
+
+## Final stack regression (2026-09-25/26)
+
+Final heads: ato `6a885970` (#1408) over #1407 `147c24be` over #1406
+`ab667b82`; ato-api `b0236692` (#693) over #692 `422cd68b`. Hosts:
+`oci-linux-test` (Linux aarch64, bwrap) and `ubuntu-sugamo` (Linux x86_64,
+Docker 29) with per-tree targets. Unmerged and undeployed throughout.
+
+| area | result |
+|---|---|
+| Local Formation Static / Python / Node (formation-worker suites) | 191 passed, 1 ignored |
+| lowering parity (K/D refs + commands vs `lowering-before-2f.json`) | pass (7 fixtures) |
+| common runtime (`ato-runtime-attempt`) | 58 passed, 1 ignored |
+| formation lib (incl. SearchState, retained descriptor) | 193 passed |
+| receipt/search authority | 7 passed |
+| Portable Run Static / Process (`ato-cli` portable) | 15 passed |
+| Portable Run OCI / service group (CLI, Docker) | Python process, OCI and service group: verified, served, confirmed stop, no containers left, scratch removed |
+| Hosted validator (`ato-portable-application`, Hosted-like fixture) | 80 passed |
+| Hosted LocalProcess etc. (`connected-realization-worker`, shim built) | 138 passed; Browser E2E fails (below) |
+| Hosted OCI / service group / egress (Docker, lease start→finish) | 3 passed; nothing labelled left |
+| Runtime Network Static / >32 MiB (40 MiB) Static / Python / Node | all satisfied, fresh receipts, VerifiedRoutes |
+| Retained replay Static / 40 MiB Static / Python / Node | after deleting 14 source objects and a Coordinator restart: all satisfied, same K/D, new attempts and receipts, stored 0 |
+| SearchState D1 fail→D2, UNKNOWN→resolve→next, retained, restart points, budget | Stage 4 acceptance above (cases 1–7) |
+| API Runtime Network suites | 119 passed; typecheck; schema:check |
+
+Browser: the Hosted Browser E2E needs `ATO_BROWSER_E2E_CHROME`; with the
+host's Playwright Chromium it fails `webmcp ... slow_increment` (the fixture's
+WebMCP tool is not registered). The stack changes no file in the Hosted worker,
+the Browser adapter or the runtime-attempt Browser code, so this is not a stack
+regression; it is not counted as a pass. No Browser full E2E success is claimed.
+
+P0 remeasure (foundation regression, not coverage): 1/20 VerifiedRoute with
+retained replay, 7 runtime capability (Go/Java), 6 build/toolchain, 3 execution
+lowering (multi-service routes), 2 D authoring (pnpm pin), 1 source transport
+(380 MiB); no K/receipt/UNKNOWN/publication defect. See
+[P0 remeasure](formation-p0-remeasure-2026-09-26.md).
+
+## Stage 4 completion gate
+
+| # | gate | evidence |
+|---|---|---|
+| 1 | K freeze | 0300 write-once `frozen_json` + request trigger + 409; case 1 frozen identity unchanged across restarts; Coordinator test |
+| 2 | deterministic candidate order | frozen D order in `decide_next`; WaitForRuntime test; case 2 continues to D2, not to a reordered D |
+| 3 | durable cumulative budget | cases 1/2 `attempts_used` across restarts; case 4 `budget_exhausted`; 3c-a tests |
+| 4 | durable UNKNOWN | case 2 held across restart and a polling healthy Runtime; resolution does not refund |
+| 5 | source object transport | 3c-b; final regression 40 MiB source |
+| 6 | retained object fresh replay | 3d; case 3; final regression Static/40 MiB/Python/Node after source deletion |
+| 7 | fresh receipt authority | every PASS accepted via `accept_verified_route` (Coordinator WASM + requester) with a new attempt and receipt |
+| 8 | D1 fail → restart → D2 PASS | case 1 |
+| 9 | termination reasons separated | cases 1/4/5/6 (verified, budget_exhausted, candidates_exhausted, effect_unknown); owner_stopped from owner stop |
+| 10 | Coordinator crash/restart consistency | restart points 1–9 (cases 1/2/3/5 + Coordinator test for 7-before) |
+| 11 | no duplicated executor/K evaluator | K only via `verify_observed_candidate`; retained replay shares `CandidateLauncher`/`run_attempt`; TypeScript fallback rules removed |
+| 12 | no AI decision in the deterministic core | `decide_next` is pure Rust over rows; no LLM/Jev/free-text patch |
+
+All twelve are met at the implemented / locally-integration-verified level on
+the unmerged stack. **Formation foundation v1 complete** is recorded in the
+roadmap on that basis; it is not merged and not deployed.
