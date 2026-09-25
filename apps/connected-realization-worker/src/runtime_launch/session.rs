@@ -1196,4 +1196,247 @@ while True:
             "A"
         );
     }
+
+    // ── Hosted OCI on a native Linux Docker host ────────────────────────────
+    //
+    // The same production `lease::start` → `lease::finish` as the process
+    // tests above, for a single container and for a service group, with real
+    // pinned images. `ATO_OCI_OWNERSHIP_FIXTURE_OUT=<dir>` writes each case
+    // normalized, to compare two builds.
+
+    const WHOAMI: &str = "docker.io/traefik/whoami@sha256:4f90b33ddca9c4d4f06527070d6e503b16d71016edea036842be2a84e60c91cb";
+    const NGINX: &str = "docker.io/nginxinc/nginx-unprivileged@sha256:28d91bdce70ad09025ea901458fdd149259d8e05982ade79d4ef2c0d9470eb48";
+
+    fn oci_owner(slot: &str, run_id: &str) -> ato_adapter_oci::OciOwner {
+        ato_adapter_oci::OciOwner {
+            runner_id: "itest-2e-c".into(),
+            slot_id: slot.into(),
+            lease_id: format!("lease-{slot}"),
+            run_id: run_id.to_owned(),
+            incarnation: "itest".into(),
+        }
+    }
+
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    /// Start and finish one Run through the Hosted lease, and describe what
+    /// happened with every volatile identifier replaced.
+    fn oci_run(
+        case: &str,
+        spec: ato_ipc::runtime_launch_v2::RuntimeLaunchSpec,
+        context: ResolvedRuntimeLaunchContext,
+        attachments: &[StateAttachmentV1],
+        surface_port: u16,
+        path: &str,
+    ) -> serde_json::Value {
+        let plane = FakeControlPlane::default();
+        let prepared = prepare_run(attachments, &context, &plane, &BTreeMap::new()).unwrap();
+        let endpoint_ports = context
+            .endpoints()
+            .iter()
+            .map(|endpoint| (endpoint.name.clone(), endpoint.host_port))
+            .collect();
+        let run_id = spec.context().run_id.clone();
+        let owner = oci_owner(case, &run_id);
+        let host = ProcessLaunchHost {
+            shim: std::env::current_exe().unwrap(),
+            runtime_root: context.workspace_root().join(".ato/test-runtime"),
+            output: None,
+        };
+        let active = super::super::lease::start(
+            &spec,
+            ResolvedRun {
+                context,
+                prepared,
+                endpoint_ports,
+            },
+            &plane,
+            &super::super::process_executor::LoopbackReadinessProbe::new(
+                reqwest::blocking::Client::new(),
+            ),
+            &owner,
+            None,
+            &host,
+        )
+        .expect("the OCI Run starts");
+        let evidence = serde_json::to_value(active.execution_evidence()).unwrap();
+        let subject = active.execution_subject();
+        let served = reqwest::blocking::get(format!("http://127.0.0.1:{surface_port}{path}"))
+            .expect("the Surface answers")
+            .status()
+            .as_u16();
+        let running = ato_adapter_oci::OwnedResourceScanner::new(&owner.runner_id, &owner.slot_id)
+            .unwrap()
+            .scan()
+            .unwrap();
+        let (stop, committed) =
+            super::super::lease::finish(&spec, active, &plane, &format!("commit_{case}"));
+        let committed = committed.expect("the confirmed stop commits");
+        let left = ato_adapter_oci::OwnedResourceScanner::new(&owner.runner_id, &owner.slot_id)
+            .unwrap()
+            .scan()
+            .unwrap();
+        assert!(stop.overall.is_confirmed(), "{stop:?}");
+        assert!(left.containers.is_empty(), "{left:?}");
+        assert!(left.networks.is_empty(), "{left:?}");
+        let plane = plane.inner.lock().unwrap();
+        let mut document = serde_json::json!({
+            "evidence": evidence,
+            "subject_parts": subject.split(',').count(),
+            "served_status": served,
+            "running_containers": running.containers.len(),
+            "running_networks": running.networks.len(),
+            "stop": stop
+                .services
+                .iter()
+                .map(|(name, outcome)| (name.clone(), serde_json::to_value(outcome).unwrap()))
+                .collect::<Vec<_>>(),
+            "stop_confirmed": stop.overall.is_confirmed(),
+            "state": committed
+                .iter()
+                .map(|outcome| serde_json::json!({
+                    "state_key": outcome.state_key,
+                    "revision_ref": outcome.revision_ref,
+                    "writer_fence": outcome.writer_fence,
+                }))
+                .collect::<Vec<_>>(),
+            "releases": plane.releases.iter().map(|(fence, kind)| format!("{fence}:{kind}")).collect::<Vec<_>>(),
+            "quarantined": plane.quarantined,
+            "left_containers": left.containers.len(),
+            "left_networks": left.networks.len(),
+        });
+        normalize_container_ids(&mut document["evidence"]);
+        if let Some(dir) = std::env::var_os("ATO_OCI_OWNERSHIP_FIXTURE_OUT") {
+            let dir = PathBuf::from(dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(format!("{case}.json")),
+                serde_json::to_vec_pretty(&document).unwrap(),
+            )
+            .unwrap();
+        }
+        document
+    }
+
+    fn normalize_container_ids(evidence: &mut serde_json::Value) {
+        if evidence["container_id"].is_string() {
+            evidence["container_id"] = serde_json::json!("<container>");
+        }
+        if let Some(services) = evidence["services"].as_array_mut() {
+            for service in services {
+                service["container_id"] = serde_json::json!("<container>");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "needs a native Linux Docker host"]
+    fn a_hosted_oci_container_starts_serves_stops_and_commits() {
+        let workspace = tempfile::tempdir().unwrap();
+        let port = free_port();
+        let mut spec = spec_for("run_2ec_container", Some(1), "unused", port);
+        spec.realization = LaunchRealizationV1::Oci(ato_ipc::runtime_launch::OciRealizationV1 {
+            image_digest_ref: WHOAMI.rsplit_once('@').unwrap().1.to_owned(),
+            image_reference: Some(WHOAMI.to_owned()),
+            platform: Some("linux/amd64".to_owned()),
+            resource_limits: Some(ato_ipc::runtime_launch::OciResourceLimitsV1 {
+                memory_bytes: 134_217_728,
+                cpu_limit_millis: 500,
+                pids_limit: 64,
+            }),
+            entrypoint: None,
+            argv: Some(vec!["--port".to_owned(), "8000".to_owned()]),
+            working_dir: None,
+            workspace_mount_path: None,
+        });
+        spec.readiness = ReadinessV1::Http {
+            endpoint_name: "http".to_owned(),
+            path: "/".to_owned(),
+            timeout_ms: 60_000,
+        };
+        let attachments = spec.state_attachments.clone();
+        let document = oci_run(
+            "container",
+            ato_ipc::runtime_launch_v2::RuntimeLaunchSpec::V1(spec),
+            context_for(workspace.path(), port),
+            &attachments,
+            port,
+            "/",
+        );
+        assert_eq!(document["evidence"]["realization"], "oci");
+        assert_eq!(document["served_status"], 200);
+        assert_eq!(document["running_containers"], 1);
+    }
+
+    #[test]
+    #[ignore = "needs a native Linux Docker host"]
+    fn a_hosted_oci_service_group_starts_serves_stops_and_commits() {
+        let mut raw: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../lib/ipc/tests/fixtures/runtime-launch-spec-v2/service-group.json"
+        ))
+        .unwrap();
+        raw["context"]["run_id"] = serde_json::json!("run_2ec_group");
+        let services = raw["realization"]["services"].as_array_mut().unwrap();
+        for (service, image) in services.iter_mut().zip([WHOAMI, NGINX]) {
+            service["image_reference"] = serde_json::json!(image);
+            service["image_digest_ref"] = serde_json::json!(image.rsplit_once('@').unwrap().1);
+        }
+        services[0]["argv"] = serde_json::json!(["--port", "8081"]);
+        services[0]["endpoints"][0]["guest_port"] = serde_json::json!(8081);
+        services[1]["readiness"]["path"] = serde_json::json!("/healthz");
+        let spec = ato_ipc::runtime_launch_v2::RuntimeLaunchSpec::parse(&raw.to_string())
+            .expect("the group spec parses");
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(
+            workspace.path().join("nginx.conf"),
+            include_str!("../../../../samples/oci-service-group-proof/nginx.conf"),
+        )
+        .unwrap();
+        let port = free_port();
+        let context = ResolvedRuntimeLaunchContext::new(
+            workspace.path().to_path_buf(),
+            "",
+            BTreeMap::new(),
+            vec![super::super::resolved::ResolvedSecret::new(
+                "ATO_BINDING_ADMIN_SECRET",
+                "itest-secret",
+            )],
+            vec![ResolvedStateAttachment::new(
+                "data",
+                None,
+                state_working_copy(workspace.path(), "data"),
+                "/data",
+                StateAccessV1::ReadWrite,
+            )],
+            vec![allocate_endpoint(
+                &EndpointV1 {
+                    name: "app.http".to_owned(),
+                    protocol: "http".to_owned(),
+                    guest_port: Some(8080),
+                    allocation: EndpointAllocationV1::Automatic,
+                    preferred_port: None,
+                },
+                port,
+            )],
+        )
+        .unwrap();
+        let attachments = vec![StateAttachmentV1 {
+            state_key: "data".to_owned(),
+            revision_ref: None,
+            mount_target: "/data".to_owned(),
+            access: StateAccessV1::ReadWrite,
+            writer_fence: Some(1),
+        }];
+        let document = oci_run("group", spec, context, &attachments, port, "/");
+        assert_eq!(document["evidence"]["realization"], "oci_service_group");
+        assert_eq!(document["served_status"], 200);
+        assert_eq!(document["running_containers"], 2);
+        assert_eq!(document["subject_parts"], 2);
+    }
 }
