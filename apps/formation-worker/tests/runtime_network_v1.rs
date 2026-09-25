@@ -150,9 +150,11 @@ fn ticket(submission: &Submission) -> (AttemptTicket, Vec<u8>) {
             contract_ref: request.contract_ref.clone(),
             base_contract_ref: request.base_contract_ref.clone(),
             derivation_ref: route.derivation_ref.clone(),
-            capsule_toml: route.capsule_toml.clone(),
+            input: ato_formation_worker::runtime_network::AttemptInput::Source {
+                capsule_toml: route.capsule_toml.clone(),
+                archive_digest: request.source.archive_digest.clone(),
+            },
             browser_contract: None,
-            archive_digest: request.source.archive_digest.clone(),
             bindings: BTreeMap::new(),
             network: "denied".to_owned(),
             // What a Coordinator reserves for a fresh search at the ceilings.
@@ -779,7 +781,13 @@ fn the_wire_fixtures_round_trip_through_the_runtime_types() {
                 .expect("the fixture budget is within the ceilings");
             serde_json::to_value(&request)
         } else if name == "attempt-ticket" {
-            let ticket: AttemptTicket = serde_json::from_value(value.clone()).expect(name);
+            let ticket: ato_formation_worker::runtime_network::LegacySourceTicket =
+                serde_json::from_value(value.clone()).expect(name);
+            let current = AttemptTicket::from_wire(value.clone()).expect("legacy read view");
+            assert!(matches!(
+                current.input,
+                ato_formation_worker::runtime_network::AttemptInput::Source { .. }
+            ));
             serde_json::to_value(&ticket)
         } else if name == "search-budget-ceilings" {
             // The Coordinator checks its constants against the same file.
@@ -935,7 +943,11 @@ fn historical_start_precedes_source_planning_and_environment_refusals() {
     let (mut ticket, archive) = ticket(&submit(dir.path(), scratch.path()));
     leave_started(&ticket, scratch.path());
     ticket.environment_id = "capability-removed".into();
-    ticket.capsule_toml = "not valid TOML".into();
+    if let ato_formation_worker::runtime_network::AttemptInput::Source { capsule_toml, .. } =
+        &mut ticket.input
+    {
+        *capsule_toml = "not valid TOML".into();
+    }
     let report = execute_ticket_with_source(&serve_config(scratch.path()), &ticket, || {
         anyhow::bail!("source fetch failed")
     });
@@ -1374,7 +1386,11 @@ fn pax_boundary_refusal_leaves_no_tree_and_preserves_started_history() {
     archive.truncate(1024);
     archive.extend_from_slice(header.as_bytes());
     archive.extend_from_slice(&vec![0; 65536 + 1024]);
-    ticket.archive_digest = format!("sha256:{:x}", Sha256::digest(&archive));
+    if let ato_formation_worker::runtime_network::AttemptInput::Source { archive_digest, .. } =
+        &mut ticket.input
+    {
+        *archive_digest = format!("sha256:{:x}", Sha256::digest(&archive));
+    }
     ticket.resource_budget.transfer_bytes = archive.len() as u64;
     ticket.resource_budget.expanded_bytes = 1024;
     let report = run(&ticket, archive.clone(), scratch.path());
@@ -1437,4 +1453,18 @@ argv = ["/bin/sh", "-c", "echo BUILD_STARTED; echo started > build-started.marke
         serde_json::to_vec_pretty(&submission.request).unwrap(),
     )
     .unwrap();
+}
+
+#[test]
+fn typed_source_and_retained_tickets_roundtrip_without_nullable_source_fields() {
+    for bytes in [
+        include_str!("fixtures/runtime-network-v0/attempt-ticket-source.json"),
+        include_str!("fixtures/runtime-network-v0/attempt-ticket-retained.json"),
+    ] {
+        let value: serde_json::Value = serde_json::from_str(bytes).unwrap();
+        let ticket = AttemptTicket::from_wire(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(ticket).unwrap(), value);
+        assert!(value.get("capsule_toml").is_none());
+        assert!(value.get("archive_digest").is_none());
+    }
 }

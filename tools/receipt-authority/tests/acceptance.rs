@@ -103,3 +103,11 @@ fn retained_descriptor_authority_binds_canonical_bytes_to_frozen_assignment() {
     input["descriptor_json"] = json!("{}");
     rejected(&input, "retained_descriptor_invalid");
 }
+
+#[test]
+fn shared_retained_fixture_has_canonical_bytes() {
+    use ato_formation::retained::{RetainedCandidateV1, content_ref};
+    let bytes = include_bytes!("fixtures/retained-static.json");
+    let descriptor = RetainedCandidateV1::parse(bytes, &content_ref(bytes)).unwrap();
+    assert_eq!(descriptor.canonical_bytes().unwrap(), bytes);
+}
