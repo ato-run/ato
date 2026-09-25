@@ -38,6 +38,8 @@ pub mod containment;
 #[cfg(feature = "planning")]
 pub mod detect;
 #[cfg(feature = "planning")]
+pub mod execution;
+#[cfg(feature = "planning")]
 pub mod failure;
 #[cfg(feature = "planning")]
 pub mod intent;

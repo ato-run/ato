@@ -22,7 +22,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use ato_formation::intent::{EffectiveBuildPlanV1, Lane, ProgramIntentV1};
+use ato_formation::{authoring::BoundDerivation, execution::ExecutionPlan, intent::Lane};
 #[cfg(test)]
 use ato_materializer_static_web::INSTANCE_STATE_BRIDGE_PATH;
 use ato_materializer_static_web::{
@@ -49,17 +49,18 @@ pub struct StaticFormationOutput {
 /// producer says so, and an id minted by the producer would not be the one the
 /// control plane registered.
 pub fn materialize_static(
-    intent: &ProgramIntentV1,
-    plan: &EffectiveBuildPlanV1,
+    derivation: &BoundDerivation,
+    plan: &ExecutionPlan,
     workspace_root: &Path,
     destination_parent: &Path,
     materialization_id: &str,
     runtime_secret_canaries: &[&[u8]],
 ) -> Result<StaticFormationOutput> {
-    if intent.lane != Lane::StaticWeb {
-        bail!("materialize_static was handed a {:?} intent", intent.lane);
+    if plan.lane != Lane::StaticWeb {
+        bail!("materialize_static was handed a {:?} intent", plan.lane);
     }
-    let declared = intent.static_output_root.clone().unwrap_or_default();
+    let serve = plan.serving(derivation);
+    let declared = serve.root.clone().unwrap_or_default();
     let output_root = resolve_output_root(workspace_root, &declared)?;
 
     let output_plan = StaticWebOutputPlan {
@@ -74,11 +75,11 @@ pub fn materialize_static(
         } else {
             declared.as_str()
         }),
-        entry_path: intent
-            .static_entry_path
+        entry_path: serve
+            .entry
             .clone()
             .unwrap_or_else(|| "index.html".to_owned()),
-        spa_fallback: intent.static_spa_fallback,
+        spa_fallback: serve.spa_fallback.unwrap_or(false),
         // Empty on purpose: a connect-src is a deployment decision the control
         // plane owns, and a Formation that guessed one would publish a policy
         // nobody chose.
@@ -223,8 +224,8 @@ fn resolve_output_root(workspace_root: &Path, declared: &str) -> Result<PathBuf>
 }
 
 /// Whether this plan needs the build sandbox at all.
-pub fn needs_build(plan: &EffectiveBuildPlanV1) -> bool {
-    !plan.steps.is_empty()
+pub fn needs_build(plan: &ExecutionPlan) -> bool {
+    !plan.actions.is_empty()
 }
 
 /// Removes every file the producer could not assign a media type to, and every
@@ -271,35 +272,22 @@ fn prune_dir(root: &Path, dir: &Path, dropped: &mut Vec<String>) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn intent() -> ProgramIntentV1 {
-        serde_json::from_value(serde_json::json!({
-            "schema": "ato.program-intent.v1",
-            "lane": "static_web",
-            "runtime": {},
-            "dependencies": { "kind": "none" },
-            "launch_argv": [],
-            "cwd_relative": "",
-            "public_env": {},
-            "exported_ports": [],
-            "readiness_http_path": null,
-            "state_slots": [],
-            "static_output_root": "",
-            "static_entry_path": "index.html",
-            "static_spa_fallback": true
-        }))
-        .expect("static intent fixture")
-    }
-
-    fn plan() -> EffectiveBuildPlanV1 {
-        serde_json::from_value(serde_json::json!({
-            "schema": "ato.effective-build-plan.v1",
-            "lane": "static_web",
-            "workspace_guest_root": "/app",
-            "runtime": {},
-            "steps": [],
-            "output_root": ""
-        }))
-        .expect("static plan fixture")
+    fn fixture() -> (BoundDerivation, ExecutionPlan) {
+        let derivation = serde_json::from_value(serde_json::json!({
+            "schema":"ato.derivation/1","inputs":[],"runtimes":{},"ports":[],"state":[],"effects":"pure",
+            "steps":[{"id":"site","protocol":"ato.browser@1","op":"serve","root":"","entry":"index.html","spa_fallback":true}]
+        })).unwrap();
+        let plan = ExecutionPlan {
+            lane: Lane::StaticWeb,
+            serving_step: 0,
+            workspace_guest_root: "/app".into(),
+            toolchains: Default::default(),
+            package_manager: None,
+            actions: vec![],
+            toolchain_path: vec![],
+            environment_bindings: Default::default(),
+        };
+        (derivation, plan)
     }
 
     /// The 2048 fixture, reduced to the files that decide this gate: a servable
@@ -341,8 +329,8 @@ mod tests {
         let workspace = workspace();
         let destination = tempfile::tempdir().unwrap();
         let produced = materialize_static(
-            &intent(),
-            &plan(),
+            &fixture().0,
+            &fixture().1,
             workspace.path(),
             destination.path(),
             "swm_fixture",

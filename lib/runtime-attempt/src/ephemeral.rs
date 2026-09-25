@@ -36,8 +36,8 @@ use crate::launch::process_executor::{
 use crate::launch::resolved::{ResolvedEndpoint, ResolvedRuntimeLaunchContext};
 use crate::launch::sandbox::endpoint_port_env_name;
 use anyhow::{Context, Result, bail};
-use ato_formation::intent::ProgramIntentV1;
 use ato_formation::verify::RuntimeHttpObservation;
+use ato_formation::{authoring::BoundDerivation, execution::ExecutionPlan};
 use ato_ipc::runtime_launch::{
     EndpointAllocationV1, EndpointV1, LaunchContextV1, LaunchRealizationV1, LaunchWorkspaceV1,
     LifecycleV1, ProcessRealizationV1, PublicEnvV1, RUNTIME_LAUNCH_SPEC_V1_PROTOCOL, ReadinessV1,
@@ -133,7 +133,8 @@ pub struct TemporaryRealizationRequest<'a> {
     pub workspace: &'a Path,
     /// Scratch owned by this realization and removed with it.
     pub scratch: &'a Path,
-    pub intent: &'a ProgramIntentV1,
+    pub derivation: &'a BoundDerivation,
+    pub plan: &'a ExecutionPlan,
     pub ports: &'a [RequiredPort],
     /// The binary bwrap re-enters as `sandbox-exec`.
     pub shim: &'a Path,
@@ -161,8 +162,8 @@ impl TemporaryRealization {
     /// Launch the candidate through the Runtime's process executor and wait
     /// until every required port accepts connections.
     pub fn launch(request: &TemporaryRealizationRequest<'_>) -> Result<Self> {
-        let intent = request.intent;
-        if intent.launch_argv.is_empty() {
+        let serve = request.plan.serving(request.derivation);
+        if serve.argv.is_empty() {
             bail!("the intent declares no launch argv");
         }
 
@@ -246,8 +247,8 @@ impl TemporaryRealization {
         }
         realization.endpoints = endpoints;
 
-        let argv = intent.launch_argv.clone();
-        let public_env = intent.public_env.clone();
+        let argv = serve.argv.clone();
+        let public_env = request.plan.process_environment(request.derivation);
 
         let spec = RuntimeLaunchSpecV1 {
             protocol: RUNTIME_LAUNCH_SPEC_V1_PROTOCOL.to_owned(),
@@ -259,7 +260,7 @@ impl TemporaryRealization {
             },
             workspace: LaunchWorkspaceV1 {
                 materialization_ref: format!("formation-attempt:{}", request.attempt_id),
-                cwd_relative: intent.cwd_relative.clone(),
+                cwd_relative: serve.cwd.clone(),
             },
             realization: LaunchRealizationV1::Process(ProcessRealizationV1 {
                 argv,
@@ -282,7 +283,7 @@ impl TemporaryRealization {
         };
         let context = ResolvedRuntimeLaunchContext::new(
             workspace_root,
-            &intent.cwd_relative,
+            &serve.cwd,
             public_env,
             Vec::new(),
             Vec::new(),

@@ -78,3 +78,46 @@ All commits use `[skip ci]`. No deploy, flags, remote migration or manual CI rer
 Repository and call-chain inspection started. No runtime code changed yet;
 no 2f tests or completion claim. #1405's validation remains historical evidence,
 not a test run of a future 2f implementation.
+
+
+## Implementation update — 2f working branch
+
+The preceding starting-point inspection is historical. The active implementation
+now uses `bind_candidate → BoundCandidate { K, D, refs }`, then
+`lower_execution(D, InputFacts, RuntimeBinding) → ExecutionPlan`.
+
+`ExecutionPlan` holds candidate lane, canonical serving-step index, guest workspace
+binding, resolved toolchain/package-manager bindings, ordered physical actions,
+toolchain PATH and physical environment defaults. Authored actions are D step
+indexes; argv/cwd/env/network/ports remain in D. Physical prerequisite commands
+reuse the previous toolchain/dependency helpers, without generating either v1 IR.
+
+Active `PlannedCandidate`, FormationRealizer, static/process lanes, Hosted v2 job
+and Runtime Network requirements no longer consume `ProgramIntentV1`,
+`EffectiveBuildPlanV1`, `intent_digest` or `plan_digest`. Historical codecs,
+diagnostics and golden tests remain in `intent.rs` and test-only support modules.
+Preset is still an AuthoringDraft frontend. ExecutionPlan is not a semantic ID.
+Nonempty post-bind string overrides fail with `authoring_overrides_require_draft`;
+callers must express those choices in AuthoringDraft, never execute a different
+command under an unchanged D. Quoted/empty argv elements now reach the executor
+as the canonical vector, with no command-string round trip.
+
+### Regression evidence so far
+
+- Before/after `lowering-before-2f.json`: seven authored fixtures (Static, Python,
+  Node/npm, pnpm, yarn, authored exec, build+serve) preserve K/D refs, ordered
+  physical commands, environment, toolchain PATH and Runtime requirements.
+- Four preset comparisons against test-only baseline preserve K/D and build
+  commands; SingleHtml/StaticFiles also preserve materialized manifest bytes/hash.
+- macOS targeted formation/runtime-attempt/worker suite passed, including historical
+  golden tests. Linux-only early returns are not counted as actual acceptance.
+- Linux actual local tests: exec Formation 2, Hosted attempt fixture 6,
+  Local Formation 18, Node Formation 4 passed; parity 2 passed. Log contains no
+  reported skip. Hosted tests use a simulated artifact API, not deployed Hosted.
+- Additional direct argv/override regression: local parity suite 3 passed.
+- CLI + portable-application cargo check, targeted all-target clippy, fmt,
+  diff whitespace and arch-check (43 packages) passed.
+
+Actual Runtime Network acceptance is being run separately. This is not a 3d,
+Stage 4, foundation completion, merged or deployed claim. No migration, flags,
+workflow changes, CI reruns or deployments were performed.
