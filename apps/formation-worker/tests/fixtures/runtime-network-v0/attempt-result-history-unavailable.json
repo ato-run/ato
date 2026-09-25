@@ -39,5 +39,9 @@
     ],
     "execution_started": true,
     "attempt_record": "history_unavailable"
+  },
+  "resource_usage": {
+    "expanded_bytes": 0,
+    "stored_bytes": 0
   }
 }
