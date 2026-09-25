@@ -26,10 +26,10 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
-use ato_adapter_oci::{OciHandle, OciOwner, StopOutcome};
+use ato_adapter_oci::{OciHandle, OciOwner, SpawnCleanupUnconfirmed, StopOutcome};
 use ato_ipc::runtime_launch::{LaunchRealizationV1, RuntimeLaunchSpecV1, StateAccessV1};
 use ato_ipc::runtime_launch_v2::{EndpointExposureV2, RuntimeLaunchSpec};
-use ato_runtime_attempt::launch::oci::{self as oci_launch, LaunchedOci};
+use ato_runtime_attempt::launch::oci::{self as oci_launch, LaunchedOci, OciStartFailure};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use super::process_executor::{ReadinessProbe, state_working_copy};
@@ -835,6 +835,29 @@ impl ActiveRun {
     }
 }
 
+/// How a failed OCI start left things: the labels' own sweep of this lease,
+/// and — never overridden by it — what the start itself established about
+/// what it had started. A cleanup the start could not confirm keeps the Run
+/// quarantined even if a later sweep finds nothing.
+fn settle_failed_oci_start(
+    owner: &OciOwner,
+    budget: ato_adapter_oci::StopBudget,
+    error: &anyhow::Error,
+) -> StopOutcome {
+    let swept = settle_lease(owner, budget);
+    let started = error
+        .downcast_ref::<OciStartFailure>()
+        .map(|failure| failure.cleanup.overall())
+        .or_else(|| {
+            error
+                .downcast_ref::<SpawnCleanupUnconfirmed>()
+                .map(|left| StopOutcome::Unconfirmed {
+                    reason: left.to_string(),
+                })
+        });
+    StopOutcome::worst(std::iter::once(&swept).chain(started.as_ref())).unwrap_or(swept)
+}
+
 /// After a start failed part-way: give the slots back only if every workload
 /// the start may have created is confirmed stopped; otherwise quarantine them.
 fn settle_failed_start(
@@ -846,10 +869,12 @@ fn settle_failed_start(
     if stop.is_confirmed() {
         abort_run(state, prepared);
     } else {
+        // The start's error names what it left (container ids, networks).
+        let reason = format!("start failed; stop unconfirmed: {stop:?}; {error:#}");
         quarantine_run(
             state,
             prepared,
-            &format!("start failed; stop unconfirmed: {stop:?}"),
+            &reason.chars().take(1024).collect::<String>(),
         );
     }
     StartFailure {
@@ -914,7 +939,7 @@ pub fn start(
                 Err(error) => {
                     // The group stopped what it had started on its way out;
                     // the labels confirm nothing of this lease survived.
-                    let stop = settle_lease(owner, budget);
+                    let stop = settle_failed_oci_start(owner, budget, &error);
                     return Err(settle_failed_start(state, &resolved.prepared, &stop, error));
                 }
             };
@@ -966,7 +991,7 @@ pub fn start(
                 Err(error) => {
                     // A spawn can fail after `docker run` created the
                     // container; only the labels can tell.
-                    let stop = settle_lease(owner, budget);
+                    let stop = settle_failed_oci_start(owner, budget, &error);
                     return Err(settle_failed_start(state, &resolved.prepared, &stop, error));
                 }
             };

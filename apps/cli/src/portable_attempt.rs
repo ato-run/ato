@@ -330,7 +330,7 @@ impl PortableBundleExecutor<'_> {
         let oci_runtime = self.runtime_root.join("oci");
         let handle = local_oci_adapter(hydrated, spec)
             .and_then(|adapter| adapter.spawn(&workspace, &oci_runtime))
-            .map_err(|error| launch(error, &workspace))?;
+            .map_err(|error| oci_launch_failure(error, &workspace, &oci_runtime))?;
         let base = format!("http://127.0.0.1:{host_port}");
         let mut execution = evidence("oci", Some("docker".to_owned()), None, None, &base);
         execution.container_id = Some(handle.container_id().to_owned());
@@ -438,11 +438,15 @@ impl PortableBundleExecutor<'_> {
         }
         let group = OciNetwork::create(&route.derivation_ref.to_string(), &BTreeMap::new())
             .and_then(|network| {
-                start_service_group(network, &workspace, services, &mut |name, group| {
-                    wait_until_service_accepts_tcp(route, name, group)
-                })
+                start_service_group(
+                    network,
+                    &workspace,
+                    services,
+                    StopBudget::DEFAULT,
+                    &mut |name, group| wait_until_service_accepts_tcp(route, name, group),
+                )
             })
-            .map_err(|error| launch(error, &workspace))?;
+            .map_err(|error| oci_launch_failure(error, &workspace, &oci_runtime))?;
         let base = format!("http://127.0.0.1:{host_port}");
         let surface = group
             .services()
@@ -565,6 +569,32 @@ fn local_oci_adapter(
         .context("offline OCI image archive is missing")?;
     let verified = ato_portable_application::oci_archive::verify_oci_archive(archive)?;
     DockerOciAdapter::new_offline(spec, verified.bytes, verified.config_reference)
+}
+
+/// Preserve partial execution separately from a failure that started nothing.
+fn oci_launch_failure(error: anyhow::Error, workspace: &Path, runtime: &Path) -> RealizeFailure {
+    let mut resources =
+        if let Some(left) = error.downcast_ref::<ato_adapter_oci::SpawnCleanupUnconfirmed>() {
+            let mut ids = vec![format!("container:{}", left.container)];
+            ids.extend(left.networks.iter().map(|name| format!("network:{name}")));
+            Some(ids)
+        } else {
+            error
+                .downcast_ref::<ato_runtime_attempt::launch::oci::OciStartFailure>()
+                .filter(|failure| !failure.confirmed())
+                .map(|failure| failure.resources())
+        };
+    if let Some(resources) = resources.as_mut() {
+        resources.push(format!("scratch:{}", workspace.display()));
+        resources.push(format!("scratch:{}", runtime.display()));
+        return RealizeFailure::Abandoned {
+            cleanup: format!("{error:#}"),
+            error,
+            resources: resources.clone(),
+        };
+    }
+    let _ = fs::remove_dir_all(runtime);
+    launch(error, workspace)
 }
 
 /// A candidate that could not be started: whatever was unpacked for it goes.
