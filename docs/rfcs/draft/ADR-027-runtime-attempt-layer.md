@@ -62,7 +62,7 @@ now carries the same `materializer` label as `replay` and `snapshot`.
   onto it; the next PRs move callers, not code.
 - The layer rule is checked by `tools/arch-check`.
 
-## Migration status (updated with stage 2e-b)
+## Migration status (updated with stage 2e-c)
 
 Which entries execute and verify through `run_attempt`, which only verify
 through its verification point, and which still build their own observation
@@ -74,11 +74,11 @@ and receipt:
 | Runtime Network ticket | `FormationRealizer` | on the common attempt (2a/2b) |
 | CLI Run, LocalProcess `.capsule` (`ato run`, `ato app start`) | `PortableBundleExecutor` (unpack, no build) | on the common attempt (2c) |
 | CLI Run, StaticWeb `.capsule` | `PortableBundleExecutor` | on the common attempt (2c) |
-| CLI Run, OCI and OCI service group | — | previous CLI path; moves in 2e |
+| CLI Run, OCI container and OCI service group | `PortableBundleExecutor` → common `OciCandidate` | on the common attempt (2e-c) |
 | Hosted Formation job (`run_claimed_job`) | — | previous path, artifact-only `verify()`; moves in 2d |
 | Hosted `.capsule` verification (`validator_agent::verify_hosted`) | none — it observes a Run it does not own | common verification and receipt (2e-a); observation through the existing API `observe_url` relay; not on the common attempt |
 | Hosted LocalProcess Run | `LaunchedProcess` | common launch, live handle, confirmed group stop and Drop cleanup (2e-b); Hosted retains lease, authorization, readiness, state and recovery |
-| Hosted OCI/service group | — | previous path; moves in 2e-c |
+| Hosted OCI container / service group | common `launch::oci` (`LaunchedOci`) | common launch, live handle and per-container confirmed stop (2e-c); Hosted retains lease, authorization, TCP egress grants, readiness policy, state and recovery |
 
 Since 2c, `run_attempt` takes an `AttemptSpec` (frozen K and D, shape,
 input identities, restored snapshot) and a `CandidateRealizer` (how the
@@ -147,3 +147,41 @@ schema and actual restored snapshot evidence.
 
 See `docs/ops/formation-2e-b-ownership-2026-09-25.md` for verification and
 review status; this is not deployment or completion of 2e-c.
+
+### OCI ownership (2e-c)
+
+`launch::oci` is where an OCI candidate comes to be running and how it
+stops, for both surfaces:
+
+- the container a v1 launch spec asks for and its readiness wait, and the
+  v2 service-group launcher (moved unchanged from the Hosted Runner);
+- `start_service_group`: services in authored order, each ready before the
+  next; on failure everything started is stopped in reverse and every
+  network removed, and services not yet started never start;
+- `LaunchedOci` / `OciStop`: one container or one group, stopped with an
+  outcome confirmed per container;
+- `OciCandidate`: the `RunningCandidate` for the common attempt, which
+  removes its runtime scratch only after every container is confirmed
+  stopped.
+
+The Hosted Runner holds `ActiveWorkload::Oci(LaunchedOci)` and stops it
+through `LaunchedOci::stop` before its existing state gate. TCP egress stays
+the Runner's to authorize: `service_group.rs` creates one egress network and
+broker per grant and hands them to the group, which keeps them exactly as
+long as its services. Lease/fence/slot, execution authorization, readiness
+policy, the ready-report execution evidence, state commit/release and
+quarantine/recovery are unchanged.
+
+The CLI realizes an OCI container or group in `PortableBundleExecutor` and
+runs it through `run_attempt`, so every portable Run is on the common
+attempt and the CLI no longer builds an observation or receipt of its own.
+Behavior that changed deliberately: a local Instance's OCI receipt names its
+Run from the start instead of being rewritten, a stop reports success only
+when every container is confirmed stopped and then removes the unpacked
+workspace and OCI scratch, and a non-Linux host is refused at admission.
+
+Not changed: image identity/offline archive rules, the adapter's isolation
+(internal network, readonly workspace, limits), new multi-service
+capability, and the old D→projection→intent interpretations (2f). See
+`docs/ops/formation-2e-c-oci-ownership-2026-09-25.md`; this is not
+deployment.
