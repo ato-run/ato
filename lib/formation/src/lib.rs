@@ -52,3 +52,5 @@ pub mod retained;
 #[cfg(feature = "planning")]
 pub mod source;
 pub mod verify;
+
+pub mod search;
