@@ -1354,3 +1354,87 @@ fn an_attempt_never_expands_more_than_the_runtime_source_ceiling() {
         ato_formation::source::SourceLimits::default().max_total_bytes
     );
 }
+
+#[test]
+fn pax_boundary_refusal_leaves_no_tree_and_preserves_started_history() {
+    use sha2::{Digest, Sha256};
+    let dir = site("");
+    let scratch = tempfile::tempdir().unwrap();
+    let (mut ticket, _) = ticket(&submit(dir.path(), scratch.path()));
+    let mut builder = tar::Builder::new(Vec::new());
+    builder
+        .append_pax_extensions([("size", b"65536".as_slice())])
+        .unwrap();
+    let mut header = tar::Header::new_gnu();
+    header.set_path("file").unwrap();
+    header.set_size(0);
+    header.set_cksum();
+    // Keep the PAX header, then append the mismatched header and physical bytes.
+    let mut archive = builder.into_inner().unwrap();
+    archive.truncate(1024);
+    archive.extend_from_slice(header.as_bytes());
+    archive.extend_from_slice(&vec![0; 65536 + 1024]);
+    ticket.archive_digest = format!("sha256:{:x}", Sha256::digest(&archive));
+    ticket.resource_budget.transfer_bytes = archive.len() as u64;
+    ticket.resource_budget.expanded_bytes = 1024;
+    let report = run(&ticket, archive.clone(), scratch.path());
+    assert_eq!(failure_code(&report), "ticket_unplannable");
+    assert!(report.failure.unwrap().message.contains("PAX size"));
+    assert_eq!(
+        report.attestation.attempt_record,
+        AttemptRecordState::NotStarted
+    );
+    assert!(!report.attestation.execution_started);
+    assert_eq!(report.resource_usage.expanded_bytes, 0);
+    assert!(
+        !scratch
+            .path()
+            .join("work")
+            .join(&ticket.attempt_id)
+            .exists()
+    );
+    let scratch = tempfile::tempdir().unwrap();
+    leave_started(&ticket, scratch.path());
+    let report = run(&ticket, archive.clone(), scratch.path());
+    assert_eq!(failure_code(&report), "attempt_already_started");
+    assert_eq!(
+        report.attestation.attempt_record,
+        AttemptRecordState::StartedUnfinished
+    );
+    let prior_attempt = ticket.attempt_id.clone();
+    ticket.attempt_id.push_str("-next");
+    let report = run(&ticket, archive, scratch.path());
+    assert_eq!(
+        report.attestation.attempt_record,
+        AttemptRecordState::BlockedByUnknown {
+            attempt_id: prior_attempt,
+        }
+    );
+}
+
+/// Produces an ordinary, correctly planned K/D request for the real API
+/// acceptance harness. The harness replaces only its source transport object.
+#[test]
+#[ignore = "manual Linux Network acceptance fixture; requires ATO_HARDENING_REQUEST"]
+fn export_source_hardening_request() {
+    let output = std::env::var_os("ATO_HARDENING_REQUEST").expect("fixture output path");
+    let dir = site("");
+    let route = STATIC_ROUTE.replace(
+        "[[derive.step]]",
+        r#"[[derive.step]]
+id = "build-marker"
+use = "ato.process@1"
+op = "exec"
+argv = ["/bin/sh", "-c", "echo BUILD_STARTED; echo started > build-started.marker"]
+
+[[derive.step]]"#,
+    );
+    std::fs::write(dir.path().join("capsule.toml"), route).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let submission = submit(dir.path(), scratch.path());
+    std::fs::write(
+        output,
+        serde_json::to_vec_pretty(&submission.request).unwrap(),
+    )
+    .unwrap();
+}
