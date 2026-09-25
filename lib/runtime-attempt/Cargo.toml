@@ -14,6 +14,7 @@ layer = "runtime"
 
 [dependencies]
 anyhow = "1"
+ato-adapter-oci = { path = "../../extensions/adapters/oci", version = "0.1.0" }
 ato-adapter-process = { path = "../../extensions/adapters/process", version = "0.1.0" }
 ato-formation = { path = "../formation", version = "0.1.0" }
 ato-ipc = { path = "../ipc", version = "0.1.0" }
