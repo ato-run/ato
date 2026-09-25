@@ -296,6 +296,158 @@ impl TreeVerifiedArchive {
     }
 }
 
+/// A verified archive whose bytes stay on disk. Network callers retain this
+/// open file through measurement and extraction; no archive-sized allocation.
+pub struct FileVerifiedArchive {
+    file: std::fs::File,
+    measured: Measured,
+}
+
+impl FileVerifiedArchive {
+    pub fn verify(
+        mut file: std::fs::File,
+        expected: &str,
+        expected_size: u64,
+        limits: SourceLimits,
+    ) -> Result<Self, SourceError> {
+        use std::io::Seek;
+        file.rewind().map_err(source_io)?;
+        let mut hasher = Sha256::new();
+        let mut size = 0u64;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let count = file.read(&mut buffer).map_err(source_io)?;
+            if count == 0 {
+                break;
+            }
+            size = size.saturating_add(count as u64);
+            if size > expected_size {
+                return Err(SourceError::LimitExceeded {
+                    limit: "archive_bytes",
+                });
+            }
+            hasher.update(&buffer[..count]);
+        }
+        let actual = format!("sha256:{:x}", hasher.finalize());
+        if expected != actual {
+            return Err(SourceError::ArchiveDigestMismatch {
+                expected: expected.into(),
+                actual,
+            });
+        }
+        if size != expected_size {
+            return Err(SourceError::Unusable("source archive size mismatch".into()));
+        }
+        validate_file_metadata(&file, limits)?;
+        let measured = measure_readers(|| file_reader(&file, limits), limits)?;
+        Ok(Self { file, measured })
+    }
+    pub fn expanded_bytes(&self) -> u64 {
+        self.measured.file_bytes
+    }
+    pub fn tree_digest(&self) -> &str {
+        &self.measured.digest
+    }
+    pub fn resolver_contract(&self) -> &'static str {
+        self.measured.contract
+    }
+    pub fn closure_ref(&self, subdirectory: &str) -> Result<SourceClosureRef, SourceError> {
+        SourceClosureRef::derive(&self.measured.digest, subdirectory, self.measured.contract)
+    }
+    pub fn materialize(
+        &mut self,
+        destination: &Path,
+        subdirectory: &str,
+        limits: SourceLimits,
+    ) -> Result<PathBuf, SourceError> {
+        let root = expand_readers(|| file_reader(&self.file, limits), destination, limits)?;
+        select_subdirectory(&root, subdirectory)
+    }
+}
+
+// tar's cooked iterator collects GNU/PAX extension contents internally. Scan
+// raw entries first so attacker-controlled metadata cannot allocate an archive-
+// sized buffer before the existing path validator gets to inspect it.
+fn validate_file_metadata(file: &std::fs::File, limits: SourceLimits) -> Result<(), SourceError> {
+    let mut archive = tar::Archive::new(file_reader(file, limits)?);
+    let mut entries = 0usize;
+    for entry in archive.entries().map_err(source_io)?.raw(true) {
+        let entry = entry.map_err(source_io)?;
+        entries += 1;
+        if entries > limits.max_files.saturating_mul(4).saturating_add(1024) {
+            return Err(SourceError::LimitExceeded {
+                limit: "archive_entries",
+            });
+        }
+        if matches!(
+            entry.header().entry_type().as_byte(),
+            b'L' | b'K' | b'x' | b'g'
+        ) && entry.size() > 64 * 1024
+        {
+            return Err(SourceError::LimitExceeded {
+                limit: "archive_metadata_bytes",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn source_io(error: std::io::Error) -> SourceError {
+    SourceError::Unusable(error.to_string())
+}
+
+fn file_reader(file: &std::fs::File, limits: SourceLimits) -> Result<Box<dyn Read>, SourceError> {
+    use std::io::{BufRead, Seek};
+    let mut file = file.try_clone().map_err(source_io)?;
+    file.rewind().map_err(source_io)?;
+    let mut reader = std::io::BufReader::new(file);
+    let magic = reader.fill_buf().map_err(source_io)?;
+    let decoder: Box<dyn Read> = if magic.starts_with(&[0x1f, 0x8b]) {
+        Box::new(flate2::read::GzDecoder::new(reader))
+    } else if magic.starts_with(&ZSTD_MAGIC) {
+        let mut decoder = zstd::stream::read::Decoder::new(reader).map_err(source_io)?;
+        decoder.window_log_max(27).map_err(source_io)?;
+        Box::new(decoder)
+    } else {
+        Box::new(reader)
+    };
+    // Include tar headers, padding and bounded metadata, separately from the
+    // resolver's logical expanded-file byte cap.
+    Ok(Box::new(ArchiveReadLimit {
+        inner: decoder,
+        remaining: limits
+            .max_total_bytes
+            .saturating_add((limits.max_files as u64).saturating_mul(2048))
+            .saturating_add(1024 * 1024),
+    }))
+}
+
+struct ArchiveReadLimit {
+    inner: Box<dyn Read>,
+    remaining: u64,
+}
+impl Read for ArchiveReadLimit {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        if self.remaining == 0 {
+            let mut byte = [0];
+            return if self.inner.read(&mut byte)? == 0 {
+                Ok(0)
+            } else {
+                Err(std::io::Error::other("source decompression limit exceeded"))
+            };
+        }
+        let count = buffer
+            .len()
+            .min(self.remaining.min(usize::MAX as u64) as usize);
+        let count = self.inner.read(&mut buffer[..count])?;
+        self.remaining -= count as u64;
+        Ok(count)
+    }
+}
+
 // ─────────────────────────────────────────────────────────── closure identity
 
 /// What a Formation is built from, as one address.
@@ -500,10 +652,10 @@ fn link_target_bytes<R: std::io::Read>(entry: &tar::Entry<'_, R>) -> Vec<u8> {
 
 /// Every entry path in an archive, checked for containment. Symlinks are
 /// checked for a contained target, and no entry may lie beneath one.
-fn entry_paths(archive: &[u8], limits: SourceLimits) -> Result<Vec<PathBuf>, SourceError> {
+fn entry_paths(archive: impl Read, limits: SourceLimits) -> Result<Vec<PathBuf>, SourceError> {
     let mut paths = Vec::new();
     let mut links: Vec<(PathBuf, Vec<u8>)> = Vec::new();
-    let mut tar = tar::Archive::new(Cursor::new(archive));
+    let mut tar = tar::Archive::new(archive);
     for entry in tar
         .entries()
         .map_err(|error| SourceError::Unusable(format!("source archive is unreadable: {error}")))?
@@ -536,6 +688,9 @@ fn entry_paths(archive: &[u8], limits: SourceLimits) -> Result<Vec<PathBuf>, Sou
             links.push((safe.clone(), link_target_bytes(&entry)));
         }
         paths.push(safe);
+        if paths.len() > limits.max_files.saturating_mul(4).saturating_add(1024) {
+            return Err(SourceError::LimitExceeded { limit: "max_files" });
+        }
     }
     // Checked against the tree as it will stand, without a transport wrapper:
     // a `..` that only climbs out of `<repo>-<sha>/` has climbed out.
@@ -586,14 +741,21 @@ struct Measured {
 }
 
 fn measure(archive: &[u8], limits: SourceLimits) -> Result<Measured, SourceError> {
+    let archive = decompressed(archive)?;
+    measure_readers(|| Ok(Cursor::new(archive.as_ref())), limits)
+}
+
+fn measure_readers<R: Read>(
+    mut open: impl FnMut() -> Result<R, SourceError>,
+    limits: SourceLimits,
+) -> Result<Measured, SourceError> {
     let mut entries: BTreeSet<(String, String)> = BTreeSet::new();
     let mut has_symlink = false;
     let mut total: u64 = 0;
     let mut count = 0usize;
 
-    let archive = decompressed(archive)?;
-    let prefix = common_prefix(&entry_paths(archive.as_ref(), limits)?);
-    let mut tar = tar::Archive::new(Cursor::new(archive.as_ref()));
+    let prefix = common_prefix(&entry_paths(open()?, limits)?);
+    let mut tar = tar::Archive::new(open()?);
     for entry in tar
         .entries()
         .map_err(|error| SourceError::Unusable(format!("source archive is unreadable: {error}")))?
@@ -657,10 +819,21 @@ fn measure(archive: &[u8], limits: SourceLimits) -> Result<Measured, SourceError
             });
         }
 
-        let mut bytes = Vec::with_capacity(size as usize);
-        std::io::Read::read_to_end(&mut entry, &mut bytes)
-            .map_err(|error| SourceError::Unusable(format!("entry is unreadable: {error}")))?;
-        entries.insert((relative.display().to_string(), content_ref(&bytes)));
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let read = entry
+                .read(&mut buffer)
+                .map_err(|error| SourceError::Unusable(format!("entry is unreadable: {error}")))?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        entries.insert((
+            relative.display().to_string(),
+            format!("sha256:{:x}", hasher.finalize()),
+        ));
     }
 
     // The lowest contract that defines every entry (see RESOLVER_CONTRACT_V2).
@@ -691,13 +864,21 @@ fn expand_archive(
     destination: &Path,
     limits: SourceLimits,
 ) -> Result<PathBuf, SourceError> {
+    let archive = decompressed(archive)?;
+    expand_readers(|| Ok(Cursor::new(archive.as_ref())), destination, limits)
+}
+
+fn expand_readers<R: Read>(
+    mut open: impl FnMut() -> Result<R, SourceError>,
+    destination: &Path,
+    limits: SourceLimits,
+) -> Result<PathBuf, SourceError> {
     std::fs::create_dir_all(destination).map_err(|error| {
         SourceError::Unusable(format!("cannot create {}: {error}", destination.display()))
     })?;
 
-    let archive = decompressed(archive)?;
-    let prefix = common_prefix(&entry_paths(archive.as_ref(), limits)?);
-    let mut tar = tar::Archive::new(Cursor::new(archive.as_ref()));
+    let prefix = common_prefix(&entry_paths(open()?, limits)?);
+    let mut tar = tar::Archive::new(open()?);
     tar.set_preserve_permissions(false);
     tar.set_unpack_xattrs(false);
     tar.set_overwrite(true);
@@ -1597,5 +1778,71 @@ mod tests {
         let bytes = tree(&[E::File("a", b"x"), E::Link("b", "a")]);
         let error = measure_source_tree(&bytes, tiny).unwrap_err();
         assert_eq!(error.code(), "source_limit_exceeded");
+    }
+    fn file_archive(
+        bytes: &[u8],
+        size: u64,
+        digest: &str,
+        limits: SourceLimits,
+    ) -> Result<FileVerifiedArchive, SourceError> {
+        use std::io::Write;
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(bytes).unwrap();
+        FileVerifiedArchive::verify(file, digest, size, limits)
+    }
+
+    #[test]
+    fn file_transport_preserves_v1_v2_closures_across_compression() {
+        use std::io::Write;
+        for entries in [
+            vec![E::File("index.html", b"hello")],
+            vec![
+                E::File("index.html", b"hello"),
+                E::Link("other", "index.html"),
+            ],
+        ] {
+            let raw = tree(&entries);
+            let mut gzip =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            gzip.write_all(&raw).unwrap();
+            let expected = DigestVerifiedArchive { bytes: raw.clone() }
+                .verify_tree_digest(None, LIMITS)
+                .unwrap();
+            for bytes in [
+                raw.clone(),
+                gzip.finish().unwrap(),
+                zstd::stream::encode_all(&raw[..], 1).unwrap(),
+            ] {
+                let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
+                let mut file = file_archive(&bytes, bytes.len() as u64, &digest, LIMITS).unwrap();
+                assert_eq!(
+                    file.closure_ref("").unwrap(),
+                    expected.closure_ref("").unwrap()
+                );
+                assert_eq!(file.resolver_contract(), expected.resolver_contract());
+                let destination = tempfile::tempdir().unwrap();
+                let root = file
+                    .materialize(&destination.path().join("tree"), "", LIMITS)
+                    .unwrap();
+                assert_eq!(std::fs::read(root.join("index.html")).unwrap(), b"hello");
+            }
+        }
+    }
+
+    #[test]
+    fn file_transport_rejects_unverified_unsafe_and_oversized_sources() {
+        let bytes = tree(&[E::File("index.html", b"hello")]);
+        let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
+        assert!(file_archive(&bytes, bytes.len() as u64, "sha256:wrong", LIMITS).is_err());
+        assert!(file_archive(&bytes, bytes.len() as u64 - 1, &digest, LIMITS).is_err());
+        assert!(file_archive(&bytes, bytes.len() as u64 + 1, &digest, LIMITS).is_err());
+        let tiny = SourceLimits {
+            max_total_bytes: 2,
+            ..LIMITS
+        };
+        assert!(file_archive(&bytes, bytes.len() as u64, &digest, tiny).is_err());
+        let bytes = tree(&[E::Link("escape", "../outside")]);
+        let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
+        assert!(file_archive(&bytes, bytes.len() as u64, &digest, LIMITS).is_err());
     }
 }

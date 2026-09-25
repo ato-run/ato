@@ -535,7 +535,66 @@ pub fn snapshot_directory(dir: &Path) -> Result<Vec<u8>> {
     if !directory.is_dir() {
         bail!("{} is not a directory", directory.display());
     }
-    tar_directory(&directory)
+    tar_directory(&directory, Vec::new())
+}
+
+/// File-backed snapshot with a physical archive cap, before upload.
+pub fn snapshot_directory_file(
+    dir: &Path,
+    work_root: &Path,
+    max_bytes: u64,
+) -> Result<std::fs::File> {
+    std::fs::create_dir_all(work_root)?;
+    let file = tempfile::tempfile_in(work_root)?;
+    let root = dir.canonicalize()?;
+    anyhow::ensure!(root.is_dir(), "source must be a directory");
+    Ok(tar_directory(
+        &root,
+        ArchiveWriter {
+            file,
+            left: max_bytes,
+        },
+    )?
+    .file)
+}
+
+struct ArchiveWriter {
+    file: std::fs::File,
+    left: u64,
+}
+impl std::io::Write for ArchiveWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        if buffer.len() as u64 > self.left {
+            return Err(std::io::Error::other("source object exceeds archive cap"));
+        }
+        let count = std::io::Write::write(&mut self.file, buffer)?;
+        self.left -= count as u64;
+        Ok(count)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        std::io::Write::flush(&mut self.file)
+    }
+}
+
+pub(crate) fn freeze_verified_file(
+    mut verified: ato_formation::source::FileVerifiedArchive,
+    work_root: &Path,
+    limits: SourceLimits,
+) -> Result<FrozenSource> {
+    let closure_ref = verified.closure_ref("")?;
+    let scratch = work_root.join(format!(
+        "source-{}-{}",
+        std::process::id(),
+        ATTEMPT_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&scratch)?;
+    let mut frozen = FrozenSource {
+        closure_ref,
+        root: PathBuf::new(),
+        scratch: scratch.clone(),
+    };
+    frozen.root = verified.materialize(&scratch.join("tree"), "", limits)?;
+    Ok(frozen)
 }
 
 /// Verify an archive against the digest it was named by, measure its tree and
@@ -600,12 +659,12 @@ pub(crate) fn freeze_verified(
 /// Symlinks are archived AS symlinks, not skipped: whether a link is
 /// acceptable is the source module's decision, and it refuses them for every
 /// source the same way.
-fn tar_directory(root: &Path) -> Result<Vec<u8>> {
+fn tar_directory<W: std::io::Write>(root: &Path, output: W) -> Result<W> {
     let mut entries: Vec<(PathBuf, PathBuf, EntryKind)> = Vec::new();
     collect_tree(root, root, &mut entries)?;
     entries.sort_by(|a, b| a.0.cmp(&b.0));
 
-    let mut builder = tar::Builder::new(Vec::new());
+    let mut builder = tar::Builder::new(output);
     append_dir(&mut builder, "source")?;
     for (relative, absolute, kind) in entries {
         let path = format!("source/{}", relative.to_string_lossy());
@@ -625,10 +684,11 @@ fn tar_directory(root: &Path) -> Result<Vec<u8>> {
                 .append_link(&mut header, &path, &target)
                 .with_context(|| format!("cannot add {path} to the source archive"))?;
         } else {
-            let bytes = std::fs::read(&absolute)
+            let file = std::fs::File::open(&absolute)
                 .with_context(|| format!("cannot read {}", absolute.display()))?;
+            let size = file.metadata()?.len();
             let mut header = tar::Header::new_gnu();
-            header.set_size(bytes.len() as u64);
+            header.set_size(size);
             header.set_mode(0o644);
             header.set_mtime(0);
             header.set_uid(0);
@@ -636,7 +696,7 @@ fn tar_directory(root: &Path) -> Result<Vec<u8>> {
             header.set_entry_type(tar::EntryType::Regular);
             header.set_cksum();
             builder
-                .append_data(&mut header, &path, bytes.as_slice())
+                .append_data(&mut header, &path, file)
                 .with_context(|| format!("cannot add {path} to the source archive"))?;
         }
     }
@@ -657,6 +717,9 @@ fn collect_tree(
 ) -> Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
+        if entries.len() >= SourceLimits::default().max_files {
+            bail!("source entry limit exceeded");
+        }
         let name = entry.file_name();
         // VCS metadata is never app content — the same reason a codeload
         // tarball does not carry it.
@@ -679,7 +742,7 @@ fn collect_tree(
     Ok(())
 }
 
-fn append_dir(builder: &mut tar::Builder<Vec<u8>>, path: &str) -> Result<()> {
+fn append_dir<W: std::io::Write>(builder: &mut tar::Builder<W>, path: &str) -> Result<()> {
     let mut header = tar::Header::new_gnu();
     header.set_size(0);
     header.set_mode(0o755);
