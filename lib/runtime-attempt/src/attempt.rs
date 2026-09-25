@@ -307,8 +307,14 @@ fn realize_and_verify(
         }
         Err(RealizeFailure::Launch { error, evidence }) => {
             attempt.outcomes.publication = Outcome::not_attempted("candidate_not_observable");
+            // Launch promises no remaining candidate, but never override
+            // explicit evidence that destruction was not confirmed.
+            let stopped = evidence
+                .as_ref()
+                .is_none_or(|e| e.destroyed)
+                .then_some(Ok(()));
             attempt.realization = evidence.map(|evidence| *evidence);
-            return not_observable(attempt, error, Some(Ok(())));
+            return not_observable(attempt, error, stopped);
         }
         Err(RealizeFailure::Abandoned {
             error,
