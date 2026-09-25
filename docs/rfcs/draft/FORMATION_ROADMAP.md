@@ -1,6 +1,6 @@
 # Formation roadmap — foundation, exploration, then adaptation
 
-Updated 2026-09-26 against live GitHub state after the foundation stack (2f → 3d → 4). Stage numbers are retained.
+Updated 2026-09-26 against live GitHub state after merging 5a-a and 5a-b. Stage numbers are retained.
 This is an implementation plan; pending rows are not shipped functionality.
 
 ## Milestones
@@ -22,11 +22,11 @@ This is an implementation plan; pending rows are not shipped functionality.
 | 3a | Coordinator uses frozen K and Rust receipt authority via bounded WASM; fail closed and keep Requester recheck | Merged: ato #1397 `16d11baf` / API #687 `7e0e7373`; real local acceptance; deployment not verified in this track |
 | 2d | Hosted Formation actual observation/common attempt; API v1/v2 receiver first, then v2 worker | Merged: API #688 `44c14abe` → ato #1398 `01933b2b`; Static/Python/Node actual execution; deployment not verified in this track |
 | 2e | Hosted Run/validator and existing OCI/service group through common execution and handle ownership | 2e-a merged: ato #1399 `ef7f345f`. 2e-b merged: ato #1401 `3c9ddd05`; Linux integration validated; not deployed. 2e-c merged: ato #1405 `de4e4fc3`; Linux Docker comparison validated; not deployed |
-| 2f | Remove duplicated D→projection→string→intent→build-plan interpretations and unused re-exports | Implemented, locally/integration verified: ato #1406 (canonical D → `execution::ExecutionPlan`; K/D refs byte-identical on the fixed goldens); unmerged, undeployed |
+| 2f | Remove duplicated D→projection→string→intent→build-plan interpretations and unused re-exports | Merged: ato #1406 `7ece42f6` (canonical D → `execution::ExecutionPlan`; K/D refs byte-identical on the fixed goldens); not deployed |
 | 3c | Search budget reservations/accounting, then streaming content-addressed source transport | 3c-a merged: ato #1400 `aaaaaa15` / API #689 `88cb8aae`. 3c-b merged: API #691 `e8b0056b` → ato #1403 `0df51b22`; Linux integration, PAX boundary/resource-limit hardening and separate 64/128 MiB rerun validated; not deployed |
-| 3d | Retained objects → validated closure/tree → new Run → same K → new receipt without source/scratch | Implemented, locally/integration verified: ato #1407 + API #692 (migration 0299, local only); actual Coordinator replay Static/Python/Node after source deletion; unmerged, undeployed |
-| 4 | Durable deterministic SearchState; D1 failure→evidence→authorized D2; restart preserves search/attempt identity | Implemented, locally/integration verified: ato #1408 + API #693 (migration 0300, local only); actual Coordinator restart acceptance cases 1–7, restart points 1–9; unmerged, undeployed |
-| 5a | Optional finite AllowedChoices DecisionProvider (inspection / known candidate / probe / stop); Jev failure uses deterministic choice under same budget; complete when safety holds with and without Jev and attempts, elapsed time and provider usage/cost are compared | 5a-a (finite choice of the next known-D attempt) merged, ADR-035: ato #1409 + API #694 (migration 0301, local only); undeployed. 5a-b (finite exploration actions: Inspect / Stop, decision seq separate from attempts) implemented, ADR-036: ato + API (migration 0302, local only); unmerged, undeployed. Probe deferred (no safe existing primitive). Not implemented: live Jev acceptance, with/without-Jev comparison of attempts, elapsed time and provider usage/cost |
+| 3d | Retained objects → validated closure/tree → new Run → same K → new receipt without source/scratch | Merged: API #692 `23d69735` → ato #1407 `4697b3b0` (migration 0299 not applied remotely); actual Coordinator replay Static/Python/Node after source deletion; not deployed |
+| 4 | Durable deterministic SearchState; D1 failure→evidence→authorized D2; restart preserves search/attempt identity | Merged: API #693 `18fe2c75` → ato #1408 `a46fd62d` (migration 0300 not applied remotely); actual Coordinator restart acceptance cases 1–7, restart points 1–9, review hardening H1–H4; not deployed |
+| 5a | Optional finite AllowedChoices DecisionProvider; deterministic fallback under the same permissions and budget; compare attempts, elapsed time, provider usage and cost | **Completion gate open**. 5a-a merged: ato #1409 / API #694 (ADR-035, migration 0301). 5a-b merged: API #695 `1853f280` → ato #1410 `c883087e` (ADR-036, migration 0302): Inspect / Stop and independent decision sequence; B0–B8 verified. Probe deferred (no safe existing primitive). Live Jev acceptance: pending. With/without-Jev attempts / elapsed time / provider usage and cost comparison: pending. Not deployed; migrations not applied remotely |
 | 5b | Typed new-D generation first, then evidence-based D improvement; reject privilege/K/UNKNOWN escape | Pending |
 | 6 | Measure 20, expand to 50 then 100; known-D revalidation on new authorized Runtime/Adapter/D | Pending |
 
@@ -37,6 +37,10 @@ and a final-stack regression ([foundation ledger](../../ops/formation-foundation
 [P0 remeasure](../../ops/formation-p0-remeasure-2026-09-26.md)). Merged 2026-09-26
 (ato `a46fd62d`, ato-api `18fe2c75`); not deployed, and migrations 0299/0300 are
 not applied to any remote database.
+
+5a-a and 5a-b are merged. The 5a completion gate stays open until live Jev
+acceptance and the same-fixture, same-budget comparison are recorded. 5b
+new-D generation remains pending.
 
 The sequential track's [integration record](../../ops/formation-integrated-2026-09-25.md)
 separates implementation, integration checks, merge and deployment. 64/128 MiB
