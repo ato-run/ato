@@ -85,6 +85,55 @@ fn submit(dir: &Path, scratch: &Path) -> Submission {
     .expect("the requester plans the route")
 }
 
+#[test]
+fn memory_and_file_source_transport_bind_identical_closure_k_and_d() {
+    use ato_formation::source::{DownloadedArchive, SourceLimits};
+    let dir = site(
+        r#"
+[[contract.require]]
+id = "source-identity"
+use = "ato.contract.workspace@1"
+input = "workspace"
+[contract.require.expect]
+digest = "capture"
+"#,
+    );
+    let scratch = tempfile::tempdir().unwrap();
+    let submission = submit(dir.path(), scratch.path());
+    let mut bytes = Vec::new(); // Small fixture only: exercise the legacy memory API.
+    std::io::Read::read_to_end(&mut submission.source_file().unwrap(), &mut bytes).unwrap();
+    let verified = DownloadedArchive::new(bytes)
+        .verify_archive_digest(&submission.request.source.archive_digest)
+        .unwrap()
+        .verify_tree_digest(None, SourceLimits::default())
+        .unwrap();
+    let closure = verified.closure_ref("").unwrap();
+    assert_eq!(closure.as_str(), submission.request.source.closure_ref);
+    let tree = verified
+        .materialize(
+            &scratch.path().join("legacy-tree"),
+            "",
+            SourceLimits::default(),
+        )
+        .unwrap();
+    let route = std::fs::read_to_string(tree.join("capsule.toml")).unwrap();
+    let draft = ato_formation::capsule_toml::parse_capsule_toml(&route).unwrap();
+    let planned = ato_formation_worker::job::plan_candidate(
+        &draft,
+        &closure,
+        &ato_formation::detect::detect(&tree).unwrap(),
+        BTreeMap::new(),
+        "/app",
+        &ato_formation_worker::local::host_triple(),
+    )
+    .unwrap();
+    assert_eq!(planned.contract_ref, submission.request.base_contract_ref);
+    assert_eq!(
+        planned.derivation_ref,
+        submission.request.authorized_derivations[0].derivation_ref
+    );
+}
+
 /// The ticket a coordinator would issue for the submission's first route.
 fn ticket(submission: &Submission) -> (AttemptTicket, Vec<u8>) {
     let request = &submission.request;
@@ -1091,38 +1140,40 @@ fn a_source_longer_than_the_transfer_cap_is_refused_before_it_is_used() {
 #[test]
 fn the_runtime_reads_at_most_one_byte_past_the_transfer_cap() {
     use std::io::{Read as _, Write as _};
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listen");
-    let port = listener.local_addr().expect("address").port();
-    // A coordinator (or anything in between) that sends far more than the
-    // ticket authorized.
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept");
-        let mut request = [0_u8; 4096];
-        let _ = stream.read(&mut request);
-        let body = vec![b'x'; 256 * 1024];
-        let _ = stream.write_all(
+    for with_length in [true, false] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listen");
+        let port = listener.local_addr().expect("address").port();
+        // A coordinator (or anything in between) that sends far more than the
+        // ticket authorized.
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request);
+            let body = vec![b'x'; 256 * 1024];
+            let _ = stream.write_all(
             format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/x-tar\r\ncontent-length: {}\r\n\r\n",
-                body.len()
+                "HTTP/1.1 200 OK\r\ncontent-type: application/x-tar\r\n{}connection: close\r\n\r\n",
+                if with_length { format!("content-length: {}\r\n", body.len()) } else { String::new() }
             )
             .as_bytes(),
         );
-        let _ = stream.write_all(&body);
-    });
-    let client = ato_formation_worker::runtime_network::Client::new(
-        &format!("http://127.0.0.1:{port}"),
-        "token",
-    )
-    .expect("client");
-    let root = tempfile::tempdir().unwrap();
-    let received = client.source("att_test", 100, 1, root.path());
-    assert!(
-        received
-            .unwrap_err()
-            .to_string()
-            .contains("exceeds transfer budget")
-    );
-    let _ = server.join();
+            let _ = stream.write_all(&body);
+        });
+        let client = ato_formation_worker::runtime_network::Client::new(
+            &format!("http://127.0.0.1:{port}"),
+            "token",
+        )
+        .expect("client");
+        let root = tempfile::tempdir().unwrap();
+        let received = client.source("att_test", 100, 1, root.path());
+        assert!(
+            received
+                .unwrap_err()
+                .to_string()
+                .contains("exceeds transfer budget")
+        );
+        let _ = server.join();
+    }
 }
 
 #[test]
