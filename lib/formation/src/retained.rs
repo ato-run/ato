@@ -166,6 +166,32 @@ impl RetainedCandidateV1 {
                         return Err(RetainedError("toolchain_binding"));
                     }
                 }
+                for (name, requirement) in &self.derivation.runtimes {
+                    let resolved = match name.as_str() {
+                        "node" | "python" => binding.toolchains.get(name),
+                        "pnpm" | "yarn" => binding
+                            .package_manager
+                            .as_ref()
+                            .filter(|m| m.name == *name)
+                            .map(|m| &m.version),
+                        _ => None,
+                    }
+                    .ok_or(RetainedError("missing_runtime_binding"))?;
+                    // D remains the authority; retained physical bindings cannot
+                    // substitute a different runtime for a frozen requirement.
+                    let matches = resolved == requirement
+                        || (name == "python"
+                            && semver::VersionReq::parse(requirement.trim_start_matches("=="))
+                                .ok()
+                                .is_some_and(|r| {
+                                    semver::Version::parse(resolved)
+                                        .ok()
+                                        .is_some_and(|v| r.matches(&v))
+                                }));
+                    if !matches {
+                        return Err(RetainedError("runtime_binding_mismatch"));
+                    }
+                }
                 if binding.python_environment && !binding.toolchains.contains_key("python") {
                     return Err(RetainedError("python_binding"));
                 }
