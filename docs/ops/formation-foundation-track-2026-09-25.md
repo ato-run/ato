@@ -73,3 +73,53 @@ on an earlier test invocation is not a product failure; the permitted run passed
 
 Stage 4, final stack regressions/P0 and final docs cleanup remain pending.
 All of this is implemented/local integration evidence, not merged or deployed.
+
+## Stage 4 — durable deterministic SearchState
+
+Stack: ato `feat/formation-durable-search-state` on #1407; ato-api
+`feat/formation-durable-search-state` on api#692 (migration 0300, local only).
+Design: [ADR-034](../rfcs/draft/ADR-034-formation-search-state.md).
+Implemented and locally/integration verified; unmerged and undeployed.
+
+### Actual acceptance (real Coordinator restarts, real Rust Runtime)
+
+Coordinator: isolated Miniflare D1/R2 with the production Runtime Network
+routes, ato-api `31b60f0a`, receipt/search authority WASM from ato `f0336685`
+(sha256 `75fb1f2e…`), continuing the 3d Coordinator's persisted state with
+migration 0300 applied on top. It was restarted as a separate process at each
+point below. Runtime and requester: native Linux aarch64 (`oci-linux-test`)
+built from the Stage 4 tree. Harness: `scripts/acceptance/formation-stage4-search.py`.
+Fixture: the Python `notes` source with two routes over one K — D1 serves the
+tree with `http.server` (no `/health` → typed K failure), D2 is the app; a
+third, `non-repeatable`, for the effect case. Fault injection is limited to SQL
+triggers that hold exactly one insert/claim, a read-only Runtime attempt journal
+(history unavailable → UNKNOWN), and a wrong requester effect hint.
+
+| case | result | evidence |
+|---|---|---|
+| 1 D1 fail → restart → D2 PASS | PASS | D1 `01M3C65BHYQRX4HGW82H0CXYV4` fail `http_status_mismatch` (record finished); restart between D1 failure and D2 issue kept 1 attempt, `attempts_used=1`; D2 `01M3C65K3KJGCR86SJ8JJKXNBA` pass, fresh receipt `fully_satisfied=true`, K `sha256:ce1e9c67…`, requester `accept_verified_routes` accepted; restart after PASS: 1 route, 2 attempts, no second charge; frozen identity length unchanged |
+| 2 D1 UNKNOWN → restart → no D2 → resolution → D2 PASS | PASS | D1 `01M3C66P6Y5ATAH616X2PRENNQ` UNKNOWN (`history_unavailable`); across restart and 20 s of a healthy Runtime polling, no D2 and no termination reason; owner resolution citing the terminated Runtime; restart; D2 `01M3C67CRPGRDNC56D15DZ27TF` pass; D1 kept UNKNOWN+resolved, `attempts_used=2`, D1's reservation not refunded |
+| 3 retained replay without sources, route usable after restart | PASS | source attempt `01M3C67G2DTD036KX44GTR8S7M` retained `sha256:11037562…`; 6 source objects deleted; restart; replays `01M3C67MPVR84XTADQ2A6XW3X1` and `01M3C67RPSEZGZ7S7RKH050DAK` (fresh attempts, same K/D, stored 0), each followed by a restart after which the route is still listed |
+| 4 budget exhaustion | PASS | `max_attempts=1`, D1 fail, D2 untried → `exhausted` / `budget_exhausted` |
+| 5 every D fails | PASS | restart directly after claim (result delivered to the restarted Coordinator) → both D `fail` → `candidates_exhausted` |
+| 6 effect uncertainty | PASS | Runtime attested `non-repeatable`, refused `effect_policy`, record `not_started` → `effect_unknown`; D2 never issued |
+| 7 concurrent advance | PASS | 3 Runtime workers + 8 parallel pollers: 2 attempts (one per D), `attempts_used=2`, `attempts_reserved=0`, 1 route |
+
+Restart points: 1 creation (case 1), 2 reserved-before-claim (1), 3 after claim
+(5), 4/5 D1 failure before D2 issue (1), 6 retained registration (3), 7 after
+PASS acceptance (1; before acceptance: Coordinator test "repairs a crash after
+pass CAS before route insert exactly once"), 8 during UNKNOWN (2), 9 after
+owner resolution (2). Evidence: ledger and logs in `.tmp/stage4-actual`.
+
+The acceptance found one defect, fixed before these runs: SearchState required
+`one_of` on every requirement, so any real request with a presence-only
+requirement could not be frozen (Rust `f0336685`, API `31b60f0a`, each with a
+regression test). Harness defects are not counted as passes: the first CASE 1
+run reused a source row whose object an earlier 3d run had deleted behind the
+Coordinator's back (typed `source_unavailable`); cases now use unique sources.
+
+Unit/integration: Rust `search_state` 7, receipt authority 7; API Runtime
+Network suites 119 (including Stage 4 D1→D2 restart, frozen identity,
+WaitForRuntime, CAS, presence-only requirement) and the shared canonical
+SearchState fixtures byte-identical in the real WASM. Browser full E2E is not
+claimed.
