@@ -197,3 +197,17 @@ Not changed: image identity/offline archive rules, the adapter's isolation
 capability, and the old D→projection→intent interpretations (2f). See
 `docs/ops/formation-2e-c-oci-ownership-2026-09-25.md`; this is not
 deployment.
+
+### Minimal execution lowering (2f)
+
+The active Formation path now separates `bind_candidate` (canonical K/D and
+refs) from `lower_execution` (D + pre-bind input facts + Runtime binding).
+`ExecutionPlan` contains physical prerequisites/toolchains/workspace bindings
+and indexes into canonical D for authored actions, not a second argv/cwd/env/
+port/effect schema. Local, Hosted v2 and Runtime Network all consume this plan.
+`ProgramIntentV1`/`EffectiveBuildPlanV1` remain historical compatibility and test
+code only; their digests are neither emitted by active jobs nor used as identity.
+Post-bind overrides are refused rather than changing execution under a fixed D.
+Preset remains an AuthoringDraft frontend. See the 2f operations record for
+fixture parity and local acceptance; no deployment is implied. Retained replay
+and durable SearchState are subsequent changes, not completed by this lowering.
