@@ -713,6 +713,7 @@ name = "ato-runtime-attempt"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ato-adapter-oci",
  "ato-adapter-process",
  "ato-formation",
  "ato-ipc",
