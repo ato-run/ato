@@ -57,6 +57,15 @@ pub enum LocalInstanceError {
     InvalidState(String),
     #[error("local instance `{instance_id}` must be stopped before saving portable data")]
     SnapshotRequiresStopped { instance_id: String },
+    #[error(
+        "local instance `{instance_id}` Run `{run_id}` is quarantined: its workload was not \
+         confirmed stopped (see {evidence}); it is kept until that is resolved"
+    )]
+    RunQuarantined {
+        instance_id: String,
+        run_id: String,
+        evidence: String,
+    },
     #[error("local instance JSON failed: {0}")]
     Json(#[from] serde_json::Error),
     #[error("local instance I/O failed at {path}: {source}")]
@@ -143,6 +152,10 @@ pub struct LocalSurfaceAsset {
 pub enum LocalInstanceRunStatus {
     Starting,
     Active,
+    /// Its workload was not confirmed stopped. The Run keeps the Instance:
+    /// no state is saved from it, it is not released, and no other Run
+    /// starts until the recorded resources are confirmed gone.
+    Quarantined,
 }
 
 impl LocalInstanceRunStatus {
@@ -150,9 +163,30 @@ impl LocalInstanceRunStatus {
         match self {
             Self::Starting => "starting",
             Self::Active => "active",
+            Self::Quarantined => "quarantined",
         }
     }
 }
+
+/// The evidence a quarantined Run keeps beside it, in
+/// `runs/<run>/stop-unconfirmed.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalRunStopUnconfirmed {
+    pub schema: String,
+    pub run_id: String,
+    /// Why the stop is not confirmed.
+    pub reason: String,
+    /// What was left, by the ids recovery finds it by: `container:<id>`,
+    /// `network:<name>`, `scratch:<path>`.
+    pub resources: Vec<String>,
+    pub observed_at: String,
+}
+
+pub const LOCAL_RUN_STOP_PENDING_FILE: &str = "stop-pending.json";
+
+pub const LOCAL_RUN_STOP_UNCONFIRMED_SCHEMA: &str = "ato.local-run-stop-unconfirmed/1";
+pub const LOCAL_RUN_STOP_UNCONFIRMED_FILE: &str = "stop-unconfirmed.json";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -724,6 +758,12 @@ impl LocalApplicationStore {
             (None, Some(_)) => Err(LocalInstanceError::SnapshotRequiresStopped {
                 instance_id: instance_id.to_owned(),
             }),
+            (Some(_), Some(active))
+                if active.status == LocalInstanceRunStatus::Quarantined
+                    || self.stop_pending(&active)? =>
+            {
+                Err(self.quarantined(&active)?)
+            }
             (Some(expected), Some(active)) if active.token == expected => Ok(()),
             (Some(_), _) => Err(LocalInstanceError::RunLeaseChanged(instance_id.to_owned())),
         }
@@ -738,6 +778,9 @@ impl LocalApplicationStore {
         self.instance(instance_id)?;
         let active_path = self.active_run_path(instance_id)?;
         if let Some(active) = self.active_run(instance_id)? {
+            if active.status == LocalInstanceRunStatus::Quarantined || self.stop_pending(&active)? {
+                return Err(self.quarantined(&active)?);
+            }
             return Err(LocalInstanceError::ActiveRunConflict {
                 instance_id: instance_id.to_owned(),
                 run_id: active.run_id,
@@ -818,6 +861,38 @@ impl LocalApplicationStore {
         Ok(active)
     }
 
+    /// Keep this Run, marked quarantined, with what it left: its workload was
+    /// not confirmed stopped. Only the Run holding `token` can do this, and
+    /// nothing releases it afterwards.
+    pub fn quarantine_run(
+        &self,
+        instance_id: &str,
+        token: &str,
+        reason: &str,
+        resources: &[String],
+    ) -> Result<LocalInstanceRun, LocalInstanceError> {
+        let mut run = self
+            .active_run(instance_id)?
+            .ok_or_else(|| LocalInstanceError::RunLeaseChanged(instance_id.to_owned()))?;
+        if run.token != token {
+            return Err(LocalInstanceError::RunLeaseChanged(instance_id.to_owned()));
+        }
+        let evidence = LocalRunStopUnconfirmed {
+            schema: LOCAL_RUN_STOP_UNCONFIRMED_SCHEMA.to_owned(),
+            run_id: run.run_id.clone(),
+            reason: reason.to_owned(),
+            resources: resources.to_vec(),
+            observed_at: observed_at(),
+        };
+        let path = self
+            .run_root(instance_id, &run.run_id)?
+            .join(LOCAL_RUN_STOP_UNCONFIRMED_FILE);
+        replace_canonical(&path, &evidence)?;
+        run.status = LocalInstanceRunStatus::Quarantined;
+        replace_canonical(&self.active_run_path(instance_id)?, &run)?;
+        Ok(run)
+    }
+
     pub fn release_run(&self, instance_id: &str, token: &str) -> Result<(), LocalInstanceError> {
         let Some(active) = self.active_run(instance_id)? else {
             return Ok(());
@@ -825,8 +900,43 @@ impl LocalApplicationStore {
         if active.token != token {
             return Err(LocalInstanceError::RunLeaseChanged(instance_id.to_owned()));
         }
+        if active.status == LocalInstanceRunStatus::Quarantined || self.stop_pending(&active)? {
+            return Err(self.quarantined(&active)?);
+        }
         let path = self.active_run_path(instance_id)?;
         fs::remove_file(&path).map_err(|source| LocalInstanceError::Io { path, source })
+    }
+
+    fn stop_pending(&self, run: &LocalInstanceRun) -> Result<bool, LocalInstanceError> {
+        let root = self.run_root(&run.instance_id, &run.run_id)?;
+        Ok(root
+            .join(LOCAL_RUN_STOP_PENDING_FILE)
+            .try_exists()
+            .map_err(|source| LocalInstanceError::Io {
+                path: root.clone(),
+                source,
+            })?
+            || root
+                .join(LOCAL_RUN_STOP_UNCONFIRMED_FILE)
+                .try_exists()
+                .map_err(|source| LocalInstanceError::Io { path: root, source })?)
+    }
+
+    fn quarantined(
+        &self,
+        run: &LocalInstanceRun,
+    ) -> Result<LocalInstanceError, LocalInstanceError> {
+        let root = self.run_root(&run.instance_id, &run.run_id)?;
+        let evidence = if root.join(LOCAL_RUN_STOP_UNCONFIRMED_FILE).exists() {
+            root.join(LOCAL_RUN_STOP_UNCONFIRMED_FILE)
+        } else {
+            root.join(LOCAL_RUN_STOP_PENDING_FILE)
+        };
+        Ok(LocalInstanceError::RunQuarantined {
+            instance_id: run.instance_id.clone(),
+            run_id: run.run_id.clone(),
+            evidence: evidence.display().to_string(),
+        })
     }
 
     pub fn run_root(&self, instance_id: &str, run_id: &str) -> Result<PathBuf, LocalInstanceError> {
@@ -1479,6 +1589,75 @@ mod tests {
             .release_run(&instance.instance_id, &run.token)
             .unwrap();
         assert!(store.active_run(&instance.instance_id).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_run_whose_stop_is_unconfirmed_keeps_the_instance_and_saves_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let (bytes, _, process_ref) = stateful_fixture();
+        let store = LocalApplicationStore::open(root.path()).unwrap();
+        let instance = store.import(&bytes, Some(&process_ref)).unwrap();
+        let run = store.claim_run(&instance.instance_id).unwrap();
+        let resources = vec![
+            "container:c1".to_owned(),
+            "network:ato-net".to_owned(),
+            "scratch:/runs/x/workspace".to_owned(),
+        ];
+
+        // Only the Run holding the token can quarantine it.
+        assert!(
+            store
+                .quarantine_run(&instance.instance_id, "wrong-token", "x", &resources)
+                .is_err()
+        );
+        let quarantined = store
+            .quarantine_run(
+                &instance.instance_id,
+                &run.token,
+                "container c1 still running after SIGKILL",
+                &resources,
+            )
+            .unwrap();
+        assert_eq!(quarantined.status, LocalInstanceRunStatus::Quarantined);
+
+        // The evidence names what was left.
+        let evidence: LocalRunStopUnconfirmed = serde_json::from_slice(
+            &fs::read(
+                store
+                    .run_root(&instance.instance_id, &run.run_id)
+                    .unwrap()
+                    .join(LOCAL_RUN_STOP_UNCONFIRMED_FILE),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(evidence.resources, resources);
+        assert_eq!(evidence.run_id, run.run_id);
+
+        // Not released, not saved from, and no other Run starts.
+        let quarantined_error =
+            |error: LocalInstanceError| matches!(error, LocalInstanceError::RunQuarantined { .. });
+        assert!(quarantined_error(
+            store
+                .release_run(&instance.instance_id, &run.token)
+                .unwrap_err()
+        ));
+        assert!(quarantined_error(
+            store
+                .save_filesystem_state_for_run(&instance.instance_id, &run.token)
+                .unwrap_err()
+        ));
+        assert!(quarantined_error(
+            store.claim_run(&instance.instance_id).unwrap_err()
+        ));
+        assert_eq!(
+            store
+                .active_run(&instance.instance_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            LocalInstanceRunStatus::Quarantined
+        );
     }
 
     #[test]
