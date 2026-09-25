@@ -44,7 +44,14 @@ pub fn launch_service_group(
             });
         }
     }
-    oci_launch::launch_service_group(spec, context, probe, owner, egress)
+    oci_launch::launch_service_group(
+        spec,
+        context,
+        probe,
+        owner,
+        egress,
+        super::recovery::stop_budget(&spec.lifecycle),
+    )
 }
 
 #[cfg(test)]
