@@ -13,9 +13,9 @@ or workflow change was performed. Every new commit has `[skip ci]`.
 |---|---|---|
 | [ato #1399](https://github.com/ato-run/ato/pull/1399), existing common Hosted verification | main / `aaaaaa15d0cfafdf397977bcabb8eb189fb5c2c2` | refactor/hosted-validator-common-verification / `ed1515bb050a798159588b4412e33517b9365151` |
 | [ato #1401](https://github.com/ato-run/ato/pull/1401), 2e-b | refactor/hosted-validator-common-verification / `ed1515bb050a798159588b4412e33517b9365151` | refactor/hosted-process-ownership / `e5be672ca0db5b6c1f3be9e6ba6f823c4506777a` |
-| [ato-api #691](https://github.com/ato-run/ato-api/pull/691), 3c-b API | main / `94782f5e6440ab1a261380cd6bf38a55bb6f5ca6` | feat/runtime-network-source-objects / `b738af62e2052963f75e44e5b95d78361b0b4d87` |
-| [ato #1403](https://github.com/ato-run/ato/pull/1403), 3c-b Runtime/Requester | refactor/hosted-process-ownership / `e5be672ca0db5b6c1f3be9e6ba6f823c4506777a` | feat/runtime-network-source-objects / `2a5d0bf935351489f706ae1e70bd53ecbc33dcb1` |
-| This documentation-only integration PR | feat/runtime-network-source-objects / `2a5d0bf935351489f706ae1e70bd53ecbc33dcb1` | docs/formation-integrated-verification; exact final head is shown on its PR |
+| [ato-api #691](https://github.com/ato-run/ato-api/pull/691), 3c-b API | main / `94782f5e6440ab1a261380cd6bf38a55bb6f5ca6` | feat/runtime-network-source-objects / `2bf5d54288715bb7f118aed7fee12b24e932496d` |
+| [ato #1403](https://github.com/ato-run/ato/pull/1403), 3c-b Runtime/Requester | refactor/hosted-process-ownership / `e5be672ca0db5b6c1f3be9e6ba6f823c4506777a` | feat/runtime-network-source-objects / `649cb2051811e7526d6cda8cccf3048d7058a791` |
+| This documentation-only integration PR | feat/runtime-network-source-objects / `649cb2051811e7526d6cda8cccf3048d7058a791` | docs/formation-integrated-verification; exact final head is shown on its PR |
 
 Recommended merge order: #1399 -> #1401 -> API #691 -> ato #1403 -> this
 integration record. The API/Rust pair should be reviewed together. Existing
@@ -69,7 +69,7 @@ EAI_AGAIN is the next observed blocker; no build/runtime workaround was added.
 Cloudflare plan ingress can be below the 256 MiB object limit; 128 MiB is local
 acceptance. No claim of deployed ingress/CPU/memory acceptance is made.
 
-## Integrated checks
+## Initial integrated checks (historical)
 
 All Linux checks used the same source tree containing 2e-b and 3c-b, under
 `~/ato-run/.tmp/formation-integrated-20260925/3c-branch/`. Dedicated src/target/
@@ -133,3 +133,48 @@ Next work stays numbered: 2e-c OCI/service groups, 2f IR reduction, 3d retained
 object replay, 4 SearchState. No full SearchState, LLM/Jev D generation, new
 runtime families/services/bindings, mass app run or deployed feature enablement
 is claimed.
+
+## Final 3c-b archive hardening review
+
+The source-only follow-up is recorded separately in
+[hardening acceptance](runtime-network-3c-b-hardening-2026-09-25.md) and its
+[JSON evidence](runtime-network-3c-b-hardening-2026-09-25.json). At baseline
+`2a5d0bf9`, a PAX size of 65536 with ordinary size 0 bypassed the 1 KiB cap:
+64 KiB was materialized while usage reported zero. Adding a large GNU longname
+after that file also bypassed the raw metadata scan, reaching the cooked path
+check. Both failures were reproduced before changing code, with locked tar
+0.4.46 and correct archive digests.
+
+Fix `9fad7cdc` refuses PAX size boundary overrides and GNU sparse in bounded
+preflight before cooked metadata allocation. Ordinary bounded PAX is retained.
+Memory/file measurement and expansion share this check, then enforce effective
+entry size and actual read/write byte limits separately from framing allowance.
+Normal v1/v2 identity remains unchanged; no receipt schema or K/D rewrite.
+
+Final Rust review head: `649cb2051811e7526d6cda8cccf3048d7058a791`.
+API review head: `2bf5d54288715bb7f118aed7fee12b24e932496d` (documentation-only
+hardening diff, executable code unchanged). This integration branch was rebased
+onto that Rust head; its diff contains only the three integration/roadmap files,
+not duplicated parent implementation.
+
+- Formation: 183 tests pass, including 41 source cases. Runtime Network: 30
+  pass; the manual request fixture export was executed separately. fmt,
+  targeted clippy and arch-check (43 packages) pass; wire bytes are identical.
+- Real API upload/finalize makes both hostile archives ready after size/SHA-256
+  verification; actual Runtime acquisition refuses them before materialization
+  or build. No marker/VerifiedRoute/tree remains; expanded usage and actual
+  expansion are both zero. Started/UNKNOWN histories remain conservative.
+- Separate 64/128 MiB raw single-file source reruns reach accepted VerifiedRoutes.
+  Their closure/K/D exactly match the prior records. Runtime peaks are
+  16,472/16,608 KiB, Requester peaks 15,524/15,564 KiB; actual source bytes match
+  charged expansion (67,109,528 / 134,218,392). No archive-sized copy appears.
+- Fresh local Coordinator/token were cleaned up, all work/scratch directories
+  are empty. The new cleanup audit is in the hardening JSON; the earlier
+  cleanup record above remains historical.
+
+Hosted/Chrome/Python/Node/P0 and API unit checks in the initial table were not
+rerun for this source-only follow-up. The existing Chrome baseline failure and
+P0 npm DNS blocker remain unresolved; no 3d replay claim is added. Stages retain
+their numbers. Implementation and targeted integration are complete for review;
+merges/deployment are still pending. #1399 remains protection-blocked, with no
+bypass. Merge order remains #1399 -> #1401 -> API #691 -> ato #1403 -> #1404.
