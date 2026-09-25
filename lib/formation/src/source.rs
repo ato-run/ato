@@ -338,7 +338,6 @@ impl FileVerifiedArchive {
         if size != expected_size {
             return Err(SourceError::Unusable("source archive size mismatch".into()));
         }
-        validate_file_metadata(&file, limits)?;
         let measured = measure_readers(|| file_reader(&file, limits), limits)?;
         Ok(Self { file, measured })
     }
@@ -365,29 +364,106 @@ impl FileVerifiedArchive {
     }
 }
 
-// tar's cooked iterator collects GNU/PAX extension contents internally. Scan
-// raw entries first so attacker-controlled metadata cannot allocate an archive-
-// sized buffer before the existing path validator gets to inspect it.
-fn validate_file_metadata(file: &std::fs::File, limits: SourceLimits) -> Result<(), SourceError> {
-    let mut archive = tar::Archive::new(file_reader(file, limits)?);
+// The cooked iterator allocates extension bodies internally. The raw pass is
+// equivalent only if no extension changes entry boundaries. Refuse PAX size
+// and GNU sparse before advancing; ordinary codeload PAX remains supported.
+fn validate_archive_metadata(reader: impl Read, limits: SourceLimits) -> Result<(), SourceError> {
+    let mut archive = tar::Archive::new(reader);
     let mut entries = 0usize;
+    let mut file_bytes = 0u64;
     for entry in archive.entries().map_err(source_io)?.raw(true) {
-        let entry = entry.map_err(source_io)?;
+        let mut entry = entry.map_err(source_io)?;
         entries += 1;
         if entries > limits.max_files.saturating_mul(4).saturating_add(1024) {
             return Err(SourceError::LimitExceeded {
                 limit: "archive_entries",
             });
         }
-        if matches!(
-            entry.header().entry_type().as_byte(),
-            b'L' | b'K' | b'x' | b'g'
-        ) && entry.size() > 64 * 1024
-        {
+        let kind = entry.header().entry_type();
+        if let Some(kind) = entry_kind(kind) {
+            return Err(SourceError::UnsupportedEntry {
+                kind,
+                path: entry.path().map_err(source_io)?.display().to_string(),
+            });
+        }
+        if kind.is_gnu_sparse() {
+            return Err(SourceError::UnsupportedEntry {
+                kind: "GNU sparse",
+                path: String::new(),
+            });
+        }
+        if is_archive_metadata(kind) && entry.size() > 64 * 1024 {
             return Err(SourceError::LimitExceeded {
                 limit: "archive_metadata_bytes",
             });
         }
+        if kind.is_pax_local_extensions() || kind.is_pax_global_extensions() {
+            // pax_extensions reads this body; its allocation was bounded above.
+            if let Some(extensions) = entry.pax_extensions().map_err(source_io)? {
+                for extension in extensions {
+                    let extension = extension.map_err(source_io)?;
+                    if extension.key_bytes() == b"size" {
+                        return Err(SourceError::UnsupportedEntry {
+                            kind: "PAX size",
+                            path: String::new(),
+                        });
+                    }
+                }
+            }
+        }
+        if kind.is_file() {
+            file_bytes =
+                file_bytes
+                    .checked_add(entry.size())
+                    .ok_or(SourceError::LimitExceeded {
+                        limit: "max_total_bytes",
+                    })?;
+            if file_bytes > limits.max_total_bytes {
+                return Err(SourceError::LimitExceeded {
+                    limit: "max_total_bytes",
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+// Check the effective length before reading, then account actual bytes before
+// passing each bounded chunk to hashing or disk. Metadata/decompression padding
+// never contributes additional file budget. Truncated data is not a smaller file.
+fn read_file_entry<R: Read>(
+    entry: &mut tar::Entry<'_, R>,
+    total: &mut u64,
+    limits: SourceLimits,
+    mut consume: impl FnMut(&[u8]) -> std::io::Result<()>,
+) -> Result<(), SourceError> {
+    let size = entry.size();
+    if size > limits.max_total_bytes.saturating_sub(*total) {
+        return Err(SourceError::LimitExceeded {
+            limit: "max_total_bytes",
+        });
+    }
+    let mut actual = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let count = entry.read(&mut buffer).map_err(source_io)?;
+        if count == 0 {
+            break;
+        }
+        if count as u64 > limits.max_total_bytes.saturating_sub(*total) {
+            return Err(SourceError::LimitExceeded {
+                limit: "max_total_bytes",
+            });
+        }
+        if count as u64 > size.saturating_sub(actual) {
+            return Err(SourceError::Unusable("source entry size mismatch".into()));
+        }
+        actual += count as u64;
+        *total += count as u64;
+        consume(&buffer[..count]).map_err(source_io)?;
+    }
+    if actual != size {
+        return Err(SourceError::Unusable("source entry size mismatch".into()));
     }
     Ok(())
 }
@@ -754,6 +830,7 @@ fn measure_readers<R: Read>(
     let mut total: u64 = 0;
     let mut count = 0usize;
 
+    validate_archive_metadata(open()?, limits)?;
     let prefix = common_prefix(&entry_paths(open()?, limits)?);
     let mut tar = tar::Archive::new(open()?);
     for entry in tar
@@ -811,25 +888,11 @@ fn measure_readers<R: Read>(
         if count > limits.max_files {
             return Err(SourceError::LimitExceeded { limit: "max_files" });
         }
-        let size = entry.header().size().unwrap_or(0);
-        total = total.saturating_add(size);
-        if total > limits.max_total_bytes {
-            return Err(SourceError::LimitExceeded {
-                limit: "max_total_bytes",
-            });
-        }
-
         let mut hasher = Sha256::new();
-        let mut buffer = [0u8; 64 * 1024];
-        loop {
-            let read = entry
-                .read(&mut buffer)
-                .map_err(|error| SourceError::Unusable(format!("entry is unreadable: {error}")))?;
-            if read == 0 {
-                break;
-            }
-            hasher.update(&buffer[..read]);
-        }
+        read_file_entry(&mut entry, &mut total, limits, |bytes| {
+            hasher.update(bytes);
+            Ok(())
+        })?;
         entries.insert((
             relative.display().to_string(),
             format!("sha256:{:x}", hasher.finalize()),
@@ -877,11 +940,9 @@ fn expand_readers<R: Read>(
         SourceError::Unusable(format!("cannot create {}: {error}", destination.display()))
     })?;
 
+    validate_archive_metadata(open()?, limits)?;
     let prefix = common_prefix(&entry_paths(open()?, limits)?);
     let mut tar = tar::Archive::new(open()?);
-    tar.set_preserve_permissions(false);
-    tar.set_unpack_xattrs(false);
-    tar.set_overwrite(true);
 
     let mut total: u64 = 0;
     for entry in tar
@@ -937,8 +998,7 @@ fn expand_readers<R: Read>(
         if !entry_type.is_file() {
             continue;
         }
-        total = total.saturating_add(entry.header().size().unwrap_or(0));
-        if total > limits.max_total_bytes {
+        if entry.size() > limits.max_total_bytes.saturating_sub(total) {
             return Err(SourceError::LimitExceeded {
                 limit: "max_total_bytes",
             });
@@ -948,9 +1008,48 @@ fn expand_readers<R: Read>(
                 SourceError::Unusable(format!("cannot create {}: {error}", parent.display()))
             })?;
         }
-        entry.unpack(&target).map_err(|error| {
-            SourceError::Unusable(format!("cannot write {}: {error}", relative.display()))
+        // As with tar::Entry::unpack, unlink existing files rather than
+        // opening through a symlink, and retain only ordinary permission bits.
+        let mut file = std::fs::File::create_new(&target)
+            .or_else(|error| {
+                if error.kind() != std::io::ErrorKind::AlreadyExists {
+                    return Err(error);
+                }
+                std::fs::remove_file(&target)?;
+                std::fs::File::create_new(&target)
+            })
+            .map_err(source_io)?;
+        use std::io::Write;
+        read_file_entry(&mut entry, &mut total, limits, |bytes| {
+            file.write_all(bytes)
         })?;
+        if let Ok(mtime) = entry.header().mtime() {
+            // Match tar's treatment of zero mtime, and ignore unrepresentable times.
+            if let Some(time) =
+                std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(mtime.max(1)))
+            {
+                file.set_times(
+                    std::fs::FileTimes::new()
+                        .set_accessed(time)
+                        .set_modified(time),
+                )
+                .map_err(source_io)?;
+            }
+        }
+        if let Ok(mode) = entry.header().mode() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                file.set_permissions(std::fs::Permissions::from_mode(mode & 0o777))
+                    .map_err(source_io)?;
+            }
+            #[cfg(windows)]
+            {
+                let mut permissions = file.metadata().map_err(source_io)?.permissions();
+                permissions.set_readonly(mode & 0o200 == 0);
+                file.set_permissions(permissions).map_err(source_io)?;
+            }
+        }
     }
     Ok(destination.to_path_buf())
 }
@@ -1789,6 +1888,231 @@ mod tests {
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(bytes).unwrap();
         FileVerifiedArchive::verify(file, digest, size, limits)
+    }
+
+    // Deliberately write the payload independently of the regular header size.
+    fn pax_size_archive(with_longname: bool) -> Vec<u8> {
+        fn append(out: &mut Vec<u8>, kind: u8, size: u64, data: &[u8]) {
+            let mut header = tar::Header::new_gnu();
+            header.set_path("file").unwrap();
+            header.set_entry_type(tar::EntryType::new(kind));
+            header.set_mode(0o644);
+            header.set_size(size);
+            header.set_cksum();
+            out.extend_from_slice(header.as_bytes());
+            out.extend_from_slice(data);
+            out.resize(out.len().div_ceil(512) * 512, 0);
+        }
+        let mut out = Vec::new();
+        let pax = b"14 size=65536\n";
+        append(&mut out, b'x', pax.len() as u64, pax);
+        append(&mut out, b'0', 0, &vec![0; 65536]);
+        if with_longname {
+            let name = vec![b'a'; 65537];
+            append(&mut out, b'L', name.len() as u64, &name);
+            append(&mut out, b'0', 0, &[]);
+        }
+        out.extend_from_slice(&[0; 1024]);
+        out
+    }
+
+    #[test]
+    fn pax_size_cannot_bypass_expanded_cap() {
+        let bytes = pax_size_archive(false);
+        let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
+        let tiny = SourceLimits {
+            max_total_bytes: 1024,
+            ..LIMITS
+        };
+        match file_archive(&bytes, bytes.len() as u64, &digest, tiny) {
+            Ok(mut archive) => {
+                let destination = tempfile::tempdir().unwrap();
+                let root = archive.materialize(destination.path(), "", tiny).unwrap();
+                panic!(
+                    "accepted: reported={}, materialized={}",
+                    archive.expanded_bytes(),
+                    std::fs::metadata(root.join("file")).unwrap().len()
+                );
+            }
+            Err(error) => assert_eq!(error.code(), "source_unsupported_entry"),
+        }
+    }
+
+    #[test]
+    fn pax_size_cannot_hide_later_metadata_from_preflight() {
+        let bytes = pax_size_archive(true);
+        let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
+        let error = file_archive(&bytes, bytes.len() as u64, &digest, LIMITS)
+            .err()
+            .expect("unsafe archive accepted");
+        assert!(
+            matches!(
+                error,
+                SourceError::UnsupportedEntry {
+                    kind: "PAX size",
+                    ..
+                }
+            ),
+            "must refuse boundary override before cooked metadata allocation: {error:?}"
+        );
+    }
+
+    #[test]
+    fn pax_refusal_precedes_payload_or_hidden_metadata_reads() {
+        struct PrefixOnly<'a>(&'a [u8]);
+        impl Read for PrefixOnly<'_> {
+            fn read(&mut self, into: &mut [u8]) -> std::io::Result<usize> {
+                assert!(!self.0.is_empty(), "read beyond the bounded PAX extension");
+                self.0.read(into)
+            }
+        }
+        let bytes = pax_size_archive(true);
+        let error = validate_archive_metadata(PrefixOnly(&bytes[..526]), LIMITS).unwrap_err();
+        assert!(matches!(
+            error,
+            SourceError::UnsupportedEntry {
+                kind: "PAX size",
+                ..
+            }
+        ));
+        assert_eq!(
+            measure(&bytes, LIMITS).err().unwrap().code(),
+            "source_unsupported_entry"
+        );
+        let destination = tempfile::tempdir().unwrap();
+        assert_eq!(
+            expand_archive(&bytes, destination.path(), LIMITS)
+                .unwrap_err()
+                .code(),
+            "source_unsupported_entry"
+        );
+        assert_eq!(std::fs::read_dir(destination.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn effective_entry_size_and_actual_bytes_share_one_file_budget() {
+        let bytes = pax_size_archive(false);
+        for cap in [1024, 65536] {
+            let mut archive = tar::Archive::new(Cursor::new(&bytes));
+            let mut entry = archive.entries().unwrap().next().unwrap().unwrap();
+            assert_eq!(entry.header().size().unwrap(), 0);
+            assert_eq!(entry.size(), 65536);
+            let mut total = 0;
+            let mut consumed = 0;
+            let result = read_file_entry(
+                &mut entry,
+                &mut total,
+                SourceLimits {
+                    max_total_bytes: cap,
+                    ..LIMITS
+                },
+                |chunk| {
+                    consumed += chunk.len() as u64;
+                    Ok(())
+                },
+            );
+            if cap == 1024 {
+                assert!(matches!(
+                    result,
+                    Err(SourceError::LimitExceeded {
+                        limit: "max_total_bytes"
+                    })
+                ));
+                assert_eq!((total, consumed), (0, 0));
+            } else {
+                result.unwrap();
+                assert_eq!((total, consumed), (65536, 65536));
+            }
+        }
+    }
+
+    #[test]
+    fn oversized_metadata_is_rejected_before_its_body_is_read() {
+        struct HeaderOnly(Cursor<Vec<u8>>);
+        impl Read for HeaderOnly {
+            fn read(&mut self, into: &mut [u8]) -> std::io::Result<usize> {
+                assert!(self.0.position() < 512, "metadata payload was read");
+                self.0.read(into)
+            }
+        }
+        for kind in [b'L', b'K', b'x', b'g'] {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::new(kind));
+            header.set_size(65537);
+            header.set_cksum();
+            let error = validate_archive_metadata(
+                HeaderOnly(Cursor::new(header.as_bytes().to_vec())),
+                LIMITS,
+            )
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                SourceError::LimitExceeded {
+                    limit: "archive_metadata_bytes"
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn ordinary_pax_preserves_identity_and_actual_expanded_bytes() {
+        let expected = tree(&[E::File("index.html", b"hello")]);
+        let mut builder = tar::Builder::new(Vec::new());
+        builder
+            .append_pax_extensions([
+                ("mtime", b"123.5".as_slice()),
+                ("comment", b"codeload".as_slice()),
+                ("path", b"index.html".as_slice()),
+            ])
+            .unwrap();
+        let mut header = tar::Header::new_gnu();
+        header.set_size(5);
+        header.set_mode(0o755);
+        header.set_mtime(123);
+        builder
+            .append_data(&mut header, "ignored", &b"hello"[..])
+            .unwrap();
+        let bytes = builder.into_inner().unwrap();
+        assert_eq!(
+            measure_source_tree(&bytes, LIMITS).unwrap(),
+            measure_source_tree(&expected, LIMITS).unwrap()
+        );
+        let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
+        let mut verified = file_archive(&bytes, bytes.len() as u64, &digest, LIMITS).unwrap();
+        assert_eq!(verified.expanded_bytes(), 5);
+        let destination = tempfile::tempdir().unwrap();
+        verified
+            .materialize(destination.path(), "", LIMITS)
+            .unwrap();
+        let metadata = std::fs::metadata(destination.path().join("index.html")).unwrap();
+        assert_eq!(metadata.len(), 5);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o755);
+        }
+        assert_eq!(
+            metadata
+                .modified()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            123
+        );
+    }
+
+    #[test]
+    fn invalid_and_truncated_sizes_are_not_zero_length_files() {
+        let mut bytes = tree(&[E::File("file", b"hello")]);
+        let header = tar::Header::from_byte_slice(&bytes[..512]);
+        let mut header = header.clone();
+        header.as_mut_bytes()[124..136].fill(b'!');
+        header.set_cksum();
+        bytes[..512].copy_from_slice(header.as_bytes());
+        assert!(measure(&bytes, LIMITS).is_err());
+        let bytes = tree(&[E::File("file", b"hello")]);
+        assert!(measure(&bytes[..514], LIMITS).is_err());
     }
 
     #[test]

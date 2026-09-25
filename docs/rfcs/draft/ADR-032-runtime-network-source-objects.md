@@ -77,7 +77,24 @@ an actual byte cap. It verifies bytes before measurement or extraction. The
 file-backed resolver makes sequential file passes using the same tree and
 symlink/path rules as the memory API; hashing individual files is also
 streaming. Compressed streams have a decompression cap and zstd window cap;
-raw tar metadata is checked before the library can allocate GNU/PAX payloads.
+both memory-backed and file-backed measurement/extraction first bound each
+GNU/PAX metadata body to 64 KiB. A raw scan alone does not prove cooked iterator
+safety: PAX `size` changes the next entry boundary in locked tar 0.4.46. The
+bounded preflight therefore refuses every local/global PAX `size` key (including
+matching or malformed values) as `source_unsupported_entry` / `PAX size`, and
+GNU sparse entries as `source_unsupported_entry` / `GNU sparse`, before advancing
+to a body or letting the cooked iterator process extensions. Invalid PAX records
+are unreadable source errors. Ordinary PAX `path`, `linkpath`, `mtime`, uid/gid
+and codeload global `comment` remain supported within the metadata/path limits.
+These are transport restrictions, not new resolver identity versions.
+
+The permitted vocabulary has the same raw/cooked entry boundaries. Header size
+parse errors fail closed. The effective `entry.size()` is checked before file
+reads; actual bounded read/write chunks are charged against the file expansion
+cap, independently of tar framing/decompression allowance. Truncated entries
+fail rather than become smaller files. Measurement reports those actual bytes;
+extraction uses the same checked copy and retains ordinary mode bits and mtime.
+Normal tar/gzip/zstd v1/v2 closure and K/D identities remain unchanged.
 No Network path converts the archive back to Vec or read_to_end. Partial
 files and trees are owned by temporary-file/directory handles and discarded.
 One source connection per served attempt, one upload per submission, no
