@@ -178,3 +178,28 @@ P0 npm DNS blocker remain unresolved; no 3d replay claim is added. Stages retain
 their numbers. Implementation and targeted integration are complete for review;
 merges/deployment are still pending. #1399 remains protection-blocked, with no
 bypass. Merge order remains #1399 -> #1401 -> API #691 -> ato #1403 -> #1404.
+
+## Merge result (appended 2026-09-25)
+
+The sections above are the pre-merge record and are unchanged. After review,
+the stack was merged in the recorded order, each pinned to its reviewed head
+(`--match-head-commit`). The ato `main` ruleset allows updates only through
+bypass actors, so the ato merges used admin bypass, explicitly authorized by
+the reviewer for this stack; ato-api #691 merged without bypass. Merge method
+was merge commits only, so no parent commit was re-applied. Each child was
+retargeted to `main` without rebase; its diff against `main` was unchanged
+(#1401: 12 files, +518/−163; #1403: 15 files, +4521/−104), no conflict was
+resolved and no test was rerun for the merges.
+
+| PR | Reviewed head | Merge commit |
+|---|---|---|
+| ato #1399 | `ed1515bb050a798159588b4412e33517b9365151` | `ef7f345ff4e8bd0db3554b5cd6e5bd9330e628b1` |
+| ato #1401 | `e5be672ca0db5b6c1f3be9e6ba6f823c4506777a` | `3c9ddd0585ca7e3deda1f9d7a1d9ed56e905065e` |
+| ato-api #691 | `2bf5d54288715bb7f118aed7fee12b24e932496d` | `e8b0056b48bdb8c3bf0f578edfa610aa0faf0b43` |
+| ato #1403 | `649cb2051811e7526d6cda8cccf3048d7058a791` | `0df51b22471682362aa10c471a04ff2683cbd1a5` |
+| ato #1404 (this record) | reviewed `cdc12630` plus this appended section | shown on the PR |
+
+Merging is not deployment: no deployment, remote migration (0298), flag
+change or manual CI rerun followed. The Chrome baseline SIGABRT, upload quota
+recycling and deployed-environment capacity/CPU limits remain operational
+gates; this merge does not resolve them or complete 3d. Next: 2e-c.
