@@ -23,16 +23,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use ato_formation::authoring::HTTP_CONTRACT_VERIFIER;
 use ato_formation::browser::{BrowserTarget, BrowserVerdict, BrowserVerificationReceipt};
 use ato_formation::failure::{FailureStage, FormationFailure};
 use ato_formation::request::{
     AttemptFailure, AttemptOutcomes, AttemptStatus, FormationAttempt, Outcome, RuntimeProfile,
 };
-use ato_formation::verify::{
-    CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V2, ContractVerification, ContractVerificationReceipt,
-    RuntimeHttpObservation, RuntimeObservation, VerificationTargetKind, verify_runtime,
-};
+use ato_formation::verify::{ContractVerification, RuntimeHttpObservation};
 
 use crate::admission::{EffectAuthorization, admit, effects_name};
 use crate::browser_verify::{BrowserVerification, verify_in_browser};
@@ -43,6 +39,11 @@ use crate::journal::{
 };
 use crate::realize::{CandidateRealizer, LiveCandidate, RealizeFailure, RunningCandidate};
 use crate::spec::AttemptSpec;
+pub use crate::verification::ReceiptContext;
+use crate::verification::{
+    HTTP_OBSERVATION_METHOD, RequiredObservation, VerificationPoint, required_http_observations,
+    verify_observed_candidate,
+};
 
 /// Bodies larger than this are not hashed into evidence.
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
@@ -81,32 +82,6 @@ pub struct AttemptRequest<'a> {
     /// Set when the caller is being stopped: observation gives up instead of
     /// waiting out its deadline.
     pub interrupt: Option<&'a AtomicBool>,
-}
-
-/// What the receipt records about where the verified bytes came from.
-#[derive(Debug, Clone, Copy)]
-pub struct ReceiptContext<'a> {
-    pub target: VerificationTargetKind,
-    /// The `.capsule` the candidate was unpacked from, when there is one. A
-    /// Formation candidate has none and names none.
-    pub bundle_sha256: Option<&'a str>,
-    /// The transport's dependency profile, when it declares one (receipt
-    /// schema /2).
-    pub portability_profile: Option<&'a str>,
-    /// The Run this attempt starts, when the caller keeps one.
-    pub run_id: Option<&'a str>,
-}
-
-impl ReceiptContext<'_> {
-    /// A Formation attempt: no transport, no Run.
-    pub fn formation() -> Self {
-        Self {
-            target: VerificationTargetKind::FormationRuntime,
-            bundle_sha256: None,
-            portability_profile: None,
-            run_id: None,
-        }
-    }
 }
 
 /// What happens to the running candidate once it has been verified.
@@ -337,7 +312,7 @@ fn realize_and_verify(
     // ── observe ─────────────────────────────────────────────────────────────
     let http = match observe_http(
         candidate.as_mut(),
-        &http_requirements(spec),
+        &required_http_observations(spec),
         request.interrupt,
     ) {
         Ok(http) => http,
@@ -349,33 +324,15 @@ fn realize_and_verify(
             return not_observable(attempt, error);
         }
     };
-    let runtime = RuntimeObservation {
-        input_refs: spec.input_refs.clone(),
-        http,
-        instance_snapshot_ref: spec.instance_snapshot_ref.clone(),
-    };
-    let verification = verify_runtime(spec.contract, &runtime);
-
     // The receipt covers the Contract's observations at this verification
     // point, and nothing that happens after it.
-    let mut receipt = ContractVerificationReceipt::for_attempt(
-        request.receipt.target,
-        request.receipt.bundle_sha256.map(str::to_owned),
-        spec.contract_ref,
-        spec.derivation_ref,
-        spec.contract,
-        &runtime,
-        verification.clone(),
-    );
     let mut execution = realized.execution;
     execution.attempt_id = Some(request.attempt_id.to_owned());
     execution.request_id = Some(request.request_id.to_owned());
-    execution.run_id = request.receipt.run_id.map(str::to_owned);
-    if let Some(profile) = request.receipt.portability_profile {
-        receipt.schema = CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V2.to_owned();
-        execution.portability_profile = Some(profile.to_owned());
-    }
-    receipt.execution = Some(execution);
+    let VerificationPoint {
+        verification,
+        receipt,
+    } = verify_observed_candidate(spec, http, execution, &request.receipt);
 
     // The browser drives the SAME candidate, and only one that already
     // satisfies the typed observations: a candidate that fails its HTTP
@@ -445,38 +402,6 @@ fn not_observable(mut attempt: FormationAttempt, error: anyhow::Error) -> Attemp
     }
 }
 
-/// An HTTP observation the Contract needs, by logical port.
-struct RequiredObservation {
-    port_id: String,
-    path: String,
-}
-
-/// The Contract's HTTP observations the Derivation exports a port for.
-///
-/// A requirement on a port the Derivation never exports is not probed — it
-/// would measure a port nobody claimed — and the verifier fails it as
-/// unobserved. Only GET is observed; anything else is left for the verifier
-/// to refuse rather than be probed with the wrong method.
-fn http_requirements(spec: &AttemptSpec<'_>) -> Vec<RequiredObservation> {
-    spec.contract
-        .requirements
-        .iter()
-        .filter(|requirement| requirement.verifier == HTTP_CONTRACT_VERIFIER)
-        .filter(|requirement| requirement.method.as_deref().is_none_or(|m| m == "GET"))
-        .filter_map(|requirement| {
-            let port_id = requirement.port.clone()?;
-            spec.derivation
-                .ports
-                .iter()
-                .any(|port| port.id == port_id)
-                .then(|| RequiredObservation {
-                    port_id,
-                    path: requirement.path.clone().unwrap_or_else(|| "/".to_owned()),
-                })
-        })
-        .collect()
-}
-
 /// GET every required path through the endpoint its logical port answers
 /// on, waiting for the candidate to accept connections — and giving up as
 /// soon as it exits, the caller is interrupted, or the deadline passes. A
@@ -529,7 +454,7 @@ fn observe_http(
         }
         observed.push(RuntimeHttpObservation::from_response(
             observation.port_id.clone(),
-            "GET",
+            HTTP_OBSERVATION_METHOD,
             observation.path.clone(),
             status,
             &body,
@@ -741,7 +666,13 @@ pub fn bounded(reason: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use ato_formation::authoring::{BoundContract, BoundRequirement, HTTP_CONTRACT_VERIFIER};
+    use ato_formation::authoring::{
+        BoundContract, BoundRequirement, HTTP_CONTRACT_VERIFIER,
+        INSTANCE_SNAPSHOT_CONTRACT_VERIFIER, WORKSPACE_CONTRACT_VERIFIER,
+    };
+    use ato_formation::verify::{
+        ContractVerificationReceipt, RuntimeObservation, VerificationTargetKind, verify_runtime,
+    };
 
     use crate::journal::AttemptJournal;
     use ato_formation::request::{OutcomeState, RealizationEvidence};
@@ -1125,6 +1056,98 @@ mod tests {
             realizer,
             journal,
         )
+    }
+
+    /// Someone who observes a candidate it did not run — the Hosted
+    /// verifier — decides K through the same verification point. Given what
+    /// `run_attempt` observed, it reaches the same verdicts and states the
+    /// same receipt, satisfied or not.
+    #[test]
+    fn run_attempt_and_an_outside_observer_reach_the_same_verification_point() {
+        for status in [200, 404] {
+            let (mut contract, derivation) = served_route(status);
+            contract.requirements.push(BoundRequirement {
+                id: "source-identity".to_owned(),
+                verifier: WORKSPACE_CONTRACT_VERIFIER.to_owned(),
+                port: None,
+                method: None,
+                path: None,
+                status: None,
+                body_digest: None,
+                input: Some("workspace".to_owned()),
+                digest: Some("sha256:tree".to_owned()),
+            });
+            contract.requirements.push(BoundRequirement {
+                id: "saved-state".to_owned(),
+                verifier: INSTANCE_SNAPSHOT_CONTRACT_VERIFIER.to_owned(),
+                port: None,
+                method: None,
+                path: None,
+                status: None,
+                body_digest: None,
+                input: None,
+                digest: Some("sha256:snapshot".to_owned()),
+            });
+            let spec = AttemptSpec {
+                contract: &contract,
+                contract_ref: "sha256:k",
+                derivation: &derivation,
+                derivation_ref: "sha256:d",
+                shape: crate::spec::CandidateShape::Process,
+                input_refs: BTreeMap::from([("workspace".to_owned(), "sha256:tree".to_owned())]),
+                instance_snapshot_ref: Some("sha256:snapshot".to_owned()),
+            };
+            let context = ReceiptContext {
+                target: VerificationTargetKind::CliLocal,
+                bundle_sha256: Some("sha256:bundle"),
+                portability_profile: Some("cached"),
+                run_id: Some("run-1"),
+            };
+            let scratch = tempfile::tempdir().unwrap();
+            let records = tempfile::tempdir().unwrap();
+            let outcome = run_attempt(
+                &AttemptRequest {
+                    request_id: "request-1",
+                    attempt_id: "attempt-1",
+                    label: "portable",
+                    spec: &spec,
+                    contract_ref: "sha256:k",
+                    runtime_id: "local",
+                    profile: &RuntimeProfile::default(),
+                    authorization: EffectAuthorization::Unattended,
+                    network: NetworkPolicy::Denied,
+                    browser: None,
+                    attempt_root: scratch.path(),
+                    continuation: Continuation::Stop,
+                    receipt: context,
+                    interrupt: None,
+                },
+                &AnsweringRealizer::default(),
+                &AttemptJournal::new(records.path()),
+            );
+            let receipt = outcome
+                .attempt
+                .receipt
+                .clone()
+                .expect("the attempt observed its candidate");
+
+            let observed = verify_observed_candidate(
+                &spec,
+                vec![RuntimeHttpObservation::from_response(
+                    "app.http", "GET", "/", 200, b"ok",
+                )],
+                serde_json::from_value(serde_json::json!({
+                    "realization": "test",
+                    "attempt_id": "attempt-1",
+                    "request_id": "request-1",
+                }))
+                .unwrap(),
+                &context,
+            );
+            assert_eq!(observed.receipt, receipt);
+            assert_eq!(outcome.attempt.verification, Some(observed.verification));
+            assert_eq!(receipt.fully_satisfied, status == 200);
+        }
     }
 
     #[test]
