@@ -15,16 +15,18 @@ historical evidence, not implementation authority.
 
 ## Implementation-track drafts (non-normative)
 
-Drafts are proposals and work-in-progress, not current architecture. A file
-being under `draft/` means neither "unimplemented" nor "accepted": check the
-roadmap state and the merged implementation before treating any draft as
-current behavior. Adopted spec and merged implementation are separate states.
+Documents under `draft/` are non-normative: they are not implementation
+authority, whether they describe merged code or pending plans. Draft status
+alone says nothing about implementation state — some drafts describe merged
+behavior, others describe work not yet started. Check the roadmap state and
+the merged implementation before relying on any draft. Adopted spec and
+merged implementation are separate states.
 
 - [Formation roadmap](draft/FORMATION_ROADMAP.md) — the single progress
-  reference for the Formation stages. Its stage states (`Merged` /
-  `Implemented ... not merged` / `Pending` / `not deployed`) are the
-  authority; do not copy the stage table into other files. Pending rows are
-  plans, not shipped functionality.
+  reference for the Formation stages. Its stage states (`Merged` / `Pending` /
+  `not deployed` / `deploy status unconfirmed`) are the authority; do not copy
+  the stage table into other files. Pending rows are plans, not shipped
+  functionality.
 - Formation attempt, verification, and receipt authority (draft):
   [ADR-018](draft/ADR-018-formation-build-sandbox-substrate.md),
   [ADR-019](draft/ADR-019-formation-ephemeral-verification.md),
@@ -48,7 +50,12 @@ current behavior. Adopted spec and merged implementation are separate states.
   [ADR-021](draft/ADR-021-runtime-network-phase1.md),
   [ADR-028](draft/ADR-028-runtime-network-search-unknown.md),
   [ADR-031](draft/ADR-031-runtime-network-search-budget.md),
+  [ADR-032](draft/ADR-032-runtime-network-source-objects.md),
+  [ADR-033](draft/ADR-033-formation-retained-replay.md),
+  [ADR-034](draft/ADR-034-formation-search-state.md),
   [runner-worker-isolation](draft/runner-worker-isolation.md)
+- Source freeze and resolver (draft):
+  [ADR-023](draft/ADR-023-source-resolver-v2-contained-symlinks.md)
 - Browser evidence and hosted browser computation (draft):
   [ADR-020](draft/ADR-020-formation-browser-contract-v0.md),
   [ADR-022](draft/ADR-022-browser-verifier-containment.md),
@@ -68,5 +75,5 @@ current behavior. Adopted spec and merged implementation are separate states.
   [ACTIVITY_OPERATION_ADAPTER_V0](draft/ACTIVITY_OPERATION_ADAPTER_V0.md),
   [TAURI_DESKTOP_MIGRATION](draft/TAURI_DESKTOP_MIGRATION.md)
 
-Other files under `draft/` predate this track; read them as proposals, not as
-implementation status.
+Files not listed above are likewise non-normative drafts; check each file and
+the merged implementation before relying on it.
