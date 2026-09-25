@@ -129,3 +129,10 @@ normalizes through ready objects. Old Runtime clients require upgrade before
 new object-reference requests (fence header/file acquisition). No rollout was
 performed. Raw logs and harness scripts remain in the dedicated roots above;
 `runtime-network-3c-b-2026-09-25.json` records the relevant IDs and evidence.
+
+## Archive hardening follow-up
+
+The later [PAX boundary/resource-limit review](runtime-network-3c-b-hardening-2026-09-25.md)
+records the baseline defect, transport refusals and a separate Linux rerun.
+The measurements and identities above remain historical results for their
+recorded implementation.
