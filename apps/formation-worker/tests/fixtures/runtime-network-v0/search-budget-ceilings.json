@@ -1,0 +1,9 @@
+{
+  "max_attempts": 32,
+  "deadline_seconds": 604800,
+  "max_transfer_bytes": 10737418240,
+  "max_expanded_bytes": 10737418240,
+  "max_stored_bytes": 10737418240,
+  "max_attempt_expanded_bytes": 536870912,
+  "max_attempt_stored_bytes": 536870912
+}
