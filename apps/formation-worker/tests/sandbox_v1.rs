@@ -10,9 +10,7 @@ use std::path::{Path, PathBuf};
 use ato_formation::intent::{
     BuildStepV1, EFFECTIVE_BUILD_PLAN_V1_SCHEMA, EffectiveBuildPlanV1, Lane,
 };
-use ato_formation_worker::build::{
-    BuildAttempt, BuildOutcome, may_publish, output_root, run_build,
-};
+use ato_formation_worker::build::{BuildAttempt, BuildOutcome, may_publish};
 use ato_formation_worker::sandbox::*;
 
 fn dirs() -> (tempfile::TempDir, PathBuf, PathBuf) {
@@ -374,3 +372,8 @@ fn only_a_provisioning_step_may_write_the_toolchain_root() {
     assert!(argv.contains(&format!("--bind {TOOLCHAIN_ROOT} {TOOLCHAIN_ROOT}")));
     assert!(provisioning.policy.read_write_paths.contains(&toolchain));
 }
+
+use legacy_execution::{output_root, run_build};
+
+#[path = "support/legacy_execution.rs"]
+mod legacy_execution;

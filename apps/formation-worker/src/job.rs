@@ -20,7 +20,7 @@ use anyhow::{Context, Result, bail};
 use ato_formation::capsule_toml::{parse_capsule_toml, read_capsule_toml};
 use ato_formation::detect::detect;
 use ato_formation::failure::FormationFailure;
-use ato_formation::intent::{EffectiveBuildPlanV1, Lane, ProgramIntentV1};
+use ato_formation::intent::Lane;
 use ato_formation::preset::{select_preset, synthesize_authoring};
 use ato_formation::request::{AttemptOutcomes, Outcome};
 use ato_formation::source::{DownloadedArchive, SourceClosureRef, SourceLimits};
@@ -144,8 +144,6 @@ pub trait TreePacker {
 pub struct JobOutcome {
     pub attempt: BuildAttempt,
     pub closure_ref: SourceClosureRef,
-    pub intent_digest: String,
-    pub plan_digest: String,
     pub materialization_ref: String,
     pub outcome: PublishOutcome,
 }
@@ -468,21 +466,12 @@ pub fn run_claimed_job_with_ledger(
         }
     };
     persist_hosted_outcome(&attempt_root, &outcome.attempt, &outcomes)?;
-    let PlannedCandidate {
-        contract_ref,
-        derivation_ref,
-        intent,
-        plan,
-        intent_digest,
-        plan_digest,
-        ..
-    } = &planned;
-
+    let contract_ref = &planned.contract_ref;
+    let derivation_ref = &planned.derivation_ref;
     let result = compose_result(
         &attempt,
         &closure_ref,
-        intent,
-        plan,
+        &planned,
         &materialization_ref,
         // The artifact's real size, whichever store it went to. Reporting the
         // packed length for a static bundle would say zero — the bundle is
@@ -525,8 +514,6 @@ pub fn run_claimed_job_with_ledger(
     Ok(JobOutcome {
         attempt,
         closure_ref,
-        intent_digest: intent_digest.clone(),
-        plan_digest: plan_digest.clone(),
         materialization_ref,
         outcome: published,
     })
@@ -612,8 +599,7 @@ fn persist_hosted_outcome(
 fn compose_result(
     attempt: &BuildAttempt,
     closure_ref: &SourceClosureRef,
-    intent: &ProgramIntentV1,
-    plan: &EffectiveBuildPlanV1,
+    planned: &PlannedCandidate,
 
     materialization_ref: &str,
     size_bytes: u64,
@@ -626,14 +612,23 @@ fn compose_result(
     receipt: &ContractVerificationReceipt,
     outcomes: &AttemptOutcomes,
 ) -> Result<serde_json::Value> {
-    let (kind, candidate) = match intent.lane {
+    let plan = &planned.plan;
+    let serve = plan.serving(&planned.derivation);
+    let public_env = plan.process_environment(&planned.derivation);
+    let readiness = planned
+        .contract
+        .requirements
+        .iter()
+        .find(|r| r.verifier == ato_formation::authoring::HTTP_CONTRACT_VERIFIER)
+        .and_then(|r| r.path.as_ref());
+    let (kind, candidate) = match plan.lane {
         Lane::PythonProcess | Lane::Process => (
             "process_workspace",
             serde_json::json!({
                 "kind": "process",
-                "argv": intent.launch_argv,
-                "cwd_relative": intent.cwd_relative,
-                "public_env": intent.public_env,
+                "argv": serve.argv,
+                "cwd_relative": serve.cwd,
+                "public_env": public_env,
                 "workspace_materialization_ref": materialization_ref,
             }),
         ),
@@ -642,8 +637,8 @@ fn compose_result(
             serde_json::json!({
                 "kind": "static_browser",
                 "materialization_ref": materialization_ref,
-                "entry_path": intent.static_entry_path.clone().unwrap_or_else(|| "index.html".to_owned()),
-                "spa_fallback": intent.static_spa_fallback,
+                "entry_path": serve.entry.clone().unwrap_or_else(|| "index.html".to_owned()),
+                "spa_fallback": serve.spa_fallback.unwrap_or(false),
             }),
         ),
     };
@@ -673,28 +668,28 @@ fn compose_result(
             "content_ref": materialization_ref,
             // Per lane: a consumer that reached for the wrong reader would
             // find a tar where it expected a bundle, and say so unhelpfully.
-            "media_type": match intent.lane {
+            "media_type": match plan.lane {
                 Lane::PythonProcess | Lane::Process => "application/vnd.ato.process-workspace.v1+tar",
                 Lane::StaticWeb => "application/vnd.ato.static-web-bundle.v1",
             },
             "digest": materialization_ref,
             "size_bytes": size_bytes,
             "target": { "triple": triple, "workspace_guest_root": guest_root },
-            "compatibility": if intent.lane == Lane::StaticWeb { serde_json::json!({"evaluator":"browser"}) } else { serde_json::json!({"os":"linux"}) },
+            "compatibility": if plan.lane == Lane::StaticWeb { serde_json::json!({"evaluator":"browser"}) } else { serde_json::json!({"os":"linux"}) },
             "producer": concat!("ato-formation-worker/", env!("CARGO_PKG_VERSION")),
         }],
-        "runtime_requirements": intent.runtime.iter().map(|(name, version)| serde_json::json!({
+        "runtime_requirements": plan.toolchains.iter().map(|(name, version)| serde_json::json!({
             "name": name, "version": version, "resolution": "authored",
         })).collect::<Vec<_>>(),
         "realization_candidates": [candidate],
-        "exported_ports": intent.exported_ports.iter().map(|(name, port)| serde_json::json!({
-            "name": name, "protocol": "http", "guest_port": port,
+        "exported_ports": planned.derivation.ports.iter().filter(|p| plan.lane.is_process() && p.from == serve.id).map(|p| serde_json::json!({
+            "name": "http", "protocol": "http", "guest_port": p.guest_port,
         })).collect::<Vec<_>>(),
-        "readiness_contracts": intent.readiness_http_path.as_ref().map(|path| vec![serde_json::json!({
+        "readiness_contracts": readiness.map(|path| vec![serde_json::json!({
             "kind": "http", "port_name": "http", "path": path,
         })]).unwrap_or_default(),
-        "state_slot_declarations": intent.state_slots.iter().map(|(key, mount)| serde_json::json!({
-            "state_key": key, "mount_target": mount,
+        "state_slot_declarations": planned.derivation.state.iter().filter(|_| plan.lane.is_process()).map(|slot| serde_json::json!({
+            "state_key": slot.id, "mount_target": slot.mount,
             "access": "read_write", "protocol": "ato.state.filesystem@1",
         })).collect::<Vec<_>>(),
         "binding_requirements": [],
@@ -708,7 +703,7 @@ fn compose_result(
             },
             // What was ACTUALLY in force, so a later reader can tell whether
             // this artifact was built under isolation.
-            "isolation": if intent.lane == Lane::StaticWeb && plan.steps.is_empty() { "static-loopback;no-build" } else { network.provenance() },
+            "isolation": if plan.lane == Lane::StaticWeb && plan.actions.is_empty() { "static-loopback;no-build" } else { network.provenance() },
             "field_origins": {},
         },
         "diagnostics": [],

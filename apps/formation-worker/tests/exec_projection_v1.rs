@@ -11,7 +11,6 @@ use std::collections::BTreeMap;
 use ato_formation::capsule_toml::parse_capsule_toml;
 use ato_formation::detect::detect;
 use ato_formation::failure::FormationFailure;
-use ato_formation::intent::DependencyPlan;
 use ato_formation::source::{RESOLVER_CONTRACT_V1, SourceClosureRef};
 use ato_formation_worker::job::{PlannedCandidate, plan_candidate};
 
@@ -128,19 +127,28 @@ const PYTHON_SOURCE: &[(&str, &str)] = &[
 #[test]
 fn exec_steps_run_in_authored_order_after_the_platform_prerequisites() {
     let planned = plan(&route(&[INSTALL, GENERATE, SERVE]), PYTHON_SOURCE).expect("plans");
-    let names: Vec<_> = planned.plan.steps.iter().map(|s| s.name.as_str()).collect();
+    let names: Vec<_> = planned
+        .plan
+        .steps(&planned.derivation)
+        .unwrap()
+        .iter()
+        .map(|s| s.name.clone())
+        .collect();
     // The interpreter is a platform prerequisite; the install is the
     // author's. The platform's own `create-site-packages` / `pip-install`
     // are NOT planned beside it: one install of one graph.
     assert_eq!(names, ["provision-python", "install", "generate"]);
-    assert_eq!(planned.intent.dependencies, DependencyPlan::Authored);
+    assert!(planned.plan.actions.iter().any(|action| matches!(
+        action,
+        ato_formation::execution::BuildAction::Authored { .. }
+    )));
 
-    let install = &planned.plan.steps[1];
+    let install = &planned.plan.steps(&planned.derivation).unwrap()[1];
     assert!(install.needs_network);
     assert_eq!(install.cwd_relative, "");
     assert!(install.env.is_empty());
 
-    let generate = &planned.plan.steps[2];
+    let generate = &planned.plan.steps(&planned.derivation).unwrap()[2];
     // The argv array as written: four elements, the one with a space and the
     // empty one intact. Never joined into a line and split again.
     assert_eq!(
@@ -163,7 +171,13 @@ fn exec_steps_run_in_authored_order_after_the_platform_prerequisites() {
 #[test]
 fn without_exec_the_platform_still_installs_the_dependencies() {
     let planned = plan(&route(&[SERVE]), PYTHON_SOURCE).expect("plans");
-    let names: Vec<_> = planned.plan.steps.iter().map(|s| s.name.as_str()).collect();
+    let names: Vec<_> = planned
+        .plan
+        .steps(&planned.derivation)
+        .unwrap()
+        .iter()
+        .map(|s| s.name.clone())
+        .collect();
     assert_eq!(
         names,
         ["provision-python", "create-site-packages", "pip-install"]
@@ -223,10 +237,24 @@ fn an_authored_static_build_is_the_only_build() {
         ],
     )
     .expect("plans");
-    let names: Vec<_> = planned.plan.steps.iter().map(|s| s.name.as_str()).collect();
+    let names: Vec<_> = planned
+        .plan
+        .steps(&planned.derivation)
+        .unwrap()
+        .iter()
+        .map(|s| s.name.clone())
+        .collect();
     assert_eq!(names, ["build"]);
-    assert_eq!(planned.intent.static_build, None);
-    assert_eq!(planned.plan.output_root, "dist");
+    assert!(!planned.plan.actions.iter().any(|action| matches!(action, ato_formation::execution::BuildAction::Prerequisite(step) if step.name == "static-build")));
+    assert_eq!(
+        planned
+            .plan
+            .serving(&planned.derivation)
+            .root
+            .as_deref()
+            .unwrap_or_default(),
+        "dist"
+    );
 }
 
 // ── ordering ────────────────────────────────────────────────────────────────
@@ -291,7 +319,8 @@ fn only_an_exec_step_declares_a_network() {
 fn every_part_of_an_exec_step_is_part_of_the_derivation() {
     let base = plan(&route(&[INSTALL, GENERATE, SERVE]), PYTHON_SOURCE)
         .expect("plans")
-        .derivation_ref;
+        .derivation_ref
+        .clone();
     let variants = [
         ("argv", GENERATE.replace("\"a b\"", "\"a  b\"")),
         ("cwd", GENERATE.replace("cwd = \"tools\"", "cwd = \"lib\"")),
@@ -307,7 +336,8 @@ fn every_part_of_an_exec_step_is_part_of_the_derivation() {
     for (what, generate) in variants {
         let changed = plan(&route(&[INSTALL, &generate, SERVE]), PYTHON_SOURCE)
             .expect("plans")
-            .derivation_ref;
+            .derivation_ref
+            .clone();
         assert_ne!(
             changed, base,
             "a {what} change left the DerivationRef as it was"
@@ -316,7 +346,8 @@ fn every_part_of_an_exec_step_is_part_of_the_derivation() {
     // Order is part of the route too.
     let swapped = plan(&route(&[GENERATE, INSTALL, SERVE]), PYTHON_SOURCE)
         .expect("plans")
-        .derivation_ref;
+        .derivation_ref
+        .clone();
     assert_ne!(swapped, base);
 }
 
@@ -345,6 +376,6 @@ fn the_plan_does_not_flow_back_into_the_derivation() {
         plan_candidate(&draft, &closure, &evidence, BTreeMap::new(), "/app", triple).expect("plans")
     };
     let (x86, arm) = (on("x86_64-linux-gnu"), on("aarch64-linux-gnu"));
-    assert_ne!(x86.plan_digest, arm.plan_digest);
+    assert_ne!(x86.plan, arm.plan);
     assert_eq!(x86.derivation_ref, arm.derivation_ref);
 }

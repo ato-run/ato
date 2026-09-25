@@ -199,10 +199,22 @@ impl Launch {
     }
 
     fn launch(&self) -> anyhow::Result<TemporaryRealization> {
+        let derivation = legacy_execution::derivation(Some(&self.intent));
+        let plan = ato_formation::execution::ExecutionPlan {
+            lane: self.intent.lane,
+            serving_step: 0,
+            workspace_guest_root: "/app".into(),
+            toolchains: self.intent.runtime.clone(),
+            package_manager: None,
+            actions: vec![],
+            toolchain_path: vec![],
+            environment_bindings: BTreeMap::new(),
+        };
         TemporaryRealization::launch(&TemporaryRealizationRequest {
             workspace: self.source.path(),
             scratch: &self.realization_scratch(),
-            intent: &self.intent,
+            derivation: &derivation,
+            plan: &plan,
             ports: &self.ports,
             shim: &shim(),
             attempt_id: "test",
@@ -593,7 +605,17 @@ fn a_relative_scratch_path_still_realizes() {
     let realization = TemporaryRealization::launch(&TemporaryRealizationRequest {
         workspace: launch.source.path(),
         scratch: &relative,
-        intent: &launch.intent,
+        derivation: &legacy_execution::derivation(Some(&launch.intent)),
+        plan: &ato_formation::execution::ExecutionPlan {
+            lane: launch.intent.lane,
+            serving_step: 0,
+            workspace_guest_root: "/app".into(),
+            toolchains: Default::default(),
+            package_manager: None,
+            actions: vec![],
+            toolchain_path: vec![],
+            environment_bindings: Default::default(),
+        },
         ports: &launch.ports,
         shim: &shim(),
         attempt_id: "relative",
@@ -604,3 +626,6 @@ fn a_relative_scratch_path_still_realizes() {
     assert!(!absolute.exists());
     assert_gone(&marker("relative"));
 }
+
+#[path = "support/legacy_execution.rs"]
+mod legacy_execution;
