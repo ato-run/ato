@@ -5,18 +5,19 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use ato_formation::authoring::{
-    ClientAddressTransport, HTTP_CONTRACT_VERIFIER, HTTP_PROTOCOL, StateAccess,
-};
+use ato_formation::authoring::{ClientAddressTransport, HTTP_PROTOCOL, StateAccess};
 use ato_formation::verify::{
-    ContractVerificationReceipt, RuntimeHttpObservation, RuntimeObservation,
-    VerificationExecutionEvidence, VerificationTargetKind, verify_runtime,
+    ContractVerificationReceipt, RuntimeHttpObservation, VerificationExecutionEvidence,
+    VerificationTargetKind,
 };
 use ato_materializer_static_web::{
     STATIC_WEB_MANIFEST_V1_SCHEMA, StaticWebFileV1, StaticWebManifestV1, StaticWebRoutingV1,
     StaticWebSecurityV1,
 };
 use ato_objects::{PortableDependencyProfile, PortableOciArchive};
+use ato_runtime_attempt::verification::{
+    HTTP_OBSERVATION_METHOD, ReceiptContext, required_http_observations, verify_observed_candidate,
+};
 use base64::Engine;
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::header::HeaderValue;
@@ -150,38 +151,38 @@ impl ValidatorAgent {
         }
     }
 
+    /// Verify a Run the Hosted runtime already started and still owns: observe
+    /// it through the API and decide K with the Runtime's common verification.
+    /// Nothing here starts, stops or cleans up the candidate; the receipt says
+    /// what this observation of it established, and nothing about its lifecycle.
     fn verify_hosted(&self, job: ValidationJob) -> Result<ValidatorRunOutcome> {
         let bytes = self.api.download(&job)?;
         if bytes.len() as u64 != job.size_bytes {
             bail!("bundle size mismatch");
         }
-        if bundle_sha256(&bytes) != job.transport_digest {
+        let transport = bundle_sha256(&bytes);
+        if transport != job.transport_digest {
             bail!("bundle transport digest mismatch");
         }
         let selected_derivation_ref = job
             .selected_derivation_ref
             .as_deref()
             .context("runtime job omitted selected_derivation_ref")?;
+        // K, D and the workspace identity are the validated bundle's. The job
+        // only selects one of the bundle's declared Derivations and reports the
+        // Instance snapshot the Hosted Run restored, which K's snapshot
+        // observation is decided against.
         let (_, validated) = validate_bytes_for_derivation(&bytes, selected_derivation_ref)?;
-        let mut runtime = RuntimeObservation {
-            input_refs: validated
-                .derivation
-                .inputs
-                .iter()
-                .map(|input| (input.id.clone(), input.content_ref.clone()))
-                .collect::<BTreeMap<_, _>>(),
-            http: Vec::new(),
-            instance_snapshot_ref: job.instance_snapshot_ref.clone(),
-        };
-        for requirement in &validated.contract.requirements {
-            if requirement.verifier != HTTP_CONTRACT_VERIFIER {
-                continue;
-            }
-            let port = requirement.port.as_deref().unwrap_or_default();
-            let method = requirement.method.as_deref().unwrap_or("GET");
-            let path = requirement.path.as_deref().unwrap_or("/");
-            let observed = self.api.observe(&job, port, method, path)?;
-            runtime.http.push(RuntimeHttpObservation::from_response(
+        let spec = validated.attempt_spec(job.instance_snapshot_ref.as_deref());
+        let mut http = Vec::new();
+        for required in required_http_observations(&spec) {
+            let observed = self.api.observe(
+                &job,
+                &required.port_id,
+                HTTP_OBSERVATION_METHOD,
+                &required.path,
+            )?;
+            http.push(RuntimeHttpObservation::from_response(
                 observed.port,
                 observed.method,
                 observed.path,
@@ -189,16 +190,6 @@ impl ValidatorAgent {
                 &observed.body,
             ));
         }
-        let verification = verify_runtime(&validated.contract, &runtime);
-        let mut receipt = ContractVerificationReceipt::from_runtime(
-            &job.transport_digest,
-            validated.contract_ref.to_string(),
-            validated.derivation_ref.to_string(),
-            VerificationTargetKind::AtoRunHosted,
-            &validated.contract,
-            &runtime,
-            verification,
-        );
         let mut execution =
             job.execution_evidence
                 .clone()
@@ -224,14 +215,25 @@ impl ValidatorAgent {
                     services: Vec::new(),
                 });
         execution.endpoint = job.endpoint.clone();
-        execution.run_id = job.run_id.clone();
         execution.lease_id = job.lease_id.clone();
         execution.attempt_id = job.attempt_id.clone();
-        receipt.execution = Some(execution);
-        self.api.ack_runtime(&job, &receipt)?;
+        let point = verify_observed_candidate(
+            &spec,
+            http,
+            execution,
+            &ReceiptContext {
+                target: VerificationTargetKind::AtoRunHosted,
+                bundle_sha256: Some(&transport),
+                // The Hosted receipt is schema /1: it names no dependency
+                // profile, whatever the transport declares.
+                portability_profile: None,
+                run_id: job.run_id.as_deref(),
+            },
+        );
+        self.api.ack_runtime(&job, &point.receipt)?;
         Ok(ValidatorRunOutcome::HostedVerified {
             bundle_id: job.bundle_id,
-            fully_satisfied: receipt.fully_satisfied,
+            fully_satisfied: point.receipt.fully_satisfied,
         })
     }
 
