@@ -39,6 +39,7 @@ impl TreePacker for Packer {
 struct ApiFixture {
     url: String,
     result: Arc<Mutex<Option<Value>>>,
+    report: Arc<Mutex<Option<Value>>>,
     stopped: Arc<AtomicBool>,
     task: Option<thread::JoinHandle<()>>,
 }
@@ -49,22 +50,36 @@ impl ApiFixture {
         let url = format!("http://{}", listener.local_addr().unwrap());
         let result = Arc::new(Mutex::new(None));
         let captured = result.clone();
+        let report = Arc::new(Mutex::new(None));
+        let reported = report.clone();
         let stopped = Arc::new(AtomicBool::new(false));
         let stop = stopped.clone();
         let task = thread::spawn(move || {
-            while !stop.load(Ordering::SeqCst) {
+            'accept: while !stop.load(Ordering::SeqCst) {
                 let Ok((mut stream, _)) = listener.accept() else {
                     thread::sleep(Duration::from_millis(5));
                     continue;
                 };
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(10)))
                     .unwrap();
                 let mut bytes = Vec::new();
                 let mut chunk = [0; 4096];
                 let end = loop {
-                    let count = stream.read(&mut chunk).unwrap();
-                    assert_ne!(count, 0);
+                    let count = match stream.read(&mut chunk) {
+                        Ok(0) => continue 'accept,
+                        Ok(count) => count,
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                            ) =>
+                        {
+                            continue 'accept;
+                        }
+                        Err(error) => panic!("fixture read: {error}"),
+                    };
                     bytes.extend_from_slice(&chunk[..count]);
                     if let Some(pos) = bytes.windows(4).position(|s| s == b"\r\n\r\n") {
                         break pos + 4;
@@ -91,7 +106,12 @@ impl ApiFixture {
                             .clone(),
                     );
                 }
-                let status = if fail_upload && !is_result {
+                let is_report = header.contains("/outcome HTTP/");
+                if is_report {
+                    *reported.lock().unwrap() =
+                        Some(serde_json::from_slice::<Value>(&bytes[end..end + len]).unwrap());
+                }
+                let status = if fail_upload && !is_result && !is_report {
                     "503 Unavailable"
                 } else {
                     "200 OK"
@@ -107,6 +127,7 @@ impl ApiFixture {
         Self {
             url,
             result,
+            report,
             stopped,
             task: Some(task),
         }
@@ -126,13 +147,21 @@ fn scratch_dir() -> tempfile::TempDir {
 }
 
 fn hosted(fail_upload: bool, wrong_status: bool, process: Option<&str>) -> Value {
+    hosted_with_fault(fail_upload, wrong_status, process, None)
+}
+fn hosted_with_fault(
+    fail_upload: bool,
+    wrong_status: bool,
+    process: Option<&str>,
+    fault: Option<&str>,
+) -> Value {
     let source = scratch_dir();
     std::fs::write(
         source.path().join("index.html"),
         "<h1>Hosted common attempt</h1>",
     )
     .unwrap();
-    if wrong_status {
+    if wrong_status || fault == Some("effect") {
         std::fs::write(
             source.path().join("capsule.toml"),
             r#"
@@ -220,6 +249,17 @@ status = 200
         std::fs::write(source.path().join("capsule.toml"), manifest).unwrap();
         std::fs::write(source.path().join(filename), source_code).unwrap();
     }
+    if fault == Some("effect") {
+        let path = source.path().join("capsule.toml");
+        let manifest = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("status = 201", "status = 200");
+        std::fs::write(
+            path,
+            format!("{manifest}\n[effects]\ndefault = \"non-repeatable\"\n"),
+        )
+        .unwrap();
+    }
     let fetcher = Fetcher {
         bytes: ato_formation_worker::pack::pack_tree(source.path()).unwrap(),
         calls: AtomicUsize::new(0),
@@ -247,14 +287,100 @@ status = 200
         attempt_fence: 1,
     };
     let job = json!({"job_id":"hosted_job", "source":{"subdirectory":""}, "target":{"triple":if process.is_some() {"aarch64-linux-gnu"} else {"wasm32-browser"}, "workspace_guest_root":"/app"}, "policy":{"network":if process.is_some() {"dependency_resolution"} else {"denied"}}});
-    let outcome = run_claimed_job(
+    use ato_runtime_attempt::journal::{AttemptJournal, AttemptLedger};
+    let journal = AttemptJournal::new(scratch.path().join("attempt-records"));
+    if fault == Some("history") {
+        let mut permit = journal.acquire("hosted_job", "hosted_attempt").unwrap();
+        drop(
+            permit
+                .start(ato_runtime_attempt::journal::StartIdentity {
+                    contract_ref: "K".into(),
+                    derivation_ref: "D".into(),
+                    runtime_id: "old".into(),
+                    effects: "pure".into(),
+                    network: "denied".into(),
+                    authorization: "unattended".into(),
+                })
+                .unwrap(),
+        );
+    }
+    let failing = FinishFails(AttemptJournal::new(scratch.path().join("attempt-records")));
+    let unreadable = Unreadable;
+    let ledger: &dyn AttemptLedger = match fault {
+        Some("finish") => &failing,
+        Some("unreadable") => &unreadable,
+        _ => &journal,
+    };
+    let outcome = ato_formation_worker::job::run_claimed_job_with_ledger(
         &context,
         &attempt,
         &job,
         "compute_test",
         "revision_test",
         false,
+        ledger,
     );
+    if let Err(error) = &outcome {
+        let report = ato_formation_worker::api::classify_failure(error);
+        api.report_failure(&attempt.attempt_id, &report).unwrap();
+        let report = server
+            .report
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("typed outcome endpoint");
+        let name = if fail_upload {
+            "upload"
+        } else if wrong_status {
+            "verification"
+        } else {
+            fault.unwrap_or("unexpected")
+        };
+        if let Ok(dir) = std::env::var("HOSTED_REPORT_FIXTURES") {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                Path::new(&dir).join(format!("{name}.json")),
+                serde_json::to_vec_pretty(&report).unwrap(),
+            )
+            .unwrap();
+        }
+        match name {
+            "effect" => {
+                assert_eq!(report["code"], "effect_policy");
+                assert_eq!(report["attempt_record"], "not_started");
+            }
+            "verification" => {
+                assert_eq!(report["stage"], "verification");
+                assert_eq!(report["receipt"]["fully_satisfied"], false);
+            }
+            "upload" => {
+                assert_eq!(report["code"], "artifact_store_failed");
+                assert_eq!(
+                    report["outcomes"]["runtime_verification"]["state"],
+                    "succeeded"
+                );
+            }
+            "finish" | "history" => assert_eq!(report["attempt_record"], "started_unfinished"),
+            "unreadable" => assert_eq!(report["attempt_record"], "history_unavailable"),
+            _ => panic!("{error:#}"),
+        }
+        if fault.is_some() {
+            if name != "unreadable" {
+                assert!(
+                    run_claimed_job(
+                        &context,
+                        &attempt,
+                        &job,
+                        "compute_test",
+                        "revision_test",
+                        false
+                    )
+                    .is_err()
+                );
+            }
+            return report;
+        }
+    }
     let path = scratch.path().join("hosted_attempt/hosted-outcome.json");
     assert!(path.exists(), "outcome missing: {outcome:?}");
     let record: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
@@ -281,6 +407,14 @@ status = 200
                 .starts_with("v2:sha256:")
         );
         assert_eq!(result["verification_receipt"], record["attempt"]["receipt"]);
+        if let Ok(dir) = std::env::var("HOSTED_RESULT_FIXTURES") {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                Path::new(&dir).join(format!("{}-result.json", process.unwrap_or("static"))),
+                serde_json::to_vec_pretty(&result).unwrap(),
+            )
+            .unwrap();
+        }
         // Test-only export: the shared golden originates from a real observation.
         if process.is_none()
             && let Ok(path) = std::env::var("HOSTED_V2_GOLDEN_OUTPUT")
@@ -363,4 +497,54 @@ fn hosted_v2_golden_is_shared_with_the_receiver() {
         execution.attempt_id.as_deref(),
         result["attempt_id"].as_str()
     );
+}
+
+use ato_runtime_attempt::journal::{
+    AttemptJournal, AttemptLedger, AttemptPermit, BeginRefusal, StartIdentity, StartedRecord,
+};
+struct FinishFails(AttemptJournal);
+struct FinishFailsPermit(Box<dyn AttemptPermit>);
+struct Unfinishable;
+impl StartedRecord for Unfinishable {
+    fn finish(self: Box<Self>, _: &str) -> Result<()> {
+        anyhow::bail!("injected finish storage failure")
+    }
+}
+impl AttemptPermit for FinishFailsPermit {
+    fn start(
+        &mut self,
+        id: StartIdentity,
+    ) -> std::result::Result<Box<dyn StartedRecord>, BeginRefusal> {
+        drop(self.0.start(id)?);
+        Ok(Box::new(Unfinishable))
+    }
+}
+impl AttemptLedger for FinishFails {
+    fn acquire(
+        &self,
+        request: &str,
+        attempt: &str,
+    ) -> std::result::Result<Box<dyn AttemptPermit>, BeginRefusal> {
+        self.0
+            .acquire(request, attempt)
+            .map(|p| Box::new(FinishFailsPermit(p)) as Box<dyn AttemptPermit>)
+    }
+}
+struct Unreadable;
+impl AttemptLedger for Unreadable {
+    fn acquire(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> std::result::Result<Box<dyn AttemptPermit>, BeginRefusal> {
+        Err(BeginRefusal::HistoryUnavailable {
+            reason: "injected unreadable journal".into(),
+        })
+    }
+}
+#[test]
+fn hosted_report_preserves_admission_and_journal_uncertainty() {
+    for fault in ["effect", "finish", "history", "unreadable"] {
+        hosted_with_fault(false, false, None, Some(fault));
+    }
 }
