@@ -1,9 +1,11 @@
 {
-  "attempt-result-blocked-by-unknown": "sha256:79495d0bba98cf32abca69d116f2ecf2e684c54291baf929ce0707fbf3c06892",
-  "attempt-result-finished": "sha256:8aeeaf0ecd783641fa5293e3aa8f9935ba8a3ed4f8675fcadd182d0bc2be94ec",
-  "attempt-result-history-unavailable": "sha256:05b32cb68c44a884f2179cdde5e7a7c71c70eb3d1b711bd0f3ff01591275db6d",
-  "attempt-result-not-started": "sha256:9445375d2bff265c8723d685ff2eca70963efc315b811d4cc14e229ede6c067b",
-  "attempt-result-started-unfinished": "sha256:006a360db38f6971cce3ac4dfd745059bbf66ce89719dd889e434d893c474c1f",
-  "satisfy-request": "sha256:d4ec90f3fd12d080db7b1b3847f112949aebeccbe3aa198ff430c36255a061d1",
+  "attempt-result-blocked-by-unknown": "sha256:2d61bf6367bba879266917de52d17272df665b03c0ec1b291955613294708450",
+  "attempt-result-finished": "sha256:7b8dcc636a0ef12fe8b5ef90b8b132719d7fa7368cada10b5d4662df072b10f3",
+  "attempt-result-history-unavailable": "sha256:7120824a8654e6b37e2bf3b4f9692b3a302ef046056eb056b62d01b7c0758d06",
+  "attempt-result-not-started": "sha256:c952484ba0cb6c477bdadbfd7d77c679d604a84b0edd18b6f903c246dbea97f6",
+  "attempt-result-started-unfinished": "sha256:cf004551ae96c56c535dc95736cc77824cf9c851d83978d6213db11cd8fc7610",
+  "attempt-ticket": "sha256:08f79926cb3c805a73e150f934f26e6e3f0f04a6f541a74bf4f71a7756123ee4",
+  "satisfy-request": "sha256:0d84166bcebf7ce9af625f78e991a78de124bf19a99c9d325f7948a7673e9637",
+  "search-budget-ceilings": "sha256:be14883c8e09954026574ee2c54394f18a712d67bbe750a95a750a104596f673",
   "unknown-resolution": "sha256:4dff1d30e21e6f764175e3a317a49d978324525a5b9f998521ce572f06270061"
 }
