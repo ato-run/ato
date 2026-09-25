@@ -190,6 +190,7 @@ name = "ato-adapter-process"
 version = "0.1.0"
 dependencies = [
  "ato-adapter-api",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",

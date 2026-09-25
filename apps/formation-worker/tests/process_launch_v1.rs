@@ -87,7 +87,8 @@ fn a_launched_workload_actually_runs_and_stops() {
         argv: vec![
             "/bin/sh".to_owned(),
             "-c".to_owned(),
-            "sleep 30".to_owned(),
+            "test \"$APP_SECRET_KEY\" = hunter2 && touch /data/secret-available && sleep 30"
+                .to_owned(),
             marker.clone(),
         ],
         executable: None,
@@ -109,7 +110,10 @@ fn a_launched_workload_actually_runs_and_stops() {
 
     // The workload itself is running — not a shim that exited on arrival.
     let deadline = Instant::now() + Duration::from_secs(5);
-    while processes_matching(&marker).is_empty() {
+    while !state_working_copy(&workspace, "app_data")
+        .join("secret-available")
+        .exists()
+    {
         assert!(Instant::now() < deadline, "the workload never started");
         std::thread::sleep(Duration::from_millis(50));
     }

@@ -16,13 +16,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use ato_ipc::runtime_launch::{RuntimeLaunchSpecV1, StateAttachmentV1};
+use ato_ipc::runtime_launch::StateAttachmentV1;
 use ato_ipc::runtime_launch_v3::RunnerVolumeBackingV3;
 
-use super::process_executor::{
-    LaunchedProcess, ReadinessProbe, launch_process, state_working_copy, wait_until_ready,
-    writable_state_keys,
-};
+use super::process_executor::{state_working_copy, writable_state_keys};
 use super::resolved::ResolvedRuntimeLaunchContext;
 use super::state_artifact::{
     StateArtifactTransport, StateWriterGrant, VolumeReport, materialize_working_copy,
@@ -399,60 +396,6 @@ pub fn commit_run(
     Ok(outcomes)
 }
 
-/// Prepare, launch and wait for readiness.
-pub fn start_run(
-    spec: &RuntimeLaunchSpecV1,
-    context: &ResolvedRuntimeLaunchContext,
-    transport: &dyn StateArtifactTransport,
-    probe: &dyn ReadinessProbe,
-) -> Result<(PreparedRun, LaunchedProcess)> {
-    let prepared = prepare_run(
-        &spec.state_attachments,
-        context,
-        transport,
-        &BTreeMap::new(),
-    )?;
-    let mut launched = match launch_process(spec, context) {
-        Ok(launched) => launched,
-        Err(error) => {
-            // Spawn failure is the easiest path to a permanently stuck slot:
-            // the Run never existed, so nothing else would ever release it.
-            abort_run(transport, &prepared);
-            return Err(error);
-        }
-    };
-    match wait_until_ready(spec, context, &mut launched, probe) {
-        Ok(()) => Ok((prepared, launched)),
-        Err(error) => {
-            // A workload that never became ready still gets stopped AND still
-            // gives its slots back. Leaving either behind turns one failed Run
-            // into an App that can never start again.
-            let _ = launched.stop(&spec.lifecycle);
-            abort_run(transport, &prepared);
-            Err(error)
-        }
-    }
-}
-
-/// Stop the workload and commit what it wrote.
-pub fn finish_run(
-    spec: &RuntimeLaunchSpecV1,
-    context: &ResolvedRuntimeLaunchContext,
-    transport: &dyn StateArtifactTransport,
-    prepared: &PreparedRun,
-    launched: LaunchedProcess,
-    commit_request_id: &str,
-) -> Result<Vec<RunStateOutcome>> {
-    if let Err(error) = launched.stop(&spec.lifecycle) {
-        // The subtree may still be alive, so packing is refused — but the
-        // slot is still given back, because a stuck slot would outlive the
-        // stuck process.
-        abort_run(transport, prepared);
-        return Err(error);
-    }
-    commit_run(context, transport, prepared, commit_request_id)
-}
-
 /// The working copy of a state key, for a caller that needs to inspect it.
 pub fn working_copy(workspace_root: &Path, state_key: &str) -> PathBuf {
     state_working_copy(workspace_root, state_key)
@@ -465,12 +408,78 @@ mod tests {
 
     use ato_ipc::runtime_launch::{
         EndpointAllocationV1, EndpointV1, LaunchRealizationV1, ProcessRealizationV1, ReadinessV1,
-        StateAccessV1, StateAttachmentV1,
+        RuntimeLaunchSpecV1, StateAccessV1, StateAttachmentV1,
     };
 
+    use super::super::lease::{ActiveRun, ActiveWorkload, ResolvedRun};
+    use super::super::process_executor::{ProcessLaunchHost, ReadinessProbe};
     use super::super::resolved::{ResolvedStateAttachment, allocate_endpoint};
     use super::super::state_artifact::{StateArtifact, state_artifact_digest};
     use super::*;
+
+    // Exercise the Hosted production lifecycle, not a second start/finish
+    // implementation maintained solely for these state tests.
+    fn start_run(
+        spec: &RuntimeLaunchSpecV1,
+        context: ResolvedRuntimeLaunchContext,
+        transport: &dyn StateArtifactTransport,
+        probe: &dyn ReadinessProbe,
+    ) -> Result<ActiveRun> {
+        let prepared = prepare_run(
+            &spec.state_attachments,
+            &context,
+            transport,
+            &BTreeMap::new(),
+        )?;
+        let host = ProcessLaunchHost {
+            shim: std::env::var_os("ATO_TEST_WORKER_BIN")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::current_exe().expect("test executable")),
+            runtime_root: context.workspace_root().join(".ato/test-runtime"),
+            output: None,
+        };
+        let endpoint_ports = context
+            .endpoints()
+            .iter()
+            .map(|p| (p.name.clone(), p.host_port))
+            .collect();
+        super::super::lease::start(
+            &ato_ipc::runtime_launch_v2::RuntimeLaunchSpec::V1(spec.clone()),
+            ResolvedRun {
+                context,
+                prepared,
+                endpoint_ports,
+            },
+            transport,
+            probe,
+            &ato_adapter_oci::OciOwner {
+                runner_id: "test-runner".into(),
+                slot_id: "test-slot".into(),
+                lease_id: spec.context.run_id.clone(),
+                run_id: spec.context.run_id.clone(),
+                incarnation: "test-incarnation".into(),
+            },
+            None,
+            &host,
+        )
+        .map_err(anyhow::Error::new)
+    }
+
+    fn finish_run(
+        spec: &RuntimeLaunchSpecV1,
+        transport: &dyn StateArtifactTransport,
+        active: ActiveRun,
+        request: &str,
+    ) -> Result<Vec<RunStateOutcome>> {
+        let (stop, result) = super::super::lease::finish(
+            &ato_ipc::runtime_launch_v2::RuntimeLaunchSpec::V1(spec.clone()),
+            active,
+            transport,
+            request,
+        );
+        assert!(stop.overall.is_confirmed(), "{stop:?}");
+        result
+    }
 
     /// A control plane, reduced to the two rules that matter: revisions are
     /// immutable, and a stale fence cannot commit.
@@ -720,12 +729,12 @@ while True:
     /// previous Run's directory back. That is the whole point: if the second
     /// Run reused the first one's disk, the test would pass without any state
     /// ever being committed or restored.
-    fn run_once(
-        plane: &FakeControlPlane,
-        run_id: &str,
-        note: &str,
-        port: u16,
-    ) -> (Vec<RunStateOutcome>, u32) {
+    fn run_once(plane: &FakeControlPlane, run_id: &str, note: &str) -> (Vec<RunStateOutcome>, u32) {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("dedicated test port")
+            .local_addr()
+            .unwrap()
+            .port();
         let workspace = tempfile::tempdir().expect("tempdir");
         let context = context_for(workspace.path(), port);
         let grant_fence = {
@@ -734,25 +743,21 @@ while True:
         };
         let spec = spec_for(run_id, Some(grant_fence), note, port);
 
-        let (prepared, launched) = start_run(
+        let active = start_run(
             &spec,
-            &context,
+            context,
             plane,
             &super::super::process_executor::LoopbackReadinessProbe::new(
                 reqwest::blocking::Client::new(),
             ),
         )
         .expect("run starts");
-        let pid = launched.pid();
-        let outcomes = finish_run(
-            &spec,
-            &context,
-            plane,
-            &prepared,
-            launched,
-            &format!("commit_{run_id}"),
-        )
-        .expect("run commits");
+        let pid = match &active.launched {
+            ActiveWorkload::Process(p) => p.pid(),
+            _ => panic!("process"),
+        };
+        let outcomes =
+            finish_run(&spec, plane, active, &format!("commit_{run_id}")).expect("run commits");
         (outcomes, pid)
     }
 
@@ -771,7 +776,7 @@ while True:
         }
         let plane = FakeControlPlane::default();
 
-        let (first, first_pid) = run_once(&plane, "run_first", "from-run-1", 39_101);
+        let (first, first_pid) = run_once(&plane, "run_first", "from-run-1");
         assert_eq!(
             first[0].parent_revision_ref, None,
             "a first Run has no parent"
@@ -779,7 +784,7 @@ while True:
         assert_eq!(first[0].revision_ref.as_deref(), Some("isrev_1"));
         assert_eq!(first[0].writer_fence, 1);
 
-        let (second, second_pid) = run_once(&plane, "run_second", "from-run-2", 39_102);
+        let (second, second_pid) = run_once(&plane, "run_second", "from-run-2");
         // Different Run, different process...
         assert_ne!(first_pid, second_pid);
         // ...advanced fence...
@@ -823,7 +828,23 @@ while True:
             .expect("prepared");
         assert_eq!(prepared.writer_fences().get("app_data"), Some(&1));
 
-        quarantine_run(&plane, &prepared, "container still running after SIGKILL");
+        let unconfirmed = ato_adapter_oci::StopOutcome::Unconfirmed {
+            reason: "process group survived".into(),
+        };
+        let (_, committed) = super::super::lease::settle_stopped_run(
+            super::super::lease::FinishedStop {
+                overall: unconfirmed.clone(),
+                services: vec![("process".into(), unconfirmed)],
+            },
+            ResolvedRun {
+                context,
+                prepared,
+                endpoint_ports: BTreeMap::new(),
+            },
+            &plane,
+            "must-not-commit",
+        );
+        assert!(committed.is_err());
 
         let inner = plane.inner.lock().expect("lock");
         // Held, quarantined, and neither released nor aborted: a new writer
@@ -858,7 +879,7 @@ while True:
             return;
         }
         let plane = FakeControlPlane::default();
-        run_once(&plane, "run_write", "only-row", 39_103);
+        run_once(&plane, "run_write", "only-row");
 
         // A Run that touches nothing: same App, same state, no new bytes.
         let workspace = tempfile::tempdir().expect("tempdir");
@@ -870,10 +891,8 @@ while True:
         });
         // Nothing to serve, so readiness is the weakest form.
         spec.readiness = ReadinessV1::Process { timeout_ms: 5_000 };
-        let (prepared, launched) =
-            start_run(&spec, &context, &plane, &AlwaysReady).expect("starts");
-        let outcomes = finish_run(&spec, &context, &plane, &prepared, launched, "commit_noop")
-            .expect("commits");
+        let active = start_run(&spec, context, &plane, &AlwaysReady).expect("starts");
+        let outcomes = finish_run(&spec, &plane, active, "commit_noop").expect("commits");
         // Committing anyway would grow the history with a revision that
         // restores to exactly what came before.
         assert_eq!(outcomes[0].revision_ref, None);
@@ -927,7 +946,7 @@ while True:
             argv: Vec::new(),
             executable: None,
         });
-        assert!(start_run(&spec, &context, &plane, &AlwaysReady).is_err());
+        assert!(start_run(&spec, context, &plane, &AlwaysReady).is_err());
 
         let inner = plane.inner.lock().expect("lock");
         assert_eq!(inner.held_by_fence, None, "the slot is still held");
@@ -944,7 +963,7 @@ while True:
             argv: Vec::new(),
             executable: None,
         });
-        assert!(start_run(&spec, &context, &plane, &AlwaysReady).is_err());
+        assert!(start_run(&spec, context, &plane, &AlwaysReady).is_err());
 
         // The acceptance criterion: a DIFFERENT Run can take the same
         // state_key immediately, with an advanced fence.
@@ -973,7 +992,7 @@ while True:
             return;
         }
         let plane = FakeControlPlane::default();
-        run_once(&plane, "run_seed", "only-row", 39_109);
+        run_once(&plane, "run_seed", "only-row");
         let inner = plane.inner.lock().expect("lock");
         // Committed or not, the slot goes back — otherwise a wake that changed
         // nothing would be indistinguishable from a crash.

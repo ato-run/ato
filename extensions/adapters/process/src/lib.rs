@@ -443,13 +443,14 @@ pub fn force_kill_process_tree(pid: u32, process_group: u32) -> Result<(), Proce
 /// disappear" question a supervisor must answer before packing state.
 #[cfg(unix)]
 pub fn process_group_is_alive(process_group: u32) -> bool {
-    Command::new("kill")
-        .args(["-0", "--", &format!("-{process_group}")])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+    let Ok(raw_group) = i32::try_from(process_group) else {
+        return true;
+    };
+    let Some(group) = rustix::process::Pid::from_raw(raw_group) else {
+        return true;
+    };
+    // EPERM and probe errors are not proof of disappearance.
+    rustix::process::test_kill_process_group(group) != Err(rustix::io::Errno::SRCH)
 }
 
 #[cfg(windows)]

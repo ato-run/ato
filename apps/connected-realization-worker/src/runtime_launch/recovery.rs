@@ -288,14 +288,22 @@ pub fn process_start_time(_pid: u32) -> Option<u64> {
 
 /// A recorded process workload is confirmed gone when no process with that
 /// pid AND start time exists. A live pid with a different start time is a
-/// reused pid, not ours, and is never signalled.
+/// reused pid, not ours, and is never signalled. A surviving process group
+/// still prevents release, including after the leader was reaped.
 fn settle_process(identity: &ProcessIdentity) -> StopOutcome {
     match process_start_time(identity.pid) {
-        None => StopOutcome::AlreadyExited { exit_code: -1 },
-        Some(start) if start != identity.start_time => StopOutcome::AlreadyExited { exit_code: -1 },
-        Some(_) => StopOutcome::Unconfirmed {
+        None if !ato_adapter_process::process_group_is_alive(identity.pid) => {
+            StopOutcome::AlreadyExited { exit_code: -1 }
+        }
+        Some(start)
+            if start != identity.start_time
+                && !ato_adapter_process::process_group_is_alive(identity.pid) =>
+        {
+            StopOutcome::AlreadyExited { exit_code: -1 }
+        }
+        _ => StopOutcome::Unconfirmed {
             reason: format!(
-                "process workload {} from a previous Runner incarnation is still alive",
+                "process workload or group {} from a previous Runner incarnation is still alive",
                 identity.pid
             ),
         },
@@ -574,6 +582,32 @@ mod tests {
         assert!(result.clean);
         assert_eq!(reporter.reports.borrow()[0].outcome, "stopped");
         assert!(journal.load().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_reaped_leader_with_live_descendants_is_not_recovered_as_stopped() {
+        use ato_adapter_process::{ProcessAdapter, ProcessSpec};
+        let root = tempfile::tempdir().unwrap();
+        let mut handle = ProcessAdapter::new(ProcessSpec {
+            id: "recovery-orphan".into(),
+            command: vec!["/bin/sh".into(), "-c".into(), "sleep 30 & exit 0".into()],
+            cwd: std::path::PathBuf::new(),
+            environment: BTreeMap::new(),
+            isolated_group: true,
+        })
+        .unwrap()
+        .spawn(root.path())
+        .unwrap();
+        let identity = ProcessIdentity {
+            pid: handle.pid(),
+            start_time: process_start_time(handle.pid()).unwrap_or(0),
+        };
+        handle.wait().unwrap();
+        let stop = settle_process(&identity);
+        // Clean even when the assertion below finds a regression.
+        ato_adapter_process::force_kill_process_tree(identity.pid, identity.pid).unwrap();
+        assert!(!stop.is_confirmed(), "recovery released a surviving group");
     }
 
     #[test]

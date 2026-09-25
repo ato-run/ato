@@ -150,6 +150,7 @@ pub struct LaunchedProcess {
     run_id: String,
     runtime_executable: String,
     runtime_version: Option<String>,
+    stopped: bool,
 }
 
 impl LaunchedProcess {
@@ -200,27 +201,60 @@ impl LaunchedProcess {
     /// forked children — a dev server spawning a reloader — would otherwise
     /// leave them behind.
     pub fn stop(mut self, lifecycle: &ato_ipc::runtime_launch::LifecycleV1) -> Result<StopOutcome> {
+        let outcome = self.stop_owned(lifecycle)?;
+        self.stopped = true;
+        Ok(outcome)
+    }
+
+    fn stop_owned(
+        &mut self,
+        lifecycle: &ato_ipc::runtime_launch::LifecycleV1,
+    ) -> Result<StopOutcome> {
         let group = self.handle.process_group();
         let pid = self.handle.pid();
-
         if let Some(status) = self
             .handle
             .try_wait()
             .context("failed to reap the workload")?
+            && (group == 0 || !process_group_is_alive(group))
         {
-            return finish_stop(group, StopKind::AlreadyExited, Some(status));
+            return Ok(StopOutcome {
+                kind: StopKind::AlreadyExited,
+                exit_status: Some(status),
+            });
         }
-
-        self.handle
-            .terminate()
-            .context("failed to signal the workload")?;
-        if let Some(status) = wait_for_exit(&mut self.handle, lifecycle.graceful_shutdown_ms)? {
-            return finish_stop(group, StopKind::Graceful, Some(status));
+        // A reaped leader does not prove that its descendants stopped.
+        // Signal and wait for the whole owned group even after leader exit.
+        let signalled = self.handle.terminate();
+        if let Some(status) = wait_for_stop(&mut self.handle, lifecycle.graceful_shutdown_ms)? {
+            return Ok(StopOutcome {
+                kind: StopKind::Graceful,
+                exit_status: Some(status),
+            });
         }
-
+        // A failed TERM still allows a bounded KILL attempt; neither signal
+        // result substitutes for the disappearance check below.
+        let _ = signalled;
         force_kill_process_tree(pid, group).context("failed to force-stop the workload")?;
-        let status = wait_for_exit(&mut self.handle, lifecycle.force_kill_after_ms.max(1))?;
-        finish_stop(group, StopKind::Forced, status)
+        let status = wait_for_stop(&mut self.handle, lifecycle.force_kill_after_ms.max(1))?
+            .context("workload or process group survived termination; refusing to pack state")?;
+        Ok(StopOutcome {
+            kind: StopKind::Forced,
+            exit_status: Some(status),
+        })
+    }
+}
+
+impl Drop for LaunchedProcess {
+    fn drop(&mut self) {
+        if !self.stopped {
+            // This owns only physical cleanup. The Hosted caller retains its
+            // writer/lease and recovery authority; Drop cannot commit/release.
+            let _ = self.stop_owned(&ato_ipc::runtime_launch::LifecycleV1 {
+                graceful_shutdown_ms: 100,
+                force_kill_after_ms: 2_000,
+            });
+        }
     }
 }
 
@@ -242,13 +276,15 @@ pub struct StopOutcome {
     pub exit_status: Option<std::process::ExitStatus>,
 }
 
-fn wait_for_exit(
+fn wait_for_stop(
     handle: &mut ProcessHandle,
     budget_ms: u64,
 ) -> Result<Option<std::process::ExitStatus>> {
     let deadline = Instant::now() + Duration::from_millis(budget_ms);
     loop {
-        if let Some(status) = handle.try_wait().context("failed to reap the workload")? {
+        if let Some(status) = handle.try_wait().context("failed to reap the workload")?
+            && (handle.process_group() == 0 || !process_group_is_alive(handle.process_group()))
+        {
             return Ok(Some(status));
         }
         if Instant::now() >= deadline {
@@ -256,29 +292,6 @@ fn wait_for_exit(
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-}
-
-/// Refuse to report a stop the subtree did not honour.
-fn finish_stop(
-    group: u32,
-    kind: StopKind,
-    exit_status: Option<std::process::ExitStatus>,
-) -> Result<StopOutcome> {
-    if group != 0 {
-        // The direct child is reaped by now; this asks about everything it
-        // spawned. Give the kernel a moment to tear the group down first.
-        for _ in 0..50 {
-            if !process_group_is_alive(group) {
-                return Ok(StopOutcome { kind, exit_status });
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        anyhow::bail!(
-            "process group {group} survived termination; refusing to pack state that a live \
-             process may still be writing"
-        );
-    }
-    Ok(StopOutcome { kind, exit_status })
 }
 
 /// Spawn the workload described by `spec`, contained.
@@ -399,6 +412,7 @@ pub fn launch_process_with(
         run_id: spec.context.run_id.clone(),
         runtime_executable,
         runtime_version,
+        stopped: false,
     })
 }
 
@@ -748,6 +762,7 @@ mod tests {
             run_id: spec.context.run_id.clone(),
             runtime_executable: "/bin/true".to_owned(),
             runtime_version: None,
+            stopped: false,
         };
         struct NeverProbed;
         impl ReadinessProbe for NeverProbed {
@@ -813,6 +828,7 @@ mod tests {
             run_id: spec.context.run_id.clone(),
             runtime_executable: "/bin/sleep".to_owned(),
             runtime_version: None,
+            stopped: false,
         };
         struct AlwaysRefused;
         impl ReadinessProbe for AlwaysRefused {
@@ -852,6 +868,75 @@ mod tests {
             workspace_mount_path: None,
         });
         assert!(launch_process(&spec, &fixture.context).is_err());
+    }
+
+    #[cfg(unix)]
+    fn stubborn_group() -> (tempfile::TempDir, LaunchedProcess) {
+        let root = tempfile::tempdir().expect("fixture root");
+        // The leader and its child ignore TERM. Drop and explicit stop
+        // must reach KILL for the whole group.
+        let script = "trap '' TERM; touch ready; sleep 60 & wait";
+        let handle = ProcessAdapter::new(ProcessSpec {
+            id: "owned-stubborn-group".into(),
+            command: vec!["/bin/sh".into(), "-c".into(), script.into()],
+            cwd: PathBuf::new(),
+            environment: BTreeMap::new(),
+            isolated_group: true,
+        })
+        .expect("spec")
+        .spawn(root.path())
+        .expect("spawn");
+        let process = LaunchedProcess {
+            handle,
+            run_id: "owned".into(),
+            runtime_executable: "/bin/sh".into(),
+            runtime_version: None,
+            stopped: false,
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !root.path().join("ready").exists() {
+            assert!(Instant::now() < deadline, "fixture did not start");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        (root, process)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn drop_stops_a_group_which_ignores_term_without_touching_another_run() {
+        let (_first_root, first) = stubborn_group();
+        let (_second_root, mut second) = stubborn_group();
+        let first_group = first.pid();
+        drop(first);
+        assert!(
+            !process_group_is_alive(first_group),
+            "Drop left descendants"
+        );
+        assert!(
+            second.exited().expect("poll").is_none(),
+            "another Run was stopped"
+        );
+        second
+            .stop(&LifecycleV1 {
+                graceful_shutdown_ms: 20,
+                force_kill_after_ms: 2_000,
+            })
+            .expect("second stops");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stopping_a_term_resistant_group_confirms_forced_cessation() {
+        let (_root, process) = stubborn_group();
+        let group = process.pid();
+        let stopped = process
+            .stop(&LifecycleV1 {
+                graceful_shutdown_ms: 20,
+                force_kill_after_ms: 2_000,
+            })
+            .expect("group stopped");
+        assert_eq!(stopped.kind, StopKind::Forced);
+        assert!(!process_group_is_alive(group));
     }
 
     fn spawn_true() -> ProcessHandle {
