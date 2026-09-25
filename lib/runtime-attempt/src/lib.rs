@@ -8,6 +8,10 @@
 //! try, leases and fences, publication, and whether a verified candidate is
 //! stopped or kept afterwards. Those stay with the caller.
 //!
+//! The verification point itself ([`verification`]) is also used by a
+//! caller that observes a candidate it does not run — the Hosted `.capsule`
+//! verifier — so K is decided and receipted the same way for both.
+//!
 //! Layer `runtime`: it may use the lower layers (lib, ipc, adapters,
 //! materializers, objects) and is used by apps. It never depends on an app.
 
@@ -29,3 +33,4 @@ pub mod spec;
 pub mod static_lane;
 pub mod static_server;
 pub mod text;
+pub mod verification;
