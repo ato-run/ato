@@ -24,7 +24,6 @@ use ato_formation_worker::runtime_network::{
     Submission, TicketResourceBudget, UnknownAttempt, execute_ticket, new_search_id,
     prepare_submission,
 };
-use base64::Engine as _;
 
 const STATIC_ROUTE: &str = r#"
 schema = "ato.capsule/1"
@@ -86,13 +85,61 @@ fn submit(dir: &Path, scratch: &Path) -> Submission {
     .expect("the requester plans the route")
 }
 
+#[test]
+fn memory_and_file_source_transport_bind_identical_closure_k_and_d() {
+    use ato_formation::source::{DownloadedArchive, SourceLimits};
+    let dir = site(
+        r#"
+[[contract.require]]
+id = "source-identity"
+use = "ato.contract.workspace@1"
+input = "workspace"
+[contract.require.expect]
+digest = "capture"
+"#,
+    );
+    let scratch = tempfile::tempdir().unwrap();
+    let submission = submit(dir.path(), scratch.path());
+    let mut bytes = Vec::new(); // Small fixture only: exercise the legacy memory API.
+    std::io::Read::read_to_end(&mut submission.source_file().unwrap(), &mut bytes).unwrap();
+    let verified = DownloadedArchive::new(bytes)
+        .verify_archive_digest(&submission.request.source.archive_digest)
+        .unwrap()
+        .verify_tree_digest(None, SourceLimits::default())
+        .unwrap();
+    let closure = verified.closure_ref("").unwrap();
+    assert_eq!(closure.as_str(), submission.request.source.closure_ref);
+    let tree = verified
+        .materialize(
+            &scratch.path().join("legacy-tree"),
+            "",
+            SourceLimits::default(),
+        )
+        .unwrap();
+    let route = std::fs::read_to_string(tree.join("capsule.toml")).unwrap();
+    let draft = ato_formation::capsule_toml::parse_capsule_toml(&route).unwrap();
+    let planned = ato_formation_worker::job::plan_candidate(
+        &draft,
+        &closure,
+        &ato_formation::detect::detect(&tree).unwrap(),
+        BTreeMap::new(),
+        "/app",
+        &ato_formation_worker::local::host_triple(),
+    )
+    .unwrap();
+    assert_eq!(planned.contract_ref, submission.request.base_contract_ref);
+    assert_eq!(
+        planned.derivation_ref,
+        submission.request.authorized_derivations[0].derivation_ref
+    );
+}
+
 /// The ticket a coordinator would issue for the submission's first route.
 fn ticket(submission: &Submission) -> (AttemptTicket, Vec<u8>) {
     let request = &submission.request;
     let route = &request.authorized_derivations[0];
-    let archive = base64::engine::general_purpose::STANDARD
-        .decode(&request.source.archive_base64)
-        .expect("archive");
+    let mut archive = Vec::new();
+    std::io::Read::read_to_end(&mut submission.source_file().unwrap(), &mut archive).unwrap();
     (
         AttemptTicket {
             attempt_id: "att_test".to_owned(),
@@ -657,10 +704,14 @@ fn a_browser_contract_route_needs_a_passing_browser_receipt_from_the_same_attemp
 
 // ── the wire both sides read (ato-api keeps the same files) ───────────────
 
-const FIXTURES: [(&str, &str); 9] = [
+const FIXTURES: [(&str, &str); 10] = [
     (
         "satisfy-request",
         include_str!("fixtures/runtime-network-v0/satisfy-request.json"),
+    ),
+    (
+        "satisfy-source-object",
+        include_str!("fixtures/runtime-network-v0/satisfy-source-object.json"),
     ),
     (
         "attempt-ticket",
@@ -719,7 +770,7 @@ fn the_wire_fixtures_are_the_recorded_bytes() {
 fn the_wire_fixtures_round_trip_through_the_runtime_types() {
     for (name, text) in FIXTURES {
         let value: serde_json::Value = serde_json::from_str(text).expect(name);
-        let reserialized = if name == "satisfy-request" {
+        let reserialized = if name == "satisfy-request" || name == "satisfy-source-object" {
             let request: SatisfyRequest = serde_json::from_value(value.clone()).expect(name);
             assert!(request.search_id.starts_with("search_"));
             request
@@ -1089,36 +1140,40 @@ fn a_source_longer_than_the_transfer_cap_is_refused_before_it_is_used() {
 #[test]
 fn the_runtime_reads_at_most_one_byte_past_the_transfer_cap() {
     use std::io::{Read as _, Write as _};
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listen");
-    let port = listener.local_addr().expect("address").port();
-    // A coordinator (or anything in between) that sends far more than the
-    // ticket authorized.
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept");
-        let mut request = [0_u8; 4096];
-        let _ = stream.read(&mut request);
-        let body = vec![b'x'; 256 * 1024];
-        let _ = stream.write_all(
+    for with_length in [true, false] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listen");
+        let port = listener.local_addr().expect("address").port();
+        // A coordinator (or anything in between) that sends far more than the
+        // ticket authorized.
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request);
+            let body = vec![b'x'; 256 * 1024];
+            let _ = stream.write_all(
             format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/x-tar\r\ncontent-length: {}\r\n\r\n",
-                body.len()
+                "HTTP/1.1 200 OK\r\ncontent-type: application/x-tar\r\n{}connection: close\r\n\r\n",
+                if with_length { format!("content-length: {}\r\n", body.len()) } else { String::new() }
             )
             .as_bytes(),
         );
-        let _ = stream.write_all(&body);
-    });
-    let client = ato_formation_worker::runtime_network::Client::new(
-        &format!("http://127.0.0.1:{port}"),
-        "token",
-    )
-    .expect("client");
-    let received = client.source("att_test", 100).expect("source");
-    assert_eq!(
-        received.len(),
-        101,
-        "one byte past the cap shows it is over"
-    );
-    let _ = server.join();
+            let _ = stream.write_all(&body);
+        });
+        let client = ato_formation_worker::runtime_network::Client::new(
+            &format!("http://127.0.0.1:{port}"),
+            "token",
+        )
+        .expect("client");
+        let root = tempfile::tempdir().unwrap();
+        let received = client.source("att_test", 100, 1, root.path());
+        assert!(
+            received
+                .unwrap_err()
+                .to_string()
+                .contains("exceeds transfer budget")
+        );
+        let _ = server.join();
+    }
 }
 
 #[test]
@@ -1298,4 +1353,88 @@ fn an_attempt_never_expands_more_than_the_runtime_source_ceiling() {
         MAX_ATTEMPT_EXPANDED_BYTES,
         ato_formation::source::SourceLimits::default().max_total_bytes
     );
+}
+
+#[test]
+fn pax_boundary_refusal_leaves_no_tree_and_preserves_started_history() {
+    use sha2::{Digest, Sha256};
+    let dir = site("");
+    let scratch = tempfile::tempdir().unwrap();
+    let (mut ticket, _) = ticket(&submit(dir.path(), scratch.path()));
+    let mut builder = tar::Builder::new(Vec::new());
+    builder
+        .append_pax_extensions([("size", b"65536".as_slice())])
+        .unwrap();
+    let mut header = tar::Header::new_gnu();
+    header.set_path("file").unwrap();
+    header.set_size(0);
+    header.set_cksum();
+    // Keep the PAX header, then append the mismatched header and physical bytes.
+    let mut archive = builder.into_inner().unwrap();
+    archive.truncate(1024);
+    archive.extend_from_slice(header.as_bytes());
+    archive.extend_from_slice(&vec![0; 65536 + 1024]);
+    ticket.archive_digest = format!("sha256:{:x}", Sha256::digest(&archive));
+    ticket.resource_budget.transfer_bytes = archive.len() as u64;
+    ticket.resource_budget.expanded_bytes = 1024;
+    let report = run(&ticket, archive.clone(), scratch.path());
+    assert_eq!(failure_code(&report), "ticket_unplannable");
+    assert!(report.failure.unwrap().message.contains("PAX size"));
+    assert_eq!(
+        report.attestation.attempt_record,
+        AttemptRecordState::NotStarted
+    );
+    assert!(!report.attestation.execution_started);
+    assert_eq!(report.resource_usage.expanded_bytes, 0);
+    assert!(
+        !scratch
+            .path()
+            .join("work")
+            .join(&ticket.attempt_id)
+            .exists()
+    );
+    let scratch = tempfile::tempdir().unwrap();
+    leave_started(&ticket, scratch.path());
+    let report = run(&ticket, archive.clone(), scratch.path());
+    assert_eq!(failure_code(&report), "attempt_already_started");
+    assert_eq!(
+        report.attestation.attempt_record,
+        AttemptRecordState::StartedUnfinished
+    );
+    let prior_attempt = ticket.attempt_id.clone();
+    ticket.attempt_id.push_str("-next");
+    let report = run(&ticket, archive, scratch.path());
+    assert_eq!(
+        report.attestation.attempt_record,
+        AttemptRecordState::BlockedByUnknown {
+            attempt_id: prior_attempt,
+        }
+    );
+}
+
+/// Produces an ordinary, correctly planned K/D request for the real API
+/// acceptance harness. The harness replaces only its source transport object.
+#[test]
+#[ignore = "manual Linux Network acceptance fixture; requires ATO_HARDENING_REQUEST"]
+fn export_source_hardening_request() {
+    let output = std::env::var_os("ATO_HARDENING_REQUEST").expect("fixture output path");
+    let dir = site("");
+    let route = STATIC_ROUTE.replace(
+        "[[derive.step]]",
+        r#"[[derive.step]]
+id = "build-marker"
+use = "ato.process@1"
+op = "exec"
+argv = ["/bin/sh", "-c", "echo BUILD_STARTED; echo started > build-started.marker"]
+
+[[derive.step]]"#,
+    );
+    std::fs::write(dir.path().join("capsule.toml"), route).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let submission = submit(dir.path(), scratch.path());
+    std::fs::write(
+        output,
+        serde_json::to_vec_pretty(&submission.request).unwrap(),
+    )
+    .unwrap();
 }
