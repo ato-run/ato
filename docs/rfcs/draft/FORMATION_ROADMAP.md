@@ -1,6 +1,6 @@
 # Formation roadmap — foundation, exploration, then adaptation
 
-Updated 2026-09-25 after the sequential 2e-b / 3c-b integration track. Stage numbers are retained.
+Updated 2026-09-25 after sequential integration and the 3c-b archive hardening review. Stage numbers are retained.
 This is an implementation plan; pending rows are not shipped functionality.
 
 ## Milestones
@@ -23,7 +23,7 @@ This is an implementation plan; pending rows are not shipped functionality.
 | 2d | Hosted Formation actual observation/common attempt; API v1/v2 receiver first, then v2 worker | Merged: API #688 `44c14abe` → ato #1398 `01933b2b`; Static/Python/Node actual execution; deployment not verified in this track |
 | 2e | Hosted Run/validator and existing OCI/service group through common execution and handle ownership | 2e-a: #1399 implemented, unmerged. 2e-b: #1401 implemented and Linux integration validated, unmerged/undeployed. 2e-c OCI/service group remains pending |
 | 2f | Remove duplicated D→projection→string→intent→build-plan interpretations and unused re-exports | Pending |
-| 3c | Search budget reservations/accounting, then streaming content-addressed source transport | 3c-a merged: ato #1400 `aaaaaa15` / API #689 `88cb8aae`. 3c-b: ato #1403 / API #691 implemented and Linux integration validated, unmerged/undeployed |
+| 3c | Search budget reservations/accounting, then streaming content-addressed source transport | 3c-a merged: ato #1400 `aaaaaa15` / API #689 `88cb8aae`. 3c-b: ato #1403 / API #691 implemented and Linux integration validated; PAX boundary/resource-limit hardening and separate 64/128 MiB rerun validated, unmerged/undeployed |
 | 3d | Retained objects → validated closure/tree → new Run → same K → new receipt without source/scratch | Pending |
 | 4 | Durable deterministic SearchState; D1 failure→evidence→authorized D2; restart preserves search/attempt identity | Pending |
 | 5a | Optional finite AllowedChoices DecisionProvider; Jev failure uses deterministic choice under same budget | Pending |
@@ -84,3 +84,7 @@ LLM adaptation requires explicit scope/policy/budget.
 
 Deployments, migrations, feature flags and staging/production canaries remain
 separate authorization gates. Merging any of these PRs grants none of those.
+
+The final 3c-b [archive hardening evidence](../../ops/runtime-network-3c-b-hardening-2026-09-25.md)
+records restricted transports, preserved normal identities and re-review heads;
+it does not advance 3d or alter the historical integration results.
