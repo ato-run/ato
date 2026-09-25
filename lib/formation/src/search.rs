@@ -69,7 +69,10 @@ pub struct SearchCandidate {
 #[serde(deny_unknown_fields)]
 pub struct Requirement {
     pub fact: String,
-    pub one_of: Vec<String>,
+    /// Absent: the fact only has to be present. Same wire shape as the
+    /// Runtime Network requirement a requester computes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub one_of: Option<Vec<String>>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]

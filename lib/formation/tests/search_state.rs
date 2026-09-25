@@ -160,3 +160,26 @@ fn frozen_identity_is_checked_and_policy_changes_change_canonical_freeze() {
         altered.frozen.canonical_bytes().unwrap()
     );
 }
+
+/// Requirements arrive exactly as a requester computes them for the Runtime
+/// Network: a presence-only requirement has no `one_of`, and freezing must
+/// neither refuse it nor invent one.
+#[test]
+fn presence_only_requirements_freeze_as_the_wire_carries_them() {
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fixture("newly-created").canonical_bytes().unwrap()).unwrap();
+    value["frozen"]["candidates"][0]["requirements"] = serde_json::json!([
+        {"fact": "platform", "one_of": ["linux/aarch64", "linux/x86_64"]},
+        {"fact": "toolchain.python"}
+    ]);
+    let state: SearchStateV1 = serde_json::from_value(value.clone()).unwrap();
+    let canonical: serde_json::Value =
+        serde_json::from_slice(&state.canonical_bytes().unwrap()).unwrap();
+    assert_eq!(canonical, value);
+    assert!(
+        canonical["frozen"]["candidates"][0]["requirements"][1]
+            .get("one_of")
+            .is_none()
+    );
+    assert!(decide_next(&state, &placements(&state), 1).is_ok());
+}

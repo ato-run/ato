@@ -14,7 +14,7 @@ fn main() -> Result<()> {
         );
     }
     let client = Client::new(&a[1], &std::fs::read_to_string(&a[2])?)?;
-    let submission = prepare_submission(
+    let mut submission = prepare_submission(
         Path::new(&a[3]),
         &a[8..].iter().map(Into::into).collect::<Vec<_>>(),
         None,
@@ -27,10 +27,22 @@ fn main() -> Result<()> {
         SatisfyBudget::ceilings(a[6].parse()?, "first_pass"),
         &a[5],
     )?;
+    // Fault injection for the effect-uncertainty acceptance only: a requester
+    // whose effect hint is wrong. The Runtime re-plans D and attests the real
+    // class; nothing here changes K or D.
+    if let Ok(effects) = std::env::var("ATO_ACCEPTANCE_DECLARED_EFFECTS") {
+        for derivation in &mut submission.request.authorized_derivations {
+            derivation.effects = effects.clone();
+        }
+    }
     let created = client.submit(&submission)?;
     std::fs::write(&a[7], serde_json::to_vec_pretty(&created)?)?;
     let id = created["satisfy_id"].as_str().context("satisfy id")?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    let settle = std::env::var("ATO_ACCEPTANCE_SETTLE_SECS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(300);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(settle);
     loop {
         // Coordinator may be restarting; a transport failure is not D failure.
         if let Ok(status) = client.satisfy_status(id) {
