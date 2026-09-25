@@ -17,9 +17,12 @@ use ato_formation::browser::{
 };
 use ato_formation_worker::journal::AttemptRecordState;
 use ato_formation_worker::runtime_network::{
-    AttemptResultReport, AttemptTicket, NATIVE_ENVIRONMENT, RuntimeConstraintWire, SatisfyBudget,
-    SatisfyPolicy, SatisfyRequest, ServeConfig, Settlement, Submission, UnknownAttempt,
-    execute_ticket, new_search_id, prepare_submission,
+    AttemptResultReport, AttemptTicket, MAX_ATTEMPT_EXPANDED_BYTES, MAX_ATTEMPT_STORED_BYTES,
+    MAX_SEARCH_ATTEMPTS, MAX_SEARCH_DEADLINE_SECONDS, MAX_SEARCH_EXPANDED_BYTES,
+    MAX_SEARCH_STORED_BYTES, MAX_SEARCH_TRANSFER_BYTES, NATIVE_ENVIRONMENT, ResourceUsage,
+    RuntimeConstraintWire, SatisfyBudget, SatisfyPolicy, SatisfyRequest, ServeConfig, Settlement,
+    Submission, TicketResourceBudget, UnknownAttempt, execute_ticket, new_search_id,
+    prepare_submission,
 };
 use base64::Engine as _;
 
@@ -77,10 +80,7 @@ fn submit(dir: &Path, scratch: &Path) -> Submission {
             network: "denied".to_owned(),
             allow_managed: false,
         },
-        SatisfyBudget {
-            max_attempts: 4,
-            mode: "first_pass".to_owned(),
-        },
+        SatisfyBudget::ceilings(4, "first_pass"),
         "search_test",
     )
     .expect("the requester plans the route")
@@ -108,6 +108,12 @@ fn ticket(submission: &Submission) -> (AttemptTicket, Vec<u8>) {
             archive_digest: request.source.archive_digest.clone(),
             bindings: BTreeMap::new(),
             network: "denied".to_owned(),
+            // What a Coordinator reserves for a fresh search at the ceilings.
+            resource_budget: TicketResourceBudget {
+                transfer_bytes: archive.len() as u64,
+                expanded_bytes: MAX_ATTEMPT_EXPANDED_BYTES,
+                stored_bytes: MAX_ATTEMPT_STORED_BYTES,
+            },
         },
         archive,
     )
@@ -651,10 +657,18 @@ fn a_browser_contract_route_needs_a_passing_browser_receipt_from_the_same_attemp
 
 // ── the wire both sides read (ato-api keeps the same files) ───────────────
 
-const FIXTURES: [(&str, &str); 7] = [
+const FIXTURES: [(&str, &str); 9] = [
     (
         "satisfy-request",
         include_str!("fixtures/runtime-network-v0/satisfy-request.json"),
+    ),
+    (
+        "attempt-ticket",
+        include_str!("fixtures/runtime-network-v0/attempt-ticket.json"),
+    ),
+    (
+        "search-budget-ceilings",
+        include_str!("fixtures/runtime-network-v0/search-budget-ceilings.json"),
     ),
     (
         "attempt-result-not-started",
@@ -708,7 +722,29 @@ fn the_wire_fixtures_round_trip_through_the_runtime_types() {
         let reserialized = if name == "satisfy-request" {
             let request: SatisfyRequest = serde_json::from_value(value.clone()).expect(name);
             assert!(request.search_id.starts_with("search_"));
+            request
+                .budget
+                .validate()
+                .expect("the fixture budget is within the ceilings");
             serde_json::to_value(&request)
+        } else if name == "attempt-ticket" {
+            let ticket: AttemptTicket = serde_json::from_value(value.clone()).expect(name);
+            serde_json::to_value(&ticket)
+        } else if name == "search-budget-ceilings" {
+            // The Coordinator checks its constants against the same file.
+            assert_eq!(
+                value,
+                serde_json::json!({
+                    "max_attempts": MAX_SEARCH_ATTEMPTS,
+                    "deadline_seconds": MAX_SEARCH_DEADLINE_SECONDS,
+                    "max_transfer_bytes": MAX_SEARCH_TRANSFER_BYTES,
+                    "max_expanded_bytes": MAX_SEARCH_EXPANDED_BYTES,
+                    "max_stored_bytes": MAX_SEARCH_STORED_BYTES,
+                    "max_attempt_expanded_bytes": MAX_ATTEMPT_EXPANDED_BYTES,
+                    "max_attempt_stored_bytes": MAX_ATTEMPT_STORED_BYTES,
+                })
+            );
+            Ok(value.clone())
         } else if name == "unknown-resolution" {
             let resolution: ato_formation_worker::runtime_network::UnknownResolution =
                 serde_json::from_value(value.clone()).expect(name);
@@ -739,12 +775,24 @@ fn the_wire_fixtures_round_trip_through_the_runtime_types() {
         assert_eq!(serde_json::to_value(state).unwrap(), name);
     }
     // A report without it is not a report this Runtime reads or writes.
-    let mut missing: serde_json::Value = serde_json::from_str(FIXTURES[2].1).unwrap();
+    let finished = include_str!("fixtures/runtime-network-v0/attempt-result-finished.json");
+    let mut missing: serde_json::Value = serde_json::from_str(finished).unwrap();
     missing["attestation"]
         .as_object_mut()
         .unwrap()
         .remove("attempt_record");
     assert!(serde_json::from_value::<AttemptResultReport>(missing).is_err());
+    // Nor one without its resource usage, nor a ticket without its caps:
+    // a Runtime never runs an attempt it could not hold to a budget.
+    let mut unmeasured: serde_json::Value = serde_json::from_str(finished).unwrap();
+    unmeasured.as_object_mut().unwrap().remove("resource_usage");
+    assert!(serde_json::from_value::<AttemptResultReport>(unmeasured).is_err());
+    let mut uncapped: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/runtime-network-v0/attempt-ticket.json"
+    ))
+    .unwrap();
+    uncapped.as_object_mut().unwrap().remove("resource_budget");
+    assert!(serde_json::from_value::<AttemptTicket>(uncapped).is_err());
 }
 
 #[test]
@@ -1005,4 +1053,249 @@ fn concurrent_deliveries_cannot_start_after_a_not_started_refusal() {
         AttemptRecordState::NotStarted
     );
     assert_eq!(failure_code(&second), "attempt_already_refused");
+}
+
+// ── a ticket's caps are hard limits (ADR-031) ─────────────────────────────
+
+/// The logical bytes a site's source expands to: its files' content.
+fn tree_bytes(dir: &Path) -> u64 {
+    ["index.html", "capsule.toml"]
+        .iter()
+        .map(|name| std::fs::metadata(dir.join(name)).expect("file").len())
+        .sum()
+}
+
+fn formation_outcome(report: &AttemptResultReport, name: &str) -> serde_json::Value {
+    report.formation_attempt.as_ref().expect("attempt evidence")["outcomes"][name].clone()
+}
+
+#[test]
+fn a_source_longer_than_the_transfer_cap_is_refused_before_it_is_used() {
+    let dir = site("");
+    let scratch = tempfile::tempdir().expect("scratch");
+    let (mut ticket, archive) = ticket(&submit(dir.path(), scratch.path()));
+    ticket.resource_budget.transfer_bytes = archive.len() as u64 - 1;
+    let report = run(&ticket, archive, scratch.path());
+    assert_eq!(report.outcome, "inconclusive");
+    assert_eq!(failure_code(&report), "search_transfer_budget_exceeded");
+    assert!(!report.attestation.execution_started);
+    assert_eq!(
+        report.attestation.attempt_record,
+        AttemptRecordState::NotStarted
+    );
+    assert_eq!(report.resource_usage, ResourceUsage::default());
+}
+
+#[test]
+fn the_runtime_reads_at_most_one_byte_past_the_transfer_cap() {
+    use std::io::{Read as _, Write as _};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listen");
+    let port = listener.local_addr().expect("address").port();
+    // A coordinator (or anything in between) that sends far more than the
+    // ticket authorized.
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let mut request = [0_u8; 4096];
+        let _ = stream.read(&mut request);
+        let body = vec![b'x'; 256 * 1024];
+        let _ = stream.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/x-tar\r\ncontent-length: {}\r\n\r\n",
+                body.len()
+            )
+            .as_bytes(),
+        );
+        let _ = stream.write_all(&body);
+    });
+    let client = ato_formation_worker::runtime_network::Client::new(
+        &format!("http://127.0.0.1:{port}"),
+        "token",
+    )
+    .expect("client");
+    let received = client.source("att_test", 100).expect("source");
+    assert_eq!(
+        received.len(),
+        101,
+        "one byte past the cap shows it is over"
+    );
+    let _ = server.join();
+}
+
+#[test]
+fn a_tree_larger_than_the_expanded_cap_is_refused_before_it_runs() {
+    let dir = site("");
+    let scratch = tempfile::tempdir().expect("scratch");
+    let (mut ticket, archive) = ticket(&submit(dir.path(), scratch.path()));
+    ticket.resource_budget.expanded_bytes = tree_bytes(dir.path()) - 1;
+    let report = run(&ticket, archive, scratch.path());
+    assert_eq!(report.outcome, "inconclusive");
+    assert_eq!(failure_code(&report), "search_expanded_budget_exceeded");
+    assert!(!report.attestation.execution_started);
+    assert_eq!(
+        report.attestation.attempt_record,
+        AttemptRecordState::NotStarted
+    );
+    // Refused while measuring: nothing of the tree was expanded.
+    assert_eq!(report.resource_usage.expanded_bytes, 0);
+    assert!(report.verifier_receipts.is_empty());
+    assert!(report.materialization_ref.is_none());
+}
+
+#[test]
+fn an_attempt_reports_the_logical_bytes_it_expanded_and_kept() {
+    let dir = site("");
+    let tree = tree_bytes(dir.path());
+    let scratch = tempfile::tempdir().expect("scratch");
+    let (mut ticket, archive) = ticket(&submit(dir.path(), scratch.path()));
+    // Exactly the tree fits.
+    ticket.resource_budget.expanded_bytes = tree;
+    let report = run(&ticket, archive, scratch.path());
+    assert_eq!(report.outcome, "pass", "{:?}", report.failure);
+    assert_eq!(report.resource_usage.expanded_bytes, tree);
+    let kept = report.resource_usage.stored_bytes;
+    assert!(kept > 0, "a kept static bundle has bytes");
+    // What it reports is what the store holds for the artifact.
+    let bundle = scratch
+        .path()
+        .join("out/bundles")
+        .join(&report.materialization_ref.as_deref().expect("kept")["sha256:".len()..]);
+    let mut on_disk = 0;
+    let mut pending = vec![bundle];
+    while let Some(path) = pending.pop() {
+        for entry in std::fs::read_dir(path).expect("bundle") {
+            let entry = entry.expect("entry");
+            let metadata = std::fs::symlink_metadata(entry.path()).expect("metadata");
+            if metadata.is_dir() {
+                pending.push(entry.path());
+            } else if metadata.is_file() {
+                on_disk += metadata.len();
+            }
+        }
+    }
+    assert_eq!(kept, on_disk);
+
+    // A stored cap of exactly that size keeps it too.
+    let exact = tempfile::tempdir().expect("scratch");
+    let (mut capped, archive) = self::ticket(&submit(dir.path(), exact.path()));
+    capped.resource_budget.stored_bytes = kept;
+    let report = run(&capped, archive, exact.path());
+    assert_eq!(report.outcome, "pass", "{:?}", report.failure);
+    assert_eq!(report.resource_usage.stored_bytes, kept);
+}
+
+#[test]
+fn an_artifact_over_the_stored_cap_is_verified_but_not_kept() {
+    let dir = site("");
+    let scratch = tempfile::tempdir().expect("scratch");
+    let (mut ticket, archive) = ticket(&submit(dir.path(), scratch.path()));
+    ticket.resource_budget.stored_bytes = 1;
+    let report = run(&ticket, archive, scratch.path());
+    // Not a pass: a Runtime Network route needs the artifact kept.
+    assert_eq!(report.outcome, "fail");
+    assert_eq!(failure_code(&report), "search_stored_budget_exceeded");
+    assert_eq!(report.failure.as_ref().expect("failure").stage, "publish");
+    assert!(report.materialization_ref.is_none());
+    // It ran and finished; only keeping its artifact was refused.
+    assert_eq!(
+        report.attestation.attempt_record,
+        AttemptRecordState::Finished
+    );
+    assert!(report.resource_usage.expanded_bytes > 0);
+    assert_eq!(report.resource_usage.stored_bytes, 0);
+    // K verification stands, with its receipt; publication failed on its own.
+    assert_eq!(
+        formation_outcome(&report, "runtime_verification")["state"],
+        "succeeded"
+    );
+    assert_eq!(
+        formation_outcome(&report, "publication"),
+        serde_json::json!({ "state": "failed", "reason": "search_stored_budget_exceeded" })
+    );
+    let receipt = report
+        .verifier_receipts
+        .iter()
+        .find(|receipt| receipt["kind"] == "contract_verification")
+        .expect("the verification receipt is kept as evidence")["receipt"]
+        .clone();
+    assert_eq!(receipt["fully_satisfied"], true);
+    assert_eq!(receipt["execution"]["attempt_id"], "att_test");
+    // Nothing was written to the store.
+    let bundles = scratch.path().join("out/bundles");
+    assert!(
+        !bundles.exists()
+            || std::fs::read_dir(&bundles)
+                .expect("bundles")
+                .next()
+                .is_none(),
+        "an artifact over its stored cap is not kept"
+    );
+}
+
+#[test]
+fn a_search_budget_above_a_ceiling_is_never_sent() {
+    let within = SatisfyBudget::ceilings(MAX_SEARCH_ATTEMPTS, "all");
+    within
+        .validate()
+        .expect("the ceilings themselves are a valid budget");
+    for over in [
+        SatisfyBudget {
+            max_attempts: MAX_SEARCH_ATTEMPTS + 1,
+            ..within.clone()
+        },
+        SatisfyBudget {
+            max_attempts: 0,
+            ..within.clone()
+        },
+        SatisfyBudget {
+            deadline_seconds: MAX_SEARCH_DEADLINE_SECONDS + 1,
+            ..within.clone()
+        },
+        SatisfyBudget {
+            max_transfer_bytes: MAX_SEARCH_TRANSFER_BYTES + 1,
+            ..within.clone()
+        },
+        SatisfyBudget {
+            max_expanded_bytes: MAX_SEARCH_EXPANDED_BYTES + 1,
+            ..within.clone()
+        },
+        SatisfyBudget {
+            max_stored_bytes: MAX_SEARCH_STORED_BYTES + 1,
+            ..within.clone()
+        },
+        SatisfyBudget {
+            mode: "some".to_owned(),
+            ..within.clone()
+        },
+    ] {
+        assert!(over.validate().is_err(), "{over:?}");
+    }
+    let dir = site("");
+    let scratch = tempfile::tempdir().expect("scratch");
+    let refused = prepare_submission(
+        dir.path(),
+        &[],
+        None,
+        &scratch.path().join("submit"),
+        RuntimeConstraintWire::Any,
+        SatisfyPolicy {
+            network: "denied".to_owned(),
+            allow_managed: false,
+        },
+        SatisfyBudget {
+            max_stored_bytes: MAX_SEARCH_STORED_BYTES + 1,
+            ..within
+        },
+        "search_test",
+    );
+    assert!(refused.is_err());
+}
+
+#[test]
+fn an_attempt_never_expands_more_than_the_runtime_source_ceiling() {
+    // The Coordinator caps an attempt's expanded reservation at this; it is
+    // the ceiling the Runtime enforces on every source anyway.
+    assert_eq!(
+        MAX_ATTEMPT_EXPANDED_BYTES,
+        ato_formation::source::SourceLimits::default().max_total_bytes
+    );
 }
