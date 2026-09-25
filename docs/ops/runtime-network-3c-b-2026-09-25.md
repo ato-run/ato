@@ -1,6 +1,8 @@
 # Runtime Network 3c-b acceptance — 2026-09-25
 
 Status: implemented and locally/Linux validated; not merged or deployed.
+PRs: [ato #1403](https://github.com/ato-run/ato/pull/1403) and
+[ato-api #691](https://github.com/ato-run/ato-api/pull/691).
 No manual CI rerun, workflow edit, remote migration or environment flag change.
 This evidence does not establish saved-object replay into a normal Hosted Run
 (3d). Hosted lifecycle integration is recorded separately.
@@ -55,6 +57,16 @@ Cloudflare ingress limits are separate: Free/Pro requests are limited to
 100 MB; the 128 MiB row is local acceptance, not deployed ingress acceptance.
 64 MiB demonstrates the required >32 MiB path below that limit. The 256 MiB
 object cap does not authorize a 10 GiB HTTP request. See ADR-032 for limits.
+
+A separate single-file check placed one random 64/128 MiB `payload.bin` in
+the source and served only `public/`. Both reached accepted VerifiedRoutes.
+This separates source measurement/extraction from the unchanged artifact
+materializer, whose per-file/process packing behavior is outside 3c-b.
+
+| Single file | Archive bytes | Requester peak KiB | Runtime peak KiB | Stored artifact bytes |
+|---|---:|---:|---:|---:|
+| 64 MiB | 67,113,984 | 15,832 | 16,752 | 50,509 |
+| 128 MiB | 134,222,848 | 15,716 | 16,480 | 50,509 |
 
 ## Fixed P0 repository
 

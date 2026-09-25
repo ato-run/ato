@@ -1393,6 +1393,306 @@
       "stored_request_bytes": 2033
     },
     {
+      "name": "single-file-128",
+      "satisfy_id": "01M3BDX8DRRQ6YYZSXTVAKPPTB",
+      "search_id": "search_48d1899bec23d404335558967808ac2d",
+      "status": "satisfied",
+      "contract_ref": "sha256:93f7338c2bd8449e85fec4ead9cda5d0c96d0482c049a4b9a14b23e9dd94bc6c",
+      "search_budget": {
+        "attempts": {
+          "max": 8,
+          "remaining": 7,
+          "reserved": 0,
+          "used": 1
+        },
+        "budget_version": "ato.runtime-network.search-budget/0",
+        "created_at": "2026-09-25T04:41:49.739Z",
+        "deadline_at": "2026-09-26T04:41:49.739Z",
+        "expanded_bytes": {
+          "max": 10737418240,
+          "remaining": 10603199848,
+          "reserved": 0,
+          "used": 134218392
+        },
+        "mode": "first_pass",
+        "stored_bytes": {
+          "max": 10737418240,
+          "remaining": 10737367731,
+          "reserved": 0,
+          "used": 50509
+        },
+        "transfer_bytes": {
+          "max": 10737418240,
+          "remaining": 10603195392,
+          "reserved": 0,
+          "used": 134222848
+        }
+      },
+      "verified_route_count": 1,
+      "attempts": [
+        {
+          "attempt_id": "01M3BDX8ENHD22XAZ9SH3TD4X9",
+          "status": "pass",
+          "resource_budget": {
+            "expanded_bytes": 536870912,
+            "stored_bytes": 536870912,
+            "transfer_bytes": 134222848
+          },
+          "resource_charged": {
+            "expanded_bytes": 134218392,
+            "stored_bytes": 50509,
+            "transfer_bytes": 134222848
+          },
+          "failure": null,
+          "formation_attempt": {
+            "attempt_id": "01M3BDX8ENHD22XAZ9SH3TD4X9",
+            "candidate": "authored",
+            "contract_ref": "sha256:93f7338c2bd8449e85fec4ead9cda5d0c96d0482c049a4b9a14b23e9dd94bc6c",
+            "derivation_ref": "sha256:461613f3da282601b6b7f4bc2c8b42de61779320226db551bea87b14bc6b5056",
+            "outcomes": {
+              "cleanup": {
+                "state": "succeeded"
+              },
+              "publication": {
+                "state": "succeeded"
+              },
+              "runtime_verification": {
+                "state": "succeeded"
+              },
+              "seal": {
+                "state": "succeeded"
+              }
+            },
+            "realization": {
+              "build_network": "n/a",
+              "candidate_network": "loopback only",
+              "containment": "none; serves the produced bundle's files, runs nothing",
+              "destroyed": true,
+              "endpoints": {
+                "app.http": "loopback static server"
+              },
+              "executor": "runtime-static-loopback",
+              "workspace": "the produced static web bundle, read-only"
+            },
+            "receipt": {
+              "contract_ref": "sha256:93f7338c2bd8449e85fec4ead9cda5d0c96d0482c049a4b9a14b23e9dd94bc6c",
+              "derivation_ref": "sha256:461613f3da282601b6b7f4bc2c8b42de61779320226db551bea87b14bc6b5056",
+              "execution": {
+                "attempt_id": "01M3BDX8ENHD22XAZ9SH3TD4X9",
+                "endpoint": "http://127.0.0.1:36891/",
+                "platform": "linux/aarch64",
+                "realization": "static_web",
+                "request_id": "01M3BDX8DRRQ6YYZSXTVAKPPTB"
+              },
+              "fully_satisfied": true,
+              "observations": [
+                {
+                  "evidence": {
+                    "body_sha256": "sha256:1ea4c961fb793d6b19fbadef6ee835c6c045061ac877bf98aed8993949172daf",
+                    "method": "GET",
+                    "path": "/",
+                    "status": 200
+                  },
+                  "id": "root",
+                  "outcome": "satisfied"
+                },
+                {
+                  "evidence": {
+                    "digest": "sha256:fb66fc508f1b675b83be2d8950555ed8990f6104eb27d04dc4aacfb70c484221",
+                    "input": "workspace"
+                  },
+                  "id": "source-identity",
+                  "outcome": "satisfied"
+                }
+              ],
+              "schema": "ato.contract-verification-receipt/1",
+              "target": {
+                "kind": "formation-runtime"
+              }
+            },
+            "runtime_id": "rn_source_acceptance",
+            "status": "verified",
+            "verification": {
+              "verdicts": [
+                {
+                  "id": "root",
+                  "outcome": {
+                    "result": "satisfied"
+                  }
+                },
+                {
+                  "id": "source-identity",
+                  "outcome": {
+                    "result": "satisfied"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "request_max_rss_kib": 15716,
+      "runtime_max_rss_kib": 16480,
+      "source": {
+        "archive_digest": "sha256:72ed5c553aa10378b9ad663299c4047573b1314acf0df2558887ec2b96719778",
+        "closure_ref": "sha256:fb66fc508f1b675b83be2d8950555ed8990f6104eb27d04dc4aacfb70c484221",
+        "archive_bytes": 134222848,
+        "content_ref": "sha256:72ed5c553aa10378b9ad663299c4047573b1314acf0df2558887ec2b96719778",
+        "fence_required": true
+      },
+      "stored_request_bytes": 2053
+    },
+    {
+      "name": "single-file-64",
+      "satisfy_id": "01M3BDVHY1SX24W8ZM7S5KZ8NS",
+      "search_id": "search_de834b1977c88369f976f7797408e6ef",
+      "status": "satisfied",
+      "contract_ref": "sha256:ee21db9beb161ecd366396f97b77a4cc98dfb5b32abd06a8a76ca474b355fc4a",
+      "search_budget": {
+        "attempts": {
+          "max": 8,
+          "remaining": 7,
+          "reserved": 0,
+          "used": 1
+        },
+        "budget_version": "ato.runtime-network.search-budget/0",
+        "created_at": "2026-09-25T04:40:53.931Z",
+        "deadline_at": "2026-09-26T04:40:53.931Z",
+        "expanded_bytes": {
+          "max": 10737418240,
+          "remaining": 10670308712,
+          "reserved": 0,
+          "used": 67109528
+        },
+        "mode": "first_pass",
+        "stored_bytes": {
+          "max": 10737418240,
+          "remaining": 10737367731,
+          "reserved": 0,
+          "used": 50509
+        },
+        "transfer_bytes": {
+          "max": 10737418240,
+          "remaining": 10670304256,
+          "reserved": 0,
+          "used": 67113984
+        }
+      },
+      "verified_route_count": 1,
+      "attempts": [
+        {
+          "attempt_id": "01M3BDVHZ1808PPM8A91DVDHQA",
+          "status": "pass",
+          "resource_budget": {
+            "expanded_bytes": 536870912,
+            "stored_bytes": 536870912,
+            "transfer_bytes": 67113984
+          },
+          "resource_charged": {
+            "expanded_bytes": 67109528,
+            "stored_bytes": 50509,
+            "transfer_bytes": 67113984
+          },
+          "failure": null,
+          "formation_attempt": {
+            "attempt_id": "01M3BDVHZ1808PPM8A91DVDHQA",
+            "candidate": "authored",
+            "contract_ref": "sha256:ee21db9beb161ecd366396f97b77a4cc98dfb5b32abd06a8a76ca474b355fc4a",
+            "derivation_ref": "sha256:1e6f33a5ed5492345fc86a9b3b22621d50b624062082c1acd6ba277b2d2d44ff",
+            "outcomes": {
+              "cleanup": {
+                "state": "succeeded"
+              },
+              "publication": {
+                "state": "succeeded"
+              },
+              "runtime_verification": {
+                "state": "succeeded"
+              },
+              "seal": {
+                "state": "succeeded"
+              }
+            },
+            "realization": {
+              "build_network": "n/a",
+              "candidate_network": "loopback only",
+              "containment": "none; serves the produced bundle's files, runs nothing",
+              "destroyed": true,
+              "endpoints": {
+                "app.http": "loopback static server"
+              },
+              "executor": "runtime-static-loopback",
+              "workspace": "the produced static web bundle, read-only"
+            },
+            "receipt": {
+              "contract_ref": "sha256:ee21db9beb161ecd366396f97b77a4cc98dfb5b32abd06a8a76ca474b355fc4a",
+              "derivation_ref": "sha256:1e6f33a5ed5492345fc86a9b3b22621d50b624062082c1acd6ba277b2d2d44ff",
+              "execution": {
+                "attempt_id": "01M3BDVHZ1808PPM8A91DVDHQA",
+                "endpoint": "http://127.0.0.1:35017/",
+                "platform": "linux/aarch64",
+                "realization": "static_web",
+                "request_id": "01M3BDVHY1SX24W8ZM7S5KZ8NS"
+              },
+              "fully_satisfied": true,
+              "observations": [
+                {
+                  "evidence": {
+                    "body_sha256": "sha256:1ea4c961fb793d6b19fbadef6ee835c6c045061ac877bf98aed8993949172daf",
+                    "method": "GET",
+                    "path": "/",
+                    "status": 200
+                  },
+                  "id": "root",
+                  "outcome": "satisfied"
+                },
+                {
+                  "evidence": {
+                    "digest": "sha256:0aed6c1574e72133ce7a42e154b3545366bd8da82fd2bce0d7873d4b3742c414",
+                    "input": "workspace"
+                  },
+                  "id": "source-identity",
+                  "outcome": "satisfied"
+                }
+              ],
+              "schema": "ato.contract-verification-receipt/1",
+              "target": {
+                "kind": "formation-runtime"
+              }
+            },
+            "runtime_id": "rn_source_acceptance",
+            "status": "verified",
+            "verification": {
+              "verdicts": [
+                {
+                  "id": "root",
+                  "outcome": {
+                    "result": "satisfied"
+                  }
+                },
+                {
+                  "id": "source-identity",
+                  "outcome": {
+                    "result": "satisfied"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "request_max_rss_kib": 15832,
+      "runtime_max_rss_kib": 16752,
+      "source": {
+        "archive_digest": "sha256:9c0ce7a5c4781d088e59291bd9f8d168209751bdc4e2c145cfb6dc3956944d28",
+        "closure_ref": "sha256:0aed6c1574e72133ce7a42e154b3545366bd8da82fd2bce0d7873d4b3742c414",
+        "archive_bytes": 67113984,
+        "content_ref": "sha256:9c0ce7a5c4781d088e59291bd9f8d168209751bdc4e2c145cfb6dc3956944d28",
+        "fence_required": true
+      },
+      "stored_request_bytes": 2052
+    },
+    {
       "name": "static-128",
       "satisfy_id": "01M3BCB2XWHN5HFS38MWCNYT08",
       "search_id": "search_185931157e7f4b5e39ab6ead2c30db77",
@@ -1908,6 +2208,18 @@
       "content_ref": "sha256:44db3393b7ee65bfe03a8be094723b8ac1871f9708891b143dfb8e156c57ee1b",
       "declared_bytes": 67145728,
       "verified_bytes": 67145728,
+      "status": "ready"
+    },
+    {
+      "content_ref": "sha256:9c0ce7a5c4781d088e59291bd9f8d168209751bdc4e2c145cfb6dc3956944d28",
+      "declared_bytes": 67113984,
+      "verified_bytes": 67113984,
+      "status": "ready"
+    },
+    {
+      "content_ref": "sha256:72ed5c553aa10378b9ad663299c4047573b1314acf0df2558887ec2b96719778",
+      "declared_bytes": 134222848,
+      "verified_bytes": 134222848,
       "status": "ready"
     }
   ],
