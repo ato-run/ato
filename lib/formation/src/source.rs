@@ -196,6 +196,8 @@ pub struct TreeVerifiedArchive {
     tree_digest: String,
     /// The resolver contract the tree was measured under.
     resolver_contract: &'static str,
+    /// The content bytes of the tree's regular files, as measured.
+    file_bytes: u64,
 }
 
 impl DownloadedArchive {
@@ -235,19 +237,20 @@ impl DigestVerifiedArchive {
         expected: Option<&str>,
         limits: SourceLimits,
     ) -> Result<TreeVerifiedArchive, SourceError> {
-        let (tree_digest, resolver_contract) = measure_source_tree_contract(&self.bytes, limits)?;
+        let measured = measure(&self.bytes, limits)?;
         if let Some(expected) = expected
-            && expected != tree_digest
+            && expected != measured.digest
         {
             return Err(SourceError::TreeDigestMismatch {
                 expected: expected.to_owned(),
-                actual: tree_digest,
+                actual: measured.digest,
             });
         }
         Ok(TreeVerifiedArchive {
             bytes: self.bytes,
-            tree_digest,
-            resolver_contract,
+            tree_digest: measured.digest,
+            resolver_contract: measured.contract,
+            file_bytes: measured.file_bytes,
         })
     }
 }
@@ -266,6 +269,13 @@ impl TreeVerifiedArchive {
     /// [`RESOLVER_CONTRACT_V2`] for how it is chosen).
     pub fn resolver_contract(&self) -> &'static str {
         self.resolver_contract
+    }
+
+    /// The logical bytes [`Self::materialize`] writes: the content of the
+    /// tree's regular files. Directories and symlinks are zero. Measured
+    /// under the same limits, before anything is written.
+    pub fn expanded_bytes(&self) -> u64 {
+        self.file_bytes
     }
 
     /// The closure identity: the tree, plus the rules that measured it.
@@ -564,6 +574,18 @@ pub fn measure_source_tree_contract(
     archive: &[u8],
     limits: SourceLimits,
 ) -> Result<(String, &'static str), SourceError> {
+    measure(archive, limits).map(|measured| (measured.digest, measured.contract))
+}
+
+/// A tree as measured: its digest, the contract it was measured under, and
+/// the content bytes of its regular files.
+struct Measured {
+    digest: String,
+    contract: &'static str,
+    file_bytes: u64,
+}
+
+fn measure(archive: &[u8], limits: SourceLimits) -> Result<Measured, SourceError> {
     let mut entries: BTreeSet<(String, String)> = BTreeSet::new();
     let mut has_symlink = false;
     let mut total: u64 = 0;
@@ -656,7 +678,11 @@ pub fn measure_source_tree_contract(
             hasher.update(field.as_bytes());
         }
     }
-    Ok((format!("sha256:{:x}", hasher.finalize()), contract))
+    Ok(Measured {
+        digest: format!("sha256:{:x}", hasher.finalize()),
+        contract,
+        file_bytes: total,
+    })
 }
 
 /// Expand into a staging directory, applying the same rules the measurement did.
@@ -1015,6 +1041,54 @@ mod tests {
             measure_source_tree(&too_deep, tiny).unwrap_err().code(),
             "source_limit_exceeded"
         );
+    }
+
+    #[test]
+    fn the_expanded_bytes_are_known_and_bounded_before_expansion() {
+        let bytes = archive(&[("a", b"12345"), ("dir/b", b"678")], 0);
+        let digest = content_ref(&bytes);
+        let under = SourceLimits {
+            max_total_bytes: 7,
+            ..LIMITS
+        };
+        // Over the limit: refused while measuring, before a file exists.
+        let refused = DownloadedArchive::new(bytes.clone())
+            .verify_archive_digest(&digest)
+            .expect("bytes")
+            .verify_tree_digest(None, under)
+            .unwrap_err();
+        assert!(matches!(
+            refused,
+            SourceError::LimitExceeded {
+                limit: "max_total_bytes"
+            }
+        ));
+
+        // Within it: the measured bytes are exactly what expansion writes.
+        let verified = DownloadedArchive::new(bytes)
+            .verify_archive_digest(&digest)
+            .expect("bytes")
+            .verify_tree_digest(None, LIMITS)
+            .expect("tree");
+        assert_eq!(verified.expanded_bytes(), 8);
+        let scratch = tempfile::tempdir().expect("scratch");
+        let root = verified
+            .materialize(&scratch.path().join("tree"), "", LIMITS)
+            .expect("expands");
+        let written = std::fs::metadata(root.join("a")).unwrap().len()
+            + std::fs::metadata(root.join("dir/b")).unwrap().len();
+        assert_eq!(written, verified.expanded_bytes());
+
+        // Expansion holds the limit by itself too, part-way through.
+        let refused = verified
+            .materialize(&scratch.path().join("again"), "", under)
+            .unwrap_err();
+        assert!(matches!(
+            refused,
+            SourceError::LimitExceeded {
+                limit: "max_total_bytes"
+            }
+        ));
     }
 
     #[test]
