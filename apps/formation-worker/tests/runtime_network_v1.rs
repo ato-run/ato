@@ -24,7 +24,6 @@ use ato_formation_worker::runtime_network::{
     Submission, TicketResourceBudget, UnknownAttempt, execute_ticket, new_search_id,
     prepare_submission,
 };
-use base64::Engine as _;
 
 const STATIC_ROUTE: &str = r#"
 schema = "ato.capsule/1"
@@ -90,9 +89,8 @@ fn submit(dir: &Path, scratch: &Path) -> Submission {
 fn ticket(submission: &Submission) -> (AttemptTicket, Vec<u8>) {
     let request = &submission.request;
     let route = &request.authorized_derivations[0];
-    let archive = base64::engine::general_purpose::STANDARD
-        .decode(&request.source.archive_base64)
-        .expect("archive");
+    let mut archive = Vec::new();
+    std::io::Read::read_to_end(&mut submission.source_file().unwrap(), &mut archive).unwrap();
     (
         AttemptTicket {
             attempt_id: "att_test".to_owned(),
@@ -657,10 +655,14 @@ fn a_browser_contract_route_needs_a_passing_browser_receipt_from_the_same_attemp
 
 // ── the wire both sides read (ato-api keeps the same files) ───────────────
 
-const FIXTURES: [(&str, &str); 9] = [
+const FIXTURES: [(&str, &str); 10] = [
     (
         "satisfy-request",
         include_str!("fixtures/runtime-network-v0/satisfy-request.json"),
+    ),
+    (
+        "satisfy-source-object",
+        include_str!("fixtures/runtime-network-v0/satisfy-source-object.json"),
     ),
     (
         "attempt-ticket",
@@ -719,7 +721,7 @@ fn the_wire_fixtures_are_the_recorded_bytes() {
 fn the_wire_fixtures_round_trip_through_the_runtime_types() {
     for (name, text) in FIXTURES {
         let value: serde_json::Value = serde_json::from_str(text).expect(name);
-        let reserialized = if name == "satisfy-request" {
+        let reserialized = if name == "satisfy-request" || name == "satisfy-source-object" {
             let request: SatisfyRequest = serde_json::from_value(value.clone()).expect(name);
             assert!(request.search_id.starts_with("search_"));
             request
@@ -1112,11 +1114,13 @@ fn the_runtime_reads_at_most_one_byte_past_the_transfer_cap() {
         "token",
     )
     .expect("client");
-    let received = client.source("att_test", 100).expect("source");
-    assert_eq!(
-        received.len(),
-        101,
-        "one byte past the cap shows it is over"
+    let root = tempfile::tempdir().unwrap();
+    let received = client.source("att_test", 100, 1, root.path());
+    assert!(
+        received
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds transfer budget")
     );
     let _ = server.join();
 }

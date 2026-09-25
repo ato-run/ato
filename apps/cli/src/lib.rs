@@ -729,7 +729,7 @@ fn form_on_runtime_network(args: FormArgs) -> Result<()> {
         &search_id,
     )?;
     let client = Client::new(&api, &token)?;
-    let accepted = client.satisfy(&submission.request)?;
+    let accepted = client.submit(&submission)?;
     let id = accepted["satisfy_id"]
         .as_str()
         .context("the coordinator returned no satisfy_id")?
