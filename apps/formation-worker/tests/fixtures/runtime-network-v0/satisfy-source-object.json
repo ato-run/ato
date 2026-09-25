@@ -1,0 +1,59 @@
+{
+  "protocol": "ato.runtime-network/0",
+  "search_id": "search_0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+  "contract_ref": "sha256:9bf1dde591e75171e28f258321116dff9a877d190d8ddad3da524c08b42227e5",
+  "base_contract_ref": "sha256:9bf1dde591e75171e28f258321116dff9a877d190d8ddad3da524c08b42227e5",
+  "source": {
+    "archive_digest": "sha256:4d9379a27a59854452956e359fa163a2e44d3e06ee6d82635c7c3171d3453fce",
+    "closure_ref": "closure-fixture",
+    "content_ref": "sha256:4d9379a27a59854452956e359fa163a2e44d3e06ee6d82635c7c3171d3453fce",
+    "archive_bytes": 24
+  },
+  "authorized_derivations": [
+    {
+      "derivation_ref": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "capsule_toml": "# route fixture\n",
+      "effects": "pure",
+      "requirements": [
+        {
+          "fact": "runtime.process",
+          "one_of": [
+            "true"
+          ]
+        }
+      ],
+      "provisions": [
+        "toolchain.python.3.12.7"
+      ]
+    }
+  ],
+  "runtime_constraint": {
+    "kind": "any"
+  },
+  "bindings": {},
+  "policy": {
+    "network": "denied",
+    "allow_managed": false
+  },
+  "budget": {
+    "max_attempts": 4,
+    "mode": "first_pass",
+    "deadline_seconds": 86400,
+    "max_transfer_bytes": 1073741824,
+    "max_expanded_bytes": 2147483648,
+    "max_stored_bytes": 10737418240
+  },
+  "base_contract": {
+    "requirements": [
+      {
+        "id": "root",
+        "method": "GET",
+        "path": "/",
+        "port": "app.http",
+        "status": 200,
+        "verifier": "ato.contract.http@1"
+      }
+    ],
+    "schema": "ato.contract/1"
+  }
+}

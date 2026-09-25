@@ -32,7 +32,6 @@ use ato_formation::capsule_toml::parse_capsule_toml;
 use ato_formation::detect::detect;
 use ato_formation::request::AttemptStatus;
 use ato_formation::source::{SourceError, SourceLimits};
-use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
 use crate::attempt::{AttemptRequest, Continuation, ReceiptContext, run_reserved_attempt};
@@ -40,10 +39,14 @@ use crate::browser_verify::{BrowserVerification, BrowserVerifierCommand};
 use crate::executor::LocalAttemptExecutor;
 use crate::job::{PlannedCandidate, digest, plan_candidate};
 use crate::journal::{AttemptJournal, AttemptLedger, AttemptPermit, AttemptRecordState};
-use crate::local::{self, freeze_archive, host_triple, snapshot_directory};
+use crate::local::{self, host_triple};
 use crate::sandbox::{BuildLimits, NetworkPolicy, TOOLCHAIN_ROOT, containment_available};
+use ato_formation::source::FileVerifiedArchive;
 use ato_runtime_attempt::admission::EffectAuthorization;
 use ato_runtime_attempt::formation_realizer::FormationRealizer;
+use sha2::{Digest, Sha256};
+use std::fs::File;
+use std::io::{Read, Seek, Write};
 
 pub const PROTOCOL: &str = "ato.runtime-network/0";
 /// The one execution environment a host advertises in Phase 1: itself.
@@ -126,8 +129,13 @@ pub struct AuthorizedDerivation {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SourceInline {
-    pub archive_base64: String,
+pub struct SourceTransport {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_base64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_bytes: Option<u64>,
     pub archive_digest: String,
     pub closure_ref: String,
 }
@@ -265,7 +273,7 @@ pub struct SatisfyRequest {
     pub base_contract: ato_formation::authoring::BoundContract,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_contract: Option<BrowserContractV0>,
-    pub source: SourceInline,
+    pub source: SourceTransport,
     pub authorized_derivations: Vec<AuthorizedDerivation>,
     pub runtime_constraint: RuntimeConstraintWire,
     pub bindings: BTreeMap<String, String>,
@@ -522,6 +530,7 @@ pub fn derivation_requirements(planned: &PlannedCandidate) -> (Vec<Requirement>,
 // ──────────────────────────────────────────────────────────── requesting
 
 pub struct Submission {
+    archive: File,
     pub request: SatisfyRequest,
     /// The frozen K each authorized route was planned against, by
     /// DerivationRef — what a returned receipt is checked against.
@@ -533,6 +542,31 @@ pub struct Submission {
 pub fn new_search_id(entropy: [u8; 16]) -> String {
     let hex: String = entropy.iter().map(|byte| format!("{byte:02x}")).collect();
     format!("search_{hex}")
+}
+
+impl Submission {
+    pub fn source_file(&self) -> Result<File> {
+        let mut file = self.archive.try_clone()?;
+        file.rewind()?;
+        Ok(file)
+    }
+}
+
+pub const MAX_SOURCE_OBJECT_BYTES: u64 = 256 * 1024 * 1024;
+
+fn file_digest(file: &mut File) -> Result<String> {
+    file.rewind()?;
+    let mut hash = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+    }
+    file.rewind()?;
+    Ok(format!("sha256:{:x}", hash.finalize()))
 }
 
 /// Freeze `dir`, plan every authorized route against it, and assemble the
@@ -550,15 +584,23 @@ pub fn prepare_submission(
     search_id: &str,
 ) -> Result<Submission> {
     budget.validate()?;
-    let archive = snapshot_directory(dir)?;
-    if archive.len() > MAX_SOURCE_BYTES {
-        bail!("the source is larger than {MAX_SOURCE_BYTES} bytes");
-    }
-    let archive_digest = digest(&archive);
     std::fs::create_dir_all(work_root)?;
-    let frozen = freeze_archive(
-        archive.clone(),
+    anyhow::ensure!(
+        fs2::available_space(work_root)?
+            >= MAX_SOURCE_OBJECT_BYTES + SourceLimits::default().max_total_bytes,
+        "insufficient scratch capacity to freeze source"
+    );
+    let mut archive = local::snapshot_directory_file(dir, work_root, MAX_SOURCE_OBJECT_BYTES)?;
+    let archive_bytes = archive.metadata()?.len();
+    let archive_digest = file_digest(&mut archive)?;
+    let verified = FileVerifiedArchive::verify(
+        archive.try_clone()?,
         &archive_digest,
+        archive_bytes,
+        SourceLimits::default(),
+    )?;
+    let frozen = local::freeze_verified_file(
+        verified,
         &std::path::absolute(work_root)?,
         SourceLimits::default(),
     )?;
@@ -621,8 +663,10 @@ pub fn prepare_submission(
                 .context("no frozen Contract")?
                 .clone(),
             browser_contract,
-            source: SourceInline {
-                archive_base64: base64::engine::general_purpose::STANDARD.encode(&archive),
+            source: SourceTransport {
+                archive_base64: None,
+                content_ref: Some(archive_digest.clone()),
+                archive_bytes: Some(archive_bytes),
                 archive_digest,
                 closure_ref: frozen.closure_ref.as_str().to_owned(),
             },
@@ -633,6 +677,7 @@ pub fn prepare_submission(
             budget,
         },
         contracts,
+        archive,
     })
 }
 
@@ -873,28 +918,74 @@ impl Client {
     /// The ticket's source, read up to `max_bytes` (the ticket's transfer
     /// cap) and one byte more: a longer source is returned as such, never
     /// read to its end.
-    pub fn source(&self, attempt_id: &str, max_bytes: u64) -> Result<Vec<u8>> {
-        use std::io::Read as _;
+    pub fn source(
+        &self,
+        attempt_id: &str,
+        max_bytes: u64,
+        fence: u32,
+        work_root: &Path,
+    ) -> Result<File> {
+        anyhow::ensure!(
+            max_bytes <= MAX_SOURCE_OBJECT_BYTES,
+            "source exceeds object cap"
+        );
+        std::fs::create_dir_all(work_root)?;
+        anyhow::ensure!(
+            fs2::available_space(work_root)? >= max_bytes + SourceLimits::default().max_total_bytes,
+            "insufficient Runtime scratch capacity"
+        );
         let response = self
             .http
             .get(self.url(&format!("/attempts/{attempt_id}/source")))
+            .header("x-ato-attempt-fence", fence)
             .bearer_auth(&self.token)
-            // The one transfer sized by the source, up to MAX_SOURCE_BYTES:
-            // the client's 60 s would demand more than 0.5 MB/s of every
-            // Runtime's link for a source the protocol admits.
             .timeout(SOURCE_TRANSFER_TIMEOUT)
             .send()?;
-        if !response.status().is_success() {
-            bail!(
-                "the source for {attempt_id} is unavailable ({})",
-                response.status()
-            );
+        anyhow::ensure!(
+            response.status().is_success(),
+            "source unavailable ({})",
+            response.status()
+        );
+        let mut response = response.take(max_bytes.saturating_add(1));
+        let mut file = tempfile::tempfile_in(work_root)?;
+        let mut size = 0u64;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let count = response.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            size += count as u64;
+            anyhow::ensure!(size <= max_bytes, "source exceeds transfer budget");
+            file.write_all(&buffer[..count])?;
         }
-        let mut bytes = Vec::new();
-        response
-            .take(max_bytes.saturating_add(1))
-            .read_to_end(&mut bytes)?;
-        Ok(bytes)
+        anyhow::ensure!(size == max_bytes, "source size mismatch");
+        file.rewind()?;
+        Ok(file)
+    }
+
+    pub fn submit(&self, submission: &Submission) -> Result<serde_json::Value> {
+        let source = &submission.request.source;
+        let pending: serde_json::Value = self.send(self.http.post(self.url("/sources")).json(&serde_json::json!({
+            "archive_digest": source.archive_digest, "archive_bytes": source.archive_bytes,
+        })))?.context("missing source upload response")?;
+        let id = pending["upload_id"]
+            .as_str()
+            .context("missing source upload id")?;
+        if pending["status"] != "ready" {
+            let _: Option<serde_json::Value> = self.send(
+                self.http
+                    .put(self.url(&format!("/sources/{id}/content")))
+                    .timeout(SOURCE_TRANSFER_TIMEOUT)
+                    .body(submission.source_file()?),
+            )?;
+            let _: Option<serde_json::Value> = self.send(
+                self.http
+                    .post(self.url(&format!("/sources/{id}/finalize")))
+                    .timeout(SOURCE_TRANSFER_TIMEOUT),
+            )?;
+        }
+        self.satisfy(&submission.request)
     }
 
     pub fn report(&self, attempt_id: &str, result: &AttemptResultReport) -> Result<()> {
@@ -1009,8 +1100,13 @@ pub fn serve(config: &ServeConfig) -> Result<()> {
                 "[runtime-network] attempt {} — {} on {}",
                 ticket.attempt_id, ticket.derivation_ref, ticket.environment_id
             );
-            let report = execute_ticket_with_source(config, &ticket, || {
-                client.source(&ticket.attempt_id, ticket.resource_budget.transfer_bytes)
+            let report = execute_ticket_with_file(config, &ticket, || {
+                client.source(
+                    &ticket.attempt_id,
+                    ticket.resource_budget.transfer_bytes,
+                    ticket.fence,
+                    &config.work_root,
+                )
             });
             eprintln!(
                 "[runtime-network] attempt {} → {}",
@@ -1112,6 +1208,20 @@ pub fn execute_ticket_with_source(
     ticket: &AttemptTicket,
     source: impl FnOnce() -> Result<Vec<u8>>,
 ) -> AttemptResultReport {
+    execute_ticket_with_file(config, ticket, || {
+        let bytes = source()?;
+        std::fs::create_dir_all(&config.work_root)?;
+        let mut file = tempfile::tempfile_in(&config.work_root)?;
+        file.write_all(&bytes)?;
+        Ok(file)
+    })
+}
+
+pub fn execute_ticket_with_file(
+    config: &ServeConfig,
+    ticket: &AttemptTicket,
+    source: impl FnOnce() -> Result<File>,
+) -> AttemptResultReport {
     let mut attested = attestation();
     let permit = match AttemptJournal::new(config.out_dir.join("attempt-records"))
         .acquire(&ticket.satisfy_id, &ticket.attempt_id)
@@ -1136,7 +1246,9 @@ pub fn execute_ticket_with_source(
     };
     // The ticket's transfer cap is the source's own size; a longer source is
     // not the one the search paid for.
-    if archive.len() as u64 > ticket.resource_budget.transfer_bytes {
+    if archive.metadata().map(|m| m.len()).unwrap_or(u64::MAX)
+        > ticket.resource_budget.transfer_bytes
+    {
         return refused(
             ticket,
             attested,
@@ -1182,7 +1294,7 @@ pub fn execute_ticket_with_source(
 fn execute_planned_ticket(
     config: &ServeConfig,
     ticket: &AttemptTicket,
-    archive: Vec<u8>,
+    archive: File,
     attempt_root: &Path,
     attested: &mut RuntimeAttestation,
     permit: Box<dyn AttemptPermit>,
@@ -1197,7 +1309,14 @@ fn execute_planned_ticket(
             .min(ticket.resource_budget.expanded_bytes),
         ..ceiling
     };
-    let verified = match local::verify_archive(archive, &ticket.archive_digest, limits) {
+    let verified = match FileVerifiedArchive::verify(
+        archive,
+        &ticket.archive_digest,
+        ticket.resource_budget.transfer_bytes,
+        limits,
+    )
+    .map_err(anyhow::Error::new)
+    {
         Ok(verified) => verified,
         Err(error) => {
             let over_cap = ticket.resource_budget.expanded_bytes <= ceiling.max_total_bytes
@@ -1234,7 +1353,8 @@ fn execute_planned_ticket(
         };
     let planned = (|| -> Result<_> {
         std::fs::create_dir_all(attempt_root)?;
-        let frozen = local::freeze_verified(verified, &std::path::absolute(attempt_root)?, limits)?;
+        let frozen =
+            local::freeze_verified_file(verified, &std::path::absolute(attempt_root)?, limits)?;
         let evidence = detect(&frozen.root).context("detection failed")?;
         let draft: AuthoringDraft = parse_capsule_toml(&ticket.capsule_toml)
             .map_err(ato_formation::failure::FormationFailure::from)?;
