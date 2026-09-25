@@ -217,10 +217,10 @@ pub fn evaluate(bytes: &[u8]) -> Decision {
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum SearchRequest {
     FreezeSearch {
-        frozen: ato_formation::search::FrozenSearchV1,
+        frozen: Box<ato_formation::search::FrozenSearchV1>,
     },
     DecideSearch {
-        state: ato_formation::search::SearchStateV1,
+        state: Box<ato_formation::search::SearchStateV1>,
         placements: Vec<ato_formation::search::Placement>,
         now_ms: u64,
     },

@@ -392,7 +392,6 @@ pub fn decide_next(
     if now_ms >= s.deadline_ms
         || available(l.max_attempts, b.attempts_used, b.attempts_reserved) == 0
         || available(l.max_expanded_bytes, b.expanded_used, b.expanded_reserved) == 0
-        || available(l.max_stored_bytes, b.stored_used, b.stored_reserved) == 0
     {
         return Ok(finish(if passed {
             Termination::Verified
