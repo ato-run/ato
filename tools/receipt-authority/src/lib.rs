@@ -211,6 +211,58 @@ pub fn evaluate(bytes: &[u8]) -> Decision {
     }
 }
 
+/// Search uses the same bounded memory transport, not the receipt decision ABI.
+/// In particular a search decision can never be mistaken for an accepted K.
+#[derive(Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+enum SearchRequest {
+    FreezeSearch {
+        frozen: ato_formation::search::FrozenSearchV1,
+    },
+    DecideSearch {
+        state: ato_formation::search::SearchStateV1,
+        placements: Vec<ato_formation::search::Placement>,
+        now_ms: u64,
+    },
+}
+pub fn evaluate_search(bytes: &[u8]) -> Value {
+    use ato_formation::search::*;
+    let evaluate = || -> Result<Value, String> {
+        if bytes.len() > MAX_INPUT_BYTES {
+            return Err("search_input_too_large".into());
+        }
+        let request: SearchRequest = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+        match request {
+            SearchRequest::FreezeSearch { frozen } => {
+                FrozenContract {
+                    base_contract: frozen.base_contract.clone(),
+                    base_contract_ref: frozen.base_contract_ref.clone(),
+                    effective_contract_ref: frozen.contract_ref.clone(),
+                    browser_contract: frozen.browser_contract.clone(),
+                }
+                .validate()
+                .map_err(|e| e.detail)?;
+                let canonical = frozen.canonical_bytes().map_err(|e| e.to_string())?;
+                Ok(
+                    serde_json::json!({"status":"frozen","canonical_json":String::from_utf8(canonical).unwrap()}),
+                )
+            }
+            SearchRequest::DecideSearch {
+                state,
+                placements,
+                now_ms,
+            } => {
+                let action = decide_next(&state, &placements, now_ms).map_err(|e| e.to_string())?;
+                let canonical = state.canonical_bytes().map_err(|e| e.to_string())?;
+                Ok(
+                    serde_json::json!({"status":"search_decision","state_json":String::from_utf8(canonical).unwrap(),"events":events(&state,&action),"action":action}),
+                )
+            }
+        }
+    };
+    evaluate().unwrap_or_else(|detail|serde_json::json!({"status":"rejected","code":"search_state_invalid","detail":detail}))
+}
+
 // Each JS call creates a fresh instance. Buffers remain owned by Rust for the
 // lifetime of that instance. The host writes only the allocated input range,
 // synchronously between prepare and evaluate; no Rust reference spans that write.
@@ -234,6 +286,21 @@ mod abi {
             let mut input = input.borrow_mut();
             input.resize(length, 0);
             input.as_mut_ptr() as usize
+        })
+    }
+    #[unsafe(no_mangle)]
+    pub extern "C" fn authority_search() -> u64 {
+        let decision = INPUT.with(|input| super::evaluate_search(&input.borrow()));
+        let Ok(bytes) = serde_json::to_vec(&decision) else {
+            return 0;
+        };
+        if bytes.len() > super::MAX_INPUT_BYTES {
+            return 0;
+        }
+        OUTPUT.with(|output| {
+            let mut output = output.borrow_mut();
+            *output = bytes;
+            ((output.len() as u64) << 32) | output.as_ptr() as u64
         })
     }
     #[unsafe(no_mangle)]
