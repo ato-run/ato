@@ -30,15 +30,23 @@
 
 pub mod authoring;
 pub mod browser;
+#[cfg(feature = "planning")]
 pub mod capsule_toml;
+#[cfg(feature = "planning")]
 pub mod capsule_toml_v2;
 pub mod containment;
+#[cfg(feature = "planning")]
 pub mod detect;
+#[cfg(feature = "planning")]
 pub mod failure;
+#[cfg(feature = "planning")]
 pub mod intent;
+#[cfg(feature = "planning")]
 pub mod preset;
+#[cfg(feature = "planning")]
 pub mod projection;
 pub mod receipt;
 pub mod request;
+#[cfg(feature = "planning")]
 pub mod source;
 pub mod verify;
