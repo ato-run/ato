@@ -30,14 +30,14 @@ use ato_runtime_attempt::{
     attempt::{AttemptRequest, Continuation, ReceiptContext, run_reserved_attempt},
     executor::{AttemptExecution, AttemptExecutor, ExecutedCandidate, LocalAttemptExecutor},
     formation_realizer::FormationRealizer,
-    journal::{AttemptJournal, AttemptLedger},
+    journal::{AttemptJournal, AttemptLedger, AttemptRecordState},
 };
 
 pub use ato_runtime_attempt::plan::{
     PlannedCandidate, copy_tree, digest, observe_candidate, plan_candidate, stage_workspace,
 };
 
-use crate::api::{FormationApi, PublishOutcome};
+use crate::api::{FailureReport, FormationApi, PublishOutcome};
 use crate::build::BuildAttempt;
 use crate::sandbox::{BuildLimits, NetworkPolicy};
 
@@ -197,13 +197,43 @@ pub fn run_claimed_job(
     capsule_revision_id: &str,
     operation_catalog_required: bool,
 ) -> Result<JobOutcome> {
+    let journal = AttemptJournal::new(context.work_root.join("attempt-records"));
+    run_claimed_job_with_ledger(
+        context,
+        attempt,
+        job,
+        compute_id,
+        capsule_revision_id,
+        operation_catalog_required,
+        &journal,
+    )
+}
+
+/// Injectable durable ledger, shared by production and failure-injection tests.
+pub fn run_claimed_job_with_ledger(
+    context: &JobContext<'_>,
+    attempt: &BuildAttempt,
+    job: &serde_json::Value,
+    compute_id: &str,
+    capsule_revision_id: &str,
+    operation_catalog_required: bool,
+    journal: &dyn AttemptLedger,
+) -> Result<JobOutcome> {
     let attempt = attempt.clone();
     // Reserve historical execution before fetching source or refusing planning.
     // A redelivery must never overwrite prior uncertainty with a fresh refusal.
-    let journal = AttemptJournal::new(context.work_root.join("attempt-records"));
     let permit = journal
         .acquire(&attempt.job_id, &attempt.attempt_id)
-        .map_err(|refusal| anyhow::anyhow!("{}: {:?}", refusal.code(), refusal))?;
+        .map_err(|refusal| {
+            HostedAttemptFailure::new(
+                refusal.code(),
+                "record",
+                refusal.record_state(),
+                None,
+                None,
+                Some(anyhow::anyhow!(refusal.message())),
+            )
+        })?;
 
     // ── source ──────────────────────────────────────────────────────────────
     let source = &job["source"];
@@ -318,7 +348,7 @@ pub fn run_claimed_job(
     };
     let profile = crate::local::probe_local_runtime();
     let spec = planned.attempt_spec();
-    let outcome = run_reserved_attempt(
+    let mut outcome = run_reserved_attempt(
         &AttemptRequest {
             request_id: &attempt.job_id,
             attempt_id: &attempt.attempt_id,
@@ -345,10 +375,39 @@ pub fn run_claimed_job(
         Ok(permit),
     );
     let mut outcomes = outcome.attempt.outcomes.clone();
-    persist_hosted_outcome(&attempt_root, &outcome.attempt, &outcomes)?;
-    let executed = outcome.verified.context(
-        "Hosted attempt did not produce a verified candidate; see durable attempt record",
-    )?;
+    // Preserve the original outcome even if writing the diagnostic sidecar fails.
+    let persisted = persist_hosted_outcome(&attempt_root, &outcome.attempt, &outcomes);
+    let executed = match outcome.verified.take() {
+        Some(executed) => executed,
+        None => {
+            let (code, stage) = outcome
+                .attempt
+                .failure
+                .as_ref()
+                .map(|failure| (failure.code.as_str(), failure.stage.as_str()))
+                .unwrap_or(("attempt_outcome_missing", "record"));
+            return Err(HostedAttemptFailure::new(
+                code,
+                stage,
+                outcome.attempt_record,
+                outcome.attempt.receipt.as_ref(),
+                Some(&outcomes),
+                outcome.error.or_else(|| persisted.err()),
+            )
+            .with_failure(outcome.attempt.failure.clone())
+            .into());
+        }
+    };
+    persisted.map_err(|error| {
+        HostedAttemptFailure::new(
+            "outcome_record_failed",
+            "record",
+            outcome.attempt_record.clone(),
+            outcome.attempt.receipt.as_ref(),
+            Some(&outcomes),
+            Some(error),
+        )
+    })?;
     let verification = outcome
         .attempt
         .verification
@@ -396,10 +455,16 @@ pub fn run_claimed_job(
         }
         Err(error) => {
             outcomes.publication = Outcome::failed("artifact_store_failed");
-            persist_hosted_outcome(&attempt_root, &outcome.attempt, &outcomes)?;
-            return Err(
-                error.context("artifact publication failed; verification evidence is preserved")
-            );
+            let _ = persist_hosted_outcome(&attempt_root, &outcome.attempt, &outcomes);
+            return Err(HostedAttemptFailure::new(
+                "artifact_store_failed",
+                "publish",
+                outcome.attempt_record.clone(),
+                Some(receipt),
+                Some(&outcomes),
+                Some(error),
+            )
+            .into());
         }
     };
     persist_hosted_outcome(&attempt_root, &outcome.attempt, &outcomes)?;
@@ -437,9 +502,25 @@ pub fn run_claimed_job(
         attempt_root.join("formation-result-v2.json"),
         serde_jcs::to_vec(&result)?,
     )?;
-    let outcome = context
+    let published = match context
         .api
-        .publish_result(&result, compute_id, capsule_revision_id)?;
+        .publish_result(&result, compute_id, capsule_revision_id)
+    {
+        Ok(published) => published,
+        Err(error) => {
+            outcomes.publication = Outcome::failed("result_publication_unconfirmed");
+            let _ = persist_hosted_outcome(&attempt_root, &outcome.attempt, &outcomes);
+            return Err(HostedAttemptFailure::new(
+                "result_publication_unconfirmed",
+                "publish",
+                outcome.attempt_record.clone(),
+                Some(receipt),
+                Some(&outcomes),
+                Some(error),
+            )
+            .into());
+        }
+    };
 
     Ok(JobOutcome {
         attempt,
@@ -447,8 +528,54 @@ pub fn run_claimed_job(
         intent_digest: intent_digest.clone(),
         plan_digest: plan_digest.clone(),
         materialization_ref,
-        outcome,
+        outcome: published,
     })
+}
+
+/// Carries common attempt facts through anyhow without classifying error prose.
+#[derive(Debug)]
+pub struct HostedAttemptFailure {
+    pub report: FailureReport,
+    pub attempt_failure: Option<ato_formation::request::AttemptFailure>,
+    cause: Option<anyhow::Error>,
+}
+impl HostedAttemptFailure {
+    fn new(
+        code: &str,
+        stage: &str,
+        record: AttemptRecordState,
+        receipt: Option<&ContractVerificationReceipt>,
+        outcomes: Option<&AttemptOutcomes>,
+        cause: Option<anyhow::Error>,
+    ) -> Self {
+        Self {
+            report: FailureReport {
+                code: code.into(),
+                stage: stage.into(),
+                // Detailed causes stay in operator logs; no raw build output on wire.
+                message: format!("Hosted attempt stopped at {stage} ({code})"),
+                attempt_record: Some(record),
+                receipt: receipt.map(|r| serde_json::json!(r)),
+                outcomes: outcomes.map(|o| serde_json::json!(o)),
+            },
+            cause,
+            attempt_failure: None,
+        }
+    }
+    fn with_failure(mut self, failure: Option<ato_formation::request::AttemptFailure>) -> Self {
+        self.attempt_failure = failure;
+        self
+    }
+}
+impl std::fmt::Display for HostedAttemptFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.report.message)
+    }
+}
+impl std::error::Error for HostedAttemptFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.cause.as_ref().map(|e| e.as_ref())
+    }
 }
 
 struct HostedBuildExecutor {

@@ -1,0 +1,57 @@
+{
+  "attempt_record": "finished",
+  "code": "artifact_store_failed",
+  "outcomes": {
+    "cleanup": {
+      "state": "succeeded"
+    },
+    "publication": {
+      "reason": "artifact_store_failed",
+      "state": "failed"
+    },
+    "runtime_verification": {
+      "state": "succeeded"
+    },
+    "seal": {
+      "state": "succeeded"
+    }
+  },
+  "reason": "Hosted attempt stopped at publish (artifact_store_failed)",
+  "receipt": {
+    "contract_ref": "sha256:d491ec6af19d21096dd7c2f5399bc844b1f277210051795cd28bfe82c251295e",
+    "derivation_ref": "sha256:0c17640c9dbd8f8edbe7c49ac425167fb15d8c404ae61999037e7fe7aecb809e",
+    "execution": {
+      "attempt_id": "hosted_attempt",
+      "endpoint": "http://127.0.0.1:63486/",
+      "platform": "macos/aarch64",
+      "realization": "static_web",
+      "request_id": "hosted_job"
+    },
+    "fully_satisfied": true,
+    "observations": [
+      {
+        "evidence": {
+          "body_sha256": "sha256:ea080747b5946205c3ffd4ddb4838f3db348eafe293e2f06068c2bcaf436bb6f",
+          "method": "GET",
+          "path": "/",
+          "status": 200
+        },
+        "id": "root",
+        "outcome": "satisfied"
+      },
+      {
+        "evidence": {
+          "digest": "sha256:bb2c774078a8bb35873fc7989d43a81a94b71f8e9564597dc4dc8c71d8ae44e4",
+          "input": "workspace"
+        },
+        "id": "source-identity",
+        "outcome": "satisfied"
+      }
+    ],
+    "schema": "ato.contract-verification-receipt/1",
+    "target": {
+      "kind": "formation-runtime"
+    }
+  },
+  "stage": "publish"
+}

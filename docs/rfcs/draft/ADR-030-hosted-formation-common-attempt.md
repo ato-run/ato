@@ -31,8 +31,8 @@ must not rewrite a satisfied receipt. The worker itself retains candidates only
 after successful cleanup, so it will not publish a candidate it failed to stop.
 
 Rollout order is receiver v1/v2 acceptance, then worker v2 sending. There is no
-implicit v1 fallback and no deployment in this change. The receiver requires no DB
-migration: the existing result JSON stores all four outcomes and the receipt.
+implicit v1 fallback and no deployment in this change. Successful results use the existing result JSON. Final hardening adds migration
+0296 for failure reports and the Hosted job stop boundary.
 
 ## Publication failures
 
@@ -41,9 +41,10 @@ is persisted before publication in `hosted-outcome.json`, atomically replaced an
 fsynced beside the job scratch;
 it records the caller's publication outcome separately from the immutable attempt.
 An upload failure keeps the successful verification and marks publication failed.
-No schema is registered. This evidence is local worker storage; this stage does
-not claim remote retention of failed-publication receipts or a restartable upload
-queue. Normal successful results retain the full receipt in API result JSON.
+No schema is registered. Typed failure reports retain receipt/outcomes at the API
+when delivered; a reporting failure leaves the local sidecar. No restartable
+upload/report queue is introduced. Successful results retain the full receipt in
+API result JSON.
 
 ## Reuse is not verification
 
@@ -59,3 +60,37 @@ A receipt must never be relabelled with a new attempt id.
 Hosted Run, validator_agent and the OCI/service-group paths remain stage 2e.
 Removing projection/ProgramIntent/EffectiveBuildPlan is stage 2f. Search budgets,
 retained-object resumption, persistent exploration and AI remain later stages.
+
+## Typed failure and Hosted uncertainty (final hardening)
+
+`HostedAttemptFailure` retains the common failure, original error chain, journal
+state, receipt and independent outcomes. Daemon and one-shot share one classifier
+and reporter. Operator-only causes do not become user-facing raw build output.
+Admission, verification, cleanup, record and publication errors keep their codes.
+Reservation/history refusals also retain the typed journal state.
+
+Typed reports use `/formation/attempts/:id/outcome`. An old receiver returns an
+error instead of silently ignoring uncertainty fields on the old failure API.
+`started_unfinished`, `history_unavailable` and `blocked_by_unknown` install a
+permanent Hosted job stop; known `not_started` / `finished` refusals remain known
+failures. Effect classification never resolves uncertainty.
+
+API migration 0296 adds immutable report rows and a monotonic
+`formation_job_unknowns` overlay. The overlay is the authoritative UNKNOWN state;
+legacy job/attempt status CHECKs are left intact and their values are frozen.
+Both owner-facing status readers return `unknown` before reading legacy status or
+accepted results. This is not a failed job or a pending retry. Database triggers
+block new attempts, fence/status updates and result inserts even when their
+preflight read raced the UNKNOWN report. Late reports remain evidence; no report,
+result, timeout or retry clears the stop. Authenticated superseded workers may
+report uncertainty, but cannot publish a result at a stale fence.
+
+No automatic or manual resolution endpoint is added in this Hosted slice. The
+job cannot resume automatically; an operator must separately reconcile execution
+before any explicit new work. This is a job boundary, not Network SearchState.
+
+Failure receipts/outcomes are persisted remotely when the typed report reaches
+the API. The fsynced local sidecar remains the fallback when reporting fails.
+There is no durable report-delivery queue or remote reconstruction of a lost
+worker filesystem. Rollout requires migration and receiver before sender;
+those deployment operations remain separately authorized.

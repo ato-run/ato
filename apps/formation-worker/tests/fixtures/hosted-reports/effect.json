@@ -1,0 +1,25 @@
+{
+  "attempt_record": "not_started",
+  "code": "effect_policy",
+  "outcomes": {
+    "cleanup": {
+      "reason": "nothing ran",
+      "state": "not_applicable"
+    },
+    "publication": {
+      "reason": "effect_policy",
+      "state": "not_attempted"
+    },
+    "runtime_verification": {
+      "reason": "effect_policy",
+      "state": "not_attempted"
+    },
+    "seal": {
+      "reason": "effect_policy",
+      "state": "not_attempted"
+    }
+  },
+  "reason": "Hosted attempt stopped at admission (effect_policy)",
+  "receipt": null,
+  "stage": "admission"
+}
