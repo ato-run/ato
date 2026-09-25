@@ -1,0 +1,8 @@
+{
+  "attempt_record": "history_unavailable",
+  "code": "attempt_history_unavailable",
+  "outcomes": null,
+  "reason": "Hosted attempt stopped at record (attempt_history_unavailable)",
+  "receipt": null,
+  "stage": "record"
+}

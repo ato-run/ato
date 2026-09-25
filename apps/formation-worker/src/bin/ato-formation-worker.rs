@@ -4,10 +4,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use ato_formation::failure::FormationFailure;
 use ato_formation::source::SourceLimits;
 use ato_formation_worker::api::{
-    FAILURE_REASON_LIMIT, FailureReport, FormationApi, PublishOutcome, bounded_reason,
+    FailureReport, FormationApi, PublishOutcome, bounded_reason, classify_failure as classify,
 };
 use ato_formation_worker::build::BuildAttempt;
 use ato_formation_worker::job::{JobContext, PinnedSourceFetcher, TreePacker, run_claimed_job};
@@ -218,34 +217,6 @@ fn serve(args: &[String]) -> Result<()> {
                 }
             }
         }
-    }
-}
-
-/// What crosses back to the person who uploaded the source.
-///
-/// Derived from the error's TYPE, never from its prose. A failure that carries
-/// a `FormationFailure` already knows its own code, stage and sentence — the
-/// parser, the preset selector and the projector each wrote one — so this
-/// passes them through. Matching on message text to recover a code would break
-/// silently the first time somebody improved a message.
-///
-/// Anything else stays anonymous. `{error:#}` is not a message for an
-/// uploader: it is a chain of internal context that can name paths, echo
-/// tokens, or carry a credentialed URL. So an unrecognised failure gets one
-/// generic sentence plus the attempt id, which is the identifier an operator
-/// needs to find the real chain in the log above.
-fn classify(error: &anyhow::Error) -> FailureReport {
-    match error.downcast_ref::<FormationFailure>() {
-        Some(failure) => FailureReport {
-            code: failure.code.clone(),
-            stage: failure.stage.as_str().to_owned(),
-            message: failure.bounded_message(FAILURE_REASON_LIMIT),
-        },
-        None => FailureReport {
-            code: "build_failed".to_owned(),
-            stage: "build".to_owned(),
-            message: "the app could not be built from this source".to_owned(),
-        },
     }
 }
 
