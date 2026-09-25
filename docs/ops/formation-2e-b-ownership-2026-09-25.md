@@ -69,7 +69,8 @@ Linux final targeted results:
 
 The full Hosted library also ran: **138 passed, 1 failed**. The remaining
 Browser E2E starts installed ARM Chrome, which aborts with SIGABRT before
-CDP readiness; baseline comparison is pending. No test was ignored or marked
+CDP readiness; the same single test fails identically on baseline
+`ed1515bb` with the same Chrome and fd limit (`browser-baseline.log`). No test was ignored or marked
 successful. A separate stateful rerun found a fixed-port collision; its
 fixture now allocates an ephemeral port, and all 83 targeted tests pass.
 Logs remain in the isolated Linux root above (`hosted-final.log`,
