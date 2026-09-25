@@ -859,6 +859,7 @@ fn settle_failed_start(
     StartFailure {
         error,
         stop: stop.clone(),
+        process: None,
     }
 }
 
@@ -868,6 +869,7 @@ fn settle_failed_start(
 pub struct StartFailure {
     pub error: anyhow::Error,
     pub stop: StopOutcome,
+    pub process: Option<super::recovery::ProcessIdentity>,
 }
 
 impl std::fmt::Display for StartFailure {
@@ -884,6 +886,7 @@ impl From<anyhow::Error> for StartFailure {
         StartFailure {
             error,
             stop: StopOutcome::AlreadyExited { exit_code: 0 },
+            process: None,
         }
     }
 }
@@ -898,6 +901,7 @@ pub fn start(
     probe: &dyn ReadinessProbe,
     owner: &OciOwner,
     network_authorization: Option<&NetworkAuthorization>,
+    process_host: &super::process_executor::ProcessLaunchHost,
 ) -> std::result::Result<ActiveRun, StartFailure> {
     let budget = stop_budget(spec.lifecycle());
     let spec = match spec {
@@ -926,29 +930,33 @@ pub fn start(
     };
     let launched = match &spec.realization {
         LaunchRealizationV1::Process(_) => {
-            let mut launched =
-                match super::process_executor::launch_process(spec, &resolved.context) {
-                    Ok(launched) => launched,
-                    Err(error) => {
-                        // `launch_process` fails before spawning or kills
-                        // what it spawned; nothing is left running.
-                        abort_run(state, &resolved.prepared);
-                        return Err(error.into());
-                    }
-                };
+            let mut launched = match super::process_executor::launch_process_with(
+                spec,
+                &resolved.context,
+                process_host,
+            ) {
+                Ok(launched) => launched,
+                Err(error) => {
+                    // `launch_process` fails before spawning or kills
+                    // what it spawned; nothing is left running.
+                    abort_run(state, &resolved.prepared);
+                    return Err(error.into());
+                }
+            };
+            let process_identity = super::recovery::ProcessIdentity {
+                pid: launched.pid(),
+                start_time: super::recovery::process_start_time(launched.pid()).unwrap_or(0),
+            };
             if let Err(error) = super::process_executor::wait_until_ready(
                 spec,
                 &resolved.context,
                 &mut launched,
                 probe,
             ) {
-                let stop = match launched.stop(&spec.lifecycle) {
-                    Ok(_) => StopOutcome::Forced { exit_code: -1 },
-                    Err(stop_error) => StopOutcome::Unconfirmed {
-                        reason: format!("{stop_error:#}"),
-                    },
-                };
-                return Err(settle_failed_start(state, &resolved.prepared, &stop, error));
+                let stop = process_stop_outcome(launched.stop(&spec.lifecycle));
+                let mut failure = settle_failed_start(state, &resolved.prepared, &stop, error);
+                failure.process = Some(process_identity);
+                return Err(failure);
             }
             ActiveWorkload::Process(launched)
         }
@@ -1167,6 +1175,16 @@ pub fn finish(
             .unwrap_or(StopOutcome::AlreadyExited { exit_code: 0 }),
         services,
     };
+    settle_stopped_run(stop, resolved, state, commit_request_id)
+}
+
+/// Only this Hosted state gate may commit/release after physical cessation.
+pub(super) fn settle_stopped_run(
+    stop: FinishedStop,
+    resolved: ResolvedRun,
+    state: &dyn StateArtifactTransport,
+    commit_request_id: &str,
+) -> (FinishedStop, Result<Vec<RunStateOutcome>>) {
     if !stop.overall.is_confirmed() {
         quarantine_run(
             state,

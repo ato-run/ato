@@ -80,13 +80,19 @@ enum Candidate {
     Static { root: PathBuf, entry: String },
     /// A process the Hosted Run started; the API relays to its ready URL.
     Process { child: Child, ready_url: String },
+    HostedProcess {
+        _owned: ato_runtime_attempt::launch::process_executor::LaunchedProcess,
+        ready_url: String,
+    },
 }
 
 impl Candidate {
     fn ready_url(&self) -> Option<&str> {
         match self {
             Self::Static { .. } => None,
-            Self::Process { ready_url, .. } => Some(ready_url),
+            Self::Process { ready_url, .. } | Self::HostedProcess { ready_url, .. } => {
+                Some(ready_url)
+            }
         }
     }
 }
@@ -107,6 +113,70 @@ fn start_process(root: &Path) -> Candidate {
         let probe = TcpListener::bind("127.0.0.1:0").unwrap();
         probe.local_addr().unwrap().port()
     };
+    if let Some(shim) = std::env::var_os("ATO_HOSTED_PROCESS_SHIM") {
+        use ato_ipc::runtime_launch::*;
+        use ato_runtime_attempt::launch::{process_executor::*, resolved::*};
+        let mut spec = RuntimeLaunchSpecV1::parse(include_str!(
+            "../../../lib/ipc/tests/fixtures/runtime-launch-spec-v1/fastapi-process.json"
+        ))
+        .unwrap();
+        spec.realization = LaunchRealizationV1::Process(ProcessRealizationV1 {
+            argv: vec![
+                "python3".into(),
+                "-m".into(),
+                "http.server".into(),
+                port.to_string(),
+                "--bind".into(),
+                "127.0.0.1".into(),
+            ],
+            executable: None,
+        });
+        spec.secret_grants.clear();
+        spec.state_attachments.clear();
+        spec.readiness = ReadinessV1::Http {
+            endpoint_name: "web".into(),
+            path: "/".into(),
+            timeout_ms: 10_000,
+        };
+        let endpoint = EndpointV1 {
+            name: "web".into(),
+            protocol: "http".into(),
+            guest_port: Some(port),
+            allocation: EndpointAllocationV1::Automatic,
+            preferred_port: None,
+        };
+        spec.endpoints = vec![endpoint.clone()];
+        let context = ResolvedRuntimeLaunchContext::new(
+            root.to_path_buf(),
+            "",
+            BTreeMap::new(),
+            vec![],
+            vec![],
+            vec![allocate_endpoint(&endpoint, port)],
+        )
+        .unwrap();
+        let mut owned = launch_process_with(
+            &spec,
+            &context,
+            &ProcessLaunchHost {
+                shim: shim.into(),
+                runtime_root: root.parent().unwrap().join("process-runtime"),
+                output: None,
+            },
+        )
+        .unwrap();
+        wait_until_ready(
+            &spec,
+            &context,
+            &mut owned,
+            &LoopbackReadinessProbe::new(reqwest::blocking::Client::new()),
+        )
+        .unwrap();
+        return Candidate::HostedProcess {
+            _owned: owned,
+            ready_url: format!("http://127.0.0.1:{port}/"),
+        };
+    }
     let child = Command::new("python3")
         .args([
             "-m",
@@ -376,7 +446,8 @@ fn route(
                         }
                     }
                 }
-                Candidate::Process { ready_url, .. } => {
+                Candidate::Process { ready_url, .. }
+                | Candidate::HostedProcess { ready_url, .. } => {
                     let client = reqwest::blocking::Client::builder()
                         .redirect(reqwest::redirect::Policy::none())
                         .timeout(Duration::from_secs(5))
