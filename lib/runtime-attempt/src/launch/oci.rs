@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail, ensure};
 use ato_adapter_oci::{
     DockerOciAdapter, OciEndpoint, OciHandle, OciMount, OciNetwork, OciOwner, OciResourceLimits,
-    OciServiceGroup, OciSpec, StopBudget, StopOutcome,
+    OciServiceGroup, OciSpec, SpawnCleanupUnconfirmed, StopBudget, StopOutcome,
 };
 use ato_ipc::runtime_launch::{OciRealizationV1, ReadinessV1, RuntimeLaunchSpecV1, StateAccessV1};
 use ato_ipc::runtime_launch_v2::{
@@ -36,7 +36,7 @@ use ato_ipc::runtime_launch_v2::{
 
 use super::process_executor::{ReadinessProbe, state_path_env_name};
 use super::resolved::ResolvedRuntimeLaunchContext;
-use crate::realize::RunningCandidate;
+use crate::realize::{CandidateStopFailure, RunningCandidate};
 
 const INTERNAL_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -62,6 +62,60 @@ impl OciStop {
             .unwrap_or(StopOutcome::AlreadyExited { exit_code: 0 })
     }
 }
+
+/// A start that failed after some of it ran: the start error, and how
+/// everything it had started was then stopped. Only a confirmed cleanup lets a
+/// caller treat the start as having left nothing running.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OciStartFailure {
+    /// Why the start failed.
+    pub error: String,
+    /// Each started container's stop, in stop (reverse start) order; a
+    /// container a failed launch may have left is reported unconfirmed.
+    pub cleanup: OciStop,
+    /// Every container the start created, by id (by name when Docker
+    /// returned none).
+    pub containers: Vec<String>,
+    /// Networks kept because a container on them is not confirmed stopped.
+    pub networks: Vec<String>,
+}
+
+impl OciStartFailure {
+    pub fn confirmed(&self) -> bool {
+        self.cleanup.overall().is_confirmed()
+    }
+
+    /// What recovery would look for, when the cleanup is not confirmed.
+    pub fn resources(&self) -> Vec<String> {
+        self.containers
+            .iter()
+            .map(|id| format!("container:{id}"))
+            .chain(self.networks.iter().map(|name| format!("network:{name}")))
+            .collect()
+    }
+}
+
+impl std::fmt::Display for OciStartFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.confirmed() {
+            write!(
+                formatter,
+                "{}; everything it started was confirmed stopped",
+                self.error
+            )
+        } else {
+            write!(
+                formatter,
+                "{}; what it started is not confirmed stopped ({:?}); kept: {}",
+                self.error,
+                self.cleanup.services,
+                self.resources().join(", ")
+            )
+        }
+    }
+}
+
+impl std::error::Error for OciStartFailure {}
 
 impl LaunchedOci {
     /// Every container, by the name its stop outcome is reported under.
@@ -244,37 +298,85 @@ pub struct ServiceStart {
 }
 
 /// Start `services` in order on `network`, each only after `ready` accepts
-/// it. On any failure every service already started is stopped in reverse
-/// order and every network removed before the error is returned; services
-/// not yet started are never started, and their networks and guards go too.
+/// it. On any failure what had started is stopped explicitly, in reverse, with
+/// `budget`, and the error is an [`OciStartFailure`] carrying both the start
+/// error and each container's stop; networks are removed only when every
+/// container is confirmed stopped. Services not yet started never start, and
+/// their networks and guards go too. Dropping the group stays as the last
+/// defence, never as the evidence of a stop.
 pub fn start_service_group(
     network: OciNetwork,
     workspace: &Path,
     services: Vec<ServiceStart>,
+    budget: StopBudget,
     ready: &mut dyn FnMut(&str, &OciServiceGroup) -> Result<()>,
 ) -> Result<OciServiceGroup> {
-    // From here on, dropping `group` stops whatever started and removes the
-    // networks, so every early return cleans up.
     let mut group = OciServiceGroup::new(network);
     for service in services {
-        let handle = service.adapter.spawn_in_network(
+        let handle = match service.adapter.spawn_in_network(
             workspace,
             &service.runtime_root,
             group.network(),
             Some(&service.name),
-        )?;
+        ) {
+            Ok(handle) => handle,
+            Err(error) => return Err(abandon_group(group, budget, error)),
+        };
         let container = handle.container_id().to_owned();
         group.push(service.name.clone(), handle);
         for network in service.networks {
-            network.connect_container(&container)?;
+            let connected = network.connect_container(&container);
+            // Even a failed connect may have taken effect in Docker.
             group.push_auxiliary_network(network);
+            if let Err(error) = connected {
+                return Err(abandon_group(group, budget, error));
+            }
         }
         for guard in service.guards {
             group.retain_resource(guard);
         }
-        ready(&service.name, &group)?;
+        if let Err(error) = ready(&service.name, &group) {
+            return Err(abandon_group(group, budget, error));
+        }
     }
     Ok(group)
+}
+
+/// Stop what a failed group start had started, in reverse, and report it with
+/// the start error.
+fn abandon_group(
+    mut group: OciServiceGroup,
+    budget: StopBudget,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    let mut containers = group
+        .services()
+        .map(|(_, handle)| handle.container_id().to_owned())
+        .collect::<Vec<_>>();
+    let networks = group.network_names();
+    if error.downcast_ref::<SpawnCleanupUnconfirmed>().is_some() {
+        group.retain_networks_for_recovery();
+    }
+    let report = group.stop_gracefully(budget);
+    let mut cleanup = OciStop {
+        services: report.services,
+    };
+    if let Some(left) = error.downcast_ref::<SpawnCleanupUnconfirmed>() {
+        containers.push(left.container.clone());
+        cleanup.services.push((
+            format!("failed launch {}", left.container),
+            StopOutcome::Unconfirmed {
+                reason: left.reason.clone(),
+            },
+        ));
+    }
+    let confirmed = cleanup.overall().is_confirmed();
+    anyhow::Error::new(OciStartFailure {
+        error: format!("{error:#}"),
+        cleanup,
+        containers,
+        networks: if confirmed { Vec::new() } else { networks },
+    })
 }
 
 /// A TCP egress the caller authorized for one service of a v2 group: the
@@ -299,6 +401,7 @@ pub fn launch_service_group(
     probe: &dyn ReadinessProbe,
     owner: &OciOwner,
     egress: Vec<ServiceEgress>,
+    budget: StopBudget,
 ) -> Result<OciServiceGroup> {
     ensure!(
         cfg!(target_os = "linux"),
@@ -357,6 +460,7 @@ pub fn launch_service_group(
         network,
         context.workspace_root(),
         starts,
+        budget,
         &mut |name, group| {
             let service = group_spec
                 .services
@@ -556,15 +660,43 @@ impl OciCandidate {
         let Some(launched) = self.launched.take() else {
             return Ok(());
         };
-        let stop = launched.stop(self.budget);
-        if !stop.overall().is_confirmed() {
-            bail!(
-                "the OCI workload could not be confirmed stopped ({:?}); its runtime scratch \
-                 is kept",
-                stop.services
+        let mut resources = launched
+            .containers()
+            .into_iter()
+            .map(|(_, handle)| format!("container:{}", handle.container_id()))
+            .collect::<Vec<_>>();
+        if let LaunchedOci::Container(container) = &launched
+            && let Some(network) = container.network_name()
+        {
+            resources.push(format!("network:{network}"));
+        }
+        if let LaunchedOci::Group(group) = &launched {
+            resources.extend(
+                group
+                    .network_names()
+                    .into_iter()
+                    .map(|name| format!("network:{name}")),
             );
         }
-        remove_owned(&std::mem::take(&mut self.owned))
+        let stop = launched.stop(self.budget);
+        if !stop.overall().is_confirmed() {
+            // Kept, scratch included: an unconfirmed container may still be
+            // writing through its mounts.
+            resources.extend(
+                self.owned
+                    .iter()
+                    .map(|path| format!("scratch:{}", path.display())),
+            );
+            return Err(anyhow::Error::new(CandidateStopFailure::Unconfirmed {
+                reason: format!("{:?}", stop.services),
+                resources,
+            }));
+        }
+        remove_owned(&std::mem::take(&mut self.owned)).map_err(|error| {
+            anyhow::Error::new(CandidateStopFailure::ScratchKept {
+                reason: format!("{error:#}"),
+            })
+        })
     }
 }
 
@@ -617,6 +749,125 @@ fn remove_owned(paths: &[PathBuf]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Uses real Docker, with one test-process-only wrapper refusing the
+    /// first container's state inspection. Never stops the shared daemon.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "needs native Linux Docker; creates two isolated test containers"]
+    fn partial_group_readiness_failure_retains_unconfirmed_stop() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+        const CHILD: &str = "ATO_TEST_PARTIAL_GROUP_ROOT";
+        if let Some(root) = std::env::var_os(CHILD) {
+            let root = PathBuf::from(root);
+            let network = OciNetwork::create("hardening-1405", &BTreeMap::new()).unwrap();
+            let network_name = network.name().to_owned();
+            std::fs::write(root.join("network"), &network_name).unwrap();
+            let services = ["first", "second"].into_iter().map(|name| ServiceStart {
+                name: name.to_owned(),
+                adapter: DockerOciAdapter::new(OciSpec {
+                    id: name.to_owned(),
+                    image: "docker.io/traefik/whoami@sha256:4f90b33ddca9c4d4f06527070d6e503b16d71016edea036842be2a84e60c91cb".to_owned(),
+                    platform: "linux/amd64".to_owned(), entrypoint: None,
+                    argv: vec!["--port".to_owned(), "8000".to_owned()],
+                    working_dir: "/app".to_owned(), workspace_mount_path: "/app".to_owned(),
+                    environment: BTreeMap::new(), endpoints: vec![], mounts: vec![],
+                    limits: OciResourceLimits { memory_bytes: 134_217_728, cpu_limit_millis: 500, pids_limit: 64 },
+                    stop_timeout_seconds: 1, labels: BTreeMap::new(),
+                }).unwrap(),
+                runtime_root: root.join(name), networks: vec![], guards: vec![],
+            }).collect();
+            let error = start_service_group(
+                network,
+                &root,
+                services,
+                StopBudget {
+                    graceful: Duration::from_millis(50),
+                    force: Duration::from_millis(50),
+                },
+                &mut |name, group| {
+                    for (service, handle) in group.services() {
+                        std::fs::write(root.join(format!("id-{service}")), handle.container_id())?;
+                    }
+                    if name == "second" {
+                        std::fs::write(root.join("inject"), "yes")?;
+                        bail!("injected second service readiness failure");
+                    }
+                    Ok(())
+                },
+            )
+            .err()
+            .expect("readiness must fail");
+            let failure = error.downcast_ref::<OciStartFailure>().unwrap();
+            assert!(failure.error.contains("second service readiness failure"));
+            assert!(!failure.confirmed());
+            assert_eq!(
+                failure
+                    .cleanup
+                    .services
+                    .iter()
+                    .map(|(name, _)| name.as_str())
+                    .collect::<Vec<_>>(),
+                ["second", "first"]
+            );
+            assert!(failure.cleanup.services[0].1.is_confirmed());
+            assert!(!failure.cleanup.services[1].1.is_confirmed());
+            assert_eq!(failure.containers.len(), 2);
+            assert_eq!(failure.networks, [network_name]);
+            assert!(root.join("first/ownership.json").is_file());
+            assert!(root.join("second/ownership.json").is_file());
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let real = Command::new("sh")
+            .args(["-c", "command -v docker"])
+            .output()
+            .unwrap();
+        assert!(real.status.success());
+        let real = String::from_utf8(real.stdout).unwrap().trim().to_owned();
+        let bin = root.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let wrapper = bin.join("docker");
+        std::fs::write(&wrapper, r#"#!/bin/sh
+if [ -f "$ATO_TEST_PARTIAL_GROUP_ROOT/inject" ] && [ "$1" = inspect ] && [ "$3" = '{{.State.Running}}|{{.State.ExitCode}}' ] && [ "$4" = "$(cat "$ATO_TEST_PARTIAL_GROUP_ROOT/id-first")" ]; then
+    echo 'injected state inspection failure for first container' >&2
+    exit 1
+fi
+exec "$ATO_TEST_REAL_DOCKER" "$@"
+"#).unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let result = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "launch::oci::tests::partial_group_readiness_failure_retains_unconfirmed_stop",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env(CHILD, root.path())
+            .env("ATO_TEST_REAL_DOCKER", &real)
+            .env(
+                "PATH",
+                format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+            )
+            .output()
+            .unwrap();
+        // Recovery is test-owned and targets only identities written by this test.
+        for name in ["first", "second"] {
+            if let Ok(id) = std::fs::read_to_string(root.path().join(format!("id-{name}"))) {
+                let _ = Command::new(&real).args(["rm", "--force", &id]).output();
+            }
+        }
+        if let Ok(name) = std::fs::read_to_string(root.path().join("network")) {
+            let _ = Command::new(&real).args(["network", "rm", &name]).output();
+        }
+        assert!(
+            result.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
 
     #[test]
     fn a_stop_is_confirmed_only_when_every_container_is() {

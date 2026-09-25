@@ -37,7 +37,9 @@ use crate::executor::ExecutedCandidate;
 use crate::journal::{
     AttemptLedger, AttemptPermit, AttemptRecordState, BeginRefusal, StartIdentity,
 };
-use crate::realize::{CandidateRealizer, LiveCandidate, RealizeFailure, RunningCandidate};
+use crate::realize::{
+    CandidateRealizer, LiveCandidate, RealizeFailure, RunningCandidate, StopClass,
+};
 use crate::spec::AttemptSpec;
 pub use crate::verification::ReceiptContext;
 use crate::verification::{
@@ -116,6 +118,11 @@ pub struct AttemptOutcome {
     /// the person who asked (a Run). Never serialized: the attempt record
     /// carries the bounded sentence.
     pub error: Option<anyhow::Error>,
+    /// How this attempt's own stop of the candidate went, when it stopped
+    /// one: confirmed, confirmed with its scratch kept, or unconfirmed. `None`
+    /// when it stopped nothing (nothing ran, or it was handed off). A caller
+    /// that owns durable state reads this, not the cleanup sentence.
+    pub stop: Option<StopClass>,
 }
 
 impl AttemptOutcome {
@@ -182,6 +189,7 @@ pub fn run_reserved_attempt(
             verified: None,
             live: None,
             error: None,
+            stop: None,
         }
     };
 
@@ -254,7 +262,9 @@ fn unfinished(request: &AttemptRequest<'_>, outcome: &mut AttemptOutcome, error:
     if let Some(live) = outcome.live.take() {
         // Not handed off: an attempt whose end is not durable keeps nothing
         // running.
-        outcome.attempt.outcomes.cleanup = match live.stop() {
+        let stopped = live.stop();
+        outcome.stop = Some(StopClass::of(&stopped));
+        outcome.attempt.outcomes.cleanup = match stopped {
             Ok(()) => Outcome::succeeded(),
             Err(error) => Outcome::failed(&bounded(&format!("{error:#}"))),
         };
@@ -281,6 +291,7 @@ fn realize_and_verify(
         verified: None,
         live: None,
         error: Some(error),
+        stop: None,
     };
 
     let realized = match realizer.realize(request.attempt_id, request.attempt_root) {
@@ -297,7 +308,31 @@ fn realize_and_verify(
         Err(RealizeFailure::Launch { error, evidence }) => {
             attempt.outcomes.publication = Outcome::not_attempted("candidate_not_observable");
             attempt.realization = evidence.map(|evidence| *evidence);
-            return not_observable(attempt, error);
+            return not_observable(attempt, error, Some(Ok(())));
+        }
+        Err(RealizeFailure::Abandoned {
+            error,
+            cleanup,
+            resources,
+        }) => {
+            // Part of it ran and is not confirmed stopped: kept for recovery,
+            // never reported as "nothing was realized".
+            attempt.outcomes.publication = Outcome::not_attempted("candidate_stop_unconfirmed");
+            attempt.outcomes.seal = Outcome::failed("candidate_stop_unconfirmed");
+            attempt.outcomes.runtime_verification = Outcome::failed("candidate_not_observable");
+            attempt.outcomes.cleanup = Outcome::failed(&bounded(&cleanup));
+            attempt.failure = Some(AttemptFailure {
+                code: "candidate_stop_unconfirmed".to_owned(),
+                stage: FailureStage::Verification.as_str().to_owned(),
+                message: bounded(&format!("{error:#}")),
+            });
+            return AttemptOutcome {
+                stop: Some(StopClass::Unconfirmed {
+                    reason: cleanup,
+                    resources,
+                }),
+                ..failed(attempt, error)
+            };
         }
     };
     // Publication is the caller's for what a Formation keeps; a candidate
@@ -317,11 +352,13 @@ fn realize_and_verify(
     ) {
         Ok(http) => http,
         Err(error) => {
+            // A candidate was realized: its stop is recorded whatever the
+            // realizer reported as evidence.
             let stopped = candidate.stop();
             if let Some(evidence) = attempt.realization.as_mut() {
                 evidence.destroyed = stopped.is_ok();
             }
-            return not_observable(attempt, error);
+            return not_observable(attempt, error, Some(stopped));
         }
     };
     // The receipt covers the Contract's observations at this verification
@@ -355,7 +392,7 @@ fn realize_and_verify(
         .map(|failure| anyhow::anyhow!("{}: {}", failure.code, failure.message));
     attempt.verification = Some(verification);
     attempt.receipt = Some(receipt);
-    let (verified, live) = after_verification(
+    let (verified, live, stop) = after_verification(
         &mut attempt,
         failure,
         candidate,
@@ -373,20 +410,40 @@ fn realize_and_verify(
         attempt_record: AttemptRecordState::StartedUnfinished,
         verified: if verified { realized.kept } else { None },
         live: live.map(LiveCandidate::new),
+        stop,
     }
 }
 
 /// The candidate could not be observed at all: nothing is verified, and
-/// guessing verdicts would invent evidence. Whatever was realized is gone
-/// (see `evidence.destroyed`).
-fn not_observable(mut attempt: FormationAttempt, error: anyhow::Error) -> AttemptOutcome {
+/// guessing verdicts would invent evidence. `stopped` is the stop of a
+/// candidate that was realized; without one, the realizer's evidence says
+/// whether anything it started is gone.
+fn not_observable(
+    mut attempt: FormationAttempt,
+    error: anyhow::Error,
+    stopped: Option<Result<()>>,
+) -> AttemptOutcome {
     attempt.outcomes.seal = Outcome::failed("candidate_not_observable");
     attempt.outcomes.runtime_verification = Outcome::failed("candidate_not_observable");
-    attempt.outcomes.cleanup = match &attempt.realization {
-        Some(evidence) if evidence.destroyed => Outcome::succeeded(),
-        Some(_) => Outcome::failed("the realization was not confirmed gone"),
-        None => Outcome::not_applicable("no candidate was realized"),
+    let (cleanup, stop) = match (&stopped, &attempt.realization) {
+        (Some(Ok(())), _) => (Outcome::succeeded(), Some(StopClass::Confirmed)),
+        (Some(Err(error)), _) => (
+            Outcome::failed(&bounded(&format!("{error:#}"))),
+            stopped.as_ref().map(StopClass::of),
+        ),
+        (None, Some(evidence)) if evidence.destroyed => {
+            (Outcome::succeeded(), Some(StopClass::Confirmed))
+        }
+        (None, Some(_)) => (
+            Outcome::failed("the realization was not confirmed gone"),
+            Some(StopClass::Unconfirmed {
+                reason: "the realization was not confirmed gone".to_owned(),
+                resources: Vec::new(),
+            }),
+        ),
+        (None, None) => (Outcome::not_applicable("no candidate was realized"), None),
     };
+    attempt.outcomes.cleanup = cleanup;
     attempt.failure = Some(AttemptFailure {
         code: "candidate_not_observable".to_owned(),
         stage: FailureStage::Verification.as_str().to_owned(),
@@ -399,6 +456,7 @@ fn not_observable(mut attempt: FormationAttempt, error: anyhow::Error) -> Attemp
         verified: None,
         live: None,
         error: Some(error),
+        stop,
     }
 }
 
@@ -477,7 +535,7 @@ fn after_verification<L>(
     live: L,
     continuation: Continuation,
     stop: impl FnOnce(L) -> Result<()>,
-) -> (bool, Option<L>) {
+) -> (bool, Option<L>, Option<StopClass>) {
     attempt.outcomes.runtime_verification = match &failure {
         None => Outcome::succeeded(),
         Some(failure) => Outcome::failed(&failure.code),
@@ -501,10 +559,11 @@ fn after_verification<L>(
     if let Some(evidence) = attempt.realization.as_mut() {
         evidence.destroyed = !hand_off && stopped.is_ok();
     }
+    let stop = (!hand_off).then(|| StopClass::of(&stopped));
 
     if let Some(failure) = failure {
         attempt.failure = Some(failure);
-        return (false, None);
+        return (false, None, stop);
     }
     // K was satisfied at the verification point; a candidate that could not
     // be stopped afterwards is still not one to keep. The receipt and
@@ -515,10 +574,10 @@ fn after_verification<L>(
             stage: "cleanup".to_owned(),
             message: bounded(&format!("{error:#}")),
         });
-        return (false, None);
+        return (false, None, stop);
     }
     attempt.status = AttemptStatus::Verified;
-    (true, live)
+    (true, live, stop)
 }
 
 /// Every Contract observation must be Satisfied by this attempt. A verdict
@@ -741,11 +800,12 @@ mod tests {
     fn a_cleanup_failure_does_not_unverify_what_was_verified() {
         let mut attempt = verified_attempt();
         let receipt = attempt.receipt.clone();
-        let (kept, live) = after_verification(&mut attempt, None, (), Continuation::Stop, |()| {
-            Err(anyhow::anyhow!(
-                "the realization scratch could not be removed"
-            ))
-        });
+        let (kept, live, _) =
+            after_verification(&mut attempt, None, (), Continuation::Stop, |()| {
+                Err(anyhow::anyhow!(
+                    "the realization scratch could not be removed"
+                ))
+            });
         // K was satisfied, and still is on record.
         assert_eq!(
             attempt.outcomes.runtime_verification.state,
@@ -982,6 +1042,109 @@ mod tests {
                 kept: None,
             })
         }
+    }
+
+    struct UnconfirmedRealizer {
+        observation_fails: bool,
+    }
+    struct UnconfirmedCandidate {
+        inner: Box<dyn RunningCandidate>,
+        endpoints: BTreeMap<String, String>,
+        observation_fails: bool,
+    }
+    impl RunningCandidate for UnconfirmedCandidate {
+        fn endpoints(&self) -> &BTreeMap<String, String> {
+            &self.endpoints
+        }
+        fn exited(&mut self) -> Result<Option<String>> {
+            Ok(self
+                .observation_fails
+                .then(|| "injected observation failure".to_owned()))
+        }
+        fn stop(self: Box<Self>) -> Result<()> {
+            self.inner.stop()?;
+            Err(crate::realize::CandidateStopFailure::Unconfirmed {
+                reason: "injected stop uncertainty".to_owned(),
+                resources: vec!["container:fixture".to_owned()],
+            }
+            .into())
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+    impl CandidateRealizer for UnconfirmedRealizer {
+        fn admit(&self, _: &RuntimeProfile) -> Option<AttemptFailure> {
+            None
+        }
+        fn realize(
+            &self,
+            id: &str,
+            root: &Path,
+        ) -> Result<crate::realize::Realized, RealizeFailure> {
+            let mut realized = AnsweringRealizer::default().realize(id, root)?;
+            assert!(realized.evidence.is_none());
+            let endpoints = if self.observation_fails {
+                BTreeMap::from([("app.http".to_owned(), "invalid://fixture".to_owned())])
+            } else {
+                realized.candidate.endpoints().clone()
+            };
+            realized.candidate = Box::new(UnconfirmedCandidate {
+                inner: realized.candidate,
+                endpoints,
+                observation_fails: self.observation_fails,
+            });
+            Ok(realized)
+        }
+    }
+
+    #[test]
+    fn observation_failure_keeps_unconfirmed_cleanup_without_realization_evidence() {
+        let records = tempfile::tempdir().unwrap();
+        let outcome = served_attempt(
+            200,
+            EffectAuthorization::UserInvoked {
+                derivation_ref: "sha256:d",
+            },
+            Continuation::Stop,
+            &UnconfirmedRealizer {
+                observation_fails: true,
+            },
+            &AttemptJournal::new(records.path()),
+        );
+        assert!(outcome.attempt.realization.is_none());
+        assert_eq!(outcome.attempt.outcomes.cleanup.state, OutcomeState::Failed);
+        assert!(matches!(
+            outcome.stop,
+            Some(crate::realize::StopClass::Unconfirmed { .. })
+        ));
+        assert!(outcome.attempt.receipt.is_none());
+    }
+
+    #[test]
+    fn passing_k_survives_unconfirmed_stop_through_run_attempt() {
+        let records = tempfile::tempdir().unwrap();
+        let outcome = served_attempt(
+            200,
+            EffectAuthorization::UserInvoked {
+                derivation_ref: "sha256:d",
+            },
+            Continuation::Stop,
+            &UnconfirmedRealizer {
+                observation_fails: false,
+            },
+            &AttemptJournal::new(records.path()),
+        );
+        assert!(outcome.attempt.receipt.as_ref().unwrap().fully_satisfied);
+        assert_eq!(
+            outcome.attempt.outcomes.runtime_verification.state,
+            OutcomeState::Succeeded
+        );
+        assert_eq!(outcome.attempt.outcomes.cleanup.state, OutcomeState::Failed);
+        assert!(matches!(
+            outcome.stop,
+            Some(crate::realize::StopClass::Unconfirmed { .. })
+        ));
     }
 
     /// A ledger that makes the start durable and cannot make the finish so —
@@ -1257,7 +1420,7 @@ mod tests {
     #[test]
     fn a_hand_off_never_stops_and_is_not_a_cleanup_failure() {
         let mut attempt = verified_attempt();
-        let (kept, live) = after_verification(
+        let (kept, live, _) = after_verification(
             &mut attempt,
             None,
             "the running candidate",
