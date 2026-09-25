@@ -13,7 +13,6 @@ pub mod activity_mcp;
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -26,20 +25,11 @@ use ato_adapter_api::AdapterContext;
 use ato_adapter_browser::{
     BROWSER_CLICK_OPERATION, BROWSER_KEYBOARD_OPERATION, BROWSER_PROTOCOL_ID,
 };
-use ato_adapter_oci::{
-    DockerOciAdapter, OciEndpoint, OciHandle, OciMount, OciNetwork, OciResourceLimits,
-    OciServiceGroup, OciSpec,
-};
 use ato_adapter_process::terminate_process_tree;
 use ato_adapter_workspace::restore_workspace;
 use ato_computation::{ComputationRef, ContentRef};
-use ato_formation::authoring::{
-    HTTP_CONTRACT_VERIFIER, STATE_FILESYSTEM_PROTOCOL, WORKSPACE_PROTOCOL,
-};
-use ato_formation::verify::{
-    ContractVerificationReceipt, RuntimeHttpObservation, RuntimeObservation,
-    VerificationExecutionEvidence, VerificationTargetKind, verify_runtime,
-};
+use ato_formation::authoring::STATE_FILESYSTEM_PROTOCOL;
+use ato_formation::verify::{ContractVerificationReceipt, VerificationTargetKind};
 use ato_materializer_api::{
     ContractContext, MaterializerContext, MaterializerRegistry, accept_candidate,
 };
@@ -61,9 +51,8 @@ use ato_portable_application::local_instance::{
 use ato_portable_application::portability_export::repack_portable_dependencies_with_archives;
 use ato_portable_application::portability_plan::{PortableExportProfile, plan_portable_export};
 use ato_portable_application::{
-    OCI_CPU_MILLIS_RUNTIME, OCI_IMAGE_RUNTIME, OCI_MEMORY_BYTES_RUNTIME, OCI_PIDS_LIMIT_RUNTIME,
-    OCI_PLATFORM_RUNTIME, PortableRealizationKind, StaticApplicationAsset, StaticApplicationState,
-    ValidatedPortableApplication, build_authored_bundle_v2, bundle_sha256, materialize_tree,
+    PortableRealizationKind, StaticApplicationAsset, StaticApplicationState,
+    ValidatedPortableApplication, build_authored_bundle_v2, bundle_sha256,
     resolve_application_bindings, validate_bundle_for_derivation,
 };
 use ato_realization_planner::{
@@ -1546,7 +1535,7 @@ fn portable_instance_worker_claimed(
     };
     let filesystem_state = store.filesystem_state_paths(&claimed.instance_id)?;
     let run_root = store.run_root(&claimed.instance_id, &claimed.run_id)?;
-    let mut started = start_and_verify_portable_application(
+    let started = start_and_verify_portable_application(
         &bundle_bytes,
         bundle,
         &instance.selected_derivation_ref,
@@ -1565,15 +1554,6 @@ fn portable_instance_worker_claimed(
         || started.receipt.derivation_ref != instance.selected_derivation_ref
     {
         bail!("local Instance verification receipt does not match imported metadata");
-    }
-    // OCI routes still start on the CLI's own path, whose receipt does not
-    // know the Run yet; the common attempt names it from the start and its
-    // receipt is never rewritten.
-    if !matches!(started.runtime, PortableLocalRuntime::Live { .. })
-        && let Some(execution) = &mut started.receipt.execution
-    {
-        execution.run_id = Some(claimed.run_id.clone());
-        execution.attempt_id = Some(claimed.run_id.clone());
     }
     let receipt = started.receipt.canonical_bytes()?;
     let process = OwnedProcessIdentity::current()?;
@@ -2006,7 +1986,7 @@ fn run_portable_application(
         }
         // A service group is one Application: when any service exits, the
         // whole group is stopped (by dropping the runtime) and the run fails.
-        if matches!(runtime, PortableLocalRuntime::OciServiceGroup { .. }) {
+        if runtime.stops_when_a_service_exits {
             runtime.try_wait()?;
         }
         #[cfg(not(unix))]
@@ -2137,17 +2117,21 @@ fn start_portable_attempt(
         .context("a verified Run carries its receipt")?;
     let label = match validated.realization {
         PortableRealizationKind::StaticWeb => "static web",
-        _ => "local process",
+        PortableRealizationKind::LocalProcess => "local process",
+        PortableRealizationKind::OciContainer => "OCI container",
+        PortableRealizationKind::OciServiceGroup => "OCI service group",
     };
     let base_url = live
         .endpoint()
         .map(|endpoint| endpoint.trim_end_matches('/').to_owned())
         .context("the verified candidate answers nowhere")?;
     Ok(StartedPortableApplication {
-        runtime: PortableLocalRuntime::Live {
+        runtime: PortableLocalRuntime {
             live,
             base_url,
             label,
+            stops_when_a_service_exits: validated.realization
+                == PortableRealizationKind::OciServiceGroup,
         },
         receipt,
     })
@@ -2185,255 +2169,28 @@ fn start_and_verify_portable_application(
         &validated.application,
         runtime_state.bindings.unwrap_or(&empty_bindings),
     )?;
-    if matches!(
-        validated.realization,
-        PortableRealizationKind::LocalProcess | PortableRealizationKind::StaticWeb
-    ) {
-        return start_portable_attempt(
-            bundle_bytes,
-            &bundle,
-            &validated,
-            runtime_root,
-            shutdown,
-            runtime_state,
-            &binding_environment,
-        );
-    }
-    // OCI and OCI service groups stay on this path until they move onto the
-    // common attempt (roadmap stage 2e).
-    fs::create_dir_all(runtime_root)?;
-    let workspace = runtime_root.join("workspace");
-    let (hydrated, dependency_fetches) = portable_dependency::hydrate_external_objects(&bundle)?;
-    for reference in &dependency_fetches {
-        eprintln!("dependency fetched and verified: {reference}");
-    }
-    materialize_tree(&hydrated, &validated, &workspace)?;
-    let mut runtime = PortableLocalRuntime::start(
-        &workspace,
-        runtime_root,
+    start_portable_attempt(
+        bundle_bytes,
+        &bundle,
         &validated,
-        &hydrated,
-        runtime_state.static_state,
-        runtime_state.filesystem_state,
+        runtime_root,
+        shutdown,
+        runtime_state,
         &binding_environment,
-    )?;
-
-    let mut observation = RuntimeObservation {
-        instance_snapshot_ref: runtime_state.restored_snapshot_ref.map(str::to_owned),
-        ..RuntimeObservation::default()
-    };
-    for input in &validated.derivation.inputs {
-        if input.protocol == WORKSPACE_PROTOCOL {
-            observation
-                .input_refs
-                .insert(input.id.clone(), validated.tree_ref.to_string());
-        }
-    }
-    let client = reqwest::blocking::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_millis(500))
-        .build()?;
-    for requirement in &validated.contract.requirements {
-        if requirement.verifier != HTTP_CONTRACT_VERIFIER {
-            continue;
-        }
-        let method = requirement.method.as_deref().unwrap_or("GET");
-        if method != "GET" {
-            bail!("portable local verifier does not support HTTP method {method}");
-        }
-        let path = requirement.path.as_deref().unwrap_or("/");
-        let request_url = format!("{}{path}", runtime.base_url());
-        let mut attempts = 0;
-        let response = loop {
-            if shutdown.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
-                bail!("portable run interrupted before Contract verification completed");
-            }
-            match client.get(&request_url).send() {
-                Ok(response) => break response,
-                Err(error) => {
-                    if let Some(status) = runtime.try_wait()? {
-                        bail!("selected process derivation exited before verification: {status}");
-                    }
-                    if attempts >= 1_200 {
-                        return Err(error).context(format!(
-                            "selected derivation did not become reachable at {request_url}"
-                        ));
-                    }
-                    attempts += 1;
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-            }
-        };
-        let status = response.status().as_u16();
-        let body = response.bytes()?;
-        observation.http.push(RuntimeHttpObservation::from_response(
-            requirement.port.as_deref().unwrap_or_default(),
-            method,
-            path,
-            status,
-            &body,
-        ));
-    }
-
-    let verification = verify_runtime(&validated.contract, &observation);
-    let mut receipt = ContractVerificationReceipt::from_runtime(
-        bundle_sha256(bundle_bytes),
-        validated.contract_ref.to_string(),
-        validated.derivation_ref.to_string(),
-        VerificationTargetKind::CliLocal,
-        &validated.contract,
-        &observation,
-        verification,
-    );
-    let mut execution = runtime.execution_evidence();
-    if let Some(portability) = &bundle.portability {
-        receipt.schema = ato_formation::verify::CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V2.to_owned();
-        execution.portability_profile = Some(
-            match portability.profile {
-                PortableDependencyProfile::Thin => "thin",
-                PortableDependencyProfile::Cached => "cached",
-                PortableDependencyProfile::Offline => "offline",
-            }
-            .to_owned(),
-        );
-        if portability.profile == PortableDependencyProfile::Offline
-            && validated.realization == PortableRealizationKind::OciContainer
-        {
-            execution.embedded_oci_image_loaded = execution.image.clone();
-        }
-    }
-    execution.dependency_fetches = dependency_fetches;
-    receipt.execution = Some(execution);
-    if !receipt.fully_satisfied {
-        let failure = receipt
-            .observations
-            .iter()
-            .find(|observation| {
-                !matches!(
-                    observation.outcome,
-                    ato_formation::verify::ReceiptOutcome::Satisfied
-                )
-            })
-            .map(|observation| observation.id.as_str())
-            .unwrap_or("unknown");
-        bail!("runtime Contract verification did not fully satisfy observation {failure}");
-    }
-    Ok(StartedPortableApplication { runtime, receipt })
+    )
 }
 
-enum PortableLocalRuntime {
-    /// A LocalProcess or StaticWeb candidate the common attempt verified and
-    /// handed off. Dropping it stops it and removes its runtime scratch.
-    Live {
-        live: ato_runtime_attempt::realize::LiveCandidate,
-        base_url: String,
-        label: &'static str,
-    },
-    Oci {
-        handle: OciHandle,
-        base_url: String,
-    },
-    OciServiceGroup {
-        group: OciServiceGroup,
-        surface: String,
-        base_url: String,
-    },
+/// A Run the common attempt verified and handed off. Dropping it stops it
+/// and removes the runtime scratch its realization owns.
+struct PortableLocalRuntime {
+    live: ato_runtime_attempt::realize::LiveCandidate,
+    base_url: String,
+    label: &'static str,
+    /// A service group is one Application: any service exiting ends the Run.
+    stops_when_a_service_exits: bool,
 }
 
 impl PortableLocalRuntime {
-    fn start(
-        workspace: &std::path::Path,
-        runtime_root: &std::path::Path,
-        route: &ValidatedPortableApplication,
-        bundle: &ato_objects::PortableApplicationBundle,
-        static_state: Option<StaticApplicationState>,
-        filesystem_state: Option<&BTreeMap<String, PathBuf>>,
-        binding_environment: &BTreeMap<String, String>,
-    ) -> Result<Self> {
-        let state_mounts = resolve_portable_state_mounts(route, runtime_root, filesystem_state)?;
-        match route.realization {
-            PortableRealizationKind::OciServiceGroup => start_local_service_group(
-                workspace,
-                runtime_root,
-                route,
-                bundle,
-                &state_mounts,
-                binding_environment,
-            ),
-            PortableRealizationKind::StaticWeb | PortableRealizationKind::LocalProcess => {
-                // These run through the common attempt
-                // (`start_portable_attempt`), never through here.
-                let _ = (static_state, binding_environment);
-                bail!(
-                    "{} routes run through the Runtime's common attempt",
-                    route.realization.label()
-                )
-            }
-            PortableRealizationKind::OciContainer => {
-                let step = &route.derivation.steps[0];
-                let port = &route.derivation.ports[0];
-                let guest_port = port.guest_port.context("OCI route omitted guest_port")?;
-                let listener = TcpListener::bind("127.0.0.1:0")?;
-                let host_port = listener.local_addr()?.port();
-                drop(listener);
-                let runtime = &route.derivation.runtimes;
-                let mut environment = step.env.clone();
-                environment.extend(binding_environment.clone());
-                let mounts = state_mounts
-                    .iter()
-                    .map(|state| {
-                        environment
-                            .insert(state_path_env_name(&state.id), state.guest_path.clone());
-                        Ok(OciMount {
-                            host_path: state.host_path.clone(),
-                            guest_path: state.guest_path.clone(),
-                            writable: true,
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                let spec = OciSpec {
-                    id: route.derivation_ref.to_string(),
-                    image: runtime
-                        .get(OCI_IMAGE_RUNTIME)
-                        .context("OCI route omitted image")?
-                        .clone(),
-                    platform: runtime
-                        .get(OCI_PLATFORM_RUNTIME)
-                        .context("OCI route omitted platform")?
-                        .clone(),
-                    entrypoint: runtime
-                        .get(ato_portable_application::OCI_ENTRYPOINT_RUNTIME)
-                        .cloned(),
-                    argv: step.argv.clone(),
-                    working_dir: "/app".to_owned(),
-                    workspace_mount_path: runtime
-                        .get(ato_portable_application::OCI_WORKSPACE_MOUNT_RUNTIME)
-                        .cloned()
-                        .unwrap_or_else(|| "/app".to_owned()),
-                    environment,
-                    endpoints: vec![OciEndpoint {
-                        host_port,
-                        guest_port,
-                    }],
-                    mounts,
-                    limits: OciResourceLimits {
-                        memory_bytes: parse_runtime_limit(runtime, OCI_MEMORY_BYTES_RUNTIME)?,
-                        cpu_limit_millis: parse_runtime_limit(runtime, OCI_CPU_MILLIS_RUNTIME)?,
-                        pids_limit: parse_runtime_limit(runtime, OCI_PIDS_LIMIT_RUNTIME)?,
-                    },
-                    stop_timeout_seconds: 5,
-                    labels: BTreeMap::new(),
-                };
-                let adapter = local_oci_adapter(bundle, spec)?;
-                let handle = adapter.spawn(workspace, &runtime_root.join("oci"))?;
-                Ok(Self::Oci {
-                    handle,
-                    base_url: format!("http://127.0.0.1:{host_port}"),
-                })
-            }
-        }
-    }
-
     /// Stop the Run and record how that went — the Run owner's lifecycle
     /// record, separate from the attempt, whose cleanup stays
     /// `not_attempted (handed_off)`. Written beside the Run when it has a
@@ -2443,19 +2200,13 @@ impl PortableLocalRuntime {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_secs())
             .unwrap_or_default();
-        let stopped = match self {
-            Self::Live { live, .. } => live.stop(),
-            // Their handles stop the containers when dropped.
-            other => {
-                drop(other);
-                Ok(())
-            }
-        };
+        let stopped = self.live.stop();
         let record = serde_json::json!({
             "schema": "ato.local-run-lifecycle/1",
             "stop_requested_at": requested_at,
-            // For a Live Run a successful stop also removed the runtime
-            // scratch its realization owned; a failure says which part.
+            // A successful stop is a confirmed one (for OCI, every container)
+            // and also removed the runtime scratch its realization owned; a
+            // failure says which part.
             "stop": match &stopped { Ok(()) => "succeeded", Err(_) => "failed" },
             "reason": stopped.as_ref().err().map(|error| format!("{error:#}")),
         });
@@ -2477,289 +2228,29 @@ impl PortableLocalRuntime {
     }
 
     fn base_url(&self) -> &str {
-        match self {
-            Self::Live { base_url, .. } => base_url,
-            Self::Oci { base_url, .. } => base_url,
-            Self::OciServiceGroup { base_url, .. } => base_url,
-        }
+        &self.base_url
     }
 
     fn local_storage(&self) -> Result<Option<BTreeMap<String, String>>> {
-        match self {
-            Self::Live { live, .. } => {
-                match live.downcast_ref::<portable_attempt::PortableStaticCandidate>() {
-                    Some(candidate) => candidate.local_storage(),
-                    None => Ok(None),
-                }
-            }
-            Self::Oci { .. } | Self::OciServiceGroup { .. } => Ok(None),
+        match self
+            .live
+            .downcast_ref::<portable_attempt::PortableStaticCandidate>()
+        {
+            Some(candidate) => candidate.local_storage(),
+            None => Ok(None),
         }
     }
 
     fn label(&self) -> &'static str {
-        match self {
-            Self::Live { label, .. } => label,
-            Self::Oci { .. } => "OCI container",
-            Self::OciServiceGroup { .. } => "OCI service group",
-        }
+        self.label
     }
 
-    fn execution_evidence(&self) -> VerificationExecutionEvidence {
-        match self {
-            // The common attempt wrote this Run's receipt, execution evidence
-            // included; the CLI never builds one for it.
-            Self::Live { base_url, .. } => VerificationExecutionEvidence {
-                realization: "live".to_owned(),
-                runtime_executable: None,
-                runtime_version: None,
-                pid: None,
-                container_id: None,
-                image: None,
-                platform: None,
-                endpoint: Some(base_url.clone()),
-                run_id: None,
-                lease_id: None,
-                attempt_id: None,
-                request_id: None,
-                dependency_fetches: Vec::new(),
-                portability_profile: None,
-                embedded_oci_image_loaded: None,
-                services: Vec::new(),
-            },
-            Self::OciServiceGroup {
-                group,
-                surface,
-                base_url,
-            } => {
-                let handle = group
-                    .services()
-                    .find(|(name, _)| name == surface)
-                    .map(|(_, handle)| handle);
-                VerificationExecutionEvidence {
-                    realization: "oci_service_group".to_owned(),
-                    runtime_executable: Some("docker".to_owned()),
-                    runtime_version: None,
-                    pid: None,
-                    container_id: handle.map(|handle| handle.container_id().to_owned()),
-                    image: handle.map(|handle| handle.image().to_owned()),
-                    platform: handle.map(|handle| handle.platform().to_owned()),
-                    endpoint: Some(base_url.clone()),
-                    run_id: None,
-                    lease_id: None,
-                    attempt_id: None,
-                    request_id: None,
-                    dependency_fetches: Vec::new(),
-                    portability_profile: None,
-                    embedded_oci_image_loaded: None,
-                    services: group
-                        .services()
-                        .map(
-                            |(name, handle)| ato_formation::verify::VerificationServiceEvidence {
-                                name: name.to_owned(),
-                                container_id: handle.container_id().to_owned(),
-                                image: handle.image().to_owned(),
-                            },
-                        )
-                        .collect(),
-                }
-            }
-            Self::Oci { handle, base_url } => VerificationExecutionEvidence {
-                realization: "oci".to_owned(),
-                runtime_executable: Some("docker".to_owned()),
-                runtime_version: None,
-                pid: None,
-                container_id: Some(handle.container_id().to_owned()),
-                image: Some(handle.image().to_owned()),
-                platform: Some(handle.platform().to_owned()),
-                endpoint: Some(base_url.clone()),
-                run_id: None,
-                lease_id: None,
-                attempt_id: None,
-                request_id: None,
-                dependency_fetches: Vec::new(),
-                portability_profile: None,
-                embedded_oci_image_loaded: None,
-                services: Vec::new(),
-            },
+    fn try_wait(&mut self) -> Result<()> {
+        match self.live.exited()? {
+            Some(exit) => bail!("{exit}; the Run was stopped"),
+            None => Ok(()),
         }
     }
-
-    fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>> {
-        match self {
-            Self::Live { live, .. } => match live.exited()? {
-                Some(exit) => bail!("{exit}"),
-                None => Ok(None),
-            },
-            Self::Oci { handle, .. } => match handle.exit_code()? {
-                Some(code) => bail!("selected OCI derivation exited before verification: {code}"),
-                None => Ok(None),
-            },
-            Self::OciServiceGroup { group, .. } => match group.exited_service()? {
-                Some((name, code)) => {
-                    bail!("OCI service `{name}` exited with code {code}; the group was stopped")
-                }
-                None => Ok(None),
-            },
-        }
-    }
-}
-
-/// A Docker adapter for one image, loading it from the bundle's verified
-/// archive when the bundle is an offline export.
-fn local_oci_adapter(
-    bundle: &ato_objects::PortableApplicationBundle,
-    spec: OciSpec,
-) -> Result<DockerOciAdapter> {
-    if !bundle
-        .portability
-        .as_ref()
-        .is_some_and(|portability| portability.profile == PortableDependencyProfile::Offline)
-    {
-        return DockerOciAdapter::new(spec);
-    }
-    let archive = bundle
-        .portability
-        .as_ref()
-        .and_then(|portability| {
-            portability
-                .oci_archives
-                .iter()
-                .find(|archive| archive.image == spec.image && archive.platform == spec.platform)
-        })
-        .context("offline OCI image archive is missing")?;
-    let verified = ato_portable_application::oci_archive::verify_oci_archive(archive)?;
-    DockerOciAdapter::new_offline(spec, verified.bytes, verified.config_reference)
-}
-
-/// Realize an OCI service group locally: one `--internal` network, each
-/// service under its own DNS alias, started in authored order after the
-/// previous one accepts TCP on its first Port. Only the Surface Port is
-/// forwarded to loopback. Each service receives only its own Bindings and
-/// state mounts.
-fn start_local_service_group(
-    workspace: &std::path::Path,
-    runtime_root: &std::path::Path,
-    route: &ValidatedPortableApplication,
-    bundle: &ato_objects::PortableApplicationBundle,
-    state_mounts: &[PortableStateMount],
-    binding_environment: &BTreeMap<String, String>,
-) -> Result<PortableLocalRuntime> {
-    anyhow::ensure!(
-        cfg!(target_os = "linux"),
-        "OCI service groups require a native Linux Docker host"
-    );
-    let derivation = &route.derivation;
-    let platform = derivation
-        .runtimes
-        .get(OCI_PLATFORM_RUNTIME)
-        .context("OCI service group omitted platform")?;
-    let surface_port = derivation
-        .ports
-        .iter()
-        .find(|port| port.protocol == ato_formation::authoring::HTTP_PROTOCOL)
-        .context("OCI service group omitted its Surface Port")?;
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    let host_port = listener.local_addr()?.port();
-    drop(listener);
-
-    let mut group = OciServiceGroup::new(OciNetwork::create(
-        &route.derivation_ref.to_string(),
-        &BTreeMap::new(),
-    )?);
-    for step in &derivation.steps {
-        let runtime = &step.runtimes;
-        let mut environment = step.env.clone();
-        for binding in &step.bindings {
-            let name = ato_portable_application::binding_environment_name(binding);
-            if let Some(value) = binding_environment.get(&name) {
-                environment.insert(name, value.clone());
-            }
-        }
-        let mounts = state_mounts
-            .iter()
-            .filter(|state| step.state.contains(&state.id))
-            .map(|state| {
-                environment.insert(state_path_env_name(&state.id), state.guest_path.clone());
-                OciMount {
-                    host_path: state.host_path.clone(),
-                    guest_path: state.guest_path.clone(),
-                    writable: true,
-                }
-            })
-            .collect();
-        let spec = OciSpec {
-            id: format!("{}-{}", route.derivation_ref, step.id),
-            image: runtime
-                .get(OCI_IMAGE_RUNTIME)
-                .context("OCI service omitted image")?
-                .clone(),
-            platform: platform.clone(),
-            entrypoint: runtime
-                .get(ato_portable_application::OCI_ENTRYPOINT_RUNTIME)
-                .cloned(),
-            argv: step.argv.clone(),
-            working_dir: "/app".to_owned(),
-            workspace_mount_path: runtime
-                .get(ato_portable_application::OCI_WORKSPACE_MOUNT_RUNTIME)
-                .cloned()
-                .unwrap_or_else(|| "/app".to_owned()),
-            environment,
-            endpoints: if surface_port.from == step.id {
-                vec![OciEndpoint {
-                    host_port,
-                    guest_port: surface_port
-                        .guest_port
-                        .context("Surface Port omitted guest_port")?,
-                }]
-            } else {
-                Vec::new()
-            },
-            mounts,
-            limits: OciResourceLimits {
-                memory_bytes: parse_runtime_limit(runtime, OCI_MEMORY_BYTES_RUNTIME)?,
-                cpu_limit_millis: parse_runtime_limit(runtime, OCI_CPU_MILLIS_RUNTIME)?,
-                pids_limit: parse_runtime_limit(runtime, OCI_PIDS_LIMIT_RUNTIME)?,
-            },
-            stop_timeout_seconds: 5,
-            // Local runs are not Runner-owned; recovery never scans them.
-            labels: BTreeMap::new(),
-        };
-        let handle = local_oci_adapter(bundle, spec)?.spawn_in_network(
-            workspace,
-            &runtime_root.join("oci").join(&step.id),
-            group.network(),
-            Some(&step.id),
-        )?;
-        let address = handle.container_address();
-        group.push(step.id.clone(), handle);
-        let guest_port = derivation
-            .ports
-            .iter()
-            .find(|port| port.from == step.id)
-            .and_then(|port| port.guest_port)
-            .context("OCI service serves no Port")?;
-        let deadline = std::time::Instant::now() + Duration::from_secs(60);
-        loop {
-            if let Some((name, code)) = group.exited_service()? {
-                bail!("OCI service `{name}` exited before the group was ready: {code}");
-            }
-            let target = std::net::SocketAddr::new(address, guest_port);
-            if std::net::TcpStream::connect_timeout(&target, Duration::from_millis(500)).is_ok() {
-                break;
-            }
-            anyhow::ensure!(
-                std::time::Instant::now() < deadline,
-                "OCI service `{}` did not accept TCP on {guest_port} within 60s",
-                step.id
-            );
-            std::thread::sleep(Duration::from_millis(100));
-        }
-    }
-    Ok(PortableLocalRuntime::OciServiceGroup {
-        group,
-        surface: surface_port.from.clone(),
-        base_url: format!("http://127.0.0.1:{host_port}"),
-    })
 }
 
 fn resolve_pinned_python(version: &str) -> Result<(String, String)> {
