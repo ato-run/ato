@@ -11,6 +11,7 @@
   - [Capsule bundle](capsule.md)
   - [Snapshot materialization](snapshot.md)
   - [Current RFCs](rfcs/README.md)
+  - [Formation roadmap (draft plan)](rfcs/draft/FORMATION_ROADMAP.md)
 - Theory
   - [Capsule Process Model](theory/capsule-process-model.md)
 - [Historical docs](archive/README.md)

@@ -449,7 +449,7 @@ placement-specific semantic roots.
 8. The tag push triggers `release.yml`, which builds 4-platform artifacts and publishes the GitHub Release.
 9. Verify: `gh release view vX.Y.Z --json name,isDraft,publishedAt,assets`
 
-See `docs/ops/RELEASE.md` for the full checklist.
+See `.claude/skills/ato-release/SKILL.md` for the full checklist.
 
 ## Temp Files
 
