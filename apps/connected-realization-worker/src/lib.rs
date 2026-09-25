@@ -1464,6 +1464,14 @@ impl ConnectedWorker {
         );
         // `resolve_run` acquires the writers and gives them back itself if it
         // fails; no workload exists yet.
+        let process_host = runtime_launch::process_executor::ProcessLaunchHost {
+            shim: match std::env::current_exe() {
+                Ok(path) => path,
+                Err(error) => return not_started(Err(error.into())),
+            },
+            runtime_root: lease_root.join("process-runtime"),
+            output: None,
+        };
         let resolved = match runtime_launch::lease::resolve_run(
             spec,
             lease_root,
@@ -1491,9 +1499,11 @@ impl ConnectedWorker {
             &probe,
             owner,
             network_authorization,
+            &process_host,
         ) {
             Ok(active) => active,
-            Err(failure) => {
+            Err(mut failure) => {
+                entry.process = failure.process.take();
                 return RuntimeLaunchOutcome {
                     stop_confirmed: failure.stop.is_confirmed(),
                     result: Err(anyhow::Error::new(failure)),
