@@ -233,7 +233,7 @@ A VerifiedRoute still requires the common Rust receipt authority through
 
 ## Persistence
 
-ato-api migration `0296_runtime_network_search_budget.sql` makes these
+ato-api migration `0297_runtime_network_search_budget.sql` makes these
 changes:
 
 - It adds `runtime_network_searches`:
