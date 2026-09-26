@@ -1,0 +1,640 @@
+{
+  "schema": "ato.formation-typed-generation-acceptance/1",
+  "run_id": "1790425639229723495",
+  "date": "2026-09-26",
+  "environment": "isolated Linux Miniflare local D1/R2; actual Rust requester/Runtime; no remote D1 or deployment",
+  "live_attempts_total": 1,
+  "live_retry_performed": false,
+  "live_target_passed": false,
+  "cases": {
+    "c0": {
+      "search_id": "typedc01790425639229723495",
+      "satisfy_id": "01M3ETYCSGX4JX6JJ2HXJK342N",
+      "contract_ref": "sha256:e87937c2802c1a903bca6c6f8e050834a941a8938c1b6ba384847084a7fe6829",
+      "attempts": [
+        {
+          "id": "01M3ETYCYQ7EJ239HZTH8ZTPJF",
+          "d": "sha256:a23d788ed475162346bd123343ccc123ec1acafdbabe5fbf7ffc066d6d07282b",
+          "status": "fail"
+        }
+      ],
+      "outcome": "unsatisfied",
+      "generation_outcome": null,
+      "elapsed_seconds": 2.669,
+      "calls": [],
+      "budget": {
+        "attempts_reserved": 0,
+        "attempts_used": 1,
+        "expanded_reserved": 0,
+        "expanded_used": 2555,
+        "stored_reserved": 0,
+        "stored_used": 0,
+        "transfer_reserved": 0,
+        "transfer_used": 8192
+      },
+      "policy_ref": "policy_0",
+      "initial_candidates_ref": "initial_candidates"
+    },
+    "c1": {
+      "search_id": "typedc11790425639229723495",
+      "satisfy_id": "01M3ETYFZJD9RXPM82SWXC5N88",
+      "contract_ref": "sha256:e87937c2802c1a903bca6c6f8e050834a941a8938c1b6ba384847084a7fe6829",
+      "attempts": [
+        {
+          "id": "01M3ETYG3TTJFSD0Y0V4W3D44K",
+          "d": "sha256:a23d788ed475162346bd123343ccc123ec1acafdbabe5fbf7ffc066d6d07282b",
+          "status": "fail"
+        },
+        {
+          "id": "01M3ETYJR65NXT4AVG10RAPQME",
+          "d": "sha256:8e3c25d79d1498fbe5847734bd72ab5e8a88f8c46709b41accc574cf43b8a00c",
+          "status": "pass"
+        }
+      ],
+      "outcome": "satisfied",
+      "generation_outcome": "admitted",
+      "elapsed_seconds": 5.275,
+      "calls": [
+        {
+          "answer": {
+            "draft": {
+              "entrypoint_id": "entry_app",
+              "operation": "python_script",
+              "schema": "ato.formation-derivation-draft/1"
+            },
+            "provenance": {
+              "model": "fixed",
+              "prompt_version": "acceptance/1",
+              "provider": "acceptance",
+              "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0
+              }
+            },
+            "revision": 5
+          },
+          "elapsed_ms": 353,
+          "submission_accepted": true
+        }
+      ],
+      "budget": {
+        "attempts_reserved": 0,
+        "attempts_used": 2,
+        "expanded_reserved": 0,
+        "expanded_used": 5110,
+        "stored_reserved": 0,
+        "stored_used": 7680,
+        "transfer_reserved": 0,
+        "transfer_used": 16384
+      },
+      "policy_ref": "policy_1",
+      "initial_candidates_ref": "initial_candidates"
+    },
+    "c_failure": {
+      "search_id": "typedc_failure1790425639229723495",
+      "satisfy_id": "01M3ETYNZ9Y19NEWXRV1DKQA0N",
+      "contract_ref": "sha256:e87937c2802c1a903bca6c6f8e050834a941a8938c1b6ba384847084a7fe6829",
+      "attempts": [
+        {
+          "id": "01M3ETYP3Y5Q3J4X85D057FF1E",
+          "d": "sha256:a23d788ed475162346bd123343ccc123ec1acafdbabe5fbf7ffc066d6d07282b",
+          "status": "fail"
+        }
+      ],
+      "outcome": "unsatisfied",
+      "generation_outcome": "provider_error",
+      "elapsed_seconds": 3.722,
+      "calls": [
+        {
+          "answer": {
+            "fallback": "provider_error",
+            "revision": 5
+          },
+          "elapsed_ms": 274,
+          "submission_accepted": true
+        }
+      ],
+      "budget": {
+        "attempts_reserved": 0,
+        "attempts_used": 1,
+        "expanded_reserved": 0,
+        "expanded_used": 2555,
+        "stored_reserved": 0,
+        "stored_used": 0,
+        "transfer_reserved": 0,
+        "transfer_used": 8192
+      },
+      "policy_ref": "policy_1",
+      "initial_candidates_ref": "initial_candidates"
+    },
+    "c_duplicate": {
+      "search_id": "typedc_duplicate1790425639229723495",
+      "satisfy_id": "01M3ETYTE5Q0GWVZQ0QY1NX9XP",
+      "contract_ref": "sha256:e87937c2802c1a903bca6c6f8e050834a941a8938c1b6ba384847084a7fe6829",
+      "attempts": [
+        {
+          "id": "01M3ETYTJQM0MHPMWJFJFZEWZ0",
+          "d": "sha256:a23d788ed475162346bd123343ccc123ec1acafdbabe5fbf7ffc066d6d07282b",
+          "status": "fail"
+        }
+      ],
+      "outcome": "unsatisfied",
+      "generation_outcome": "duplicate",
+      "elapsed_seconds": 3.621,
+      "calls": [
+        {
+          "answer": {
+            "draft": {
+              "entrypoint_id": "entry_bad",
+              "operation": "python_script",
+              "schema": "ato.formation-derivation-draft/1"
+            },
+            "provenance": {
+              "model": "fixed",
+              "prompt_version": "acceptance/1",
+              "provider": "acceptance",
+              "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0
+              }
+            },
+            "revision": 5
+          },
+          "elapsed_ms": 269,
+          "submission_accepted": true
+        }
+      ],
+      "budget": {
+        "attempts_reserved": 0,
+        "attempts_used": 1,
+        "expanded_reserved": 0,
+        "expanded_used": 2555,
+        "stored_reserved": 0,
+        "stored_used": 0,
+        "transfer_reserved": 0,
+        "transfer_used": 8192
+      },
+      "policy_ref": "policy_2",
+      "initial_candidates_ref": "initial_candidates"
+    },
+    "c_exact": {
+      "search_id": "typedc_exact1790425639229723495",
+      "satisfy_id": "01M3ETYYKYSNXA2KTCZRFJHNJX",
+      "contract_ref": "sha256:e87937c2802c1a903bca6c6f8e050834a941a8938c1b6ba384847084a7fe6829",
+      "attempts": [
+        {
+          "id": "01M3ETYYS3E8BAJ171X95VYJ2S",
+          "d": "sha256:a23d788ed475162346bd123343ccc123ec1acafdbabe5fbf7ffc066d6d07282b",
+          "status": "fail"
+        },
+        {
+          "id": "01M3ETZ1FTH2EPVYG5NSNTC5QE",
+          "d": "sha256:8e3c25d79d1498fbe5847734bd72ab5e8a88f8c46709b41accc574cf43b8a00c",
+          "status": "pass"
+        }
+      ],
+      "outcome": "satisfied",
+      "generation_outcome": "admitted",
+      "elapsed_seconds": 5.375,
+      "calls": [
+        {
+          "answer": {
+            "draft": {
+              "entrypoint_id": "entry_app",
+              "operation": "python_script",
+              "schema": "ato.formation-derivation-draft/1"
+            },
+            "provenance": {
+              "model": "fixed",
+              "prompt_version": "acceptance/1",
+              "provider": "acceptance",
+              "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0
+              }
+            },
+            "revision": 5
+          },
+          "elapsed_ms": 356,
+          "submission_accepted": true
+        }
+      ],
+      "budget": {
+        "attempts_reserved": 0,
+        "attempts_used": 2,
+        "expanded_reserved": 0,
+        "expanded_used": 5110,
+        "stored_reserved": 0,
+        "stored_used": 7680,
+        "transfer_reserved": 0,
+        "transfer_used": 16384
+      },
+      "policy_ref": "policy_3",
+      "initial_candidates_ref": "initial_candidates"
+    },
+    "c_timeout": {
+      "search_id": "typedc_timeout1790425639229723495",
+      "satisfy_id": "01M3ETZ4G9AB72V6KYGPVKFBA7",
+      "contract_ref": "sha256:e87937c2802c1a903bca6c6f8e050834a941a8938c1b6ba384847084a7fe6829",
+      "attempts": [
+        {
+          "id": "01M3ETZ4NEYDVZYRNC3BGB12NV",
+          "d": "sha256:a23d788ed475162346bd123343ccc123ec1acafdbabe5fbf7ffc066d6d07282b",
+          "status": "fail"
+        }
+      ],
+      "outcome": "unsatisfied",
+      "generation_outcome": "timeout",
+      "elapsed_seconds": 33.133,
+      "calls": [],
+      "budget": {
+        "attempts_reserved": 0,
+        "attempts_used": 1,
+        "expanded_reserved": 0,
+        "expanded_used": 2555,
+        "stored_reserved": 0,
+        "stored_used": 0,
+        "transfer_reserved": 0,
+        "transfer_used": 8192
+      },
+      "policy_ref": "policy_1",
+      "initial_candidates_ref": "initial_candidates"
+    },
+    "c_restart_concurrent": {
+      "search_id": "typedc_restart_concurrent1790425639229723495",
+      "satisfy_id": "01M3EV05KXB03XCZ7EC4QFRJ1Y",
+      "contract_ref": "sha256:e87937c2802c1a903bca6c6f8e050834a941a8938c1b6ba384847084a7fe6829",
+      "attempts": [
+        {
+          "id": "01M3EV05SJ5JS8AQ1YVX0MWZ48",
+          "d": "sha256:a23d788ed475162346bd123343ccc123ec1acafdbabe5fbf7ffc066d6d07282b",
+          "status": "fail"
+        },
+        {
+          "id": "01M3EV0CP2ZW1Z6GD2S8SHJ52K",
+          "d": "sha256:8e3c25d79d1498fbe5847734bd72ab5e8a88f8c46709b41accc574cf43b8a00c",
+          "status": "pass"
+        }
+      ],
+      "outcome": "satisfied",
+      "generation_outcome": "admitted",
+      "elapsed_seconds": 9.01,
+      "calls": [],
+      "budget": {
+        "attempts_reserved": 0,
+        "attempts_used": 2,
+        "expanded_reserved": 0,
+        "expanded_used": 5110,
+        "stored_reserved": 0,
+        "stored_used": 7680,
+        "transfer_reserved": 0,
+        "transfer_used": 16384
+      },
+      "policy_ref": "policy_1",
+      "initial_candidates_ref": "initial_candidates"
+    },
+    "c_live": {
+      "acceptance_target_passed": false,
+      "outcome": "unsatisfied",
+      "termination_reason": "candidates_exhausted",
+      "generation_outcome": "declined",
+      "contract_ref": "sha256:e87937c2802c1a903bca6c6f8e050834a941a8938c1b6ba384847084a7fe6829",
+      "attempts": [
+        {
+          "id": "01M3EV0F8QTCFAANPR388S3AWZ",
+          "d": "sha256:a23d788ed475162346bd123343ccc123ec1acafdbabe5fbf7ffc066d6d07282b",
+          "status": "fail"
+        }
+      ],
+      "external_provider_calls": 1,
+      "configured_and_response_validated_model": "jev-1.13.0",
+      "calls": [
+        {
+          "answer": {
+            "fallback": "declined",
+            "revision": 5
+          },
+          "elapsed_ms": 555,
+          "submission_accepted": true
+        }
+      ],
+      "elapsed_seconds": null,
+      "provider_and_submission_elapsed_ms": 555,
+      "usage": null,
+      "estimated_cost_usd": null,
+      "missing_telemetry_reason": "The original valid-decline branch discarded provenance; full elapsed was not saved before the target assertion. These cannot be recovered and are not zero.",
+      "budget": {
+        "attempts_reserved": 0,
+        "attempts_used": 1,
+        "expanded_reserved": 0,
+        "expanded_used": 2555,
+        "stored_reserved": 0,
+        "stored_used": 0,
+        "transfer_reserved": 0,
+        "transfer_used": 8192
+      },
+      "policy_ref": "policy_1",
+      "initial_candidates_ref": "initial_candidates"
+    }
+  },
+  "comparison": {
+    "fixed_vs_live_same_K": true,
+    "same_initial_D": true,
+    "same_source_closure_and_archive": true,
+    "same_frozen_policy_and_budget_limits": true,
+    "performance_claim": false
+  },
+  "implementation": {
+    "core": "a6cc5693be4bb4025f42f47254613e1df850b3c5",
+    "requester": "8daa6a19a50a84221f3c38b909de663fe568e780",
+    "api": "f4ddc50323969659d488057794783626871d908f",
+    "migration": "0303"
+  },
+  "notes": [
+    "Fixed typed draft and live Jev are not equivalent acceptance claims.",
+    "Live decline was a valid bounded decision, not a transport error or a K verdict.",
+    "The generation safety tests passed; LLM Dnew -> same-K PASS remains open."
+  ],
+  "artifacts_primary_run_sha256": {
+    "runtime_cli": "a02c962cb3a25b8e74be37e57ea66110b5c21b8b477a98b5ad19daa27bac86a6",
+    "requester": "db1d0f7f1787fde7fe8282d41236c4c8007533ab2ba94c22496a0b39261b0d5e",
+    "coordinator": "5cf21b3484234e46927804d29bd200bba1629b66bc287ca1d132aaab10afeaaa",
+    "wasm": "8a7934171d9e30bad25b9f86b4ebd0c75475e51e8f6348b5f9530df0a0baff4b",
+    "harness": "a50aeca675c33be18eff88a6ee122e2814e2776b3ed22f453346c07285e0ae31"
+  },
+  "policies": {
+    "policy_0": {
+      "allow_managed": false,
+      "bindings": {},
+      "budget": {
+        "deadline_seconds": 604800,
+        "max_attempts": 2,
+        "max_expanded_bytes": 10737418240,
+        "max_stored_bytes": 10737418240,
+        "max_transfer_bytes": 10737418240
+      },
+      "mode": "first_pass",
+      "network": "dependency-resolution",
+      "runtime_constraint": {
+        "kind": "any"
+      }
+    },
+    "policy_1": {
+      "allow_managed": false,
+      "bindings": {},
+      "budget": {
+        "deadline_seconds": 604800,
+        "max_attempts": 2,
+        "max_expanded_bytes": 10737418240,
+        "max_stored_bytes": 10737418240,
+        "max_transfer_bytes": 10737418240
+      },
+      "generation": {
+        "base_derivation_ref": "sha256:a23d788ed475162346bd123343ccc123ec1acafdbabe5fbf7ffc066d6d07282b",
+        "entrypoints": {
+          "entry_app": "app.py"
+        },
+        "max_generations": 1,
+        "schema": "ato.formation-generation-policy/1",
+        "timeout_ms": 30000
+      },
+      "mode": "first_pass",
+      "network": "dependency-resolution",
+      "runtime_constraint": {
+        "kind": "any"
+      }
+    },
+    "policy_2": {
+      "allow_managed": false,
+      "bindings": {},
+      "budget": {
+        "deadline_seconds": 604800,
+        "max_attempts": 2,
+        "max_expanded_bytes": 10737418240,
+        "max_stored_bytes": 10737418240,
+        "max_transfer_bytes": 10737418240
+      },
+      "generation": {
+        "base_derivation_ref": "sha256:a23d788ed475162346bd123343ccc123ec1acafdbabe5fbf7ffc066d6d07282b",
+        "entrypoints": {
+          "entry_bad": "bad.py"
+        },
+        "max_generations": 1,
+        "schema": "ato.formation-generation-policy/1",
+        "timeout_ms": 30000
+      },
+      "mode": "first_pass",
+      "network": "dependency-resolution",
+      "runtime_constraint": {
+        "kind": "any"
+      }
+    },
+    "policy_3": {
+      "allow_managed": false,
+      "bindings": {},
+      "budget": {
+        "deadline_seconds": 604800,
+        "max_attempts": 2,
+        "max_expanded_bytes": 10737418240,
+        "max_stored_bytes": 10737418240,
+        "max_transfer_bytes": 10737418240
+      },
+      "generation": {
+        "base_derivation_ref": "sha256:a23d788ed475162346bd123343ccc123ec1acafdbabe5fbf7ffc066d6d07282b",
+        "entrypoints": {
+          "entry_app": "app.py"
+        },
+        "max_generations": 1,
+        "schema": "ato.formation-generation-policy/1",
+        "timeout_ms": 30000
+      },
+      "mode": "first_pass",
+      "network": "dependency-resolution",
+      "runtime_constraint": {
+        "kind": "exact",
+        "runtime_id": "rnr_1c826446dcb588ee31e21b5a"
+      }
+    }
+  },
+  "initial_candidates": [
+    {
+      "derivation_ref": "sha256:a23d788ed475162346bd123343ccc123ec1acafdbabe5fbf7ffc066d6d07282b",
+      "effects": "pure",
+      "materialization": {
+        "archive_digest": "sha256:589d5e76b103249e32c4a4df5c2aee24a8a3035cf6a34c3b1e130650fb910516",
+        "closure_ref": "sha256:542428e725f65331af8d5b6f4064cf655ad8e110d9016289331666d507d7f5c6",
+        "kind": "source"
+      },
+      "provisions": [
+        "toolchain.python.3.12.7"
+      ],
+      "requirements": [
+        {
+          "fact": "runtime.process",
+          "one_of": [
+            "true"
+          ]
+        },
+        {
+          "fact": "containment",
+          "one_of": [
+            "bwrap+landlock"
+          ]
+        },
+        {
+          "fact": "toolchain.root"
+        }
+      ]
+    }
+  ],
+  "final_regressions": {
+    "decision": {
+      "run_id": "1790426300894804789",
+      "passed": [
+        "a0",
+        "a1",
+        "a2",
+        "a3",
+        "a4",
+        "a5",
+        "a6",
+        "a7",
+        "a8",
+        "a9"
+      ],
+      "results_sha256": "1c111effe0993e8d6d82b575e2a35b66f13e110fa2938714b8f809719792410a"
+    },
+    "exploration": {
+      "run_id": "1790426300894804789",
+      "passed": [
+        "b0",
+        "b1",
+        "b2",
+        "b3",
+        "b4",
+        "b7",
+        "b8"
+      ],
+      "results_sha256": "2a3678acf51b36dcf200983a897fbfd2eb8bec9297655b9d19d08d056df646e2"
+    }
+  },
+  "post_live_hardening_acceptance": {
+    "run_id": "1790426294410987029",
+    "provider": "fixed synthetic decline, NOT a second Jev call",
+    "result": {
+      "search_id": "typedc_declined1790426294410987029",
+      "satisfy_id": "01M3EVJCDZ071646BKFVTWQM9C",
+      "contract_ref": "sha256:6256d453c34838fe4b166316558e5fb8709feae77f55b1ea6b149c1bc2964245",
+      "attempts": [
+        {
+          "id": "01M3EVJCN0YXX0C7Y4131PRQB0",
+          "d": "sha256:b34f467cd9f1fdfe7ea091872e73b2bae172edb11a8436163d02dacefa2e0f5f",
+          "status": "fail"
+        }
+      ],
+      "outcome": "unsatisfied",
+      "generation_outcome": "declined",
+      "elapsed_seconds": 4.173,
+      "calls": [
+        {
+          "answer": {
+            "fallback": "declined",
+            "provenance": {
+              "model": "fixed-decline",
+              "prompt_version": "acceptance/1",
+              "provider": "acceptance",
+              "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0
+              }
+            },
+            "revision": 5
+          },
+          "elapsed_ms": 345,
+          "submission_accepted": true
+        }
+      ],
+      "budget": {
+        "attempts_reserved": 0,
+        "attempts_used": 1,
+        "expanded_reserved": 0,
+        "expanded_used": 2555,
+        "stored_reserved": 0,
+        "stored_used": 0,
+        "transfer_reserved": 0,
+        "transfer_used": 8192
+      },
+      "policy": {
+        "allow_managed": false,
+        "bindings": {},
+        "budget": {
+          "deadline_seconds": 604800,
+          "max_attempts": 2,
+          "max_expanded_bytes": 10737418240,
+          "max_stored_bytes": 10737418240,
+          "max_transfer_bytes": 10737418240
+        },
+        "generation": {
+          "base_derivation_ref": "sha256:b34f467cd9f1fdfe7ea091872e73b2bae172edb11a8436163d02dacefa2e0f5f",
+          "entrypoints": {
+            "entry_app": "app.py"
+          },
+          "max_generations": 1,
+          "schema": "ato.formation-generation-policy/1",
+          "timeout_ms": 30000
+        },
+        "mode": "first_pass",
+        "network": "dependency-resolution",
+        "runtime_constraint": {
+          "kind": "any"
+        }
+      },
+      "initial_candidates": [
+        {
+          "derivation_ref": "sha256:b34f467cd9f1fdfe7ea091872e73b2bae172edb11a8436163d02dacefa2e0f5f",
+          "effects": "pure",
+          "materialization": {
+            "archive_digest": "sha256:7cfd04e446d84e7aeb40301cf45c9f8d65f9231520afa4f114e99a07e6583f74",
+            "closure_ref": "sha256:1d5070d2d92ce19f4c3812ad42fc82ee98c55337da02bd04a83a675c01a74969",
+            "kind": "source"
+          },
+          "provisions": [
+            "toolchain.python.3.12.7"
+          ],
+          "requirements": [
+            {
+              "fact": "runtime.process",
+              "one_of": [
+                "true"
+              ]
+            },
+            {
+              "fact": "containment",
+              "one_of": [
+                "bwrap+landlock"
+              ]
+            },
+            {
+              "fact": "toolchain.root"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "tests": {
+    "rust_passed": 527,
+    "rust_existing_ignored": 1,
+    "api_passed": 209,
+    "api_files": 8,
+    "trigger_deletion_mutation_probes": 11,
+    "typecheck": "pass",
+    "schema_check": "pass",
+    "clippy": "pass"
+  },
+  "artifacts_post_hardening_sha256": {
+    "requester": "8bf374db94651e62e40add79b6ac32d1060ba8f9445e81a9a94feebe95656293",
+    "coordinator": "b9c4df2439bf227d8863cf41ab667351382294bc24cfe4a3ef6d59398cbee993",
+    "wasm": "8a7934171d9e30bad25b9f86b4ebd0c75475e51e8f6348b5f9530df0a0baff4b"
+  }
+}
