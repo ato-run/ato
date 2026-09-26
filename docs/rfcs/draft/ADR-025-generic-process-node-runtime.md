@@ -1,6 +1,9 @@
 # ADR-025 — Generic Process execution; Node, npm, pnpm and yarn
 
 **Status**: proposed
+
+> **Current status (appended 2026-09-26).** Historical record. The generic process lane, declared runtimes and package-manager rules still hold; the `ProgramIntent` / `EffectiveBuildPlan` digests this ADR relied on are no longer part of the active path after 2f (ato #1406, unmerged foundation stack), which lowers canonical D to `execution::ExecutionPlan` with byte-identical K/D refs. Source transport beyond 32 MiB exists since 3c-b (ADR-032).
+
 **Context**: P0 Formation benchmark. After authored `exec` projection
 (ADR-024) the most common first blocker was "this build provisions only
 `python`": 8 of 20 Derivations declare Node. Code:
