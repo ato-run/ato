@@ -314,10 +314,11 @@ pub fn allowed_choices(s: &SearchStateV1, placements: &[Placement]) -> Vec<Choic
     let l = &s.frozen.policy.budget;
     let transfer_left = available(l.max_transfer_bytes, b.transfer_used, b.transfer_reserved);
     let mut out = Vec::new();
-    for d in s.candidates().filter(|d| safe(&d.effects)) {
+    for d in s.attempt_candidates().filter(|d| safe(&d.effects)) {
         for p in placements.iter().filter(|p| {
             p.derivation_ref == d.derivation_ref
                 && p.admissible
+                && s.generation_placement_allowed(p)
                 && p.transfer_bytes <= transfer_left
         }) {
             let tried = s.attempts.iter().any(|a| {
