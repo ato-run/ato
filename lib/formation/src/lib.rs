@@ -48,6 +48,7 @@ pub mod preset;
 pub mod projection;
 pub mod receipt;
 pub mod request;
+pub mod retained;
 #[cfg(feature = "planning")]
 pub mod source;
 pub mod verify;

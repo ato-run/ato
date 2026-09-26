@@ -293,6 +293,30 @@ pub fn lower_execution(
     )?;
     let mut actions: Vec<_> = steps.into_iter().map(BuildAction::Prerequisite).collect();
     actions.extend((0..serving_step).map(|step| BuildAction::Authored { step }));
+    let environment_bindings = runtime_environment(
+        lane,
+        &toolchains,
+        package_manager.as_ref(),
+        binding.workspace_guest_root,
+    );
+    Ok(ExecutionPlan {
+        lane,
+        serving_step,
+        workspace_guest_root: binding.workspace_guest_root.trim_end_matches('/').into(),
+        toolchains,
+        package_manager,
+        actions,
+        toolchain_path,
+        environment_bindings,
+    })
+}
+
+fn runtime_environment(
+    lane: Lane,
+    toolchains: &BTreeMap<String, String>,
+    package_manager: Option<&ResolvedPackageManager>,
+    guest_root: &str,
+) -> BTreeMap<String, String> {
     let mut environment_bindings = BTreeMap::new();
     if lane == Lane::PythonProcess {
         let version = &toolchains["python"];
@@ -301,13 +325,13 @@ pub fn lower_execution(
             "PYTHONPATH".into(),
             format!(
                 "{}/.venv/lib/python{minor}/site-packages",
-                binding.workspace_guest_root.trim_end_matches('/')
+                guest_root.trim_end_matches('/')
             ),
         );
     } else if lane == Lane::Process {
         environment_bindings.insert(
             "PATH".into(),
-            intent::toolchain_bin_dirs(&toolchains, package_manager.as_ref())
+            intent::toolchain_bin_dirs(toolchains, package_manager)
                 .into_iter()
                 .chain([intent::SYSTEM_PATH.into()])
                 .collect::<Vec<_>>()
@@ -319,13 +343,57 @@ pub fn lower_execution(
             environment_bindings.insert("npm_config_update_notifier".into(), "false".into());
         }
     }
+    environment_bindings
+}
+
+/// Bind a validated retained materialization without input detection, authoring
+/// or build planning. Historical exec steps are provenance, not replay actions.
+pub fn lower_retained(
+    descriptor: &crate::retained::RetainedCandidateV1,
+) -> Result<ExecutionPlan, crate::retained::RetainedError> {
+    use crate::retained::{RetainedError, RetainedShape};
+    descriptor.validate()?;
+    let d = &descriptor.derivation;
+    let serving_step = d
+        .steps
+        .iter()
+        .position(|s| s.op == "serve")
+        .ok_or(RetainedError("serving_step"))?;
+    let serve = &d.steps[serving_step];
+    if serving_step + 1 != d.steps.len() || !serve.network.is_denied() {
+        return Err(RetainedError("serving_policy"));
+    }
+    let (lane, toolchains, package_manager) = match &descriptor.shape {
+        RetainedShape::StaticWeb => (Lane::StaticWeb, BTreeMap::new(), None),
+        RetainedShape::ProcessWorkspace { binding } => {
+            project_exec(serve).map_err(|_| RetainedError("serving_step"))?;
+            (
+                if binding.python_environment {
+                    Lane::PythonProcess
+                } else {
+                    Lane::Process
+                },
+                binding.toolchains.clone(),
+                binding
+                    .package_manager
+                    .as_ref()
+                    .map(|m| ResolvedPackageManager {
+                        name: m.name.clone(),
+                        version: m.version.clone(),
+                    }),
+            )
+        }
+    };
+    let environment_bindings =
+        runtime_environment(lane, &toolchains, package_manager.as_ref(), "/app");
+    let toolchain_path = intent::toolchain_bin_dirs(&toolchains, package_manager.as_ref());
     Ok(ExecutionPlan {
         lane,
         serving_step,
-        workspace_guest_root: binding.workspace_guest_root.trim_end_matches('/').into(),
+        workspace_guest_root: "/app".into(),
         toolchains,
         package_manager,
-        actions,
+        actions: vec![],
         toolchain_path,
         environment_bindings,
     })

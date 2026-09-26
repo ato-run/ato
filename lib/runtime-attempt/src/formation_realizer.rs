@@ -89,6 +89,29 @@ impl CandidateRealizer for FormationRealizer<'_> {
             source_root: self.source_root,
             attempt_root,
         })?;
+        CandidateLauncher {
+            planned: self.planned,
+            shim: self.shim,
+            network: self.network,
+        }
+        .realize(executed, attempt_id, attempt_root)
+    }
+}
+
+/// Shared launch boundary for built and retained candidates. No build/source
+/// authority lives here; callers supply an already validated materialization.
+pub(crate) struct CandidateLauncher<'a> {
+    pub planned: &'a PlannedCandidate,
+    pub shim: &'a Path,
+    pub network: NetworkPolicy,
+}
+impl CandidateLauncher<'_> {
+    pub(crate) fn realize(
+        &self,
+        executed: ExecutedCandidate,
+        attempt_id: &str,
+        attempt_root: &Path,
+    ) -> Result<Realized, RealizeFailure> {
         let (candidate, evidence, realization) = match &executed {
             ExecutedCandidate::Process { workspace_root } => {
                 let (candidate, evidence) =
@@ -120,7 +143,7 @@ impl CandidateRealizer for FormationRealizer<'_> {
     }
 }
 
-impl FormationRealizer<'_> {
+impl CandidateLauncher<'_> {
     /// Launch a process candidate in a temporary realization: a disposable
     /// copy of the build output, read-only at /app, no egress.
     fn realize_process(
