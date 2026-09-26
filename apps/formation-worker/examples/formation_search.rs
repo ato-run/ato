@@ -2,7 +2,8 @@
 //! once, then every accepted route is checked by the shared Rust authority.
 use anyhow::{Context, Result, bail};
 use ato_formation_worker::decision_provider::{
-    DecisionPoint, DecisionProvider, ProviderAnswer, serve_decision,
+    DEFAULT_DECISION_MODEL, DecisionPoint, DecisionProvider, JevDecisionProvider, ProviderAnswer,
+    decision_request, serve_decision,
 };
 use ato_formation_worker::runtime_network::{
     Client, RuntimeConstraintWire, SatisfyBudget, SatisfyPolicy, accept_verified_routes,
@@ -17,9 +18,43 @@ use std::path::Path;
 struct AcceptanceProvider {
     mode: String,
     log: Option<std::path::PathBuf>,
+    jev: Option<JevDecisionProvider>,
 }
 impl DecisionProvider for AcceptanceProvider {
     fn decide(&self, point: &DecisionPoint) -> ProviderAnswer {
+        if let Some(jev) = &self.jev {
+            let started = std::time::Instant::now();
+            let answer = jev.decide(point);
+            // Acceptance telemetry only: no key, source, raw response or receipt.
+            // Use the production provider and its unchanged bounded projection.
+            let model = std::env::var("ATO_DECISION_JEV_MODEL")
+                .unwrap_or_else(|_| DEFAULT_DECISION_MODEL.to_owned());
+            let request_bytes = serde_json::to_vec(&decision_request(&model, point))
+                .expect("serializable provider request")
+                .len();
+            if let Some(log) = &self.log {
+                use std::io::Write as _;
+                let mut file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(log)
+                    .expect("open live acceptance ledger");
+                writeln!(
+                    file,
+                    "{}",
+                    serde_json::json!({
+                        "seq": point.seq,
+                        "mode": "jev",
+                        "elapsed_ms": started.elapsed().as_millis(),
+                        "request_bytes": request_bytes,
+                        "offered": point.choices.iter().map(|c| &c.choice_id).collect::<Vec<_>>(),
+                        "answer": answer.submission(point.seq),
+                    })
+                )
+                .expect("write live acceptance ledger");
+            }
+            return answer;
+        }
         if let Some(log) = &self.log {
             use std::io::Write as _;
             if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -74,11 +109,7 @@ impl DecisionProvider for AcceptanceProvider {
                 // inspect, stop): exercises the exploration actions without
                 // naming an index.
                 let want = &kind[5..];
-                match point
-                    .choices
-                    .iter()
-                    .find(|c| action_kind(c) == want)
-                {
+                match point.choices.iter().find(|c| action_kind(c) == want) {
                     Some(c) => ProviderAnswer::Choice {
                         choice_id: c.choice_id.clone(),
                         evidence: serde_json::json!({"provider": "acceptance", "mode": kind}),
@@ -180,6 +211,10 @@ fn main() -> Result<()> {
     let provider = std::env::var("ATO_ACCEPTANCE_DECISION_PROVIDER")
         .ok()
         .map(|mode| AcceptanceProvider {
+            jev: (mode == "jev")
+                .then(|| JevDecisionProvider::from_env(std::time::Duration::from_secs(20)))
+                .transpose()
+                .expect("live Jev acceptance configuration"),
             mode,
             log: std::env::var_os("ATO_ACCEPTANCE_DECISION_LOG").map(Into::into),
         });
