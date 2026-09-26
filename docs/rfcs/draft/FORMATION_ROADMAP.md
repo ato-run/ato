@@ -26,7 +26,7 @@ This is an implementation plan; pending rows are not shipped functionality.
 | 3c | Search budget reservations/accounting, then streaming content-addressed source transport | 3c-a merged: ato #1400 `aaaaaa15` / API #689 `88cb8aae`. 3c-b merged: API #691 `e8b0056b` → ato #1403 `0df51b22`; Linux integration, PAX boundary/resource-limit hardening and separate 64/128 MiB rerun validated; not deployed |
 | 3d | Retained objects → validated closure/tree → new Run → same K → new receipt without source/scratch | Merged: API #692 `23d69735` → ato #1407 `4697b3b0` (migration 0299 not applied remotely); actual Coordinator replay Static/Python/Node after source deletion; not deployed |
 | 4 | Durable deterministic SearchState; D1 failure→evidence→authorized D2; restart preserves search/attempt identity | Merged: API #693 `18fe2c75` → ato #1408 `a46fd62d` (migration 0300 not applied remotely); actual Coordinator restart acceptance cases 1–7, restart points 1–9, review hardening H1–H4; not deployed |
-| 5a | Optional finite AllowedChoices DecisionProvider; deterministic fallback under the same permissions and budget; compare attempts, elapsed time, provider usage and cost | **Completion gate open**. 5a-a merged: ato #1409 / API #694 (ADR-035, migration 0301). 5a-b merged: API #695 `1853f280` → ato #1410 `c883087e` (ADR-036, migration 0302): Inspect / Stop and independent decision sequence; B0–B8 verified. Probe deferred (no safe existing primitive). Live Jev acceptance: pending. With/without-Jev attempts / elapsed time / provider usage and cost comparison: pending. Not deployed; migrations not applied remotely |
+| 5a | Optional finite AllowedChoices DecisionProvider; deterministic fallback under the same permissions and budget; compare attempts, elapsed time, provider usage and cost | **Completed (implemented and locally/integration verified)**. 5a-a merged: ato #1409 / API #694 (ADR-035, migration 0301). 5a-b merged: API #695 `1853f280` → ato #1410 `c883087e` (ADR-036, migration 0302): Inspect / Stop and independent decision sequence; B0–B8 verified. Probe deferred (no safe existing primitive). Live Jev acceptance and same-fixture/same-budget comparison: passed (2026-09-26); both arms 2 attempts / PASS; deterministic 3.573 s, Jev 3.022 s, 1 call, 1612 input / 134 output tokens, estimated $0.000067704. Not deployed; migrations not applied remotely |
 | 5b | Typed new-D generation first, then evidence-based D improvement; reject privilege/K/UNKNOWN escape | Pending |
 | 6 | Measure 20, expand to 50 then 100; known-D revalidation on new authorized Runtime/Adapter/D | Pending |
 
@@ -38,9 +38,12 @@ and a final-stack regression ([foundation ledger](../../ops/formation-foundation
 (ato `a46fd62d`, ato-api `18fe2c75`); not deployed, and migrations 0299/0300 are
 not applied to any remote database.
 
-5a-a and 5a-b are merged. The 5a completion gate stays open until live Jev
-acceptance and the same-fixture, same-budget comparison are recorded. 5b
-new-D generation remains pending.
+5a-a and 5a-b are merged. **5a completion gate closed** after the
+[live Jev acceptance and comparison ledger](https://github.com/ato-run/ato/blob/b675381a276f46d4408c0418975d6feb7848c5fa/docs/ops/formation-live-jev-2026-09-26.md).
+This single pair establishes bounded integration and records cost; it does not
+show an attempt-count improvement or a statistically meaningful speedup.
+Probe is deferred until a safe typed primitive exists. 5b new-D generation
+remains pending. Deployment is not part of this completed integration gate.
 
 The sequential track's [integration record](../../ops/formation-integrated-2026-09-25.md)
 separates implementation, integration checks, merge and deployment. 64/128 MiB
