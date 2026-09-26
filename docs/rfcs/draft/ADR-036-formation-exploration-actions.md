@@ -1,6 +1,6 @@
 # ADR-036 — Finite exploration actions (Formation 5a-b)
 
-Status: implemented on an unmerged PR pair (ato + ato-api); not deployed.
+Status: implemented and merged (ato #1410, ato-api #695); not deployed.
 Migration 0302 is local-only. Builds on ADR-034 (SearchState) and ADR-035
 (the requester-side DecisionProvider). ADR-035 stays the record of the
 attempt-choice mechanism; this ADR generalizes the offered set.
