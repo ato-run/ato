@@ -426,6 +426,14 @@ struct FormArgs {
     /// (1000–120000).
     #[arg(long, default_value_t = 30_000, requires = "decision_provider")]
     decision_timeout_ms: u64,
+    /// Generate one bounded typed Python draft after known D exhaustion.
+    /// Uses ATO_GENERATION_JEV_API_KEY, separately from decision/browser keys.
+    #[arg(long, value_parser = ["jev"], requires_all = ["runtime_network", "generation_entrypoints"])]
+    generation_provider: Option<String>,
+    /// Explicit source entrypoint authorization: opaque-id=relative-file.py.
+    /// Repeat for up to 16 files. Model sees IDs, never the paths or source.
+    #[arg(long = "generation-entrypoint", requires = "generation_provider")]
+    generation_entrypoints: Vec<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -726,7 +734,7 @@ fn form_on_runtime_network(args: FormArgs) -> Result<()> {
         None => None,
     };
     let mut answered = std::collections::BTreeSet::new();
-    let submission = prepare_submission(
+    let mut submission = prepare_submission(
         &args.path,
         &args.routes,
         browser_contract,
@@ -742,6 +750,7 @@ fn form_on_runtime_network(args: FormArgs) -> Result<()> {
             network: args.network.clone(),
             allow_managed: args.allow_managed,
             decision: decision_policy.clone(),
+            generation: None,
         },
         SatisfyBudget {
             max_attempts: u32::try_from(args.max_attempts)
@@ -754,6 +763,26 @@ fn form_on_runtime_network(args: FormArgs) -> Result<()> {
         },
         &search_id,
     )?;
+    let generation_provider = if args.generation_provider.is_some() {
+        let mut entries = std::collections::BTreeMap::new();
+        for entry in &args.generation_entrypoints {
+            let (id, path) = entry
+                .split_once('=')
+                .context("--generation-entrypoint expects ID=PATH")?;
+            anyhow::ensure!(
+                entries.insert(id.to_owned(), path.to_owned()).is_none(),
+                "duplicate entrypoint ID"
+            );
+        }
+        submission.authorize_generation(entries, 30_000)?;
+        Some(
+            ato_formation_worker::generation_provider::JevGenerationProvider::from_env(
+                std::time::Duration::from_secs(20),
+            )?,
+        )
+    } else {
+        None
+    };
     let client = Client::new(&api, &token)?;
     let accepted = client.submit(&submission)?;
     let id = accepted["satisfy_id"]
@@ -767,6 +796,17 @@ fn form_on_runtime_network(args: FormArgs) -> Result<()> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60 * 30);
     loop {
         let status = client.satisfy_status(&id)?;
+        submission.accept_generated_candidate(&status)?;
+        if let Some(provider) = &generation_provider {
+            ato_formation_worker::runtime_network::serve_generation(
+                &mut submission,
+                &client,
+                &id,
+                &status,
+                provider,
+            )?;
+        }
+
         if let Some(provider) = &provider {
             ato_formation_worker::decision_provider::serve_decision(
                 &client,
