@@ -418,7 +418,8 @@ def case5():
 
 
 def case6():
-    """A route whose real effect class is not disposable: effect_unknown, no fallback."""
+    """A route whose real effect class is not disposable, refused before start:
+    effect_policy_refused (not effect_unknown), no fallback."""
     c = "case6"
     sid = search_id(c)
     rt = runtime(c, "runtime", 2)
@@ -427,9 +428,9 @@ def case6():
     rc, result = settled(c, req)
     stop(rt)
     s = state(c, satisfy, sid)
-    expect(result["termination_reason"] == "effect_unknown" and len(s["attempts"]) == 1
+    expect(result["termination_reason"] == "effect_policy_refused" and len(s["attempts"]) == 1
            and s["attempts"][0]["effects"] == "non-repeatable",
-           "effect_unknown, D2 never issued", c, state=s)
+           "effect_policy_refused, D2 never issued", c, state=s)
     return {"satisfy_id": satisfy, "attempt": s["attempts"][0], "termination": result["termination_reason"]}
 
 
