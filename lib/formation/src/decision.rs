@@ -72,7 +72,6 @@ impl Eq for RefusalEntry {}
 impl Eq for InspectionResult {}
 impl Eq for InspectionEvidence {}
 
-
 /// The bounded, pre-defined read-only inspections a provider may ask for.
 /// Each maps to one Coordinator-side typed evidence producer; there are no
 /// provider-supplied arguments and nothing here can reach a shell, the
@@ -204,8 +203,7 @@ impl InspectionEvidence {
                     }
                     for reason in &entry.reasons {
                         // Reasons are typed {code, ...} objects only.
-                        let bytes =
-                            serde_json::to_vec(reason).map_or(usize::MAX, |b| b.len());
+                        let bytes = serde_json::to_vec(reason).map_or(usize::MAX, |b| b.len());
                         if !reason.is_object()
                             || !reason["code"].is_string()
                             || bytes > MAX_REASON_BYTES
@@ -316,7 +314,7 @@ pub fn allowed_choices(s: &SearchStateV1, placements: &[Placement]) -> Vec<Choic
     let l = &s.frozen.policy.budget;
     let transfer_left = available(l.max_transfer_bytes, b.transfer_used, b.transfer_reserved);
     let mut out = Vec::new();
-    for d in s.frozen.candidates.iter().filter(|d| safe(&d.effects)) {
+    for d in s.candidates().filter(|d| safe(&d.effects)) {
         for p in placements.iter().filter(|p| {
             p.derivation_ref == d.derivation_ref
                 && p.admissible
@@ -364,7 +362,7 @@ pub fn allowed_choices(s: &SearchStateV1, placements: &[Placement]) -> Vec<Choic
     // Inspections whose evidence is not recorded yet, in frozen D order.
     // attempt_failures exists only for a D with a finished non-pass attempt.
     if out.len() < MAX_CHOICES - 1 {
-        'ds: for d in &s.frozen.candidates {
+        'ds: for d in s.candidates() {
             for inspection in [
                 InspectionKind::CandidateRefusals,
                 InspectionKind::AttemptFailures,
@@ -426,11 +424,9 @@ fn issue(s: &SearchStateV1, c: &ChoiceAction) -> SearchAction {
         unreachable!("issue takes an attempt action")
     };
     let d = s
-        .frozen
-        .candidates
-        .iter()
+        .candidates()
         .find(|d| &d.derivation_ref == derivation_ref)
-        .expect("choices come from the frozen list");
+        .expect("choices come from the authorized candidate list");
     match &d.materialization {
         CandidateInput::Source { .. } => SearchAction::IssueAttempt {
             candidate_id: candidate_id.clone(),
@@ -485,36 +481,39 @@ pub(crate) fn apply(
             }
             Some(DecisionOutcome::Chosen) => {
                 match record.released() {
-                    Some(attempt @ ChoiceAction::Attempt {
-                        derivation_ref,
-                        runtime_id,
-                        environment_id,
-                        ..
-                    }) => {
+                    Some(
+                        attempt @ ChoiceAction::Attempt {
+                            derivation_ref,
+                            runtime_id,
+                            environment_id,
+                            ..
+                        },
+                    ) => {
                         let issued = s.attempts.iter().any(|a| {
                             a.derivation_ref == *derivation_ref
                                 && a.runtime_id == *runtime_id
                                 && a.environment_id == *environment_id
                         });
                         if !issued && s.attempts.len() as u64 == record.attempt_seq {
-                            let offered = allowed_choices(s, placements)
-                                .into_iter()
-                                .find(|c| match (&c.action, attempt) {
-                                    (
-                                        ChoiceAction::Attempt {
-                                            derivation_ref: d1,
-                                            runtime_id: r1,
-                                            environment_id: e1,
-                                            ..
-                                        },
-                                        ChoiceAction::Attempt {
-                                            derivation_ref: d2,
-                                            runtime_id: r2,
-                                            environment_id: e2,
-                                            ..
-                                        },
-                                    ) => d1 == d2 && r1 == r2 && e1 == e2,
-                                    _ => false,
+                            let offered =
+                                allowed_choices(s, placements).into_iter().find(|c| {
+                                    match (&c.action, attempt) {
+                                        (
+                                            ChoiceAction::Attempt {
+                                                derivation_ref: d1,
+                                                runtime_id: r1,
+                                                environment_id: e1,
+                                                ..
+                                            },
+                                            ChoiceAction::Attempt {
+                                                derivation_ref: d2,
+                                                runtime_id: r2,
+                                                environment_id: e2,
+                                                ..
+                                            },
+                                        ) => d1 == d2 && r1 == r2 && e1 == e2,
+                                        _ => false,
+                                    }
                                 });
                             return match offered {
                                 Some(choice) => issue(s, &choice.action),
@@ -529,9 +528,11 @@ pub(crate) fn apply(
                         inspection,
                         target_ref,
                     }) => {
-                        if !s.evidence.iter().any(|e| {
-                            e.kind == *inspection && e.target_ref == *target_ref
-                        }) {
+                        if !s
+                            .evidence
+                            .iter()
+                            .any(|e| e.kind == *inspection && e.target_ref == *target_ref)
+                        {
                             return SearchAction::RunInspection {
                                 inspection: *inspection,
                                 target_ref: target_ref.clone(),
@@ -646,9 +647,7 @@ pub fn validate_decision(
     };
     let offered = |id: &String| record.choices.iter().any(|c| &c.choice_id == id);
     match (&submission.choice_id, submission.fallback) {
-        (Some(id), None) if offered(id) => {
-            Ok(verdict(DecisionOutcome::Chosen, Some(id.clone())))
-        }
+        (Some(id), None) if offered(id) => Ok(verdict(DecisionOutcome::Chosen, Some(id.clone()))),
         (Some(_), None) => Ok(verdict(DecisionOutcome::OutOfSet, None)),
         (
             None,
