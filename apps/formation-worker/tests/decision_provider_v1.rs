@@ -12,13 +12,25 @@ fn point() -> DecisionPoint {
         "default_choice_id": "c1111111111111111",
         "expires_at": "2026-09-26T00:00:30.000Z",
         "choices": [
-            {"choice_id": "c1111111111111111", "derivation_ref": "sha256:d1-UNTRUSTED-MARKER",
-             "runtime_id": "rt", "environment_id": "native",
+            {"choice_id": "c1111111111111111",
+             "action": {"kind": "attempt", "candidate_id": "cand-1",
+                        "derivation_ref": "sha256:d1-UNTRUSTED-MARKER",
+                        "runtime_id": "rt", "environment_id": "native"},
              "derivation": {"effects": "pure"}, "runtime_facts": {"platform": "linux/aarch64"},
              "prior_attempts": [{"status": "fail", "failure_code": "http_status_mismatch"}]},
-            {"choice_id": "c2222222222222222", "derivation_ref": "sha256:d2",
-             "runtime_id": "rt", "environment_id": "native"}
-        ]
+            {"choice_id": "c2222222222222222",
+             "action": {"kind": "attempt", "candidate_id": "cand-2",
+                        "derivation_ref": "sha256:d2",
+                        "runtime_id": "rt", "environment_id": "native"}},
+            {"choice_id": "c3333333333333333",
+             "action": {"kind": "inspect", "inspection": "candidate_refusals",
+                        "target_ref": "sha256:d1-UNTRUSTED-MARKER"}},
+            {"choice_id": "c4444444444444444",
+             "action": {"kind": "stop", "reason_class": "no_promising_action"}}
+        ],
+        "evidence": [{"kind": "attempt_failures", "target_ref": "sha256:d0",
+                      "failures": [{"runtime_id": "rt", "status": "fail",
+                                    "failure_code": "http_status_mismatch"}]}]
     }))
     .unwrap()
 }
@@ -78,7 +90,8 @@ fn provider(url: &str, timeout: Duration) -> JevDecisionProvider {
 fn a_well_formed_choice_is_returned_with_evidence_and_the_question_carries_no_data() {
     let body = answer(
         "c2222222222222222",
-        serde_json::json!({"c1111111111111111": 0.2, "c2222222222222222": 0.8}),
+        serde_json::json!({"c1111111111111111": 0.2, "c2222222222222222": 0.5,
+                          "c3333333333333333": 0.2, "c4444444444444444": 0.1}),
     );
     let (url, server) = serve_once(200, body, Duration::ZERO);
     let got = provider(&url, Duration::from_secs(5)).decide(&point());
@@ -107,11 +120,14 @@ fn a_well_formed_choice_is_returned_with_evidence_and_the_question_carries_no_da
     assert!(!question.contains("http_status_mismatch"));
     assert!(json["state"].to_string().contains("UNTRUSTED-MARKER"));
     assert_eq!(json["questions"]["decision"]["type"], "choice");
+    // The recorded evidence projection is state data too.
+    assert!(json["state"]["evidence"].to_string().contains("attempt_failures"));
 }
 
 #[test]
 fn malformed_or_out_of_set_answers_are_invalid() {
-    let both = serde_json::json!({"c1111111111111111": 0.5, "c2222222222222222": 0.5});
+    let both = serde_json::json!({"c1111111111111111": 0.5, "c2222222222222222": 0.5,
+                                 "c3333333333333333": 0.0, "c4444444444444444": 0.0});
     for raw in [
         answer("c9999999999999999", both.clone()),
         answer(

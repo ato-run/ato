@@ -142,8 +142,8 @@ fn search_authority_offers_and_judges_a_finite_decision() {
     let choices = opened["action"]["choices"].as_array().unwrap().clone();
     state["budget"]["decisions_used"] = serde_json::json!(1);
     state["decisions"] = serde_json::json!([{
-        "seq": 0, "opened_at_ms": 10, "default_id": opened["action"]["default_id"],
-        "choices": choices.iter().map(|c| c["choice_id"].clone()).collect::<Vec<_>>(),
+        "seq": 0, "attempt_seq": 0, "opened_at_ms": 10, "default_id": opened["action"]["default_id"],
+        "choices": choices.clone(),
         "outcome": null, "chosen_id": null
     }]);
     let judge_at = |state: &Value, submission: Value, now: u64| {
