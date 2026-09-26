@@ -180,6 +180,15 @@ impl ato_formation_worker::generation_provider::GenerationProvider
             std::thread::sleep(std::time::Duration::from_secs(31));
             return GenerationAnswer::Fallback { reason: "timeout" };
         }
+        if self.mode == "decline" {
+            return GenerationAnswer::Declined {
+                provenance: serde_json::json!({
+                    "provider": "acceptance", "model": "fixed-decline",
+                    "prompt_version": "acceptance/1",
+                    "usage": {"input_tokens":0,"output_tokens":0},
+                }),
+            };
+        }
         let id = self.mode.strip_prefix("fixed:").unwrap_or(
             point
                 .entrypoint_ids
