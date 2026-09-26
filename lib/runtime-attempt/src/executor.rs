@@ -83,6 +83,7 @@ impl LocalAttemptExecutor {
 
         let built = run_build(
             &candidate.plan,
+            &candidate.derivation,
             build_attempt,
             &BuildSandbox {
                 source_root,
@@ -96,16 +97,16 @@ impl LocalAttemptExecutor {
             },
         )?;
 
-        match candidate.intent.lane {
+        match candidate.plan.lane {
             ato_formation::intent::Lane::PythonProcess | ato_formation::intent::Lane::Process => {
-                let root = output_root(&built, &candidate.plan)?;
+                let root = output_root(&built, "")?;
                 Ok(ExecutedCandidate::Process {
                     workspace_root: root,
                 })
             }
             ato_formation::intent::Lane::StaticWeb => {
                 let produced = crate::static_lane::materialize_static(
-                    &candidate.intent,
+                    &candidate.derivation,
                     &candidate.plan,
                     // The WORKSPACE root: the lane resolves
                     // `static.output_root` itself.

@@ -1,0 +1,360 @@
+{
+  "build-serve": {
+    "argv": [
+      "node",
+      "app.py",
+      "a b"
+    ],
+    "build_steps": [
+      {
+        "argv": [
+          "/bin/sh",
+          "-euc",
+          "if [ ! -x /opt/ato/toolchains/node/22.14.0/bin/node ]; then mkdir -p /opt/ato/toolchains/node/22.14.0 && curl -fsSL 'https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-x64.tar.gz' | tar -xz --strip-components=1 -C /opt/ato/toolchains/node/22.14.0; fi; /opt/ato/toolchains/node/22.14.0/bin/node -v"
+        ],
+        "name": "provision-node",
+        "needs_network": true
+      },
+      {
+        "argv": [
+          "/bin/echo",
+          "a b"
+        ],
+        "env": {
+          "BUILD_MODE": "fixture"
+        },
+        "name": "prepare",
+        "needs_network": false
+      }
+    ],
+    "contract_ref": "sha256:496a17d2da79d20968ebecb0496c18c26e4efc68a52cdfd650e567cc7756c9aa",
+    "cwd": "",
+    "derivation_ref": "sha256:70e4495fb4164fb64305f95e80abaa96ce07a37b141384f5b307e54d65a6eb03",
+    "env": {
+      "HOME": "/tmp",
+      "MODE": "fixture",
+      "PATH": "/opt/ato/toolchains/node/22.14.0/bin:/usr/local/bin:/usr/bin:/bin",
+      "npm_config_cache": "/tmp/.npm",
+      "npm_config_update_notifier": "false"
+    },
+    "provisions": [
+      "toolchain.node.22.14.0"
+    ],
+    "requirements": [
+      {
+        "fact": "runtime.process",
+        "one_of": [
+          "true"
+        ]
+      },
+      {
+        "fact": "containment",
+        "one_of": [
+          "bwrap+landlock"
+        ]
+      },
+      {
+        "fact": "toolchain.root"
+      }
+    ],
+    "static_root": null,
+    "toolchain_path": [
+      "/opt/ato/toolchains/node/22.14.0/bin"
+    ]
+  },
+  "exec": {
+    "argv": [
+      "python3",
+      "app.py",
+      "a b"
+    ],
+    "build_steps": [
+      {
+        "argv": [
+          "/bin/sh",
+          "-euc",
+          "if [ ! -x /opt/ato/toolchains/python/3.12.7/bin/python3 ]; then mkdir -p /opt/ato/toolchains/python/3.12.7 && curl -fsSL 'https://github.com/astral-sh/python-build-standalone/releases/download/20241016/cpython-3.12.7%2B20241016-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz' | tar -xz --strip-components=1 -C /opt/ato/toolchains/python/3.12.7; fi; /opt/ato/toolchains/python/3.12.7/bin/python3 -V"
+        ],
+        "name": "provision-python",
+        "needs_network": true
+      },
+      {
+        "argv": [
+          "/bin/echo",
+          "a b"
+        ],
+        "env": {
+          "BUILD_MODE": "fixture"
+        },
+        "name": "prepare",
+        "needs_network": false
+      }
+    ],
+    "contract_ref": "sha256:496a17d2da79d20968ebecb0496c18c26e4efc68a52cdfd650e567cc7756c9aa",
+    "cwd": "",
+    "derivation_ref": "sha256:f5870469a5a04bcc67c6b5cfb15c743c206f2afc691ff281bf50b5b1a5a1a5f3",
+    "env": {
+      "MODE": "fixture",
+      "PYTHONPATH": "/app/.venv/lib/python3.12/site-packages"
+    },
+    "provisions": [
+      "toolchain.python.3.12.7"
+    ],
+    "requirements": [
+      {
+        "fact": "runtime.process",
+        "one_of": [
+          "true"
+        ]
+      },
+      {
+        "fact": "containment",
+        "one_of": [
+          "bwrap+landlock"
+        ]
+      },
+      {
+        "fact": "toolchain.root"
+      }
+    ],
+    "static_root": null,
+    "toolchain_path": []
+  },
+  "node": {
+    "argv": [
+      "node",
+      "app.py",
+      "a b"
+    ],
+    "build_steps": [
+      {
+        "argv": [
+          "/bin/sh",
+          "-euc",
+          "if [ ! -x /opt/ato/toolchains/node/22.14.0/bin/node ]; then mkdir -p /opt/ato/toolchains/node/22.14.0 && curl -fsSL 'https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-x64.tar.gz' | tar -xz --strip-components=1 -C /opt/ato/toolchains/node/22.14.0; fi; /opt/ato/toolchains/node/22.14.0/bin/node -v"
+        ],
+        "name": "provision-node",
+        "needs_network": true
+      }
+    ],
+    "contract_ref": "sha256:496a17d2da79d20968ebecb0496c18c26e4efc68a52cdfd650e567cc7756c9aa",
+    "cwd": "",
+    "derivation_ref": "sha256:4f94dc83764f81a8c219ce1e0c782340c7a7fc7060878ac0cd337e67278683c9",
+    "env": {
+      "HOME": "/tmp",
+      "MODE": "fixture",
+      "PATH": "/opt/ato/toolchains/node/22.14.0/bin:/usr/local/bin:/usr/bin:/bin",
+      "npm_config_cache": "/tmp/.npm",
+      "npm_config_update_notifier": "false"
+    },
+    "provisions": [
+      "toolchain.node.22.14.0"
+    ],
+    "requirements": [
+      {
+        "fact": "runtime.process",
+        "one_of": [
+          "true"
+        ]
+      },
+      {
+        "fact": "containment",
+        "one_of": [
+          "bwrap+landlock"
+        ]
+      },
+      {
+        "fact": "toolchain.root"
+      }
+    ],
+    "static_root": null,
+    "toolchain_path": [
+      "/opt/ato/toolchains/node/22.14.0/bin"
+    ]
+  },
+  "pnpm": {
+    "argv": [
+      "node",
+      "app.py",
+      "a b"
+    ],
+    "build_steps": [
+      {
+        "argv": [
+          "/bin/sh",
+          "-euc",
+          "if [ ! -x /opt/ato/toolchains/node/22.14.0/bin/node ]; then mkdir -p /opt/ato/toolchains/node/22.14.0 && curl -fsSL 'https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-x64.tar.gz' | tar -xz --strip-components=1 -C /opt/ato/toolchains/node/22.14.0; fi; /opt/ato/toolchains/node/22.14.0/bin/node -v"
+        ],
+        "name": "provision-node",
+        "needs_network": true
+      },
+      {
+        "argv": [
+          "/bin/sh",
+          "-euc",
+          "export PATH=/opt/ato/toolchains/node/22.14.0/bin:/usr/local/bin:/usr/bin:/bin; if [ ! -x /opt/ato/toolchains/pnpm/9.15.4/bin/pnpm ]; then mkdir -p /opt/ato/toolchains/pnpm/9.15.4 && npm install --global --prefix /opt/ato/toolchains/pnpm/9.15.4 --no-audit --no-fund pnpm@9.15.4; fi; test \"$(/opt/ato/toolchains/pnpm/9.15.4/bin/pnpm --version)\" = 9.15.4"
+        ],
+        "name": "provision-pnpm",
+        "needs_network": true
+      }
+    ],
+    "contract_ref": "sha256:496a17d2da79d20968ebecb0496c18c26e4efc68a52cdfd650e567cc7756c9aa",
+    "cwd": "",
+    "derivation_ref": "sha256:4f94dc83764f81a8c219ce1e0c782340c7a7fc7060878ac0cd337e67278683c9",
+    "env": {
+      "HOME": "/tmp",
+      "MODE": "fixture",
+      "PATH": "/opt/ato/toolchains/pnpm/9.15.4/bin:/opt/ato/toolchains/node/22.14.0/bin:/usr/local/bin:/usr/bin:/bin",
+      "npm_config_cache": "/tmp/.npm",
+      "npm_config_update_notifier": "false"
+    },
+    "provisions": [
+      "toolchain.node.22.14.0",
+      "toolchain.pnpm.9.15.4"
+    ],
+    "requirements": [
+      {
+        "fact": "runtime.process",
+        "one_of": [
+          "true"
+        ]
+      },
+      {
+        "fact": "containment",
+        "one_of": [
+          "bwrap+landlock"
+        ]
+      },
+      {
+        "fact": "toolchain.root"
+      }
+    ],
+    "static_root": null,
+    "toolchain_path": [
+      "/opt/ato/toolchains/pnpm/9.15.4/bin",
+      "/opt/ato/toolchains/node/22.14.0/bin"
+    ]
+  },
+  "python": {
+    "argv": [
+      "python3",
+      "app.py",
+      "a b"
+    ],
+    "build_steps": [
+      {
+        "argv": [
+          "/bin/sh",
+          "-euc",
+          "if [ ! -x /opt/ato/toolchains/python/3.12.7/bin/python3 ]; then mkdir -p /opt/ato/toolchains/python/3.12.7 && curl -fsSL 'https://github.com/astral-sh/python-build-standalone/releases/download/20241016/cpython-3.12.7%2B20241016-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz' | tar -xz --strip-components=1 -C /opt/ato/toolchains/python/3.12.7; fi; /opt/ato/toolchains/python/3.12.7/bin/python3 -V"
+        ],
+        "name": "provision-python",
+        "needs_network": true
+      }
+    ],
+    "contract_ref": "sha256:496a17d2da79d20968ebecb0496c18c26e4efc68a52cdfd650e567cc7756c9aa",
+    "cwd": "",
+    "derivation_ref": "sha256:f922d6ba7ff6f6aaa479325a5e05d877575f8d53e92f2c0f61b62a889206c478",
+    "env": {
+      "MODE": "fixture",
+      "PYTHONPATH": "/app/.venv/lib/python3.12/site-packages"
+    },
+    "provisions": [
+      "toolchain.python.3.12.7"
+    ],
+    "requirements": [
+      {
+        "fact": "runtime.process",
+        "one_of": [
+          "true"
+        ]
+      },
+      {
+        "fact": "containment",
+        "one_of": [
+          "bwrap+landlock"
+        ]
+      },
+      {
+        "fact": "toolchain.root"
+      }
+    ],
+    "static_root": null,
+    "toolchain_path": []
+  },
+  "static": {
+    "argv": [],
+    "build_steps": [],
+    "contract_ref": "sha256:496a17d2da79d20968ebecb0496c18c26e4efc68a52cdfd650e567cc7756c9aa",
+    "cwd": "",
+    "derivation_ref": "sha256:8b420195fe963552b85b5f6fadb2cc5c8ce5b72e7cc4df08c72895e31aeda5cd",
+    "env": {},
+    "provisions": [],
+    "requirements": [],
+    "static_root": "",
+    "toolchain_path": []
+  },
+  "yarn": {
+    "argv": [
+      "node",
+      "app.py",
+      "a b"
+    ],
+    "build_steps": [
+      {
+        "argv": [
+          "/bin/sh",
+          "-euc",
+          "if [ ! -x /opt/ato/toolchains/node/22.14.0/bin/node ]; then mkdir -p /opt/ato/toolchains/node/22.14.0 && curl -fsSL 'https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-x64.tar.gz' | tar -xz --strip-components=1 -C /opt/ato/toolchains/node/22.14.0; fi; /opt/ato/toolchains/node/22.14.0/bin/node -v"
+        ],
+        "name": "provision-node",
+        "needs_network": true
+      },
+      {
+        "argv": [
+          "/bin/sh",
+          "-euc",
+          "export PATH=/opt/ato/toolchains/node/22.14.0/bin:/usr/local/bin:/usr/bin:/bin; if [ ! -x /opt/ato/toolchains/yarn/1.22.22/bin/yarn ]; then mkdir -p /opt/ato/toolchains/yarn/1.22.22 && npm install --global --prefix /opt/ato/toolchains/yarn/1.22.22 --no-audit --no-fund yarn@1.22.22; fi; test \"$(/opt/ato/toolchains/yarn/1.22.22/bin/yarn --version)\" = 1.22.22"
+        ],
+        "name": "provision-yarn",
+        "needs_network": true
+      }
+    ],
+    "contract_ref": "sha256:496a17d2da79d20968ebecb0496c18c26e4efc68a52cdfd650e567cc7756c9aa",
+    "cwd": "",
+    "derivation_ref": "sha256:4f94dc83764f81a8c219ce1e0c782340c7a7fc7060878ac0cd337e67278683c9",
+    "env": {
+      "HOME": "/tmp",
+      "MODE": "fixture",
+      "PATH": "/opt/ato/toolchains/yarn/1.22.22/bin:/opt/ato/toolchains/node/22.14.0/bin:/usr/local/bin:/usr/bin:/bin",
+      "npm_config_cache": "/tmp/.npm",
+      "npm_config_update_notifier": "false"
+    },
+    "provisions": [
+      "toolchain.node.22.14.0",
+      "toolchain.yarn.1.22.22"
+    ],
+    "requirements": [
+      {
+        "fact": "runtime.process",
+        "one_of": [
+          "true"
+        ]
+      },
+      {
+        "fact": "containment",
+        "one_of": [
+          "bwrap+landlock"
+        ]
+      },
+      {
+        "fact": "toolchain.root"
+      }
+    ],
+    "static_root": null,
+    "toolchain_path": [
+      "/opt/ato/toolchains/yarn/1.22.22/bin",
+      "/opt/ato/toolchains/node/22.14.0/bin"
+    ]
+  }
+}

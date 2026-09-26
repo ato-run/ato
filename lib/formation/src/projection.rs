@@ -355,7 +355,7 @@ pub fn project(
 /// names somewhere other than inside the workspace. The cwd is checked again,
 /// against the real directory, immediately before the step runs — an earlier
 /// step can create it, or a link in its place.
-fn project_exec(step: &BoundStep) -> Result<BuildStepV1, ProjectionError> {
+pub fn project_exec(step: &BoundStep) -> Result<BuildStepV1, ProjectionError> {
     let refuse = |detail: String| ProjectionError::Unprojectable {
         detail: format!("exec step {:?}: {detail}", step.id),
     };
