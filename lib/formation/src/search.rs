@@ -4,7 +4,10 @@
 use crate::{
     authoring::BoundContract,
     browser::{BrowserContractV0, effective_contract_ref},
-    decision::{Choice, DecisionOutcome, DecisionPolicy, DecisionRecord},
+    decision::{
+        Choice, ChoiceAction, DecisionOutcome, DecisionPolicy, DecisionRecord,
+        InspectionEvidence, InspectionKind,
+    },
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -123,6 +126,10 @@ pub struct SearchStateV1 {
     pub owner_stopped: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub decisions: Vec<DecisionRecord>,
+    /// Durable typed evidence produced by chosen inspections (Stage 5a-b):
+    /// append-only, write-once per (kind, target).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<InspectionEvidence>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -185,6 +192,9 @@ pub enum Termination {
     /// The Runtime refused a D whose attested effect class may not run
     /// unattended, and proved it did not start: nothing happened.
     EffectPolicyRefused,
+    /// The requester's DecisionProvider chose the offered stop: a decision,
+    /// not a K failure and not an owner stop.
+    DecisionStopped,
     OwnerStopped,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -229,6 +239,13 @@ pub enum SearchAction {
     RecordFallback {
         seq: u64,
         reason: DecisionOutcome,
+    },
+    /// Stage 5a-b: run the recorded bounded read-only inspection and store
+    /// its typed evidence. Executed by the Coordinator over durable rows;
+    /// never a shell, a network call or a provider-supplied argument.
+    RunInspection {
+        inspection: InspectionKind,
+        target_ref: String,
     },
     Finish {
         reason: Termination,
@@ -282,6 +299,11 @@ pub enum SearchEvent {
     /// The recorded choice was no longer issuable; the default was taken.
     DecisionUnavailableAtIssue {
         seq: u64,
+    },
+    /// A chosen inspection produced its durable typed evidence.
+    InspectionRecorded {
+        inspection: InspectionKind,
+        target_ref: String,
     },
 }
 #[derive(Debug, thiserror::Error)]
@@ -528,40 +550,64 @@ pub fn events(s: &SearchStateV1, action: &SearchAction) -> Vec<SearchEvent> {
     let mut events = attempt_events(s, action);
     for d in &s.decisions {
         events.push(SearchEvent::DecisionOpened { seq: d.seq });
-        match (d.outcome, &d.chosen_id) {
-            (Some(DecisionOutcome::Chosen), Some(id)) => {
-                events.push(SearchEvent::DecisionMade {
-                    seq: d.seq,
-                    chosen_id: id.clone(),
-                });
-                let seq_now = s.attempts.len() as u64;
-                let issued_choice = match action {
-                    SearchAction::IssueAttempt {
-                        derivation_ref,
-                        runtime_id,
-                        environment_id,
-                        ..
+        match d.outcome {
+            Some(DecisionOutcome::Chosen) => {
+                if let Some(id) = &d.chosen_id {
+                    events.push(SearchEvent::DecisionMade {
+                        seq: d.seq,
+                        chosen_id: id.clone(),
+                    });
+                }
+                // The recorded attempt never landed and the frontier moved on
+                // without it (a substitute was issued, or another issue is
+                // being released now): the default was taken.
+                if let Some(ChoiceAction::Attempt {
+                    derivation_ref,
+                    runtime_id,
+                    environment_id,
+                    ..
+                }) = d.released()
+                {
+                    let landed = s.attempts.iter().any(|a| {
+                        a.derivation_ref == *derivation_ref
+                            && a.runtime_id == *runtime_id
+                            && a.environment_id == *environment_id
+                    });
+                    let issuing_other = matches!(
+                        action,
+                        SearchAction::IssueAttempt {
+                            derivation_ref: d2,
+                            runtime_id: r2,
+                            environment_id: e2,
+                            ..
+                        } | SearchAction::ReplayRetained {
+                            derivation_ref: d2,
+                            runtime_id: r2,
+                            environment_id: e2,
+                            ..
+                        } if *d2 != *derivation_ref
+                            || *r2 != *runtime_id
+                            || *e2 != *environment_id
+                    );
+                    if !landed
+                        && (issuing_other || s.attempts.len() as u64 > d.attempt_seq)
+                    {
+                        events.push(SearchEvent::DecisionUnavailableAtIssue { seq: d.seq });
                     }
-                    | SearchAction::ReplayRetained {
-                        derivation_ref,
-                        runtime_id,
-                        environment_id,
-                        ..
-                    } => Some(crate::decision::choice_id(
-                        seq_now,
-                        derivation_ref,
-                        runtime_id,
-                        environment_id,
-                    )),
-                    _ => None,
-                };
-                if d.seq == seq_now && issued_choice.is_some_and(|c| &c != id) {
-                    events.push(SearchEvent::DecisionUnavailableAtIssue { seq: d.seq });
                 }
             }
-            (Some(reason), _) => events.push(SearchEvent::DecisionFallback { seq: d.seq, reason }),
-            (None, _) => {}
+            Some(reason) => events.push(SearchEvent::DecisionFallback {
+                seq: d.seq,
+                reason,
+            }),
+            None => {}
         }
+    }
+    for e in &s.evidence {
+        events.push(SearchEvent::InspectionRecorded {
+            inspection: e.kind,
+            target_ref: e.target_ref.clone(),
+        });
     }
     events
 }
