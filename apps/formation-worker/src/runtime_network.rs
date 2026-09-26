@@ -140,6 +140,40 @@ pub struct SourceTransport {
     pub closure_ref: String,
 }
 
+/// Read-only compatibility codec for already persisted v0 source tickets.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LegacySourceTicket {
+    pub attempt_id: String,
+    pub fence: u32,
+    pub satisfy_id: String,
+    pub runtime_id: String,
+    pub environment_id: String,
+    pub contract_ref: String,
+    pub base_contract_ref: String,
+    pub derivation_ref: String,
+    pub capsule_toml: String,
+    #[serde(default)]
+    pub browser_contract: Option<BrowserContractV0>,
+    pub archive_digest: String,
+    pub bindings: BTreeMap<String, String>,
+    pub network: String,
+    /// This attempt's caps. A ticket without them is not one this Runtime
+    /// runs: it would have nothing to hold the attempt to.
+    pub resource_budget: TicketResourceBudget,
+}
+
+impl AttemptTicket {
+    pub fn from_wire(mut value: serde_json::Value) -> Result<Self> {
+        if value.get("input").is_none() {
+            let old: LegacySourceTicket = serde_json::from_value(value.clone())?;
+            let map = value.as_object_mut().context("ticket object required")?;
+            map.remove("capsule_toml");
+            map.remove("archive_digest");
+            map.insert("input".into(),serde_json::json!({"kind":"source","capsule_toml":old.capsule_toml,"archive_digest":old.archive_digest}));
+        }
+        Ok(serde_json::from_value(value)?)
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RuntimeConstraintWire {
@@ -292,15 +326,27 @@ pub struct AttemptTicket {
     pub contract_ref: String,
     pub base_contract_ref: String,
     pub derivation_ref: String,
-    pub capsule_toml: String,
+    pub input: AttemptInput,
     #[serde(default)]
     pub browser_contract: Option<BrowserContractV0>,
-    pub archive_digest: String,
     pub bindings: BTreeMap<String, String>,
     pub network: String,
     /// This attempt's caps. A ticket without them is not one this Runtime
     /// runs: it would have nothing to hold the attempt to.
     pub resource_budget: TicketResourceBudget,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AttemptInput {
+    Source {
+        capsule_toml: String,
+        archive_digest: String,
+    },
+    Retained {
+        retained_ref: String,
+        descriptor_json: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -346,6 +392,8 @@ pub struct AttemptResultReport {
     pub contract_ref: Option<String>,
     pub derivation_ref: Option<String>,
     pub materialization_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_ref: Option<String>,
     pub failure: Option<AttemptFailureWire>,
     /// The Formation attempt as the Runtime recorded it: verification,
     /// realization evidence, browser receipt.
@@ -498,7 +546,7 @@ pub fn derivation_requirements(planned: &PlannedCandidate) -> (Vec<Requirement>,
             one_of: Some(vec!["true".to_owned()]),
         });
     }
-    if !planned.plan.actions.is_empty() {
+    if !planned.plan.actions.is_empty() || planned.plan.lane.is_process() {
         requirements.push(Requirement {
             fact: "containment".to_owned(),
             one_of: Some(vec!["bwrap+landlock".to_owned()]),
@@ -823,7 +871,7 @@ pub fn accept_verified_routes(
     satisfy_id: &str,
     status: &serde_json::Value,
 ) -> (Vec<serde_json::Value>, Vec<String>) {
-    use ato_formation::receipt::{VerifiedRouteAssignment, accept_verified_route};
+    use ato_formation::receipt::VerifiedRouteAssignment;
     let request = &submission.request;
     let assignment = VerifiedRouteAssignment {
         request_id: satisfy_id,
@@ -832,12 +880,19 @@ pub fn accept_verified_routes(
         contracts: &submission.contracts,
         browser_contract: request.browser_contract.as_ref(),
     };
+    accept_routes_for_assignment(&assignment, status)
+}
+pub fn accept_routes_for_assignment(
+    assignment: &ato_formation::receipt::VerifiedRouteAssignment<'_>,
+    status: &serde_json::Value,
+) -> (Vec<serde_json::Value>, Vec<String>) {
+    use ato_formation::receipt::accept_verified_route;
     let empty = Vec::new();
     let attempts = status["attempts"].as_array().unwrap_or(&empty);
     let mut accepted = Vec::new();
     let mut refused = Vec::new();
     for route in status["verified_routes"].as_array().unwrap_or(&empty) {
-        match accept_verified_route(&assignment, route, attempts) {
+        match accept_verified_route(assignment, route, attempts) {
             Ok(()) => accepted.push(route.clone()),
             Err(rejection) => refused.push(format!(
                 "{} on {}/{}: {}: {}",
@@ -911,7 +966,9 @@ impl Client {
     }
 
     pub fn claim(&self) -> Result<Option<AttemptTicket>> {
-        self.send(self.http.post(self.url("/attempts/claim")))
+        self.send::<serde_json::Value>(self.http.post(self.url("/attempts/claim")))?
+            .map(AttemptTicket::from_wire)
+            .transpose()
     }
 
     /// The ticket's source, read up to `max_bytes` (the ticket's transfer
@@ -924,6 +981,16 @@ impl Client {
         fence: u32,
         work_root: &Path,
     ) -> Result<File> {
+        self.download_input(attempt_id, max_bytes, fence, work_root, "source")
+    }
+    fn download_input(
+        &self,
+        attempt_id: &str,
+        max_bytes: u64,
+        fence: u32,
+        work_root: &Path,
+        kind: &str,
+    ) -> Result<File> {
         anyhow::ensure!(
             max_bytes <= MAX_SOURCE_OBJECT_BYTES,
             "source exceeds object cap"
@@ -935,7 +1002,7 @@ impl Client {
         );
         let response = self
             .http
-            .get(self.url(&format!("/attempts/{attempt_id}/source")))
+            .get(self.url(&format!("/attempts/{attempt_id}/{kind}")))
             .header("x-ato-attempt-fence", fence)
             .bearer_auth(&self.token)
             .timeout(SOURCE_TRANSFER_TIMEOUT)
@@ -1099,14 +1166,23 @@ pub fn serve(config: &ServeConfig) -> Result<()> {
                 "[runtime-network] attempt {} — {} on {}",
                 ticket.attempt_id, ticket.derivation_ref, ticket.environment_id
             );
-            let report = execute_ticket_with_file(config, &ticket, || {
-                client.source(
-                    &ticket.attempt_id,
-                    ticket.resource_budget.transfer_bytes,
-                    ticket.fence,
-                    &config.work_root,
-                )
-            });
+            let report = execute_ticket_with_publication(
+                config,
+                &ticket,
+                || {
+                    client.download_input(
+                        &ticket.attempt_id,
+                        ticket.resource_budget.transfer_bytes,
+                        ticket.fence,
+                        &config.work_root,
+                        match ticket.input {
+                            AttemptInput::Source { .. } => "source",
+                            AttemptInput::Retained { .. } => "retained-content",
+                        },
+                    )
+                },
+                Some(&client),
+            );
             eprintln!(
                 "[runtime-network] attempt {} → {}",
                 ticket.attempt_id, report.outcome
@@ -1169,6 +1245,7 @@ fn refused(
         contract_ref: None,
         derivation_ref: None,
         materialization_ref: None,
+        retained_ref: None,
         failure: Some(AttemptFailureWire {
             code: code.to_owned(),
             stage: "admission".to_owned(),
@@ -1220,6 +1297,14 @@ pub fn execute_ticket_with_file(
     config: &ServeConfig,
     ticket: &AttemptTicket,
     source: impl FnOnce() -> Result<File>,
+) -> AttemptResultReport {
+    execute_ticket_with_publication(config, ticket, source, None)
+}
+fn execute_ticket_with_publication(
+    config: &ServeConfig,
+    ticket: &AttemptTicket,
+    source: impl FnOnce() -> Result<File>,
+    publisher: Option<&Client>,
 ) -> AttemptResultReport {
     let mut attested = attestation();
     let permit = match AttemptJournal::new(config.out_dir.join("attempt-records"))
@@ -1285,6 +1370,7 @@ pub fn execute_ticket_with_file(
         &attempt_root,
         &mut attested,
         permit,
+        publisher,
     );
     let _ = std::fs::remove_dir_all(&attempt_root);
     report
@@ -1297,7 +1383,15 @@ fn execute_planned_ticket(
     attempt_root: &Path,
     attested: &mut RuntimeAttestation,
     permit: Box<dyn AttemptPermit>,
+    publisher: Option<&Client>,
 ) -> AttemptResultReport {
+    let AttemptInput::Source {
+        capsule_toml,
+        archive_digest,
+    } = &ticket.input
+    else {
+        return execute_retained_ticket(config, ticket, archive, attempt_root, attested, permit);
+    };
     // The ticket's expanded cap, under this Runtime's own source ceiling. The
     // tree is measured against it before anything is written, and expansion
     // enforces it again.
@@ -1310,7 +1404,7 @@ fn execute_planned_ticket(
     };
     let verified = match FileVerifiedArchive::verify(
         archive,
-        &ticket.archive_digest,
+        archive_digest,
         ticket.resource_budget.transfer_bytes,
         limits,
     )
@@ -1355,7 +1449,7 @@ fn execute_planned_ticket(
         let frozen =
             local::freeze_verified_file(verified, &std::path::absolute(attempt_root)?, limits)?;
         let evidence = detect(&frozen.root).context("detection failed")?;
-        let draft: AuthoringDraft = parse_capsule_toml(&ticket.capsule_toml)
+        let draft: AuthoringDraft = parse_capsule_toml(capsule_toml)
             .map_err(ato_formation::failure::FormationFailure::from)?;
         let planned = plan_candidate(
             &draft,
@@ -1505,36 +1599,388 @@ fn execute_planned_ticket(
         None => None,
     };
 
+    let mut report = attempt_report(ticket, &attempt, attested, materialization_ref, None, usage);
+    if let Some(publisher) = publisher
+        && report.outcome == "pass"
+    {
+        let publication = (|| -> Result<String> {
+            let executed = outcome
+                .verified
+                .as_ref()
+                .context("verified artifact missing")?;
+            let prepared = crate::retained::prepare(
+                executed,
+                &planned,
+                ticket.browser_contract.as_ref(),
+                &ticket.attempt_id,
+            )?;
+            anyhow::ensure!(
+                prepared.descriptor.artifact.bytes <= ticket.resource_budget.stored_bytes,
+                "search_stored_budget_exceeded"
+            );
+            report.resource_usage.stored_bytes = prepared.descriptor.artifact.bytes;
+            publisher.retain(ticket, &prepared, &report)
+        })();
+        match publication {
+            Ok(reference) => report.retained_ref = Some(reference),
+            Err(error) => {
+                report.outcome = "fail".into();
+                report.materialization_ref = None;
+                report.failure = Some(AttemptFailureWire {
+                    code: "retained_publication_failed".into(),
+                    stage: "publish".into(),
+                    message: crate::api::bounded_reason(&format!("{error:#}")),
+                });
+                if let Some(attempt) = &mut report.formation_attempt {
+                    attempt["status"] = serde_json::json!("failed");
+                    attempt["outcomes"]["publication"] = serde_json::json!({"state":"failed","reason":"retained_publication_failed"});
+                    attempt["failure"] = serde_json::to_value(&report.failure).unwrap_or_default();
+                }
+            }
+        }
+    }
+    report
+}
+
+/// Explicit replay dispatch. Never call source resolution or plan_candidate.
+fn execute_retained_ticket(
+    config: &ServeConfig,
+    ticket: &AttemptTicket,
+    mut archive: File,
+    attempt_root: &Path,
+    attested: &mut RuntimeAttestation,
+    permit: Box<dyn AttemptPermit>,
+) -> AttemptResultReport {
+    use ato_formation::{execution::lower_retained, retained::RetainedCandidateV1};
+    use ato_runtime_attempt::{
+        plan::{BoundCandidate, PlannedCandidate},
+        retained::RetainedCandidateRealizer,
+    };
+    let AttemptInput::Retained {
+        retained_ref,
+        descriptor_json,
+    } = &ticket.input
+    else {
+        unreachable!("typed dispatch")
+    };
+    let prepared = (|| -> Result<_> {
+        let descriptor = RetainedCandidateV1::parse(descriptor_json.as_bytes(), retained_ref)?;
+        descriptor.match_assignment(&ticket.contract_ref, &ticket.derivation_ref)?;
+        anyhow::ensure!(
+            descriptor.base_contract_ref == ticket.base_contract_ref
+                && descriptor.browser_contract == ticket.browser_contract,
+            "retained frozen K mismatch"
+        );
+        anyhow::ensure!(
+            descriptor.artifact.bytes == ticket.resource_budget.transfer_bytes,
+            "retained transfer reservation mismatch"
+        );
+        anyhow::ensure!(
+            descriptor.artifact.expanded_bytes <= ticket.resource_budget.expanded_bytes,
+            "retained expanded reservation exceeded"
+        );
+        let planned = PlannedCandidate {
+            bound: BoundCandidate {
+                contract: descriptor.base_contract.clone(),
+                derivation: descriptor.derivation.clone(),
+                contract_ref: descriptor.base_contract_ref.clone(),
+                derivation_ref: descriptor.derivation_ref.clone(),
+            },
+            plan: lower_retained(&descriptor)?,
+        };
+        std::fs::create_dir_all(attempt_root)?;
+        let path = attempt_root.join("retained.tar");
+        archive.rewind()?;
+        std::io::copy(&mut archive, &mut File::create(&path)?)?;
+        Ok((descriptor, planned, path))
+    })();
+    let (descriptor, planned, path) = match prepared {
+        Ok(value) => value,
+        Err(error) => {
+            return refused(
+                ticket,
+                attested.clone(),
+                "retained_preflight_failed",
+                &format!("{error:#}"),
+            );
+        }
+    };
+    let (requirements, provisions) = derivation_requirements(&planned);
+    attested.derivation_ref = Some(planned.derivation_ref.clone());
+    attested.contract_ref = Some(ticket.contract_ref.clone());
+    attested.effects = Some(effects_name(planned.derivation.effects));
+    attested.requirements = requirements;
+    attested.provisions = provisions;
+    let browser = ticket
+        .browser_contract
+        .as_ref()
+        .map(|contract| BrowserVerification {
+            contract: contract.clone(),
+            verifier: config
+                .browser_verifier
+                .clone()
+                .filter(BrowserVerifierCommand::is_contained),
+            budget: Default::default(),
+        });
+    let spec = planned.attempt_spec();
+    let outcome = run_reserved_attempt(
+        &AttemptRequest {
+            request_id: &ticket.satisfy_id,
+            attempt_id: &ticket.attempt_id,
+            label: "retained",
+            spec: &spec,
+            contract_ref: &ticket.contract_ref,
+            runtime_id: &ticket.runtime_id,
+            profile: &local::probe_local_runtime(),
+            authorization: EffectAuthorization::Unattended,
+            network: NetworkPolicy::Denied,
+            browser: browser.as_ref(),
+            attempt_root,
+            continuation: Continuation::Stop,
+            receipt: ReceiptContext::formation(),
+            interrupt: None,
+        },
+        &RetainedCandidateRealizer {
+            descriptor: &descriptor,
+            archive: &path,
+            expected_contract_ref: &ticket.contract_ref,
+            expected_derivation_ref: &ticket.derivation_ref,
+            expanded_limit: ticket.resource_budget.expanded_bytes,
+            shim: &config.shim,
+        },
+        Ok(permit),
+    );
+    attested.execution_started = outcome.execution_started();
+    attested.attempt_record = outcome.attempt_record;
+    let attempt = outcome.attempt;
+    let pass = attempt.status == AttemptStatus::Verified;
+    attempt_report(
+        ticket,
+        &attempt,
+        attested,
+        pass.then_some(descriptor.materialization_ref),
+        pass.then(|| retained_ref.clone()),
+        ResourceUsage {
+            expanded_bytes: descriptor.artifact.expanded_bytes,
+            stored_bytes: 0,
+        },
+    )
+}
+
+impl Client {
+    fn retain(
+        &self,
+        ticket: &AttemptTicket,
+        prepared: &crate::retained::PreparedRetained,
+        report: &AttemptResultReport,
+    ) -> Result<String> {
+        let reference = prepared.descriptor.retained_ref()?;
+        let path = format!("/attempts/{}/retained", ticket.attempt_id);
+        let pending:serde_json::Value=self.send(self.http.post(self.url(&path)).json(&serde_json::json!({
+            "fence":ticket.fence,"retained_ref":reference,"descriptor_json":String::from_utf8(prepared.descriptor.canonical_bytes()?)?,"verification":report
+        })))?.context("missing retained reservation")?;
+        let id = pending["upload_id"]
+            .as_str()
+            .context("missing retained upload id")?;
+        if pending["status"] != "ready" {
+            let _: Option<serde_json::Value> = self.send(
+                self.http
+                    .put(self.url(&format!("{path}/{id}/content")))
+                    .header("x-ato-attempt-fence", ticket.fence)
+                    .timeout(SOURCE_TRANSFER_TIMEOUT)
+                    .body(prepared.bytes.clone()),
+            )?;
+            let ready: serde_json::Value = self
+                .send(
+                    self.http
+                        .post(self.url(&format!("{path}/{id}/finalize")))
+                        .header("x-ato-attempt-fence", ticket.fence)
+                        .timeout(SOURCE_TRANSFER_TIMEOUT),
+                )?
+                .context("missing retained finalization")?;
+            anyhow::ensure!(
+                ready["status"] == "ready" && ready["retained_ref"] == reference,
+                "retained object is not ready"
+            );
+        }
+        Ok(reference)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetainedAuthorizedDerivation {
+    pub derivation_ref: String,
+    pub effects: String,
+    pub requirements: Vec<Requirement>,
+    pub provisions: Vec<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RetainedRequestInput {
+    Retained { retained_ref: String },
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetainedSatisfyRequest {
+    pub protocol: String,
+    pub search_id: String,
+    pub contract_ref: String,
+    pub base_contract_ref: String,
+    pub base_contract: ato_formation::authoring::BoundContract,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser_contract: Option<BrowserContractV0>,
+    pub input: RetainedRequestInput,
+    pub authorized_derivations: Vec<RetainedAuthorizedDerivation>,
+    pub runtime_constraint: RuntimeConstraintWire,
+    pub bindings: BTreeMap<String, String>,
+    pub policy: SatisfyPolicy,
+    pub budget: SatisfyBudget,
+}
+pub struct RetainedSubmission {
+    pub request: RetainedSatisfyRequest,
+    pub contracts: BTreeMap<String, ato_formation::authoring::BoundContract>,
+}
+impl RetainedSubmission {
+    pub fn accept_routes(
+        &self,
+        satisfy_id: &str,
+        status: &serde_json::Value,
+    ) -> (Vec<serde_json::Value>, Vec<String>) {
+        accept_routes_for_assignment(
+            &ato_formation::receipt::VerifiedRouteAssignment {
+                request_id: satisfy_id,
+                effective_contract_ref: &self.request.contract_ref,
+                base_contract_ref: &self.request.base_contract_ref,
+                contracts: &self.contracts,
+                browser_contract: self.request.browser_contract.as_ref(),
+            },
+            status,
+        )
+    }
+}
+impl Client {
+    pub fn prepare_retained(
+        &self,
+        reference: &str,
+        search_id: &str,
+        constraint: RuntimeConstraintWire,
+        budget: SatisfyBudget,
+    ) -> Result<RetainedSubmission> {
+        use ato_formation::{
+            execution::lower_retained,
+            retained::{MAX_DESCRIPTOR_BYTES, RetainedCandidateV1},
+        };
+        use ato_runtime_attempt::plan::{BoundCandidate, PlannedCandidate};
+        anyhow::ensure!(
+            reference.len() == 71
+                && reference.starts_with("sha256:")
+                && reference[7..]
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "invalid retained reference"
+        );
+        budget.validate()?;
+        let response = self
+            .http
+            .get(self.url(&format!("/retained/{reference}")))
+            .bearer_auth(&self.token)
+            .send()?;
+        anyhow::ensure!(
+            response.status().is_success(),
+            "retained descriptor unavailable ({})",
+            response.status()
+        );
+        let mut bytes = Vec::new();
+        response
+            .take((MAX_DESCRIPTOR_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        let d = RetainedCandidateV1::parse(&bytes, reference)?;
+        let planned = PlannedCandidate {
+            bound: BoundCandidate {
+                contract: d.base_contract.clone(),
+                derivation: d.derivation.clone(),
+                contract_ref: d.base_contract_ref.clone(),
+                derivation_ref: d.derivation_ref.clone(),
+            },
+            plan: lower_retained(&d)?,
+        };
+        let (requirements, provisions) = derivation_requirements(&planned);
+        Ok(RetainedSubmission {
+            contracts: BTreeMap::from([(d.derivation_ref.clone(), d.base_contract.clone())]),
+            request: RetainedSatisfyRequest {
+                protocol: PROTOCOL.into(),
+                search_id: search_id.into(),
+                contract_ref: d.contract_ref,
+                base_contract_ref: d.base_contract_ref,
+                base_contract: d.base_contract,
+                browser_contract: d.browser_contract,
+                input: RetainedRequestInput::Retained {
+                    retained_ref: reference.into(),
+                },
+                authorized_derivations: vec![RetainedAuthorizedDerivation {
+                    derivation_ref: d.derivation_ref,
+                    effects: effects_name(d.derivation.effects),
+                    requirements,
+                    provisions,
+                }],
+                runtime_constraint: constraint,
+                bindings: BTreeMap::new(),
+                policy: SatisfyPolicy {
+                    network: "denied".into(),
+                    allow_managed: false,
+                },
+                budget,
+            },
+        })
+    }
+    pub fn submit_retained(&self, submission: &RetainedSubmission) -> Result<serde_json::Value> {
+        self.send(
+            self.http
+                .post(self.url("/satisfy"))
+                .json(&submission.request),
+        )?
+        .context("missing retained request response")
+    }
+}
+
+fn attempt_report(
+    ticket: &AttemptTicket,
+    attempt: &ato_formation::request::FormationAttempt,
+    attested: &RuntimeAttestation,
+    materialization_ref: Option<String>,
+    retained_ref: Option<String>,
+    usage: ResourceUsage,
+) -> AttemptResultReport {
     let failure_code = attempt.failure.as_ref().map(|f| f.code.as_str());
     let outcome = match (attempt.status, failure_code) {
         (AttemptStatus::Verified, _) => "pass",
-        // Not decided: the browser verification had no verdict, or this
-        // Runtime refused the route after all.
         (_, Some("browser_contract_inconclusive")) | (AttemptStatus::Filtered, _) => "inconclusive",
         _ => "fail",
     };
     let mut receipts = Vec::new();
     if let Some(verification) = &attempt.verification {
-        receipts.push(serde_json::json!({ "kind": "http_contract", "verification": verification }));
+        receipts.push(serde_json::json!({"kind":"http_contract","verification":verification}));
     }
     if let Some(receipt) = &attempt.receipt {
-        receipts.push(serde_json::json!({ "kind": "contract_verification", "receipt": receipt }));
+        receipts.push(serde_json::json!({"kind":"contract_verification","receipt":receipt}));
     }
     if let Some(browser) = &attempt.browser_verification {
-        receipts.push(serde_json::json!({ "kind": "browser_contract", "receipt": browser }));
+        receipts.push(serde_json::json!({"kind":"browser_contract","receipt":browser}));
     }
     AttemptResultReport {
         fence: ticket.fence,
-        outcome: outcome.to_owned(),
+        outcome: outcome.into(),
         contract_ref: attempt.contract_ref.clone(),
         derivation_ref: attempt.derivation_ref.clone(),
         materialization_ref,
+        retained_ref,
         failure: attempt.failure.as_ref().map(|f| AttemptFailureWire {
             code: f.code.clone(),
             stage: f.stage.clone(),
             message: f.message.clone(),
         }),
-        formation_attempt: serde_json::to_value(&attempt).ok(),
+        formation_attempt: serde_json::to_value(attempt).ok(),
         verifier_receipts: receipts,
         attestation: attested.clone(),
         resource_usage: usage,
