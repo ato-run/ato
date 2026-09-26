@@ -53,4 +53,5 @@ pub mod retained;
 pub mod source;
 pub mod verify;
 
+pub mod decision;
 pub mod search;
