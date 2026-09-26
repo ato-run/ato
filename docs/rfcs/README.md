@@ -53,6 +53,8 @@ merged implementation are separate states.
   [ADR-032](draft/ADR-032-runtime-network-source-objects.md),
   [ADR-033](draft/ADR-033-formation-retained-replay.md),
   [ADR-034](draft/ADR-034-formation-search-state.md),
+  [ADR-035](draft/ADR-035-formation-decision-provider.md),
+  [ADR-036](draft/ADR-036-formation-exploration-actions.md),
   [runner-worker-isolation](draft/runner-worker-isolation.md)
 - Source freeze and resolver (draft):
   [ADR-023](draft/ADR-023-source-resolver-v2-contained-symlinks.md)
