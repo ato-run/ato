@@ -59,6 +59,8 @@ impl Server {
                 assert!(Instant::now() < deadline, "loopback server was not stopped");
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        // macOS can inherit the listener's nonblocking mode.
+                        stream.set_nonblocking(false).unwrap();
                         stream
                             .set_read_timeout(Some(Duration::from_secs(5)))
                             .unwrap();
