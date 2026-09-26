@@ -43,8 +43,17 @@ impl GenerationPoint {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum GenerationAnswer {
-    Draft { draft: Value, provenance: Value },
-    Fallback { reason: &'static str },
+    Draft {
+        draft: Value,
+        provenance: Value,
+    },
+    /// A validated model decision to decline still incurred provider usage.
+    Declined {
+        provenance: Value,
+    },
+    Fallback {
+        reason: &'static str,
+    },
 }
 
 impl GenerationAnswer {
@@ -52,6 +61,9 @@ impl GenerationAnswer {
         match self {
             Self::Draft { draft, provenance } => {
                 json!({"revision": revision, "draft": draft, "provenance": provenance})
+            }
+            Self::Declined { provenance } => {
+                json!({"revision": revision, "fallback": "declined", "provenance": provenance})
             }
             Self::Fallback { reason } => json!({"revision": revision, "fallback": reason}),
         }
@@ -237,9 +249,15 @@ pub fn validate_response(model: &str, point: &GenerationPoint, raw: &Value) -> G
     {
         return invalid;
     }
+    let provenance = json!({
+        "provider": "jev",
+        "model": model,
+        "prompt_version": GENERATION_PROMPT_VERSION,
+        "usage": response.usage,
+    });
     if response.answers.operation.choice == "decline" {
         return if response.answers.entrypoint.choice == "none" {
-            GenerationAnswer::Fallback { reason: "declined" }
+            GenerationAnswer::Declined { provenance }
         } else {
             invalid
         };
@@ -257,12 +275,7 @@ pub fn validate_response(model: &str, point: &GenerationPoint, raw: &Value) -> G
             "operation": "python_script",
             "entrypoint_id": entrypoint_id,
         }),
-        provenance: json!({
-            "provider": "jev",
-            "model": model,
-            "prompt_version": GENERATION_PROMPT_VERSION,
-            "usage": response.usage,
-        }),
+        provenance,
     }
 }
 
