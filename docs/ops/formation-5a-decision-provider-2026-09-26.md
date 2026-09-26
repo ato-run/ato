@@ -75,7 +75,8 @@ Review blockers fixed in ato `f7132025` and ato-api `fd12caab`:
   closed or expired 409.
 
 Tests: formation `search_decision` 10, receipt authority 8,
-`decision_provider_v1` 7; API Runtime Network 136 (Stage 5a 12). Deadline
+`decision_provider_v1` 7; Linux (oci) formation + formation-worker + receipt
+authority 411 passed, 0 failed; API Runtime Network 136 (Stage 5a 12). Deadline
 fence mutation-checked (dropped → the late-outcome test fails).
 
 Actual acceptance rerun (same harness; 0301 recreated in the continued local
