@@ -228,6 +228,8 @@ enum SearchRequest {
     ValidateDecision {
         state: Box<ato_formation::search::SearchStateV1>,
         submission: ato_formation::decision::DecisionSubmission,
+        /// The Coordinator's trusted time: a point past its deadline is closed.
+        now_ms: u64,
     },
 }
 pub fn evaluate_search(bytes: &[u8]) -> Value {
@@ -263,8 +265,12 @@ pub fn evaluate_search(bytes: &[u8]) -> Value {
                     serde_json::json!({"status":"search_decision","state_json":String::from_utf8(canonical).unwrap(),"events":events(&state,&action),"action":action}),
                 )
             }
-            SearchRequest::ValidateDecision { state, submission } => Ok(
-                match ato_formation::decision::validate_decision(&state, &submission) {
+            SearchRequest::ValidateDecision {
+                state,
+                submission,
+                now_ms,
+            } => Ok(
+                match ato_formation::decision::validate_decision(&state, &submission, now_ms) {
                     Ok(verdict) => {
                         serde_json::json!({"status":"decision_verdict","verdict":verdict})
                     }

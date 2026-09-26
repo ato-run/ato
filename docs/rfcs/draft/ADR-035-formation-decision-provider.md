@@ -1,8 +1,13 @@
-# ADR-035 — Finite AllowedChoices DecisionProvider (Formation 5a)
+# ADR-035 — Finite AllowedChoices DecisionProvider (Formation 5a-a)
 
 Status: implemented on an unmerged PR pair (ato + ato-api); not deployed.
 Migration 0301 is local-only. Builds on ADR-034 (SearchState) and ADR-026
 (the decision provider is not the Browser judge).
+
+Scope: this is **5a-a, finite choice of the next known-D attempt**. The rest of
+5a — inspection, probe and stop choices — is not implemented, and 5a is not
+complete: its gate (safety with and without Jev, and a comparison of attempts,
+elapsed time and provider usage/cost, including a live Jev call) is open.
 
 ## Decision
 
@@ -40,14 +45,20 @@ decide_next(state, placements, now)
   and posts `POST /satisfy/:id/decisions` with a `choice_id` or a fallback
   reason (`invalid`, `provider_error`, `timeout`) and bounded evidence
   (≤ 16 KiB: model, confidence, probabilities, usage).
-- **One durable answer per point.** The Rust authority (`validate_decision`,
-  bounded WASM) judges an answer against the choices recorded when the point
-  opened. A named choice that was not offered is recorded as `out_of_set`.
-  The outcome is write-once; a later answer is `409 decision_closed`. After
-  any restart the recorded outcome is reused; no provider is asked again.
-- **Failure is the default, under the same budget.** Silence, a malformed or
-  out-of-set answer and a provider error all take the default; so does a
-  spent decision budget. Only a `chosen` outcome spends `decisions_used`.
+- **One durable answer per point, before its deadline.** The Rust authority
+  (`validate_decision`, bounded WASM) judges an answer against the choices
+  recorded when the point opened, at the Coordinator's trusted time. From the
+  deadline (`opened_at + decision_timeout_ms`) on, only the timeout fallback
+  may settle the point: the Coordinator first advances the search (settling an
+  expired point as `timeout`), then judges the submission, and the database
+  refuses a non-timeout outcome stamped at or after `expires_at`. A named
+  choice that was not offered is recorded as `out_of_set` (200). The outcome is
+  write-once; a later answer is `409 decision_closed`. After any restart the
+  recorded outcome is reused; no provider is asked again.
+- **The decision budget bounds provider use.** Opening a point spends one
+  decision atomically, whatever its outcome (`decisions_used` = number of
+  points). Silence, a malformed or out-of-set answer and a provider error all
+  take the default and stay spent; at `max_decisions` no further point opens.
   Attempt/transfer/expanded/stored budgets, UNKNOWN blocking, owner stop and
   the issue-time placement re-check are unchanged, so a choice can never
   obtain more work than the default could.
@@ -63,7 +74,10 @@ exactly the offered labels. Following ADR-026 it is separate from the Browser
 judge: its key is `ATO_DECISION_JEV_API_KEY` (never `JEV_API_KEY`), its model
 pin `ATO_DECISION_JEV_MODEL` (default `jev-1.13.0`). The instructions and each
 criterion are fixed text naming only labels; offered derivation summaries,
-runtime facts and prior typed failure codes are `state` data. It sees no
+runtime facts and prior typed failure codes are `state` data. Runtime facts are
+scoped to the facts the choice's own D requires — by the Coordinator's view
+and again by the provider — never by a naming convention, so an arbitrary or
+future fact (a host name, say) is not sent. It sees no
 receipt, verdict, source or secret. Requests over 48 KiB are not sent; an
 answer is accepted only when its model is a `jev-` model, its choice is an
 offered label and its probabilities cover exactly the offered labels. Any

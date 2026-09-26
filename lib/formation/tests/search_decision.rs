@@ -51,18 +51,18 @@ fn opened(s: &mut SearchStateV1, at: u64) -> (Vec<Choice>, String) {
         outcome: None,
         chosen_id: None,
     });
+    // Opening a point spends one provider decision, whatever its outcome.
+    s.budget.decisions_used += 1;
     (choices, default_id)
 }
 fn submit(s: &SearchStateV1, body: serde_json::Value) -> Result<DecisionVerdict, DecisionRefusal> {
-    validate_decision(s, &serde_json::from_value(body).unwrap())
+    // Before the deadline of points opened at 10 with a 5 s timeout.
+    validate_decision(s, &serde_json::from_value(body).unwrap(), 11)
 }
 fn record(s: &mut SearchStateV1, v: &DecisionVerdict) {
     let d = s.decisions.iter_mut().find(|d| d.seq == v.seq).unwrap();
     d.outcome = Some(v.outcome);
     d.chosen_id = v.chosen_id.clone();
-    if v.outcome == DecisionOutcome::Chosen {
-        s.budget.decisions_used += 1;
-    }
 }
 
 #[test]
@@ -201,7 +201,8 @@ fn every_provider_failure_takes_the_default() {
         let v = submit(&s, body.clone()).unwrap();
         assert!(v.outcome.is_fallback(), "{body}");
         record(&mut s, &v);
-        assert_eq!(s.budget.decisions_used, 0);
+        // A failed point still spent its provider decision.
+        assert_eq!(s.budget.decisions_used, 1);
         assert!(
             matches!(decide_next(&s,&placements(&s),11).unwrap(), SearchAction::IssueAttempt{candidate_id,..} if candidate_id=="candidate-0"),
             "{body}"
@@ -251,29 +252,58 @@ fn a_choice_no_longer_issuable_takes_the_default_without_waiting() {
 
 #[test]
 fn decision_budget_exhaustion_is_the_default_not_a_termination() {
+    // A provider that only ever fails still spends the budget: with
+    // max_decisions 1, no second point opens after a failed first one.
+    for failure in ["provider_error", "invalid", "timeout"] {
+        let mut s = with_policy(fixture("newly-created"));
+        s.frozen.policy.decision.as_mut().unwrap().max_decisions = 1;
+        opened(&mut s, 10);
+        let v = submit(&s, serde_json::json!({"seq":0,"fallback":failure})).unwrap();
+        record(&mut s, &v);
+        assert_eq!(s.budget.decisions_used, 1, "{failure}");
+        // The default attempt then failed; two placements for D2 would warrant a point.
+        let mut failed = fixture("d1-failed");
+        failed.frozen = s.frozen.clone();
+        failed.decisions = s.decisions.clone();
+        failed.budget.decisions_used = 1;
+        let mut p = placements(&failed);
+        p.push(Placement {
+            candidate_id: "candidate-2".into(),
+            runtime_id: "runtime-b".into(),
+            ..p[1].clone()
+        });
+        assert!(
+            matches!(decide_next(&failed,&p,11).unwrap(), SearchAction::IssueAttempt{candidate_id,..} if candidate_id=="candidate-1"),
+            "{failure}"
+        );
+    }
+}
+
+#[test]
+fn the_deadline_is_authoritative_for_answers() {
     let mut s = with_policy(fixture("newly-created"));
-    s.frozen.policy.decision.as_mut().unwrap().max_decisions = 1;
     let (choices, _) = opened(&mut s, 10);
-    let v = submit(
-        &s,
-        serde_json::json!({"seq":0,"choice_id":choices[0].choice_id}),
-    )
-    .unwrap();
-    record(&mut s, &v);
-    // Pretend that attempt failed: the next point would open, but the budget is spent.
-    let mut failed = fixture("d1-failed");
-    failed.frozen = s.frozen.clone();
-    failed.decisions = s.decisions.clone();
-    failed.budget.decisions_used = 1;
-    // Offer two placements for D2 so a point would be warranted.
-    let mut p = placements(&failed);
-    p.push(Placement {
-        candidate_id: "candidate-2".into(),
-        runtime_id: "runtime-b".into(),
-        ..p[1].clone()
-    });
-    assert!(
-        matches!(decide_next(&failed,&p,11).unwrap(), SearchAction::IssueAttempt{candidate_id,..} if candidate_id=="candidate-1")
+    let answer: DecisionSubmission =
+        serde_json::from_value(serde_json::json!({"seq":0,"choice_id":choices[1].choice_id}))
+            .unwrap();
+    // One millisecond before the deadline the choice is accepted...
+    assert_eq!(
+        validate_decision(&s, &answer, 5_009).unwrap().outcome,
+        DecisionOutcome::Chosen
+    );
+    // ...from the deadline on, only the timeout fallback may settle the point.
+    for now in [5_010, 5_011, u64::MAX] {
+        assert_eq!(
+            validate_decision(&s, &answer, now).unwrap_err().code,
+            "decision_expired"
+        );
+    }
+    assert_eq!(
+        decide_next(&s, &placements(&s), 5_011).unwrap(),
+        SearchAction::RecordFallback {
+            seq: 0,
+            reason: DecisionOutcome::Timeout
+        }
     );
 }
 
@@ -298,15 +328,22 @@ fn only_issues_are_ever_replaced() {
 fn durable_decision_records_are_checked() {
     let mut s = with_policy(fixture("newly-created"));
     let (choices, _) = opened(&mut s, 10);
+    assert!(s.validate().is_ok());
+    // decisions_used is the number of opened points, exactly.
+    for used in [0, 2] {
+        let mut bad = s.clone();
+        bad.budget.decisions_used = used;
+        assert!(bad.validate().is_err(), "decisions_used {used}");
+    }
     let mut bad = s.clone();
+    bad.budget.decisions_used = 1;
     bad.decisions[0].outcome = Some(DecisionOutcome::Chosen);
     bad.decisions[0].chosen_id = Some(choices[0].choice_id.clone());
-    assert!(bad.validate().is_err(), "chosen without budget charge");
-    bad.budget.decisions_used = 1;
     assert!(bad.validate().is_ok());
     bad.decisions[0].chosen_id = Some("c0000000000000000".into());
     assert!(bad.validate().is_err(), "chosen outside offered set");
     let mut orphan = fixture("newly-created");
     orphan.decisions = s.decisions.clone();
+    orphan.budget.decisions_used = 1;
     assert!(orphan.validate().is_err(), "decisions need a policy");
 }
