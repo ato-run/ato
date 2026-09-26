@@ -125,6 +125,11 @@ pub struct SearchStateV1 {
     pub frozen: FrozenSearchV1,
     pub deadline_ms: u64,
     pub budget: BudgetCounters,
+    /// Persisted request source size, independent of currently eligible
+    /// placements. Required to prove transfer budget before generation opens;
+    /// not part of the frozen Contract or candidate identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_archive_bytes: Option<u64>,
     pub attempts: Vec<SearchAttempt>,
     pub owner_stopped: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -703,16 +708,12 @@ fn default_next(
         if !pending {
             let transfer_left =
                 available(l.max_transfer_bytes, b.transfer_used, b.transfer_reserved);
-            // The generated D consumes exactly the parent's source. A tried
-            // placement can still tell us its transfer cost. Without one we
-            // cannot invent a byte count; issue-time reservation remains final.
-            let source_transfer = placements
-                .iter()
-                .filter(|p| p.derivation_ref == policy.base_derivation_ref)
-                .map(|p| p.transfer_bytes)
-                .min();
-            if transfer_left == 0
-                || source_transfer.is_some_and(|bytes| bytes > transfer_left)
+            // The generated D consumes the same source archive. Runtime
+            // disappearance must not erase its known cost or allow generation
+            // that the durable coordinator cannot admit. Unknown costs fail
+            // closed rather than repeatedly proposing an unrecordable point.
+            if s.source_archive_bytes
+                .is_none_or(|bytes| bytes == 0 || bytes > transfer_left)
                 || available(l.max_stored_bytes, b.stored_used, b.stored_reserved) == 0
             {
                 return Ok(finish(Termination::BudgetExhausted));

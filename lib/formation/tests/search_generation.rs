@@ -5,6 +5,7 @@ fn state() -> SearchStateV1 {
     let mut s: SearchStateV1 =
         serde_json::from_str(include_str!("fixtures/search-state/d1-failed.json")).unwrap();
     s.frozen.candidates.truncate(1);
+    s.source_archive_bytes = Some(64);
     s.frozen.policy.generation = Some(GenerationPolicy {
         schema: GENERATION_POLICY_SCHEMA.into(),
         base_derivation_ref: s.frozen.candidates[0].derivation_ref.clone(),
@@ -321,9 +322,10 @@ fn malformed_record_or_unauthorized_policy_is_rejected() {
 
 #[test]
 fn known_source_transfer_cost_and_search_deadline_bound_generation() {
-    let s = state();
+    let mut s = state();
     let mut p = placement(&s.frozen.candidates[0].derivation_ref);
     p.transfer_bytes = 4097;
+    s.source_archive_bytes = Some(4097);
     assert_eq!(
         decide_next(&s, &[p.clone()], 10).unwrap(),
         SearchAction::Finish {
@@ -331,6 +333,7 @@ fn known_source_transfer_cost_and_search_deadline_bound_generation() {
         }
     );
     p.transfer_bytes = 4096;
+    s.source_archive_bytes = Some(4096);
     assert_eq!(
         decide_next(&s, &[p], 59999).unwrap(),
         SearchAction::OpenGeneration {
@@ -338,6 +341,69 @@ fn known_source_transfer_cost_and_search_deadline_bound_generation() {
             expires_at_ms: 60000
         }
     );
+}
+
+#[test]
+fn generation_requires_full_source_budget_even_without_eligible_placements() {
+    for (source_bytes, used, reserved) in [
+        (None, 0, 0),
+        (Some(0), 0, 0),
+        (Some(64), 4095, 0),
+        (Some(64), 4000, 33),
+        (Some(u64::MAX), 0, 0),
+    ] {
+        let mut s = state();
+        s.source_archive_bytes = source_bytes;
+        s.budget.transfer_used = used;
+        s.budget.transfer_reserved = reserved;
+        let frozen = s.frozen.canonical_bytes().unwrap();
+        // A stale/understated placement must not override the archive cost.
+        let mut p = placement(&s.frozen.candidates[0].derivation_ref);
+        p.transfer_bytes = 0;
+        for placements in [vec![], vec![p]] {
+            assert_eq!(
+                decide_next(&s, &placements, 10).unwrap(),
+                SearchAction::Finish {
+                    reason: Termination::BudgetExhausted
+                },
+                "source={source_bytes:?}, used={used}, reserved={reserved}"
+            );
+        }
+        assert_eq!(s.frozen.canonical_bytes().unwrap(), frozen);
+    }
+    let mut s = state();
+    s.budget.transfer_used = 4000;
+    s.budget.transfer_reserved = 32;
+    assert!(matches!(
+        decide_next(&s, &[], 10).unwrap(),
+        SearchAction::OpenGeneration { .. }
+    ));
+}
+
+#[test]
+fn source_size_roundtrips_without_changing_legacy_frozen_bytes() {
+    let legacy: SearchStateV1 =
+        serde_json::from_str(include_str!("fixtures/search-state/d1-failed.json")).unwrap();
+    assert!(legacy.source_archive_bytes.is_none());
+    assert!(
+        serde_json::to_value(&legacy)
+            .unwrap()
+            .get("source_archive_bytes")
+            .is_none()
+    );
+    let mut with_size = legacy.clone();
+    with_size.source_archive_bytes = Some(64);
+    assert_eq!(
+        with_size.frozen.canonical_bytes().unwrap(),
+        legacy.frozen.canonical_bytes().unwrap()
+    );
+    assert_eq!(
+        decide_next(&with_size, &[], 10).unwrap(),
+        decide_next(&legacy, &[], 10).unwrap()
+    );
+    let restored: SearchStateV1 =
+        serde_json::from_slice(&with_size.canonical_bytes().unwrap()).unwrap();
+    assert_eq!(restored.source_archive_bytes, Some(64));
 }
 
 #[test]
