@@ -413,6 +413,19 @@ struct FormArgs {
     /// 10 GiB).
     #[arg(long, default_value_t = ato_formation_worker::runtime_network::MAX_SEARCH_STORED_BYTES)]
     max_stored_bytes: u64,
+    /// Let a decision provider pick the next attempt among those the search
+    /// offers (Stage 5a). `jev` reads ATO_DECISION_JEV_API_KEY (never the
+    /// browser judge's key). Without a usable answer the search takes its
+    /// deterministic default. Frozen with the search.
+    #[arg(long, value_parser = ["jev"], requires = "runtime_network")]
+    decision_provider: Option<String>,
+    /// Decision points the provider may answer over the whole search (1–64).
+    #[arg(long, default_value_t = 8, requires = "decision_provider")]
+    max_decisions: u32,
+    /// How long a decision point waits for the provider, in milliseconds
+    /// (1000–120000).
+    #[arg(long, default_value_t = 30_000, requires = "decision_provider")]
+    decision_timeout_ms: u64,
 }
 
 #[derive(Debug, Subcommand)]
@@ -690,6 +703,29 @@ fn form_on_runtime_network(args: FormArgs) -> Result<()> {
             new_search_id(entropy)
         }
     };
+    let decision_policy =
+        args.decision_provider
+            .as_ref()
+            .map(|_| ato_formation::decision::DecisionPolicy {
+                provider: ato_formation::decision::ProviderLocation::Requester,
+                max_decisions: args.max_decisions,
+                decision_timeout_ms: args.decision_timeout_ms,
+            });
+    if let Some(policy) = &decision_policy {
+        policy.validate().map_err(|_| {
+            anyhow::anyhow!("--max-decisions must be 1–64 and --decision-timeout-ms 1000–120000")
+        })?;
+    }
+    // The provider must answer before the Coordinator's deadline for the point.
+    let provider = match &decision_policy {
+        Some(policy) => Some(
+            ato_formation_worker::decision_provider::JevDecisionProvider::from_env(
+                std::time::Duration::from_millis(policy.decision_timeout_ms * 3 / 4),
+            )?,
+        ),
+        None => None,
+    };
+    let mut answered = std::collections::BTreeSet::new();
     let submission = prepare_submission(
         &args.path,
         &args.routes,
@@ -705,6 +741,7 @@ fn form_on_runtime_network(args: FormArgs) -> Result<()> {
         SatisfyPolicy {
             network: args.network.clone(),
             allow_managed: args.allow_managed,
+            decision: decision_policy.clone(),
         },
         SatisfyBudget {
             max_attempts: u32::try_from(args.max_attempts)
@@ -730,6 +767,15 @@ fn form_on_runtime_network(args: FormArgs) -> Result<()> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60 * 30);
     loop {
         let status = client.satisfy_status(&id)?;
+        if let Some(provider) = &provider {
+            ato_formation_worker::decision_provider::serve_decision(
+                &client,
+                &id,
+                &status,
+                provider,
+                &mut answered,
+            );
+        }
         let settlement = Settlement::of(&status)?;
         if settlement != Settlement::Running {
             println!("{}", serde_json::to_string_pretty(&status)?);

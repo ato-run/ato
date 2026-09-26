@@ -26,7 +26,7 @@ This is an implementation plan; pending rows are not shipped functionality.
 | 3c | Search budget reservations/accounting, then streaming content-addressed source transport | 3c-a merged: ato #1400 `aaaaaa15` / API #689 `88cb8aae`. 3c-b merged: API #691 `e8b0056b` → ato #1403 `0df51b22`; Linux integration, PAX boundary/resource-limit hardening and separate 64/128 MiB rerun validated; not deployed |
 | 3d | Retained objects → validated closure/tree → new Run → same K → new receipt without source/scratch | Implemented, locally/integration verified: ato #1407 + API #692 (migration 0299, local only); actual Coordinator replay Static/Python/Node after source deletion; unmerged, undeployed |
 | 4 | Durable deterministic SearchState; D1 failure→evidence→authorized D2; restart preserves search/attempt identity | Implemented, locally/integration verified: ato #1408 + API #693 (migration 0300, local only); actual Coordinator restart acceptance cases 1–7, restart points 1–9; unmerged, undeployed |
-| 5a | Optional finite AllowedChoices DecisionProvider; Jev failure uses deterministic choice under same budget | Pending |
+| 5a | Optional finite AllowedChoices DecisionProvider; Jev failure uses deterministic choice under same budget | Implemented (ADR-035): requester-side provider, durable decision points (API migration 0301, local only); unmerged, undeployed |
 | 5b | Typed new-D generation first, then evidence-based D improvement; reject privilege/K/UNKNOWN escape | Pending |
 | 6 | Measure 20, expand to 50 then 100; known-D revalidation on new authorized Runtime/Adapter/D | Pending |
 
