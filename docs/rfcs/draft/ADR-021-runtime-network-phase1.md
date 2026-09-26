@@ -1,6 +1,9 @@
 # ADR-021 — Runtime Network Phase 1: satisfying one K across owned Runtimes
 
 **Status**: proposed
+
+> **Current status (appended 2026-09-26).** Historical Phase 1 record; its body is unchanged. Source transport is no longer inline-only: ADR-032 (3c-b, merged) carries sources as owner-scoped, content-addressed streamed objects up to 256 MiB, and ADR-031 budgets them search-wide. The Coordinator's candidate/termination decisions now come from the Rust SearchState authority (ADR-034, unmerged foundation stack).
+
 **Context**: Runtime Network Phase 1, on top of ADR-019 (ephemeral verification)
 and ADR-020 (Browser Contract v0). Coordinator: `ato-api`
 `src/services/runtime_network/`, migration `0288_runtime_network.sql`.

@@ -1,6 +1,6 @@
 # Formation roadmap — foundation, exploration, then adaptation
 
-Updated 2026-09-25 after sequential integration and the 3c-b archive hardening review. Stage numbers are retained.
+Updated 2026-09-26 against live GitHub state after the foundation stack (2f → 3d → 4). Stage numbers are retained.
 This is an implementation plan; pending rows are not shipped functionality.
 
 ## Milestones
@@ -21,21 +21,29 @@ This is an implementation plan; pending rows are not shipped functionality.
 | 3b | Durable UNKNOWN across Runtimes/requests; historical attestation, owner effect finding plus physical cessation evidence, crash-consistent settlement | Merged: ato #1396 `722f0761`, API #686 `c0f2682e`; not deployed |
 | 3a | Coordinator uses frozen K and Rust receipt authority via bounded WASM; fail closed and keep Requester recheck | Merged: ato #1397 `16d11baf` / API #687 `7e0e7373`; real local acceptance; deployment not verified in this track |
 | 2d | Hosted Formation actual observation/common attempt; API v1/v2 receiver first, then v2 worker | Merged: API #688 `44c14abe` → ato #1398 `01933b2b`; Static/Python/Node actual execution; deployment not verified in this track |
-| 2e | Hosted Run/validator and existing OCI/service group through common execution and handle ownership | 2e-a merged: ato #1399 `ef7f345f`. 2e-b merged: ato #1401 `3c9ddd05`; Linux integration validated; not deployed. 2e-c: OCI container and service group on the common OCI launch (Hosted) and common attempt (CLI); Linux Docker comparison validated; unmerged/undeployed |
-| 2f | Remove duplicated D→projection→string→intent→build-plan interpretations and unused re-exports | Pending |
+| 2e | Hosted Run/validator and existing OCI/service group through common execution and handle ownership | 2e-a merged: ato #1399 `ef7f345f`. 2e-b merged: ato #1401 `3c9ddd05`; Linux integration validated; not deployed. 2e-c merged: ato #1405 `de4e4fc3`; Linux Docker comparison validated; not deployed |
+| 2f | Remove duplicated D→projection→string→intent→build-plan interpretations and unused re-exports | Implemented, locally/integration verified: ato #1406 (canonical D → `execution::ExecutionPlan`; K/D refs byte-identical on the fixed goldens); unmerged, undeployed |
 | 3c | Search budget reservations/accounting, then streaming content-addressed source transport | 3c-a merged: ato #1400 `aaaaaa15` / API #689 `88cb8aae`. 3c-b merged: API #691 `e8b0056b` → ato #1403 `0df51b22`; Linux integration, PAX boundary/resource-limit hardening and separate 64/128 MiB rerun validated; not deployed |
-| 3d | Retained objects → validated closure/tree → new Run → same K → new receipt without source/scratch | Pending |
-| 4 | Durable deterministic SearchState; D1 failure→evidence→authorized D2; restart preserves search/attempt identity | Pending |
+| 3d | Retained objects → validated closure/tree → new Run → same K → new receipt without source/scratch | Implemented, locally/integration verified: ato #1407 + API #692 (migration 0299, local only); actual Coordinator replay Static/Python/Node after source deletion; unmerged, undeployed |
+| 4 | Durable deterministic SearchState; D1 failure→evidence→authorized D2; restart preserves search/attempt identity | Implemented, locally/integration verified: ato #1408 + API #693 (migration 0300, local only); actual Coordinator restart acceptance cases 1–7, restart points 1–9; unmerged, undeployed |
 | 5a | Optional finite AllowedChoices DecisionProvider; Jev failure uses deterministic choice under same budget | Pending |
 | 5b | Typed new-D generation first, then evidence-based D improvement; reject privilege/K/UNKNOWN escape | Pending |
 | 6 | Measure 20, expand to 50 then 100; known-D revalidation on new authorized Runtime/Adapter/D | Pending |
+
+**Formation foundation v1 complete** (2026-09-26): all twelve Stage 4 gates are
+met on the stack ato #1406 → #1407 → #1408 and ato-api #692 → #693 — implemented
+and locally/integration verified with an actual Coordinator restart acceptance
+and a final-stack regression ([foundation ledger](../../ops/formation-foundation-track-2026-09-25.md),
+[P0 remeasure](../../ops/formation-p0-remeasure-2026-09-26.md)). Not merged, not
+deployed; migrations 0299/0300 are local only. The next stage is 5a (finite
+AllowedChoices DecisionProvider / Jev); it has not been started.
 
 The sequential track's [integration record](../../ops/formation-integrated-2026-09-25.md)
 separates implementation, integration checks, merge and deployment. 64/128 MiB
 actual source -> receipt authority -> Requester-accepted VerifiedRoute passed.
 The fixed P0 Node-RED source now reaches build; npm DNS EAI_AGAIN remains the
 next observed blocker. Existing Chrome E2E SIGABRT also reproduces on baseline;
-that full-browser gate is not green. No 3d saved-object replay is claimed.
+that full-browser gate is not green. (Historical note from the 3c-b integration; 3d and Stage 4 evidence is in the [foundation ledger](../../ops/formation-foundation-track-2026-09-25.md).)
 
 P0 regression measurement continues at each stage. Go, Java, native build and
 new multi-service capacity belong to coverage expansion, not foundation PRs.

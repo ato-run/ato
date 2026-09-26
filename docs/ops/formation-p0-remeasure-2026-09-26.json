@@ -1,0 +1,357 @@
+{
+ "code-server": {
+  "attempt": "01M3D82AKFT38WT9M1WHF555C7",
+  "browser_judgment": "not_run",
+  "code": "formation_failed",
+  "commit_sha": "8a7bf87a4d66914e328d97815e2faa9f25097866",
+  "declared_runtimes": [
+   "node@22.14.0"
+  ],
+  "detail": "the candidate could not be formed from this source",
+  "foundation_layer": "build_toolchain",
+  "layer": "build_toolchain",
+  "level": 0,
+  "outcome": "fail",
+  "repo": "coder/code-server",
+  "satisfy_id": "01M3D82AHSBES9DVHF34NKQ2JG",
+  "seconds": 75,
+  "source_bytes": 1765846,
+  "stage": "build",
+  "status": "exhausted",
+  "termination_reason": "budget_exhausted",
+  "verification": null
+ },
+ "excalidraw": {
+  "attempt": "01M3D6WR6740BPWPK4RKYVRCM1",
+  "browser_judgment": "not_run",
+  "code": "formation_failed",
+  "commit_sha": "2b9da9610083254edaec68871d593fb6b08e9072",
+  "declared_runtimes": [
+   "node@20.20.2"
+  ],
+  "detail": "the candidate could not be formed from this source",
+  "foundation_layer": "build_toolchain",
+  "layer": "build_toolchain",
+  "level": 0,
+  "outcome": "fail",
+  "repo": "excalidraw/excalidraw",
+  "satisfy_id": "01M3D6WR43NRSTSX28JKDAX5AQ",
+  "seconds": 28,
+  "source_bytes": 56250863,
+  "stage": "build",
+  "status": "exhausted",
+  "termination_reason": "budget_exhausted",
+  "verification": null
+ },
+ "filestash": {
+  "browser_judgment": "not_run",
+  "code": "requester_refused",
+  "commit_sha": "dd80cc78ca33d26ac07778ca0a6dca6d5c9e4dac",
+  "declared_runtimes": [
+   "go@1.25",
+   "node@22.14.0"
+  ],
+  "detail": "Error: intent_unsupported_runtime: runtime go 1.25 is not one this build provisions exactly (none)",
+  "foundation_layer": "runtime_capability",
+  "layer": "other:requester",
+  "level": null,
+  "repo": "mickael-kerjean/filestash",
+  "seconds": 8,
+  "source_bytes": 34807306
+ },
+ "freshrss": {
+  "browser_judgment": "not_run",
+  "code": "unsupported_step",
+  "commit_sha": "64f7f24c6e2c72968c2e7b7f1983ac0a71186481",
+  "declared_runtimes": [
+   "php@8.3"
+  ],
+  "detail": "Error: projection_serving_steps: a route this build can execute has exactly one serving step; this one has 2",
+  "foundation_layer": "execution_lowering",
+  "layer": "execution_lowering",
+  "level": null,
+  "repo": "FreshRSS/FreshRSS",
+  "seconds": 3,
+  "source_bytes": 11338403
+ },
+ "gitea": {
+  "browser_judgment": "not_run",
+  "code": "requester_refused",
+  "commit_sha": "8164130349836e75d35471fd056cb449310e5548",
+  "declared_runtimes": [
+   "go@1.25",
+   "node@22.14.0"
+  ],
+  "detail": "Error: intent_unsupported_runtime: runtime go 1.25 is not one this build provisions exactly (none)",
+  "foundation_layer": "runtime_capability",
+  "layer": "other:requester",
+  "level": null,
+  "repo": "go-gitea/gitea",
+  "seconds": 10,
+  "source_bytes": 34018770
+ },
+ "grafana": {
+  "browser_judgment": "not_run",
+  "code": "requester_refused",
+  "commit_sha": "533b5986711cd2e78c2057e21c0d68dbc5eea9c7",
+  "declared_runtimes": [
+   "go@1.25",
+   "node@22.14.0"
+  ],
+  "detail": "Error: intent_unsupported_runtime: runtime go 1.25 is not one this build provisions exactly (none)",
+  "foundation_layer": "runtime_capability",
+  "layer": "other:requester",
+  "level": null,
+  "repo": "grafana/grafana",
+  "seconds": 57,
+  "source_bytes": 215955106
+ },
+ "homepage": {
+  "browser_judgment": "not_run",
+  "code": "requester_refused",
+  "commit_sha": "d1c1ee7a1ef0ab3d749fa59bed054632f26710dc",
+  "declared_runtimes": [
+   "node@22.14.0"
+  ],
+  "detail": "Error: package_manager_version_unresolved: the pnpm version cannot be resolved exactly: the source carries a pnpm lockfile and package.json declares no packageManager; declare an exact one, or a [[runtime]] pnpm",
+  "foundation_layer": "d_authoring_detection",
+  "layer": "other:requester",
+  "level": null,
+  "repo": "gethomepage/homepage",
+  "seconds": 3,
+  "source_bytes": 11085229
+ },
+ "immich": {
+  "browser_judgment": "not_run",
+  "code": "unsupported_step",
+  "commit_sha": "959d46c6547e82056e8ea4190110dfd5f522873e",
+  "declared_runtimes": [
+   "node@22.14.0"
+  ],
+  "detail": "Error: projection_serving_steps: a route this build can execute has exactly one serving step; this one has 2",
+  "foundation_layer": "execution_lowering",
+  "layer": "execution_lowering",
+  "level": null,
+  "repo": "immich-app/immich",
+  "seconds": 26,
+  "source_bytes": 110191808
+ },
+ "memos": {
+  "browser_judgment": "not_run",
+  "code": "requester_refused",
+  "commit_sha": "05a2c6db7a3e926c9142a635f42f7af0f078c81d",
+  "declared_runtimes": [
+   "go@1.25",
+   "node@22.14.0"
+  ],
+  "detail": "Error: intent_unsupported_runtime: runtime go 1.25 is not one this build provisions exactly (none)",
+  "foundation_layer": "runtime_capability",
+  "layer": "other:requester",
+  "level": null,
+  "repo": "usememos/memos",
+  "seconds": 3,
+  "source_bytes": 12032631
+ },
+ "metabase": {
+  "browser_judgment": "not_run",
+  "code": "requester_refused",
+  "commit_sha": "6ec07f75184dd7f06d84c551d57c58687cf4b859",
+  "declared_runtimes": [
+   "java@21",
+   "node@22.14.0"
+  ],
+  "detail": "Error: cannot add source/locales/sr.po to the source archive\n\nCaused by:\n    source object exceeds archive cap",
+  "foundation_layer": "source_transport",
+  "layer": "other:requester",
+  "level": null,
+  "repo": "metabase/metabase",
+  "seconds": 1,
+  "source_bytes": 398896335
+ },
+ "n8n": {
+  "attempt": "01M3D6Z73VEW6NBNG2DDAQE0SF",
+  "browser_judgment": "not_run",
+  "code": "formation_failed",
+  "commit_sha": "67fadbc64b2256251f6b8a19d5b9e053c730efc0",
+  "declared_runtimes": [
+   "node@22.14.0"
+  ],
+  "detail": "the candidate could not be formed from this source",
+  "foundation_layer": "build_toolchain",
+  "layer": "build_toolchain",
+  "level": 0,
+  "outcome": "fail",
+  "repo": "n8n-io/n8n",
+  "satisfy_id": "01M3D6Z71ZX6AXNFYC8NXFZ57W",
+  "seconds": 1016,
+  "source_bytes": 201922520,
+  "stage": "build",
+  "status": "exhausted",
+  "termination_reason": "budget_exhausted",
+  "verification": null
+ },
+ "navidrome": {
+  "browser_judgment": "not_run",
+  "code": "requester_refused",
+  "commit_sha": "961ee8c4136fbd18b78de1929ee5f97a1ae37f7c",
+  "declared_runtimes": [
+   "go@1.25",
+   "node@22.14.0"
+  ],
+  "detail": "Error: intent_unsupported_runtime: runtime go 1.25 is not one this build provisions exactly (none)",
+  "foundation_layer": "runtime_capability",
+  "layer": "other:requester",
+  "level": null,
+  "repo": "navidrome/navidrome",
+  "seconds": 5,
+  "source_bytes": 19443676
+ },
+ "nocodb": {
+  "browser_judgment": "not_run",
+  "code": "requester_refused",
+  "commit_sha": "9901007c1b3017e6b9e64fdff73ebdf73b8f3b1d",
+  "declared_runtimes": [
+   "node@22.14.0"
+  ],
+  "detail": "Error: package_manager_version_unresolved: the pnpm version cannot be resolved exactly: the source carries a pnpm lockfile and package.json declares no packageManager; declare an exact one, or a [[runtime]] pnpm",
+  "foundation_layer": "d_authoring_detection",
+  "layer": "other:requester",
+  "level": null,
+  "repo": "nocodb/nocodb",
+  "seconds": 38,
+  "source_bytes": 158654447
+ },
+ "node-red": {
+  "attempt": "01M3D7WGBD0A2M2PJWE19RREKR",
+  "browser_judgment": "not_run",
+  "code": "formation_failed",
+  "commit_sha": "1e85f1efbc8875ad960400905038154a4e4dd76e",
+  "declared_runtimes": [
+   "node@20.20.2"
+  ],
+  "detail": "the candidate could not be formed from this source",
+  "foundation_layer": "build_toolchain",
+  "layer": "build_toolchain",
+  "level": 0,
+  "outcome": "fail",
+  "repo": "node-red/node-red",
+  "satisfy_id": "01M3D7WG9NZNNQE3MJ3F0J95P2",
+  "seconds": 91,
+  "source_bytes": 35383604,
+  "stage": "build",
+  "status": "exhausted",
+  "termination_reason": "budget_exhausted",
+  "verification": null
+ },
+ "open-webui": {
+  "attempt": "01M3CNVAAZNVSFRDRJ70VFMFC9",
+  "browser_judgment": "not_run",
+  "code": "formation_failed",
+  "commit_sha": "8bd8b4fac5e059578ac0c74b3c18d11139f88b7d",
+  "declared_runtimes": [
+   "python@3.12.7",
+   "node@22.14.0"
+  ],
+  "detail": "the candidate could not be formed from this source",
+  "foundation_layer": "build_toolchain",
+  "layer": "build_toolchain",
+  "level": 0,
+  "outcome": "fail",
+  "repo": "open-webui/open-webui",
+  "satisfy_id": "01M3CNVA99H3637GWN4FR03GXM",
+  "seconds": 97,
+  "source_bytes": 43625516,
+  "stage": "build",
+  "status": "exhausted",
+  "termination_reason": "budget_exhausted",
+  "verification": null
+ },
+ "paperless-ngx": {
+  "browser_judgment": "not_run",
+  "code": "unsupported_step",
+  "commit_sha": "b11f1f845904301b5bb6239e456f1e1d557cc04e",
+  "declared_runtimes": [
+   "python@3.12.7",
+   "node@22.14.0"
+  ],
+  "detail": "Error: projection_serving_steps: a route this build can execute has exactly one serving step; this one has 2",
+  "foundation_layer": "execution_lowering",
+  "layer": "execution_lowering",
+  "level": null,
+  "repo": "paperless-ngx/paperless-ngx",
+  "seconds": 22,
+  "source_bytes": 92800235
+ },
+ "portainer": {
+  "browser_judgment": "not_run",
+  "code": "requester_refused",
+  "commit_sha": "d661cbc0bbe2fb67dcc320ac8600b127c7f8cb9b",
+  "declared_runtimes": [
+   "go@1.25",
+   "node@22.14.0"
+  ],
+  "detail": "Error: intent_unsupported_runtime: runtime go 1.25 is not one this build provisions exactly (none)",
+  "foundation_layer": "runtime_capability",
+  "layer": "other:requester",
+  "level": null,
+  "repo": "portainer/portainer",
+  "seconds": 6,
+  "source_bytes": 19493716
+ },
+ "searxng": {
+  "attempt": "01M3D7Z4DZJ597B6TE4TNKVVK1",
+  "browser_judgment": "not_run",
+  "commit_sha": "2ed96e6fcfc96ca1045155fc52a12f5f7b070417",
+  "declared_runtimes": [
+   "python@3.12.7"
+  ],
+  "foundation_layer": "verified_route",
+  "layer": "verified_route",
+  "level": 5,
+  "repo": "searxng/searxng",
+  "retained_ref": "sha256:78691074f337dd641db33e4b60faac5e711a8b8fa458e7895b2a8af9e76e024a",
+  "retained_replay": "satisfied",
+  "satisfy_id": "01M3D7Z4C7JEV1YY1WQ47ZTBPQ",
+  "seconds": 87,
+  "source_bytes": 20612719,
+  "status": "satisfied",
+  "termination_reason": "verified"
+ },
+ "stirling-pdf": {
+  "browser_judgment": "not_run",
+  "code": "requester_refused",
+  "commit_sha": "455ad987181d54c980ba8310c516d94a87f70041",
+  "declared_runtimes": [
+   "java@21"
+  ],
+  "detail": "Error: intent_unsupported_runtime: runtime java 21 is not one this build provisions exactly (none)",
+  "foundation_layer": "runtime_capability",
+  "layer": "other:requester",
+  "level": null,
+  "repo": "Stirling-Tools/Stirling-PDF",
+  "seconds": 55,
+  "source_bytes": 228788285
+ },
+ "uptime-kuma": {
+  "attempt": "01M3CNXZD5YP3QSYV7RTC7SRB7",
+  "browser_judgment": "not_run",
+  "code": "formation_failed",
+  "commit_sha": "e62702d868a0b072c6e1870e5278762319637f04",
+  "declared_runtimes": [
+   "node@20.20.2"
+  ],
+  "detail": "the candidate could not be formed from this source",
+  "foundation_layer": "build_toolchain",
+  "layer": "build_toolchain",
+  "level": 0,
+  "outcome": "fail",
+  "repo": "louislam/uptime-kuma",
+  "satisfy_id": "01M3CNXZBGYP8Q70QK13ENY8V9",
+  "seconds": 80,
+  "source_bytes": 8616648,
+  "stage": "build",
+  "status": "exhausted",
+  "termination_reason": "budget_exhausted",
+  "verification": null
+ }
+}

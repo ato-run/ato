@@ -2,6 +2,8 @@
 
 Status: proposed implementation (stage 2d). Deployment is a separate decision.
 
+> **Current status (appended 2026-09-26).** Stage 2d is merged (ato #1398, API #688). The removal anticipated below was done in 2f (ato #1406, unmerged foundation stack): the active Hosted v2 path no longer generates `ProgramIntent` / `EffectiveBuildPlan`; old refs stay readable for compatibility.
+
 ## Boundary
 
 `run_claimed_job` reserves the durable job/attempt identity before source acquisition,
