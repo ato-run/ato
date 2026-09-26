@@ -44,7 +44,7 @@ fn refused(code: &str, message: impl Into<String>) -> Option<AttemptFailure> {
 impl CandidateRealizer for FormationRealizer<'_> {
     fn admit(&self, profile: &RuntimeProfile) -> Option<AttemptFailure> {
         let planned = self.planned;
-        if !planned.plan.steps.is_empty()
+        if !planned.plan.actions.is_empty()
             && profile.get("formation.containment") != Some("bwrap+landlock")
         {
             return refused(
@@ -53,7 +53,7 @@ impl CandidateRealizer for FormationRealizer<'_> {
                  bwrap); it was not attempted",
             );
         }
-        if !planned.plan.steps.is_empty() && profile.get("formation.toolchain_root").is_none() {
+        if !planned.plan.actions.is_empty() && profile.get("formation.toolchain_root").is_none() {
             return refused(
                 "runtime_has_no_toolchain_root",
                 format!(
@@ -62,7 +62,7 @@ impl CandidateRealizer for FormationRealizer<'_> {
                 ),
             );
         }
-        if planned.intent.lane.is_process()
+        if planned.plan.lane.is_process()
             && profile.get("formation.containment") != Some("bwrap+landlock")
         {
             return refused(
@@ -71,8 +71,7 @@ impl CandidateRealizer for FormationRealizer<'_> {
                  process (no bwrap); it was not attempted",
             );
         }
-        if planned.plan.steps.iter().any(|step| step.needs_network)
-            && self.network == NetworkPolicy::Denied
+        if planned.plan.needs_network(&planned.derivation) && self.network == NetworkPolicy::Denied
         {
             return refused(
                 "network_denied",
@@ -165,7 +164,8 @@ impl FormationRealizer<'_> {
         let realization = match TemporaryRealization::launch(&TemporaryRealizationRequest {
             workspace: workspace_root,
             scratch: &scratch,
-            intent: &planned.intent,
+            derivation: &planned.derivation,
+            plan: &planned.plan,
             ports: &ports,
             shim: self.shim,
             attempt_id,

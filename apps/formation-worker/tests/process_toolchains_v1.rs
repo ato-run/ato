@@ -53,8 +53,14 @@ fn code(error: &anyhow::Error) -> String {
         .unwrap_or_else(|| format!("untyped: {error:#}"))
 }
 
-fn names(planned: &PlannedCandidate) -> Vec<&str> {
-    planned.plan.steps.iter().map(|s| s.name.as_str()).collect()
+fn names(planned: &PlannedCandidate) -> Vec<String> {
+    planned
+        .plan
+        .steps(&planned.derivation)
+        .unwrap()
+        .iter()
+        .map(|s| s.name.clone())
+        .collect()
 }
 
 const HEAD: &str = r#"
@@ -126,20 +132,30 @@ fn a_node_route_is_a_generic_process_with_its_declared_node() {
         serve(&["node", "server.js"])
     );
     let planned = plan(&route, NODE_SOURCE).expect("plans");
-    assert_eq!(planned.intent.lane, Lane::Process);
+    assert_eq!(planned.plan.lane, Lane::Process);
     assert_eq!(
-        planned.intent.runtime,
+        planned.plan.toolchains,
         BTreeMap::from([("node".to_owned(), "22.14.0".to_owned())])
     );
     assert_eq!(names(&planned), ["provision-node", "build"]);
-    assert!(planned.plan.steps[0].argv[2].contains("node-v22.14.0-linux-x64"));
+    assert!(
+        planned.plan.steps(&planned.derivation).unwrap()[0].argv[2]
+            .contains("node-v22.14.0-linux-x64")
+    );
     assert_eq!(planned.plan.toolchain_path, [format!("{NODE_HOME}/bin")]);
     // The Run finds the same Node first, and nothing of the host's.
     assert_eq!(
-        planned.intent.public_env.get("PATH").map(String::as_str),
+        planned
+            .plan
+            .process_environment(&planned.derivation)
+            .get("PATH")
+            .map(String::as_str),
         Some(&*format!("{NODE_HOME}/bin:/usr/local/bin:/usr/bin:/bin"))
     );
-    assert_eq!(planned.intent.launch_argv, ["node", "server.js"]);
+    assert_eq!(
+        planned.plan.serving(&planned.derivation).argv,
+        ["node", "server.js"]
+    );
 
     // It needs a process Runtime, and provisions the declared toolchain.
     let (requirements, provisions) = derivation_requirements(&planned);
@@ -165,7 +181,11 @@ fn an_authored_path_is_kept_as_written() {
     );
     let planned = plan(&route, NODE_SOURCE).expect("plans");
     assert_eq!(
-        planned.intent.public_env.get("PATH").map(String::as_str),
+        planned
+            .plan
+            .process_environment(&planned.derivation)
+            .get("PATH")
+            .map(String::as_str),
         Some("/app/bin:/usr/bin")
     );
 }
@@ -176,9 +196,9 @@ fn a_node_argv_without_a_declared_node_gets_no_node() {
     // argv's `node` is not read as a declaration.
     let route = format!("{HEAD}{}", serve(&["node", "server.js"]));
     let planned = plan(&route, &[("server.py", "x"), ("server.js", "x")]).expect("plans");
-    assert_eq!(planned.intent.lane, Lane::PythonProcess);
-    assert!(!planned.intent.runtime.contains_key("node"));
-    assert!(!names(&planned).contains(&"provision-node"));
+    assert_eq!(planned.plan.lane, Lane::PythonProcess);
+    assert!(!planned.plan.toolchains.contains_key("node"));
+    assert!(!names(&planned).contains(&"provision-node".to_owned()));
 }
 
 #[test]
@@ -240,7 +260,7 @@ fn an_exact_pnpm_pin_is_provisioned_and_heads_the_path() {
     )
     .expect("plans");
     assert_eq!(
-        planned.intent.package_manager,
+        planned.plan.package_manager,
         Some(ResolvedPackageManager {
             name: "pnpm".to_owned(),
             version: "10.4.1".to_owned()
@@ -250,7 +270,7 @@ fn an_exact_pnpm_pin_is_provisioned_and_heads_the_path() {
         names(&planned),
         ["provision-node", "provision-pnpm", "install"]
     );
-    let provision = &planned.plan.steps[1].argv[2];
+    let provision = &planned.plan.steps(&planned.derivation).unwrap()[1].argv[2];
     assert!(provision.contains("pnpm@10.4.1"), "{provision}");
     assert!(
         provision.contains("/opt/ato/toolchains/pnpm/10.4.1"),
@@ -264,7 +284,10 @@ fn an_exact_pnpm_pin_is_provisioned_and_heads_the_path() {
             &*format!("{NODE_HOME}/bin")
         ]
     );
-    assert!(planned.intent.public_env["PATH"].starts_with("/opt/ato/toolchains/pnpm/10.4.1/bin:"));
+    assert!(
+        planned.plan.process_environment(&planned.derivation)["PATH"]
+            .starts_with("/opt/ato/toolchains/pnpm/10.4.1/bin:")
+    );
     let (_, provisions) = derivation_requirements(&planned);
     assert_eq!(
         provisions,
@@ -275,10 +298,15 @@ fn an_exact_pnpm_pin_is_provisioned_and_heads_the_path() {
 #[test]
 fn yarn_1_and_yarn_berry_are_provisioned_from_their_own_packages() {
     let classic = plan_pm(r#","packageManager":"yarn@1.22.22""#, Some("yarn"), "").expect("plans");
-    assert!(classic.plan.steps[1].argv[2].contains(" yarn@1.22.22"));
+    assert!(classic.plan.steps(&classic.derivation).unwrap()[1].argv[2].contains(" yarn@1.22.22"));
     let berry = plan_pm(r#","packageManager":"yarn@4.5.3""#, Some("yarn"), "").expect("plans");
-    assert!(berry.plan.steps[1].argv[2].contains("@yarnpkg/cli-dist@4.5.3"));
-    assert_eq!(berry.plan.steps[1].name, "provision-yarn");
+    assert!(
+        berry.plan.steps(&berry.derivation).unwrap()[1].argv[2].contains("@yarnpkg/cli-dist@4.5.3")
+    );
+    assert_eq!(
+        berry.plan.steps(&berry.derivation).unwrap()[1].name,
+        "provision-yarn"
+    );
 }
 
 #[test]
@@ -301,7 +329,7 @@ fn a_package_manager_without_an_exact_version_is_refused() {
 #[test]
 fn a_derivation_may_pin_the_package_manager_the_source_does_not() {
     let planned = plan_pm("", Some("pnpm"), &runtime("pnpm", "9.15.4")).expect("plans");
-    assert_eq!(planned.intent.package_manager.unwrap().version, "9.15.4");
+    assert_eq!(planned.plan.package_manager.unwrap().version, "9.15.4");
     // …but not contradict the one the source pins.
     let error = plan_pm(
         r#","packageManager":"pnpm@10.4.1""#,
@@ -316,7 +344,7 @@ fn a_derivation_may_pin_the_package_manager_the_source_does_not() {
 #[test]
 fn npm_is_the_one_the_declared_node_ships() {
     let planned = plan_pm(r#","packageManager":"npm@10.9.2""#, None, "").expect("plans");
-    assert_eq!(planned.intent.package_manager, None);
+    assert_eq!(planned.plan.package_manager, None);
     assert_eq!(names(&planned), ["provision-node", "install"]);
 }
 
@@ -325,8 +353,8 @@ fn the_resolved_manager_is_part_of_the_plan_and_not_of_the_derivation() {
     let a = plan_pm(r#","packageManager":"pnpm@10.4.1""#, Some("pnpm"), "").expect("plans");
     let a_again = plan_pm(r#","packageManager":"pnpm@10.4.1""#, Some("pnpm"), "").expect("plans");
     let b = plan_pm(r#","packageManager":"pnpm@10.5.0""#, Some("pnpm"), "").expect("plans");
-    assert_eq!(a.plan_digest, a_again.plan_digest);
-    assert_ne!(a.plan_digest, b.plan_digest);
+    assert_eq!(a.plan, a_again.plan);
+    assert_ne!(a.plan, b.plan);
     // The source differs (it is I); the route does not.
     assert_eq!(a.derivation_ref, b.derivation_ref);
 }
@@ -352,7 +380,7 @@ fn a_python_and_node_route_provisions_both_and_serves_python() {
         ],
     )
     .expect("plans");
-    assert_eq!(planned.intent.lane, Lane::Process);
+    assert_eq!(planned.plan.lane, Lane::Process);
     assert_eq!(
         names(&planned),
         ["provision-python", "provision-node", "frontend"]
@@ -364,7 +392,10 @@ fn a_python_and_node_route_provisions_both_and_serves_python() {
             "/opt/ato/toolchains/python/3.12.7/bin".to_owned()
         ]
     );
-    assert_eq!(planned.intent.launch_argv, ["python3", "-m", "backend"]);
+    assert_eq!(
+        planned.plan.serving(&planned.derivation).argv,
+        ["python3", "-m", "backend"]
+    );
     let (_, provisions) = derivation_requirements(&planned);
     assert_eq!(
         provisions,
@@ -413,8 +444,8 @@ status = 200
         ],
     )
     .expect("plans");
-    assert_eq!(planned.intent.lane, Lane::StaticWeb);
-    assert_eq!(planned.intent.static_build, None);
+    assert_eq!(planned.plan.lane, Lane::StaticWeb);
+    assert!(!planned.plan.actions.iter().any(|action| matches!(action, ato_formation::execution::BuildAction::Prerequisite(step) if step.name == "static-build")));
     assert_eq!(names(&planned), ["provision-node", "build"]);
     assert_eq!(
         planned.plan.toolchain_path,
@@ -431,8 +462,10 @@ fn the_same_route_plans_its_own_node_per_target_and_keeps_one_derivation() {
     );
     let x86 = plan_on(&route, NODE_SOURCE, "x86_64-linux-gnu").expect("plans");
     let arm = plan_on(&route, NODE_SOURCE, "aarch64-linux-gnu").expect("plans");
-    assert!(arm.plan.steps[0].argv[2].contains("node-v22.14.0-linux-arm64"));
-    assert_ne!(x86.plan_digest, arm.plan_digest);
+    assert!(
+        arm.plan.steps(&arm.derivation).unwrap()[0].argv[2].contains("node-v22.14.0-linux-arm64")
+    );
+    assert_ne!(x86.plan, arm.plan);
     assert_eq!(x86.derivation_ref, arm.derivation_ref);
 }
 
@@ -447,9 +480,8 @@ fn only_the_platforms_provisioning_steps_may_write_the_shared_toolchains() {
         &exec("provision-node", &["node", "-e", "1"], false),
     )
     .expect("plans");
-    let access: Vec<(&str, ToolchainAccess)> = planned
-        .plan
-        .steps
+    let steps = planned.plan.steps(&planned.derivation).unwrap();
+    let access: Vec<(&str, ToolchainAccess)> = steps
         .iter()
         .map(|step| (step.name.as_str(), step.toolchain_access))
         .collect();

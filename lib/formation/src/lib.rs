@@ -13,8 +13,8 @@
 //!                  ├─▶ AuthoringDraft ─▶ bind ─▶ BoundContract  (ContractRef)
 //!   Preset      ───┘                          └▶ BoundDerivation (DerivationRef)
 //!                                                      │
-//!                                                      ▼  projection
-//!                                        ProgramIntent / EffectiveBuildPlan
+//!                                                      ▼  lower(D, I facts, Runtime binding)
+//!                                        minimal ExecutionPlan
 //!                                                      │
 //!                                                      ▼  execute (worker)
 //!                                                 candidate C'
@@ -23,10 +23,9 @@
 //!                                                   C' ⊨ K
 //! ```
 //!
-//! A Capsule's identity is the canonical Contract. `ProgramIntent` and
-//! `EffectiveBuildPlan` sit BELOW the line: they are the projection of a
-//! Derivation onto the execution machinery this worker already has, and are
-//! never inputs to identity.
+//! A Capsule's identity is the canonical Contract. `ExecutionPlan` binds D to
+//! physical machinery without copying its semantics or contributing to identity.
+//! The old v1 intent/build-plan codecs remain only for historical compatibility.
 
 pub mod authoring;
 pub mod browser;
@@ -37,6 +36,8 @@ pub mod capsule_toml_v2;
 pub mod containment;
 #[cfg(feature = "planning")]
 pub mod detect;
+#[cfg(feature = "planning")]
+pub mod execution;
 #[cfg(feature = "planning")]
 pub mod failure;
 #[cfg(feature = "planning")]

@@ -17,12 +17,13 @@ use ato_formation::source::{
     DownloadedArchive, RESOLVER_CONTRACT_V1, RESOLVER_CONTRACT_V2, SourceLimits,
     TreeVerifiedArchive,
 };
-use ato_formation_worker::build::{BuildAttempt, run_build};
+use ato_formation_worker::build::BuildAttempt;
 use ato_formation_worker::job::{copy_tree, digest};
 use ato_formation_worker::local::snapshot_directory;
 use ato_formation_worker::sandbox::{
     BuildLimits, BuildSandbox, NetworkPolicy, containment_available,
 };
+use legacy_execution::run_build;
 
 fn verify(bytes: Vec<u8>) -> Result<TreeVerifiedArchive, ato_formation::source::SourceError> {
     let archive_digest = digest(&bytes);
@@ -268,3 +269,6 @@ fn no_link_reaches_the_host_from_inside_the_build_sandbox() {
         assert!(out.contains("unreachable"), "{name}: {out}");
     }
 }
+
+#[path = "support/legacy_execution.rs"]
+mod legacy_execution;
