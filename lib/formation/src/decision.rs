@@ -62,6 +62,12 @@ pub struct DecisionRecord {
     pub outcome: Option<DecisionOutcome>,
     pub chosen_id: Option<String>,
 }
+impl DecisionRecord {
+    /// The instant from which only the timeout fallback may settle the point.
+    pub fn expires_at_ms(&self, policy: &DecisionPolicy) -> u64 {
+        self.opened_at_ms.saturating_add(policy.decision_timeout_ms)
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DecisionOutcome {
@@ -216,9 +222,7 @@ pub(crate) fn apply(
                 .unwrap_or(default),
             (Some(_), _) => default,
             (None, _) => {
-                let expires_at_ms = record
-                    .opened_at_ms
-                    .saturating_add(policy.decision_timeout_ms);
+                let expires_at_ms = record.expires_at_ms(policy);
                 if now_ms >= expires_at_ms {
                     SearchAction::RecordFallback {
                         seq,
@@ -257,21 +261,24 @@ pub struct DecisionRefusal {
     pub code: &'static str,
 }
 
-/// Judge a submission against the decision point as it was opened. A named
-/// choice that was not offered is recorded as `out_of_set` (the default is
-/// taken); a point that is already decided, or not open, is refused.
+/// Judge a submission against the decision point as it was opened, at the
+/// Coordinator's trusted `now_ms`. A named choice that was not offered is
+/// recorded as `out_of_set` (the default is taken); a point that is already
+/// decided, not open, or past its deadline is refused — past the deadline the
+/// point belongs to the timeout fallback, never to a late answer.
 pub fn validate_decision(
     s: &SearchStateV1,
     submission: &DecisionSubmission,
+    now_ms: u64,
 ) -> Result<DecisionVerdict, DecisionRefusal> {
     s.validate().map_err(|_| DecisionRefusal {
         code: "search_state_invalid",
     })?;
-    if s.frozen.policy.decision.is_none() {
+    let Some(policy) = &s.frozen.policy.decision else {
         return Err(DecisionRefusal {
             code: "decision_not_enabled",
         });
-    }
+    };
     let record = s
         .decisions
         .iter()
@@ -282,6 +289,11 @@ pub fn validate_decision(
     if record.outcome.is_some() || s.attempts.len() as u64 != record.seq {
         return Err(DecisionRefusal {
             code: "decision_closed",
+        });
+    }
+    if now_ms >= record.expires_at_ms(policy) {
+        return Err(DecisionRefusal {
+            code: "decision_expired",
         });
     }
     if let Some(evidence) = &submission.evidence
@@ -317,6 +329,10 @@ pub fn validate_decision(
 
 impl SearchStateV1 {
     pub(crate) fn validate_decisions(&self) -> Result<(), SearchError> {
+        // Every opened point spends one provider decision, whatever its outcome.
+        if self.budget.decisions_used != self.decisions.len() as u64 {
+            return Err(SearchError("decision_budget_mismatch"));
+        }
         if self.decisions.is_empty() {
             return Ok(());
         }
@@ -327,12 +343,7 @@ impl SearchStateV1 {
             .as_ref()
             .ok_or(SearchError("decision_without_policy"))?;
         let mut seen = std::collections::BTreeSet::new();
-        let chosen = self
-            .decisions
-            .iter()
-            .filter(|d| d.outcome == Some(DecisionOutcome::Chosen))
-            .count() as u64;
-        if self.decisions.len() > 256 || chosen != self.budget.decisions_used {
+        if self.decisions.len() > 256 {
             return Err(SearchError("decision_bounds"));
         }
         if self.budget.decisions_used > u64::from(policy.max_decisions) {

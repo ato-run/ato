@@ -197,3 +197,33 @@ fn submissions_have_the_coordinator_shape() {
         serde_json::json!({"seq": 3, "fallback": "timeout"})
     );
 }
+
+#[test]
+fn only_requirement_facts_reach_the_provider() {
+    let mut p = point();
+    p.choices[0].derivation = serde_json::json!({
+        "effects": "pure",
+        "requirements": [{"fact": "platform", "one_of": ["linux/aarch64"]}]
+    });
+    p.choices[0].runtime_facts = [
+        ("platform", "linux/aarch64"),
+        ("runtime.hostname", "build-host-7.internal"),
+        ("toolchain.secret_token", "s3cr3t-canary"),
+        ("runtime.browser", "true"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+    .collect();
+    let request = decision_request("jev-1.13.0", &p).to_string();
+    assert!(request.contains("linux/aarch64"));
+    for leaked in [
+        "build-host-7.internal",
+        "s3cr3t-canary",
+        "runtime.hostname",
+        "runtime.browser",
+    ] {
+        assert!(!request.contains(leaked), "{leaked}");
+    }
+    // A choice whose D requires nothing sends no Runtime facts at all.
+    assert!(requirement_scoped_facts(&p.choices[1]).is_empty());
+}
