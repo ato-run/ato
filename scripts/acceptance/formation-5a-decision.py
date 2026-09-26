@@ -12,6 +12,14 @@ provider: fixed index / out-of-set label / silence).
   A4  max_decisions 1: the second point never opens; default thereafter
   A5  Coordinator restart after the answer was recorded and before the issue:
       the recorded choice is issued, no point re-opens, the provider is asked once
+  A6  an answer arriving after the deadline: settled as timeout, never chosen;
+      only the default is issued
+  A7  a provider that only fails still spends the decision budget: with
+      max_decisions 1 no second point opens
+  A8  the provider-visible Runtime facts are exactly the choice's D requirements
+      (canary facts injected into the Runtime's profile never appear)
+  A9  concurrency at the deadline: choice POSTs and status polls racing across
+      expires_at settle exactly one outcome and one default-consistent ticket
 
 D1 = d-fail (serves no /health: a known K failure), D2 = d-good. Runs as its
 own owner. Reuses formation-stage4-search.py (installed as stage4_acceptance.py).
@@ -19,12 +27,15 @@ own owner. Reuses formation-stage4-search.py (installed as stage4_acceptance.py)
 import hashlib, json, secrets, subprocess, sys, time
 import stage4_acceptance as h
 
-OWNER = "decision_acceptance"
+import os
+# The per-owner source quota (0298) is not recycled: a rerun can name a fresh
+# owner (DECISION_OWNER) and gets its own token file.
+OWNER = os.environ.get("DECISION_OWNER", "decision_acceptance")
 OUT = h.S4 / "decision-5a"
 OUT.mkdir(parents=True, exist_ok=True)
 h.OUT = OUT
 h.LEDGER = open(OUT / "ledger.jsonl", "a")
-TOKEN = h.S4 / "runner-token-decision"
+TOKEN = h.S4 / ("runner-token-decision" + ("" if OWNER == "decision_acceptance" else "-" + OWNER))
 
 
 def ensure_owner():
@@ -163,7 +174,7 @@ def a2():
     order = attempts_order(r)
     h.expect(rc == 0 and r["status"] == "satisfied" and order == [route_ref(r, 0), route_ref(r, 1)]
              and [x["outcome"] for x in d] == ["out_of_set"]
-             and not r["search_state"]["budget"].get("decisions_used"),
+             and r["search_state"]["budget"].get("decisions_used") == 1,
              "out_of_set recorded; default D1 then D2", c, decisions=d, order=order)
     h.note(c, "passed", decisions=d, attempts=[a["attempt_id"] for a in r["attempts"]])
     return {"satisfy_id": satisfy, "decisions": d}
@@ -247,6 +258,147 @@ def a5():
     return {"satisfy_id": satisfy}
 
 
+def a6():
+    c = "a6"
+    rt = h.runtime(c, "runtime", 3)
+    try:
+        req, satisfy, sid, root = submit(c, [h.ROUTES / "d-fail.toml", h.ROUTES / "d-good.toml"],
+                                         provider="late:6000", policy="2,3000")
+        rc, r = finished(c, req, root)
+    finally:
+        h.stop(rt)
+    d = decisions(sid)
+    order = attempts_order(r)
+    h.expect(rc == 0 and r["status"] == "satisfied" and len(d) == 1
+             and d[0]["outcome"] == "timeout" and d[0]["chosen_choice"] is None
+             and d[0]["decided_at"] >= r["decisions"][0]["expires_at"]
+             and order[0] == route_ref(r, 0) and len(calls(root)) == 1,
+             "late answer settled as timeout; default D1 first", c, decisions=d, order=order)
+    h.note(c, "passed", decision=d[0], expires_at=r["decisions"][0]["expires_at"],
+           attempts=[a["attempt_id"] for a in r["attempts"]])
+    return {"satisfy_id": satisfy}
+
+
+def a7():
+    c = "a7"
+    rt = h.runtime(c, "runtime", 4)
+    try:
+        req, satisfy, sid, root = submit(
+            c, [h.ROUTES / "d-fail.toml", h.ROUTES / "d-fail-b.toml", h.ROUTES / "d-good.toml"],
+            provider="error", policy="1,30000")
+        rc, r = finished(c, req, root)
+    finally:
+        h.stop(rt)
+    d = decisions(sid)
+    order = attempts_order(r)
+    h.expect(rc == 0 and r["status"] == "satisfied"
+             and order == [route_ref(r, 0), route_ref(r, 1), route_ref(r, 2)]
+             and [x["outcome"] for x in d] == ["provider_error"] and len(calls(root)) == 1
+             and r["search_state"]["budget"]["decisions_used"] == 1,
+             "failed point spent the budget; no second point", c, decisions=d, order=order)
+    h.note(c, "passed", decisions=d, attempts=[a["attempt_id"] for a in r["attempts"]])
+    return {"satisfy_id": satisfy}
+
+
+def a8():
+    c = "a8"
+    rid = h.sql("SELECT id FROM runner_devices WHERE token_hash=?",
+                hashlib.sha256(TOKEN.read_text().strip().encode()).hexdigest())[0]["id"]
+    rt = h.runtime(c, "runtime", 3)
+    injected = None
+    try:
+        profile = h.wait_for(lambda: h.sql(
+            "SELECT e.current_facts_ref AS ref, p.facts_json AS facts FROM runtime_environments e "
+            "JOIN runtime_capability_profiles p ON p.facts_ref=e.current_facts_ref "
+            "WHERE e.runtime_id=?", rid), "Runtime profile", timeout=120)[0]
+        injected = profile
+        h.sql("UPDATE runtime_capability_profiles SET facts_json=json_set(facts_json,"
+              "'$.\"runtime.hostname\"','build-host-canary.internal',"
+              "'$.\"toolchain.secret_token\"','s3cr3t-canary') WHERE facts_ref=?", profile["ref"])
+        req, satisfy, sid, root = submit(c, [h.ROUTES / "d-fail.toml", h.ROUTES / "d-good.toml"],
+                                         provider="fixed:1", policy="2,30000")
+        rc, r = finished(c, req, root)
+    finally:
+        if injected:
+            h.sql("UPDATE runtime_capability_profiles SET facts_json=? WHERE facts_ref=?",
+                  injected["facts"], injected["ref"])
+        h.stop(rt)
+    seen = calls(root)
+    all_facts = json.loads(injected["facts"])
+    ok = len(seen) == 1
+    for call in seen:
+        text = json.dumps(call)
+        ok &= "canary" not in text
+        for cid, facts in call["view_facts"].items():
+            required = {x["fact"] for x in (call["requirements"][cid] or [])}
+            ok &= set(facts) <= required and len(facts) < len(all_facts)
+    h.expect(ok and rc == 0 and r["status"] == "satisfied", "provider facts are requirement-scoped",
+             c, calls=seen)
+    h.note(c, "passed", provider_view_facts=seen[0]["view_facts"],
+           requirements=seen[0]["requirements"], runtime_fact_count=len(all_facts) + 2)
+    return {"satisfy_id": satisfy}
+
+
+def a9():
+    import threading, urllib.request
+    c = "a9"
+    rt = h.runtime(c, "runtime", 3)
+    try:
+        req, satisfy, sid, root = submit(c, [h.ROUTES / "d-fail.toml", h.ROUTES / "d-good.toml"],
+                                         provider="silent", policy="2,3000")
+        view = h.wait_for(lambda: (lambda v: v if v.get("decision_point") else None)(
+            status_as(satisfy, TOKEN)), "decision point", timeout=120, poll=0.1)
+        point = view["decision_point"]
+        from datetime import datetime
+        expires = datetime.fromisoformat(point["expires_at"].replace("Z", "+00:00")).timestamp()
+        chosen = point["choices"][1]["choice_id"]
+        codes = []
+
+        def post(at):
+            time.sleep(max(0, at - time.time()))
+            body = json.dumps({"seq": point["seq"], "choice_id": chosen}).encode()
+            q = urllib.request.Request(f"{h.API}/v1/runtime-network/satisfy/{satisfy}/decisions",
+                                       data=body, method="POST", headers={
+                                           "authorization": "Bearer " + TOKEN.read_text().strip(),
+                                           "content-type": "application/json"})
+            try:
+                with urllib.request.urlopen(q, timeout=20) as res:
+                    codes.append(("post", res.status, at - expires))
+            except urllib.error.HTTPError as e:
+                codes.append(("post", e.code, at - expires))
+
+        def poll(at):
+            time.sleep(max(0, at - time.time()))
+            status_as(satisfy, TOKEN)
+            codes.append(("poll", 200, at - expires))
+        threads = []
+        for k in range(12):
+            at = expires - 0.12 + k * 0.02
+            threads.append(threading.Thread(target=post, args=(at,)))
+            threads.append(threading.Thread(target=poll, args=(at + 0.01,)))
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        rc, r = finished(c, req, root)
+    finally:
+        h.stop(rt)
+    d = decisions(sid)
+    order = attempts_order(r)
+    outcome = d[0]["outcome"]
+    first = r["attempts"][0]["derivation_ref"]
+    posts_ok = [x for x in codes if x[0] == "post" and x[1] == 200]
+    h.expect(rc == 0 and len(d) == 1 and outcome in ("chosen", "timeout")
+             and (outcome != "chosen" or d[0]["decided_at"] < r["decisions"][0]["expires_at"])
+             and first == (route_ref(r, 1) if outcome == "chosen" else route_ref(r, 0))
+             and len(posts_ok) <= 1
+             and all(x[1] in (200, 409) for x in codes if x[0] == "post"),
+             "one outcome, one default-consistent ticket", c, decisions=d, codes=codes)
+    h.note(c, "passed", outcome=outcome, decision=d[0], posts=sorted(codes),
+           first_attempt=r["attempts"][0]["attempt_id"])
+    return {"satisfy_id": satisfy, "outcome": outcome}
+
+
 def status_as(satisfy_id, token_file):
     import urllib.request
     req = urllib.request.Request(f"{h.API}/v1/runtime-network/satisfy/{satisfy_id}",
@@ -264,7 +416,7 @@ if __name__ == "__main__":
         ensure_owner()
         h.TOKEN = TOKEN
         h.OWNER = OWNER
-        wanted = sys.argv[1:] or ["a0", "a1", "a2", "a3", "a4", "a5"]
+        wanted = sys.argv[1:] or ["a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9"]
         for name in wanted:
             results[name] = globals()[name]()
         h.note("decision", "ALL_PASSED", cases=wanted)
