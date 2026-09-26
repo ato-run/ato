@@ -224,6 +224,11 @@ enum SearchRequest {
         placements: Vec<ato_formation::search::Placement>,
         now_ms: u64,
     },
+    /// Stage 5a: judge a requester's answer against the point as opened.
+    ValidateDecision {
+        state: Box<ato_formation::search::SearchStateV1>,
+        submission: ato_formation::decision::DecisionSubmission,
+    },
 }
 pub fn evaluate_search(bytes: &[u8]) -> Value {
     use ato_formation::search::*;
@@ -258,6 +263,16 @@ pub fn evaluate_search(bytes: &[u8]) -> Value {
                     serde_json::json!({"status":"search_decision","state_json":String::from_utf8(canonical).unwrap(),"events":events(&state,&action),"action":action}),
                 )
             }
+            SearchRequest::ValidateDecision { state, submission } => Ok(
+                match ato_formation::decision::validate_decision(&state, &submission) {
+                    Ok(verdict) => {
+                        serde_json::json!({"status":"decision_verdict","verdict":verdict})
+                    }
+                    Err(refusal) => {
+                        serde_json::json!({"status":"decision_refused","code":refusal.code})
+                    }
+                },
+            ),
         }
     };
     evaluate().unwrap_or_else(|detail|serde_json::json!({"status":"rejected","code":"search_state_invalid","detail":detail}))
