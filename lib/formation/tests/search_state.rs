@@ -71,9 +71,8 @@ fn canonical_states_have_deterministic_actions_after_restart() {
 fn unknown_dominates_late_receipt_and_budget_and_never_refunds() {
     let mut s = fixture("d1-unknown");
     s.budget.attempts_used = 4;
-    s.attempts[0]
-        .receipts
-        .push(serde_json::json!({"fully_satisfied":true}));
+    // A late PASS receipt is not decision input at all: receipts are judged
+    // only by accept_verified_route, never by the search state.
     assert!(matches!(
         decide_next(&s, &placements(&s), 999999).unwrap(),
         SearchAction::WaitForUnknownResolution { .. }
@@ -129,6 +128,52 @@ fn uncertainty_budget_and_candidate_exhaustion_are_distinct() {
             reason: Termination::OwnerStopped
         }
     );
+}
+/// Runtime refused an unsafe attested effect class and proved nothing started:
+/// policy refusal, not uncertainty. Started or unrecorded stays EffectUnknown.
+#[test]
+fn proven_not_started_policy_refusal_is_not_effect_unknown() {
+    let mut s = fixture("d1-failed");
+    s.attempts[0].effects = Some("non-repeatable".into());
+    s.attempts[0].record = Some(ExecutionRecord::NotStarted);
+    s.attempts[0].failure_code = Some("effect_policy".into());
+    assert_eq!(
+        decide_next(&s, &placements(&s), 1).unwrap(),
+        SearchAction::Finish {
+            reason: Termination::EffectPolicyRefused
+        }
+    );
+    for record in [
+        None,
+        Some(ExecutionRecord::StartedUnfinished),
+        Some(ExecutionRecord::HistoryUnavailable),
+        Some(ExecutionRecord::Finished),
+    ] {
+        s.attempts[0].record = record;
+        assert_eq!(
+            decide_next(&s, &placements(&s), 1).unwrap(),
+            SearchAction::Finish {
+                reason: Termination::EffectUnknown
+            },
+            "{record:?}"
+        );
+    }
+    // Resolution of a real UNKNOWN still lets the search continue.
+    s.attempts[0].status = DurableAttemptStatus::Unknown;
+    s.attempts[0].unknown_resolved = true;
+    assert!(matches!(
+        decide_next(&s, &placements(&s), 1).unwrap(),
+        SearchAction::IssueAttempt { .. }
+    ));
+}
+/// Decision input carries no receipt bodies, so verifier history cannot push
+/// a search over the bounded authority's input limit.
+#[test]
+fn receipt_bodies_are_not_search_decision_input() {
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fixture("d1-failed").canonical_bytes().unwrap()).unwrap();
+    value["attempts"][0]["receipts"] = serde_json::json!([{"receipt": "x".repeat(2 << 20)}]);
+    assert!(serde_json::from_value::<SearchStateV1>(value).is_err());
 }
 #[test]
 fn pending_route_recovery_does_not_reexecute_or_use_receipt_alone() {
