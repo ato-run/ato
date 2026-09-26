@@ -94,6 +94,12 @@ pub enum AuthorityRequest {
     ValidateContract {
         frozen: FrozenContract,
     },
+    ValidateRetained {
+        frozen: FrozenContract,
+        derivation_ref: String,
+        retained_ref: String,
+        descriptor_json: String,
+    },
     AcceptRoute {
         frozen: FrozenContract,
         request_id: String,
@@ -113,6 +119,37 @@ pub enum Decision {
 fn check(request: AuthorityRequest) -> Result<(), ReceiptRejection> {
     match request {
         AuthorityRequest::ValidateContract { frozen } => frozen.validate(),
+        AuthorityRequest::ValidateRetained {
+            frozen,
+            derivation_ref,
+            retained_ref,
+            descriptor_json,
+        } => {
+            frozen.validate()?;
+            let descriptor = ato_formation::retained::RetainedCandidateV1::parse(
+                descriptor_json.as_bytes(),
+                &retained_ref,
+            )
+            .map_err(|e| ReceiptRejection {
+                code: "retained_descriptor_invalid",
+                detail: e.to_string(),
+            })?;
+            descriptor
+                .match_assignment(&frozen.effective_contract_ref, &derivation_ref)
+                .map_err(|e| ReceiptRejection {
+                    code: "retained_assignment_mismatch",
+                    detail: e.to_string(),
+                })?;
+            if descriptor.base_contract != frozen.base_contract
+                || descriptor.browser_contract != frozen.browser_contract
+            {
+                return Err(ReceiptRejection {
+                    code: "retained_contract_mismatch",
+                    detail: "retained K differs from the frozen request".into(),
+                });
+            }
+            Ok(())
+        }
         AuthorityRequest::AcceptRoute {
             frozen,
             request_id,
