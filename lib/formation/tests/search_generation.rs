@@ -133,6 +133,7 @@ fn generation_spends_no_new_execution_permission_or_budget() {
         );
     }
     let mut s = state();
+    s.frozen.policy.generation = None;
     s.frozen.policy.runtime_constraint = RuntimeConstraint::Exact {
         runtime_id: "runtime".into(),
         environment_id: None,
@@ -404,6 +405,156 @@ fn source_size_roundtrips_without_changing_legacy_frozen_bytes() {
     let restored: SearchStateV1 =
         serde_json::from_slice(&with_size.canonical_bytes().unwrap()).unwrap();
     assert_eq!(restored.source_archive_bytes, Some(64));
+}
+
+#[test]
+fn exact_parent_failure_allows_only_the_generated_d_on_the_exact_runtime() {
+    let mut s = state();
+    s.frozen.policy.runtime_constraint = RuntimeConstraint::Exact {
+        runtime_id: "runtime".into(),
+        environment_id: Some("native".into()),
+    };
+    let mut known = s.frozen.candidates[0].clone();
+    known.derivation_ref = format!("sha256:{}", "e".repeat(64));
+    let known_placement = placement(&known.derivation_ref);
+    s.frozen.candidates.push(known);
+    assert!(matches!(
+        decide_next(&s, std::slice::from_ref(&known_placement), 10).unwrap(),
+        SearchAction::OpenGeneration { .. }
+    ));
+    let frozen = s.frozen.canonical_bytes().unwrap();
+    let new_ref = admit(&mut s);
+    let expected = placement(&new_ref);
+    let mut wrong_runtime = expected.clone();
+    wrong_runtime.runtime_id = "other-runtime".into();
+    let mut wrong_environment = expected.clone();
+    wrong_environment.environment_id = "other-environment".into();
+    let mut placements = vec![known_placement, wrong_runtime, wrong_environment];
+    assert_eq!(
+        decide_next(&s, &placements, 11).unwrap(),
+        SearchAction::WaitForRuntime {
+            derivation_ref: new_ref.clone()
+        }
+    );
+    placements.push(expected);
+    assert!(matches!(
+        decide_next(&s, &placements, 11).unwrap(),
+        SearchAction::IssueAttempt { derivation_ref, runtime_id, environment_id, .. }
+        if derivation_ref == new_ref && runtime_id == "runtime" && environment_id == "native"
+    ));
+    s.frozen.policy.decision = Some(DecisionPolicy {
+        provider: ProviderLocation::Requester,
+        max_decisions: 4,
+        decision_timeout_ms: 1000,
+    });
+    let SearchAction::OpenDecision { choices, .. } = decide_next(&s, &placements, 11).unwrap()
+    else {
+        panic!("expected decision");
+    };
+    let attempts: Vec<_> = choices
+        .iter()
+        .filter_map(|c| match &c.action {
+            ChoiceAction::Attempt {
+                derivation_ref,
+                runtime_id,
+                environment_id,
+                ..
+            } => Some((
+                derivation_ref.as_str(),
+                runtime_id.as_str(),
+                environment_id.as_str(),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(attempts, vec![(new_ref.as_str(), "runtime", "native")]);
+    s.frozen.policy.decision = None;
+    let mut generated_attempt = s.attempts[0].clone();
+    generated_attempt.attempt_id = "new-attempt".into();
+    generated_attempt.derivation_ref = new_ref;
+    s.attempts.push(generated_attempt);
+    s.budget.attempts_used += 1;
+    assert_eq!(
+        decide_next(&s, &placements, 12).unwrap(),
+        SearchAction::Finish {
+            reason: Termination::CandidatesExhausted
+        }
+    );
+    assert_eq!(s.frozen.canonical_bytes().unwrap(), frozen);
+}
+
+#[test]
+fn exact_generation_exception_requires_the_failed_parent_on_the_exact_placement() {
+    for refusal in [
+        "no_policy",
+        "wrong_parent",
+        "wrong_runtime",
+        "wrong_environment",
+        "not_finished",
+        "not_pure",
+        "not_fail",
+    ] {
+        let mut s = state();
+        s.frozen.policy.runtime_constraint = RuntimeConstraint::Exact {
+            runtime_id: "runtime".into(),
+            environment_id: Some("native".into()),
+        };
+        let mut known = s.frozen.candidates[0].clone();
+        known.derivation_ref = format!("sha256:{}", "e".repeat(64));
+        let p = placement(&known.derivation_ref);
+        s.frozen.candidates.push(known);
+        match refusal {
+            "no_policy" => s.frozen.policy.generation = None,
+            "wrong_parent" => {
+                s.frozen
+                    .policy
+                    .generation
+                    .as_mut()
+                    .unwrap()
+                    .base_derivation_ref = p.derivation_ref.clone()
+            }
+            "wrong_runtime" => s.attempts[0].runtime_id = "other-runtime".into(),
+            "wrong_environment" => s.attempts[0].environment_id = "other-environment".into(),
+            "not_finished" => s.attempts[0].record = Some(ExecutionRecord::NotStarted),
+            "not_pure" => s.attempts[0].effects = Some("idempotent".into()),
+            "not_fail" => s.attempts[0].status = DurableAttemptStatus::Inconclusive,
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            decide_next(&s, &[p], 10).unwrap(),
+            SearchAction::Finish {
+                reason: Termination::CandidatesExhausted
+            },
+            "{refusal}"
+        );
+    }
+}
+
+#[test]
+fn exact_generation_keeps_its_open_point_and_never_reopens_a_decline() {
+    let mut s = state();
+    s.frozen.policy.runtime_constraint = RuntimeConstraint::Exact {
+        runtime_id: "runtime".into(),
+        environment_id: None,
+    };
+    open(&mut s);
+    assert_eq!(
+        decide_next(&s, &[], 11).unwrap(),
+        SearchAction::WaitForGeneration {
+            expires_at_ms: 5010
+        }
+    );
+    assert_eq!(
+        decide_next(&s, &[], 5010).unwrap(),
+        SearchAction::ExpireGeneration {}
+    );
+    s.generation.as_mut().unwrap().outcome = Some(GenerationOutcome::Declined);
+    assert_eq!(
+        decide_next(&s, &[], 11).unwrap(),
+        SearchAction::Finish {
+            reason: Termination::CandidatesExhausted
+        }
+    );
 }
 
 #[test]
