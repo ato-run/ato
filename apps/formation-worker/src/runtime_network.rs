@@ -19,7 +19,7 @@
 //! refs, environment, effects or platform do not hold, and attests what it
 //! established. The coordinator decides fallback from that attestation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -196,6 +196,9 @@ pub struct SatisfyPolicy {
     /// offered attempts. Frozen with the search; absent means no provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision: Option<ato_formation::decision::DecisionPolicy>,
+    /// Owner-authorized, frozen typed draft domain. No policy means no generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<ato_formation::generation::GenerationPolicy>,
 }
 
 /// The budget of the whole search the request belongs to (ADR-031). The
@@ -582,6 +585,10 @@ pub fn derivation_requirements(planned: &PlannedCandidate) -> (Vec<Requirement>,
 
 pub struct Submission {
     archive: File,
+    source_entries: BTreeSet<String>,
+    /// Pin the sole admitted generation; repeated receiver views may replay it,
+    /// but cannot grow the receipt authorization set with another generated D.
+    generated_derivation_ref: Option<String>,
     pub request: SatisfyRequest,
     /// The frozen K each authorized route was planned against, by
     /// DerivationRef — what a returned receipt is checked against.
@@ -601,9 +608,167 @@ impl Submission {
         file.rewind()?;
         Ok(file)
     }
+
+    /// Explicit owner authorization of the small typed generation domain. This
+    /// must happen before submitting the search; the receiver freezes it.
+    pub fn authorize_generation(
+        &mut self,
+        entrypoints: BTreeMap<String, String>,
+        timeout_ms: u64,
+    ) -> Result<()> {
+        use ato_formation::generation::{GENERATION_POLICY_SCHEMA, GenerationPolicy};
+        let base = self
+            .request
+            .authorized_derivations
+            .first()
+            .context("no base D")?;
+        let policy = GenerationPolicy {
+            schema: GENERATION_POLICY_SCHEMA.into(),
+            base_derivation_ref: base.derivation_ref.clone(),
+            entrypoints,
+            max_generations: 1,
+            timeout_ms,
+        };
+        policy.validate()?;
+        anyhow::ensure!(
+            policy
+                .entrypoints
+                .values()
+                .all(|path| self.source_entries.contains(path)),
+            "generation entrypoint absent from frozen source"
+        );
+        self.request.policy.generation = Some(policy);
+        Ok(())
+    }
+
+    /// Reconstruct an admitted generated D from our own frozen authorization,
+    /// not from the receiver's claimed authority. Receipt checks then use the
+    /// original K under that recomputed D, including after requester restart.
+    pub fn accept_generated_candidate(&mut self, status: &serde_json::Value) -> Result<()> {
+        let generation = &status["generation"];
+        if generation["outcome"] != "admitted" {
+            return Ok(());
+        }
+        let policy = self
+            .request
+            .policy
+            .generation
+            .as_ref()
+            .context("generation not authorized")?;
+        let base = self
+            .request
+            .authorized_derivations
+            .iter()
+            .find(|d| d.derivation_ref == policy.base_derivation_ref)
+            .context("generation base not authorized")?;
+        let draft = serde_json::from_value(generation["draft"].clone())?;
+        let compiled = ato_formation::generation::compile(
+            policy,
+            &base.capsule_toml,
+            &self.request.source.closure_ref,
+            &self.request.base_contract_ref,
+            &draft,
+        )?;
+        anyhow::ensure!(
+            generation["derivation_ref"] == compiled.derivation_ref
+                && generation["capsule_toml"] == compiled.capsule_toml,
+            "generated candidate differs from frozen authorization"
+        );
+        anyhow::ensure!(
+            self.generated_derivation_ref
+                .as_ref()
+                .is_none_or(|accepted| accepted == &compiled.derivation_ref),
+            "admitted generated candidate changed"
+        );
+        self.generated_derivation_ref = Some(compiled.derivation_ref.clone());
+        self.contracts
+            .insert(compiled.derivation_ref, self.request.base_contract.clone());
+        Ok(())
+    }
+}
+
+/// The provider can be invoked only after a durable one-shot Coordinator claim.
+/// A lost claim/result response is settled by status/replay or the fixed
+/// deadline; it never authorizes another model call.
+pub fn serve_generation(
+    submission: &mut Submission,
+    client: &Client,
+    satisfy_id: &str,
+    status: &serde_json::Value,
+    provider: &dyn crate::generation_provider::GenerationProvider,
+) -> Result<Option<serde_json::Value>> {
+    use crate::generation_provider::GenerationPoint;
+    submission.accept_generated_candidate(status)?;
+    let Some(raw) = status.get("generation_point").filter(|v| !v.is_null()) else {
+        return Ok(None);
+    };
+    let mut point: GenerationPoint = serde_json::from_value(raw.clone())?;
+    if point.claimed || status["status"] != "running" {
+        return Ok(None);
+    }
+    let policy = submission
+        .request
+        .policy
+        .generation
+        .as_ref()
+        .context("generation not authorized")?;
+    let expected: Vec<_> = policy.entrypoints.keys().cloned().collect();
+    let mut offered = point.entrypoint_ids.clone();
+    offered.sort();
+    anyhow::ensure!(
+        offered == expected,
+        "generation domain differs from frozen authorization"
+    );
+    let Ok(claim) = client.claim_generation(satisfy_id, point.revision) else {
+        // A competing requester may have claimed or the point closed.
+        return Ok(None);
+    };
+    point.revision = claim["revision"]
+        .as_u64()
+        .context("generation claim has no revision")?;
+    let started = std::time::Instant::now();
+    let answer = provider.generate(&point).submission(point.revision);
+    let accepted = client.submit_generation(satisfy_id, &answer).is_ok();
+    Ok(Some(serde_json::json!({
+        "answer": answer,
+        "elapsed_ms": started.elapsed().as_millis(),
+        "submission_accepted": accepted,
+    })))
 }
 
 pub const MAX_SOURCE_OBJECT_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Inventory the private, already verified extraction, before it is dropped.
+/// Unlike detector markers this includes nested files. `file_type` does not
+/// follow links, so neither linked files nor directories authorize entrypoints.
+fn source_file_inventory(root: &Path) -> Result<BTreeSet<String>> {
+    let mut files = BTreeSet::new();
+    let mut directories = vec![root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            let path = entry.path();
+            if kind.is_dir() {
+                directories.push(path);
+            } else if kind.is_file() {
+                let relative = path.strip_prefix(root)?;
+                // Policy paths use '/' on every host; do not reinterpret a
+                // literal backslash in a Unix filename as a path separator.
+                let components: Result<Vec<_>> = relative
+                    .components()
+                    .map(|part| {
+                        part.as_os_str()
+                            .to_str()
+                            .context("source path is not UTF-8")
+                    })
+                    .collect();
+                files.insert(components?.join("/"));
+            }
+        }
+    }
+    Ok(files)
+}
 
 fn file_digest(file: &mut File) -> Result<String> {
     file.rewind()?;
@@ -703,6 +868,8 @@ pub fn prepare_submission(
     let base_contract_ref = base_contract_ref.context("no authorized route")?;
     let contract_ref = effective_contract_ref(&base_contract_ref, browser_contract.as_ref());
     Ok(Submission {
+        source_entries: source_file_inventory(&frozen.root)?,
+        generated_derivation_ref: None,
         request: SatisfyRequest {
             protocol: PROTOCOL.to_owned(),
             search_id: search_id.to_owned(),
@@ -1095,6 +1262,29 @@ impl Client {
                 .json(submission),
         )?
         .context("empty decision answer")
+    }
+
+    /// Reserve the sole generation invocation before contacting a model.
+    pub fn claim_generation(&self, id: &str, revision: u64) -> Result<serde_json::Value> {
+        self.send(
+            self.http
+                .post(self.url(&format!("/satisfy/{id}/generation/claim")))
+                .json(&serde_json::json!({"revision": revision})),
+        )?
+        .context("empty generation claim")
+    }
+
+    pub fn submit_generation(
+        &self,
+        id: &str,
+        answer: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        self.send(
+            self.http
+                .post(self.url(&format!("/satisfy/{id}/generation")))
+                .json(answer),
+        )?
+        .context("empty generation answer")
     }
 
     pub fn satisfy_status(&self, id: &str) -> Result<serde_json::Value> {
@@ -1959,6 +2149,7 @@ impl Client {
                     network: "denied".into(),
                     allow_managed: false,
                     decision: None,
+                    generation: None,
                 },
                 budget,
             },
