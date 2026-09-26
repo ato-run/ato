@@ -273,17 +273,21 @@ impl JevDecisionProvider {
         })
     }
 }
-impl DecisionProvider for JevDecisionProvider {
-    fn decide(&self, point: &DecisionPoint) -> ProviderAnswer {
-        let request = decision_request(&self.model, point);
-        let Ok(body) = serde_json::to_vec(&request) else {
-            return ProviderAnswer::Fallback { reason: "invalid" };
-        };
+impl JevDecisionProvider {
+    pub(crate) fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// Shared bounded, no-redirect transport. Callers must validate the typed
+    /// answer before returning anything to a Coordinator or execution path.
+    pub(crate) fn evaluate(
+        &self,
+        request: &serde_json::Value,
+    ) -> Result<serde_json::Value, &'static str> {
+        let body = serde_json::to_vec(request).map_err(|_| "invalid")?;
         if body.len() > MAX_REQUEST_BYTES {
-            return ProviderAnswer::Fallback { reason: "invalid" };
+            return Err("invalid");
         }
-        // Never propagate the provider's bodies or headers: nothing of the
-        // exchange but the validated answer leaves this function.
         let response = match self
             .http
             .post(format!("{}/v1/systemone", self.base_url))
@@ -293,17 +297,9 @@ impl DecisionProvider for JevDecisionProvider {
             .send()
         {
             Ok(r) if r.status().is_success() => r,
-            Ok(_) => {
-                return ProviderAnswer::Fallback {
-                    reason: "provider_error",
-                };
-            }
-            Err(e) if e.is_timeout() => return ProviderAnswer::Fallback { reason: "timeout" },
-            Err(_) => {
-                return ProviderAnswer::Fallback {
-                    reason: "provider_error",
-                };
-            }
+            Ok(_) => return Err("provider_error"),
+            Err(e) if e.is_timeout() => return Err("timeout"),
+            Err(_) => return Err("provider_error"),
         };
         use std::io::Read as _;
         let mut bytes = Vec::new();
@@ -313,11 +309,16 @@ impl DecisionProvider for JevDecisionProvider {
             .is_err()
             || bytes.len() as u64 > MAX_RESPONSE_BYTES
         {
-            return ProviderAnswer::Fallback { reason: "invalid" };
+            return Err("invalid");
         }
-        match serde_json::from_slice(&bytes) {
+        serde_json::from_slice(&bytes).map_err(|_| "invalid")
+    }
+}
+impl DecisionProvider for JevDecisionProvider {
+    fn decide(&self, point: &DecisionPoint) -> ProviderAnswer {
+        match self.evaluate(&decision_request(&self.model, point)) {
             Ok(raw) => validate_response(point, &raw),
-            Err(_) => ProviderAnswer::Fallback { reason: "invalid" },
+            Err(reason) => ProviderAnswer::Fallback { reason },
         }
     }
 }
