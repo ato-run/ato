@@ -111,3 +111,65 @@ fn shared_retained_fixture_has_canonical_bytes() {
     let descriptor = RetainedCandidateV1::parse(bytes, &content_ref(bytes)).unwrap();
     assert_eq!(descriptor.canonical_bytes().unwrap(), bytes);
 }
+
+/// Stage 5a: the same bounded authority opens and judges decision points.
+#[test]
+fn search_authority_offers_and_judges_a_finite_decision() {
+    let mut state: Value = serde_json::from_slice(
+        &std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../lib/formation/tests/fixtures/search-state/newly-created.json"
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    state["frozen"]["policy"]["decision"] =
+        serde_json::json!({"provider":"requester","max_decisions":1,"decision_timeout_ms":5000});
+    let placements: Vec<Value> = state["frozen"]["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .map(|(n, d)| serde_json::json!({"candidate_id":format!("candidate-{n}"),"derivation_ref":d["derivation_ref"],"runtime_id":"runtime","environment_id":"native","admissible":true,"transfer_bytes":64}))
+        .collect();
+    let decide = |state: &Value, now: u64| {
+        ato_receipt_authority::evaluate_search(
+            &serde_json::to_vec(&serde_json::json!({"operation":"decide_search","state":state,"placements":placements,"now_ms":now})).unwrap(),
+        )
+    };
+    let opened = decide(&state, 10);
+    assert_eq!(opened["action"]["kind"], "open_decision", "{opened}");
+    let choices = opened["action"]["choices"].as_array().unwrap().clone();
+    state["budget"]["decisions_used"] = serde_json::json!(1);
+    state["decisions"] = serde_json::json!([{
+        "seq": 0, "opened_at_ms": 10, "default_id": opened["action"]["default_id"],
+        "choices": choices.iter().map(|c| c["choice_id"].clone()).collect::<Vec<_>>(),
+        "outcome": null, "chosen_id": null
+    }]);
+    let judge_at = |state: &Value, submission: Value, now: u64| {
+        ato_receipt_authority::evaluate_search(
+            &serde_json::to_vec(&serde_json::json!({"operation":"validate_decision","state":state,"submission":submission,"now_ms":now})).unwrap(),
+        )
+    };
+    let judge = |state: &Value, submission: Value| judge_at(state, submission, 11);
+    let verdict = judge(
+        &state,
+        serde_json::json!({"seq":0,"choice_id":choices[1]["choice_id"],"evidence":{"model":"jev-1.13.0"}}),
+    );
+    assert_eq!(verdict["status"], "decision_verdict", "{verdict}");
+    assert_eq!(verdict["verdict"]["outcome"], "chosen");
+    let outside = judge(
+        &state,
+        serde_json::json!({"seq":0,"choice_id":"c0000000000000000"}),
+    );
+    assert_eq!(outside["verdict"]["outcome"], "out_of_set");
+    let refused = judge(&state, serde_json::json!({"seq":3,"fallback":"invalid"}));
+    assert_eq!(refused["status"], "decision_refused");
+    assert_eq!(decide(&state, 5_010)["action"]["kind"], "record_fallback");
+    let late = judge_at(
+        &state,
+        serde_json::json!({"seq":0,"choice_id":choices[1]["choice_id"]}),
+        5_010,
+    );
+    assert_eq!(late["code"], "decision_expired", "{late}");
+}

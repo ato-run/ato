@@ -26,7 +26,7 @@ This is an implementation plan; pending rows are not shipped functionality.
 | 3c | Search budget reservations/accounting, then streaming content-addressed source transport | 3c-a merged: ato #1400 `aaaaaa15` / API #689 `88cb8aae`. 3c-b merged: API #691 `e8b0056b` → ato #1403 `0df51b22`; Linux integration, PAX boundary/resource-limit hardening and separate 64/128 MiB rerun validated; not deployed |
 | 3d | Retained objects → validated closure/tree → new Run → same K → new receipt without source/scratch | Implemented, locally/integration verified: ato #1407 + API #692 (migration 0299, local only); actual Coordinator replay Static/Python/Node after source deletion; unmerged, undeployed |
 | 4 | Durable deterministic SearchState; D1 failure→evidence→authorized D2; restart preserves search/attempt identity | Implemented, locally/integration verified: ato #1408 + API #693 (migration 0300, local only); actual Coordinator restart acceptance cases 1–7, restart points 1–9; unmerged, undeployed |
-| 5a | Optional finite AllowedChoices DecisionProvider; Jev failure uses deterministic choice under same budget | Pending |
+| 5a | Optional finite AllowedChoices DecisionProvider (inspection / known candidate / probe / stop); Jev failure uses deterministic choice under same budget; complete when safety holds with and without Jev and attempts, elapsed time and provider usage/cost are compared | 5a-a (finite choice of the next known-D attempt) implemented, ADR-035: ato #1409 + API #694 (migration 0301, local only); unmerged, undeployed. Not implemented: inspection, probe and stop choices. Completion gate open: with/without-Jev comparison of attempts, elapsed time and provider usage/cost, and a live Jev call |
 | 5b | Typed new-D generation first, then evidence-based D improvement; reject privilege/K/UNKNOWN escape | Pending |
 | 6 | Measure 20, expand to 50 then 100; known-D revalidation on new authorized Runtime/Adapter/D | Pending |
 
@@ -34,9 +34,9 @@ This is an implementation plan; pending rows are not shipped functionality.
 met on the stack ato #1406 → #1407 → #1408 and ato-api #692 → #693 — implemented
 and locally/integration verified with an actual Coordinator restart acceptance
 and a final-stack regression ([foundation ledger](../../ops/formation-foundation-track-2026-09-25.md),
-[P0 remeasure](../../ops/formation-p0-remeasure-2026-09-26.md)). Not merged, not
-deployed; migrations 0299/0300 are local only. The next stage is 5a (finite
-AllowedChoices DecisionProvider / Jev); it has not been started.
+[P0 remeasure](../../ops/formation-p0-remeasure-2026-09-26.md)). Merged 2026-09-26
+(ato `a46fd62d`, ato-api `18fe2c75`); not deployed, and migrations 0299/0300 are
+not applied to any remote database.
 
 The sequential track's [integration record](../../ops/formation-integrated-2026-09-25.md)
 separates implementation, integration checks, merge and deployment. 64/128 MiB

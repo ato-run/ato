@@ -28,6 +28,7 @@ pub mod sandbox_exec {
 }
 
 pub mod api;
+pub mod decision_provider;
 pub mod job;
 pub mod local;
 pub mod pack;

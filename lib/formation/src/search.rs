@@ -4,6 +4,7 @@
 use crate::{
     authoring::BoundContract,
     browser::{BrowserContractV0, effective_contract_ref},
+    decision::{Choice, DecisionOutcome, DecisionPolicy, DecisionRecord},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -29,6 +30,10 @@ pub struct SearchPolicy {
     pub allow_managed: bool,
     pub bindings: BTreeMap<String, String>,
     pub budget: BudgetLimits,
+    /// Stage 5a: absent means no provider, and the frozen bytes of a search
+    /// without one are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<DecisionPolicy>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -95,6 +100,13 @@ pub struct BudgetCounters {
     pub expanded_reserved: u64,
     pub stored_used: u64,
     pub stored_reserved: u64,
+    /// Decision points opened for a provider, whatever their outcome: the
+    /// provider decision budget (always equal to the recorded points).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub decisions_used: u64,
+}
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -109,6 +121,8 @@ pub struct SearchStateV1 {
     pub budget: BudgetCounters,
     pub attempts: Vec<SearchAttempt>,
     pub owner_stopped: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<DecisionRecord>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -201,6 +215,21 @@ pub enum SearchAction {
     AcceptPendingRoute {
         attempt_id: String,
     },
+    /// Stage 5a: offer `choices` to the requester's provider; `default_id` is
+    /// what the search takes without a usable answer.
+    OpenDecision {
+        seq: u64,
+        default_id: String,
+        choices: Vec<Choice>,
+    },
+    WaitForDecision {
+        seq: u64,
+        expires_at_ms: u64,
+    },
+    RecordFallback {
+        seq: u64,
+        reason: DecisionOutcome,
+    },
     Finish {
         reason: Termination,
     },
@@ -239,6 +268,21 @@ pub enum SearchEvent {
     },
     BudgetExhausted,
     OwnerStopped,
+    DecisionOpened {
+        seq: u64,
+    },
+    DecisionMade {
+        seq: u64,
+        chosen_id: String,
+    },
+    DecisionFallback {
+        seq: u64,
+        reason: DecisionOutcome,
+    },
+    /// The recorded choice was no longer issuable; the default was taken.
+    DecisionUnavailableAtIssue {
+        seq: u64,
+    },
 }
 #[derive(Debug, thiserror::Error)]
 #[error("invalid search state: {0}")]
@@ -254,6 +298,9 @@ impl FrozenSearchV1 {
                 != self.contract_ref
         {
             return Err(SearchError("frozen_contract_mismatch"));
+        }
+        if let Some(policy) = &self.policy.decision {
+            policy.validate()?;
         }
         if self.candidates.is_empty() || self.candidates.len() > 64 {
             return Err(SearchError("candidate_count"));
@@ -293,25 +340,35 @@ impl SearchStateV1 {
                 return Err(SearchError("attempt_identity_or_state"));
             }
         }
-        Ok(())
+        self.validate_decisions()
     }
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, SearchError> {
         self.validate()?;
         serde_jcs::to_vec(self).map_err(|_| SearchError("canonical"))
     }
 }
-fn safe(effects: &str) -> bool {
+pub(crate) fn safe(effects: &str) -> bool {
     matches!(effects, "pure" | "idempotent" | "record-substitutable")
 }
 fn finish(reason: Termination) -> SearchAction {
     SearchAction::Finish { reason }
 }
-fn available(max: u64, used: u64, reserved: u64) -> u64 {
+pub(crate) fn available(max: u64, used: u64, reserved: u64) -> u64 {
     max.saturating_sub(used.saturating_add(reserved))
 }
 /// A deterministic decision over a revisioned snapshot. Its action is a proposal:
 /// storage must CAS against this revision and recheck assignment/budget fences.
+/// With a frozen decision policy, an issue may be replaced by the provider's
+/// recorded choice among the same finite set (`decision::apply`).
 pub fn decide_next(
+    s: &SearchStateV1,
+    placements: &[Placement],
+    now_ms: u64,
+) -> Result<SearchAction, SearchError> {
+    let default = default_next(s, placements, now_ms)?;
+    Ok(crate::decision::apply(s, placements, now_ms, default))
+}
+fn default_next(
     s: &SearchStateV1,
     placements: &[Placement],
     now_ms: u64,
@@ -468,6 +525,47 @@ pub fn decide_next(
 }
 /// Typed projection of durable facts for auditing; not a second event store.
 pub fn events(s: &SearchStateV1, action: &SearchAction) -> Vec<SearchEvent> {
+    let mut events = attempt_events(s, action);
+    for d in &s.decisions {
+        events.push(SearchEvent::DecisionOpened { seq: d.seq });
+        match (d.outcome, &d.chosen_id) {
+            (Some(DecisionOutcome::Chosen), Some(id)) => {
+                events.push(SearchEvent::DecisionMade {
+                    seq: d.seq,
+                    chosen_id: id.clone(),
+                });
+                let seq_now = s.attempts.len() as u64;
+                let issued_choice = match action {
+                    SearchAction::IssueAttempt {
+                        derivation_ref,
+                        runtime_id,
+                        environment_id,
+                        ..
+                    }
+                    | SearchAction::ReplayRetained {
+                        derivation_ref,
+                        runtime_id,
+                        environment_id,
+                        ..
+                    } => Some(crate::decision::choice_id(
+                        seq_now,
+                        derivation_ref,
+                        runtime_id,
+                        environment_id,
+                    )),
+                    _ => None,
+                };
+                if d.seq == seq_now && issued_choice.is_some_and(|c| &c != id) {
+                    events.push(SearchEvent::DecisionUnavailableAtIssue { seq: d.seq });
+                }
+            }
+            (Some(reason), _) => events.push(SearchEvent::DecisionFallback { seq: d.seq, reason }),
+            (None, _) => {}
+        }
+    }
+    events
+}
+fn attempt_events(s: &SearchStateV1, action: &SearchAction) -> Vec<SearchEvent> {
     let mut events = vec![SearchEvent::SearchCreated];
     for d in &s.frozen.candidates {
         events.push(if safe(&d.effects) {

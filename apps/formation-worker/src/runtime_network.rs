@@ -192,6 +192,10 @@ pub struct SatisfyPolicy {
     pub network: String,
     /// May `ato_managed` Runtimes be used for this request?
     pub allow_managed: bool,
+    /// Stage 5a: whether this requester's DecisionProvider may choose among
+    /// offered attempts. Frozen with the search; absent means no provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<ato_formation::decision::DecisionPolicy>,
 }
 
 /// The budget of the whole search the request belongs to (ADR-031). The
@@ -1068,6 +1072,20 @@ impl Client {
             .context("empty satisfy answer")
     }
 
+    /// Answer an open decision point of `id` (Stage 5a).
+    pub fn submit_decision(
+        &self,
+        id: &str,
+        submission: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        self.send(
+            self.http
+                .post(self.url(&format!("/satisfy/{id}/decisions")))
+                .json(submission),
+        )?
+        .context("empty decision answer")
+    }
+
     pub fn satisfy_status(&self, id: &str) -> Result<serde_json::Value> {
         self.send(self.http.get(self.url(&format!("/satisfy/{id}"))))?
             .context("empty status answer")
@@ -1929,6 +1947,7 @@ impl Client {
                 policy: SatisfyPolicy {
                     network: "denied".into(),
                     allow_managed: false,
+                    decision: None,
                 },
                 budget,
             },
