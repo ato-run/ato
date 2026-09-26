@@ -102,7 +102,7 @@ triggers that hold exactly one insert/claim, a read-only Runtime attempt journal
 | 3 retained replay without sources, route usable after restart | PASS | source attempt `01M3C67G2DTD036KX44GTR8S7M` retained `sha256:11037562…`; 6 source objects deleted; restart; replays `01M3C67MPVR84XTADQ2A6XW3X1` and `01M3C67RPSEZGZ7S7RKH050DAK` (fresh attempts, same K/D, stored 0), each followed by a restart after which the route is still listed |
 | 4 budget exhaustion | PASS | `max_attempts=1`, D1 fail, D2 untried → `exhausted` / `budget_exhausted` |
 | 5 every D fails | PASS | restart directly after claim (result delivered to the restarted Coordinator) → both D `fail` → `candidates_exhausted` |
-| 6 effect uncertainty | PASS | Runtime attested `non-repeatable`, refused `effect_policy`, record `not_started` → `effect_unknown`; D2 never issued |
+| 6 effect uncertainty | PASS | Runtime attested `non-repeatable`, refused `effect_policy`, record `not_started` → recorded then as `effect_unknown`; D2 never issued. After review this is `effect_policy_refused` (re-run as H4 below) |
 | 7 concurrent advance | PASS | 3 Runtime workers + 8 parallel pollers: 2 attempts (one per D), `attempts_used=2`, `attempts_reserved=0`, 1 route |
 
 Restart points: 1 creation (case 1), 2 reserved-before-claim (1), 3 after claim
@@ -160,6 +160,27 @@ lowering (multi-service routes), 2 D authoring (pnpm pin), 1 source transport
 (380 MiB); no K/receipt/UNKNOWN/publication defect. See
 [P0 remeasure](formation-p0-remeasure-2026-09-26.md).
 
+## Stage 4 review hardening (2026-09-26)
+
+Review found the Stage 4 code issuing on a stale placement snapshot, feeding
+receipt bodies into the bounded decision, answering a resent satisfied search
+with an empty satisfied request, conflating a proven-not-started policy refusal
+with effect uncertainty, and a CAS trigger that was NULL-open (the 0297 budget
+trigger already refused that insert). Fixed in ato `8c5eb001` and ato-api
+`709a1109`; the D-order wait is kept and recorded as a decision in ADR-034.
+
+Actual acceptance, same Coordinator harness (Miniflare restarted as a process,
+real Rust Runtime and requester), own owner `hardening_acceptance`
+(`scripts/acceptance/formation-stage4-hardening.py`). The 0300 changes were
+applied to the continued local D1 as a delta after a state backup:
+
+| case | result | evidence |
+|---|---|---|
+| H1 Runtime drained inside the ticket INSERT (after the decision and the Coordinator re-check) | PASS | request `01M3DRBSMQKS7CHV1C6TA9CVJ9`: 0 attempts, `attempts_reserved`/`transfer_reserved` 0, candidate `runtime_drained`; undrained → one ticket `01M3DRC4Y468VQMKCK0JEB82QW` verified, `attempts_used` 1 |
+| H2 D1 receipt history 2.1 MB (> 1 MiB authority input) + restart before D2 | PASS | D1 `01M3DRC718080NCBRF7E41YEWK` `http_status_mismatch`, `result_json` 2,100,609 B; D2 `01M3DRCBCNSNAQQPQNDT7HM6EY` `fully_satisfied`, requester accepted; decision state has no receipts |
+| H3 resend of H2's satisfied first-pass search | PASS | 200 `existing`, same satisfy_id `01M3DRC6YDCJZ4ET5PEC4Q4CMB`; requests/attempts/sources/budget/revision unchanged; requester accepted route of `01M3DRCBCNSNAQQPQNDT7HM6EY` |
+| H4 non-repeatable attested, refused not_started (CASE 6 re-run) | PASS | attempt `01M3DRFPDGE6KSVBM0GC498GF2` `effect_policy`/`not_started` → `effect_policy_refused`, D2 never issued |
+
 ## Stage 4 completion gate
 
 | # | gate | evidence |
@@ -172,7 +193,7 @@ lowering (multi-service routes), 2 D authoring (pnpm pin), 1 source transport
 | 6 | retained object fresh replay | 3d; case 3; final regression Static/40 MiB/Python/Node after source deletion |
 | 7 | fresh receipt authority | every PASS accepted via `accept_verified_route` (Coordinator WASM + requester) with a new attempt and receipt |
 | 8 | D1 fail → restart → D2 PASS | case 1 |
-| 9 | termination reasons separated | cases 1/4/5/6 (verified, budget_exhausted, candidates_exhausted, effect_unknown); owner_stopped from owner stop |
+| 9 | termination reasons separated | cases 1/4/5 (verified, budget_exhausted, candidates_exhausted), H4 (effect_policy_refused), case 2 held UNKNOWN / unit tests (effect_unknown); owner_stopped from owner stop |
 | 10 | Coordinator crash/restart consistency | restart points 1–9 (cases 1/2/3/5 + Coordinator test for 7-before) |
 | 11 | no duplicated executor/K evaluator | K only via `verify_observed_candidate`; retained replay shares `CandidateLauncher`/`run_attempt`; TypeScript fallback rules removed |
 | 12 | no AI decision in the deterministic core | `decide_next` is pure Rust over rows; no LLM/Jev/free-text patch |
