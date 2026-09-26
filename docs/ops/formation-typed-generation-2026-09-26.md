@@ -15,8 +15,9 @@ No live retry or prompt adjustment was used to select a successful result.
   `a6cc5693be4bb4025f42f47254613e1df850b3c5`.
 - Receiver [API #696](https://github.com/ato-run/ato-api/pull/696):
   `57cb3ed67fc1a88d0f2fcff572539b7adccdcb94`.
-- Requester/provider, harness, ADR-037 and this ledger are a separate stacked
-  follow-up to the core. Its live target remains unmet.
+- Requester/provider [ato #1413](https://github.com/ato-run/ato/pull/1413) is a
+  **Draft** stacked on the core, including harness, ADR-037 and this ledger.
+  Its live target remains unmet.
 - [#1402](https://github.com/ato-run/ato/pull/1402) remains open at
   `2c1c6924286782f090783f1bd47a68e2e9b979ba`. After #1411, its Roadmap equals
   main (empty file diff). Do not merge it as part of 5a/5b; after future 5b
