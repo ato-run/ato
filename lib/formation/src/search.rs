@@ -6,7 +6,6 @@ use crate::{
     browser::{BrowserContractV0, effective_contract_ref},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 pub const SEARCH_SCHEMA: &str = "ato.formation-search-state/1";
 
@@ -125,7 +124,6 @@ pub struct SearchAttempt {
     pub failure_code: Option<String>,
     /// Only the existing physical-cessation-authorized durable resolution.
     pub unknown_resolved: bool,
-    pub receipts: Vec<Value>,
     pub retained_ref: Option<String>,
     pub materialization_ref: Option<String>,
     /// Set only after accept_verified_route has accepted this exact attempt.
@@ -168,7 +166,11 @@ pub enum Termination {
     Verified,
     CandidatesExhausted,
     BudgetExhausted,
+    /// An effect may have happened and its outcome is not known.
     EffectUnknown,
+    /// The Runtime refused a D whose attested effect class may not run
+    /// unattended, and proved it did not start: nothing happened.
+    EffectPolicyRefused,
     OwnerStopped,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -369,6 +371,13 @@ pub fn decide_next(
             } else {
                 Termination::BudgetExhausted
             }));
+        }
+        // Policy refusal proven before start is not effect uncertainty.
+        if !last.unknown_resolved
+            && last.effects.as_deref().is_some_and(|e| !safe(e))
+            && (!last.claimed || last.record == Some(ExecutionRecord::NotStarted))
+        {
+            return Ok(finish(Termination::EffectPolicyRefused));
         }
         let can_continue = last.unknown_resolved
             || ((last.effects.as_deref().is_none_or(safe))
