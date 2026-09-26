@@ -1,58 +1,38 @@
-//! One candidate Derivation, bound and projected onto the execution
-//! machinery: the plan an attempt executes, the staged workspace it builds
-//! in, and what the executed candidate is observed as.
-
+//! Semantic binding and physical lowering are separate authority boundaries.
+use anyhow::{Context, Result};
+use ato_formation::authoring::{
+    AuthoringDraft, BindingContext, BoundContract, BoundDerivation, HTTP_CONTRACT_VERIFIER, bind,
+};
+use ato_formation::detect::DetectorEvidence;
+use ato_formation::execution::{ExecutionPlan, InputFacts, RuntimeBinding, lower_execution};
+use ato_formation::failure::{FailureStage, FormationFailure};
+use ato_formation::source::SourceClosureRef;
+use ato_formation::verify::CandidateObservation;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use anyhow::{Context, Result};
-use ato_formation::authoring::{
-    AuthoringDraft, AuthoringProvenance, BindingContext, BoundContract, BoundDerivation, bind,
-};
-use ato_formation::detect::{DetectorEvidence, FieldOrigins};
-use ato_formation::failure::{FailureStage, FormationFailure};
-use ato_formation::intent::{
-    AuthoredOverrides, EffectiveBuildPlanV1, ProgramIntentV1, compile_build_plan, compile_intent,
-};
-use ato_formation::projection::{DerivationProjection, project};
-use ato_formation::source::SourceClosureRef;
-use ato_formation::verify::CandidateObservation;
-
-/// One candidate Derivation, bound and projected onto this worker's
-/// execution machinery — everything an attempt needs to run.
-pub struct PlannedCandidate {
+pub struct BoundCandidate {
     pub contract: BoundContract,
     pub derivation: BoundDerivation,
     pub contract_ref: String,
     pub derivation_ref: String,
-    pub projected: DerivationProjection,
-    pub intent: ProgramIntentV1,
-    pub plan: EffectiveBuildPlanV1,
-    pub intent_digest: String,
-    pub plan_digest: String,
 }
 
-/// Bind one authoring draft against the verified closure, then project and
-/// compile it into an intent and a build plan.
-///
-/// This is the shared middle of every Formation attempt: the hosted job calls
-/// it once, a local Formation calls it per candidate. Nothing here executes —
-/// it turns a route somebody named into a plan a Runtime can be asked to run.
-pub fn plan_candidate(
+pub struct PlannedCandidate {
+    pub bound: BoundCandidate,
+    pub plan: ExecutionPlan,
+}
+impl std::ops::Deref for PlannedCandidate {
+    type Target = BoundCandidate;
+    fn deref(&self) -> &Self::Target {
+        &self.bound
+    }
+}
+
+pub fn bind_candidate(
     draft: &AuthoringDraft,
     closure_ref: &SourceClosureRef,
-    evidence: &DetectorEvidence,
-    authored_overrides: BTreeMap<String, String>,
-    guest_root: &str,
-    triple: &str,
-) -> Result<PlannedCandidate> {
-    // ── bind: drafts become addressable ─────────────────────────────────────
-    //
-    // A draft names a workspace by path and may ask for an observation to be
-    // captured rather than stated. Binding resolves both against the closure
-    // this build has already verified, and only then is there something to
-    // hash. The Contract's digest is the Capsule's identity; the Derivation's
-    // is this route's, separately.
+) -> Result<BoundCandidate> {
     let (contract, derivation) = bind(
         draft,
         &BindingContext {
@@ -64,66 +44,46 @@ pub fn plan_candidate(
     let derivation_ref = derivation
         .derivation_ref()
         .map_err(FormationFailure::from)?;
-
-    // ── project onto this worker's execution machinery ──────────────────────
-    //
-    // `ProgramIntent` and `EffectiveBuildPlan` are below this line: an
-    // execution plan for running THIS Derivation on THIS worker, and never an
-    // input to either digest above.
-    let projected = project(&derivation, &contract).map_err(FormationFailure::from)?;
-
-    let mut authored = authored_overrides;
-    match draft.provenance {
-        // An author who wrote a route is authoritative over it. A job override
-        // silently changing an authored argv is the same sin as a Preset
-        // fallback, arriving through a different door.
-        AuthoringProvenance::Authored => {
-            for (key, value) in projected.overrides.0.clone() {
-                authored.insert(key, value);
-            }
-        }
-        // Nobody stated an intent, so an explicit override from the caller is
-        // the most specific thing anybody said.
-        AuthoringProvenance::PresetSynthesized { .. } => {
-            for (key, value) in projected.overrides.0.clone() {
-                authored.entry(key).or_insert(value);
-            }
-        }
-    }
-    let overrides = AuthoredOverrides(authored);
-
-    let mut origins = FieldOrigins::new();
-    let intent = compile_intent(evidence, &overrides, guest_root, &mut origins)
-        .map_err(FormationFailure::from)?;
-    // A plan that cannot be compiled is a projection problem, not the author's
-    // grammar: it is this worker failing to turn a valid intent into steps.
-    let mut plan = compile_build_plan(&intent, guest_root, triple).map_err(|error| {
-        FormationFailure::new(error.code(), FailureStage::Projection, error.to_string())
-    })?;
-    // The author's `exec` steps, in the order written, after the platform's
-    // prerequisites (a provisioned interpreter). The projection already kept
-    // any inferred application build from being planned beside them.
-    plan.steps.extend(projected.build_steps.iter().cloned());
-    // Digest failures are ours, not the author's: nothing they could change
-    // would fix one, so they stay anonymous and reach the operator log only.
-    let intent_digest = intent
-        .canonical_digest()
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
-    let plan_digest = plan
-        .canonical_digest()
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
-
-    Ok(PlannedCandidate {
+    Ok(BoundCandidate {
         contract,
         derivation,
         contract_ref,
         derivation_ref,
-        projected,
-        intent,
-        plan,
-        intent_digest,
-        plan_digest,
     })
+}
+
+pub fn plan_candidate(
+    draft: &AuthoringDraft,
+    closure_ref: &SourceClosureRef,
+    evidence: &DetectorEvidence,
+    authored_overrides: BTreeMap<String, String>,
+    guest_root: &str,
+    triple: &str,
+) -> Result<PlannedCandidate> {
+    // Frontends must express semantic choices in their draft. A post-bind
+    // override must never execute a different D under the same address.
+    if !authored_overrides.is_empty() {
+        return Err(FormationFailure::new(
+            "authoring_overrides_require_draft",
+            FailureStage::Authoring,
+            "authoring overrides must be resolved into AuthoringDraft before binding".to_owned(),
+        )
+        .into());
+    }
+    let facts = InputFacts::capture(evidence);
+    let bound = bind_candidate(draft, closure_ref)?;
+    let plan = lower_execution(
+        &bound.derivation,
+        facts,
+        RuntimeBinding {
+            workspace_guest_root: guest_root,
+            target_triple: triple,
+        },
+    )
+    .map_err(|error| {
+        FormationFailure::new(error.code(), FailureStage::Projection, error.to_string())
+    })?;
+    Ok(PlannedCandidate { bound, plan })
 }
 
 /// Copy the source into the workspace the build writes to.
@@ -186,7 +146,7 @@ pub fn digest(bytes: &[u8]) -> String {
 /// very same Contract, and to nothing else.
 pub fn observe_candidate(
     derivation: &BoundDerivation,
-    projected: &ato_formation::projection::DerivationProjection,
+    contract: &BoundContract,
     static_bundle: Option<&crate::static_lane::StaticFormationOutput>,
 ) -> CandidateObservation {
     let mut statically_served_paths = BTreeSet::new();
@@ -211,10 +171,15 @@ pub fn observe_candidate(
             .map(|port| port.id.clone())
             .collect(),
         statically_served_paths,
-        runtime_readiness: projected
-            .readiness
-            .as_ref()
-            .map(|readiness| (readiness.port_id.clone(), readiness.path.clone())),
+        runtime_readiness: contract
+            .requirements
+            .iter()
+            .find(|r| r.verifier == HTTP_CONTRACT_VERIFIER)
+            .and_then(|r| {
+                r.port
+                    .as_ref()
+                    .map(|port| (port.clone(), r.path.clone().unwrap_or_else(|| "/".into())))
+            }),
         instance_snapshot_ref: None,
     }
 }
@@ -229,12 +194,12 @@ impl PlannedCandidate {
             contract_ref: &self.contract_ref,
             derivation: &self.derivation,
             derivation_ref: &self.derivation_ref,
-            shape: if self.intent.lane.is_process() {
+            shape: if self.plan.lane.is_process() {
                 crate::spec::CandidateShape::Process
             } else {
                 crate::spec::CandidateShape::StaticWeb
             },
-            input_refs: observe_candidate(&self.derivation, &self.projected, None).input_refs,
+            input_refs: observe_candidate(&self.derivation, &self.contract, None).input_refs,
             instance_snapshot_ref: None,
         }
     }

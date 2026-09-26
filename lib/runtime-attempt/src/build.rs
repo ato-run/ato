@@ -17,7 +17,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail, ensure};
 #[cfg(unix)]
 use ato_formation::failure::{FailureStage, FormationFailure};
-use ato_formation::intent::{BuildStepV1, EffectiveBuildPlanV1};
+use ato_formation::intent::BuildStepV1;
+use ato_formation::{authoring::BoundDerivation, execution::ExecutionPlan};
 
 use crate::build_sandbox::{
     BuildSandbox, GUEST_WORKSPACE_ROOT, NetworkPolicy, sandboxed_build_step_command,
@@ -96,7 +97,8 @@ fn redact_urls_in(text: &str) -> String {
 
 /// Execute a plan's steps, in order, each under isolation.
 pub fn run_build(
-    plan: &EffectiveBuildPlanV1,
+    plan: &ExecutionPlan,
+    derivation: &BoundDerivation,
     attempt: BuildAttempt,
     sandbox: &BuildSandbox<'_>,
 ) -> Result<BuildOutcome> {
@@ -121,14 +123,14 @@ pub fn run_build(
             && !path_is_within(policy_path, source_root)?,
         "the build sandbox policy must live outside every path the build can reach"
     );
+    let steps = plan.steps(derivation)?;
     let mut diagnostics = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(limits.wall_clock_seconds);
 
     // A step that needs more network than the policy allows is refused before
     // ANY step runs: a build that fails at its third step has already spent
     // the first two, and left their output behind.
-    if let Some(step) = plan
-        .steps
+    if let Some(step) = steps
         .iter()
         .find(|step| step.needs_network && network == NetworkPolicy::Denied)
     {
@@ -138,7 +140,7 @@ pub fn run_build(
         );
     }
 
-    for step in &plan.steps {
+    for step in &steps {
         // A step that declared no network must not get one, even when the job's
         // policy would have allowed it. The narrower of the two wins.
         let step_network = if step.needs_network {
@@ -646,18 +648,18 @@ pub fn may_publish(attempt: &BuildAttempt, current_fence: u64) -> bool {
 }
 
 /// The workspace subtree that becomes the materialization.
-pub fn output_root(outcome: &BuildOutcome, plan: &EffectiveBuildPlanV1) -> Result<PathBuf> {
-    if plan.output_root.is_empty() {
+pub fn output_root(outcome: &BuildOutcome, declared: &str) -> Result<PathBuf> {
+    if declared.is_empty() {
         return Ok(outcome.workspace_root.clone());
     }
-    let candidate = outcome.workspace_root.join(&plan.output_root);
+    let candidate = outcome.workspace_root.join(declared);
     if !candidate.is_dir() {
         // The plan DECLARED this directory. Its absence is a disagreement
         // between declaration and execution, which is a build failure — never a
         // reason to fall back to the whole workspace.
         bail!(
             "the build plan declares output root {:?}, which the build did not produce",
-            plan.output_root
+            declared
         );
     }
     let root = outcome

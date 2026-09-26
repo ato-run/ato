@@ -13,7 +13,9 @@ use std::collections::BTreeMap;
 use ato_formation::capsule_toml::parse_capsule_toml;
 use ato_formation::detect::detect;
 use ato_formation::source::{RESOLVER_CONTRACT_V1, SourceClosureRef};
-use ato_formation_worker::job::plan_candidate;
+#[path = "support/legacy_plan.rs"]
+mod legacy_plan;
+use legacy_plan::plan_candidate;
 
 fn tree(files: &[(&str, &str)]) -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");

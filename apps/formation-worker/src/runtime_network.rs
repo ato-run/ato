@@ -492,13 +492,13 @@ pub fn derivation_requirements(planned: &PlannedCandidate) -> (Vec<Requirement>,
             ),
         });
     }
-    if planned.intent.lane.is_process() {
+    if planned.plan.lane.is_process() {
         requirements.push(Requirement {
             fact: "runtime.process".to_owned(),
             one_of: Some(vec!["true".to_owned()]),
         });
     }
-    if !planned.plan.steps.is_empty() {
+    if !planned.plan.actions.is_empty() {
         requirements.push(Requirement {
             fact: "containment".to_owned(),
             one_of: Some(vec!["bwrap+landlock".to_owned()]),
@@ -509,14 +509,13 @@ pub fn derivation_requirements(planned: &PlannedCandidate) -> (Vec<Requirement>,
         });
     }
     let mut provisions: Vec<String> = planned
-        .derivation
-        .runtimes
+        .plan
+        .toolchains
         .iter()
-        .chain(planned.intent.runtime.iter())
         .map(|(name, version)| format!("toolchain.{name}.{version}"))
         .chain(
             planned
-                .intent
+                .plan
                 .package_manager
                 .iter()
                 .map(|manager| format!("toolchain.{}.{}", manager.name, manager.version)),
