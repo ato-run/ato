@@ -90,6 +90,22 @@ fn criterion(label: &str) -> String {
     format!("Attempt the option under `options[\"{label}\"]` next.")
 }
 
+/// Only the Runtime facts the choice's own D requires, whatever the view
+/// carried: what reaches an external provider never depends on how Runtime
+/// facts are named (a future `runtime.hostname` stays here).
+pub fn requirement_scoped_facts(choice: &OfferedChoice) -> BTreeMap<String, String> {
+    let required: std::collections::BTreeSet<&str> = choice.derivation["requirements"]
+        .as_array()
+        .map(|r| r.iter().filter_map(|r| r["fact"].as_str()).collect())
+        .unwrap_or_default();
+    choice
+        .runtime_facts
+        .iter()
+        .filter(|(k, _)| required.contains(k.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
 /// The request for one decision. Exposed so tests can check that offered data
 /// never reaches the question text.
 pub fn decision_request(model: &str, point: &DecisionPoint) -> serde_json::Value {
@@ -104,7 +120,7 @@ pub fn decision_request(model: &str, point: &DecisionPoint) -> serde_json::Value
                     "derivation": c.derivation,
                     "runtime_id": c.runtime_id,
                     "environment_id": c.environment_id,
-                    "runtime_facts": c.runtime_facts,
+                    "runtime_facts": requirement_scoped_facts(c),
                     "prior_attempts": c.prior_attempts,
                 }),
             )

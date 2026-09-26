@@ -140,16 +140,18 @@ fn search_authority_offers_and_judges_a_finite_decision() {
     let opened = decide(&state, 10);
     assert_eq!(opened["action"]["kind"], "open_decision", "{opened}");
     let choices = opened["action"]["choices"].as_array().unwrap().clone();
+    state["budget"]["decisions_used"] = serde_json::json!(1);
     state["decisions"] = serde_json::json!([{
         "seq": 0, "opened_at_ms": 10, "default_id": opened["action"]["default_id"],
         "choices": choices.iter().map(|c| c["choice_id"].clone()).collect::<Vec<_>>(),
         "outcome": null, "chosen_id": null
     }]);
-    let judge = |state: &Value, submission: Value| {
+    let judge_at = |state: &Value, submission: Value, now: u64| {
         ato_receipt_authority::evaluate_search(
-            &serde_json::to_vec(&serde_json::json!({"operation":"validate_decision","state":state,"submission":submission})).unwrap(),
+            &serde_json::to_vec(&serde_json::json!({"operation":"validate_decision","state":state,"submission":submission,"now_ms":now})).unwrap(),
         )
     };
+    let judge = |state: &Value, submission: Value| judge_at(state, submission, 11);
     let verdict = judge(
         &state,
         serde_json::json!({"seq":0,"choice_id":choices[1]["choice_id"],"evidence":{"model":"jev-1.13.0"}}),
@@ -164,4 +166,10 @@ fn search_authority_offers_and_judges_a_finite_decision() {
     let refused = judge(&state, serde_json::json!({"seq":3,"fallback":"invalid"}));
     assert_eq!(refused["status"], "decision_refused");
     assert_eq!(decide(&state, 5_010)["action"]["kind"], "record_fallback");
+    let late = judge_at(
+        &state,
+        serde_json::json!({"seq":0,"choice_id":choices[1]["choice_id"]}),
+        5_010,
+    );
+    assert_eq!(late["code"], "decision_expired", "{late}");
 }

@@ -100,7 +100,8 @@ pub struct BudgetCounters {
     pub expanded_reserved: u64,
     pub stored_used: u64,
     pub stored_reserved: u64,
-    /// Decision points a provider answered (fallbacks are not counted).
+    /// Decision points opened for a provider, whatever their outcome: the
+    /// provider decision budget (always equal to the recorded points).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub decisions_used: u64,
 }

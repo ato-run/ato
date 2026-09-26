@@ -30,7 +30,15 @@ impl DecisionProvider for AcceptanceProvider {
                 let _ = writeln!(
                     f,
                     "{}",
-                    serde_json::json!({"seq": point.seq, "offered": point.choices.iter().map(|c| &c.choice_id).collect::<Vec<_>>(), "default": point.default_choice_id, "mode": self.mode})
+                    serde_json::json!({
+                        "seq": point.seq,
+                        "offered": point.choices.iter().map(|c| &c.choice_id).collect::<Vec<_>>(),
+                        "default": point.default_choice_id,
+                        "mode": self.mode,
+                        // What the Coordinator exposed to a provider, per choice.
+                        "view_facts": point.choices.iter().map(|c| (&c.choice_id, &c.runtime_facts)).collect::<std::collections::BTreeMap<_, _>>(),
+                        "requirements": point.choices.iter().map(|c| (&c.choice_id, &c.derivation["requirements"])).collect::<std::collections::BTreeMap<_, _>>(),
+                    })
                 );
             }
         }
@@ -47,6 +55,19 @@ impl DecisionProvider for AcceptanceProvider {
                 choice_id: "c0000000000000000".into(),
                 evidence: serde_json::json!({"provider": "acceptance", "mode": "out_of_set"}),
             },
+            late if late.starts_with("late:") => {
+                // Answer only after the point's deadline has passed: the
+                // Coordinator must settle it as timeout, not as this choice.
+                let ms: u64 = late[5..].parse().unwrap_or(0);
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+                match point.choices.get(1) {
+                    Some(c) => ProviderAnswer::Choice {
+                        choice_id: c.choice_id.clone(),
+                        evidence: serde_json::json!({"provider": "acceptance", "mode": late}),
+                    },
+                    None => ProviderAnswer::Fallback { reason: "invalid" },
+                }
+            }
             fixed => {
                 let n: usize = fixed
                     .strip_prefix("fixed:")
