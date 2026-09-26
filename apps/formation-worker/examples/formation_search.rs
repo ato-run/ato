@@ -1,4 +1,4 @@
-//! Actual known-D search acceptance driver. Frozen source and routes are planned
+//! Actual Formation search acceptance driver. Frozen source and routes are planned
 //! once, then every accepted route is checked by the shared Rust authority.
 use anyhow::{Context, Result, bail};
 use ato_formation_worker::decision_provider::{
@@ -215,7 +215,12 @@ fn main() -> Result<()> {
         &a[8..].iter().map(Into::into).collect::<Vec<_>>(),
         None,
         Path::new(&a[4]),
-        RuntimeConstraintWire::Any,
+        std::env::var("ATO_ACCEPTANCE_EXACT_RUNTIME")
+            .map(|runtime_id| RuntimeConstraintWire::Exact {
+                runtime_id,
+                environment_id: None,
+            })
+            .unwrap_or(RuntimeConstraintWire::Any),
         SatisfyPolicy {
             network: "dependency-resolution".into(),
             allow_managed: false,
