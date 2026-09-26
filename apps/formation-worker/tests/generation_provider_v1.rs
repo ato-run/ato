@@ -443,11 +443,142 @@ fn decline_requires_none_and_never_yields_a_draft() {
     );
     raw["answers"]["entrypoint"]["choice"] = json!("none");
     let answer = validate_response(DEFAULT_GENERATION_MODEL, &point(), &raw);
-    assert_eq!(answer, GenerationAnswer::Fallback { reason: "declined" });
+    let provenance = json!({
+        "provider": "jev", "model": DEFAULT_GENERATION_MODEL,
+        "prompt_version": GENERATION_PROMPT_VERSION,
+        "usage": {"input_tokens": 123, "output_tokens": 8},
+    });
+    assert_eq!(
+        answer,
+        GenerationAnswer::Declined {
+            provenance: provenance.clone()
+        }
+    );
     assert_eq!(
         answer.submission(9),
-        json!({"revision": 9, "fallback": "declined"})
+        json!({"revision": 9, "fallback": "declined", "provenance": provenance})
     );
+}
+
+#[test]
+fn declined_http_answer_retains_only_bounded_provenance_without_private_point_data() {
+    let model = "jev-1.14.0";
+    let mut raw = response();
+    raw["model"] = json!(model);
+    raw["answers"]["operation"]["choice"] = json!("decline");
+    raw["answers"]["entrypoint"]["choice"] = json!("none");
+    let mut input = point_value();
+    for field in [
+        "source",
+        "raw_logs",
+        "K",
+        "permissions",
+        "runtime_facts",
+        "path",
+        "receipts",
+        "unrelated",
+    ] {
+        input[field] = json!("PRIVATE_CANARY");
+    }
+    input["expires_at"] = json!("EXPIRY_PRIVATE_CANARY");
+    input["claimed"] = json!(true);
+    input["failures"] =
+        json!([{"status": "STATUS_PRIVATE_CANARY", "failure_code": "SECRET_PRIVATE_CANARY"}]);
+    let point: GenerationPoint = serde_json::from_value(input).unwrap();
+    let server = Server::new(200, raw.to_string(), Duration::ZERO);
+    let provider =
+        JevGenerationProvider::new(&server.url, KEY, model, Duration::from_secs(5)).unwrap();
+    let answer = provider.generate(&point);
+    let GenerationAnswer::Declined { provenance } = &answer else {
+        panic!("{answer:?}")
+    };
+    assert_eq!(
+        provenance,
+        &json!({
+            "provider": "jev", "model": model,
+            "prompt_version": GENERATION_PROMPT_VERSION,
+            "usage": {"input_tokens": 123, "output_tokens": 8},
+        })
+    );
+    assert!(serde_json::to_vec(provenance).unwrap().len() <= 4096);
+    let submitted = answer.submission(7);
+    assert_eq!(
+        submitted,
+        json!({"revision": 7, "fallback": "declined", "provenance": provenance})
+    );
+    assert!(!submitted.to_string().contains("PRIVATE_CANARY"));
+    assert!(!submitted.to_string().contains(KEY));
+    let requests = server.finish();
+    assert_eq!(requests.len(), 1);
+    let body = requests[0].split_once("\r\n\r\n").unwrap().1;
+    assert!(!body.contains("PRIVATE_CANARY"));
+    assert!(!body.contains(KEY));
+    let sent: Value = serde_json::from_str(body).unwrap();
+    assert_eq!(sent, generation_request(model, &point).unwrap());
+}
+
+#[test]
+fn invalid_decline_cannot_smuggle_provenance_or_invent_usage() {
+    let mut declined = response();
+    declined["answers"]["operation"]["choice"] = json!("decline");
+    declined["answers"]["entrypoint"]["choice"] = json!("none");
+    let mut cases = Vec::new();
+    for pointer in [
+        "",
+        "/answers",
+        "/answers/operation",
+        "/answers/entrypoint",
+        "/usage",
+    ] {
+        let mut raw = declined.clone();
+        raw.pointer_mut(pointer).unwrap()["source"] = json!("PRIVATE_CANARY");
+        cases.push(raw);
+    }
+    for usage in [
+        json!(null),
+        json!({}),
+        json!({"input_tokens": -1, "output_tokens": 8}),
+        json!({"input_tokens": "SECRET", "output_tokens": 8}),
+    ] {
+        let mut raw = declined.clone();
+        raw["usage"] = usage;
+        cases.push(raw);
+    }
+    let mut missing = declined.clone();
+    missing.as_object_mut().unwrap().remove("usage");
+    cases.push(missing);
+    let mut wrong_model = declined.clone();
+    wrong_model["model"] = json!("jev-1.14.0");
+    cases.push(wrong_model);
+    let mut oversized = declined.clone();
+    oversized["extra"] = json!("x".repeat(MAX_RESPONSE_BYTES));
+    cases.push(oversized);
+    for raw in cases {
+        let answer = validate_response(DEFAULT_GENERATION_MODEL, &point(), &raw);
+        assert_eq!(answer, invalid());
+        assert_eq!(
+            answer.submission(7),
+            json!({"revision": 7, "fallback": "invalid"})
+        );
+    }
+    // Genuine zero usage remains distinguishable from missing usage, which is invalid above.
+    declined["usage"] = json!({"input_tokens": 0, "output_tokens": 0});
+    let answer = validate_response(DEFAULT_GENERATION_MODEL, &point(), &declined);
+    assert!(matches!(answer, GenerationAnswer::Declined { .. }));
+    assert_eq!(
+        answer.submission(7)["provenance"]["usage"],
+        declined["usage"]
+    );
+}
+
+#[test]
+fn generic_error_fallbacks_keep_their_original_wire_shape_without_telemetry() {
+    for reason in ["invalid", "timeout", "provider_error"] {
+        assert_eq!(
+            GenerationAnswer::Fallback { reason }.submission(7),
+            json!({"revision": 7, "fallback": reason})
+        );
+    }
 }
 
 #[test]
