@@ -780,6 +780,9 @@ pub enum Settlement {
     EffectUnknown(Vec<UnknownAttempt>),
     /// The owner stopped the search after an UNKNOWN attempt.
     Stopped,
+    /// The search's own decision policy chose the offered stop: not a K
+    /// failure and not an owner stop.
+    DecisionStopped,
 }
 
 /// An attempt whose result is not known, as the requester is shown it.
@@ -815,7 +818,10 @@ impl Settlement {
                     })
                     .collect(),
             ),
-            "stopped" => Self::Stopped,
+            "stopped" => match status["stop"]["kind"].as_str() {
+                Some("decision_stopped") => Self::DecisionStopped,
+                _ => Self::Stopped,
+            },
             other => {
                 bail!("the coordinator reports a status this requester does not know: {other:?}")
             }
@@ -830,6 +836,7 @@ impl Settlement {
             Self::Exhausted => Some("budget_exhausted"),
             Self::EffectUnknown(_) => Some("effect_unknown"),
             Self::Stopped => Some("search_stopped"),
+            Self::DecisionStopped => Some("decision_stopped"),
         }
     }
 }
@@ -859,6 +866,10 @@ impl std::fmt::Display for Settlement {
                 )
             }
             Self::Stopped => write!(f, "search_stopped: the owner stopped this search"),
+            Self::DecisionStopped => write!(
+                f,
+                "decision_stopped: the search's decision policy chose to stop the exploration"
+            ),
         }
     }
 }
