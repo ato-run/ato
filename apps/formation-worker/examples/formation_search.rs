@@ -38,6 +38,7 @@ impl DecisionProvider for AcceptanceProvider {
                         // What the Coordinator exposed to a provider, per choice.
                         "view_facts": point.choices.iter().map(|c| (&c.choice_id, &c.runtime_facts)).collect::<std::collections::BTreeMap<_, _>>(),
                         "requirements": point.choices.iter().map(|c| (&c.choice_id, &c.derivation["requirements"])).collect::<std::collections::BTreeMap<_, _>>(),
+                        "evidence": point.evidence,
                     })
                 );
             }
@@ -68,6 +69,39 @@ impl DecisionProvider for AcceptanceProvider {
                     None => ProviderAnswer::Fallback { reason: "invalid" },
                 }
             }
+            kind if kind.starts_with("kind:") => {
+                // The first offered choice of an action kind (attempt,
+                // inspect, stop): exercises the exploration actions without
+                // naming an index.
+                let want = &kind[5..];
+                match point
+                    .choices
+                    .iter()
+                    .find(|c| action_kind(c) == want)
+                {
+                    Some(c) => ProviderAnswer::Choice {
+                        choice_id: c.choice_id.clone(),
+                        evidence: serde_json::json!({"provider": "acceptance", "mode": kind}),
+                    },
+                    None => ProviderAnswer::Fallback { reason: "invalid" },
+                }
+            }
+            script if script.starts_with("seq:") => {
+                // Per-point script, "seq:0=3,1=0": the offered index to pick
+                // at each decision sequence.
+                let index: Option<usize> = script[4..]
+                    .split(',')
+                    .filter_map(|part| part.split_once('='))
+                    .find(|(seq, _)| seq.parse::<u64>().ok() == Some(point.seq))
+                    .and_then(|(_, i)| i.parse().ok());
+                match index.and_then(|i| point.choices.get(i)) {
+                    Some(c) => ProviderAnswer::Choice {
+                        choice_id: c.choice_id.clone(),
+                        evidence: serde_json::json!({"provider": "acceptance", "mode": script}),
+                    },
+                    None => ProviderAnswer::Fallback { reason: "invalid" },
+                }
+            }
             fixed => {
                 let n: usize = fixed
                     .strip_prefix("fixed:")
@@ -82,6 +116,15 @@ impl DecisionProvider for AcceptanceProvider {
                 }
             }
         }
+    }
+}
+
+fn action_kind(choice: &ato_formation_worker::decision_provider::OfferedChoice) -> &'static str {
+    use ato_formation_worker::decision_provider::OfferedAction;
+    match &choice.action {
+        OfferedAction::Attempt { .. } => "attempt",
+        OfferedAction::Inspect { .. } => "inspect",
+        OfferedAction::Stop { .. } => "stop",
     }
 }
 
