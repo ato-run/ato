@@ -5,9 +5,10 @@ use crate::{
     authoring::BoundContract,
     browser::{BrowserContractV0, effective_contract_ref},
     decision::{
-        Choice, ChoiceAction, DecisionOutcome, DecisionPolicy, DecisionRecord,
-        InspectionEvidence, InspectionKind,
+        Choice, ChoiceAction, DecisionOutcome, DecisionPolicy, DecisionRecord, InspectionEvidence,
+        InspectionKind,
     },
+    generation::{GenerationOutcome, GenerationPolicy, GenerationRecord},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -37,6 +38,8 @@ pub struct SearchPolicy {
     /// without one are unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision: Option<DecisionPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<GenerationPolicy>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -130,6 +133,8 @@ pub struct SearchStateV1 {
     /// append-only, write-once per (kind, target).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<InspectionEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<GenerationRecord>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -247,6 +252,14 @@ pub enum SearchAction {
         inspection: InspectionKind,
         target_ref: String,
     },
+    OpenGeneration {
+        opened_at_ms: u64,
+        expires_at_ms: u64,
+    },
+    WaitForGeneration {
+        expires_at_ms: u64,
+    },
+    ExpireGeneration {},
     Finish {
         reason: Termination,
     },
@@ -324,6 +337,18 @@ impl FrozenSearchV1 {
         if let Some(policy) = &self.policy.decision {
             policy.validate()?;
         }
+        if let Some(policy) = &self.policy.generation {
+            policy.validate().map_err(|e| SearchError(e.code()))?;
+            if !self.policy.bindings.is_empty()
+                || !self.candidates.iter().any(|c| {
+                    c.derivation_ref == policy.base_derivation_ref
+                        && c.effects == "pure"
+                        && matches!(c.materialization, CandidateInput::Source { .. })
+                })
+            {
+                return Err(SearchError("generation_base_unauthorized"));
+            }
+        }
         if self.candidates.is_empty() || self.candidates.len() > 64 {
             return Err(SearchError("candidate_count"));
         }
@@ -339,6 +364,74 @@ impl FrozenSearchV1 {
     }
 }
 impl SearchStateV1 {
+    /// The frozen initial domain followed by at most one validated generated D.
+    /// Generated candidates never rewrite the frozen search bytes.
+    pub fn candidates(&self) -> impl Iterator<Item = &SearchCandidate> {
+        self.frozen.candidates.iter().chain(
+            self.generation
+                .as_ref()
+                .filter(|g| g.outcome == Some(GenerationOutcome::Admitted))
+                .and_then(|g| g.candidate.as_ref()),
+        )
+    }
+
+    fn generation_parent_failed(&self, policy: &GenerationPolicy) -> bool {
+        self.attempts.iter().any(|a| {
+            a.derivation_ref == policy.base_derivation_ref
+                && a.status == DurableAttemptStatus::Fail
+                && a.record == Some(ExecutionRecord::Finished)
+                && a.effects.as_deref() == Some("pure")
+        })
+    }
+
+    fn validate_generation(&self) -> Result<(), SearchError> {
+        let Some(record) = &self.generation else {
+            return Ok(());
+        };
+        let policy = self
+            .frozen
+            .policy
+            .generation
+            .as_ref()
+            .ok_or(SearchError("generation_without_policy"))?;
+        if record.opened_at_ms >= self.deadline_ms
+            || record.expires_at_ms
+                != record
+                    .opened_at_ms
+                    .saturating_add(policy.timeout_ms)
+                    .min(self.deadline_ms)
+            || !self.generation_parent_failed(policy)
+            || ((record.outcome == Some(GenerationOutcome::Admitted)) != record.candidate.is_some())
+        {
+            return Err(SearchError("generation_record_invalid"));
+        }
+        if let Some(candidate) = &record.candidate {
+            let base = self
+                .frozen
+                .candidates
+                .iter()
+                .find(|c| c.derivation_ref == policy.base_derivation_ref)
+                .ok_or(SearchError("generation_base_unauthorized"))?;
+            if self
+                .frozen
+                .candidates
+                .iter()
+                .any(|c| c.derivation_ref == candidate.derivation_ref)
+            {
+                return Err(SearchError("generation_duplicate"));
+            }
+            if !crate::generation::is_sha256(&candidate.derivation_ref)
+                || candidate.effects != base.effects
+                || candidate.materialization != base.materialization
+                || candidate.requirements != base.requirements
+                || candidate.provisions != base.provisions
+            {
+                return Err(SearchError("generation_candidate_scope"));
+            }
+        }
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<(), SearchError> {
         if self.schema != SEARCH_SCHEMA
             || self.search_id.is_empty()
@@ -348,13 +441,12 @@ impl SearchStateV1 {
             return Err(SearchError("schema_or_bounds"));
         }
         self.frozen.canonical_bytes()?;
+        self.validate_generation()?;
         let mut ids = BTreeSet::new();
         for a in &self.attempts {
             if !ids.insert(&a.attempt_id)
                 || !self
-                    .frozen
-                    .candidates
-                    .iter()
+                    .candidates()
                     .any(|d| d.derivation_ref == a.derivation_ref)
                 || (a.unknown_resolved && a.status != DurableAttemptStatus::Unknown)
                 || (a.route_accepted && a.status != DurableAttemptStatus::Pass)
@@ -490,7 +582,20 @@ fn default_next(
             Termination::BudgetExhausted
         }));
     }
-    for d in &s.frozen.candidates {
+    // A durable open generation point owns the frontier until it settles.
+    // UNKNOWN, running attempts, owner stop and the budgets above still win.
+    if let Some(record) = &s.generation
+        && record.outcome.is_none()
+    {
+        return Ok(if now_ms >= record.expires_at_ms {
+            SearchAction::ExpireGeneration {}
+        } else {
+            SearchAction::WaitForGeneration {
+                expires_at_ms: record.expires_at_ms,
+            }
+        });
+    }
+    for d in s.candidates() {
         let history: Vec<_> = s
             .attempts
             .iter()
@@ -536,6 +641,85 @@ fn default_next(
         if history.is_empty() {
             return Ok(SearchAction::WaitForRuntime {
                 derivation_ref: d.derivation_ref.clone(),
+            });
+        }
+    }
+    if !passed
+        && let Some(policy) = &s.frozen.policy.generation
+        && s.generation.is_none()
+        && s.generation_parent_failed(policy)
+    {
+        // Never skip an unanswered decision or an unconsumed inspection/stop.
+        if let Some(d) = s.decisions.last() {
+            if d.outcome.is_none()
+                && let Some(decision_policy) = &s.frozen.policy.decision
+            {
+                let expires_at_ms = d.expires_at_ms(decision_policy);
+                return Ok(if now_ms >= expires_at_ms {
+                    SearchAction::RecordFallback {
+                        seq: d.seq,
+                        reason: DecisionOutcome::Timeout,
+                    }
+                } else {
+                    SearchAction::WaitForDecision {
+                        seq: d.seq,
+                        expires_at_ms,
+                    }
+                });
+            }
+            match d.released() {
+                Some(ChoiceAction::Stop { .. }) => return Ok(finish(Termination::DecisionStopped)),
+                Some(ChoiceAction::Inspect {
+                    inspection,
+                    target_ref,
+                }) if !s
+                    .evidence
+                    .iter()
+                    .any(|e| e.kind == *inspection && e.target_ref == *target_ref) =>
+                {
+                    return Ok(SearchAction::RunInspection {
+                        inspection: *inspection,
+                        target_ref: target_ref.clone(),
+                    });
+                }
+                _ => {}
+            }
+        }
+        let pending = s.decisions.last().is_some_and(|d| {
+            d.outcome.is_none()
+                || match d.released() {
+                    Some(ChoiceAction::Stop { .. }) => true,
+                    Some(ChoiceAction::Inspect {
+                        inspection,
+                        target_ref,
+                    }) => !s
+                        .evidence
+                        .iter()
+                        .any(|e| e.kind == *inspection && e.target_ref == *target_ref),
+                    Some(ChoiceAction::Attempt { .. }) => s.attempts.len() as u64 == d.attempt_seq,
+                    None => false,
+                }
+        });
+        if !pending {
+            let transfer_left =
+                available(l.max_transfer_bytes, b.transfer_used, b.transfer_reserved);
+            // The generated D consumes exactly the parent's source. A tried
+            // placement can still tell us its transfer cost. Without one we
+            // cannot invent a byte count; issue-time reservation remains final.
+            let source_transfer = placements
+                .iter()
+                .filter(|p| p.derivation_ref == policy.base_derivation_ref)
+                .map(|p| p.transfer_bytes)
+                .min();
+            if transfer_left == 0
+                || source_transfer.is_some_and(|bytes| bytes > transfer_left)
+                || available(l.max_stored_bytes, b.stored_used, b.stored_reserved) == 0
+            {
+                return Ok(finish(Termination::BudgetExhausted));
+            }
+            return Ok(SearchAction::OpenGeneration {
+                opened_at_ms: now_ms,
+                expires_at_ms: now_ms.saturating_add(policy.timeout_ms).min(s.deadline_ms),
             });
         }
     }
@@ -589,17 +773,12 @@ pub fn events(s: &SearchStateV1, action: &SearchAction) -> Vec<SearchEvent> {
                             || *r2 != *runtime_id
                             || *e2 != *environment_id
                     );
-                    if !landed
-                        && (issuing_other || s.attempts.len() as u64 > d.attempt_seq)
-                    {
+                    if !landed && (issuing_other || s.attempts.len() as u64 > d.attempt_seq) {
                         events.push(SearchEvent::DecisionUnavailableAtIssue { seq: d.seq });
                     }
                 }
             }
-            Some(reason) => events.push(SearchEvent::DecisionFallback {
-                seq: d.seq,
-                reason,
-            }),
+            Some(reason) => events.push(SearchEvent::DecisionFallback { seq: d.seq, reason }),
             None => {}
         }
     }
@@ -613,7 +792,7 @@ pub fn events(s: &SearchStateV1, action: &SearchAction) -> Vec<SearchEvent> {
 }
 fn attempt_events(s: &SearchStateV1, action: &SearchAction) -> Vec<SearchEvent> {
     let mut events = vec![SearchEvent::SearchCreated];
-    for d in &s.frozen.candidates {
+    for d in s.candidates() {
         events.push(if safe(&d.effects) {
             SearchEvent::CandidateAdmitted {
                 derivation_ref: d.derivation_ref.clone(),
