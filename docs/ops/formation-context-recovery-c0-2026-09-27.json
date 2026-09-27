@@ -1,0 +1,345 @@
+{
+  "schema": "ato.formation-context-recovery-offline/1",
+  "base_sha": "c9fc25fea5ed474c3d24ab64750645190b0f608a",
+  "context_schema": "ato.formation-generation-context/2",
+  "model_calls": 0,
+  "runtime_acceptance_reruns": 0,
+  "efficacy_claim": false,
+  "cells": [
+    {
+      "case": "E04",
+      "negative": {
+        "classes": "one",
+        "custom_http_handler": true,
+        "delegation": "none",
+        "encoding": "utf8",
+        "frameworks": [],
+        "functions": "two_to_four",
+        "id": "m2",
+        "imports": [
+          "http_server"
+        ],
+        "language": "python",
+        "main_guard": false,
+        "server_listen": true,
+        "size_bucket": "up_to1_kib",
+        "source_scan": "complete"
+      },
+      "permutation": 0,
+      "positive": {
+        "classes": "zero",
+        "custom_http_handler": false,
+        "delegation": "python_main",
+        "encoding": "utf8",
+        "frameworks": [],
+        "functions": "zero",
+        "id": "q7",
+        "imports": [],
+        "language": "python",
+        "main_guard": false,
+        "server_listen": false,
+        "size_bucket": "up_to1_kib",
+        "source_scan": "complete"
+      },
+      "separable": true
+    },
+    {
+      "case": "E04",
+      "negative": {
+        "classes": "one",
+        "custom_http_handler": true,
+        "delegation": "none",
+        "encoding": "utf8",
+        "frameworks": [],
+        "functions": "two_to_four",
+        "id": "q7",
+        "imports": [
+          "http_server"
+        ],
+        "language": "python",
+        "main_guard": false,
+        "server_listen": true,
+        "size_bucket": "up_to1_kib",
+        "source_scan": "complete"
+      },
+      "permutation": 1,
+      "positive": {
+        "classes": "zero",
+        "custom_http_handler": false,
+        "delegation": "python_main",
+        "encoding": "utf8",
+        "frameworks": [],
+        "functions": "zero",
+        "id": "m2",
+        "imports": [],
+        "language": "python",
+        "main_guard": false,
+        "server_listen": false,
+        "size_bucket": "up_to1_kib",
+        "source_scan": "complete"
+      },
+      "separable": true
+    },
+    {
+      "case": "E06",
+      "negative": {
+        "classes": "one",
+        "custom_http_handler": true,
+        "delegation": "none",
+        "encoding": "utf8",
+        "frameworks": [],
+        "functions": "two_to_four",
+        "id": "m2",
+        "imports": [
+          "http_server"
+        ],
+        "language": "python",
+        "main_guard": false,
+        "server_listen": true,
+        "size_bucket": "up_to1_kib",
+        "source_scan": "complete"
+      },
+      "permutation": 0,
+      "positive": {
+        "classes": "one",
+        "custom_http_handler": true,
+        "delegation": "none",
+        "encoding": "utf8",
+        "frameworks": [],
+        "functions": "two_to_four",
+        "id": "q7",
+        "imports": [
+          "http_server"
+        ],
+        "language": "python",
+        "main_guard": false,
+        "server_listen": true,
+        "size_bucket": "over64_kib",
+        "source_scan": "bounded_prefix"
+      },
+      "separable": true
+    },
+    {
+      "case": "E06",
+      "negative": {
+        "classes": "one",
+        "custom_http_handler": true,
+        "delegation": "none",
+        "encoding": "utf8",
+        "frameworks": [],
+        "functions": "two_to_four",
+        "id": "q7",
+        "imports": [
+          "http_server"
+        ],
+        "language": "python",
+        "main_guard": false,
+        "server_listen": true,
+        "size_bucket": "up_to1_kib",
+        "source_scan": "complete"
+      },
+      "permutation": 1,
+      "positive": {
+        "classes": "one",
+        "custom_http_handler": true,
+        "delegation": "none",
+        "encoding": "utf8",
+        "frameworks": [],
+        "functions": "two_to_four",
+        "id": "m2",
+        "imports": [
+          "http_server"
+        ],
+        "language": "python",
+        "main_guard": false,
+        "server_listen": true,
+        "size_bucket": "over64_kib",
+        "source_scan": "bounded_prefix"
+      },
+      "separable": true
+    },
+    {
+      "case": "E07",
+      "negative": {
+        "classes": "one",
+        "custom_http_handler": true,
+        "delegation": "none",
+        "encoding": "utf8",
+        "frameworks": [],
+        "functions": "two_to_four",
+        "id": "m2",
+        "imports": [
+          "http_server"
+        ],
+        "language": "python",
+        "main_guard": false,
+        "server_listen": true,
+        "size_bucket": "up_to1_kib",
+        "source_scan": "complete"
+      },
+      "permutation": 0,
+      "positive": {
+        "classes": "one",
+        "custom_http_handler": true,
+        "delegation": "none",
+        "encoding": "latin1",
+        "frameworks": [],
+        "functions": "two_to_four",
+        "id": "q7",
+        "imports": [
+          "http_server"
+        ],
+        "language": "python",
+        "main_guard": false,
+        "server_listen": true,
+        "size_bucket": "up_to1_kib",
+        "source_scan": "complete"
+      },
+      "separable": true
+    },
+    {
+      "case": "E07",
+      "negative": {
+        "classes": "one",
+        "custom_http_handler": true,
+        "delegation": "none",
+        "encoding": "utf8",
+        "frameworks": [],
+        "functions": "two_to_four",
+        "id": "q7",
+        "imports": [
+          "http_server"
+        ],
+        "language": "python",
+        "main_guard": false,
+        "server_listen": true,
+        "size_bucket": "up_to1_kib",
+        "source_scan": "complete"
+      },
+      "permutation": 1,
+      "positive": {
+        "classes": "one",
+        "custom_http_handler": true,
+        "delegation": "none",
+        "encoding": "latin1",
+        "frameworks": [],
+        "functions": "two_to_four",
+        "id": "m2",
+        "imports": [
+          "http_server"
+        ],
+        "language": "python",
+        "main_guard": false,
+        "server_listen": true,
+        "size_bucket": "up_to1_kib",
+        "source_scan": "complete"
+      },
+      "separable": true
+    }
+  ],
+  "negative_controls": {
+    "E05": "equal_except_id",
+    "E09": "equal_except_id",
+    "E10": "no_service_marker"
+  },
+  "fixture_provenance": "Candidate bytes asserted against SHA-256 values in immutable E1 preregistration by generation_context_v2.rs",
+  "mutation_probes": [
+    {
+      "probe": "delegation_removed",
+      "test": "offline_e04_e06_e07_six_permutations_are_separable",
+      "detected": true
+    },
+    {
+      "probe": "prefix_removed",
+      "test": "offline_e04_e06_e07_six_permutations_are_separable",
+      "detected": true
+    },
+    {
+      "probe": "latin1_removed",
+      "test": "encodings_are_closed_and_malformed_cookies_fail_closed",
+      "detected": true
+    },
+    {
+      "probe": "failure_mapping_removed",
+      "test": "failure_and_inspection_projection_uses_actual_codes_without_messages",
+      "detected": true
+    }
+  ],
+  "verification": {
+    "passed": 567,
+    "failed": 0,
+    "ignored": 1,
+    "clippy": "passed",
+    "formation": 261,
+    "worker": 238,
+    "runtime_attempt": 58,
+    "receipt_authority": 10
+  },
+  "unchanged_e1_files": [
+    {
+      "path": "docs/ops/formation-efficacy-e1-amendment.json",
+      "sha256": "b1da620d789f8e59c270581589f56fb8b96a5c015da0575b32886bff3f089714"
+    },
+    {
+      "path": "docs/ops/formation-efficacy-e1-amendment.md",
+      "sha256": "9ef3a9208cc92d05aaa0a2d61f3b923c74cd7399445e3ca1b463977b9877071a"
+    },
+    {
+      "path": "docs/ops/formation-efficacy-e1-completeness-review.md",
+      "sha256": "1f91459edb0e87c506a4f1703cb1efc17f8e8fd10a350e3b66082aed0813e675"
+    },
+    {
+      "path": "docs/ops/formation-efficacy-e1-oracle-plan.md",
+      "sha256": "553a74a5e918bfb9baf0e8befcced952d5485ca3bdc324f36e74f49b73b65278"
+    },
+    {
+      "path": "docs/ops/formation-efficacy-e1-oracle-results.json",
+      "sha256": "0d7fa9cf58ca1b63d95c3470bc2022bca6d2d659964a9e6d22e63932eb2cc473"
+    },
+    {
+      "path": "docs/ops/formation-efficacy-e1-original-observations.json",
+      "sha256": "cb5e2620fc587d6e6221d9a09eab78102d4c82549f6e080c002839c4c6689d73"
+    },
+    {
+      "path": "docs/ops/formation-efficacy-e1-plan.json",
+      "sha256": "1e7c942e6f4c81c0d5511e55b1bcf8e4a18e4f0a19b07786aa5d86d790873585"
+    },
+    {
+      "path": "docs/ops/formation-efficacy-e1-plan.md",
+      "sha256": "7517d8c57cd4cc91432873a10d59392d2f8baee5a3dc61fe67e478fd56921931"
+    },
+    {
+      "path": "docs/ops/formation-efficacy-e1-reservations.json",
+      "sha256": "2cc7cc5100b4c0742fdac86ede0c2d9ea27097bb67ee60ec86ee4c2b07af7ec6"
+    },
+    {
+      "path": "docs/ops/formation-efficacy-e1-results.json",
+      "sha256": "0a6fd77aa7fee6836802bc767057776207073a409c22f975aafbc306ef705670"
+    },
+    {
+      "path": "docs/ops/formation-efficacy-e1-summary.json",
+      "sha256": "6a0fa980e37ad856356f25bb8316d2535d106ddcb1b104609ac62c8621937198"
+    },
+    {
+      "path": "scripts/acceptance/efficacy/analyze.py",
+      "sha256": "a1f7a4ebf0d960e74c33bddc45374280b1ac8f4b47f6009e4bba8d27d1d8dd15"
+    },
+    {
+      "path": "scripts/acceptance/efficacy/fixtures.py",
+      "sha256": "244162de29fa452d3e59a5b3ba7639087cc7c4025255b207957607db439003e3"
+    },
+    {
+      "path": "scripts/acceptance/efficacy/oracle.py",
+      "sha256": "7b848fb9dbc5d969b60b13f77625f705271fa86ef464660f9bdae6734a322ac2"
+    },
+    {
+      "path": "scripts/acceptance/efficacy/test_analyze.py",
+      "sha256": "a0e5616d6e6d5193f9cf9b948056874c67653ccb9e1ed8ee9d538dde18505596"
+    },
+    {
+      "path": "scripts/acceptance/efficacy/test_fixtures.py",
+      "sha256": "e22ee5f64cb1046ac5593a12391189ac8a113b281c7441ba1dff235b0df096b4"
+    }
+  ],
+  "status_only_exception": "formation-efficacy-e1-results.md: explicitly labeled post-merge status correction only"
+}
