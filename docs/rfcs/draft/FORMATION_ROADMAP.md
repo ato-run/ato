@@ -63,10 +63,14 @@ no C retry and zero robust additional-success cases. **Efficacy gate NOT met;
 5b remains In progress.** E1 evidence-preservation PR #1417 merged at
 `c9fc25fea5ed474c3d24ab64750645190b0f608a`; this does not promote either selector.
 The separate [5b-c0 offline information recovery](../../ops/formation-context-recovery-c0-2026-09-27.md)
-implements context/2 (unmerged): delegation, bounded-prefix and limited encoding
-facts, plus audited failure codes. Provider point/2 and prompt/2 stay unchanged.
-General 5b-c and E2 model evaluation remain on hold pending separate approval;
-c0 expresses evidence, not efficacy. No deployment or remote migration.
+merged as #1419 at `660dbf6eaedc3384017137f1f20282a359d423aa`: context/2 delegation,
+bounded-prefix and limited encoding facts, plus audited failure codes.
+[5b-c1 Provider integration](ADR-040-formation-context-provider-v3.md) is implemented,
+unmerged: explicit local point/3 + prompt/3 opt-in using cached context/2; old
+v1/v2 paths remain unchanged. Offline verification is not efficacy verification.
+**E2 not started**; its preregistration requires merged exact c1 artifacts and
+separate approval. General repair/5b-c expansion remains on hold. Overall 5b
+remains In progress. No deployment or remote migration.
 Exact Runtime now exhausts known Ds within that placement before generation;
 no-policy semantics remain unchanged. Prompt-v1 decline remains historical;
 prompt-v2 acceptance is recorded separately, never retried until success.
