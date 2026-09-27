@@ -44,6 +44,9 @@ revision, expires_at, claimed, entrypoint_ids
 context = ato.formation-generation-context/2
 ```
 
+Public request and response validators require `claimed=true`; pre-claim local
+construction uses structural validation only.
+
 Point/3 is limited to 18 KiB serialized; raw `from_json` input is bounded before
 parsing. Expires-at is at most 64 bytes. Context keeps its 16 KiB limit, entries
 16 × at most 1 KiB, failures 16, inspections 4, refusal codes 8. Context IDs must
@@ -57,10 +60,12 @@ versions and malformed public-field mutations fail boundary validation.
 3. Validate offered domain against frozen policy, build/validate local point/3.
 4. Obtain the existing durable generation claim.
 5. Set the returned revision and `claimed=true` locally.
-6. Call the v3 provider once and submit through the unchanged completion API.
+6. Revalidate the claimed point, including the receiver's JavaScript-safe revision
+   domain, before invoking any custom or Jev provider.
+7. Call the v3 provider once and submit through the unchanged completion API.
 
-No HTTP request occurs before a successful claim. Jev's v3 method additionally
-rejects unclaimed or invalid points before transport. A lost claim response
+No provider/model HTTP request occurs before a successful durable claim.
+Jev's v3 method additionally rejects unclaimed or invalid points before transport. A lost claim response
 causes no provider call; stale status after restart still cannot win a second
 claim. A lost completion response cannot authorize a retry. Unit integration
 uses a loopback Coordinator mock and an in-memory recording provider; it is

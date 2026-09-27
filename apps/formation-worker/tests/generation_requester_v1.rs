@@ -1133,3 +1133,61 @@ fn context_opt_ins_are_exclusive_and_reauthorization_clears_v3() {
     );
     server.finish();
 }
+
+#[test]
+fn custom_provider_receives_only_a_revalidated_claimed_point() {
+    // Deliberately no validation in this provider: serve_generation owns the boundary.
+    #[derive(Default)]
+    struct UncheckedProvider(
+        Mutex<Vec<ato_formation_worker::generation_provider::GenerationPointV3>>,
+    );
+    impl GenerationProvider for UncheckedProvider {
+        fn generate(&self, _: &GenerationPoint) -> GenerationAnswer {
+            panic!("unexpected downgrade");
+        }
+        fn generate_v3(
+            &self,
+            point: &ato_formation_worker::generation_provider::GenerationPointV3,
+        ) -> GenerationAnswer {
+            self.0.lock().unwrap().push(point.clone());
+            GenerationAnswer::Fallback { reason: "declined" }
+        }
+    }
+    for mode in 0..3 {
+        let (_root, mut submission) = authorized_submission();
+        submission.enable_generation_context_v2().unwrap();
+        let server = Coordinator::new(move |path, _| match path {
+            CLAIM_PATH => match mode {
+                0 => Some((409, json!({"error":"already_claimed"}))),
+                1 => Some((200, json!({"revision":1_u64 << 53}))),
+                _ => Some((200, json!({"revision":42}))),
+            },
+            ANSWER_PATH => Some((200, json!({"revision":43}))),
+            _ => panic!("unexpected {path}"),
+        });
+        let provider = UncheckedProvider::default();
+        let result = serve_generation(
+            &mut submission,
+            &server.client(),
+            "test",
+            &open_point(),
+            &provider,
+        );
+        match mode {
+            0 => assert!(result.unwrap().is_none()),
+            1 => assert!(result.is_err()),
+            _ => assert!(result.unwrap().is_some()),
+        }
+        let points = provider.0.lock().unwrap();
+        assert_eq!(points.len(), usize::from(mode == 2));
+        for point in points.iter() {
+            assert!(point.claimed);
+            assert_eq!(point.revision, 42);
+        }
+        let requests = server.finish();
+        assert_eq!(
+            requests.iter().filter(|(p, _)| p == ANSWER_PATH).count(),
+            usize::from(mode == 2)
+        );
+    }
+}
