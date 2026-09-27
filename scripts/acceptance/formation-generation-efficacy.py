@@ -18,7 +18,7 @@ from efficacy.fixtures import CASES, materialize
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
-PLAN = ROOT / 'docs/ops/formation-efficacy-e1-plan.json'
+PLAN = ROOT / 'docs/ops/formation-efficacy-e1-amendment.json'
 
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
@@ -90,18 +90,30 @@ def main():
     if not (h.API_DIR/'initialized-0303').exists(): raise RuntimeError('local0303 not initialized')
     for name,path in [('requester',h.REQ),('runtime',h.ATO),('wasm',h.API_DIR/'worker-final-bundle/receipt_authority.wasm')]:
         if hashlib.sha256(path.read_bytes()).hexdigest() != plan['artifacts'][name]: raise RuntimeError('artifact drift: '+name)
-    out = h.S4 / 'efficacy-e1'
+    original = h.S4 / 'efficacy-e1'
+    out = h.S4 / 'efficacy-e1-repaired'
     out.mkdir(exist_ok=False)  # whole experiment once, no resume/retry
     h.LEDGER.close(); h.OUT = v1.OUT = c.OUT = out
     h.LEDGER = (out/'ledger.jsonl').open('x')
     (out/'registration.json').write_bytes(PLAN.read_bytes())
-    results = []
+    original_results = json.loads((original/'results.json').read_text())
+    # Retain every original A/C observation, including model declines. Only the
+    # broken local comparator is replaced under the prospectively registered amendment.
+    results = [r for r in original_results if r['arm'] != 'B']
+    reused = {f"{r['case']}p{r['permutation']}{r['arm']}" for r in results}
+    reserved = {p.stem for p in original.glob('*.reserved') if not p.stem.endswith('B')}
+    if reused != reserved or sorted(reused) != sorted(plan['reuse_cells']):
+        raise RuntimeError('ambiguous old A/C reservation: never re-call')
+    if hashlib.sha256((original/'results.json').read_bytes()).hexdigest() != plan['original_results_sha256']:
+        raise RuntimeError('original observations changed')
     h.start_coordinator('efficacy')
     try:
         for case in CASES:
             for permutation in (0,1):
                 for arm in ('ABC' if permutation == 0 else 'CBA'):
                     cell = f'{case}p{permutation}{arm}'
+                    if cell in reused:
+                        continue
                     # Persistent reservation before startup; never removed.
                     (out/f'{cell}.reserved').write_text('reserved\n')
                     root = out/cell; root.mkdir()
