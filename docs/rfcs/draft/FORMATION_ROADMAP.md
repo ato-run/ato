@@ -60,7 +60,13 @@ D improvement remains unproven; Stage 6 coverage expansion is separate.
 [E1 amended efficacy results](../../ops/formation-efficacy-e1-results.md): 60 cells,
 A 0/20, deterministic B 9/20, Jev C 2/20 same-K successes; 20 model calls,
 no C retry and zero robust additional-success cases. **Efficacy gate NOT met;
-5b remains In progress.** Analyze information loss before any 5b-c expansion.
+5b remains In progress.** E1 evidence-preservation PR #1417 merged at
+`c9fc25fea5ed474c3d24ab64750645190b0f608a`; this does not promote either selector.
+The separate [5b-c0 offline information recovery](../../ops/formation-context-recovery-c0-2026-09-27.md)
+implements context/2 (unmerged): delegation, bounded-prefix and limited encoding
+facts, plus audited failure codes. Provider point/2 and prompt/2 stay unchanged.
+General 5b-c and E2 model evaluation remain on hold pending separate approval;
+c0 expresses evidence, not efficacy. No deployment or remote migration.
 Exact Runtime now exhausts known Ds within that placement before generation;
 no-policy semantics remain unchanged. Prompt-v1 decline remains historical;
 prompt-v2 acceptance is recorded separately, never retried until success.

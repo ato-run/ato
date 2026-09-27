@@ -171,7 +171,9 @@ local 0303, actual Rust requester and actual Rust Runtime, not a mock HTTP succe
 - **Implemented:** 5b-a/5b-b foundation; evaluation-only selector/harness/analysis.
 - **Locally/integration verified:** prior minimal G9 gate plus amended E1's complete
   60-cell comparison. Efficacy threshold failed; this is not an implementation PASS claim.
-- **Merged:** six approved foundation PRs. Evaluation/results PR #1417 remains open.
+- **Merged (post-merge status note, 2026-09-27):** six approved foundation PRs and
+  evidence-preservation PR #1417 at `c9fc25fea5ed474c3d24ab64750645190b0f608a`.
+  This status correction changes no E1 observation, aggregate, or efficacy conclusion.
 - **Deployed:** no. No staging/production changes, remote migration, provider-key
   configuration changes, manual CI reruns, #1402 edits or 5b-c work.
 
