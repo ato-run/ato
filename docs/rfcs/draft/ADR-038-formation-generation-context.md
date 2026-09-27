@@ -12,6 +12,12 @@ entrypoint ID. Canonicalization, static validation, same frozen K, ordinary
 Runtime admission/execution/verification and fresh receipt acceptance remain
 mandatory. Context never enters D/K identity or supplies capabilities.
 
+This is **bounded parameter synthesis**: selecting an owner-authorized existing
+Python entrypoint and compiling it against a parent D into a new canonical D.
+It is neither arbitrary program generation nor general repair. Fixed G1 returns
+the correct draft as an oracle control; it is not an implemented deterministic
+new-D searcher and cannot establish that Jev is more effective.
+
 Before generation, all authorized known Ds are explored within the Runtime
 constraint. Exact restricts placement, not the known-D frontier. A known PASS
 prevents generation; generated D is subject to that same Exact constraint.
