@@ -586,6 +586,9 @@ pub fn derivation_requirements(planned: &PlannedCandidate) -> (Vec<Requirement>,
 pub struct Submission {
     archive: File,
     source_entries: BTreeSet<String>,
+    frozen_source: local::FrozenSource,
+    project_summary: ato_formation::generation_context::ProjectSummary,
+    generation_context: Option<ato_formation::generation_context::GenerationContext>,
     /// Pin the sole admitted generation; repeated receiver views may replay it,
     /// but cannot grow the receipt authorization set with another generated D.
     generated_derivation_ref: Option<String>,
@@ -637,8 +640,58 @@ impl Submission {
                 .all(|path| self.source_entries.contains(path)),
             "generation entrypoint absent from frozen source"
         );
+        self.generation_context = None;
         self.request.policy.generation = Some(policy);
         Ok(())
+    }
+
+    /// Opt into prompt-v2 evidence, reading only our verified private snapshot.
+    /// No source path or bytes are retained in the provider-visible context.
+    pub fn enable_generation_context(&mut self) -> Result<()> {
+        use ato_formation::generation_context::{
+            GenerationContext, MAX_SOURCE_BYTES, project_python,
+        };
+        let policy = self
+            .request
+            .policy
+            .generation
+            .as_ref()
+            .context("generation not authorized")?;
+        let mut entries = Vec::with_capacity(policy.entrypoints.len());
+        for (id, relative) in &policy.entrypoints {
+            let file = File::open(self.frozen_source.root.join(relative))?;
+            let size = file.metadata()?.len();
+            let mut bytes = Vec::new();
+            // Oversized files produce only a size bucket; do not scan a prefix.
+            if size <= MAX_SOURCE_BYTES as u64 {
+                file.take(MAX_SOURCE_BYTES as u64).read_to_end(&mut bytes)?;
+            }
+            entries.push(project_python(id, &bytes, size)?);
+        }
+        self.generation_context = Some(GenerationContext::new(
+            entries,
+            self.project_summary.clone(),
+            vec![],
+            vec![],
+        )?);
+        Ok(())
+    }
+
+    /// Dynamic evidence is a separate fixed-vocabulary projection; never forward
+    /// durable evidence, raw failure messages or receiver identities wholesale.
+    pub fn generation_context_for(
+        &self,
+        failures: &serde_json::Value,
+        evidence: &serde_json::Value,
+    ) -> Result<Option<ato_formation::generation_context::GenerationContext>> {
+        use ato_formation::generation_context::{project_failures, project_inspections};
+        let Some(mut context) = self.generation_context.clone() else {
+            return Ok(None);
+        };
+        context.failures = project_failures(failures);
+        context.inspections = project_inspections(evidence);
+        context.validate()?;
+        Ok(Some(context))
     }
 
     /// Reconstruct an admitted generated D from our own frozen authorization,
@@ -710,7 +763,14 @@ pub fn serve_generation(
     let Some(raw) = status.get("generation_point").filter(|v| !v.is_null()) else {
         return Ok(None);
     };
-    let mut point: GenerationPoint = serde_json::from_value(raw.clone())?;
+    // Source context is requester-local. A receiver cannot supply it, even
+    // when no local v2 context was enabled, nor break v1 with malformed extras.
+    let mut wire = raw.clone();
+    if let Some(object) = wire.as_object_mut() {
+        object.remove("schema");
+        object.remove("context");
+    }
+    let mut point: GenerationPoint = serde_json::from_value(wire)?;
     if point.claimed || status["status"] != "running" {
         return Ok(None);
     }
@@ -727,6 +787,10 @@ pub fn serve_generation(
         offered == expected,
         "generation domain differs from frozen authorization"
     );
+    if let Some(context) = submission.generation_context_for(&raw["failures"], &raw["evidence"])? {
+        point.schema = "ato.formation-generation-point/2".into();
+        point.context = Some(context);
+    }
     let Ok(claim) = client.claim_generation(satisfy_id, point.revision) else {
         // A competing requester may have claimed or the point closed.
         return Ok(None);
@@ -736,9 +800,11 @@ pub fn serve_generation(
         .context("generation claim has no revision")?;
     let started = std::time::Instant::now();
     let answer = provider.generate(&point).submission(point.revision);
+    let provider_elapsed_ms = started.elapsed().as_millis();
     let accepted = client.submit_generation(satisfy_id, &answer).is_ok();
     Ok(Some(serde_json::json!({
         "answer": answer,
+        "provider_elapsed_ms": provider_elapsed_ms,
         "elapsed_ms": started.elapsed().as_millis(),
         "submission_accepted": accepted,
     })))
@@ -875,8 +941,13 @@ pub fn prepare_submission(
     }
     let base_contract_ref = base_contract_ref.context("no authorized route")?;
     let contract_ref = effective_contract_ref(&base_contract_ref, browser_contract.as_ref());
+    let source_entries = source_file_inventory(&frozen.root)?;
+    let project_summary =
+        ato_formation::generation_context::project_project(&evidence, &source_entries);
     Ok(Submission {
-        source_entries: source_file_inventory(&frozen.root)?,
+        source_entries,
+        project_summary,
+        generation_context: None,
         generated_derivation_ref: None,
         request: SatisfyRequest {
             protocol: PROTOCOL.to_owned(),
@@ -904,6 +975,7 @@ pub fn prepare_submission(
         },
         contracts,
         archive,
+        frozen_source: frozen,
     })
 }
 

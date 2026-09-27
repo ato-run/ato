@@ -73,13 +73,16 @@ or invent a success heuristic.
 The one-shot durable claim precedes any model invocation; no retry after claim.
 Deadline, generation/decision/attempt/transfer/expanded/stored bounds and UNKNOWN
 barriers remain Rust/receiver authority. Source evidence does not change these
-budgets. v2 requires a validated context before HTTP. No new receiver schema or
-migration is needed: migration 0303 remains in the unmerged predecessor.
+budgets. v2 requires a validated context before HTTP. Source context requires no receiver schema change. A separate compatibility
+PR allows bounded observed provenance on invalid/error/timeout fallbacks in the
+existing column; it does not admit a draft. No migration is needed: migration
+0303 remains unchanged in the unmerged predecessor.
 
 ## Provenance and acceptance
 
 Provider/exact model/prompt version/input and output tokens are recorded for
-validated drafts and declines. Acceptance logs the privacy-projected request,
+validated drafts and declines, and well-formed pinned-model responses with
+invalid choices. Invalid envelopes/unknown usage are not fabricated. Acceptance logs the privacy-projected request,
 call count, provider latency, total elapsed, attempts, selected ID/decline,
 resulting D ref and fresh same-K receipt result. Estimated cost uses separately
 cited pricing; unknown historical usage is never backfilled.

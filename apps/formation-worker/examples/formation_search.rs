@@ -211,6 +211,41 @@ impl ato_formation_worker::generation_provider::GenerationProvider
     }
 }
 
+/// Record exactly the privacy-projected provider payload, never GenerationPoint.
+struct RecordedGenerationProvider {
+    inner: Box<dyn ato_formation_worker::generation_provider::GenerationProvider>,
+    path: std::path::PathBuf,
+    v2: bool,
+}
+impl ato_formation_worker::generation_provider::GenerationProvider for RecordedGenerationProvider {
+    fn generate(
+        &self,
+        point: &ato_formation_worker::generation_provider::GenerationPoint,
+    ) -> ato_formation_worker::generation_provider::GenerationAnswer {
+        use ato_formation_worker::generation_provider::{self as generation, GenerationAnswer};
+        let model = std::env::var("ATO_GENERATION_JEV_MODEL")
+            .unwrap_or_else(|_| generation::DEFAULT_GENERATION_MODEL.into());
+        let payload = if self.v2 {
+            generation::generation_request_v2(&model, point)
+        } else {
+            generation::generation_request(&model, point)
+        };
+        let Ok(payload) = payload else {
+            return GenerationAnswer::Fallback { reason: "invalid" };
+        };
+        if serde_json::to_vec_pretty(&payload)
+            .ok()
+            .and_then(|bytes| std::fs::write(&self.path, bytes).ok())
+            .is_none()
+        {
+            return GenerationAnswer::Fallback {
+                reason: "provider_error",
+            };
+        }
+        self.inner.generate(point)
+    }
+}
+
 fn main() -> Result<()> {
     let a: Vec<_> = std::env::args().collect();
     if a.len() < 9 {
@@ -253,9 +288,16 @@ fn main() -> Result<()> {
     if let Ok(entries) = std::env::var("ATO_ACCEPTANCE_GENERATION_ENTRYPOINTS") {
         submission.authorize_generation(serde_json::from_str(&entries)?, 30_000)?;
     }
+    if std::env::var("ATO_ACCEPTANCE_GENERATION_CONTEXT").as_deref() == Ok("v2") {
+        submission.enable_generation_context()?;
+    }
     let generation_provider = std::env::var("ATO_ACCEPTANCE_GENERATION_PROVIDER").ok()
         .map(|mode| -> Result<Box<dyn ato_formation_worker::generation_provider::GenerationProvider>> {
-            if mode == "jev" {
+            if mode == "jev_v2" {
+                Ok(Box::new(ato_formation_worker::generation_provider::JevGenerationProvider::from_env_v2(
+                    std::time::Duration::from_secs(20),
+                )?))
+            } else if mode == "jev" {
                 Ok(Box::new(ato_formation_worker::generation_provider::JevGenerationProvider::from_env(
                     std::time::Duration::from_secs(20),
                 )?))
@@ -263,6 +305,17 @@ fn main() -> Result<()> {
                 Ok(Box::new(AcceptanceGenerationProvider { mode }))
             }
         }).transpose()?;
+    let generation_provider = generation_provider.map(|inner| {
+        if let Some(path) = std::env::var_os("ATO_ACCEPTANCE_GENERATION_INPUT") {
+            Box::new(RecordedGenerationProvider {
+                inner,
+                path: path.into(),
+                v2: std::env::var("ATO_ACCEPTANCE_GENERATION_CONTEXT").as_deref() == Ok("v2"),
+            }) as Box<dyn ato_formation_worker::generation_provider::GenerationProvider>
+        } else {
+            inner
+        }
+    });
     // Fault injection for the effect-uncertainty acceptance only: a requester
     // whose effect hint is wrong. The Runtime re-plans D and attests the real
     // class; nothing here changes K or D.
