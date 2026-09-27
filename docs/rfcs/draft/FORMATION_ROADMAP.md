@@ -1,6 +1,6 @@
 # Formation roadmap — foundation, exploration, then adaptation
 
-Updated 2026-09-26 against live GitHub state after merging 5a-a and 5a-b. Stage numbers are retained.
+Updated 2026-09-26 against live GitHub state after merging 5a-a, 5a-b and the 5a live-acceptance follow-up #1411. Stage numbers are retained.
 This is an implementation plan; pending rows are not shipped functionality.
 
 ## Milestones
@@ -27,7 +27,7 @@ This is an implementation plan; pending rows are not shipped functionality.
 | 3d | Retained objects → validated closure/tree → new Run → same K → new receipt without source/scratch | Merged: API #692 `23d69735` → ato #1407 `4697b3b0` (migration 0299 not applied remotely); actual Coordinator replay Static/Python/Node after source deletion; not deployed |
 | 4 | Durable deterministic SearchState; D1 failure→evidence→authorized D2; restart preserves search/attempt identity | Merged: API #693 `18fe2c75` → ato #1408 `a46fd62d` (migration 0300 not applied remotely); actual Coordinator restart acceptance cases 1–7, restart points 1–9, review hardening H1–H4; not deployed |
 | 5a | Optional finite AllowedChoices DecisionProvider; deterministic fallback under the same permissions and budget; compare attempts, elapsed time, provider usage and cost | **Completed (implemented and locally/integration verified)**. 5a-a merged: ato #1409 / API #694 (ADR-035, migration 0301). 5a-b merged: API #695 `1853f280` → ato #1410 `c883087e` (ADR-036, migration 0302): Inspect / Stop and independent decision sequence; B0–B8 verified. Probe deferred (no safe existing primitive). Live Jev acceptance and same-fixture/same-budget comparison: passed (2026-09-26); both arms 2 attempts / PASS; deterministic 3.573 s, Jev 3.022 s, 1 call, 1612 input / 134 output tokens, estimated $0.000067704. Not deployed; migrations not applied remotely |
-| 5b | Typed new-D generation first, then evidence-based D improvement; reject privilege/K/UNKNOWN escape | Pending |
+| 5b | Typed new-D generation first, then evidence-based D improvement; reject privilege/K/UNKNOWN escape | **In progress; completion gate open**. 5b-a bounded Python-entrypoint draft compiler/requester and receiver 0303 implemented. Fixed-draft actual D1 FAIL → Dnew same-K PASS, dedup/Exact/restart/concurrency verified. One live Jev call validly declined; **LLM-generated Dnew PASS not achieved**. Core ato #1412 / API #696 / requester ato #1413 (Draft) open, not merged/deployed. See [typed generation ledger](../../ops/formation-typed-generation-2026-09-26.md) |
 | 6 | Measure 20, expand to 50 then 100; known-D revalidation on new authorized Runtime/Adapter/D | Pending |
 
 **Formation foundation v1 complete** (2026-09-26): all twelve Stage 4 gates are
@@ -39,11 +39,13 @@ and a final-stack regression ([foundation ledger](../../ops/formation-foundation
 not applied to any remote database.
 
 5a-a and 5a-b are merged. **5a completion gate closed** after the
-[live Jev acceptance and comparison ledger](https://github.com/ato-run/ato/blob/b675381a276f46d4408c0418975d6feb7848c5fa/docs/ops/formation-live-jev-2026-09-26.md).
+[live Jev acceptance and comparison ledger](https://github.com/ato-run/ato/blob/7be9c53514f2e01d37d7f049e8892df798981b27/docs/ops/formation-live-jev-2026-09-26.md).
 This single pair establishes bounded integration and records cost; it does not
 show an attempt-count improvement or a statistically meaningful speedup.
-Probe is deferred until a safe typed primitive exists. 5b new-D generation
-remains pending. Deployment is not part of this completed integration gate.
+Probe is deferred until a safe typed primitive exists. 5b-a has started as a
+local/integration track, not a deployment. Its fixed typed-draft execution works,
+but the single live Jev call declined: the 5b LLM-generation PASS gate is open.
+The 5a gate stays closed; its result must not be conflated with 5b.
 
 The sequential track's [integration record](../../ops/formation-integrated-2026-09-25.md)
 separates implementation, integration checks, merge and deployment. 64/128 MiB

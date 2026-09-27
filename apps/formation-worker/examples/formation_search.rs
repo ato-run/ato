@@ -1,4 +1,4 @@
-//! Actual known-D search acceptance driver. Frozen source and routes are planned
+//! Actual Formation search acceptance driver. Frozen source and routes are planned
 //! once, then every accepted route is checked by the shared Rust authority.
 use anyhow::{Context, Result, bail};
 use ato_formation_worker::decision_provider::{
@@ -159,6 +159,58 @@ fn action_kind(choice: &ato_formation_worker::decision_provider::OfferedChoice) 
     }
 }
 
+/// Fault injection / deterministic draft producer for actual acceptance only.
+struct AcceptanceGenerationProvider {
+    mode: String,
+}
+impl ato_formation_worker::generation_provider::GenerationProvider
+    for AcceptanceGenerationProvider
+{
+    fn generate(
+        &self,
+        point: &ato_formation_worker::generation_provider::GenerationPoint,
+    ) -> ato_formation_worker::generation_provider::GenerationAnswer {
+        use ato_formation_worker::generation_provider::GenerationAnswer;
+        if self.mode == "error" {
+            return GenerationAnswer::Fallback {
+                reason: "provider_error",
+            };
+        }
+        if self.mode == "silent" {
+            std::thread::sleep(std::time::Duration::from_secs(31));
+            return GenerationAnswer::Fallback { reason: "timeout" };
+        }
+        if self.mode == "decline" {
+            return GenerationAnswer::Declined {
+                provenance: serde_json::json!({
+                    "provider": "acceptance", "model": "fixed-decline",
+                    "prompt_version": "acceptance/1",
+                    "usage": {"input_tokens":0,"output_tokens":0},
+                }),
+            };
+        }
+        let id = self.mode.strip_prefix("fixed:").unwrap_or(
+            point
+                .entrypoint_ids
+                .first()
+                .map(String::as_str)
+                .unwrap_or("none"),
+        );
+        GenerationAnswer::Draft {
+            draft: serde_json::json!({
+                "schema": "ato.formation-derivation-draft/1",
+                "operation": "python_script",
+                "entrypoint_id": id,
+            }),
+            provenance: serde_json::json!({
+                "provider": "acceptance", "model": "fixed",
+                "prompt_version": "acceptance/1",
+                "usage": {"input_tokens":0,"output_tokens":0},
+            }),
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let a: Vec<_> = std::env::args().collect();
     if a.len() < 9 {
@@ -172,10 +224,16 @@ fn main() -> Result<()> {
         &a[8..].iter().map(Into::into).collect::<Vec<_>>(),
         None,
         Path::new(&a[4]),
-        RuntimeConstraintWire::Any,
+        std::env::var("ATO_ACCEPTANCE_EXACT_RUNTIME")
+            .map(|runtime_id| RuntimeConstraintWire::Exact {
+                runtime_id,
+                environment_id: None,
+            })
+            .unwrap_or(RuntimeConstraintWire::Any),
         SatisfyPolicy {
             network: "dependency-resolution".into(),
             allow_managed: false,
+            generation: None,
             // ATO_ACCEPTANCE_DECISION_POLICY="MAX_DECISIONS,TIMEOUT_MS"
             decision: std::env::var("ATO_ACCEPTANCE_DECISION_POLICY")
                 .ok()
@@ -192,6 +250,19 @@ fn main() -> Result<()> {
         SatisfyBudget::ceilings(a[6].parse()?, "first_pass"),
         &a[5],
     )?;
+    if let Ok(entries) = std::env::var("ATO_ACCEPTANCE_GENERATION_ENTRYPOINTS") {
+        submission.authorize_generation(serde_json::from_str(&entries)?, 30_000)?;
+    }
+    let generation_provider = std::env::var("ATO_ACCEPTANCE_GENERATION_PROVIDER").ok()
+        .map(|mode| -> Result<Box<dyn ato_formation_worker::generation_provider::GenerationProvider>> {
+            if mode == "jev" {
+                Ok(Box::new(ato_formation_worker::generation_provider::JevGenerationProvider::from_env(
+                    std::time::Duration::from_secs(20),
+                )?))
+            } else {
+                Ok(Box::new(AcceptanceGenerationProvider { mode }))
+            }
+        }).transpose()?;
     // Fault injection for the effect-uncertainty acceptance only: a requester
     // whose effect hint is wrong. The Runtime re-plans D and attests the real
     // class; nothing here changes K or D.
@@ -222,6 +293,24 @@ fn main() -> Result<()> {
     loop {
         // Coordinator may be restarting; a transport failure is not D failure.
         if let Ok(status) = client.satisfy_status(id) {
+            submission.accept_generated_candidate(&status)?;
+            if let Some(provider) = &generation_provider
+                && let Some(call) = ato_formation_worker::runtime_network::serve_generation(
+                    &mut submission,
+                    &client,
+                    id,
+                    &status,
+                    provider.as_ref(),
+                )?
+                && let Some(path) = std::env::var_os("ATO_ACCEPTANCE_GENERATION_LOG")
+            {
+                use std::io::Write as _;
+                let mut log = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)?;
+                writeln!(log, "{call}")?;
+            }
             if let Some(provider) = &provider {
                 // A silent provider must not stall this poll loop.
                 if provider.mode == "silent" {
