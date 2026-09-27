@@ -754,3 +754,84 @@ fn receiver_cannot_supply_local_context_or_break_historical_v1_with_context_extr
         server.finish();
     }
 }
+
+#[test]
+fn c0_offline_context_reads_only_verified_snapshot_without_enabling_provider() {
+    use ato_formation::generation_context::{MAX_SOURCE_BYTES, v2};
+    let (root, mut submission) = submission_with_source(|source| {
+        let mut large = b"listen()\n#".to_vec();
+        large.resize(MAX_SOURCE_BYTES + 100, b'x');
+        std::fs::write(source.join("large.py"), large).unwrap();
+        std::fs::write(source.join("repaired.py"), b"# coding: latin-1\n# \xff\nimport runpy\nrunpy.run_path('PRIVATE_PATH_CANARY', run_name='__main__')\n").unwrap();
+    });
+    assert!(
+        submission
+            .generation_context_v2_for_offline(&json!([]), &json!([]))
+            .is_err()
+    );
+    submission
+        .authorize_generation(
+            BTreeMap::from([
+                ("q7".into(), "repaired.py".into()),
+                ("m2".into(), "large.py".into()),
+            ]),
+            30_000,
+        )
+        .unwrap();
+    std::fs::write(root.path().join("source/repaired.py"), "import flask\n").unwrap();
+    let request_before = serde_json::to_value(&submission.request).unwrap();
+    let result = submission.generation_context_v2_for_offline(
+        &json!([{"status":"fail","failure_code":"candidate_not_observable","message":"sk-test-private"}]),
+        &json!([{"kind":"attempt_failures","result":{"failures":[{"status":"fail","failure_code":"formation_failed"}]}}])).unwrap();
+    assert_eq!(
+        result.entrypoints[0].source_scan,
+        v2::SourceScan::BoundedPrefix
+    );
+    assert!(result.entrypoints[0].server_listen);
+    assert_eq!(result.entrypoints[1].encoding, v2::Encoding::Latin1);
+    assert_eq!(result.entrypoints[1].delegation, v2::Delegation::PythonMain);
+    assert_eq!(result.failures.len(), 1);
+    assert_eq!(result.inspections.len(), 1);
+    // Point/2 cannot silently accept context/2; a future provider must use a new point/prompt.
+    let incompatible = json!({"schema":"ato.formation-generation-point/2", "revision":0,
+        "expires_at":"2099-01-01T00:00:00Z", "entrypoint_ids":["m2","q7"], "failures":[], "context":result});
+    assert!(
+        serde_json::from_value::<ato_formation_worker::generation_provider::GenerationPoint>(
+            incompatible
+        )
+        .is_err()
+    );
+    let wire = serde_json::to_string(&result).unwrap();
+    for forbidden in [
+        "PRIVATE_PATH_CANARY",
+        "sk-test-private",
+        "repaired.py",
+        "large.py",
+        "flask",
+    ] {
+        assert!(!wire.contains(forbidden));
+    }
+    assert_eq!(
+        serde_json::to_value(&submission.request).unwrap(),
+        request_before
+    );
+    assert!(
+        submission
+            .generation_context_for(&json!([]), &json!([]))
+            .unwrap()
+            .is_none()
+    );
+    submission.enable_generation_context().unwrap();
+    let old = submission
+        .generation_context_for(&json!([]), &json!([]))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        old.entrypoints[0].source_scan,
+        ato_formation::generation_context::SourceScan::TooLarge
+    );
+    assert_eq!(
+        old.entrypoints[1].source_scan,
+        ato_formation::generation_context::SourceScan::Unavailable
+    );
+}
