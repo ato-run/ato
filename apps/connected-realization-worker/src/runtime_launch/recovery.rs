@@ -71,6 +71,12 @@ pub enum RunPhase {
     Launching,
     Active,
     Stopping,
+    /// The workloads are provably gone but the terminal report never reached
+    /// the control plane. Recovery owes it a `stopped` report — that is what
+    /// releases this Run's grants. Keeping the entry (rather than deleting it
+    /// because the host knows the stop) is what lets a later incarnation
+    /// deliver that evidence.
+    StopConfirmedUnreported,
     /// A stop was attempted and could not be confirmed.
     StopUnconfirmed,
 }

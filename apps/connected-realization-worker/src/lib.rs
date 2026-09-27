@@ -1043,10 +1043,31 @@ pub struct WorkerConfig {
 }
 
 /// How a runtime launch ended, and whether its workloads are confirmed
-/// stopped (the journal entry may then go).
+/// stopped. The journal entry may go only when BOTH hold: the host proved the
+/// stop AND the terminal report reached the control plane. A dropped entry
+/// whose report never arrived leaves the lease open and the Run's state
+/// writer held forever — nothing else links the dead Run back to this lease.
 struct RuntimeLaunchOutcome {
     result: Result<()>,
     stop_confirmed: bool,
+}
+
+/// What the journal records for a finished Run, or `None` when the entry may
+/// go. `stop_confirmed` alone is not enough to drop it: the API still
+/// believes the workload may be running — its lease stays open and the Run's
+/// state writer stays held, so every relaunch of the Instance wedges.
+/// Keeping the entry lets recovery deliver the `stopped` report the control
+/// plane needs to release the grants.
+fn journal_phase_after_run(
+    outcome: &RuntimeLaunchOutcome,
+) -> Option<runtime_launch::recovery::RunPhase> {
+    if outcome.stop_confirmed && outcome.result.is_ok() {
+        None
+    } else if outcome.stop_confirmed {
+        Some(runtime_launch::recovery::RunPhase::StopConfirmedUnreported)
+    } else {
+        Some(runtime_launch::recovery::RunPhase::StopUnconfirmed)
+    }
 }
 
 struct RuntimeServeControls<'a> {
@@ -1380,13 +1401,20 @@ impl ConnectedWorker {
                 self.fixed_tcp.deactivate(&lease.run_id, allocation);
             }
         }
-        if outcome.stop_confirmed {
-            // Confirmed stopped, or never started: nothing left to recover.
-            journal.remove(&lease.id)?;
-        } else {
-            // Kept for recovery; the slots are quarantined, not released.
-            entry.phase = runtime_launch::recovery::RunPhase::StopUnconfirmed;
-            journal.record(&entry)?;
+        match journal_phase_after_run(&outcome) {
+            // Confirmed stopped AND the terminal report was delivered, or the
+            // Run never started: nothing left to recover.
+            None => journal.remove(&lease.id)?,
+            // StopUnconfirmed: the workload may still be running, so recovery
+            // must confirm the stop before the slot can be released.
+            // StopConfirmedUnreported: provably gone, but the control plane
+            // never learned it — the lease stays open and the Run's state
+            // grants stay held until a later incarnation delivers the
+            // `stopped` recovery this entry preserves.
+            Some(phase) => {
+                entry.phase = phase;
+                journal.record(&entry)?;
+            }
         }
         outcome.result
     }
@@ -4678,6 +4706,38 @@ mod tests {
 
     use super::*;
     use tungstenite::client::IntoClientRequest;
+
+    #[test]
+    fn journal_entry_is_dropped_only_once_the_terminal_report_is_delivered() {
+        let reported = RuntimeLaunchOutcome {
+            result: Ok(()),
+            stop_confirmed: true,
+        };
+        assert_eq!(journal_phase_after_run(&reported), None);
+
+        // The host proved the stop but the API never heard it: keep the entry
+        // so recovery can deliver the `stopped` evidence and free the Run's
+        // state grants. Dropping it here strands the lease open forever.
+        let unreported = RuntimeLaunchOutcome {
+            result: Err(anyhow::anyhow!("report delivery failed")),
+            stop_confirmed: true,
+        };
+        assert_eq!(
+            journal_phase_after_run(&unreported),
+            Some(runtime_launch::recovery::RunPhase::StopConfirmedUnreported)
+        );
+
+        // The workload may still be running: keep the entry as unconfirmed so
+        // recovery proves the stop (or quarantines) before the slot frees.
+        let unconfirmed = RuntimeLaunchOutcome {
+            result: Err(anyhow::anyhow!("stop unconfirmed")),
+            stop_confirmed: false,
+        };
+        assert_eq!(
+            journal_phase_after_run(&unconfirmed),
+            Some(runtime_launch::recovery::RunPhase::StopUnconfirmed)
+        );
+    }
 
     #[test]
     fn explicit_stop_wins_a_race_with_revoked_continuation_authority() {
