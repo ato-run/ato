@@ -1,0 +1,28 @@
+{
+  "original_C_reservations": [
+    "E01p0C",
+    "E01p1C",
+    "E02p0C",
+    "E02p1C"
+  ],
+  "remaining_C_reservations": [
+    "E03p0C",
+    "E03p1C",
+    "E04p0C",
+    "E04p1C",
+    "E05p0C",
+    "E05p1C",
+    "E06p0C",
+    "E06p1C",
+    "E07p0C",
+    "E07p1C",
+    "E08p0C",
+    "E08p1C",
+    "E09p0C",
+    "E09p1C",
+    "E10p0C",
+    "E10p1C"
+  ],
+  "original_results_sha256": "cb5e2620fc587d6e6221d9a09eab78102d4c82549f6e080c002839c4c6689d73",
+  "final_results_sha256": "f4d8415e5b39e9d245a88bbb504bdd9724d9ef74be68ac07f2b1f0056c874773"
+}
