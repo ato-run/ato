@@ -130,7 +130,8 @@ fn encodings_are_closed_and_malformed_cookies_fail_closed() {
     for bytes in [
         b"# coding: shift-jis\nlisten()\n".as_slice(),
         b"# coding: \nlisten()\n",
-        b"# coding utf-8\nlisten()\n",
+        b"# coding=\nlisten()\n",
+        b"# coding: ???\nlisten()\n",
         b"# coding: utf-8\n# coding: latin-1\nlisten()\n",
         b"\xef\xbb\xbf# coding: latin-1\nlisten()\n",
         b"# coding: utf-8\n# \xff\nlisten()\n",
@@ -301,4 +302,34 @@ fn failures_inspections_and_entry_bytes_remain_bounded() {
     c.failures.pop();
     c.entrypoints.push(c.entrypoints[0].clone());
     assert!(c.validate().is_err());
+}
+
+#[test]
+fn ordinary_coding_comments_do_not_override_default_or_mask_actual_cookies() {
+    for source in [
+        "# coding examples\nlisten()\n",
+        "# coding utf-8\nlisten()\n",
+        "# ordinary coding discussion\n# another coding comment\nlisten()\n",
+        "# decoding examples\nlisten()\n",
+    ] {
+        let entry = scan(source.as_bytes());
+        assert_eq!(entry.encoding, v2::Encoding::Utf8);
+        assert_eq!(entry.source_scan, v2::SourceScan::Complete);
+        assert!(entry.server_listen);
+    }
+    for source in [
+        b"# coding discussion; coding=latin-1\n# \xff\nlisten()\n".as_slice(),
+        b"# coding discussion\n# coding: iso-8859-1\n# \xff\nlisten()\n",
+    ] {
+        let entry = scan(source);
+        assert_eq!(entry.encoding, v2::Encoding::Latin1);
+        assert_eq!(entry.source_scan, v2::SourceScan::Complete);
+        assert!(entry.server_listen);
+    }
+    for source in [
+        b"# coding discussion; coding=\nlisten()\n".as_slice(),
+        b"# coding discussion; coding=unknown\nlisten()\n",
+    ] {
+        assert_eq!(scan(source).source_scan, v2::SourceScan::Unavailable);
+    }
 }

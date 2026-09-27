@@ -68,7 +68,9 @@ complete scan (which itself is not a behavior proof).
 Examine only the first two physical lines, each at most 1 KiB. The second line
 is eligible only when the first is blank or a comment (including shebang).
 Accept default UTF-8, UTF-8 BOM, exact `utf-8` / `utf8`, or explicit
-`latin-1` / `latin1` / `iso-8859-1` cookies. Malformed/conflicting/unsupported
+`latin-1` / `latin1` / `iso-8859-1` cookies. Only actual `coding:` / `coding=`
+markers declare an encoding; ordinary comments mentioning `coding` retain the
+UTF-8 default. Malformed/conflicting/unsupported
 cookies, BOM conflicts and invalid UTF-8 become unavailable. This is a
 conservative PEP-263-shaped subset, not general Python codec compatibility.
 Encoding strings are never emitted, only the enum. No literal/status value,
@@ -91,8 +93,9 @@ The worker `runtime_network.rs` reports the resulting `AttemptFailure.code`.
 | Existing EvidenceCode values | unchanged | unchanged | same fixed vocabulary |
 | Anything else | other | other | never parse raw messages |
 
-The first two recover process-startup evidence; the latter two preserve the
-associated lifecycle boundary without pretending to know a process exit reason.
+`candidate_not_observable` retains observability evidence; `formation_failed` is
+a generic formation/execution fallback, not process-startup-specific evidence.
+The latter two preserve lifecycle boundaries without inferring a process exit reason.
 `ProcessExited` already exists in context/1 vocabulary, but the audited launch
 path does not emit that code. No new exit-specific classification is invented.
 Committed E08 observations contain `other`; the original exact code cannot be

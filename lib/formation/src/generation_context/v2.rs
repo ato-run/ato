@@ -149,14 +149,15 @@ fn encoding(bytes: &[u8]) -> Encoding {
             }
             continue;
         }
-        let Some(at) = line.windows(6).position(|w| w == b"coding") else {
+        // Ordinary prose mentioning coding is not an encoding declaration.
+        // Search for the delimiter as well, so prose cannot hide a later cookie.
+        let Some(at) = line
+            .windows(7)
+            .position(|w| w == b"coding:" || w == b"coding=")
+        else {
             continue;
         };
-        let tail = &line[at + 6..];
-        if !matches!(tail.first(), Some(b':' | b'=')) {
-            return Encoding::Unsupported;
-        }
-        let tail = tail[1..].trim_ascii_start();
+        let tail = line[at + 7..].trim_ascii_start();
         let end = tail
             .iter()
             .position(|b| !(b.is_ascii_alphanumeric() || b"-_.".contains(b)))
