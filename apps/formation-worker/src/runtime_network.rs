@@ -877,6 +877,8 @@ pub fn serve_generation(
     let answer = if let Some(local) = &mut point_v3 {
         local.revision = point.revision;
         local.claimed = true;
+        // Close the boundary for every provider, not just the Jev implementation.
+        local.validate_claimed().map_err(anyhow::Error::msg)?;
         provider.generate_v3(local)
     } else {
         provider.generate(&point)

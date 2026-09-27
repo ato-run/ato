@@ -326,3 +326,30 @@ fn wrong_provider_version_and_unclaimed_points_never_reach_transport() {
         GenerationAnswer::Fallback { reason: "invalid" }
     ));
 }
+
+#[test]
+fn unclaimed_points_are_invalid_at_public_request_and_response_boundaries() {
+    let mut p = point();
+    p.claimed = false;
+    assert!(p.validate().is_ok()); // Required for building the local point before claim.
+    assert_eq!(
+        generation_request_v3(DEFAULT_GENERATION_MODEL, &p),
+        Err("invalid")
+    );
+    for (operation, entrypoint) in [("python_script", "q7"), ("decline", "none")] {
+        assert!(matches!(
+            validate_response_v3(
+                DEFAULT_GENERATION_MODEL,
+                &p,
+                &response(operation, entrypoint)
+            ),
+            GenerationAnswer::Fallback { reason: "invalid" }
+        ));
+    }
+    p.claimed = true;
+    assert!(generation_request_v3(DEFAULT_GENERATION_MODEL, &p).is_ok());
+    p.revision = (1_u64 << 53) - 1;
+    assert!(p.validate_claimed().is_ok());
+    p.revision += 1;
+    assert!(p.validate_claimed().is_err());
+}

@@ -57,7 +57,9 @@ pub struct GenerationPointV3 {
 
 impl GenerationPointV3 {
     pub fn validate(&self) -> Result<(), &'static str> {
+        // Match the receiver's nonnegative JavaScript-safe revision domain.
         if self.schema != GENERATION_POINT_SCHEMA_V3
+            || self.revision > (1_u64 << 53) - 1
             || self.expires_at.len() > 64
             || serde_json::to_vec(self).map_or(true, |bytes| bytes.len() > MAX_POINT_V3_BYTES)
         {
@@ -73,6 +75,15 @@ impl GenerationPointV3 {
             .map(|entry| entry.id.as_str())
             .collect();
         if offered != projected {
+            return Err("invalid");
+        }
+        Ok(())
+    }
+
+    /// Pre-claim construction uses validate(); every provider boundary requires this.
+    pub fn validate_claimed(&self) -> Result<(), &'static str> {
+        self.validate()?;
+        if !self.claimed {
             return Err("invalid");
         }
         Ok(())
@@ -204,7 +215,7 @@ pub fn generation_request_v3(
     model: &str,
     point: &GenerationPointV3,
 ) -> Result<Value, &'static str> {
-    point.validate()?;
+    point.validate_claimed()?;
     let mut request = generation_request(model, &point.domain())?;
     request["state"] = serde_json::to_value(&point.context).map_err(|_| "invalid")?;
     for question in ["operation", "entrypoint"] {
@@ -218,7 +229,7 @@ pub fn validate_response_v3(
     point: &GenerationPointV3,
     raw: &Value,
 ) -> GenerationAnswer {
-    if point.validate().is_err() {
+    if point.validate_claimed().is_err() {
         return GenerationAnswer::Fallback { reason: "invalid" };
     }
     validate_response_with_prompt(model, &point.domain(), raw, GENERATION_PROMPT_VERSION_V3)
