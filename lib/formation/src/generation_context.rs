@@ -622,6 +622,12 @@ pub fn project_python(
     let Some(tokens) = std::str::from_utf8(bytes).ok().and_then(lex) else {
         return Ok(result);
     };
+    summarize_tokens(&tokens, &mut result);
+    result.validate()?;
+    Ok(result)
+}
+
+fn summarize_tokens(tokens: &[Token<'_>], result: &mut EntryPointSummary) {
     result.source_scan = SourceScan::Complete;
     let mut imports = BTreeSet::new();
     for statement in tokens.split(|t| *t == Token::End) {
@@ -726,6 +732,6 @@ pub fn project_python(
         })
         .collect();
     result.imports = imports.into_iter().collect();
-    result.validate()?;
-    Ok(result)
 }
+
+pub mod v2;
