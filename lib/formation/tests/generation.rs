@@ -312,3 +312,26 @@ fn generated_d_uses_the_same_existing_lowering_and_pinned_toolchain() {
     // Platform-owned provisioning is unchanged, not a new permission from the model.
     assert!(plan.needs_network(&result.derivation));
 }
+
+#[test]
+fn serialized_generation_must_fit_the_receiver_byte_limit() {
+    // A valid near-limit parent can grow during TOML serialization and the
+    // authorized script substitution. Input size alone does not bound output.
+    let template = BASE.replace("path = \"/\"", "path = \"/PAD\"");
+    let padding = "x".repeat(MAX_CAPSULE_TOML_BYTES - 128 - template.len() + 3);
+    let text = template.replace("PAD", &padding);
+    assert_eq!(text.len(), MAX_CAPSULE_TOML_BYTES - 128);
+    let mut scope = policy(&text);
+    scope
+        .entrypoints
+        .insert("entry_a".into(), format!("{}.py", "a".repeat(253)));
+    assert_eq!(
+        generate(&text, &scope).unwrap_err().code(),
+        "generation_result_too_large"
+    );
+    let smaller = text.replacen(&padding, &"x".repeat(1024), 1);
+    scope.base_derivation_ref = bound(&smaller).1.derivation_ref().unwrap();
+    let result = generate(&smaller, &scope).unwrap();
+    assert!(result.capsule_toml.len() <= MAX_CAPSULE_TOML_BYTES);
+    assert_eq!(bound(&smaller).0, bound(&result.capsule_toml).0);
+}
