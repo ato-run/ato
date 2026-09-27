@@ -173,8 +173,10 @@ def a2():
     d = decisions(sid)
     order = attempts_order(r)
     h.expect(rc == 0 and r["status"] == "satisfied" and order == [route_ref(r, 0), route_ref(r, 1)]
-             and [x["outcome"] for x in d] == ["out_of_set"]
-             and r["search_state"]["budget"].get("decisions_used") == 1,
+             # Since 5a-b, the second frontier also offers Inspect/Stop, so it
+             # consumes the second authorized point rather than being singleton.
+             and [x["outcome"] for x in d] == ["out_of_set", "out_of_set"]
+             and r["search_state"]["budget"].get("decisions_used") == 2,
              "out_of_set recorded; default D1 then D2", c, decisions=d, order=order)
     h.note(c, "passed", decisions=d, attempts=[a["attempt_id"] for a in r["attempts"]])
     return {"satisfy_id": satisfy, "decisions": d}
@@ -185,7 +187,7 @@ def a3():
     rt = h.runtime(c, "runtime", 3)
     try:
         req, satisfy, sid, root = submit(c, [h.ROUTES / "d-fail.toml", h.ROUTES / "d-good.toml"],
-                                         provider="silent", policy="2,15000")
+                                         provider="silent", policy="1,15000")
         h.wait_for(lambda: decisions(sid), "decision point opened", timeout=120)
         h.restart(c, "while_decision_open")
         d = decisions(sid)
@@ -263,7 +265,7 @@ def a6():
     rt = h.runtime(c, "runtime", 3)
     try:
         req, satisfy, sid, root = submit(c, [h.ROUTES / "d-fail.toml", h.ROUTES / "d-good.toml"],
-                                         provider="late:6000", policy="2,3000")
+                                         provider="late:6000", policy="1,3000")
         rc, r = finished(c, req, root)
     finally:
         h.stop(rt)
@@ -345,7 +347,7 @@ def a9():
     rt = h.runtime(c, "runtime", 3)
     try:
         req, satisfy, sid, root = submit(c, [h.ROUTES / "d-fail.toml", h.ROUTES / "d-good.toml"],
-                                         provider="silent", policy="2,3000")
+                                         provider="silent", policy="1,3000")
         view = h.wait_for(lambda: (lambda v: v if v.get("decision_point") else None)(
             status_as(satisfy, TOKEN)), "decision point", timeout=120, poll=0.1)
         point = view["decision_point"]
