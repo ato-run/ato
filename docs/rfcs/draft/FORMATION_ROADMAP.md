@@ -57,6 +57,10 @@ fixes 10 cases, two ID permutations and three arms. Its
 [comparator-only repair amendment](../../ops/formation-efficacy-e1-amendment.md)
 preserves every prior model outcome and permits no repeat C calls. Evidence-based
 D improvement remains unproven; Stage 6 coverage expansion is separate.
+[E1 amended efficacy results](../../ops/formation-efficacy-e1-results.md): 60 cells,
+A 0/20, deterministic B 9/20, Jev C 2/20 same-K successes; 20 model calls,
+no C retry and zero robust additional-success cases. **Efficacy gate NOT met;
+5b remains In progress.** Analyze information loss before any 5b-c expansion.
 Exact Runtime now exhausts known Ds within that placement before generation;
 no-policy semantics remain unchanged. Prompt-v1 decline remains historical;
 prompt-v2 acceptance is recorded separately, never retried until success.
