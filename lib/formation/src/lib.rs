@@ -29,7 +29,6 @@
 
 pub mod authoring;
 pub mod browser;
-#[cfg(feature = "planning")]
 pub mod capsule_toml;
 #[cfg(feature = "planning")]
 pub mod capsule_toml_v2;
@@ -54,4 +53,5 @@ pub mod source;
 pub mod verify;
 
 pub mod decision;
+pub mod generation;
 pub mod search;
