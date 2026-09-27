@@ -5,6 +5,15 @@ import statistics
 import sys
 from pathlib import Path
 
+# Immutable E1 domain from docs/ops/formation-efficacy-e1-plan.json.
+# The comparator-only amendment did not change cases, permutations or arms.
+REGISTERED_CELLS = frozenset(
+    (f'E{i:02}', permutation, arm)
+    for i in range(1, 11)
+    for permutation in (0, 1)
+    for arm in 'ABC'
+)
+
 def summarize(rows):
     keys=[(r['case'],r['permutation'],r['arm']) for r in rows]
     if len(set(keys)) != len(keys): raise ValueError('duplicate cell')
@@ -49,7 +58,7 @@ def summarize(rows):
         if all(index.get((case,p,'C'),{}).get('same_k_success') is True and
                index.get((case,p,'B'),{}).get('same_k_success') is False for p in (0,1)):
             robust.append(case)
-    complete=len(rows)==60
+    complete=set(keys)==REGISTERED_CELLS
     gate=(complete and len(robust)>=2 and totals['C']['same_k_successes']>totals['B']['same_k_successes']
           and not any(v['violations'] for v in totals.values()))
     return {'protocol':'E1 comparator-repair amendment','complete':complete,'arms':totals,
