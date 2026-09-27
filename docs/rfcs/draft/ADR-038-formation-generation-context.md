@@ -1,6 +1,7 @@
 # ADR-038: Bounded source evidence for typed generation
 
-Status: Implemented in an unmerged local/integration stack; no deployment.
+Status: merged (ato #1414/#1415, API #697); no deployment.
+Overall 5b remains In progress; efficacy is separate from the minimal live gate.
 Predecessor: [ADR-037](ADR-037-formation-typed-generation.md), retained as the
 historical 5b-a design and prompt-v1 acceptance (one valid decline).
 

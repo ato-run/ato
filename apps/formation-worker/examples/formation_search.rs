@@ -171,6 +171,34 @@ impl ato_formation_worker::generation_provider::GenerationProvider
         point: &ato_formation_worker::generation_provider::GenerationPoint,
     ) -> ato_formation_worker::generation_provider::GenerationAnswer {
         use ato_formation_worker::generation_provider::GenerationAnswer;
+        if self.mode == "deterministic_v1" {
+            use ato_formation_worker::generation_provider::generation_request_v2;
+            if generation_request_v2(
+                ato_formation_worker::generation_provider::DEFAULT_GENERATION_MODEL,
+                point,
+            )
+            .is_err()
+            {
+                return GenerationAnswer::Fallback { reason: "invalid" };
+            }
+            let provenance = serde_json::json!({
+                "provider": "acceptance", "model": "deterministic-selector-v1",
+                "prompt_version": "efficacy-selector/1",
+                "usage": {"input_tokens":0,"output_tokens":0},
+            });
+            let selected = point
+                .context
+                .as_ref()
+                .and_then(|context| efficacy_entrypoint(&context.entrypoints));
+            return match selected {
+                Some(id) => GenerationAnswer::Draft {
+                    draft: serde_json::json!({"schema":"ato.formation-derivation-draft/1",
+                        "operation":"python_script", "entrypoint_id":id}),
+                    provenance,
+                },
+                None => GenerationAnswer::Declined { provenance },
+            };
+        }
         if self.mode == "error" {
             return GenerationAnswer::Fallback {
                 reason: "provider_error",
@@ -209,6 +237,40 @@ impl ato_formation_worker::generation_provider::GenerationProvider
             }),
         }
     }
+}
+
+/// Evaluation-only fixed rule. No source, paths, labels or outcome feedback.
+/// Complete scans only; positive score, then ascending opaque ID for ties.
+fn efficacy_entrypoint(
+    entries: &[ato_formation::generation_context::EntryPointSummary],
+) -> Option<&str> {
+    use ato_formation::generation_context::{ImportMarker, SourceScan};
+    entries
+        .iter()
+        .filter(|entry| entry.source_scan == SourceScan::Complete)
+        .map(|entry| {
+            let http = entry.imports.iter().any(|marker| {
+                matches!(
+                    marker,
+                    ImportMarker::HttpServer
+                        | ImportMarker::Flask
+                        | ImportMarker::Fastapi
+                        | ImportMarker::Uvicorn
+                        | ImportMarker::Aiohttp
+                        | ImportMarker::Tornado
+                        | ImportMarker::Wsgiref
+                        | ImportMarker::Django
+                )
+            });
+            let score = 4 * u8::from(entry.custom_http_handler)
+                + 2 * u8::from(entry.server_listen)
+                + u8::from(http)
+                + u8::from(entry.main_guard);
+            (entry.id.as_str(), score)
+        })
+        .filter(|(_, score)| *score > 0)
+        .min_by(|(id_a, score_a), (id_b, score_b)| score_b.cmp(score_a).then(id_a.cmp(id_b)))
+        .map(|(id, _)| id)
 }
 
 /// Reject mode combinations that would record a different prompt from the
@@ -443,6 +505,59 @@ mod capture_tests {
         for context in [false, true] {
             assert!(validate_generation_capture(Some("fixed:e01"), context).is_ok());
             assert!(validate_generation_capture(None, context).is_ok());
+        }
+    }
+}
+
+#[cfg(test)]
+mod efficacy_tests {
+    use super::efficacy_entrypoint;
+    use ato_formation::generation_context::project_python;
+    #[test]
+    fn fixed_rule_uses_markers_not_input_order_and_breaks_ties_by_id() {
+        let source = b"from http.server import HTTPServer\nHTTPServer().serve_forever()";
+        let a = project_python("q7", source, source.len() as u64).unwrap();
+        let b = project_python("m2", source, source.len() as u64).unwrap();
+        assert_eq!(efficacy_entrypoint(&[a.clone(), b.clone()]), Some("m2"));
+        assert_eq!(efficacy_entrypoint(&[b, a]), Some("m2"));
+    }
+    #[test]
+    fn fixed_rule_declines_empty_zero_and_unavailable_contexts() {
+        assert_eq!(efficacy_entrypoint(&[]), None);
+        let zero = project_python("q7", b"print('hi')", 11).unwrap();
+        let large = project_python("m2", b"", 65537).unwrap();
+        let unavailable = project_python("z3", &[255], 1).unwrap();
+        assert_eq!(efficacy_entrypoint(&[zero, large, unavailable]), None);
+    }
+}
+
+#[cfg(test)]
+mod efficacy_provider_tests {
+    use super::AcceptanceGenerationProvider;
+    use ato_formation_worker::generation_provider::{
+        GenerationAnswer, GenerationPoint, GenerationProvider,
+    };
+    #[test]
+    fn comparator_reaches_draft_through_production_context_validation() {
+        let source = b"from http.server import HTTPServer\nHTTPServer().serve_forever()";
+        let summary =
+            ato_formation::generation_context::project_python("m2", source, source.len() as u64)
+                .unwrap();
+        let point: GenerationPoint = serde_json::from_value(serde_json::json!({
+            "schema":"ato.formation-generation-point/2","revision":1,"expires_at":"2026-09-27T00:00:00Z",
+            "entrypoint_ids":["m2"],"failures":[],"context":{
+                "schema":"ato.formation-generation-context/1","entrypoints":[summary],
+                "project_summary":{"python":true,"node":false,"manifest":true,"lockfile":false,
+                    "readme":false,"static_html":false,"regular_files":"one","python_files":"one"},
+                "failures":[],"inspections":[]
+            }
+        })).unwrap();
+        let provider = AcceptanceGenerationProvider {
+            mode: "deterministic_v1".into(),
+        };
+        match provider.generate(&point) {
+            GenerationAnswer::Draft { draft, .. } => assert_eq!(draft["entrypoint_id"], "m2"),
+            answer => panic!("expected comparator draft, got {answer:?}"),
         }
     }
 }
