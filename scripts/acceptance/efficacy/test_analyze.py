@@ -1,5 +1,7 @@
+import json
 import unittest
-from analyze import summarize
+from pathlib import Path
+from analyze import REGISTERED_CELLS, summarize
 
 class Analysis(unittest.TestCase):
     def rows(self):
@@ -25,8 +27,44 @@ class Analysis(unittest.TestCase):
         self.assertTrue(summarize(rows)['efficacy_gate_passed'])
         next(r for r in rows if r['arm']=='C' and r['case']=='E02' and r['permutation']==1)['same_k_success']=False
         self.assertFalse(summarize(rows)['efficacy_gate_passed'])
-    def test_missing_or_duplicate_cells_cannot_close_gate(self):
-        rows=self.rows();self.assertFalse(summarize(rows[:-1])['complete'])
-        with self.assertRaises(ValueError):summarize(rows+[rows[0]])
+    def test_registered_domain_matches_immutable_preregistration(self):
+        root = Path(__file__).resolve().parents[3]
+        plan = json.loads((root / 'docs/ops/formation-efficacy-e1-plan.json').read_text())
+        expected = {
+            (case, permutation, arm)
+            for case, fixture in plan['fixtures'].items()
+            for permutation in range(len(fixture['permutations']))
+            for arm in plan['arms']
+        }
+        self.assertEqual(len(expected), plan['cells'])
+        self.assertEqual(REGISTERED_CELLS, expected)
+
+    def test_registered_sixty_cells_are_complete(self):
+        self.assertTrue(summarize(self.rows())['complete'])
+
+    def test_missing_cell_is_incomplete(self):
+        self.assertFalse(summarize(self.rows()[:-1])['complete'])
+
+    def test_unregistered_cell_cannot_fill_a_missing_registered_cell(self):
+        for field, value in [('case', 'E11'), ('permutation', 2), ('arm', 'D')]:
+            with self.subTest(field=field):
+                rows = self.rows()
+                # Make the other gate conditions true so completeness alone
+                # prevents a substituted cell from falsely closing the gate.
+                for row in rows:
+                    if row['arm'] == 'C' and row['case'] in ('E01', 'E02'):
+                        row['same_k_success'] = True
+                rows[-1][field] = value
+                self.assertEqual(len(rows), 60)
+                result = summarize(rows)
+                self.assertFalse(result['complete'])
+                self.assertFalse(result['efficacy_gate_passed'])
+
+    def test_duplicate_cells_are_rejected(self):
+        rows = self.rows()
+        with self.assertRaisesRegex(ValueError, 'duplicate cell'):
+            summarize(rows + [rows[0]])
+        with self.assertRaisesRegex(ValueError, 'duplicate cell'):
+            summarize(rows[:-1] + [rows[0]])
 
 if __name__=='__main__':unittest.main()
