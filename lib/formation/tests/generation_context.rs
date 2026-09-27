@@ -420,3 +420,29 @@ fn lexical_markers_do_not_confuse_definitions_with_calls_or_class_names_with_bas
     assert!(!scan("custom_listen_CANARY()\n").server_listen);
     assert!(scan("if '__main__' == __name__: pass\n").main_guard);
 }
+
+#[test]
+fn mutation_entry_count_bound_rejects_seventeen_otherwise_valid_entries() {
+    let base = context();
+    let entries = (0..17)
+        .map(|i| project_python(&format!("e{i:02}"), b"pass", 4).unwrap())
+        .collect();
+    assert!(GenerationContext::new(entries, base.project_summary, vec![], vec![]).is_err());
+}
+
+#[test]
+fn mutation_wire_byte_bound_rejects_valid_json_with_excess_padding() {
+    let mut bytes = wire(&context()).into_bytes();
+    bytes.resize(MAX_CONTEXT_BYTES + 1, b' ');
+    // It is valid JSON and satisfies every typed bound: only raw byte size rejects it.
+    assert!(serde_json::from_slice::<GenerationContext>(&bytes).is_ok());
+    assert!(GenerationContext::from_json(&bytes).is_err());
+}
+
+#[test]
+fn mutation_source_identifier_canary_never_becomes_the_output_id() {
+    let source = "PRIVATE_SOURCE_CANARY";
+    let summary = project_python("entry_a", source.as_bytes(), source.len() as u64).unwrap();
+    assert!(!wire(&summary).contains(source));
+    assert_eq!(summary.id, "entry_a");
+}
