@@ -1,6 +1,7 @@
 # ADR-037 — Bounded typed Derivation generation (Formation 5b-a)
 
-Status: implemented on a local/integration branch; not merged or deployed.
+Status: merged (ato #1412/#1413, API #696); not deployed.
+The following v1 acceptance description is historical; v2 evidence is in ADR-038.
 Fixed-draft execution and safety integration verified. Live Jev declined; the
 LLM-generated Dnew PASS acceptance and the overall 5b completion gate remain open. This is a draft design record, not an accepted RFC. Builds on
 ADR-034–036. Migration 0303 is additive; prior migrations stay immutable.
