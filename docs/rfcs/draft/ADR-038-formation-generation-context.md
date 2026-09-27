@@ -48,7 +48,9 @@ opaque ID (1–32 ASCII alphanumeric/underscore, excluding `none`).
 Limits: 16 entrypoints; read at most 64 KiB per authorized file; larger files
 are not prefix-scanned; entry summary at most 1 KiB; whole context at most
 16 KiB; at most 16 failures, 4 inspections, 8 refusal codes per inspection;
-11 import markers, 6 framework markers. Count/size buckets have fixed enum
+11 import markers, 6 framework markers. String-interpolation nesting is capped at 16; provider response is capped at 64 KiB.
+Transport timeout is 20 s by default and cannot exceed 30 s; the durable
+generation deadline and one-generation budget remain unchanged. Count/size buckets have fixed enum
 values. Dynamic evidence deterministically retains recent eligible records.
 Unknown fields/enums, duplicate or unordered identities, and oversized contexts
 are rejected. Unknown failure codes become `other`, never echoed.
