@@ -243,6 +243,11 @@ pub fn compile(
         toml::Value::Array(argv.into_iter().map(toml::Value::String).collect());
     let capsule_toml = toml::to_string(&document)
         .map_err(|_| GenerationError("generation_canonicalization_failed"))?;
+    // The receiver stores the serialized recipe under the same byte ceiling.
+    // A valid parent near that ceiling can grow after formatting/substitution.
+    if capsule_toml.len() > MAX_CAPSULE_TOML_BYTES {
+        return Err(GenerationError("generation_result_too_large"));
+    }
     let roundtrip = parse_capsule_toml(&capsule_toml)
         .map_err(|_| GenerationError("generation_roundtrip_failed"))?;
     let (roundtrip_k, roundtrip_d) =
