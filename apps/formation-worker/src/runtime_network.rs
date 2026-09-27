@@ -589,6 +589,7 @@ pub struct Submission {
     frozen_source: local::FrozenSource,
     project_summary: ato_formation::generation_context::ProjectSummary,
     generation_context: Option<ato_formation::generation_context::GenerationContext>,
+    generation_context_v2: Option<ato_formation::generation_context::v2::GenerationContext>,
     /// Pin the sole admitted generation; repeated receiver views may replay it,
     /// but cannot grow the receipt authorization set with another generated D.
     generated_derivation_ref: Option<String>,
@@ -641,6 +642,7 @@ impl Submission {
             "generation entrypoint absent from frozen source"
         );
         self.generation_context = None;
+        self.generation_context_v2 = None;
         self.request.policy.generation = Some(policy);
         Ok(())
     }
@@ -674,6 +676,14 @@ impl Submission {
             vec![],
             vec![],
         )?);
+        self.generation_context_v2 = None;
+        Ok(())
+    }
+
+    /// Explicit prompt/3 opt-in. Cache source facts once, never reread on claim.
+    pub fn enable_generation_context_v2(&mut self) -> Result<()> {
+        self.generation_context_v2 = Some(self.project_generation_context_v2()?);
+        self.generation_context = None;
         Ok(())
     }
 
@@ -683,6 +693,25 @@ impl Submission {
         &self,
         failures: &serde_json::Value,
         evidence: &serde_json::Value,
+    ) -> Result<ato_formation::generation_context::v2::GenerationContext> {
+        let context = self.project_generation_context_v2()?;
+        Self::with_generation_evidence_v2(context, failures, evidence)
+    }
+
+    fn with_generation_evidence_v2(
+        mut context: ato_formation::generation_context::v2::GenerationContext,
+        failures: &serde_json::Value,
+        evidence: &serde_json::Value,
+    ) -> Result<ato_formation::generation_context::v2::GenerationContext> {
+        use ato_formation::generation_context::v2;
+        context.failures = v2::project_failures(failures);
+        context.inspections = v2::project_inspections(evidence);
+        context.validate()?;
+        Ok(context)
+    }
+
+    fn project_generation_context_v2(
+        &self,
     ) -> Result<ato_formation::generation_context::v2::GenerationContext> {
         use ato_formation::generation_context::{MAX_SOURCE_BYTES, v2};
         let policy = self
@@ -702,8 +731,8 @@ impl Submission {
         Ok(v2::GenerationContext::new(
             entries,
             self.project_summary.clone(),
-            v2::project_failures(failures),
-            v2::project_inspections(evidence),
+            vec![],
+            vec![],
         )?)
     }
 
@@ -817,6 +846,22 @@ pub fn serve_generation(
         offered == expected,
         "generation domain differs from frozen authorization"
     );
+    let mut point_v3 = if let Some(context) = submission.generation_context_v2.clone() {
+        let context =
+            Submission::with_generation_evidence_v2(context, &raw["failures"], &raw["evidence"])?;
+        let local = crate::generation_provider::GenerationPointV3 {
+            schema: crate::generation_provider::GENERATION_POINT_SCHEMA_V3.into(),
+            revision: point.revision,
+            expires_at: point.expires_at.clone(),
+            claimed: false,
+            entrypoint_ids: point.entrypoint_ids.clone(),
+            context,
+        };
+        local.validate().map_err(anyhow::Error::msg)?;
+        Some(local)
+    } else {
+        None
+    };
     if let Some(context) = submission.generation_context_for(&raw["failures"], &raw["evidence"])? {
         point.schema = "ato.formation-generation-point/2".into();
         point.context = Some(context);
@@ -829,7 +874,16 @@ pub fn serve_generation(
         .as_u64()
         .context("generation claim has no revision")?;
     let started = std::time::Instant::now();
-    let answer = provider.generate(&point).submission(point.revision);
+    let answer = if let Some(local) = &mut point_v3 {
+        local.revision = point.revision;
+        local.claimed = true;
+        // Close the boundary for every provider, not just the Jev implementation.
+        local.validate_claimed().map_err(anyhow::Error::msg)?;
+        provider.generate_v3(local)
+    } else {
+        provider.generate(&point)
+    }
+    .submission(point.revision);
     let provider_elapsed_ms = started.elapsed().as_millis();
     let accepted = client.submit_generation(satisfy_id, &answer).is_ok();
     Ok(Some(serde_json::json!({
@@ -978,6 +1032,7 @@ pub fn prepare_submission(
         source_entries,
         project_summary,
         generation_context: None,
+        generation_context_v2: None,
         generated_derivation_ref: None,
         request: SatisfyRequest {
             protocol: PROTOCOL.to_owned(),
