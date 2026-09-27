@@ -12,6 +12,12 @@ entrypoint ID. Canonicalization, static validation, same frozen K, ordinary
 Runtime admission/execution/verification and fresh receipt acceptance remain
 mandatory. Context never enters D/K identity or supplies capabilities.
 
+This is **bounded parameter synthesis**: selecting an owner-authorized existing
+Python entrypoint and compiling it against a parent D into a new canonical D.
+It is neither arbitrary program generation nor general repair. Fixed G1 returns
+the correct draft as an oracle control; it is not an implemented deterministic
+new-D searcher and cannot establish that Jev is more effective.
+
 Before generation, all authorized known Ds are explored within the Runtime
 constraint. Exact restricts placement, not the known-D frontier. A known PASS
 prevents generation; generated D is subject to that same Exact constraint.
@@ -48,7 +54,9 @@ opaque ID (1–32 ASCII alphanumeric/underscore, excluding `none`).
 Limits: 16 entrypoints; read at most 64 KiB per authorized file; larger files
 are not prefix-scanned; entry summary at most 1 KiB; whole context at most
 16 KiB; at most 16 failures, 4 inspections, 8 refusal codes per inspection;
-11 import markers, 6 framework markers. Count/size buckets have fixed enum
+11 import markers, 6 framework markers. String-interpolation nesting is capped at 16; provider response is capped at 64 KiB.
+Transport timeout is 20 s by default and cannot exceed 30 s; the durable
+generation deadline and one-generation budget remain unchanged. Count/size buckets have fixed enum
 values. Dynamic evidence deterministically retains recent eligible records.
 Unknown fields/enums, duplicate or unordered identities, and oversized contexts
 are rejected. Unknown failure codes become `other`, never echoed.
@@ -73,13 +81,16 @@ or invent a success heuristic.
 The one-shot durable claim precedes any model invocation; no retry after claim.
 Deadline, generation/decision/attempt/transfer/expanded/stored bounds and UNKNOWN
 barriers remain Rust/receiver authority. Source evidence does not change these
-budgets. v2 requires a validated context before HTTP. No new receiver schema or
-migration is needed: migration 0303 remains in the unmerged predecessor.
+budgets. v2 requires a validated context before HTTP. Source context requires no receiver schema change. A separate compatibility
+PR allows bounded observed provenance on invalid/error/timeout fallbacks in the
+existing column; it does not admit a draft. No migration is needed: migration
+0303 remains unchanged in the unmerged predecessor.
 
 ## Provenance and acceptance
 
 Provider/exact model/prompt version/input and output tokens are recorded for
-validated drafts and declines. Acceptance logs the privacy-projected request,
+validated drafts and declines, and well-formed pinned-model responses with
+invalid choices. Invalid envelopes/unknown usage are not fabricated. Acceptance logs the privacy-projected request,
 call count, provider latency, total elapsed, attempts, selected ID/decline,
 resulting D ref and fresh same-K receipt result. Estimated cost uses separately
 cited pricing; unknown historical usage is never backfilled.

@@ -211,6 +211,54 @@ impl ato_formation_worker::generation_provider::GenerationProvider
     }
 }
 
+/// Reject mode combinations that would record a different prompt from the
+/// one sent by the real provider. Fixed providers can exercise either format.
+fn validate_generation_capture(mode: Option<&str>, context_v2: bool) -> Result<()> {
+    anyhow::ensure!(
+        !matches!(
+            (mode, context_v2),
+            (Some("jev"), true) | (Some("jev_v2"), false)
+        ),
+        "generation provider and context versions must match"
+    );
+    Ok(())
+}
+
+/// Record exactly the privacy-projected provider payload, never GenerationPoint.
+struct RecordedGenerationProvider {
+    inner: Box<dyn ato_formation_worker::generation_provider::GenerationProvider>,
+    path: std::path::PathBuf,
+    v2: bool,
+}
+impl ato_formation_worker::generation_provider::GenerationProvider for RecordedGenerationProvider {
+    fn generate(
+        &self,
+        point: &ato_formation_worker::generation_provider::GenerationPoint,
+    ) -> ato_formation_worker::generation_provider::GenerationAnswer {
+        use ato_formation_worker::generation_provider::{self as generation, GenerationAnswer};
+        let model = std::env::var("ATO_GENERATION_JEV_MODEL")
+            .unwrap_or_else(|_| generation::DEFAULT_GENERATION_MODEL.into());
+        let payload = if self.v2 {
+            generation::generation_request_v2(&model, point)
+        } else {
+            generation::generation_request(&model, point)
+        };
+        let Ok(payload) = payload else {
+            return GenerationAnswer::Fallback { reason: "invalid" };
+        };
+        if serde_json::to_vec_pretty(&payload)
+            .ok()
+            .and_then(|bytes| std::fs::write(&self.path, bytes).ok())
+            .is_none()
+        {
+            return GenerationAnswer::Fallback {
+                reason: "provider_error",
+            };
+        }
+        self.inner.generate(point)
+    }
+}
+
 fn main() -> Result<()> {
     let a: Vec<_> = std::env::args().collect();
     if a.len() < 9 {
@@ -253,9 +301,23 @@ fn main() -> Result<()> {
     if let Ok(entries) = std::env::var("ATO_ACCEPTANCE_GENERATION_ENTRYPOINTS") {
         submission.authorize_generation(serde_json::from_str(&entries)?, 30_000)?;
     }
+    let context_v2 = std::env::var("ATO_ACCEPTANCE_GENERATION_CONTEXT").as_deref() == Ok("v2");
+    validate_generation_capture(
+        std::env::var("ATO_ACCEPTANCE_GENERATION_PROVIDER")
+            .ok()
+            .as_deref(),
+        context_v2,
+    )?;
+    if context_v2 {
+        submission.enable_generation_context()?;
+    }
     let generation_provider = std::env::var("ATO_ACCEPTANCE_GENERATION_PROVIDER").ok()
         .map(|mode| -> Result<Box<dyn ato_formation_worker::generation_provider::GenerationProvider>> {
-            if mode == "jev" {
+            if mode == "jev_v2" {
+                Ok(Box::new(ato_formation_worker::generation_provider::JevGenerationProvider::from_env_v2(
+                    std::time::Duration::from_secs(20),
+                )?))
+            } else if mode == "jev" {
                 Ok(Box::new(ato_formation_worker::generation_provider::JevGenerationProvider::from_env(
                     std::time::Duration::from_secs(20),
                 )?))
@@ -263,6 +325,17 @@ fn main() -> Result<()> {
                 Ok(Box::new(AcceptanceGenerationProvider { mode }))
             }
         }).transpose()?;
+    let generation_provider = generation_provider.map(|inner| {
+        if let Some(path) = std::env::var_os("ATO_ACCEPTANCE_GENERATION_INPUT") {
+            Box::new(RecordedGenerationProvider {
+                inner,
+                path: path.into(),
+                v2: std::env::var("ATO_ACCEPTANCE_GENERATION_CONTEXT").as_deref() == Ok("v2"),
+            }) as Box<dyn ato_formation_worker::generation_provider::GenerationProvider>
+        } else {
+            inner
+        }
+    });
     // Fault injection for the effect-uncertainty acceptance only: a requester
     // whose effect hint is wrong. The Runtime re-plans D and attests the real
     // class; nothing here changes K or D.
@@ -354,5 +427,22 @@ fn main() -> Result<()> {
             "search did not settle"
         );
         std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::validate_generation_capture;
+
+    #[test]
+    fn live_provider_version_must_match_captured_context() {
+        assert!(validate_generation_capture(Some("jev"), false).is_ok());
+        assert!(validate_generation_capture(Some("jev_v2"), true).is_ok());
+        assert!(validate_generation_capture(Some("jev"), true).is_err());
+        assert!(validate_generation_capture(Some("jev_v2"), false).is_err());
+        for context in [false, true] {
+            assert!(validate_generation_capture(Some("fixed:e01"), context).is_ok());
+            assert!(validate_generation_capture(None, context).is_ok());
+        }
     }
 }
