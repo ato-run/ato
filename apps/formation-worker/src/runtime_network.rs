@@ -677,6 +677,36 @@ impl Submission {
         Ok(())
     }
 
+    /// Offline c0 projection only: never installed into the point/2 provider path.
+    /// Reads only owner-authorized files in this requester's verified snapshot.
+    pub fn generation_context_v2_for_offline(
+        &self,
+        failures: &serde_json::Value,
+        evidence: &serde_json::Value,
+    ) -> Result<ato_formation::generation_context::v2::GenerationContext> {
+        use ato_formation::generation_context::{MAX_SOURCE_BYTES, v2};
+        let policy = self
+            .request
+            .policy
+            .generation
+            .as_ref()
+            .context("generation not authorized")?;
+        let mut entries = Vec::with_capacity(policy.entrypoints.len());
+        for (id, relative) in &policy.entrypoints {
+            let file = File::open(self.frozen_source.root.join(relative))?;
+            let size = file.metadata()?.len();
+            let mut bytes = Vec::new();
+            file.take(MAX_SOURCE_BYTES as u64).read_to_end(&mut bytes)?;
+            entries.push(v2::project_python(id, &bytes, size)?);
+        }
+        Ok(v2::GenerationContext::new(
+            entries,
+            self.project_summary.clone(),
+            v2::project_failures(failures),
+            v2::project_inspections(evidence),
+        )?)
+    }
+
     /// Dynamic evidence is a separate fixed-vocabulary projection; never forward
     /// durable evidence, raw failure messages or receiver identities wholesale.
     pub fn generation_context_for(
