@@ -1,0 +1,262 @@
+{
+  "protocol": "E1 comparator-repair amendment",
+  "complete": true,
+  "arms": {
+    "A": {
+      "registered_cells": 20,
+      "recorded_cells": 20,
+      "missing_cells": 0,
+      "same_k_successes": 0,
+      "same_k_success_rate": 0.0,
+      "generation_outcomes": {
+        "none": 20
+      },
+      "drafts": 0,
+      "admitted": 0,
+      "admission_rate_per_cell": 0.0,
+      "admission_rate_per_draft": null,
+      "declines": 0,
+      "decline_rate": 0.0,
+      "invalid_rejected": 0,
+      "invalid_rejected_rate": 0.0,
+      "attempts_total": 20,
+      "attempts_to_pass": [],
+      "provider_calls": 0,
+      "model_calls": 0,
+      "observed_input_tokens": 0,
+      "observed_output_tokens": 0,
+      "missing_usage_cells": 0,
+      "observed_cost_usd": 0,
+      "missing_cost_cells": 0,
+      "elapsed_seconds_total": 76.693,
+      "elapsed_seconds_median": 3.4985,
+      "provider_latency_ms_median": null,
+      "errors": 0,
+      "violations": []
+    },
+    "B": {
+      "registered_cells": 20,
+      "recorded_cells": 20,
+      "missing_cells": 0,
+      "same_k_successes": 9,
+      "same_k_success_rate": 0.45,
+      "generation_outcomes": {
+        "admitted": 18,
+        "declined": 2
+      },
+      "drafts": 18,
+      "admitted": 18,
+      "admission_rate_per_cell": 0.9,
+      "admission_rate_per_draft": 1.0,
+      "declines": 2,
+      "decline_rate": 0.1,
+      "invalid_rejected": 0,
+      "invalid_rejected_rate": 0.0,
+      "attempts_total": 40,
+      "attempts_to_pass": [
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        3
+      ],
+      "provider_calls": 20,
+      "model_calls": 0,
+      "observed_input_tokens": 0,
+      "observed_output_tokens": 0,
+      "missing_usage_cells": 0,
+      "observed_cost_usd": 0,
+      "missing_cost_cells": 0,
+      "elapsed_seconds_total": 200.193,
+      "elapsed_seconds_median": 7.984,
+      "provider_latency_ms_median": 0.0,
+      "errors": 0,
+      "violations": []
+    },
+    "C": {
+      "registered_cells": 20,
+      "recorded_cells": 20,
+      "missing_cells": 0,
+      "same_k_successes": 2,
+      "same_k_success_rate": 0.1,
+      "generation_outcomes": {
+        "admitted": 8,
+        "declined": 12
+      },
+      "drafts": 8,
+      "admitted": 8,
+      "admission_rate_per_cell": 0.4,
+      "admission_rate_per_draft": 1.0,
+      "declines": 12,
+      "decline_rate": 0.6,
+      "invalid_rejected": 0,
+      "invalid_rejected_rate": 0.0,
+      "attempts_total": 30,
+      "attempts_to_pass": [
+        2,
+        2
+      ],
+      "provider_calls": 20,
+      "model_calls": 20,
+      "observed_input_tokens": 22292,
+      "observed_output_tokens": 1488,
+      "missing_usage_cells": 0,
+      "observed_cost_usd": 0.000936264,
+      "missing_cost_cells": 0,
+      "elapsed_seconds_total": 165.15,
+      "elapsed_seconds_median": 7.007,
+      "provider_latency_ms_median": 113.5,
+      "errors": 0,
+      "violations": []
+    }
+  },
+  "by_case": {
+    "E01": {
+      "A": [
+        false,
+        false
+      ],
+      "B": [
+        true,
+        true
+      ],
+      "C": [
+        true,
+        true
+      ]
+    },
+    "E02": {
+      "A": [
+        false,
+        false
+      ],
+      "B": [
+        true,
+        true
+      ],
+      "C": [
+        false,
+        false
+      ]
+    },
+    "E03": {
+      "A": [
+        false,
+        false
+      ],
+      "B": [
+        false,
+        true
+      ],
+      "C": [
+        false,
+        false
+      ]
+    },
+    "E04": {
+      "A": [
+        false,
+        false
+      ],
+      "B": [
+        false,
+        false
+      ],
+      "C": [
+        false,
+        false
+      ]
+    },
+    "E05": {
+      "A": [
+        false,
+        false
+      ],
+      "B": [
+        false,
+        true
+      ],
+      "C": [
+        false,
+        false
+      ]
+    },
+    "E06": {
+      "A": [
+        false,
+        false
+      ],
+      "B": [
+        false,
+        false
+      ],
+      "C": [
+        false,
+        false
+      ]
+    },
+    "E07": {
+      "A": [
+        false,
+        false
+      ],
+      "B": [
+        false,
+        false
+      ],
+      "C": [
+        false,
+        false
+      ]
+    },
+    "E08": {
+      "A": [
+        false,
+        false
+      ],
+      "B": [
+        true,
+        true
+      ],
+      "C": [
+        false,
+        false
+      ]
+    },
+    "E09": {
+      "A": [
+        false,
+        false
+      ],
+      "B": [
+        false,
+        true
+      ],
+      "C": [
+        false,
+        false
+      ]
+    },
+    "E10": {
+      "A": [
+        false,
+        false
+      ],
+      "B": [
+        false,
+        false
+      ],
+      "C": [
+        false,
+        false
+      ]
+    }
+  },
+  "robust_additional_success_cases": [],
+  "efficacy_gate_passed": false,
+  "elapsed_comparison_valid": false
+}
