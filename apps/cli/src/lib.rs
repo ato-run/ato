@@ -775,8 +775,9 @@ fn form_on_runtime_network(args: FormArgs) -> Result<()> {
             );
         }
         submission.authorize_generation(entries, 30_000)?;
+        submission.enable_generation_context()?;
         Some(
-            ato_formation_worker::generation_provider::JevGenerationProvider::from_env(
+            ato_formation_worker::generation_provider::JevGenerationProvider::from_env_v2(
                 std::time::Duration::from_secs(20),
             )?,
         )
