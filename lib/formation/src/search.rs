@@ -386,53 +386,25 @@ impl SearchStateV1 {
                 && a.status == DurableAttemptStatus::Fail
                 && a.record == Some(ExecutionRecord::Finished)
                 && a.effects.as_deref() == Some("pure")
+                && match &self.frozen.policy.runtime_constraint {
+                    RuntimeConstraint::Any => true,
+                    RuntimeConstraint::Exact {
+                        runtime_id,
+                        environment_id,
+                    } => {
+                        a.runtime_id == *runtime_id
+                            && environment_id
+                                .as_ref()
+                                .is_none_or(|id| a.environment_id == *id)
+                    }
+                }
         })
     }
 
-    /// Exact placement permits one explicitly authorized new D, not fallback
-    /// among known Ds. Only the failed parent on that placement opens this path.
-    fn exact_generation_parent_failed(&self) -> bool {
-        let RuntimeConstraint::Exact {
-            runtime_id,
-            environment_id,
-        } = &self.frozen.policy.runtime_constraint
-        else {
-            return false;
-        };
-        let Some(policy) = &self.frozen.policy.generation else {
-            return false;
-        };
-        self.attempts.last().is_some_and(|a| {
-            a.derivation_ref == policy.base_derivation_ref
-                && a.status == DurableAttemptStatus::Fail
-                && a.record == Some(ExecutionRecord::Finished)
-                && a.effects.as_deref() == Some("pure")
-                && a.runtime_id == *runtime_id
-                && environment_id
-                    .as_ref()
-                    .is_none_or(|id| a.environment_id == *id)
-        })
-    }
-
-    fn exact_generation_only(&self) -> bool {
-        matches!(
-            self.frozen.policy.runtime_constraint,
-            RuntimeConstraint::Exact { .. }
-        ) && (self.generation.is_some() || self.exact_generation_parent_failed())
-    }
-
-    /// Identity/validation still use all candidates; scheduling and provider
-    /// attempt choices share this narrower frontier after an Exact failure.
-    pub(crate) fn attempt_candidates(&self) -> impl Iterator<Item = &SearchCandidate> {
-        let generated = self.generation.as_ref().and_then(|g| g.candidate.as_ref());
-        self.candidates().filter(move |d| {
-            !self.exact_generation_only()
-                || generated.is_some_and(|g| g.derivation_ref == d.derivation_ref)
-        })
-    }
-
+    /// Generation changes the frontier, never the owner's placement constraint.
+    /// No-policy behavior is kept byte/behavior compatible with the prior core.
     pub(crate) fn generation_placement_allowed(&self, p: &Placement) -> bool {
-        if !self.exact_generation_only() {
+        if self.frozen.policy.generation.is_none() {
             return true;
         }
         match &self.frozen.policy.runtime_constraint {
@@ -627,7 +599,7 @@ fn default_next(
         if matches!(
             s.frozen.policy.runtime_constraint,
             RuntimeConstraint::Exact { .. }
-        ) && !s.exact_generation_parent_failed()
+        ) && s.frozen.policy.generation.is_none()
         {
             return Ok(finish(if passed {
                 Termination::Verified
@@ -661,7 +633,7 @@ fn default_next(
             }
         });
     }
-    for d in s.attempt_candidates() {
+    for d in s.candidates() {
         let history: Vec<_> = s
             .attempts
             .iter()

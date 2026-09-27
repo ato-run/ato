@@ -408,7 +408,7 @@ fn source_size_roundtrips_without_changing_legacy_frozen_bytes() {
 }
 
 #[test]
-fn exact_parent_failure_allows_only_the_generated_d_on_the_exact_runtime() {
+fn exact_exhausts_known_ds_before_generation_and_never_changes_runtime() {
     let mut s = state();
     s.frozen.policy.runtime_constraint = RuntimeConstraint::Exact {
         runtime_id: "runtime".into(),
@@ -418,6 +418,22 @@ fn exact_parent_failure_allows_only_the_generated_d_on_the_exact_runtime() {
     known.derivation_ref = format!("sha256:{}", "e".repeat(64));
     let known_placement = placement(&known.derivation_ref);
     s.frozen.candidates.push(known);
+    assert!(matches!(
+        decide_next(&s, std::slice::from_ref(&known_placement), 10).unwrap(),
+        SearchAction::IssueAttempt { derivation_ref, .. } if derivation_ref == known_placement.derivation_ref
+    ));
+    // Absence of an in-constraint Runtime must not skip this known candidate.
+    let mut wrong_known = known_placement.clone();
+    wrong_known.runtime_id = "other-runtime".into();
+    assert!(matches!(
+        decide_next(&s, &[wrong_known], 10).unwrap(),
+        SearchAction::WaitForRuntime { .. }
+    ));
+    let mut known_failure = s.attempts[0].clone();
+    known_failure.attempt_id = "second-known".into();
+    known_failure.derivation_ref = known_placement.derivation_ref.clone();
+    s.attempts.push(known_failure);
+    s.budget.attempts_used += 1;
     assert!(matches!(
         decide_next(&s, std::slice::from_ref(&known_placement), 10).unwrap(),
         SearchAction::OpenGeneration { .. }
@@ -484,7 +500,7 @@ fn exact_parent_failure_allows_only_the_generated_d_on_the_exact_runtime() {
 }
 
 #[test]
-fn exact_generation_exception_requires_the_failed_parent_on_the_exact_placement() {
+fn generation_requires_a_safe_parent_failure_on_the_authorized_placement() {
     for refusal in [
         "no_policy",
         "wrong_parent",
@@ -502,7 +518,10 @@ fn exact_generation_exception_requires_the_failed_parent_on_the_exact_placement(
         let mut known = s.frozen.candidates[0].clone();
         known.derivation_ref = format!("sha256:{}", "e".repeat(64));
         let p = placement(&known.derivation_ref);
-        s.frozen.candidates.push(known);
+        // An untried known D remains first even when the parent cannot generate.
+        if refusal == "no_policy" {
+            s.frozen.candidates.push(known.clone());
+        }
         match refusal {
             "no_policy" => s.frozen.policy.generation = None,
             "wrong_parent" => {
@@ -511,7 +530,8 @@ fn exact_generation_exception_requires_the_failed_parent_on_the_exact_placement(
                     .generation
                     .as_mut()
                     .unwrap()
-                    .base_derivation_ref = p.derivation_ref.clone()
+                    .base_derivation_ref = p.derivation_ref.clone();
+                s.frozen.candidates.push(known)
             }
             "wrong_runtime" => s.attempts[0].runtime_id = "other-runtime".into(),
             "wrong_environment" => s.attempts[0].environment_id = "other-environment".into(),
@@ -522,8 +542,17 @@ fn exact_generation_exception_requires_the_failed_parent_on_the_exact_placement(
         }
         assert_eq!(
             decide_next(&s, &[p], 10).unwrap(),
-            SearchAction::Finish {
-                reason: Termination::CandidatesExhausted
+            if refusal == "wrong_parent" {
+                SearchAction::IssueAttempt {
+                    candidate_id: "generated".into(),
+                    derivation_ref: format!("sha256:{}", "e".repeat(64)),
+                    runtime_id: "runtime".into(),
+                    environment_id: "native".into(),
+                }
+            } else {
+                SearchAction::Finish {
+                    reason: Termination::CandidatesExhausted,
+                }
             },
             "{refusal}"
         );
@@ -613,4 +642,35 @@ fn exhaustion_cannot_skip_an_open_decision_chosen_inspection_or_stop() {
             reason: Termination::DecisionStopped
         }
     );
+}
+
+#[test]
+fn exact_known_pass_finishes_without_opening_generation() {
+    let mut s = state();
+    s.frozen.policy.runtime_constraint = RuntimeConstraint::Exact {
+        runtime_id: "runtime".into(),
+        environment_id: None,
+    };
+    let mut known = s.frozen.candidates[0].clone();
+    known.derivation_ref = format!("sha256:{}", "e".repeat(64));
+    let p = placement(&known.derivation_ref);
+    s.frozen.candidates.push(known);
+    assert!(matches!(
+        decide_next(&s, &[p.clone()], 10).unwrap(),
+        SearchAction::IssueAttempt { .. }
+    ));
+    let mut passed = s.attempts[0].clone();
+    passed.attempt_id = "known-pass".into();
+    passed.derivation_ref = p.derivation_ref;
+    passed.status = DurableAttemptStatus::Pass;
+    passed.route_accepted = true;
+    s.attempts.push(passed);
+    s.budget.attempts_used += 1;
+    assert_eq!(
+        decide_next(&s, &[], 11).unwrap(),
+        SearchAction::Finish {
+            reason: Termination::Verified
+        }
+    );
+    assert!(s.generation.is_none());
 }
