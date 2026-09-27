@@ -328,7 +328,7 @@ fn known_source_transfer_cost_and_search_deadline_bound_generation() {
     p.transfer_bytes = 4097;
     s.source_archive_bytes = Some(4097);
     assert_eq!(
-        decide_next(&s, &[p.clone()], 10).unwrap(),
+        decide_next(&s, std::slice::from_ref(&p), 10).unwrap(),
         SearchAction::Finish {
             reason: Termination::BudgetExhausted
         }
@@ -656,7 +656,7 @@ fn exact_known_pass_finishes_without_opening_generation() {
     let p = placement(&known.derivation_ref);
     s.frozen.candidates.push(known);
     assert!(matches!(
-        decide_next(&s, &[p.clone()], 10).unwrap(),
+        decide_next(&s, std::slice::from_ref(&p), 10).unwrap(),
         SearchAction::IssueAttempt { .. }
     ));
     let mut passed = s.attempts[0].clone();
