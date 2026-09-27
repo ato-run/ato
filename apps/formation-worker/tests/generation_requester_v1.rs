@@ -591,3 +591,44 @@ fn unknown_closed_or_claimed_points_and_receiver_only_authority_cannot_generate(
     assert!(provider.points.lock().unwrap().is_empty());
     assert!(server.finish().is_empty());
 }
+
+#[test]
+fn receiver_cannot_admit_a_generation_equal_to_another_known_derivation() {
+    let (_root, mut submission) = submission_with_source(|source| {
+        std::fs::copy(source.join("app.py"), source.join("alternative.py")).unwrap();
+    });
+    submission
+        .authorize_generation(
+            BTreeMap::from([
+                ("repair".into(), "repaired.py".into()),
+                ("alternative".into(), "alternative.py".into()),
+            ]),
+            30_000,
+        )
+        .unwrap();
+    let echo = admitted(&submission);
+    let d_ref = echo["generation"]["derivation_ref"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut known = submission.request.authorized_derivations[0].clone();
+    known.derivation_ref = d_ref.clone();
+    known.capsule_toml = echo["generation"]["capsule_toml"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    submission.request.authorized_derivations.push(known);
+    submission
+        .contracts
+        .insert(d_ref, submission.request.base_contract.clone());
+    let before = submission.contracts.clone();
+    let frozen = serde_json::to_value(&submission.request).unwrap();
+    assert!(submission.accept_generated_candidate(&echo).is_err());
+    assert_eq!(submission.contracts, before);
+    assert_eq!(serde_json::to_value(&submission.request).unwrap(), frozen);
+    // Rejection must not pin the duplicate and poison a legitimate echo.
+    let alternative = admitted_entrypoint(&submission, "alternative");
+    submission.accept_generated_candidate(&alternative).unwrap();
+    submission.accept_generated_candidate(&alternative).unwrap();
+    assert_eq!(submission.contracts.len(), before.len() + 1);
+}

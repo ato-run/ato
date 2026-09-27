@@ -680,6 +680,14 @@ impl Submission {
                 .is_none_or(|accepted| accepted == &compiled.derivation_ref),
             "admitted generated candidate changed"
         );
+        anyhow::ensure!(
+            !self
+                .request
+                .authorized_derivations
+                .iter()
+                .any(|known| { known.derivation_ref == compiled.derivation_ref }),
+            "generated candidate duplicates a frozen authorized derivation"
+        );
         self.generated_derivation_ref = Some(compiled.derivation_ref.clone());
         self.contracts
             .insert(compiled.derivation_ref, self.request.base_contract.clone());
