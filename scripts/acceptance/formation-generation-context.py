@@ -462,6 +462,13 @@ def G8():
     observe(run, "claims", claim_responses=claims)
     winners = [body for code, body in claims if code == 200]
     check(run, len(winners) == 1 and all(code in (200, 409) for code, _ in claims), "six claims have one winner")
+    before_claim_restart = observe(run, "claimed-before-restart")
+    h.restart(run.case, "claimed_before_completion")
+    after_claim_restart = observe(run, "claimed-after-restart")
+    check(run, before_claim_restart["generation_rows"] == after_claim_restart["generation_rows"],
+          "restart preserves one-shot claim without completion")
+    check(run, post_once("/claim", {"revision": winners[0]["revision"]})[0] == 409,
+          "restart cannot authorize a second provider invocation")
     body = {"revision": winners[0]["revision"], "draft": {
         "schema": "ato.formation-derivation-draft/1", "operation": "python_script", "entrypoint_id": "entry_app"},
         "provenance": {"provider": "acceptance", "model": "manual-fixed", "prompt_version": "acceptance/1",
