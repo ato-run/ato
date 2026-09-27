@@ -211,6 +211,19 @@ impl ato_formation_worker::generation_provider::GenerationProvider
     }
 }
 
+/// Reject mode combinations that would record a different prompt from the
+/// one sent by the real provider. Fixed providers can exercise either format.
+fn validate_generation_capture(mode: Option<&str>, context_v2: bool) -> Result<()> {
+    anyhow::ensure!(
+        !matches!(
+            (mode, context_v2),
+            (Some("jev"), true) | (Some("jev_v2"), false)
+        ),
+        "generation provider and context versions must match"
+    );
+    Ok(())
+}
+
 /// Record exactly the privacy-projected provider payload, never GenerationPoint.
 struct RecordedGenerationProvider {
     inner: Box<dyn ato_formation_worker::generation_provider::GenerationProvider>,
@@ -288,7 +301,14 @@ fn main() -> Result<()> {
     if let Ok(entries) = std::env::var("ATO_ACCEPTANCE_GENERATION_ENTRYPOINTS") {
         submission.authorize_generation(serde_json::from_str(&entries)?, 30_000)?;
     }
-    if std::env::var("ATO_ACCEPTANCE_GENERATION_CONTEXT").as_deref() == Ok("v2") {
+    let context_v2 = std::env::var("ATO_ACCEPTANCE_GENERATION_CONTEXT").as_deref() == Ok("v2");
+    validate_generation_capture(
+        std::env::var("ATO_ACCEPTANCE_GENERATION_PROVIDER")
+            .ok()
+            .as_deref(),
+        context_v2,
+    )?;
+    if context_v2 {
         submission.enable_generation_context()?;
     }
     let generation_provider = std::env::var("ATO_ACCEPTANCE_GENERATION_PROVIDER").ok()
@@ -407,5 +427,22 @@ fn main() -> Result<()> {
             "search did not settle"
         );
         std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::validate_generation_capture;
+
+    #[test]
+    fn live_provider_version_must_match_captured_context() {
+        assert!(validate_generation_capture(Some("jev"), false).is_ok());
+        assert!(validate_generation_capture(Some("jev_v2"), true).is_ok());
+        assert!(validate_generation_capture(Some("jev"), true).is_err());
+        assert!(validate_generation_capture(Some("jev_v2"), false).is_err());
+        for context in [false, true] {
+            assert!(validate_generation_capture(Some("fixed:e01"), context).is_ok());
+            assert!(validate_generation_capture(None, context).is_ok());
+        }
     }
 }
