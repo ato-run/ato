@@ -48,6 +48,15 @@ while its single prompt-v1 live call declined. The separate 5b-b prompt-v2 run
 now passes the minimal live-generation gate; overall 5b remains In progress.
 The 5a gate stays closed; its result must not be conflated with 5b.
 5b-b adds bounded source-derived evidence without code/patch/argv/path generation.
+The demonstrated operation is bounded parameter synthesis over existing,
+owner-authorized Python entrypoints, not general repair. See the
+[stack review and correction record](../../ops/formation-generation-stack-review-2026-09-27.md).
+Review completion does not authorize merge or close 5b. After a separate merge
+judgment, preregister a small three-arm evaluation (no generation, evaluation-only
+deterministic draft selection, Jev v2), using opaque ID/file permutations and
+misleading, indistinguishable, too_large/unavailable cases. No new model calls
+or efficacy comparison were performed by this review. Evidence-based D
+improvement remains unproven; Stage 6 coverage expansion is separate.
 Exact Runtime now exhausts known Ds within that placement before generation;
 no-policy semantics remain unchanged. Prompt-v1 decline remains historical;
 prompt-v2 acceptance is recorded separately, never retried until success.
