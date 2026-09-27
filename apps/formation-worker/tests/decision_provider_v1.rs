@@ -121,7 +121,11 @@ fn a_well_formed_choice_is_returned_with_evidence_and_the_question_carries_no_da
     assert!(json["state"].to_string().contains("UNTRUSTED-MARKER"));
     assert_eq!(json["questions"]["decision"]["type"], "choice");
     // The recorded evidence projection is state data too.
-    assert!(json["state"]["evidence"].to_string().contains("attempt_failures"));
+    assert!(
+        json["state"]["evidence"]
+            .to_string()
+            .contains("attempt_failures")
+    );
 }
 
 #[test]
