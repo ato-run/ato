@@ -173,7 +173,12 @@ impl ato_formation_worker::generation_provider::GenerationProvider
         use ato_formation_worker::generation_provider::GenerationAnswer;
         if self.mode == "deterministic_v1" {
             use ato_formation_worker::generation_provider::generation_request_v2;
-            if generation_request_v2("evaluation-only", point).is_err() {
+            if generation_request_v2(
+                ato_formation_worker::generation_provider::DEFAULT_GENERATION_MODEL,
+                point,
+            )
+            .is_err()
+            {
                 return GenerationAnswer::Fallback { reason: "invalid" };
             }
             let provenance = serde_json::json!({
@@ -523,5 +528,36 @@ mod efficacy_tests {
         let large = project_python("m2", b"", 65537).unwrap();
         let unavailable = project_python("z3", &[255], 1).unwrap();
         assert_eq!(efficacy_entrypoint(&[zero, large, unavailable]), None);
+    }
+}
+
+#[cfg(test)]
+mod efficacy_provider_tests {
+    use super::AcceptanceGenerationProvider;
+    use ato_formation_worker::generation_provider::{
+        GenerationAnswer, GenerationPoint, GenerationProvider,
+    };
+    #[test]
+    fn comparator_reaches_draft_through_production_context_validation() {
+        let source = b"from http.server import HTTPServer\nHTTPServer().serve_forever()";
+        let summary =
+            ato_formation::generation_context::project_python("m2", source, source.len() as u64)
+                .unwrap();
+        let point: GenerationPoint = serde_json::from_value(serde_json::json!({
+            "schema":"ato.formation-generation-point/2","revision":1,"expires_at":"2026-09-27T00:00:00Z",
+            "entrypoint_ids":["m2"],"failures":[],"context":{
+                "schema":"ato.formation-generation-context/1","entrypoints":[summary],
+                "project_summary":{"python":true,"node":false,"manifest":true,"lockfile":false,
+                    "readme":false,"static_html":false,"regular_files":"one","python_files":"one"},
+                "failures":[],"inspections":[]
+            }
+        })).unwrap();
+        let provider = AcceptanceGenerationProvider {
+            mode: "deterministic_v1".into(),
+        };
+        match provider.generate(&point) {
+            GenerationAnswer::Draft { draft, .. } => assert_eq!(draft["entrypoint_id"], "m2"),
+            answer => panic!("expected comparator draft, got {answer:?}"),
+        }
     }
 }
