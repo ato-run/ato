@@ -27,7 +27,7 @@ This is an implementation plan; pending rows are not shipped functionality.
 | 3d | Retained objects → validated closure/tree → new Run → same K → new receipt without source/scratch | Merged: API #692 `23d69735` → ato #1407 `4697b3b0` (migration 0299 not applied remotely); actual Coordinator replay Static/Python/Node after source deletion; not deployed |
 | 4 | Durable deterministic SearchState; D1 failure→evidence→authorized D2; restart preserves search/attempt identity | Merged: API #693 `18fe2c75` → ato #1408 `a46fd62d` (migration 0300 not applied remotely); actual Coordinator restart acceptance cases 1–7, restart points 1–9, review hardening H1–H4; not deployed |
 | 5a | Optional finite AllowedChoices DecisionProvider; deterministic fallback under the same permissions and budget; compare attempts, elapsed time, provider usage and cost | **Completed (implemented and locally/integration verified)**. 5a-a merged: ato #1409 / API #694 (ADR-035, migration 0301). 5a-b merged: API #695 `1853f280` → ato #1410 `c883087e` (ADR-036, migration 0302): Inspect / Stop and independent decision sequence; B0–B8 verified. Probe deferred (no safe existing primitive). Live Jev acceptance and same-fixture/same-budget comparison: passed (2026-09-26); both arms 2 attempts / PASS; deterministic 3.573 s, Jev 3.022 s, 1 call, 1612 input / 134 output tokens, estimated $0.000067704. Not deployed; migrations not applied remotely |
-| 5b | Typed new-D generation first, then evidence-based D improvement; reject privilege/K/UNKNOWN escape | **In progress; completion gate open**. 5b-a bounded Python-entrypoint draft compiler/requester and receiver 0303 implemented. Fixed-draft actual D1 FAIL → Dnew same-K PASS, dedup/Exact/restart/concurrency verified. Historical live v1 validly declined (record preserved). Live v2 now generated Dnew with same-K PASS in one call; **overall 5b remains in progress**. Core ato #1412 / API #696 / requester ato #1413 (Draft) open, not merged/deployed. 5b-b bounded source evidence implemented in a separate unmerged stack (ato #1414 core / #1415 requester, API #697 compatibility): fixed-vocabulary Python lexical summaries and prompt v2, unchanged draft authority. G0–G9 passed, including one live v2 call (1100 input / 75 output tokens); overall gate stays open. See [typed generation ledger](../../ops/formation-typed-generation-2026-09-26.md) and [5b-b acceptance ledger](../../ops/formation-generation-context-2026-09-27.md) / [ADR-038](ADR-038-formation-generation-context.md) |
+| 5b | Typed new-D generation first, then evidence-based D improvement; reject privilege/K/UNKNOWN escape | **In progress; completion gate open**. 5b-a bounded Python-entrypoint draft compiler/requester and receiver 0303 implemented. Fixed-draft actual D1 FAIL → Dnew same-K PASS, dedup/Exact/restart/concurrency verified. Historical live v1 validly declined (record preserved). Live v2 now generated Dnew with same-K PASS in one call; **overall 5b remains in progress**. Core ato #1412 / API #696 / requester ato #1413 merged; not deployed. 5b-b bounded source evidence merged as ato #1414 core / #1415 requester and API #697 compatibility: fixed-vocabulary Python lexical summaries and prompt v2, unchanged draft authority. G0–G9 passed, including one live v2 call (1100 input / 75 output tokens); overall gate stays open. See [typed generation ledger](../../ops/formation-typed-generation-2026-09-26.md) and [5b-b acceptance ledger](../../ops/formation-generation-context-2026-09-27.md) / [ADR-038](ADR-038-formation-generation-context.md) |
 | 6 | Measure 20, expand to 50 then 100; known-D revalidation on new authorized Runtime/Adapter/D | Pending |
 
 **Formation foundation v1 complete** (2026-09-26): all twelve Stage 4 gates are
@@ -51,12 +51,16 @@ The 5a gate stays closed; its result must not be conflated with 5b.
 The demonstrated operation is bounded parameter synthesis over existing,
 owner-authorized Python entrypoints, not general repair. See the
 [stack review and correction record](../../ops/formation-generation-stack-review-2026-09-27.md).
-Review completion does not authorize merge or close 5b. After a separate merge
-judgment, preregister a small three-arm evaluation (no generation, evaluation-only
-deterministic draft selection, Jev v2), using opaque ID/file permutations and
-misleading, indistinguishable, too_large/unavailable cases. No new model calls
-or efficacy comparison were performed by this review. Evidence-based D
-improvement remains unproven; Stage 6 coverage expansion is separate.
+The stack was merged after explicit approval in the recorded dependency order.
+Merge does not close 5b. The separate [E1 efficacy preregistration](../../ops/formation-efficacy-e1-plan.md)
+fixes 10 cases, two ID permutations and three arms. Its
+[comparator-only repair amendment](../../ops/formation-efficacy-e1-amendment.md)
+preserves every prior model outcome and permits no repeat C calls. Evidence-based
+D improvement remains unproven; Stage 6 coverage expansion is separate.
+[E1 amended efficacy results](../../ops/formation-efficacy-e1-results.md): 60 cells,
+A 0/20, deterministic B 9/20, Jev C 2/20 same-K successes; 20 model calls,
+no C retry and zero robust additional-success cases. **Efficacy gate NOT met;
+5b remains In progress.** Analyze information loss before any 5b-c expansion.
 Exact Runtime now exhausts known Ds within that placement before generation;
 no-policy semantics remain unchanged. Prompt-v1 decline remains historical;
 prompt-v2 acceptance is recorded separately, never retried until success.
