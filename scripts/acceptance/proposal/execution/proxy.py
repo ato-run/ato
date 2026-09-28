@@ -4,6 +4,7 @@ import http.server
 import json
 import socket
 import threading
+import time
 from .gates import before_claim
 from .preflight import Stop, require
 
@@ -69,6 +70,7 @@ class CoordinatorProxy(http.server.BaseHTTPRequestHandler):
                 if complete:
                     require(not self.server.completion_seen and not self.server.recovery_only,'completion replay forbidden')
                     self.server.completion_seen=True
+                    self.server.provider_ok = self.server.before_complete(self.server.claim_window) is not False
             status,data=self.upstream(self.command,self.path,body)
             if self.command=='GET' and status==200:
                 value=json.loads(data)
@@ -77,12 +79,12 @@ class CoordinatorProxy(http.server.BaseHTTPRequestHandler):
                         self.server.last_status=value
                         if self.server.recovery_only:
                             self.server.recovery_gets+=1
-            if complete and status==200 and self.server.drop_completion:
+            if complete and status==200 and self.server.drop_completion and self.server.provider_ok:
                 # Confirm durable commit independently before dropping exactly
                 # this Coordinator response; never drop a provider response.
                 code,saved=self.upstream('GET',self.path.removesuffix('/proposal/complete'),b'')
                 durable=json.loads(saved)
-                require(code==200 and durable['proposal_round']['status']=='completed','completion not durably committed')
+                require(code==200 and durable['proposal_round']['status'] in ('completed','invalid_output'),'completion not durably committed')
                 self.server.saved_round=durable['proposal_round']
                 self.server.recovery_only=True
                 self.server.dropped.set()
@@ -90,6 +92,11 @@ class CoordinatorProxy(http.server.BaseHTTPRequestHandler):
                 self.connection.close()
                 self.close_connection=True
                 return
+            if claim and status == 200:
+                self.server.claim_window = {
+                    'expires_at_ms': cached['proposal_round']['expires_at_ms'],
+                    'claim_delivery_not_before_ms': int(time.time() * 1000),
+                }
             self.send_response(status)
             self.send_header('Content-Type','application/json')
             self.send_header('Content-Length',str(len(data)))
@@ -104,11 +111,13 @@ class CoordinatorProxy(http.server.BaseHTTPRequestHandler):
     do_POST=handle_request
 
 
-def create_proxy(cell,port,before):
+def create_proxy(cell,port,before,before_complete=lambda window: None):
     server=http.server.ThreadingHTTPServer(('127.0.0.1',0),CoordinatorProxy)
     server.upstream_port=port
     server.cell=cell
     server.before_claim=before
+    server.before_complete=before_complete
+    server.claim_window=None
     server.lock=threading.Lock()
     server.last_status=None
     server.claim_seen=False
@@ -119,5 +128,6 @@ def create_proxy(cell,port,before):
     server.drop_completion=cell['id']=='G5'
     server.dropped=threading.Event()
     server.saved_round=None
+    server.provider_ok=True
     threading.Thread(target=server.serve_forever,daemon=True).start()
     return server

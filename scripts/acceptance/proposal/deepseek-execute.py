@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """D3-E controller. No model HTTP client or DeepSeek credential access.
 
-The immutable execution pin lacks exact post-claim request capture. Therefore
---execute fails BEFORE journal initialization/key read until re-preregistered.
-The control loop and fault proxy are offline-reviewable, not live-authorized.
+Consumes the immutable v2 plan and execution pin. The controller never reads a
+provider credential; only the pinned Rust requester inherits its environment.
 """
 import argparse
 import pathlib
 import sys
 sys.dont_write_bytecode = True
-from execution.preflight import Stop, check, initialize_budget, require_exact_request_capture
+from execution.preflight import Stop, check, initialize_budget
 from execution.build import build
-from execution.runner import execute
+from execution.runner import execute, execution_platform
 
 
 def main():
@@ -30,9 +29,9 @@ def main():
         return
     plan,configs,manifest,evidence=check(args)
     if args.mode=='preflight':
-        print('A-M PASS; execution BLOCKED: exact request capture unavailable; live calls=0; key unread')
+        print('A-M + v2 evidence contract PASS; live calls=0; key unread')
         return
-    require_exact_request_capture()
+    execution_platform()
     initialize_budget(args,manifest)
     execute(args,plan,configs,manifest)
 
