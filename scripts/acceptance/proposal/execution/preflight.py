@@ -112,7 +112,7 @@ def evidence_contract(plan, ato):
 def verify_binaries(manifest):
     require(manifest['execution_sha'] == ATO_SHA and manifest['api_sha'] == API_SHA, 'binary provenance pins')
     require(set(manifest['binaries']) == {'requester','runtime','worker','budget','project'}, 'binary inventory')
-    for item in manifest['binaries'].values():
+    for item in [*manifest['binaries'].values(),manifest['credential_wrapper']]:
         path = pathlib.Path(item['path'])
         require(path.is_file() and not path.is_symlink(), 'binary missing or symlink')
         require(digest(path.read_bytes()) == item['sha256'], 'binary hash mismatch')

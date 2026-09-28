@@ -11,6 +11,7 @@ import secrets
 import shutil
 import signal
 import subprocess
+import sys
 import time
 from .preflight import Stop, require, write_new, verify_binaries, approved_plan, helper, load, digest
 from .gates import journal_state, cell_result, request_evidence, unchanged_after_restart
@@ -27,16 +28,27 @@ class LocalRun:
         self.scratch=args.run/'scratch';self.scratch.mkdir()
         self.home=args.run/'home';self.home.mkdir()
         self.port=19544
-        # Do not copy/enumerate the controller environment. Only requester gets
-        # ordinary environment inheritance; Runtime/Coordinator get this map.
+        # Never copy/enumerate the controller environment. All processes get this
+        # non-secret map; only the requester injector receives the sealed fd.
         self.environment={'PATH':'/opt/ato/toolchains/node/22.14.0/bin:/opt/ato/toolchains/python/3.12.7/bin:/usr/local/bin:/usr/bin:/bin',
                           'HOME':str(self.home),'TMPDIR':str(self.scratch)}
 
     def start(self,argv,log,cwd=None,requester=False):
         verify_binaries(self.manifest)
+        argv = [str(x) for x in argv]
+        inherited_fds = ()
+        environment = self.environment
+        credential_fd = getattr(self.args,'credential_fd',None)
+        if requester and credential_fd is not None:
+            # Never read/check/hash the credential here, including its existence.
+            # The separately authorized injector supplied sealed anonymous memory
+            # after preflight. Only the requester wrapper inherits that descriptor.
+            argv = [sys.executable,self.manifest['credential_wrapper']['path'],str(credential_fd),*argv]
+            inherited_fds = (credential_fd,)
+            environment = self.environment
         with log.open('xb') as stream:
-            proc=subprocess.Popen([str(x) for x in argv],cwd=cwd,env=None if requester else self.environment,
-                                  stdout=stream,stderr=subprocess.STDOUT,start_new_session=True)
+            proc=subprocess.Popen(argv,cwd=cwd,env=environment,pass_fds=inherited_fds,
+                                  stdin=subprocess.DEVNULL,stdout=stream,stderr=subprocess.STDOUT,start_new_session=True)
         self.processes.append(proc)
         return proc
 
