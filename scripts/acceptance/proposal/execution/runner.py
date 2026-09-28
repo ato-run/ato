@@ -1,7 +1,7 @@
 """Bounded local Coordinator/Runtime control. No model client or key reads.
 
-Not reachable through the CLI while the immutable request-capture blocker is
-open. Evidence is operational; the pinned Rust requester alone accepts routes.
+Evidence is operational; only the pinned Rust requester invokes the model and
+accepts Runtime/Verifier routes. Controller code never reconstructs wire bytes.
 """
 import hashlib
 import json
@@ -13,7 +13,7 @@ import signal
 import subprocess
 import time
 from .preflight import Stop, require, write_new, verify_binaries, approved_plan, helper, load, digest
-from .gates import journal_state, cell_result
+from .gates import journal_state, cell_result, request_evidence, unchanged_after_restart
 from .proxy import create_proxy
 
 
@@ -119,20 +119,26 @@ def recover_after_completion_loss(local,proxy,proc,config,folder):
     return local.requester(resume,folder,1)
 
 
-def execute(args,plan,configs,manifest):
+def execution_platform():
     require(os.uname().sysname=='Linux' and os.uname().machine in ('aarch64','arm64'),'registered Runtime platform required')
+
+
+def execute(args,plan,configs,manifest):
+    execution_platform()
     local=LocalRun(args,manifest)
     completed=[];results=[]
+    cell_id=None;folder=None
     try:
         local.coordinator()
         for index,cell_id in enumerate(plan['cell_order']):
             cell=next(c for c in plan['cells'] if c['id']==cell_id)
             require(not (args.run/'STOP.json').exists(),'run already stopped')
             approved_plan(args.plan);verify_binaries(manifest)
-            helper(manifest['binaries']['budget']['path'],'reopen',args.plan,args.journal)
-            journal_state(args.journal,plan,completed)
+            journal_state(manifest['binaries']['budget']['path'],args.plan,args.journal,completed)
             folder,token,rid,config=local.configure(cell,configs[cell_id])
             proxy=None;runtime=None
+            captured_request=None
+            before_restart=None
             def capture(status,failure):
                 status_path=folder/'preclaim-status.json'
                 config_path=folder/'preclaim-config.json'
@@ -149,52 +155,78 @@ def execute(args,plan,configs,manifest):
                 if cell_id=='G2':
                     require(failure and evidence['failure_evidence'],'G2 actual projected failure absent')
                     write_new(folder/'known-failure.json',failure)
-                # This hook intentionally cannot call the independently reproduced
-                # preclaim hash an exact wire hash. CLI blocks before starting run.
-                require(evidence['provider_wire_sha256'] is not None,'exact post-claim request evidence unavailable')
+            def capture_completion(window):
+                nonlocal captured_request
+                captured_request=request_evidence(manifest['binaries']['budget']['path'],args.plan,
+                    args.journal,config['search_id'],window,require_response=False)
+                write_new(folder/'request-evidence.json',captured_request)
+                write_new(folder/'claim-timing.json',window)
+                snapshot=helper(manifest['binaries']['budget']['path'],'snapshot',args.plan,args.journal)
+                return captured_request['response_resolved'] and not snapshot['stopped']
             try:
-                proxy=create_proxy(cell,local.port,capture)
+                proxy=create_proxy(cell,local.port,capture,capture_completion)
                 config['api']=f'http://127.0.0.1:{proxy.server_port}'
                 runtime=local.start([manifest['binaries']['runtime']['path'],f'http://127.0.0.1:{local.port}',token,
                                      folder/'runtime-work',folder/'runtime-out',manifest['binaries']['worker']['path']],folder/'runtime.log')
                 local.wait(lambda:local.sql('SELECT runtime_id FROM runtime_environments WHERE runtime_id=?',[rid]),'Runtime advertisement')
                 proc=local.requester(config,folder,0)
-                if cell_id=='G5':proc=recover_after_completion_loss(local,proxy,proc,config,folder)
+                if cell_id=='G5':
+                    require(proxy.dropped.wait(60),'G5 completion drop not observed')
+                    before_restart=helper(manifest['binaries']['budget']['path'],'snapshot',args.plan,args.journal)
+                    proc=recover_after_completion_loss(local,proxy,proc,config,folder)
                 require(proc.wait(timeout=180)==0 and proxy.stop_error is None,'requester/proxy infrastructure failure')
                 result=load(pathlib.Path(config['result']))
                 completed.append(config['search_id'])
-                responses=journal_state(args.journal,plan,completed)
+                responses=journal_state(manifest['binaries']['budget']['path'],args.plan,args.journal,completed)
                 outcome=cell_result(cell,result,responses,proxy.dropped.is_set())
                 if cell_id=='G5':
                     require(proxy.recovery_gets>0 and result['status']['proposal_round']==proxy.saved_round,'G5 durable raw changed')
                 outcome['reservation_index']=index+1
-                request_evidence=load(folder/'preclaim-view.json')
-                require(request_evidence['provider_wire_sha256'] is not None, 'exact request hash missing')
-                outcome['request_sha256']=request_evidence['provider_wire_sha256']
-                outcome['failure_evidence']=request_evidence['failure_evidence']
-                outcome['inspection_evidence']=request_evidence['inspection_evidence']
-                outcome['source_context_sha256']=request_evidence['source_context_sha256']
+                require(captured_request is not None,'RequestEvidence absent')
+                inspected=request_evidence(manifest['binaries']['budget']['path'],args.plan,
+                    args.journal,config['search_id'],proxy.claim_window,captured_request)
+                if cell_id=='G5':
+                    unchanged_after_restart(before_restart,helper(manifest['binaries']['budget']['path'],'snapshot',args.plan,args.journal))
+                outcome['request_evidence']=inspected
+                for key in ('proposal_request_sha256','provider_body_sha256','proposal_request_bytes','provider_body_bytes'):
+                    outcome[key]=inspected[key]
+                outcome['actual_timeout_ms']=inspected['timeout_ms']
+                preclaim=load(folder/'preclaim-view.json')
+                for key in ('failure_evidence','inspection_evidence','source_context_sha256','known_derivations'):
+                    outcome[key]=preclaim[key]
                 write_new(folder/'cell.json',outcome)
                 results.append(outcome)
             finally:
                 if runtime:local.stop(runtime)
                 if proxy:proxy.shutdown();proxy.server_close()
                 token.unlink(missing_ok=True)
-        # Only generated by an actually executed run, never by offline tests.
-        write_new(args.run/'formation-deepseek-d3-results.json',dict(results=results,reserved_maximum_usd_micros=plan['reservation']['total_usd_micros'],
-                  observed_token_usage=[r['provider_call']['provenance']['usage'] for r in results],
-                  peak_price_equivalent_estimates_usd_micros=[r['provider_call']['provenance'].get('estimated_cost_usd_micros') for r in results],
-                  actual_account_billing=None))
-        summary=['# D3 live results','', 'Actual account billing: not measured.',
-                 'Amounts below are peak-price-equivalent estimates, not actual account spend.',
-                 f"Reserved maximum: {plan['reservation']['total_usd_micros']} USD micros.",'',
-                 '| Cell | Gate | ContractRef | Peak-equivalent USD micros |', '|---|---|---|---:|']
-        for result in results:
-            cost=result['provider_call']['provenance'].get('estimated_cost_usd_micros')
-            summary.append(f"| {result['cell']} | {result['gate']} | {result['contract_ref']} | {cost} |")
-        with (args.run/'formation-deepseek-d3-results.md').open('x') as stream:
-            stream.write('\n'.join(summary)+'\n')
+        persist_results(args,plan,results)
     except Exception:
         if not (args.run/'STOP.json').exists():write_new(args.run/'STOP.json',dict(reason='protocol_or_infrastructure',next_call_allowed=False))
+        partial={'cell':cell_id,'terminal_classification':'protocol_or_infrastructure'}
+        if folder is not None:
+            request=folder/'request-evidence.json'
+            if request.exists():partial['request_evidence']=load(request)
+            result_path=folder/'result.json'
+            if result_path.exists():
+                round=load(result_path).get('status',{}).get('proposal_round') or {}
+                partial['provider_call']=round.get('provider_call')
+        persist_results(args,plan,results,stopped=True,partial_cell=partial)
         raise
     finally:local.close()
+
+def persist_results(args,plan,results,stopped=False,partial_cell=None):
+    # Never invoked by preflight/build. Do not call estimates actual billing.
+    write_new(args.run/'formation-deepseek-d3-results.json',dict(results=results,stopped=stopped,partial_cell=partial_cell,reserved_maximum_usd_micros=plan['reservation']['total_usd_micros'],
+              observed_token_usage=[r['provider_call']['provenance']['usage'] for r in results],
+              peak_price_equivalent_estimates_usd_micros=[r['provider_call']['provenance'].get('estimated_cost_usd_micros') for r in results],
+              actual_account_billing=None))
+    summary=['# D3 live results','', f'Run stopped: {stopped}.', 'Actual account billing: not measured.',
+             'Amounts below are peak-price-equivalent estimates, not actual account spend.',
+             f"Reserved maximum: {plan['reservation']['total_usd_micros']} USD micros.",'',
+             '| Cell | Gate | ContractRef | Peak-equivalent USD micros |', '|---|---|---|---:|']
+    for result in results:
+        cost=result['provider_call']['provenance'].get('estimated_cost_usd_micros')
+        summary.append(f"| {result['cell']} | {result['gate']} | {result['contract_ref']} | {cost} |")
+    with (args.run/'formation-deepseek-d3-results.md').open('x') as stream:
+        stream.write('\n'.join(summary)+'\n')

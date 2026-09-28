@@ -7,13 +7,11 @@ import subprocess
 import urllib.request
 from datetime import datetime, timezone
 
-PLAN_SHA = 'b67607c6cff1de5339f79822bd3e5d6610d1663dcce6e3f0d6b418ef8a2a1585'
-ATO_SHA = '10ad1cd8338e8261cc5bd5e944c38867f22bfe8b'
+PLAN_SHA = 'a3af8f45f7641f7c367ff8d118b2d4e72abcf05711382ea2a7d3864548bd2249'
+ATO_SHA = 'd1dde994c2d310a725b546921f9b3455777e28da'
 API_SHA = '38668a97e7632256b33074b0d223670c16b76bfd'
 WASM_SHA = 'd4732b46f1ce5ab3d1193d957d7bcb2d24f0469ffaa80e267c6cfda5bccb8a46'
 PRICE_URL = 'https://api-docs.deepseek.com/quick_start/pricing/'
-CAPTURE_BLOCKER = ('execution pin has no post-claim provider-request capture hook; '
-                   'preclaim reconstruction is not an exact provider request SHA')
 
 
 class Stop(RuntimeError):
@@ -90,10 +88,25 @@ def fetch_pricing(folder):
     return path, dict(fetch_timestamp_utc=timestamp, final_url=final_url, response_sha256=digest(raw))
 
 
-def helper(binary, operation, plan, journal):
-    result = subprocess.run([str(binary), operation, str(plan), str(journal)],
-                            check=True, capture_output=True, text=True, timeout=30)
-    return json.loads(result.stdout)
+def helper(binary, operation, plan, journal, cell=None):
+    """Marshal BudgetPlan only; all budget/journal semantics stay in pinned Rust."""
+    import tempfile
+    with tempfile.TemporaryDirectory(dir=journal.parent, prefix='budget-helper-') as folder:
+        budget = pathlib.Path(folder)/'budget.json'
+        write_new(budget, approved_plan(plan)['budget'])
+        argv = [str(binary), operation, str(budget), str(journal)]
+        if cell is not None:
+            argv.append(cell)
+        result = subprocess.run(argv, check=True, capture_output=True, text=True, timeout=30)
+        return json.loads(result.stdout) if result.stdout.strip() else {}
+
+
+def evidence_contract(plan, ato):
+    spec = importlib.util.spec_from_file_location('pinned_d3_v2', ato/'scripts/acceptance/proposal/deepseek-v2.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    old = module.original(ato/'docs/ops/formation-deepseek-d3-plan.json')
+    module.check(plan, old, ato)
 
 
 def verify_binaries(manifest):
@@ -109,7 +122,7 @@ def check(args, fetch=fetch_pricing):
     """The ordered trace is recorded for review. No journal/credential side effects."""
     trace = []
     plan = approved_plan(args.plan); trace.append('A')
-    pin(args.ato, ATO_SHA); trace.append('B')
+    pin(args.ato, ATO_SHA); evidence_contract(plan, args.ato); trace.append('B')
     pin(args.api, API_SHA); trace.append('C')
     wasm = args.api / 'src/services/runtime_network/wasm/receipt_authority.wasm'
     require(not wasm.is_symlink() and digest(wasm.read_bytes()) == WASM_SHA, 'wrong WASM'); trace.append('D')
@@ -147,17 +160,17 @@ def check(args, fetch=fetch_pricing):
             price['output_price_usd_micros_per_million'] <= plan['budget']['output_price'], 'price increase')
     trace.append('J')
     reservation = helper(manifest['binaries']['budget']['path'], 'check', args.plan, args.journal)
-    require(reservation['per_call_usd_micros'] == plan['reservation']['per_call_usd_micros'] and
-            reservation['total_usd_micros'] == plan['reservation']['total_usd_micros'] and
-            reservation['total_usd_micros'] <= plan['budget']['ceiling_usd_micros'], 'cost journal mismatch')
+    require(reservation['per_call'] == plan['reservation']['per_call_usd_micros'] and
+            reservation['total'] == plan['reservation']['total_usd_micros'] and
+            reservation['total'] <= plan['budget']['ceiling_usd_micros'], 'cost journal mismatch')
     trace.append('K')
     require(not args.journal.exists() and not args.journal.is_symlink(), 'existing/corrupt journal: GET-only recovery required')
     trace.append('L')
     verify_binaries(manifest); trace.append('M')
     evidence = dict(trace=trace, plan_sha256=PLAN_SHA, execution_sha=ATO_SHA, api_sha=API_SHA,
                     wasm_sha256=WASM_SHA, pricing={**fetched, **price}, reservation=reservation,
-                    binaries=manifest, live_calls=0, key_read=False, execution_ready=False,
-                    blocker=CAPTURE_BLOCKER)
+                    binaries=manifest, live_calls=0, key_read=False, execution_ready=True,
+                    request_evidence_contract=plan['request_evidence'])
     write_new(args.run/'preflight.json', evidence)
     return plan, configs, manifest, evidence
 
@@ -167,9 +180,3 @@ def initialize_budget(args, manifest):
     approved_plan(args.plan)
     verify_binaries(manifest)
     return helper(manifest['binaries']['budget']['path'], 'create', args.plan, args.journal)
-
-
-def require_exact_request_capture():
-    # An immutable execution snapshot cannot acquire a hook from controller code.
-    # Do not call G0/G1 then discover the G2 evidence gap after spending money.
-    raise Stop(CAPTURE_BLOCKER)
