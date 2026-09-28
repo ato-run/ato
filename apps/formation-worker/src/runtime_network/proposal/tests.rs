@@ -241,3 +241,15 @@ fn raw_provenance_scope_and_member_count_corruption_fail_closed() {
     status["search_state"]["frozen"]["base_contract_ref"] = json!("forged");
     assert!(sub.accept_proposal_round(&status).is_err());
 }
+
+#[test]
+fn policy_cannot_bypass_enablement_or_change_after_source_verification() {
+    let (_root, mut sub) = prepared(|_| {});
+    sub.request.policy.proposal = Some(authorization());
+    assert!(sub.validate_proposal_submission().is_err());
+    sub.request.policy.proposal = None;
+    sub.enable_candidate_producer(authorization()).unwrap();
+    sub.validate_proposal_submission().unwrap();
+    sub.request.source.archive_digest = format!("sha256:{}", "a".repeat(64));
+    assert!(sub.validate_proposal_submission().is_err());
+}
