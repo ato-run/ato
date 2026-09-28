@@ -1190,3 +1190,283 @@ fn zero_known_d_respects_stop_deadline_budgets_and_single_round_error_outcomes()
         assert!(s.attempts.is_empty());
     }
 }
+
+fn source_request(auth: &ProposalAuthorization) -> ProposalRequest {
+    let s = empty_frontier();
+    ProposalRequest {
+        schema: PROPOSAL_REQUEST_SCHEMA.into(),
+        search_id: "source-search".into(),
+        frozen_contract: s.frozen.base_contract,
+        runtime_constraint: s.frozen.policy.runtime_constraint,
+        known_derivations: vec![],
+        failure_evidence: vec![],
+        inspection_evidence: vec![],
+        operation_catalog: auth.catalog().unwrap(),
+        remaining_budget: ProposalBudget {
+            rounds_remaining: 1,
+            max_proposals: 4,
+            timeout_ms: 5000,
+            attempts_remaining: 4,
+        },
+    }
+}
+fn source_auth(bytes: usize) -> ProposalAuthorization {
+    let mut auth = empty_frontier().frozen.policy.proposal.unwrap();
+    auth.policy.allow_source_text = true;
+    auth.policy.max_source_bytes = bytes;
+    auth
+}
+#[test]
+fn d2a_policy_matrix_and_old_frozen_bytes() {
+    let s = empty_frontier();
+    let old = s.frozen.canonical_bytes().unwrap();
+    let mut policy = s.frozen.policy.proposal.as_ref().unwrap().policy.clone();
+    for (allow, bytes, valid) in [
+        (false, 0, true),
+        (true, 1, true),
+        (true, 16384, true),
+        (true, 65536, true),
+        (true, 0, false),
+        (false, 1, false),
+        (true, 65537, false),
+        (false, 65536, false),
+    ] {
+        policy.allow_source_text = allow;
+        policy.max_source_bytes = bytes;
+        assert_eq!(policy.validate().is_ok(), valid);
+    }
+    assert_eq!(s.frozen.canonical_bytes().unwrap(), old);
+    assert_eq!(
+        serde_json::from_slice::<FrozenSearchV1>(&old)
+            .unwrap()
+            .canonical_bytes()
+            .unwrap(),
+        old
+    );
+}
+#[test]
+fn d2a_source_enabled_policy_does_not_change_compiled_d_or_k() {
+    let mut s = empty_frontier();
+    let before = first_candidates(&s);
+    let k = s.frozen.contract_ref.clone();
+    s.frozen.policy.proposal.as_mut().unwrap().policy = source_auth(16384).policy;
+    assert_eq!(first_candidates(&s), before);
+    assert_eq!(s.frozen.contract_ref, k);
+    assert!(matches!(
+        decide_next(&s, &[], 10).unwrap(),
+        SearchAction::OpenProposalRound { .. }
+    ));
+    assert!(s.attempts.is_empty());
+}
+#[test]
+fn d2a_v2_is_a_strict_superset_not_a_v1_reinterpretation() {
+    let auth = source_auth(16384);
+    let v1 = source_request(&auth);
+    let old = serde_json::to_value(&v1).unwrap();
+    assert!(old.get("source_context").is_none());
+    let v2 = ProposalRequestV2::new(v1.clone(), &auth, &[]).unwrap();
+    let mut wire = serde_json::to_value(&v2).unwrap();
+    assert!(serde_json::from_value::<ProposalRequest>(wire.clone()).is_err());
+    assert!(serde_json::from_value::<ProposalRequestV2>(old.clone()).is_err());
+    wire.as_object_mut().unwrap().remove("source_context");
+    wire["schema"] = json!(PROPOSAL_REQUEST_SCHEMA);
+    assert_eq!(wire, old);
+    let bytes = v2.canonical_bytes(&auth).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<ProposalRequestV2>(&bytes).unwrap(),
+        v2
+    );
+    let duplicate = String::from_utf8(bytes).unwrap().replacen(
+        "{",
+        "{\"schema\":\"ato.formation-proposal-request/2\",",
+        1,
+    );
+    assert!(serde_json::from_str::<ProposalRequestV2>(&duplicate).is_err());
+    let mut unknown = serde_json::to_value(&v2).unwrap();
+    unknown["source_domain"] = json!({});
+    assert!(serde_json::from_value::<ProposalRequestV2>(unknown).is_err());
+}
+#[test]
+fn d2a_context_is_order_independent_opaque_and_utf8_bounded() {
+    let auth = source_auth(19);
+    let a = "あいうえおかき";
+    let b = "abcdefghijklmno";
+    let sources = [
+        AuthorizedSourceText {
+            kind: SourceContextKind::Entrypoint,
+            logical_id: "entry_b",
+            bytes: b.as_bytes(),
+        },
+        AuthorizedSourceText {
+            kind: SourceContextKind::Entrypoint,
+            logical_id: "entry_a",
+            bytes: a.as_bytes(),
+        },
+    ];
+    let first = ProposalRequestV2::new(source_request(&auth), &auth, &sources).unwrap();
+    let reversed = [sources[1].bytes, sources[0].bytes];
+    let second = ProposalRequestV2::new(
+        source_request(&auth),
+        &auth,
+        &[
+            AuthorizedSourceText {
+                kind: SourceContextKind::Entrypoint,
+                logical_id: "entry_a",
+                bytes: reversed[0],
+            },
+            AuthorizedSourceText {
+                kind: SourceContextKind::Entrypoint,
+                logical_id: "entry_b",
+                bytes: reversed[1],
+            },
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        first.canonical_bytes(&auth).unwrap(),
+        second.canonical_bytes(&auth).unwrap()
+    );
+    assert_eq!(
+        first.source_context_sha256(&auth).unwrap(),
+        second.source_context_sha256(&auth).unwrap()
+    );
+    assert_eq!(first.source_context[0].text, "あいう");
+    assert!(
+        first
+            .source_context
+            .iter()
+            .all(|s| s.truncated && s.source_id.len() == 66)
+    );
+    assert!(
+        first
+            .source_context
+            .iter()
+            .map(|s| s.text.len())
+            .sum::<usize>()
+            <= 19
+    );
+    let json = String::from_utf8(first.canonical_bytes(&auth).unwrap()).unwrap();
+    for private in ["server.py", "alternate.py", "pkg.server", "source_domain"] {
+        assert!(!json.contains(private));
+    }
+}
+#[test]
+fn d2a_invalid_utf8_and_binary_are_omitted_without_conversion() {
+    let auth = source_auth(100);
+    for bytes in [&b"a\xffb"[..], &b"a\0b"[..], &b"a\x01b"[..]] {
+        let result = build_source_context(
+            &auth,
+            &[AuthorizedSourceText {
+                kind: SourceContextKind::Entrypoint,
+                logical_id: "entry_a",
+                bytes,
+            }],
+        )
+        .unwrap();
+        assert!(result.is_empty());
+    }
+    let module = build_source_context(
+        &auth,
+        &[AuthorizedSourceText {
+            kind: SourceContextKind::Module,
+            logical_id: "module_a",
+            bytes: b"print(1)\n",
+        }],
+    )
+    .unwrap();
+    assert_eq!(module[0].text, "print(1)\n");
+}
+#[test]
+fn d2a_per_entry_cap_and_authorization_are_enforced() {
+    let auth = source_auth(65536);
+    let full = vec![b'a'; 65537];
+    let result = build_source_context(
+        &auth,
+        &[AuthorizedSourceText {
+            kind: SourceContextKind::Entrypoint,
+            logical_id: "entry_a",
+            bytes: &full,
+        }],
+    )
+    .unwrap();
+    assert_eq!(result[0].text.len(), MAX_SOURCE_ENTRY_BYTES);
+    assert!(result[0].truncated);
+    assert!(
+        build_source_context(
+            &auth,
+            &[AuthorizedSourceText {
+                kind: SourceContextKind::Entrypoint,
+                logical_id: "../secret",
+                bytes: b"x"
+            }]
+        )
+        .is_err()
+    );
+    assert!(
+        build_source_context(
+            &auth,
+            &[AuthorizedSourceText {
+                kind: SourceContextKind::Module,
+                logical_id: "entry_a",
+                bytes: b"x"
+            }]
+        )
+        .is_err()
+    );
+    assert!(
+        build_source_context(
+            &auth,
+            &[
+                AuthorizedSourceText {
+                    kind: SourceContextKind::Entrypoint,
+                    logical_id: "entry_a",
+                    bytes: b"x"
+                },
+                AuthorizedSourceText {
+                    kind: SourceContextKind::Entrypoint,
+                    logical_id: "entry_a",
+                    bytes: b"x"
+                }
+            ]
+        )
+        .is_err()
+    );
+    let disabled = empty_frontier().frozen.policy.proposal.unwrap();
+    assert!(build_source_context(&disabled, &[]).is_err());
+}
+#[test]
+fn d2a_mutated_hash_budget_or_context_fails_closed() {
+    let auth = source_auth(30);
+    let good = ProposalRequestV2::new(
+        source_request(&auth),
+        &auth,
+        &[AuthorizedSourceText {
+            kind: SourceContextKind::Entrypoint,
+            logical_id: "entry_a",
+            bytes: b"print(1)",
+        }],
+    )
+    .unwrap();
+    let mut bad = good.clone();
+    bad.source_context[0].text.push('!');
+    assert!(bad.validate(&auth).is_err());
+    let mut bad = good.clone();
+    bad.source_context[0].source_id = "s_/private/path".into();
+    assert!(bad.validate(&auth).is_err());
+    let mut bad = good.clone();
+    bad.remaining_budget.max_proposals = 5;
+    assert!(bad.validate(&auth).is_err());
+    let mut bad = good.clone();
+    bad.source_context.push(bad.source_context[0].clone());
+    assert!(bad.validate(&auth).is_err());
+    assert!(good.validate(&source_auth(1)).is_err());
+    for (field, value) in [
+        ("path", json!("secret.py")),
+        ("encoding", json!("base64")),
+        ("kind", json!("readme")),
+    ] {
+        let mut wire = serde_json::to_value(&good).unwrap();
+        wire["source_context"][0][field] = value;
+        assert!(serde_json::from_value::<ProposalRequestV2>(wire).is_err());
+    }
+}
