@@ -1,6 +1,9 @@
 //! CandidateProducer proposals are untrusted authoring input, never decisions or
 //! verification evidence. Ato alone resolves logical IDs and compiles canonical D.
 //! This core has no provider transport, durable storage or execution authority.
+mod python_http;
+pub use python_http::PythonHttpProcess;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
@@ -8,7 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     generation::{self, CompiledGeneration, GenerationPolicy, PythonInvocation},
-    search::{CandidateInput, FrozenSearchV1, SearchCandidate},
+    search::{FrozenSearchV1, SearchCandidate},
 };
 
 pub const PROPOSAL_SCHEMA: &str = "ato.formation-proposal/1";
@@ -51,10 +54,18 @@ impl CandidateProducerPolicy {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProposalAuthorization {
-    pub base_derivation_ref: String,
+    pub modifiable_derivation_refs: Vec<String>,
+    pub source_domain: SourceDomain,
+    /// Ato-owned constructor parameters, not LLM arguments.
+    pub python_http_process: Option<PythonHttpProcess>,
+    pub policy: CandidateProducerPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceDomain {
     pub entrypoints: BTreeMap<String, String>,
     pub modules: BTreeMap<String, String>,
-    pub policy: CandidateProducerPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +77,8 @@ pub struct OperationCatalog {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", deny_unknown_fields)]
 pub enum OperationDomain {
+    #[serde(rename = "python_http_process@1")]
+    PythonHttpProcess { entrypoint_ids: Vec<String> },
     #[serde(rename = "python_script@1")]
     PythonScript { entrypoint_ids: Vec<String> },
     #[serde(rename = "python_module@1")]
@@ -74,6 +87,8 @@ pub enum OperationDomain {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", deny_unknown_fields)]
 pub enum OperationInvocation {
+    #[serde(rename = "python_http_process@1")]
+    PythonHttpProcess { entrypoint_id: String },
     #[serde(rename = "python_script@1")]
     PythonScript { entrypoint_id: String },
     #[serde(rename = "python_module@1")]
@@ -110,10 +125,10 @@ struct RawBatch<'a> {
 }
 
 impl ProposalAuthorization {
-    fn compiler_policy(&self, id: &str, path: &str) -> GenerationPolicy {
+    fn compiler_policy(&self, base_ref: &str, id: &str, path: &str) -> GenerationPolicy {
         GenerationPolicy {
             schema: generation::GENERATION_POLICY_SCHEMA.into(),
-            base_derivation_ref: self.base_derivation_ref.clone(),
+            base_derivation_ref: base_ref.into(),
             entrypoints: BTreeMap::from([(id.into(), path.into())]),
             max_generations: 1,
             timeout_ms: self.policy.timeout_ms,
@@ -122,49 +137,105 @@ impl ProposalAuthorization {
 
     pub fn validate(&self) -> Result<(), ProposalError> {
         self.policy.validate()?;
-        if self.entrypoints.len() + self.modules.len() == 0
-            || self.entrypoints.len() + self.modules.len() > generation::MAX_ENTRYPOINTS
+        let domain = &self.source_domain;
+        if domain.entrypoints.len() + domain.modules.len() == 0
+            || domain.entrypoints.len() + domain.modules.len() > generation::MAX_ENTRYPOINTS
+            || self.modifiable_derivation_refs.len() > 64
+            || self
+                .modifiable_derivation_refs
+                .iter()
+                .any(|r| !generation::is_sha256(r))
+            || self
+                .modifiable_derivation_refs
+                .windows(2)
+                .any(|w| w[0] >= w[1])
         {
             return Err(ProposalError("proposal_domain_bounds"));
         }
-        for (id, path) in &self.entrypoints {
-            self.compiler_policy(id, path)
-                .validate()
-                .map_err(|_| ProposalError("proposal_domain_invalid"))?;
+        for (id, path) in &domain.entrypoints {
+            if !generation::logical_id(id) || !generation::entry_path(path) {
+                return Err(ProposalError("proposal_domain_invalid"));
+            }
         }
-        for (id, module) in &self.modules {
-            if !module.split('.').all(|part| {
-                !part.is_empty()
-                    && part.as_bytes()[0].is_ascii_alphabetic()
-                    && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-            }) || module.len() > 128
+        for (id, module) in &domain.modules {
+            if !generation::logical_id(id)
+                || module.len() > 128
+                || !module.split('.').all(|part| {
+                    !part.is_empty()
+                        && part.as_bytes()[0].is_ascii_alphabetic()
+                        && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                })
             {
                 return Err(ProposalError("proposal_module_invalid"));
             }
-            self.compiler_policy(id, &format!("{}.py", module.replace('.', "/")))
-                .validate()
-                .map_err(|_| ProposalError("proposal_domain_invalid"))?;
+        }
+        if let Some(template) = &self.python_http_process {
+            template.validate()?;
         }
         Ok(())
     }
 
+    /// Modify operations exist only when an explicitly authorized known base
+    /// exists. Base-free construction has a different operation name.
     pub fn catalog(&self) -> Result<OperationCatalog, ProposalError> {
         self.validate()?;
         let mut operations = Vec::new();
-        if !self.entrypoints.is_empty() {
-            operations.push(OperationDomain::PythonScript {
-                entrypoint_ids: self.entrypoints.keys().cloned().collect(),
+        let domain = &self.source_domain;
+        if self.python_http_process.is_some() && !domain.entrypoints.is_empty() {
+            operations.push(OperationDomain::PythonHttpProcess {
+                entrypoint_ids: domain.entrypoints.keys().cloned().collect(),
             });
         }
-        if !self.modules.is_empty() {
-            operations.push(OperationDomain::PythonModule {
-                module_ids: self.modules.keys().cloned().collect(),
-            });
+        if !self.modifiable_derivation_refs.is_empty() {
+            if !domain.entrypoints.is_empty() {
+                operations.push(OperationDomain::PythonScript {
+                    entrypoint_ids: domain.entrypoints.keys().cloned().collect(),
+                });
+            }
+            if !domain.modules.is_empty() {
+                operations.push(OperationDomain::PythonModule {
+                    module_ids: domain.modules.keys().cloned().collect(),
+                });
+            }
         }
         Ok(OperationCatalog {
             schema: CATALOG_SCHEMA.into(),
             operations,
         })
+    }
+
+    pub fn validate_search(&self, frozen: &FrozenSearchV1) -> Result<(), ProposalError> {
+        self.validate()?;
+        let source = frozen
+            .initial_source
+            .as_ref()
+            .ok_or(ProposalError("proposal_initial_source_required"))?;
+        if !generation::is_sha256(&source.closure_ref)
+            || !generation::is_sha256(&source.archive_digest)
+            || frozen.policy.generation.is_some()
+            || !frozen.policy.bindings.is_empty()
+            || frozen.policy.network != "denied"
+            || frozen
+                .candidates
+                .iter()
+                .any(|c| !crate::search::safe(&c.effects))
+        {
+            return Err(ProposalError("proposal_search_scope"));
+        }
+        for reference in &self.modifiable_derivation_refs {
+            if !frozen.candidates.iter().any(|c| {
+                c.derivation_ref == *reference
+                    && c.effects == "pure"
+                    && c.materialization == source.materialization()
+            }) {
+                return Err(ProposalError("proposal_base_unauthorized"));
+            }
+        }
+        if let Some(template) = &self.python_http_process {
+            // Validate complete K/port/input coupling before a provider call.
+            template.validate_contract(&frozen.base_contract, source)?;
+        }
+        Ok(())
     }
 }
 
@@ -222,25 +293,22 @@ impl<'a> CandidateRegistry<'a> {
         &self.generated
     }
 
-    /// Source presence must have been checked against the verified closure when
-    /// the owner froze authorization. `base_toml` is private trusted input, not
-    /// provider output. Hash/Contract/permission checks are repeated here.
+    /// Only Ato parses producer bytes. `base_recipes` is a private lookup keyed
+    /// by explicit authorized D; Propose never reads it. Source-domain files
+    /// must be checked against immutable I by the future requester integration.
     pub fn validate_batch(
         &mut self,
-        authorization: &ProposalAuthorization,
-        base_toml: &str,
-        bytes: &[u8],
+        base_recipes: &BTreeMap<String, String>,
+        output: &ProducerOutput,
     ) -> Result<Vec<ProposalOutcome>, ProposalError> {
-        authorization.validate()?;
-        if self.frozen.policy.proposal.as_ref() != Some(authorization) {
-            return Err(ProposalError("proposal_authorization_mismatch"));
-        }
-        if self.frozen.policy.generation.is_some()
-            || !self.frozen.policy.bindings.is_empty()
-            || self.frozen.policy.network != "denied"
-        {
-            return Err(ProposalError("proposal_search_scope"));
-        }
+        let authorization = self
+            .frozen
+            .policy
+            .proposal
+            .as_ref()
+            .ok_or(ProposalError("proposal_without_policy"))?;
+        authorization.validate_search(self.frozen)?;
+        let bytes = output.raw();
         if bytes.len() > MAX_BATCH_BYTES {
             return Err(ProposalError("proposal_batch_bounds"));
         }
@@ -251,35 +319,15 @@ impl<'a> CandidateRegistry<'a> {
         {
             return Err(ProposalError("proposal_batch_bounds"));
         }
-        let base = self
-            .frozen
-            .candidates
-            .iter()
-            .find(|c| c.derivation_ref == authorization.base_derivation_ref)
-            .ok_or(ProposalError("proposal_base_unauthorized"))?;
-        let CandidateInput::Source { closure_ref, .. } = &base.materialization else {
-            return Err(ProposalError("proposal_base_unsupported"));
-        };
-        if base.effects != "pure" {
-            return Err(ProposalError("proposal_effect_unauthorized"));
-        }
         let mut outcomes = Vec::with_capacity(batch.proposals.len());
         for raw in batch.proposals {
             let result = serde_json::from_str::<Proposal>(raw.get())
                 .map_err(|_| ProposalError("proposal_schema"))
-                .and_then(|proposal| {
-                    compile_proposal(
-                        authorization,
-                        base_toml,
-                        closure_ref,
-                        &self.frozen.base_contract_ref,
-                        &proposal,
-                    )
-                });
+                .and_then(|proposal| compile_proposal(self.frozen, base_recipes, &proposal));
             let outcome = match result {
                 Ok(None) => ProposalOutcome::Unsupported,
                 Err(error) => ProposalOutcome::Rejected(error),
-                Ok(Some((proposal_id, compiled))) => {
+                Ok(Some((proposal_id, compiled, candidate))) => {
                     if self
                         .candidates()
                         .any(|c| c.derivation_ref == compiled.derivation_ref)
@@ -288,8 +336,6 @@ impl<'a> CandidateRegistry<'a> {
                     } else if self.generated.len() >= authorization.policy.max_proposals {
                         ProposalOutcome::Rejected(ProposalError("proposal_registry_full"))
                     } else {
-                        let mut candidate = base.clone();
-                        candidate.derivation_ref = compiled.derivation_ref.clone();
                         let validated = ValidatedCandidate {
                             proposal_id,
                             compiled,
@@ -307,89 +353,156 @@ impl<'a> CandidateRegistry<'a> {
 }
 
 fn compile_proposal(
-    authorization: &ProposalAuthorization,
-    base_toml: &str,
-    closure_ref: &str,
-    contract_ref: &str,
+    frozen: &FrozenSearchV1,
+    base_recipes: &BTreeMap<String, String>,
     proposal: &Proposal,
-) -> Result<Option<(String, CompiledGeneration)>, ProposalError> {
-    let operations = match proposal {
+) -> Result<Option<(String, CompiledGeneration, SearchCandidate)>, ProposalError> {
+    let authorization = frozen
+        .policy
+        .proposal
+        .as_ref()
+        .ok_or(ProposalError("proposal_without_policy"))?;
+    let source = frozen
+        .initial_source
+        .as_ref()
+        .ok_or(ProposalError("proposal_initial_source_required"))?;
+    let (compiled, mut candidate) = match proposal {
         Proposal::Unsupported {} => return Ok(None),
-        Proposal::ProposeDerivation { operations } => operations,
+        Proposal::ProposeDerivation { operations } => {
+            let [OperationInvocation::PythonHttpProcess { entrypoint_id }] = operations.as_slice()
+            else {
+                return Err(ProposalError("proposal_propose_operation"));
+            };
+            let template = authorization
+                .python_http_process
+                .as_ref()
+                .ok_or(ProposalError("proposal_operation_unauthorized"))?;
+            let path = authorization
+                .source_domain
+                .entrypoints
+                .get(entrypoint_id)
+                .ok_or(ProposalError("proposal_id_unauthorized"))?;
+            let compiled = template.compile(source, &frozen.base_contract, path)?;
+            let candidate = template.candidate(source, compiled.derivation_ref.clone());
+            (compiled, candidate)
+        }
         Proposal::ModifyDerivation {
             base_derivation_ref,
             operations,
         } => {
-            if *base_derivation_ref != authorization.base_derivation_ref {
+            if !authorization
+                .modifiable_derivation_refs
+                .contains(base_derivation_ref)
+            {
                 return Err(ProposalError("proposal_base_unauthorized"));
             }
-            operations
-        }
-    };
-    // v0 permits one serving operation, not arbitrary sequencing or extra effects.
-    let [operation] = operations.as_slice() else {
-        return Err(ProposalError("proposal_operation_count"));
-    };
-    let (policy, invocation) = match operation {
-        OperationInvocation::PythonScript { entrypoint_id } => {
-            let path = authorization
-                .entrypoints
-                .get(entrypoint_id)
-                .ok_or(ProposalError("proposal_id_unauthorized"))?;
-            (
-                authorization.compiler_policy(entrypoint_id, path),
-                PythonInvocation::Script(path),
+            let base = frozen
+                .candidates
+                .iter()
+                .find(|c| c.derivation_ref == *base_derivation_ref)
+                .ok_or(ProposalError("proposal_base_unauthorized"))?;
+            let base_toml = base_recipes
+                .get(base_derivation_ref)
+                .ok_or(ProposalError("proposal_base_recipe_missing"))?;
+            let [operation] = operations.as_slice() else {
+                return Err(ProposalError("proposal_operation_count"));
+            };
+            let (policy, invocation) = match operation {
+                OperationInvocation::PythonScript { entrypoint_id } => {
+                    let path = authorization
+                        .source_domain
+                        .entrypoints
+                        .get(entrypoint_id)
+                        .ok_or(ProposalError("proposal_id_unauthorized"))?;
+                    (
+                        authorization.compiler_policy(base_derivation_ref, entrypoint_id, path),
+                        PythonInvocation::Script(path),
+                    )
+                }
+                OperationInvocation::PythonModule { module_id } => {
+                    let module = authorization
+                        .source_domain
+                        .modules
+                        .get(module_id)
+                        .ok_or(ProposalError("proposal_id_unauthorized"))?;
+                    (
+                        authorization.compiler_policy(
+                            base_derivation_ref,
+                            module_id,
+                            &format!("{}.py", module.replace('.', "/")),
+                        ),
+                        PythonInvocation::Module(module),
+                    )
+                }
+                OperationInvocation::PythonHttpProcess { .. } => {
+                    return Err(ProposalError("proposal_modify_operation"));
+                }
+            };
+            let compiled = generation::compile_invocation(
+                &policy,
+                base_toml,
+                &source.closure_ref,
+                &frozen.base_contract_ref,
+                invocation,
             )
-        }
-        OperationInvocation::PythonModule { module_id } => {
-            let module = authorization
-                .modules
-                .get(module_id)
-                .ok_or(ProposalError("proposal_id_unauthorized"))?;
-            (
-                authorization
-                    .compiler_policy(module_id, &format!("{}.py", module.replace('.', "/"))),
-                PythonInvocation::Module(module),
-            )
-        }
-    };
-    let compiled =
-        generation::compile_invocation(&policy, base_toml, closure_ref, contract_ref, invocation)
             .map_err(|e| {
-            ProposalError(if e.code() == "generation_duplicate" {
-                "proposal_duplicate"
-            } else {
-                e.code()
-            })
-        })?;
+                ProposalError(if e.code() == "generation_duplicate" {
+                    "proposal_duplicate"
+                } else {
+                    e.code()
+                })
+            })?;
+            (compiled, base.clone())
+        }
+    };
+    candidate.derivation_ref = compiled.derivation_ref.clone();
+    // Content key ONLY within the frozen search domain (opaque IDs are local).
+    // It is not a global semantic Ref; persistence must pair it with search_id.
     let bytes = serde_jcs::to_vec(&(PROPOSAL_SCHEMA, proposal))
         .map_err(|_| ProposalError("proposal_canonicalization"))?;
-    let proposal_id = format!("sha256:{:x}", Sha256::digest(bytes));
-    Ok(Some((proposal_id, compiled)))
+    let proposal_id = format!("proposal-content:sha256:{:x}", Sha256::digest(bytes));
+    Ok(Some((proposal_id, compiled, candidate)))
 }
 
-/// Read-model validation for persisted candidates. The durable receiver must
-/// separately recompile the stored proposal and compare its canonical D/recipe.
+/// Structural read-model check, not a substitute for receiver recompilation.
 pub fn validate_candidate_scope(
-    known: &[SearchCandidate],
-    base_ref: &str,
+    frozen: &FrozenSearchV1,
     generated: &[SearchCandidate],
 ) -> Result<(), ProposalError> {
-    let base = known
+    let authorization = frozen
+        .policy
+        .proposal
+        .as_ref()
+        .ok_or(ProposalError("proposal_without_policy"))?;
+    let source = frozen
+        .initial_source
+        .as_ref()
+        .ok_or(ProposalError("proposal_initial_source_required"))?;
+    let mut refs: BTreeSet<_> = frozen
+        .candidates
         .iter()
-        .find(|c| c.derivation_ref == base_ref)
-        .ok_or(ProposalError("proposal_base_unauthorized"))?;
-    let mut refs: BTreeSet<_> = known.iter().map(|c| &c.derivation_ref).collect();
-    if generated.len() > MAX_PROPOSALS {
+        .map(|c| &c.derivation_ref)
+        .collect();
+    if generated.len() > authorization.policy.max_proposals {
         return Err(ProposalError("proposal_registry_full"));
     }
     for candidate in generated {
+        let new_scope = authorization
+            .python_http_process
+            .as_ref()
+            .is_some_and(|t| t.candidate(source, candidate.derivation_ref.clone()) == *candidate);
+        let modified_scope = frozen.candidates.iter().any(|base| {
+            authorization
+                .modifiable_derivation_refs
+                .contains(&base.derivation_ref)
+                && candidate.effects == base.effects
+                && candidate.materialization == base.materialization
+                && candidate.requirements == base.requirements
+                && candidate.provisions == base.provisions
+        });
         if !generation::is_sha256(&candidate.derivation_ref)
             || !refs.insert(&candidate.derivation_ref)
-            || candidate.effects != base.effects
-            || candidate.materialization != base.materialization
-            || candidate.requirements != base.requirements
-            || candidate.provisions != base.provisions
+            || (!new_scope && !modified_scope)
         {
             return Err(ProposalError("proposal_candidate_scope"));
         }
@@ -428,17 +541,10 @@ pub struct ProposalRequest {
     pub frozen_contract: crate::authoring::BoundContract,
     pub runtime_constraint: crate::search::RuntimeConstraint,
     pub known_derivations: Vec<String>,
-    pub source_context: Vec<SourceExcerpt>,
     pub failure_evidence: Vec<crate::generation_context::FailureSummary>,
     pub inspection_evidence: Vec<crate::generation_context::InspectionSummary>,
     pub operation_catalog: OperationCatalog,
     pub remaining_budget: ProposalBudget,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SourceExcerpt {
-    pub source_id: String,
-    pub text: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -452,7 +558,7 @@ pub struct ProposalBudget {
 /// Implementations propose only. Caller must claim durably before invocation
 /// and enforce timeout; this trait is not authorization to call an external LLM.
 pub trait CandidateProducer {
-    fn propose(&self, request: &ProposalRequest) -> Result<ProposalBatch, ProducerError>;
+    fn propose(&self, request: &ProposalRequest) -> Result<ProducerOutput, ProducerError>;
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ProducerError {
@@ -464,10 +570,41 @@ pub enum ProducerError {
 
 /// Preregistered fixture producer, with no transport and no K verdict.
 pub struct FixedCandidateProducer {
-    pub batch: ProposalBatch,
+    pub output: ProducerOutput,
 }
 impl CandidateProducer for FixedCandidateProducer {
-    fn propose(&self, _request: &ProposalRequest) -> Result<ProposalBatch, ProducerError> {
-        Ok(self.batch.clone())
+    fn propose(&self, _request: &ProposalRequest) -> Result<ProducerOutput, ProducerError> {
+        Ok(self.output.clone())
+    }
+}
+
+/// Opaque untrusted provider response. Bounded before JSON parsing; provenance
+/// is operational metadata and never participates in proposal/D identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProducerOutput {
+    raw: Vec<u8>,
+    provenance: ProducerProvenance,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProducerProvenance {
+    pub provider: String,
+    pub model: Option<String>,
+}
+impl ProducerOutput {
+    pub fn new(raw: Vec<u8>, provenance: ProducerProvenance) -> Result<Self, ProposalError> {
+        if raw.len() > MAX_BATCH_BYTES
+            || provenance.provider.is_empty()
+            || provenance.provider.len() > 64
+            || provenance.model.as_ref().is_some_and(|m| m.len() > 128)
+        {
+            return Err(ProposalError("proposal_output_bounds"));
+        }
+        Ok(Self { raw, provenance })
+    }
+    pub fn raw(&self) -> &[u8] {
+        &self.raw
+    }
+    pub fn provenance(&self) -> &ProducerProvenance {
+        &self.provenance
     }
 }

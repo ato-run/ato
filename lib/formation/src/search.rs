@@ -25,6 +25,24 @@ pub struct FrozenSearchV1 {
     pub policy: SearchPolicy,
     /// Input order is frozen, independently of Runtime availability/ranking.
     pub candidates: Vec<SearchCandidate>,
+    /// Opt-in Formation input, independent of any known D. Absent on legacy
+    /// searches; omission preserves their canonical bytes and interpretation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_source: Option<InitialSource>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InitialSource {
+    pub closure_ref: String,
+    pub archive_digest: String,
+}
+impl InitialSource {
+    pub fn materialization(&self) -> CandidateInput {
+        CandidateInput::Source {
+            closure_ref: self.closure_ref.clone(),
+            archive_digest: self.archive_digest.clone(),
+        }
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -368,20 +386,15 @@ impl FrozenSearchV1 {
             }
         }
         if let Some(authorization) = &self.policy.proposal {
-            authorization.validate().map_err(|e| SearchError(e.0))?;
-            if self.policy.generation.is_some()
-                || !self.policy.bindings.is_empty()
-                || self.policy.network != "denied"
-                || !self.candidates.iter().any(|c| {
-                    c.derivation_ref == authorization.base_derivation_ref
-                        && c.effects == "pure"
-                        && matches!(c.materialization, CandidateInput::Source { .. })
-                })
-            {
-                return Err(SearchError("proposal_base_unauthorized"));
-            }
+            authorization
+                .validate_search(self)
+                .map_err(|e| SearchError(e.0))?;
+        } else if self.initial_source.is_some() {
+            return Err(SearchError("initial_source_without_proposal_policy"));
         }
-        if self.candidates.is_empty() || self.candidates.len() > 64 {
+        if (self.candidates.is_empty() && self.policy.proposal.is_none())
+            || self.candidates.len() > 64
+        {
             return Err(SearchError("candidate_count"));
         }
         let mut ids = BTreeSet::new();
@@ -528,19 +541,14 @@ impl SearchStateV1 {
                         .opened_at_ms
                         .saturating_add(authorization.policy.timeout_ms)
                         .min(self.deadline_ms)
-                || !self.generation_parent_failed(&authorization.base_derivation_ref)
                 || (round.outcome != Some(ProposalRoundOutcome::Completed)
                     && !round.candidates.is_empty())
                 || round.candidates.len() > authorization.policy.max_proposals
             {
                 return Err(SearchError("proposal_round_invalid"));
             }
-            crate::proposal::validate_candidate_scope(
-                &self.frozen.candidates,
-                &authorization.base_derivation_ref,
-                &round.candidates,
-            )
-            .map_err(|e| SearchError(e.0))?;
+            crate::proposal::validate_candidate_scope(&self.frozen, &round.candidates)
+                .map_err(|e| SearchError(e.0))?;
         }
         let mut ids = BTreeSet::new();
         for a in &self.attempts {
@@ -772,9 +780,7 @@ fn default_next(
         .policy
         .proposal
         .as_ref()
-        .filter(|p| {
-            s.proposal_round.is_none() && s.generation_parent_failed(&p.base_derivation_ref)
-        })
+        .filter(|_| s.proposal_round.is_none())
         .map(|p| (true, p.policy.timeout_ms));
     if !passed && let Some((is_proposal, timeout_ms)) = pending_proposal.or(pending_generation) {
         // Never skip an unanswered decision or an unconsumed inspection/stop.
@@ -977,4 +983,27 @@ fn attempt_events(s: &SearchStateV1, action: &SearchAction) -> Vec<SearchEvent> 
         events.push(SearchEvent::OwnerStopped);
     }
     events
+}
+
+/// Runtime capability requirements shared by requester planning and the Ato
+/// base-free constructor. These are admission facts, not K observations.
+pub fn execution_requirements(process: bool, has_actions: bool) -> Vec<Requirement> {
+    let mut requirements = Vec::new();
+    if process {
+        requirements.push(Requirement {
+            fact: "runtime.process".into(),
+            one_of: Some(vec!["true".into()]),
+        });
+    }
+    if process || has_actions {
+        requirements.push(Requirement {
+            fact: "containment".into(),
+            one_of: Some(vec!["bwrap+landlock".into()]),
+        });
+        requirements.push(Requirement {
+            fact: "toolchain.root".into(),
+            one_of: None,
+        });
+    }
+    requirements
 }
