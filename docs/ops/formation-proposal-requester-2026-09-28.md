@@ -13,7 +13,7 @@ The historical A/B and E1/E2 ledgers remain historical, not current status.
   at **`b81ef143caac3f8e478b0954e9a5db2932c99f19`**. Acceptance stayed pinned to
   this clean receiver checkout; no C2 API edits or main-following.
 - Tested C2 implementation/examples/harness:
-  **`dc2c44013410c2e69add044a1c561f20afd7d884`**. Subsequent ledger/roadmap changes
+  **`ae0a17f01a583591f63d0ad1c99bd34a20cf1c6d`**. Subsequent ledger/roadmap changes
   do not change these tested bytes. The PR metadata records the final head.
 - C1 Rust WASM provenance stays B merge `0ff11e14...`, SHA-256
   `8ab4dfb6b6e0376cf0e1aec8c3d66a30c7db7839e9acd26857d0af942a072452`.
@@ -73,7 +73,7 @@ Schema baseline 0304 initialized locally. Python 3.12.7 was already provisioned.
 All spawned harness/requester/Runtime processes were stopped afterwards; test
 credentials were removed. No environment feature flag was enabled.
 
-Final run: `1790574059915716510`; 15 scenarios cover P0–P11, zero-D, both provider
+Final hardened run: `1790576069513738409`; 15 scenarios cover P0–P11, zero-D, both provider
 failures, unsupported and L1–L3. **All assertions passed; 12 fixed invocations
 in total, 0 external/live model calls.**
 
@@ -184,3 +184,65 @@ Earlier zero-D trials did not PASS. Their evidence was retained, not relabeled:
 No staging/production deployment, general LLM, source transmission, E2/oracle/
 72 cells, Escalate action or unbounded loop. Future general LLM effectiveness
 requires separately authorized PR D; 6a coverage need not wait for it.
+
+## Final hardening review — response headers fixed, Browser CI hold retained
+
+The implementation/harness pin above is now `ae0a17f01a583591f63d0ad1c99bd34a20cf1c6d`.
+The original actual record at `dc2c4401...` remains in Git history. Only the
+acceptance Python changed: LossProxy no longer reads/forwards upstream response
+headers. It emits fixed `Content-Type: application/json` and a computed
+Content-Length. No CR/LF sanitizer, suppression, or arbitrary header pass-through.
+
+- CodeQL alerts **142 and 143 are `fixed`**, queried on `refs/pull/1424/head`.
+  Python analysis **1849453447** (old head) had 2 results; **1849547971**
+  (hardened head) has **0 results, no error**, Analyze (python) job
+  [108809734163](https://github.com/ato-run/ato/actions/runs/36385440267/job/108809734163)
+  succeeded. Aggregate CodeQL was temporarily neutral because Rust analysis
+  was still missing; aggregate neutral alone was **not** used as proof of fix.
+- All **15 actual scenarios rerun**, not just P8/L1/L2: P0–P11, zero-D,
+  unsupported, both provider errors and L1–L3 PASS; fixed calls **12**, models **0**.
+  Run `1790576069513738409`. Every frozen search and recompiled recipe remained
+  byte-identical to the preceding acceptance. Native binaries were reused only
+  after confirming unchanged Rust inputs and binary hashes; the hardened harness
+  was transferred and its host/local hashes compared. JSON evidence is refreshed.
+- Selected regression rerun **638/0/1**; Clippy, fmt and diff checks PASS.
+
+### Browser failure is NOT a baseline failure
+
+Exact target:
+`tests::browser_e2e_routes_keyboard_and_click_through_authority_then_ack_then_record`
+in `ato-connected-realization-worker`.
+
+| Observation | Result |
+|---|---|
+| Base `0ff11e14...`, macOS Rust CI 36373944654 | Target PASS |
+| C2 `4b83ae51...`, [job 108803830389](https://github.com/ato-run/ato/actions/runs/36383463542/job/108803830389), attempt 1 | Target FAIL at line 5514: stale_webmcp lacks `stale_operation` |
+| **Same exact C2 head**, [job 108809601526](https://github.com/ato-run/ato/actions/runs/36383463542/job/108809601526), attempt 2 | Target FAIL at **earlier line 5271**: Browser bridge handshake timeout, before the stale assertion |
+| Hardened head `ae0a17f0...`, [job 108809739680](https://github.com/ato-run/ato/actions/runs/36385443292/job/108809739680) | Target **PASS**; whole job still fails known portable/hosted tests |
+| Hardened head, local macOS 15.7.4 arm64 / Rust 1.96.0 / Chrome 153.0.8010.53, isolated 3 sequential runs | **FAIL (handshake timeout), PASS, PASS**; no skips |
+
+The retry did **not** reproduce the original stale assertion, but also did not
+PASS. Do not erase the retry failure or call the whole Browser test green.
+This is a nondeterministic Browser observation; its root cause remains open.
+**Merge hold retained**, per the requested fail-again branch. No test assertion,
+timeout, retry policy or skip was changed to conceal it.
+
+Causality inspection: the test, BrowserHost, Browser Adapter/bridge and Cargo.lock
+are unchanged against base. Connected worker links runtime-attempt, but this
+Browser E2E starts `BrowserHost::start` directly and does not call changed
+`plan_candidate`/cached Python or ephemeral process cwd lowering. The retry fails
+while awaiting the ready file written after the Browser bridge Hello/HelloAck;
+the original failure is later at replacement-document stale validation. Thus no
+direct C2 changed-function cause was found; unchanged sources and occasional PASS
+are **not proof of independence or of a pre-existing defect**. More Browser
+startup/stale-document diagnostics are needed before removing the hold.
+
+The local timeout left its isolated headless Chrome child running because the
+start error preceded a constructed BrowserHost. Only that exact test profile's
+process was stopped; no user's ordinary browser was touched. No Browser lifecycle
+fix is mixed into this CandidateProducer hardening patch.
+
+Windows Unix-API, Ubuntu hosted Python/Node, macOS portable ownership and hosted
+validator candidate-never-listened failures retain their existing base evidence.
+C2 remains Draft/unmerged; 0304 remote apply = none; deploy = none; live model
+calls = 0; #1421 unchanged. No PR D or 6a work was started in this hardening.
