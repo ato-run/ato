@@ -1,13 +1,13 @@
 {
   "schema": "ato.acceptance.proposal-requester-evidence/1",
   "recorded_at": "2026-09-28",
-  "tested_ato_revision": "dc2c44013410c2e69add044a1c561f20afd7d884",
+  "tested_ato_revision": "ae0a17f01a583591f63d0ad1c99bd34a20cf1c6d",
   "ato_base": "0ff11e14c3ae19c30c2f3957a50d59ab14eb55c8",
   "receiver": {
     "sha": "b81ef143caac3f8e478b0954e9a5db2932c99f19",
     "baseline": "0304_formation_proposals.sql"
   },
-  "actual_run_root": "/home/ubuntu/formation-foundation/.tmp/c2-20260928/runs/1790574059915716510",
+  "actual_run_root": "/home/ubuntu/formation-foundation/.tmp/c2-20260928/runs/1790576069513738409",
   "local_processes_stopped": true,
   "remote_migration": false,
   "deployed": false,
@@ -42,7 +42,7 @@
     "lib/runtime-attempt/src/ephemeral.rs": "d9ec7a1bc9aea64c6606b1bdbb3739aa12bee7f64e5a894e2a3dc1b8cf63755b",
     "lib/runtime-attempt/src/lib.rs": "514ff4ef0ba459ab95ebf90287495b5f7683791fc262a788f305906be9f3955b",
     "lib/runtime-attempt/src/plan.rs": "7a42e26eee79615290dd781ffcaea581a386dc79acc4de0810c7da5b6a61da06",
-    "scripts/acceptance/proposal/accept.py": "8e32559cc558aab70892948a511f837c3a7b6c5bb250a96ac3c4b5ba95f61067",
+    "scripts/acceptance/proposal/accept.py": "e49c96c1de1600848a016b8142f01cfa0832c0632f2920759e525f5a3c9c614b",
     "scripts/acceptance/proposal/build-receiver.mjs": "c31b439d14fcb4387d05bf2635fb668092b3ab740eb26f699e3e485090bb607d",
     "scripts/acceptance/proposal/coordinator.mjs": "9a5c6811905499f5c51e59b517aec0f946e8db13303142e4a2086c646621e9ed"
   },
@@ -56,7 +56,7 @@
     "passed": 638,
     "failed": 0,
     "ignored": 1,
-    "log_sha256": "0dbf13189ee1dda0c36ca516b44f2bd72471eac3cd87719a548a94c30c891d7b"
+    "log_sha256": "20841444e88c77358d65bb82971e40fcadc62786c16b3cbdc9af59f512321d77"
   },
   "cases": {
     "zero": {
@@ -67,7 +67,7 @@
         "known_count": 0,
         "attempts": [
           {
-            "id": "01M3K8FW36BK52G1WADD18APHE",
+            "id": "01M3KAD6NM0D1BDM1EVNNQYQQ3",
             "d": "sha256:304c3726af1979dd2707f703f00570892b4c5d2370c7e233a79487276ed5482f",
             "status": "pass"
           }
@@ -77,7 +77,7 @@
         "outcomes": [
           "admitted"
         ],
-        "result_sha256": "bb0993098fb77a64a194dcda44a41f1de50f61a5d97917a085d1a1aa26b37933"
+        "result_sha256": "e7bdd5c55b16ed1a646fdfbca53f4aaeaa2d8e725f783eb6b481745f64033b95"
       },
       "frozen_request": {
         "authorized_derivations": [],
@@ -140,7 +140,7 @@
         "runtime_constraint": {
           "kind": "any"
         },
-        "search_id": "zero_1790574059915716510",
+        "search_id": "zero_1790576069513738409",
         "source": {
           "archive_bytes": 72192,
           "archive_digest": "sha256:8aa3d433091fb7e11ed0892df135f22d6923d616bb964402e5eb4debff678e6f",
@@ -295,7 +295,7 @@
       },
       "search_attempts": [
         {
-          "attempt_id": "01M3K8FW36BK52G1WADD18APHE",
+          "attempt_id": "01M3KAD6NM0D1BDM1EVNNQYQQ3",
           "claimed": true,
           "derivation_ref": "sha256:304c3726af1979dd2707f703f00570892b4c5d2370c7e233a79487276ed5482f",
           "effects": "pure",
@@ -303,9 +303,9 @@
           "failure_code": null,
           "materialization_ref": "sha256:6663ca275471440eaeb093420cfd4f6a20aef136fa7bd12fa8d673b7a13d541f",
           "record": "finished",
-          "retained_ref": "sha256:def7b86df14e81f7d2954c39e2850bb11901f5e622ecb8a57b5cd9e8c7f5fe97",
+          "retained_ref": "sha256:fe09f43686e3f2cdafcfe1a56d683b7959898589c767397a6f1d3e60c16a3249",
           "route_accepted": true,
-          "runtime_id": "rnr_zero_1790574059915716510",
+          "runtime_id": "rnr_zero_1790576069513738409",
           "status": "pass",
           "unknown_resolved": false
         }
@@ -313,7 +313,7 @@
       "attempts": [
         {
           "advertised_agent_version": "0.1.0",
-          "attempt_id": "01M3K8FW36BK52G1WADD18APHE",
+          "attempt_id": "01M3KAD6NM0D1BDM1EVNNQYQQ3",
           "attestation": {
             "agent_version": "0.1.0",
             "attempt_record": "finished",
@@ -344,14 +344,14 @@
             ]
           },
           "capability_profile_ref": "sha256:c0dd86279408529fc06c1fab29691a2c07d36c092f95064ec01f3f4d184c09be",
-          "claimed_at": "2026-09-28T05:41:03.729Z",
+          "claimed_at": "2026-09-28T06:14:33.407Z",
           "coordinator_note": null,
           "derivation_ref": "sha256:304c3726af1979dd2707f703f00570892b4c5d2370c7e233a79487276ed5482f",
           "environment_id": "native",
           "failure": null,
-          "finished_at": "2026-09-28T05:41:04.888Z",
+          "finished_at": "2026-09-28T06:14:34.668Z",
           "formation_attempt": {
-            "attempt_id": "01M3K8FW36BK52G1WADD18APHE",
+            "attempt_id": "01M3KAD6NM0D1BDM1EVNNQYQQ3",
             "candidate": "authored",
             "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
             "derivation_ref": "sha256:304c3726af1979dd2707f703f00570892b4c5d2370c7e233a79487276ed5482f",
@@ -384,11 +384,11 @@
               "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
               "derivation_ref": "sha256:304c3726af1979dd2707f703f00570892b4c5d2370c7e233a79487276ed5482f",
               "execution": {
-                "attempt_id": "01M3K8FW36BK52G1WADD18APHE",
+                "attempt_id": "01M3KAD6NM0D1BDM1EVNNQYQQ3",
                 "endpoint": "http://127.0.0.1:8000/",
                 "platform": "linux/aarch64",
                 "realization": "process",
-                "request_id": "01M3K8FV9J417YDFSBBSYXW0SH"
+                "request_id": "01M3KAD5SE4RWTTDER75K6PCHP"
               },
               "fully_satisfied": true,
               "observations": [
@@ -408,7 +408,7 @@
                 "kind": "formation-runtime"
               }
             },
-            "runtime_id": "rnr_zero_1790574059915716510",
+            "runtime_id": "rnr_zero_1790576069513738409",
             "status": "verified",
             "verification": {
               "verdicts": [
@@ -432,7 +432,7 @@
             "stored_bytes": 71680,
             "transfer_bytes": 72192
           },
-          "runtime_id": "rnr_zero_1790574059915716510",
+          "runtime_id": "rnr_zero_1790576069513738409",
           "status": "pass",
           "unknown_at": null
         }
@@ -440,14 +440,14 @@
       "accepted_routes": [
         {
           "agent_version": "0.1.0",
-          "attempt_id": "01M3K8FW36BK52G1WADD18APHE",
+          "attempt_id": "01M3KAD6NM0D1BDM1EVNNQYQQ3",
           "capability_profile_ref": "sha256:c0dd86279408529fc06c1fab29691a2c07d36c092f95064ec01f3f4d184c09be",
           "derivation_ref": "sha256:304c3726af1979dd2707f703f00570892b4c5d2370c7e233a79487276ed5482f",
           "effective_contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
           "environment_id": "native",
-          "retained_ref": "sha256:def7b86df14e81f7d2954c39e2850bb11901f5e622ecb8a57b5cd9e8c7f5fe97",
-          "runtime_id": "rnr_zero_1790574059915716510",
-          "verified_at": "2026-09-28T05:41:04.888Z",
+          "retained_ref": "sha256:fe09f43686e3f2cdafcfe1a56d683b7959898589c767397a6f1d3e60c16a3249",
+          "runtime_id": "rnr_zero_1790576069513738409",
+          "verified_at": "2026-09-28T06:14:34.668Z",
           "verifier_receipts": [
             {
               "kind": "http_contract",
@@ -468,11 +468,11 @@
                 "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
                 "derivation_ref": "sha256:304c3726af1979dd2707f703f00570892b4c5d2370c7e233a79487276ed5482f",
                 "execution": {
-                  "attempt_id": "01M3K8FW36BK52G1WADD18APHE",
+                  "attempt_id": "01M3KAD6NM0D1BDM1EVNNQYQQ3",
                   "endpoint": "http://127.0.0.1:8000/",
                   "platform": "linux/aarch64",
                   "realization": "process",
-                  "request_id": "01M3K8FV9J417YDFSBBSYXW0SH"
+                  "request_id": "01M3KAD5SE4RWTTDER75K6PCHP"
                 },
                 "fully_satisfied": true,
                 "observations": [
@@ -545,7 +545,7 @@
               "kind": "any"
             },
             "schema": "ato.formation-proposal-request/1",
-            "search_id": "zero_1790574059915716510"
+            "search_id": "zero_1790576069513738409"
           }
         }
       ]
@@ -558,7 +558,7 @@
         "known_count": 1,
         "attempts": [
           {
-            "id": "01M3K8FYJ2CYGK3G1VC8BFH3J4",
+            "id": "01M3KAD9GKZSN33GH3KFYZ4S55",
             "d": "sha256:2155124e861c6993759a9b4e8f2640ffb18509faa28b87cfeb9c32716c8c7160",
             "status": "fail"
           }
@@ -566,7 +566,7 @@
         "accepted_routes": 0,
         "proposal_status": null,
         "outcomes": [],
-        "result_sha256": "9db2c05d230951e062e7d35f30597e329c197887af723cb41de88c5da6a41b5d"
+        "result_sha256": "7d5b831bb419460c34ac5ecdf0ab614d78422be3c5404822288e2ddc2b1e0eb7"
       },
       "frozen_request": {
         "authorized_derivations": [
@@ -629,7 +629,7 @@
         "runtime_constraint": {
           "kind": "any"
         },
-        "search_id": "P0_1790574059915716510",
+        "search_id": "P0_1790576069513738409",
         "source": {
           "archive_bytes": 72192,
           "archive_digest": "sha256:54000d11ce530517d67b34c2aaeda14fbd6191313ca96909b9acb5b9442947fc",
@@ -706,7 +706,7 @@
       "durable_round": null,
       "search_attempts": [
         {
-          "attempt_id": "01M3K8FYJ2CYGK3G1VC8BFH3J4",
+          "attempt_id": "01M3KAD9GKZSN33GH3KFYZ4S55",
           "claimed": true,
           "derivation_ref": "sha256:2155124e861c6993759a9b4e8f2640ffb18509faa28b87cfeb9c32716c8c7160",
           "effects": "pure",
@@ -716,7 +716,7 @@
           "record": "finished",
           "retained_ref": null,
           "route_accepted": false,
-          "runtime_id": "rnr_P0_1790574059915716510",
+          "runtime_id": "rnr_P0_1790576069513738409",
           "status": "fail",
           "unknown_resolved": false
         }
@@ -724,7 +724,7 @@
       "attempts": [
         {
           "advertised_agent_version": "0.1.0",
-          "attempt_id": "01M3K8FYJ2CYGK3G1VC8BFH3J4",
+          "attempt_id": "01M3KAD9GKZSN33GH3KFYZ4S55",
           "attestation": {
             "agent_version": "0.1.0",
             "attempt_record": "finished",
@@ -755,7 +755,7 @@
             ]
           },
           "capability_profile_ref": "sha256:c0dd86279408529fc06c1fab29691a2c07d36c092f95064ec01f3f4d184c09be",
-          "claimed_at": "2026-09-28T05:41:06.254Z",
+          "claimed_at": "2026-09-28T06:14:36.317Z",
           "coordinator_note": null,
           "derivation_ref": "sha256:2155124e861c6993759a9b4e8f2640ffb18509faa28b87cfeb9c32716c8c7160",
           "environment_id": "native",
@@ -764,9 +764,9 @@
             "message": "health: GET /health on app.http returned 404; expected 200",
             "stage": "verification"
           },
-          "finished_at": "2026-09-28T05:41:06.891Z",
+          "finished_at": "2026-09-28T06:14:37.084Z",
           "formation_attempt": {
-            "attempt_id": "01M3K8FYJ2CYGK3G1VC8BFH3J4",
+            "attempt_id": "01M3KAD9GKZSN33GH3KFYZ4S55",
             "candidate": "authored",
             "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
             "derivation_ref": "sha256:2155124e861c6993759a9b4e8f2640ffb18509faa28b87cfeb9c32716c8c7160",
@@ -807,11 +807,11 @@
               "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
               "derivation_ref": "sha256:2155124e861c6993759a9b4e8f2640ffb18509faa28b87cfeb9c32716c8c7160",
               "execution": {
-                "attempt_id": "01M3K8FYJ2CYGK3G1VC8BFH3J4",
+                "attempt_id": "01M3KAD9GKZSN33GH3KFYZ4S55",
                 "endpoint": "http://127.0.0.1:8000/",
                 "platform": "linux/aarch64",
                 "realization": "process",
-                "request_id": "01M3K8FYB5QFJSFSTQC0RDQVG9"
+                "request_id": "01M3KAD96J9E1WM50N6C49AWGN"
               },
               "fully_satisfied": false,
               "observations": [
@@ -832,7 +832,7 @@
                 "kind": "formation-runtime"
               }
             },
-            "runtime_id": "rnr_P0_1790574059915716510",
+            "runtime_id": "rnr_P0_1790576069513738409",
             "status": "failed",
             "verification": {
               "verdicts": [
@@ -858,7 +858,7 @@
             "stored_bytes": 0,
             "transfer_bytes": 72192
           },
-          "runtime_id": "rnr_P0_1790574059915716510",
+          "runtime_id": "rnr_P0_1790576069513738409",
           "status": "fail",
           "unknown_at": null
         }
@@ -878,12 +878,12 @@
         "known_count": 1,
         "attempts": [
           {
-            "id": "01M3K8G0W8SJZP280W2QWPQQTB",
+            "id": "01M3KADCAZ5SD7EGM9AY0DHFM9",
             "d": "sha256:2479b9c63958ebf370d0461ae572bff645ebf87b2dda8c435c4ca729099a8a2e",
             "status": "fail"
           },
           {
-            "id": "01M3K8G49WRGAA465FGJVK9MMX",
+            "id": "01M3KADH20XBV95XEQ8MADHJH7",
             "d": "sha256:30b9c7cc3792f65f17c571979ac7a3859b42bb6612c6a7aedd760b59ec890b12",
             "status": "pass"
           }
@@ -894,7 +894,7 @@
           "admitted",
           "admitted"
         ],
-        "result_sha256": "f4a1a9310bcc832ef7e5752bdf4c645dee623cef51e061308cff57b5849227db"
+        "result_sha256": "75566dfb0beec34509771beed38e907ddf9a168ef768bc181274af8196aa0c67"
       },
       "frozen_request": {
         "authorized_derivations": [
@@ -988,7 +988,7 @@
         "runtime_constraint": {
           "kind": "any"
         },
-        "search_id": "P1_P2_P10_P11_1790574059915716510",
+        "search_id": "P1_P2_P10_P11_1790576069513738409",
         "source": {
           "archive_bytes": 72192,
           "archive_digest": "sha256:c3d1f8eab56e379e4b1bde8fdee90c0e306487b79dcb7e9e81935570b3c1e002",
@@ -1249,7 +1249,7 @@
       },
       "search_attempts": [
         {
-          "attempt_id": "01M3K8G0W8SJZP280W2QWPQQTB",
+          "attempt_id": "01M3KADCAZ5SD7EGM9AY0DHFM9",
           "claimed": true,
           "derivation_ref": "sha256:2479b9c63958ebf370d0461ae572bff645ebf87b2dda8c435c4ca729099a8a2e",
           "effects": "pure",
@@ -1259,12 +1259,12 @@
           "record": "finished",
           "retained_ref": null,
           "route_accepted": false,
-          "runtime_id": "rnr_P1_P2_P10_P11_1790574059915716510",
+          "runtime_id": "rnr_P1_P2_P10_P11_1790576069513738409",
           "status": "fail",
           "unknown_resolved": false
         },
         {
-          "attempt_id": "01M3K8G49WRGAA465FGJVK9MMX",
+          "attempt_id": "01M3KADH20XBV95XEQ8MADHJH7",
           "claimed": true,
           "derivation_ref": "sha256:30b9c7cc3792f65f17c571979ac7a3859b42bb6612c6a7aedd760b59ec890b12",
           "effects": "pure",
@@ -1272,9 +1272,9 @@
           "failure_code": null,
           "materialization_ref": "sha256:fa89de72c76c7ac84a87aa75d9984d093bb6d6a793dad12c59fcd824a29c42cb",
           "record": "finished",
-          "retained_ref": "sha256:5e7cb5aeaa3c6593d20982ef47e2db2205d21bbd78dbf343fa7b3d85e4138f71",
+          "retained_ref": "sha256:63376c01655d92786e1aa60a90411dd6333c65664e449953cfaa484c5305efaf",
           "route_accepted": true,
-          "runtime_id": "rnr_P1_P2_P10_P11_1790574059915716510",
+          "runtime_id": "rnr_P1_P2_P10_P11_1790576069513738409",
           "status": "pass",
           "unknown_resolved": false
         }
@@ -1282,7 +1282,7 @@
       "attempts": [
         {
           "advertised_agent_version": "0.1.0",
-          "attempt_id": "01M3K8G0W8SJZP280W2QWPQQTB",
+          "attempt_id": "01M3KADCAZ5SD7EGM9AY0DHFM9",
           "attestation": {
             "agent_version": "0.1.0",
             "attempt_record": "finished",
@@ -1313,7 +1313,7 @@
             ]
           },
           "capability_profile_ref": "sha256:c0dd86279408529fc06c1fab29691a2c07d36c092f95064ec01f3f4d184c09be",
-          "claimed_at": "2026-09-28T05:41:08.627Z",
+          "claimed_at": "2026-09-28T06:14:39.212Z",
           "coordinator_note": null,
           "derivation_ref": "sha256:2479b9c63958ebf370d0461ae572bff645ebf87b2dda8c435c4ca729099a8a2e",
           "environment_id": "native",
@@ -1322,9 +1322,9 @@
             "message": "health: GET /health on app.http returned 404; expected 200",
             "stage": "verification"
           },
-          "finished_at": "2026-09-28T05:41:09.052Z",
+          "finished_at": "2026-09-28T06:14:39.703Z",
           "formation_attempt": {
-            "attempt_id": "01M3K8G0W8SJZP280W2QWPQQTB",
+            "attempt_id": "01M3KADCAZ5SD7EGM9AY0DHFM9",
             "candidate": "authored",
             "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
             "derivation_ref": "sha256:2479b9c63958ebf370d0461ae572bff645ebf87b2dda8c435c4ca729099a8a2e",
@@ -1365,11 +1365,11 @@
               "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
               "derivation_ref": "sha256:2479b9c63958ebf370d0461ae572bff645ebf87b2dda8c435c4ca729099a8a2e",
               "execution": {
-                "attempt_id": "01M3K8G0W8SJZP280W2QWPQQTB",
+                "attempt_id": "01M3KADCAZ5SD7EGM9AY0DHFM9",
                 "endpoint": "http://127.0.0.1:8000/",
                 "platform": "linux/aarch64",
                 "realization": "process",
-                "request_id": "01M3K8FZYC790TVDJK8N7G5DMV"
+                "request_id": "01M3KADB2NQ4SW5JWJ43H6XBQC"
               },
               "fully_satisfied": false,
               "observations": [
@@ -1390,7 +1390,7 @@
                 "kind": "formation-runtime"
               }
             },
-            "runtime_id": "rnr_P1_P2_P10_P11_1790574059915716510",
+            "runtime_id": "rnr_P1_P2_P10_P11_1790576069513738409",
             "status": "failed",
             "verification": {
               "verdicts": [
@@ -1416,13 +1416,13 @@
             "stored_bytes": 0,
             "transfer_bytes": 72192
           },
-          "runtime_id": "rnr_P1_P2_P10_P11_1790574059915716510",
+          "runtime_id": "rnr_P1_P2_P10_P11_1790576069513738409",
           "status": "fail",
           "unknown_at": null
         },
         {
           "advertised_agent_version": "0.1.0",
-          "attempt_id": "01M3K8G49WRGAA465FGJVK9MMX",
+          "attempt_id": "01M3KADH20XBV95XEQ8MADHJH7",
           "attestation": {
             "agent_version": "0.1.0",
             "attempt_record": "finished",
@@ -1453,14 +1453,14 @@
             ]
           },
           "capability_profile_ref": "sha256:c0dd86279408529fc06c1fab29691a2c07d36c092f95064ec01f3f4d184c09be",
-          "claimed_at": "2026-09-28T05:41:12.135Z",
+          "claimed_at": "2026-09-28T06:14:44.044Z",
           "coordinator_note": null,
           "derivation_ref": "sha256:30b9c7cc3792f65f17c571979ac7a3859b42bb6612c6a7aedd760b59ec890b12",
           "environment_id": "native",
           "failure": null,
-          "finished_at": "2026-09-28T05:41:13.753Z",
+          "finished_at": "2026-09-28T06:14:46.050Z",
           "formation_attempt": {
-            "attempt_id": "01M3K8G49WRGAA465FGJVK9MMX",
+            "attempt_id": "01M3KADH20XBV95XEQ8MADHJH7",
             "candidate": "authored",
             "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
             "derivation_ref": "sha256:30b9c7cc3792f65f17c571979ac7a3859b42bb6612c6a7aedd760b59ec890b12",
@@ -1493,11 +1493,11 @@
               "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
               "derivation_ref": "sha256:30b9c7cc3792f65f17c571979ac7a3859b42bb6612c6a7aedd760b59ec890b12",
               "execution": {
-                "attempt_id": "01M3K8G49WRGAA465FGJVK9MMX",
+                "attempt_id": "01M3KADH20XBV95XEQ8MADHJH7",
                 "endpoint": "http://127.0.0.1:8000/",
                 "platform": "linux/aarch64",
                 "realization": "process",
-                "request_id": "01M3K8FZYC790TVDJK8N7G5DMV"
+                "request_id": "01M3KADB2NQ4SW5JWJ43H6XBQC"
               },
               "fully_satisfied": true,
               "observations": [
@@ -1517,7 +1517,7 @@
                 "kind": "formation-runtime"
               }
             },
-            "runtime_id": "rnr_P1_P2_P10_P11_1790574059915716510",
+            "runtime_id": "rnr_P1_P2_P10_P11_1790576069513738409",
             "status": "verified",
             "verification": {
               "verdicts": [
@@ -1541,7 +1541,7 @@
             "stored_bytes": 71680,
             "transfer_bytes": 72192
           },
-          "runtime_id": "rnr_P1_P2_P10_P11_1790574059915716510",
+          "runtime_id": "rnr_P1_P2_P10_P11_1790576069513738409",
           "status": "pass",
           "unknown_at": null
         }
@@ -1549,14 +1549,14 @@
       "accepted_routes": [
         {
           "agent_version": "0.1.0",
-          "attempt_id": "01M3K8G49WRGAA465FGJVK9MMX",
+          "attempt_id": "01M3KADH20XBV95XEQ8MADHJH7",
           "capability_profile_ref": "sha256:c0dd86279408529fc06c1fab29691a2c07d36c092f95064ec01f3f4d184c09be",
           "derivation_ref": "sha256:30b9c7cc3792f65f17c571979ac7a3859b42bb6612c6a7aedd760b59ec890b12",
           "effective_contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
           "environment_id": "native",
-          "retained_ref": "sha256:5e7cb5aeaa3c6593d20982ef47e2db2205d21bbd78dbf343fa7b3d85e4138f71",
-          "runtime_id": "rnr_P1_P2_P10_P11_1790574059915716510",
-          "verified_at": "2026-09-28T05:41:13.753Z",
+          "retained_ref": "sha256:63376c01655d92786e1aa60a90411dd6333c65664e449953cfaa484c5305efaf",
+          "runtime_id": "rnr_P1_P2_P10_P11_1790576069513738409",
+          "verified_at": "2026-09-28T06:14:46.050Z",
           "verifier_receipts": [
             {
               "kind": "http_contract",
@@ -1577,11 +1577,11 @@
                 "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
                 "derivation_ref": "sha256:30b9c7cc3792f65f17c571979ac7a3859b42bb6612c6a7aedd760b59ec890b12",
                 "execution": {
-                  "attempt_id": "01M3K8G49WRGAA465FGJVK9MMX",
+                  "attempt_id": "01M3KADH20XBV95XEQ8MADHJH7",
                   "endpoint": "http://127.0.0.1:8000/",
                   "platform": "linux/aarch64",
                   "realization": "process",
-                  "request_id": "01M3K8FZYC790TVDJK8N7G5DMV"
+                  "request_id": "01M3KADB2NQ4SW5JWJ43H6XBQC"
                 },
                 "fully_satisfied": true,
                 "observations": [
@@ -1689,7 +1689,7 @@
               "kind": "any"
             },
             "schema": "ato.formation-proposal-request/1",
-            "search_id": "P1_P2_P10_P11_1790574059915716510"
+            "search_id": "P1_P2_P10_P11_1790576069513738409"
           }
         }
       ]
@@ -1702,17 +1702,17 @@
         "known_count": 1,
         "attempts": [
           {
-            "id": "01M3K8G8BYXHA3EQV9T11Z339S",
+            "id": "01M3KADPBYYJPJV2N6RR6D8Z1D",
             "d": "sha256:7894c64cac1418f6bc865a8e0014e203bc4e83f6d172ea218f9a785b31b3e996",
             "status": "fail"
           },
           {
-            "id": "01M3K8GBWRYHVFHYKCK9D3ZDVK",
+            "id": "01M3KADVBRCNJ51JECC72ZB6BN",
             "d": "sha256:7963207917f132f16c104de668da6f5adab40fa7436f46a6e962fd444ec6fe2b",
             "status": "fail"
           },
           {
-            "id": "01M3K8GEN4RH8HMQGJT89W79BC",
+            "id": "01M3KADZ8BW2Z9V0XN4PVC5EBQ",
             "d": "sha256:3434d3be726e2fe722daa02edfba48122bfbe8fc2411fc4bfe042103640f22ed",
             "status": "pass"
           }
@@ -1723,7 +1723,7 @@
           "admitted",
           "admitted"
         ],
-        "result_sha256": "952cbcdfd907bb0f87cae54425ecf501416cdda4fc0b1c66c00d12a7d3e71b1b"
+        "result_sha256": "a7b2cc187eb694c360b72f3d249be277175f28be7d1c149e7fe7f487883f4263"
       },
       "frozen_request": {
         "authorized_derivations": [
@@ -1817,7 +1817,7 @@
         "runtime_constraint": {
           "kind": "any"
         },
-        "search_id": "P3_1790574059915716510",
+        "search_id": "P3_1790576069513738409",
         "source": {
           "archive_bytes": 72192,
           "archive_digest": "sha256:af0826dade64ff3184d2094be1d16c281e80d758b0190e1043570ca76a9427e1",
@@ -2078,7 +2078,7 @@
       },
       "search_attempts": [
         {
-          "attempt_id": "01M3K8G8BYXHA3EQV9T11Z339S",
+          "attempt_id": "01M3KADPBYYJPJV2N6RR6D8Z1D",
           "claimed": true,
           "derivation_ref": "sha256:7894c64cac1418f6bc865a8e0014e203bc4e83f6d172ea218f9a785b31b3e996",
           "effects": "pure",
@@ -2088,12 +2088,12 @@
           "record": "finished",
           "retained_ref": null,
           "route_accepted": false,
-          "runtime_id": "rnr_P3_1790574059915716510",
+          "runtime_id": "rnr_P3_1790576069513738409",
           "status": "fail",
           "unknown_resolved": false
         },
         {
-          "attempt_id": "01M3K8GBWRYHVFHYKCK9D3ZDVK",
+          "attempt_id": "01M3KADVBRCNJ51JECC72ZB6BN",
           "claimed": true,
           "derivation_ref": "sha256:7963207917f132f16c104de668da6f5adab40fa7436f46a6e962fd444ec6fe2b",
           "effects": "pure",
@@ -2103,12 +2103,12 @@
           "record": "finished",
           "retained_ref": null,
           "route_accepted": false,
-          "runtime_id": "rnr_P3_1790574059915716510",
+          "runtime_id": "rnr_P3_1790576069513738409",
           "status": "fail",
           "unknown_resolved": false
         },
         {
-          "attempt_id": "01M3K8GEN4RH8HMQGJT89W79BC",
+          "attempt_id": "01M3KADZ8BW2Z9V0XN4PVC5EBQ",
           "claimed": true,
           "derivation_ref": "sha256:3434d3be726e2fe722daa02edfba48122bfbe8fc2411fc4bfe042103640f22ed",
           "effects": "pure",
@@ -2116,9 +2116,9 @@
           "failure_code": null,
           "materialization_ref": "sha256:02777653c812b06cdc80b16ca3691ca7bf33ef4ea72b8d0e90ad591866e370a3",
           "record": "finished",
-          "retained_ref": "sha256:23bf86fb7313b66bff5100a2a6da4e05b860250fec5660ecc9c93099297bda16",
+          "retained_ref": "sha256:5e414e490093c8860ede41fba6ef7d641d71bfd2dfbe6c85c7b83a9bacdcf0ff",
           "route_accepted": true,
-          "runtime_id": "rnr_P3_1790574059915716510",
+          "runtime_id": "rnr_P3_1790576069513738409",
           "status": "pass",
           "unknown_resolved": false
         }
@@ -2126,7 +2126,7 @@
       "attempts": [
         {
           "advertised_agent_version": "0.1.0",
-          "attempt_id": "01M3K8G8BYXHA3EQV9T11Z339S",
+          "attempt_id": "01M3KADPBYYJPJV2N6RR6D8Z1D",
           "attestation": {
             "agent_version": "0.1.0",
             "attempt_record": "finished",
@@ -2157,7 +2157,7 @@
             ]
           },
           "capability_profile_ref": "sha256:c0dd86279408529fc06c1fab29691a2c07d36c092f95064ec01f3f4d184c09be",
-          "claimed_at": "2026-09-28T05:41:16.296Z",
+          "claimed_at": "2026-09-28T06:14:49.481Z",
           "coordinator_note": null,
           "derivation_ref": "sha256:7894c64cac1418f6bc865a8e0014e203bc4e83f6d172ea218f9a785b31b3e996",
           "environment_id": "native",
@@ -2166,9 +2166,9 @@
             "message": "health: GET /health on app.http returned 404; expected 200",
             "stage": "verification"
           },
-          "finished_at": "2026-09-28T05:41:16.719Z",
+          "finished_at": "2026-09-28T06:14:49.983Z",
           "formation_attempt": {
-            "attempt_id": "01M3K8G8BYXHA3EQV9T11Z339S",
+            "attempt_id": "01M3KADPBYYJPJV2N6RR6D8Z1D",
             "candidate": "authored",
             "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
             "derivation_ref": "sha256:7894c64cac1418f6bc865a8e0014e203bc4e83f6d172ea218f9a785b31b3e996",
@@ -2209,11 +2209,11 @@
               "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
               "derivation_ref": "sha256:7894c64cac1418f6bc865a8e0014e203bc4e83f6d172ea218f9a785b31b3e996",
               "execution": {
-                "attempt_id": "01M3K8G8BYXHA3EQV9T11Z339S",
+                "attempt_id": "01M3KADPBYYJPJV2N6RR6D8Z1D",
                 "endpoint": "http://127.0.0.1:8000/",
                 "platform": "linux/aarch64",
                 "realization": "process",
-                "request_id": "01M3K8G7EZ7ZJ5M39A6SK9EJGD"
+                "request_id": "01M3KADN2TPANC5FE6ZN405B5A"
               },
               "fully_satisfied": false,
               "observations": [
@@ -2234,7 +2234,7 @@
                 "kind": "formation-runtime"
               }
             },
-            "runtime_id": "rnr_P3_1790574059915716510",
+            "runtime_id": "rnr_P3_1790576069513738409",
             "status": "failed",
             "verification": {
               "verdicts": [
@@ -2260,13 +2260,13 @@
             "stored_bytes": 0,
             "transfer_bytes": 72192
           },
-          "runtime_id": "rnr_P3_1790574059915716510",
+          "runtime_id": "rnr_P3_1790576069513738409",
           "status": "fail",
           "unknown_at": null
         },
         {
           "advertised_agent_version": "0.1.0",
-          "attempt_id": "01M3K8GBWRYHVFHYKCK9D3ZDVK",
+          "attempt_id": "01M3KADVBRCNJ51JECC72ZB6BN",
           "attestation": {
             "agent_version": "0.1.0",
             "attempt_record": "finished",
@@ -2297,7 +2297,7 @@
             ]
           },
           "capability_profile_ref": "sha256:c0dd86279408529fc06c1fab29691a2c07d36c092f95064ec01f3f4d184c09be",
-          "claimed_at": "2026-09-28T05:41:19.907Z",
+          "claimed_at": "2026-09-28T06:14:54.595Z",
           "coordinator_note": null,
           "derivation_ref": "sha256:7963207917f132f16c104de668da6f5adab40fa7436f46a6e962fd444ec6fe2b",
           "environment_id": "native",
@@ -2306,9 +2306,9 @@
             "message": "health: GET /health on app.http returned 404; expected 200",
             "stage": "verification"
           },
-          "finished_at": "2026-09-28T05:41:20.673Z",
+          "finished_at": "2026-09-28T06:14:55.611Z",
           "formation_attempt": {
-            "attempt_id": "01M3K8GBWRYHVFHYKCK9D3ZDVK",
+            "attempt_id": "01M3KADVBRCNJ51JECC72ZB6BN",
             "candidate": "authored",
             "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
             "derivation_ref": "sha256:7963207917f132f16c104de668da6f5adab40fa7436f46a6e962fd444ec6fe2b",
@@ -2349,11 +2349,11 @@
               "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
               "derivation_ref": "sha256:7963207917f132f16c104de668da6f5adab40fa7436f46a6e962fd444ec6fe2b",
               "execution": {
-                "attempt_id": "01M3K8GBWRYHVFHYKCK9D3ZDVK",
+                "attempt_id": "01M3KADVBRCNJ51JECC72ZB6BN",
                 "endpoint": "http://127.0.0.1:8000/",
                 "platform": "linux/aarch64",
                 "realization": "process",
-                "request_id": "01M3K8G7EZ7ZJ5M39A6SK9EJGD"
+                "request_id": "01M3KADN2TPANC5FE6ZN405B5A"
               },
               "fully_satisfied": false,
               "observations": [
@@ -2374,7 +2374,7 @@
                 "kind": "formation-runtime"
               }
             },
-            "runtime_id": "rnr_P3_1790574059915716510",
+            "runtime_id": "rnr_P3_1790576069513738409",
             "status": "failed",
             "verification": {
               "verdicts": [
@@ -2400,13 +2400,13 @@
             "stored_bytes": 0,
             "transfer_bytes": 72192
           },
-          "runtime_id": "rnr_P3_1790574059915716510",
+          "runtime_id": "rnr_P3_1790576069513738409",
           "status": "fail",
           "unknown_at": null
         },
         {
           "advertised_agent_version": "0.1.0",
-          "attempt_id": "01M3K8GEN4RH8HMQGJT89W79BC",
+          "attempt_id": "01M3KADZ8BW2Z9V0XN4PVC5EBQ",
           "attestation": {
             "agent_version": "0.1.0",
             "attempt_record": "finished",
@@ -2437,14 +2437,14 @@
             ]
           },
           "capability_profile_ref": "sha256:c0dd86279408529fc06c1fab29691a2c07d36c092f95064ec01f3f4d184c09be",
-          "claimed_at": "2026-09-28T05:41:22.736Z",
+          "claimed_at": "2026-09-28T06:14:58.583Z",
           "coordinator_note": null,
           "derivation_ref": "sha256:3434d3be726e2fe722daa02edfba48122bfbe8fc2411fc4bfe042103640f22ed",
           "environment_id": "native",
           "failure": null,
-          "finished_at": "2026-09-28T05:41:24.312Z",
+          "finished_at": "2026-09-28T06:15:00.600Z",
           "formation_attempt": {
-            "attempt_id": "01M3K8GEN4RH8HMQGJT89W79BC",
+            "attempt_id": "01M3KADZ8BW2Z9V0XN4PVC5EBQ",
             "candidate": "authored",
             "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
             "derivation_ref": "sha256:3434d3be726e2fe722daa02edfba48122bfbe8fc2411fc4bfe042103640f22ed",
@@ -2477,11 +2477,11 @@
               "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
               "derivation_ref": "sha256:3434d3be726e2fe722daa02edfba48122bfbe8fc2411fc4bfe042103640f22ed",
               "execution": {
-                "attempt_id": "01M3K8GEN4RH8HMQGJT89W79BC",
+                "attempt_id": "01M3KADZ8BW2Z9V0XN4PVC5EBQ",
                 "endpoint": "http://127.0.0.1:8000/",
                 "platform": "linux/aarch64",
                 "realization": "process",
-                "request_id": "01M3K8G7EZ7ZJ5M39A6SK9EJGD"
+                "request_id": "01M3KADN2TPANC5FE6ZN405B5A"
               },
               "fully_satisfied": true,
               "observations": [
@@ -2501,7 +2501,7 @@
                 "kind": "formation-runtime"
               }
             },
-            "runtime_id": "rnr_P3_1790574059915716510",
+            "runtime_id": "rnr_P3_1790576069513738409",
             "status": "verified",
             "verification": {
               "verdicts": [
@@ -2525,7 +2525,7 @@
             "stored_bytes": 71680,
             "transfer_bytes": 72192
           },
-          "runtime_id": "rnr_P3_1790574059915716510",
+          "runtime_id": "rnr_P3_1790576069513738409",
           "status": "pass",
           "unknown_at": null
         }
@@ -2533,14 +2533,14 @@
       "accepted_routes": [
         {
           "agent_version": "0.1.0",
-          "attempt_id": "01M3K8GEN4RH8HMQGJT89W79BC",
+          "attempt_id": "01M3KADZ8BW2Z9V0XN4PVC5EBQ",
           "capability_profile_ref": "sha256:c0dd86279408529fc06c1fab29691a2c07d36c092f95064ec01f3f4d184c09be",
           "derivation_ref": "sha256:3434d3be726e2fe722daa02edfba48122bfbe8fc2411fc4bfe042103640f22ed",
           "effective_contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
           "environment_id": "native",
-          "retained_ref": "sha256:23bf86fb7313b66bff5100a2a6da4e05b860250fec5660ecc9c93099297bda16",
-          "runtime_id": "rnr_P3_1790574059915716510",
-          "verified_at": "2026-09-28T05:41:24.312Z",
+          "retained_ref": "sha256:5e414e490093c8860ede41fba6ef7d641d71bfd2dfbe6c85c7b83a9bacdcf0ff",
+          "runtime_id": "rnr_P3_1790576069513738409",
+          "verified_at": "2026-09-28T06:15:00.600Z",
           "verifier_receipts": [
             {
               "kind": "http_contract",
@@ -2561,11 +2561,11 @@
                 "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
                 "derivation_ref": "sha256:3434d3be726e2fe722daa02edfba48122bfbe8fc2411fc4bfe042103640f22ed",
                 "execution": {
-                  "attempt_id": "01M3K8GEN4RH8HMQGJT89W79BC",
+                  "attempt_id": "01M3KADZ8BW2Z9V0XN4PVC5EBQ",
                   "endpoint": "http://127.0.0.1:8000/",
                   "platform": "linux/aarch64",
                   "realization": "process",
-                  "request_id": "01M3K8G7EZ7ZJ5M39A6SK9EJGD"
+                  "request_id": "01M3KADN2TPANC5FE6ZN405B5A"
                 },
                 "fully_satisfied": true,
                 "observations": [
@@ -2694,7 +2694,7 @@
               "kind": "any"
             },
             "schema": "ato.formation-proposal-request/1",
-            "search_id": "P3_1790574059915716510"
+            "search_id": "P3_1790576069513738409"
           }
         }
       ]
@@ -2713,7 +2713,7 @@
           "rejected",
           "rejected"
         ],
-        "result_sha256": "db53e178585d700601c9c38672f6dfcf890fdfba39474e76f67b6459c5a911d3"
+        "result_sha256": "c6dd681349d1606fa7d10aa46c218fda6b1fd791ed7688f89003181bcaf1cf1b"
       },
       "frozen_request": {
         "authorized_derivations": [],
@@ -2776,7 +2776,7 @@
         "runtime_constraint": {
           "kind": "any"
         },
-        "search_id": "P4_1790574059915716510",
+        "search_id": "P4_1790576069513738409",
         "source": {
           "archive_bytes": 72192,
           "archive_digest": "sha256:34246cd49fdcc417633f7b07381acb2cb8cdedbf0b122038be6a889250c7dff6",
@@ -2920,7 +2920,7 @@
               "kind": "any"
             },
             "schema": "ato.formation-proposal-request/1",
-            "search_id": "P4_1790574059915716510"
+            "search_id": "P4_1790576069513738409"
           }
         }
       ]
@@ -2933,12 +2933,12 @@
         "known_count": 1,
         "attempts": [
           {
-            "id": "01M3K8GM92RES2APFHK44EX02B",
+            "id": "01M3KAE6175705H4HZQFFHJ0H4",
             "d": "sha256:b1d47555ab54f071bdcb3b21b0ea9062956c6dba6ef246e8431baa12d8d94cac",
             "status": "fail"
           },
           {
-            "id": "01M3K8GQWQA8PCRV6SS4A23ZWT",
+            "id": "01M3KAEAZSFG412TASN23R9G4M",
             "d": "sha256:73a649ce9cf000863da4fcb33bf39a8387eb99fcebbee17111d3d6816035712e",
             "status": "pass"
           }
@@ -2951,7 +2951,7 @@
           "rejected",
           "rejected"
         ],
-        "result_sha256": "58fe23064c5e593fdde1ce320257a0dd4737047945ec4aacfa125968fbfc2aae"
+        "result_sha256": "0e6fc577cc174831d3c9aac8d39fc58d96c4a8a1eab5adb9bc50b78e8506f580"
       },
       "frozen_request": {
         "authorized_derivations": [
@@ -3045,7 +3045,7 @@
         "runtime_constraint": {
           "kind": "any"
         },
-        "search_id": "P5_1790574059915716510",
+        "search_id": "P5_1790576069513738409",
         "source": {
           "archive_bytes": 72192,
           "archive_digest": "sha256:78c9a362a351824ecec9b493fc7c4f42cbe244c47e5f2884a22524e318effce3",
@@ -3314,7 +3314,7 @@
       },
       "search_attempts": [
         {
-          "attempt_id": "01M3K8GM92RES2APFHK44EX02B",
+          "attempt_id": "01M3KAE6175705H4HZQFFHJ0H4",
           "claimed": true,
           "derivation_ref": "sha256:b1d47555ab54f071bdcb3b21b0ea9062956c6dba6ef246e8431baa12d8d94cac",
           "effects": "pure",
@@ -3324,12 +3324,12 @@
           "record": "finished",
           "retained_ref": null,
           "route_accepted": false,
-          "runtime_id": "rnr_P5_1790574059915716510",
+          "runtime_id": "rnr_P5_1790576069513738409",
           "status": "fail",
           "unknown_resolved": false
         },
         {
-          "attempt_id": "01M3K8GQWQA8PCRV6SS4A23ZWT",
+          "attempt_id": "01M3KAEAZSFG412TASN23R9G4M",
           "claimed": true,
           "derivation_ref": "sha256:73a649ce9cf000863da4fcb33bf39a8387eb99fcebbee17111d3d6816035712e",
           "effects": "pure",
@@ -3337,9 +3337,9 @@
           "failure_code": null,
           "materialization_ref": "sha256:b1cc35aec6821650ac8bb702f2639a5adf20b45643ff6403edf728d255afe980",
           "record": "finished",
-          "retained_ref": "sha256:a5dc37d6a7b3c3caf7f75f914686333f0c2da43922ae7ea9d845b1f97698cb48",
+          "retained_ref": "sha256:d0ece98a3e35d5a8b5e833f8be7d948f862b4354f625cb39089d9991ca05c279",
           "route_accepted": true,
-          "runtime_id": "rnr_P5_1790574059915716510",
+          "runtime_id": "rnr_P5_1790576069513738409",
           "status": "pass",
           "unknown_resolved": false
         }
@@ -3347,7 +3347,7 @@
       "attempts": [
         {
           "advertised_agent_version": "0.1.0",
-          "attempt_id": "01M3K8GM92RES2APFHK44EX02B",
+          "attempt_id": "01M3KAE6175705H4HZQFFHJ0H4",
           "attestation": {
             "agent_version": "0.1.0",
             "attempt_record": "finished",
@@ -3378,7 +3378,7 @@
             ]
           },
           "capability_profile_ref": "sha256:c0dd86279408529fc06c1fab29691a2c07d36c092f95064ec01f3f4d184c09be",
-          "claimed_at": "2026-09-28T05:41:28.499Z",
+          "claimed_at": "2026-09-28T06:15:05.521Z",
           "coordinator_note": null,
           "derivation_ref": "sha256:b1d47555ab54f071bdcb3b21b0ea9062956c6dba6ef246e8431baa12d8d94cac",
           "environment_id": "native",
@@ -3387,9 +3387,9 @@
             "message": "health: GET /health on app.http returned 404; expected 200",
             "stage": "verification"
           },
-          "finished_at": "2026-09-28T05:41:28.951Z",
+          "finished_at": "2026-09-28T06:15:06.031Z",
           "formation_attempt": {
-            "attempt_id": "01M3K8GM92RES2APFHK44EX02B",
+            "attempt_id": "01M3KAE6175705H4HZQFFHJ0H4",
             "candidate": "authored",
             "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
             "derivation_ref": "sha256:b1d47555ab54f071bdcb3b21b0ea9062956c6dba6ef246e8431baa12d8d94cac",
@@ -3430,11 +3430,11 @@
               "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
               "derivation_ref": "sha256:b1d47555ab54f071bdcb3b21b0ea9062956c6dba6ef246e8431baa12d8d94cac",
               "execution": {
-                "attempt_id": "01M3K8GM92RES2APFHK44EX02B",
+                "attempt_id": "01M3KAE6175705H4HZQFFHJ0H4",
                 "endpoint": "http://127.0.0.1:8000/",
                 "platform": "linux/aarch64",
                 "realization": "process",
-                "request_id": "01M3K8GKBKA2SH1VKQ6VJ01JCF"
+                "request_id": "01M3KAE4R3481G5VT39N9YC8XM"
               },
               "fully_satisfied": false,
               "observations": [
@@ -3455,7 +3455,7 @@
                 "kind": "formation-runtime"
               }
             },
-            "runtime_id": "rnr_P5_1790574059915716510",
+            "runtime_id": "rnr_P5_1790576069513738409",
             "status": "failed",
             "verification": {
               "verdicts": [
@@ -3481,13 +3481,13 @@
             "stored_bytes": 0,
             "transfer_bytes": 72192
           },
-          "runtime_id": "rnr_P5_1790574059915716510",
+          "runtime_id": "rnr_P5_1790576069513738409",
           "status": "fail",
           "unknown_at": null
         },
         {
           "advertised_agent_version": "0.1.0",
-          "attempt_id": "01M3K8GQWQA8PCRV6SS4A23ZWT",
+          "attempt_id": "01M3KAEAZSFG412TASN23R9G4M",
           "attestation": {
             "agent_version": "0.1.0",
             "attempt_record": "finished",
@@ -3518,14 +3518,14 @@
             ]
           },
           "capability_profile_ref": "sha256:c0dd86279408529fc06c1fab29691a2c07d36c092f95064ec01f3f4d184c09be",
-          "claimed_at": "2026-09-28T05:41:32.194Z",
+          "claimed_at": "2026-09-28T06:15:10.597Z",
           "coordinator_note": null,
           "derivation_ref": "sha256:73a649ce9cf000863da4fcb33bf39a8387eb99fcebbee17111d3d6816035712e",
           "environment_id": "native",
           "failure": null,
-          "finished_at": "2026-09-28T05:41:34.331Z",
+          "finished_at": "2026-09-28T06:15:12.747Z",
           "formation_attempt": {
-            "attempt_id": "01M3K8GQWQA8PCRV6SS4A23ZWT",
+            "attempt_id": "01M3KAEAZSFG412TASN23R9G4M",
             "candidate": "authored",
             "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
             "derivation_ref": "sha256:73a649ce9cf000863da4fcb33bf39a8387eb99fcebbee17111d3d6816035712e",
@@ -3558,11 +3558,11 @@
               "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
               "derivation_ref": "sha256:73a649ce9cf000863da4fcb33bf39a8387eb99fcebbee17111d3d6816035712e",
               "execution": {
-                "attempt_id": "01M3K8GQWQA8PCRV6SS4A23ZWT",
+                "attempt_id": "01M3KAEAZSFG412TASN23R9G4M",
                 "endpoint": "http://127.0.0.1:8000/",
                 "platform": "linux/aarch64",
                 "realization": "process",
-                "request_id": "01M3K8GKBKA2SH1VKQ6VJ01JCF"
+                "request_id": "01M3KAE4R3481G5VT39N9YC8XM"
               },
               "fully_satisfied": true,
               "observations": [
@@ -3582,7 +3582,7 @@
                 "kind": "formation-runtime"
               }
             },
-            "runtime_id": "rnr_P5_1790574059915716510",
+            "runtime_id": "rnr_P5_1790576069513738409",
             "status": "verified",
             "verification": {
               "verdicts": [
@@ -3606,7 +3606,7 @@
             "stored_bytes": 71680,
             "transfer_bytes": 72192
           },
-          "runtime_id": "rnr_P5_1790574059915716510",
+          "runtime_id": "rnr_P5_1790576069513738409",
           "status": "pass",
           "unknown_at": null
         }
@@ -3614,14 +3614,14 @@
       "accepted_routes": [
         {
           "agent_version": "0.1.0",
-          "attempt_id": "01M3K8GQWQA8PCRV6SS4A23ZWT",
+          "attempt_id": "01M3KAEAZSFG412TASN23R9G4M",
           "capability_profile_ref": "sha256:c0dd86279408529fc06c1fab29691a2c07d36c092f95064ec01f3f4d184c09be",
           "derivation_ref": "sha256:73a649ce9cf000863da4fcb33bf39a8387eb99fcebbee17111d3d6816035712e",
           "effective_contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
           "environment_id": "native",
-          "retained_ref": "sha256:a5dc37d6a7b3c3caf7f75f914686333f0c2da43922ae7ea9d845b1f97698cb48",
-          "runtime_id": "rnr_P5_1790574059915716510",
-          "verified_at": "2026-09-28T05:41:34.331Z",
+          "retained_ref": "sha256:d0ece98a3e35d5a8b5e833f8be7d948f862b4354f625cb39089d9991ca05c279",
+          "runtime_id": "rnr_P5_1790576069513738409",
+          "verified_at": "2026-09-28T06:15:12.747Z",
           "verifier_receipts": [
             {
               "kind": "http_contract",
@@ -3642,11 +3642,11 @@
                 "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
                 "derivation_ref": "sha256:73a649ce9cf000863da4fcb33bf39a8387eb99fcebbee17111d3d6816035712e",
                 "execution": {
-                  "attempt_id": "01M3K8GQWQA8PCRV6SS4A23ZWT",
+                  "attempt_id": "01M3KAEAZSFG412TASN23R9G4M",
                   "endpoint": "http://127.0.0.1:8000/",
                   "platform": "linux/aarch64",
                   "realization": "process",
-                  "request_id": "01M3K8GKBKA2SH1VKQ6VJ01JCF"
+                  "request_id": "01M3KAE4R3481G5VT39N9YC8XM"
                 },
                 "fully_satisfied": true,
                 "observations": [
@@ -3754,7 +3754,7 @@
               "kind": "any"
             },
             "schema": "ato.formation-proposal-request/1",
-            "search_id": "P5_1790574059915716510"
+            "search_id": "P5_1790576069513738409"
           }
         }
       ]
@@ -3769,7 +3769,7 @@
         "accepted_routes": 0,
         "proposal_status": "provider_error",
         "outcomes": [],
-        "result_sha256": "aba933beec173f7342e3850204b0c8c7cae47111a1f69c57f8017867e8e6750a"
+        "result_sha256": "6b3218278741fc4e8affeace8c7a5f800a934a7082491d2a3f2eb4fdf3af6687"
       },
       "frozen_request": {
         "authorized_derivations": [],
@@ -3832,7 +3832,7 @@
         "runtime_constraint": {
           "kind": "any"
         },
-        "search_id": "P6_error_1790574059915716510",
+        "search_id": "P6_error_1790576069513738409",
         "source": {
           "archive_bytes": 72192,
           "archive_digest": "sha256:6211f4fc77e756b3c4361ea43e1456b4dd6022c3ec8fa2350f681a6c368e9965",
@@ -3961,7 +3961,7 @@
               "kind": "any"
             },
             "schema": "ato.formation-proposal-request/1",
-            "search_id": "P6_error_1790574059915716510"
+            "search_id": "P6_error_1790576069513738409"
           }
         }
       ]
@@ -3976,7 +3976,7 @@
         "accepted_routes": 0,
         "proposal_status": "timeout",
         "outcomes": [],
-        "result_sha256": "08c912e9b367397c4288286889a1eb3dc310fdf6e373f96751d5099ec4baf786"
+        "result_sha256": "c9fac13110e97b2afaa4cd9943b3c61c930eb2e4d9b33d99c9bc8c6d5ae08bba"
       },
       "frozen_request": {
         "authorized_derivations": [],
@@ -4039,7 +4039,7 @@
         "runtime_constraint": {
           "kind": "any"
         },
-        "search_id": "P6_timeout_1790574059915716510",
+        "search_id": "P6_timeout_1790576069513738409",
         "source": {
           "archive_bytes": 72192,
           "archive_digest": "sha256:e2d0f9a94375fafee62a686d4c87b0b09b2743024f743a10bc59883c8275a3f2",
@@ -4168,7 +4168,7 @@
               "kind": "any"
             },
             "schema": "ato.formation-proposal-request/1",
-            "search_id": "P6_timeout_1790574059915716510"
+            "search_id": "P6_timeout_1790576069513738409"
           }
         }
       ]
@@ -4185,7 +4185,7 @@
         "outcomes": [
           "unsupported"
         ],
-        "result_sha256": "c930323ea88e3e100ace96821e3be20ad888be98062d1969c3cb742c2984a188"
+        "result_sha256": "72efb463249950daf01dd89eea15b4a3b7691f1eb6ceea1b532c70025671a47a"
       },
       "frozen_request": {
         "authorized_derivations": [],
@@ -4248,7 +4248,7 @@
         "runtime_constraint": {
           "kind": "any"
         },
-        "search_id": "unsupported_1790574059915716510",
+        "search_id": "unsupported_1790576069513738409",
         "source": {
           "archive_bytes": 72192,
           "archive_digest": "sha256:d947fcce6d28969d48f4272e07f951d4b4c5d5086f51d8ab7c29bb74a4740ef0",
@@ -4383,7 +4383,7 @@
               "kind": "any"
             },
             "schema": "ato.formation-proposal-request/1",
-            "search_id": "unsupported_1790574059915716510"
+            "search_id": "unsupported_1790576069513738409"
           }
         }
       ]
@@ -4398,7 +4398,7 @@
         "accepted_routes": 0,
         "proposal_status": "timeout",
         "outcomes": [],
-        "result_sha256": "8ceb5a97566834507eab0718465dd487024b6236e740ee57e8f1dc4ff555e66b"
+        "result_sha256": "14946c0e5ee016c7b7eac369a3b7114c898ea874b7f6cdeb4a7da40c80df438f"
       },
       "frozen_request": {
         "authorized_derivations": [],
@@ -4461,7 +4461,7 @@
         "runtime_constraint": {
           "kind": "any"
         },
-        "search_id": "P7_1790574059915716510",
+        "search_id": "P7_1790576069513738409",
         "source": {
           "archive_bytes": 72192,
           "archive_digest": "sha256:a68c553f75ee20448a6111e693cf77bc2f1baa2357308004f08a06ab364b315d",
@@ -4590,7 +4590,7 @@
               "kind": "any"
             },
             "schema": "ato.formation-proposal-request/1",
-            "search_id": "P7_1790574059915716510"
+            "search_id": "P7_1790576069513738409"
           }
         }
       ]
@@ -4603,7 +4603,7 @@
         "known_count": 0,
         "attempts": [
           {
-            "id": "01M3K8HBHCFE6XMM0G377K3XCQ",
+            "id": "01M3KAEZ3ZS1C5NB19D0M1PNJ5",
             "d": "sha256:3838ff3486b32b3274f75e7da7732ee5918de2f1c591a40d9fe9e73ac304d3ce",
             "status": "pass"
           }
@@ -4613,7 +4613,7 @@
         "outcomes": [
           "admitted"
         ],
-        "result_sha256": "a4b4ffd92b9c2efb5ad96f84ef7cd963e3231733ed854348333ec41d3d600c58"
+        "result_sha256": "e69d212ac950d51c096807c605884f0b704c97cef1e2c83381bf8bffc7c60a88"
       },
       "frozen_request": {
         "authorized_derivations": [],
@@ -4676,7 +4676,7 @@
         "runtime_constraint": {
           "kind": "any"
         },
-        "search_id": "P8_1790574059915716510",
+        "search_id": "P8_1790576069513738409",
         "source": {
           "archive_bytes": 72192,
           "archive_digest": "sha256:54b5a9b47d8b950acd60baae6c156a644325c0ae9ca27d36967a55755e692629",
@@ -4831,7 +4831,7 @@
       },
       "search_attempts": [
         {
-          "attempt_id": "01M3K8HBHCFE6XMM0G377K3XCQ",
+          "attempt_id": "01M3KAEZ3ZS1C5NB19D0M1PNJ5",
           "claimed": true,
           "derivation_ref": "sha256:3838ff3486b32b3274f75e7da7732ee5918de2f1c591a40d9fe9e73ac304d3ce",
           "effects": "pure",
@@ -4839,9 +4839,9 @@
           "failure_code": null,
           "materialization_ref": "sha256:0588b0d9b479ffc6a487d79e94a9d0ee512576580d4c6bd903d735bdeb12150e",
           "record": "finished",
-          "retained_ref": "sha256:dfd9c40138b54e39eb703dff58f78ad15339bedfad1dfbcdde71e369d3d7bf7b",
+          "retained_ref": "sha256:2ae47068d50d725f6b5db0fcf31d1d2da1c5a03cfd3d9fad4edfd232f299135e",
           "route_accepted": true,
-          "runtime_id": "rnr_P8_1790574059915716510",
+          "runtime_id": "rnr_P8_1790576069513738409",
           "status": "pass",
           "unknown_resolved": false
         }
@@ -4849,7 +4849,7 @@
       "attempts": [
         {
           "advertised_agent_version": "0.1.0",
-          "attempt_id": "01M3K8HBHCFE6XMM0G377K3XCQ",
+          "attempt_id": "01M3KAEZ3ZS1C5NB19D0M1PNJ5",
           "attestation": {
             "agent_version": "0.1.0",
             "attempt_record": "finished",
@@ -4880,14 +4880,14 @@
             ]
           },
           "capability_profile_ref": "sha256:c0dd86279408529fc06c1fab29691a2c07d36c092f95064ec01f3f4d184c09be",
-          "claimed_at": "2026-09-28T05:41:52.321Z",
+          "claimed_at": "2026-09-28T06:15:31.220Z",
           "coordinator_note": null,
           "derivation_ref": "sha256:3838ff3486b32b3274f75e7da7732ee5918de2f1c591a40d9fe9e73ac304d3ce",
           "environment_id": "native",
           "failure": null,
-          "finished_at": "2026-09-28T05:41:54.494Z",
+          "finished_at": "2026-09-28T06:15:33.738Z",
           "formation_attempt": {
-            "attempt_id": "01M3K8HBHCFE6XMM0G377K3XCQ",
+            "attempt_id": "01M3KAEZ3ZS1C5NB19D0M1PNJ5",
             "candidate": "authored",
             "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
             "derivation_ref": "sha256:3838ff3486b32b3274f75e7da7732ee5918de2f1c591a40d9fe9e73ac304d3ce",
@@ -4920,11 +4920,11 @@
               "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
               "derivation_ref": "sha256:3838ff3486b32b3274f75e7da7732ee5918de2f1c591a40d9fe9e73ac304d3ce",
               "execution": {
-                "attempt_id": "01M3K8HBHCFE6XMM0G377K3XCQ",
+                "attempt_id": "01M3KAEZ3ZS1C5NB19D0M1PNJ5",
                 "endpoint": "http://127.0.0.1:8000/",
                 "platform": "linux/aarch64",
                 "realization": "process",
-                "request_id": "01M3K8HAE8X6164J5W9N4G81B5"
+                "request_id": "01M3KAEXY35J774XSDV9BVNRH3"
               },
               "fully_satisfied": true,
               "observations": [
@@ -4944,7 +4944,7 @@
                 "kind": "formation-runtime"
               }
             },
-            "runtime_id": "rnr_P8_1790574059915716510",
+            "runtime_id": "rnr_P8_1790576069513738409",
             "status": "verified",
             "verification": {
               "verdicts": [
@@ -4968,7 +4968,7 @@
             "stored_bytes": 71680,
             "transfer_bytes": 72192
           },
-          "runtime_id": "rnr_P8_1790574059915716510",
+          "runtime_id": "rnr_P8_1790576069513738409",
           "status": "pass",
           "unknown_at": null
         }
@@ -4976,14 +4976,14 @@
       "accepted_routes": [
         {
           "agent_version": "0.1.0",
-          "attempt_id": "01M3K8HBHCFE6XMM0G377K3XCQ",
+          "attempt_id": "01M3KAEZ3ZS1C5NB19D0M1PNJ5",
           "capability_profile_ref": "sha256:c0dd86279408529fc06c1fab29691a2c07d36c092f95064ec01f3f4d184c09be",
           "derivation_ref": "sha256:3838ff3486b32b3274f75e7da7732ee5918de2f1c591a40d9fe9e73ac304d3ce",
           "effective_contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
           "environment_id": "native",
-          "retained_ref": "sha256:dfd9c40138b54e39eb703dff58f78ad15339bedfad1dfbcdde71e369d3d7bf7b",
-          "runtime_id": "rnr_P8_1790574059915716510",
-          "verified_at": "2026-09-28T05:41:54.494Z",
+          "retained_ref": "sha256:2ae47068d50d725f6b5db0fcf31d1d2da1c5a03cfd3d9fad4edfd232f299135e",
+          "runtime_id": "rnr_P8_1790576069513738409",
+          "verified_at": "2026-09-28T06:15:33.738Z",
           "verifier_receipts": [
             {
               "kind": "http_contract",
@@ -5004,11 +5004,11 @@
                 "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
                 "derivation_ref": "sha256:3838ff3486b32b3274f75e7da7732ee5918de2f1c591a40d9fe9e73ac304d3ce",
                 "execution": {
-                  "attempt_id": "01M3K8HBHCFE6XMM0G377K3XCQ",
+                  "attempt_id": "01M3KAEZ3ZS1C5NB19D0M1PNJ5",
                   "endpoint": "http://127.0.0.1:8000/",
                   "platform": "linux/aarch64",
                   "realization": "process",
-                  "request_id": "01M3K8HAE8X6164J5W9N4G81B5"
+                  "request_id": "01M3KAEXY35J774XSDV9BVNRH3"
                 },
                 "fully_satisfied": true,
                 "observations": [
@@ -5081,7 +5081,7 @@
               "kind": "any"
             },
             "schema": "ato.formation-proposal-request/1",
-            "search_id": "P8_1790574059915716510"
+            "search_id": "P8_1790576069513738409"
           }
         }
       ]
@@ -5094,7 +5094,7 @@
         "known_count": 1,
         "attempts": [
           {
-            "id": "01M3K8HFS25M3BS0VF7C9HPZ0R",
+            "id": "01M3KAF3VQD4HWKZJD1ZDE0Q4B",
             "d": "sha256:4ac32803662e2c42f708f14156dc7312d00f68ca7bc8d598c7eb96ea9b0f7c60",
             "status": "unknown"
           }
@@ -5102,7 +5102,7 @@
         "accepted_routes": 0,
         "proposal_status": null,
         "outcomes": [],
-        "result_sha256": "a534dfc64307c1966b3c2b0cb7c58aa53ae94ad38ab2b60f8b755c8d69fb6a97"
+        "result_sha256": "b62c4e1d135e7d66cacb0045371d8ddb5b2b8d108e5e3772058e1a90c04f26ad"
       },
       "frozen_request": {
         "authorized_derivations": [
@@ -5191,7 +5191,7 @@
         "runtime_constraint": {
           "kind": "any"
         },
-        "search_id": "P9_1790574059915716510",
+        "search_id": "P9_1790576069513738409",
         "source": {
           "archive_bytes": 72192,
           "archive_digest": "sha256:f022d1feb65ba1c6cd87c2e49e3d7ac155064d89a2af3141fb2168a42a520527",
@@ -5294,7 +5294,7 @@
       "durable_round": null,
       "search_attempts": [
         {
-          "attempt_id": "01M3K8HFS25M3BS0VF7C9HPZ0R",
+          "attempt_id": "01M3KAF3VQD4HWKZJD1ZDE0Q4B",
           "claimed": true,
           "derivation_ref": "sha256:4ac32803662e2c42f708f14156dc7312d00f68ca7bc8d598c7eb96ea9b0f7c60",
           "effects": null,
@@ -5304,7 +5304,7 @@
           "record": "history_unavailable",
           "retained_ref": null,
           "route_accepted": false,
-          "runtime_id": "rnr_P9_1790574059915716510",
+          "runtime_id": "rnr_P9_1790576069513738409",
           "status": "unknown",
           "unknown_resolved": false
         }
@@ -5312,7 +5312,7 @@
       "attempts": [
         {
           "advertised_agent_version": "0.1.0",
-          "attempt_id": "01M3K8HFS25M3BS0VF7C9HPZ0R",
+          "attempt_id": "01M3KAF3VQD4HWKZJD1ZDE0Q4B",
           "attestation": {
             "agent_version": "0.1.0",
             "attempt_record": "history_unavailable",
@@ -5325,7 +5325,7 @@
             "requirements": []
           },
           "capability_profile_ref": "sha256:c0dd86279408529fc06c1fab29691a2c07d36c092f95064ec01f3f4d184c09be",
-          "claimed_at": "2026-09-28T05:41:56.653Z",
+          "claimed_at": "2026-09-28T06:15:36.066Z",
           "coordinator_note": "the Runtime cannot establish completed execution history; this result is evidence, not a verdict",
           "derivation_ref": "sha256:4ac32803662e2c42f708f14156dc7312d00f68ca7bc8d598c7eb96ea9b0f7c60",
           "environment_id": "native",
@@ -5347,9 +5347,9 @@
             "stored_bytes": 536870912,
             "transfer_bytes": 72192
           },
-          "runtime_id": "rnr_P9_1790574059915716510",
+          "runtime_id": "rnr_P9_1790576069513738409",
           "status": "unknown",
-          "unknown_at": "2026-09-28T05:41:57.031Z"
+          "unknown_at": "2026-09-28T06:15:36.535Z"
         }
       ],
       "accepted_routes": [],
@@ -5369,7 +5369,7 @@
         "accepted_routes": 0,
         "proposal_status": "timeout",
         "outcomes": [],
-        "result_sha256": "234c34f61b6fb46e76a7314ae5c1475a413a78f4a14fd1005c04bb8852527b7d"
+        "result_sha256": "1e4ade8333a199cc67718b26d6cb6a529dca297c6b53a8808116963deea19638"
       },
       "frozen_request": {
         "authorized_derivations": [],
@@ -5432,7 +5432,7 @@
         "runtime_constraint": {
           "kind": "any"
         },
-        "search_id": "L1_1790574059915716510",
+        "search_id": "L1_1790576069513738409",
         "source": {
           "archive_bytes": 72192,
           "archive_digest": "sha256:339974fdc0657b740d693087c693c20084cf8d33ba17b73f204f687bb56a65b9",
@@ -5528,7 +5528,7 @@
         "known_count": 0,
         "attempts": [
           {
-            "id": "01M3K8HXRCYC60C77XNBWX8DC6",
+            "id": "01M3KAFJ2KJADRKEFBZHFASZVZ",
             "d": "sha256:355afc7633170e296d98b9026a08b6d00c4230386f9db80382aa75bbbcef07b6",
             "status": "pass"
           }
@@ -5538,7 +5538,7 @@
         "outcomes": [
           "admitted"
         ],
-        "result_sha256": "f72da4eca43461474d604a345396a40c1a7570ba3a9952d8c62eef962f295f29"
+        "result_sha256": "e6751b44b7d7718ab65bc4616a3b7c7000dab21a987fcf38a9368a5b31db581b"
       },
       "frozen_request": {
         "authorized_derivations": [],
@@ -5601,7 +5601,7 @@
         "runtime_constraint": {
           "kind": "any"
         },
-        "search_id": "L2_1790574059915716510",
+        "search_id": "L2_1790576069513738409",
         "source": {
           "archive_bytes": 72192,
           "archive_digest": "sha256:6992ab7e7c63280460bdbf8ee74dd3d55cb32344770048bb6d2297251911a9a3",
@@ -5756,7 +5756,7 @@
       },
       "search_attempts": [
         {
-          "attempt_id": "01M3K8HXRCYC60C77XNBWX8DC6",
+          "attempt_id": "01M3KAFJ2KJADRKEFBZHFASZVZ",
           "claimed": true,
           "derivation_ref": "sha256:355afc7633170e296d98b9026a08b6d00c4230386f9db80382aa75bbbcef07b6",
           "effects": "pure",
@@ -5764,9 +5764,9 @@
           "failure_code": null,
           "materialization_ref": "sha256:60a0d691358184d89d86579a268d8c5fa8d056b5b1490d6131e0078967af02f1",
           "record": "finished",
-          "retained_ref": "sha256:cd3437cec2559609f8c27d2461c0eb5c7d465a164dffa9f0e1a1c6d05497d283",
+          "retained_ref": "sha256:2a05f62938c6c94a2034a368647625b78abcdaa881d59f6c78dba8d13bd3d2cf",
           "route_accepted": true,
-          "runtime_id": "rnr_L2_1790574059915716510",
+          "runtime_id": "rnr_L2_1790576069513738409",
           "status": "pass",
           "unknown_resolved": false
         }
@@ -5774,7 +5774,7 @@
       "attempts": [
         {
           "advertised_agent_version": "0.1.0",
-          "attempt_id": "01M3K8HXRCYC60C77XNBWX8DC6",
+          "attempt_id": "01M3KAFJ2KJADRKEFBZHFASZVZ",
           "attestation": {
             "agent_version": "0.1.0",
             "attempt_record": "finished",
@@ -5805,14 +5805,14 @@
             ]
           },
           "capability_profile_ref": "sha256:c0dd86279408529fc06c1fab29691a2c07d36c092f95064ec01f3f4d184c09be",
-          "claimed_at": "2026-09-28T05:42:10.967Z",
+          "claimed_at": "2026-09-28T06:15:50.624Z",
           "coordinator_note": null,
           "derivation_ref": "sha256:355afc7633170e296d98b9026a08b6d00c4230386f9db80382aa75bbbcef07b6",
           "environment_id": "native",
           "failure": null,
-          "finished_at": "2026-09-28T05:42:12.145Z",
+          "finished_at": "2026-09-28T06:15:51.941Z",
           "formation_attempt": {
-            "attempt_id": "01M3K8HXRCYC60C77XNBWX8DC6",
+            "attempt_id": "01M3KAFJ2KJADRKEFBZHFASZVZ",
             "candidate": "authored",
             "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
             "derivation_ref": "sha256:355afc7633170e296d98b9026a08b6d00c4230386f9db80382aa75bbbcef07b6",
@@ -5845,11 +5845,11 @@
               "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
               "derivation_ref": "sha256:355afc7633170e296d98b9026a08b6d00c4230386f9db80382aa75bbbcef07b6",
               "execution": {
-                "attempt_id": "01M3K8HXRCYC60C77XNBWX8DC6",
+                "attempt_id": "01M3KAFJ2KJADRKEFBZHFASZVZ",
                 "endpoint": "http://127.0.0.1:8000/",
                 "platform": "linux/aarch64",
                 "realization": "process",
-                "request_id": "01M3K8HWXATJQXMSANSTRGVV6N"
+                "request_id": "01M3KAFH46N8DZ8H88WHT97EJ8"
               },
               "fully_satisfied": true,
               "observations": [
@@ -5869,7 +5869,7 @@
                 "kind": "formation-runtime"
               }
             },
-            "runtime_id": "rnr_L2_1790574059915716510",
+            "runtime_id": "rnr_L2_1790576069513738409",
             "status": "verified",
             "verification": {
               "verdicts": [
@@ -5893,7 +5893,7 @@
             "stored_bytes": 71680,
             "transfer_bytes": 72192
           },
-          "runtime_id": "rnr_L2_1790574059915716510",
+          "runtime_id": "rnr_L2_1790576069513738409",
           "status": "pass",
           "unknown_at": null
         }
@@ -5901,14 +5901,14 @@
       "accepted_routes": [
         {
           "agent_version": "0.1.0",
-          "attempt_id": "01M3K8HXRCYC60C77XNBWX8DC6",
+          "attempt_id": "01M3KAFJ2KJADRKEFBZHFASZVZ",
           "capability_profile_ref": "sha256:c0dd86279408529fc06c1fab29691a2c07d36c092f95064ec01f3f4d184c09be",
           "derivation_ref": "sha256:355afc7633170e296d98b9026a08b6d00c4230386f9db80382aa75bbbcef07b6",
           "effective_contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
           "environment_id": "native",
-          "retained_ref": "sha256:cd3437cec2559609f8c27d2461c0eb5c7d465a164dffa9f0e1a1c6d05497d283",
-          "runtime_id": "rnr_L2_1790574059915716510",
-          "verified_at": "2026-09-28T05:42:12.145Z",
+          "retained_ref": "sha256:2a05f62938c6c94a2034a368647625b78abcdaa881d59f6c78dba8d13bd3d2cf",
+          "runtime_id": "rnr_L2_1790576069513738409",
+          "verified_at": "2026-09-28T06:15:51.941Z",
           "verifier_receipts": [
             {
               "kind": "http_contract",
@@ -5929,11 +5929,11 @@
                 "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
                 "derivation_ref": "sha256:355afc7633170e296d98b9026a08b6d00c4230386f9db80382aa75bbbcef07b6",
                 "execution": {
-                  "attempt_id": "01M3K8HXRCYC60C77XNBWX8DC6",
+                  "attempt_id": "01M3KAFJ2KJADRKEFBZHFASZVZ",
                   "endpoint": "http://127.0.0.1:8000/",
                   "platform": "linux/aarch64",
                   "realization": "process",
-                  "request_id": "01M3K8HWXATJQXMSANSTRGVV6N"
+                  "request_id": "01M3KAFH46N8DZ8H88WHT97EJ8"
                 },
                 "fully_satisfied": true,
                 "observations": [
@@ -6006,7 +6006,7 @@
               "kind": "any"
             },
             "schema": "ato.formation-proposal-request/1",
-            "search_id": "L2_1790574059915716510"
+            "search_id": "L2_1790576069513738409"
           }
         }
       ]
@@ -6019,7 +6019,7 @@
         "known_count": 0,
         "attempts": [
           {
-            "id": "01M3K8J61XE6QVR4QBBP5BGPJZ",
+            "id": "01M3KAFVCVRPTE71VBK0ZDGTXY",
             "d": "sha256:0d138accd0d03f5f7f0d176edd9e61d64935227ce8fce2efa9a4dc5a8957f521",
             "status": "pass"
           }
@@ -6029,7 +6029,7 @@
         "outcomes": [
           "admitted"
         ],
-        "result_sha256": "d898f109b67df482bb75d3e9fe0dc5d38adb05cb3f77afa9afd1d579ac840153"
+        "result_sha256": "3f1adbd1c02e8d473533b824d06c58ffc9f9c122b87ad5c3b20e92edd3de94cf"
       },
       "frozen_request": {
         "authorized_derivations": [],
@@ -6092,7 +6092,7 @@
         "runtime_constraint": {
           "kind": "any"
         },
-        "search_id": "L3_1790574059915716510",
+        "search_id": "L3_1790576069513738409",
         "source": {
           "archive_bytes": 72192,
           "archive_digest": "sha256:cbdec5582c2e44345b7be655ebc1f06e353d0c0feedd97f543f5313e5dd2e13a",
@@ -6247,7 +6247,7 @@
       },
       "search_attempts": [
         {
-          "attempt_id": "01M3K8J61XE6QVR4QBBP5BGPJZ",
+          "attempt_id": "01M3KAFVCVRPTE71VBK0ZDGTXY",
           "claimed": true,
           "derivation_ref": "sha256:0d138accd0d03f5f7f0d176edd9e61d64935227ce8fce2efa9a4dc5a8957f521",
           "effects": "pure",
@@ -6255,9 +6255,9 @@
           "failure_code": null,
           "materialization_ref": "sha256:9ada7cd7da8a05168eab1a62f173335fff7aa584683749b1de69d38320019863",
           "record": "finished",
-          "retained_ref": "sha256:a565e780e631dbd0d684f1ff94cfa8358be730a1161761776241267669596b0a",
+          "retained_ref": "sha256:b4d3917a73d4e7207b65dcb46579bdae83518228a47c68c1a0dfaa8e85c8794b",
           "route_accepted": true,
-          "runtime_id": "rnr_L3_1790574059915716510",
+          "runtime_id": "rnr_L3_1790576069513738409",
           "status": "pass",
           "unknown_resolved": false
         }
@@ -6265,7 +6265,7 @@
       "attempts": [
         {
           "advertised_agent_version": "0.1.0",
-          "attempt_id": "01M3K8J61XE6QVR4QBBP5BGPJZ",
+          "attempt_id": "01M3KAFVCVRPTE71VBK0ZDGTXY",
           "attestation": {
             "agent_version": "0.1.0",
             "attempt_record": "finished",
@@ -6296,14 +6296,14 @@
             ]
           },
           "capability_profile_ref": "sha256:c0dd86279408529fc06c1fab29691a2c07d36c092f95064ec01f3f4d184c09be",
-          "claimed_at": "2026-09-28T05:42:19.587Z",
+          "claimed_at": "2026-09-28T06:16:00.281Z",
           "coordinator_note": null,
           "derivation_ref": "sha256:0d138accd0d03f5f7f0d176edd9e61d64935227ce8fce2efa9a4dc5a8957f521",
           "environment_id": "native",
           "failure": null,
-          "finished_at": "2026-09-28T05:42:20.844Z",
+          "finished_at": "2026-09-28T06:16:01.682Z",
           "formation_attempt": {
-            "attempt_id": "01M3K8J61XE6QVR4QBBP5BGPJZ",
+            "attempt_id": "01M3KAFVCVRPTE71VBK0ZDGTXY",
             "candidate": "authored",
             "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
             "derivation_ref": "sha256:0d138accd0d03f5f7f0d176edd9e61d64935227ce8fce2efa9a4dc5a8957f521",
@@ -6336,11 +6336,11 @@
               "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
               "derivation_ref": "sha256:0d138accd0d03f5f7f0d176edd9e61d64935227ce8fce2efa9a4dc5a8957f521",
               "execution": {
-                "attempt_id": "01M3K8J61XE6QVR4QBBP5BGPJZ",
+                "attempt_id": "01M3KAFVCVRPTE71VBK0ZDGTXY",
                 "endpoint": "http://127.0.0.1:8000/",
                 "platform": "linux/aarch64",
                 "realization": "process",
-                "request_id": "01M3K8J0DDNAR1W08V6F70ZC7M"
+                "request_id": "01M3KAFN7SE3VJRYQT876EZ6GQ"
               },
               "fully_satisfied": true,
               "observations": [
@@ -6360,7 +6360,7 @@
                 "kind": "formation-runtime"
               }
             },
-            "runtime_id": "rnr_L3_1790574059915716510",
+            "runtime_id": "rnr_L3_1790576069513738409",
             "status": "verified",
             "verification": {
               "verdicts": [
@@ -6384,7 +6384,7 @@
             "stored_bytes": 71680,
             "transfer_bytes": 72192
           },
-          "runtime_id": "rnr_L3_1790574059915716510",
+          "runtime_id": "rnr_L3_1790576069513738409",
           "status": "pass",
           "unknown_at": null
         }
@@ -6392,14 +6392,14 @@
       "accepted_routes": [
         {
           "agent_version": "0.1.0",
-          "attempt_id": "01M3K8J61XE6QVR4QBBP5BGPJZ",
+          "attempt_id": "01M3KAFVCVRPTE71VBK0ZDGTXY",
           "capability_profile_ref": "sha256:c0dd86279408529fc06c1fab29691a2c07d36c092f95064ec01f3f4d184c09be",
           "derivation_ref": "sha256:0d138accd0d03f5f7f0d176edd9e61d64935227ce8fce2efa9a4dc5a8957f521",
           "effective_contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
           "environment_id": "native",
-          "retained_ref": "sha256:a565e780e631dbd0d684f1ff94cfa8358be730a1161761776241267669596b0a",
-          "runtime_id": "rnr_L3_1790574059915716510",
-          "verified_at": "2026-09-28T05:42:20.844Z",
+          "retained_ref": "sha256:b4d3917a73d4e7207b65dcb46579bdae83518228a47c68c1a0dfaa8e85c8794b",
+          "runtime_id": "rnr_L3_1790576069513738409",
+          "verified_at": "2026-09-28T06:16:01.682Z",
           "verifier_receipts": [
             {
               "kind": "http_contract",
@@ -6420,11 +6420,11 @@
                 "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
                 "derivation_ref": "sha256:0d138accd0d03f5f7f0d176edd9e61d64935227ce8fce2efa9a4dc5a8957f521",
                 "execution": {
-                  "attempt_id": "01M3K8J61XE6QVR4QBBP5BGPJZ",
+                  "attempt_id": "01M3KAFVCVRPTE71VBK0ZDGTXY",
                   "endpoint": "http://127.0.0.1:8000/",
                   "platform": "linux/aarch64",
                   "realization": "process",
-                  "request_id": "01M3K8J0DDNAR1W08V6F70ZC7M"
+                  "request_id": "01M3KAFN7SE3VJRYQT876EZ6GQ"
                 },
                 "fully_satisfied": true,
                 "observations": [
@@ -6497,10 +6497,82 @@
               "kind": "any"
             },
             "schema": "ato.formation-proposal-request/1",
-            "search_id": "L3_1790574059915716510"
+            "search_id": "L3_1790576069513738409"
           }
         }
       ]
     }
+  },
+  "prior_acceptance": {
+    "revision": "dc2c44013410c2e69add044a1c561f20afd7d884",
+    "run_root": "/home/ubuntu/formation-foundation/.tmp/c2-20260928/runs/1790574059915716510",
+    "evidence_sha256": "de2548f901ba0f6a04b448101a3b0c00ad514b7ae22b596cd68d84f4539c1c8a",
+    "preserved_in_git_revision": "4b83ae51bd0831f48aeceef1bf350f33e8d8a397"
+  },
+  "hardening": {
+    "response_headers": "fixed application/json and computed Content-Length; no upstream header propagation",
+    "codeql": {
+      "before": {
+        "analysis_id": 1849453447,
+        "check_run": 108803996724,
+        "results": 2
+      },
+      "after": {
+        "analysis_id": 1849547971,
+        "python_check_run": 108809734163,
+        "results": 0,
+        "error": ""
+      },
+      "alerts": {
+        "142": "fixed",
+        "143": "fixed"
+      }
+    },
+    "macos_original": {
+      "revision": "4b83ae51bd0831f48aeceef1bf350f33e8d8a397",
+      "run": 36383463542,
+      "job": 108803830389,
+      "attempt": 1,
+      "target_test": "tests::browser_e2e_routes_keyboard_and_click_through_authority_then_ack_then_record",
+      "result": "FAIL",
+      "assertion": "stale_webmcp contains stale_operation",
+      "baseline_classification": false
+    },
+    "macos_rerun": {
+      "revision": "4b83ae51bd0831f48aeceef1bf350f33e8d8a397",
+      "run": 36383463542,
+      "job": 108809601526,
+      "attempt": 2,
+      "target_result": "FAIL",
+      "reason": "timed out waiting for Browser bridge handshake",
+      "line": 5271,
+      "log_sha256": "4f0c4169fde7ab4030e9f59f2ede00cbb74d7fd2e46378cf95918bf582342ffb"
+    },
+    "macos_fixed_head_ci": {
+      "revision": "ae0a17f01a583591f63d0ad1c99bd34a20cf1c6d",
+      "run": 36385443292,
+      "job": 108809739680,
+      "target_result": "PASS",
+      "job_result": "FAIL: other documented baseline failures",
+      "log_sha256": "d259fd01516075a2a9159ce010b0ff1c57d24d58c217a71447d2f8c2babe6424"
+    },
+    "macos_isolated": {
+      "revision": "ae0a17f01a583591f63d0ad1c99bd34a20cf1c6d",
+      "os": "macOS 15.7.4 arm64",
+      "rust": "1.96.0",
+      "chrome": "153.0.8010.53",
+      "results": [
+        "FAIL: bridge handshake timeout",
+        "PASS",
+        "PASS"
+      ],
+      "log_sha256": {
+        "1": "b59c5f9dc8eeafe95bceccab9af074ebd21be88b3ccfce34a5fece1e8f28ef9a",
+        "2": "64b882ba34c478e3a472d58b17a97b068b4719383f01d78e3faad7fdf754c28d",
+        "3": "02de8639e81a2b701031a0d3759e5af155663831a66b2499a83c62f9eef958fd"
+      }
+    },
+    "merge_hold": "Browser test nondeterminism remains unresolved; not a baseline failure; no merge",
+    "causality": "BrowserHost/start and bridge protocol sources plus Cargo.lock unchanged from base; changed cached Python/ephemeral cwd functions not used in this Browser E2E. No demonstrated direct C2 cause, but this is not proof of independence."
   }
 }
