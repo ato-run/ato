@@ -48,6 +48,8 @@ ato-formation-worker={path=%s}
             'budget':target/'debug/examples/proposal_budget','project':target/'debug/proposal-project'}
     result = dict(execution_sha=ATO_SHA,api_sha=API_SHA,
                   controller_helpers={name:digest((here/name).read_bytes()) for name in ['project.rs']},
+                  credential_wrapper={'path':str(here.parent/'requester-credential-exec.py'),
+                                      'sha256':digest((here.parent/'requester-credential-exec.py').read_bytes())},
                   execution_lock_sha256=digest((args.ato/'Cargo.lock').read_bytes()),
                   helper_lock_sha256=digest((package/'Cargo.lock').read_bytes()),
                   binaries={name:dict(path=str(path),sha256=digest(path.read_bytes())) for name,path in pins.items()})
