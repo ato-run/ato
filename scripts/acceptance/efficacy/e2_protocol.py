@@ -15,6 +15,8 @@ ARM_IDENTITY = {
     'oracle': (0, 'fixed', 'acceptance/1', 'ato.formation-generation-context/1'),
 }
 ARTIFACT_NAMES = ('requester', 'runtime', 'wasm')
+ORACLE_EXPECTED_RESULTS = frozenset(('verified_pass', 'verified_k_fail', 'terminal_not_observable'))
+ORACLE_RESULT_SCHEMA = 'ato.formation-efficacy-e2-oracle/2'
 
 
 def sha256(path):
@@ -294,6 +296,91 @@ def safe_record(run, snapshot, case, permutation, arm, plan, error=None):
     return record
 
 
+def terminal_generated_failure(snapshot):
+    """Receipt-free terminal proof; only typed identity, journal and cleanup facts.
+
+    Request identity comes from the pinned requester's satisfy response, whose
+    attempts are request-scoped. FormationAttempt repeats the assigned attempt,
+    K, D and Runtime; generation is bound to the same search. No error-message
+    parsing or inference from receipt absence is permitted.
+    """
+    result = snapshot.get('result') or {}
+    frozen = (result.get('search_state') or {}).get('frozen') or {}
+    rows = snapshot.get('generation_rows') or []
+    generated = snapshot.get('generated_derivation_ref')
+    contract = result.get('contract_ref')
+    request_id, search_id = snapshot.get('satisfy_id'), snapshot.get('search_id')
+    if (snapshot.get('error') is not None or snapshot.get('requester_exit') != 0
+            or result.get('status') != 'unsatisfied'
+            or not request_id or result.get('satisfy_id') != request_id
+            or not search_id or result.get('search_id') != search_id
+            or result.get('verified_routes') != [] or result.get('unknown_attempts') != []
+            or not contract or frozen.get('contract_ref') != contract
+            or len(rows) != 1 or rows[0].get('outcome') != 'admitted'
+            or not generated or rows[0].get('derivation_ref') != generated
+            or rows[0].get('search_id') != search_id
+            or generated in [c.get('derivation_ref') for c in frozen.get('candidates', [])]):
+        return None
+    attempts = result.get('attempts') or []
+    matching = [a for a in attempts if a.get('derivation_ref') == generated]
+    if len(matching) != 1 or any(a.get('status') == 'unknown' for a in attempts):
+        return None
+    attempt = matching[0]
+    formation = attempt.get('formation_attempt') or {}
+    attestation = attempt.get('attestation') or {}
+    failure = attempt.get('failure') or {}
+    formation_failure = formation.get('failure') or {}
+    outcomes = formation.get('outcomes') or {}
+    realization = formation.get('realization') or {}
+    if (not attempt.get('attempt_id') or not attempt.get('runtime_id')
+            or sum(a.get('attempt_id') == attempt['attempt_id'] for a in attempts) != 1
+            or attempt.get('status') != 'fail' or formation.get('status') != 'failed'
+            or formation.get('attempt_id') != attempt['attempt_id']
+            or formation.get('runtime_id') != attempt['runtime_id']
+            or any(part.get('contract_ref') != contract or part.get('derivation_ref') != generated
+                   for part in (formation, attestation))
+            or attestation.get('execution_started') is not True
+            or attestation.get('attempt_record') != 'finished'
+            or attempt.get('metadata_mismatch') != []
+            or formation.get('receipt') is not None or formation.get('verification') is not None
+            or any(part.get('code') != 'candidate_not_observable' or part.get('stage') != 'verification'
+                   for part in (failure, formation_failure))
+            or any((outcomes.get(name) or {}).get('state') != 'failed'
+                   or (outcomes.get(name) or {}).get('reason') != 'candidate_not_observable'
+                   for name in ('seal', 'runtime_verification'))
+            or (outcomes.get('cleanup') or {}).get('state') != 'succeeded'
+            or realization.get('destroyed') is not True
+            or realization.get('executor') != 'runtime-process'
+            or not (realization.get('endpoints') or {}).get('app.http')):
+        return None
+    return attempt
+
+
+def oracle_observed_result(record):
+    """Reconstruct the closed terminal evidence class, never read a summary label."""
+    snapshot = record.get('evidence') or {}
+    if (record.get('error') is not None or record.get('violations')
+            or snapshot.get('error') is not None or snapshot.get('requester_exit') != 0
+            or record.get('model_calls') != 0):
+        return 'protocol_failure'
+    if terminal_generated_failure(snapshot) is not None:
+        return 'terminal_not_observable'
+    evidence = generated_evidence(snapshot)
+    if evidence is None:
+        return 'protocol_failure'
+    attempt, receipt = evidence
+    attestation = attempt.get('attestation') or {}
+    if attestation.get('execution_started') is not True or attestation.get('attempt_record') != 'finished':
+        return 'protocol_failure'
+    if same_k_success(snapshot):
+        return 'verified_pass'
+    if (receipt['fully_satisfied'] is False and attempt.get('status') == 'fail'
+            and snapshot['result'].get('status') == 'unsatisfied'
+            and snapshot['result'].get('verified_routes') == []):
+        return 'verified_k_fail'
+    return 'protocol_failure'
+
+
 def oracle_key(cell):
     return f"{cell['case']}p{cell['permutation']}:{cell['provider']}"
 
@@ -306,28 +393,22 @@ def validate_oracle_cells(plan):
     for cell in cells:
         require(cell['provider'] == 'fixed:' + cell['draft_entrypoint_id']
                 and cell['mapped_file'] == plan['fixtures'][cell['case']]['permutations'][0][cell['draft_entrypoint_id']]
-                and type(cell['expected_fully_satisfied']) is bool, 'oracle cell definition drift')
+                and isinstance(cell.get('expected_result'), str)
+                and cell['expected_result'] in ORACLE_EXPECTED_RESULTS, 'oracle cell definition drift')
     return cells
 
 
 def oracle_expectation(record, cell):
-    evidence = generated_evidence(record.get('evidence') or {})
-    if (record.get('error') is not None or record.get('violations') or evidence is None
-            or record.get('requester_exit') != 0 or record.get('model_calls') != 0
-            or record.get('selected_entrypoint') != cell['draft_entrypoint_id']):
-        return False
-    attempt, receipt = evidence
-    if cell['expected_fully_satisfied']:
-        return same_k_success(record['evidence'])
-    return (receipt['fully_satisfied'] is False and attempt.get('status') == 'fail'
-            and record['evidence']['result'].get('status') == 'unsatisfied'
-            and not record['evidence']['result'].get('verified_routes'))
+    return (cell.get('expected_result') in ORACLE_EXPECTED_RESULTS
+            and record.get('selected_entrypoint') == cell['draft_entrypoint_id']
+            and oracle_observed_result(record) == cell['expected_result'])
 
 
 def validate_oracle_result(path, plan, plan_sha, environment):
     cells = validate_oracle_cells(plan)
     require(path.is_file(), 'oracle result missing')
     output = json.loads(path.read_text())
+    require(output.get('schema') == ORACLE_RESULT_SCHEMA, 'oracle result schema mismatch')
     require(output.get('plan_sha256') == plan_sha, 'oracle registration SHA mismatch')
     require(output.get('environment') == environment, 'oracle artifact/API pins mismatch')
     require(output.get('error') is None, 'oracle error')
@@ -349,7 +430,9 @@ def validate_oracle_result(path, plan, plan_sha, environment):
         rebuilt = safe_record(
             type('Run', (), {'fixture_sha256': record.get('fixture_hash'), 'root': path.parent / 'unused'})(),
             record.get('evidence') or {}, cell['case'], 0, 'oracle', plan, record.get('error'))
-        require(row.get('expected_fully_satisfied') is cell['expected_fully_satisfied']
+        observed = oracle_observed_result(rebuilt)
+        require(row.get('expected_result') == cell['expected_result']
+                and row.get('observed_result') == observed
                 and oracle_expectation(rebuilt, cell), 'oracle expectation/evidence mismatch')
     return output
 

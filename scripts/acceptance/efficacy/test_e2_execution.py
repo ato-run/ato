@@ -13,7 +13,7 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from efficacy import e2_execution as execution, e2_oracle as oracle
 from efficacy.e2_protocol import ROOT
-from e2_test_support import PLAN_DATA, record
+from e2_test_support import PLAN_DATA, record, oracle_record
 
 spec = importlib.util.spec_from_file_location('e2_primary_test', ROOT / 'scripts/acceptance/formation-generation-efficacy-e2.py')
 primary = importlib.util.module_from_spec(spec)
@@ -107,7 +107,7 @@ class Execution(unittest.TestCase):
         self.assertEqual(arm, 'oracle')
         self.assertIn(provider, ('fixed:k4', 'fixed:v9'))
         cell = next(c for c in plan['oracle']['cells'] if c['case'] == case and c['provider'] == provider)
-        r = record(arm, case, 0, cell['expected_fully_satisfied'])
+        r = oracle_record(cell)
         r['selected_entrypoint'] = r['evidence']['selected_entrypoint'] = cell['draft_entrypoint_id']
         return r
 
