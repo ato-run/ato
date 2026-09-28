@@ -237,6 +237,44 @@ impl ato_formation_worker::generation_provider::GenerationProvider
             }),
         }
     }
+
+    fn generate_v3(
+        &self,
+        point: &ato_formation_worker::generation_provider::GenerationPointV3,
+    ) -> ato_formation_worker::generation_provider::GenerationAnswer {
+        use ato_formation_worker::generation_provider::GenerationAnswer;
+        if self.mode == "deterministic_v2" {
+            // Evaluation-only selector over the closed typed context/2. The
+            // claim boundary is enforced by the shared requester; this rule
+            // reads no source, path or oracle label.
+            use ato_formation_worker::generation_provider::generation_request_v3;
+            if generation_request_v3(
+                ato_formation_worker::generation_provider::DEFAULT_GENERATION_MODEL,
+                point,
+            )
+            .is_err()
+            {
+                return GenerationAnswer::Fallback { reason: "invalid" };
+            }
+            let provenance = serde_json::json!({
+                "provider": "acceptance", "model": "deterministic-selector-v2",
+                "prompt_version": "efficacy-selector/2",
+                "usage": {"input_tokens":0,"output_tokens":0},
+            });
+            let selected = efficacy_entrypoint_v2(&point.context.entrypoints);
+            return match selected {
+                Some(id) => GenerationAnswer::Draft {
+                    draft: serde_json::json!({"schema":"ato.formation-derivation-draft/1",
+                        "operation":"python_script", "entrypoint_id":id}),
+                    provenance,
+                },
+                None => GenerationAnswer::Declined { provenance },
+            };
+        }
+        // Every other acceptance mode fails closed rather than silently
+        // downgrading a claimed point/3 to the v1/v2 provider contract.
+        GenerationAnswer::Fallback { reason: "invalid" }
+    }
 }
 
 /// Evaluation-only fixed rule. No source, paths, labels or outcome feedback.
@@ -273,14 +311,64 @@ fn efficacy_entrypoint(
         .map(|(id, _)| id)
 }
 
+/// E2 evaluation-only fixed rule over the closed typed context/2. Registered
+/// as efficacy-selector/2 before any outcome: score lexical markers only, never
+/// encoding or scan provenance; decline when no candidate scores positive.
+fn efficacy_entrypoint_v2(
+    entries: &[ato_formation::generation_context::v2::EntryPointSummary],
+) -> Option<&str> {
+    use ato_formation::generation_context::ImportMarker;
+    use ato_formation::generation_context::v2::Delegation;
+    entries
+        .iter()
+        .map(|entry| {
+            let http = entry.imports.iter().any(|marker| {
+                matches!(
+                    marker,
+                    ImportMarker::HttpServer
+                        | ImportMarker::Flask
+                        | ImportMarker::Fastapi
+                        | ImportMarker::Uvicorn
+                        | ImportMarker::Aiohttp
+                        | ImportMarker::Tornado
+                        | ImportMarker::Wsgiref
+                        | ImportMarker::Django
+                )
+            });
+            let score = 4 * u8::from(entry.custom_http_handler)
+                + 2 * u8::from(entry.server_listen)
+                + 2 * u8::from(entry.delegation == Delegation::PythonMain)
+                + u8::from(http)
+                + u8::from(entry.main_guard);
+            (entry.id.as_str(), score)
+        })
+        .filter(|(_, score)| *score > 0)
+        .min_by(|(id_a, score_a), (id_b, score_b)| score_b.cmp(score_a).then(id_a.cmp(id_b)))
+        .map(|(id, _)| id)
+}
+
+/// Accepted generation context opt-in values. Any other configured value is a
+/// configuration error, not a silent downgrade to the v1 provider contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GenerationContextMode {
+    None,
+    V2,
+    V3,
+}
+
 /// Reject mode combinations that would record a different prompt from the
 /// one sent by the real provider. Fixed providers can exercise either format.
-fn validate_generation_capture(mode: Option<&str>, context_v2: bool) -> Result<()> {
+fn validate_generation_capture(mode: Option<&str>, context: GenerationContextMode) -> Result<()> {
+    use GenerationContextMode::{None as NoContext, V2, V3};
+    let valid = match (mode, context) {
+        (Some("jev"), NoContext) => true,
+        (Some("jev_v2" | "deterministic_v1"), V2) => true,
+        (Some("jev_v3" | "deterministic_v2"), V3) => true,
+        (Some("jev" | "jev_v2" | "jev_v3" | "deterministic_v1" | "deterministic_v2"), _) => false,
+        _ => true,
+    };
     anyhow::ensure!(
-        !matches!(
-            (mode, context_v2),
-            (Some("jev"), true) | (Some("jev_v2"), false)
-        ),
+        valid,
         "generation provider and context versions must match"
     );
     Ok(())
@@ -290,7 +378,7 @@ fn validate_generation_capture(mode: Option<&str>, context_v2: bool) -> Result<(
 struct RecordedGenerationProvider {
     inner: Box<dyn ato_formation_worker::generation_provider::GenerationProvider>,
     path: std::path::PathBuf,
-    v2: bool,
+    context: GenerationContextMode,
 }
 impl ato_formation_worker::generation_provider::GenerationProvider for RecordedGenerationProvider {
     fn generate(
@@ -300,10 +388,11 @@ impl ato_formation_worker::generation_provider::GenerationProvider for RecordedG
         use ato_formation_worker::generation_provider::{self as generation, GenerationAnswer};
         let model = std::env::var("ATO_GENERATION_JEV_MODEL")
             .unwrap_or_else(|_| generation::DEFAULT_GENERATION_MODEL.into());
-        let payload = if self.v2 {
-            generation::generation_request_v2(&model, point)
-        } else {
-            generation::generation_request(&model, point)
+        let payload = match self.context {
+            GenerationContextMode::V2 => generation::generation_request_v2(&model, point),
+            GenerationContextMode::None => generation::generation_request(&model, point),
+            // A v3 point never reaches this v1/v2 entry point.
+            GenerationContextMode::V3 => return GenerationAnswer::Fallback { reason: "invalid" },
         };
         let Ok(payload) = payload else {
             return GenerationAnswer::Fallback { reason: "invalid" };
@@ -318,6 +407,30 @@ impl ato_formation_worker::generation_provider::GenerationProvider for RecordedG
             };
         }
         self.inner.generate(point)
+    }
+
+    fn generate_v3(
+        &self,
+        point: &ato_formation_worker::generation_provider::GenerationPointV3,
+    ) -> ato_formation_worker::generation_provider::GenerationAnswer {
+        use ato_formation_worker::generation_provider::{self as generation, GenerationAnswer};
+        if self.context != GenerationContextMode::V3 {
+            return GenerationAnswer::Fallback { reason: "invalid" };
+        }
+        let model = std::env::var("ATO_GENERATION_JEV_MODEL")
+            .unwrap_or_else(|_| generation::DEFAULT_GENERATION_MODEL.into());
+        let payload = generation::generation_request_v3(&model, point);
+        let Ok(payload) = payload else {
+            return GenerationAnswer::Fallback { reason: "invalid" };
+        };
+        if serde_json::to_vec_pretty(&payload)
+            .ok()
+            .and_then(|bytes| std::fs::write(&self.path, bytes).ok())
+            .is_none()
+        {
+            return GenerationAnswer::Fallback { reason: "provider_error" };
+        }
+        self.inner.generate_v3(point)
     }
 }
 
@@ -363,19 +476,30 @@ fn main() -> Result<()> {
     if let Ok(entries) = std::env::var("ATO_ACCEPTANCE_GENERATION_ENTRYPOINTS") {
         submission.authorize_generation(serde_json::from_str(&entries)?, 30_000)?;
     }
-    let context_v2 = std::env::var("ATO_ACCEPTANCE_GENERATION_CONTEXT").as_deref() == Ok("v2");
+    let generation_context = match std::env::var("ATO_ACCEPTANCE_GENERATION_CONTEXT").as_deref() {
+        Ok("v2") => GenerationContextMode::V2,
+        Ok("v3") => GenerationContextMode::V3,
+        Err(_) => GenerationContextMode::None,
+        Ok(other) => anyhow::bail!("unknown generation context mode {other}"),
+    };
     validate_generation_capture(
         std::env::var("ATO_ACCEPTANCE_GENERATION_PROVIDER")
             .ok()
             .as_deref(),
-        context_v2,
+        generation_context,
     )?;
-    if context_v2 {
-        submission.enable_generation_context()?;
+    match generation_context {
+        GenerationContextMode::V2 => submission.enable_generation_context()?,
+        GenerationContextMode::V3 => submission.enable_generation_context_v2()?,
+        GenerationContextMode::None => {}
     }
     let generation_provider = std::env::var("ATO_ACCEPTANCE_GENERATION_PROVIDER").ok()
         .map(|mode| -> Result<Box<dyn ato_formation_worker::generation_provider::GenerationProvider>> {
-            if mode == "jev_v2" {
+            if mode == "jev_v3" {
+                Ok(Box::new(ato_formation_worker::generation_provider::JevGenerationProvider::from_env_v3(
+                    std::time::Duration::from_secs(20),
+                )?))
+            } else if mode == "jev_v2" {
                 Ok(Box::new(ato_formation_worker::generation_provider::JevGenerationProvider::from_env_v2(
                     std::time::Duration::from_secs(20),
                 )?))
@@ -392,7 +516,7 @@ fn main() -> Result<()> {
             Box::new(RecordedGenerationProvider {
                 inner,
                 path: path.into(),
-                v2: std::env::var("ATO_ACCEPTANCE_GENERATION_CONTEXT").as_deref() == Ok("v2"),
+                context: generation_context,
             }) as Box<dyn ato_formation_worker::generation_provider::GenerationProvider>
         } else {
             inner
@@ -494,18 +618,81 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod capture_tests {
-    use super::validate_generation_capture;
+    use super::{GenerationContextMode, efficacy_entrypoint_v2, validate_generation_capture};
+    use GenerationContextMode::{None as NoContext, V2, V3};
 
     #[test]
     fn live_provider_version_must_match_captured_context() {
-        assert!(validate_generation_capture(Some("jev"), false).is_ok());
-        assert!(validate_generation_capture(Some("jev_v2"), true).is_ok());
-        assert!(validate_generation_capture(Some("jev"), true).is_err());
-        assert!(validate_generation_capture(Some("jev_v2"), false).is_err());
-        for context in [false, true] {
+        assert!(validate_generation_capture(Some("jev"), NoContext).is_ok());
+        assert!(validate_generation_capture(Some("jev_v2"), V2).is_ok());
+        assert!(validate_generation_capture(Some("jev_v3"), V3).is_ok());
+        assert!(validate_generation_capture(Some("deterministic_v1"), V2).is_ok());
+        assert!(validate_generation_capture(Some("deterministic_v2"), V3).is_ok());
+        for context in [NoContext, V2, V3] {
             assert!(validate_generation_capture(Some("fixed:e01"), context).is_ok());
             assert!(validate_generation_capture(None, context).is_ok());
         }
+        for (mode, context) in [
+            ("jev", V2),
+            ("jev", V3),
+            ("jev_v2", NoContext),
+            ("jev_v2", V3),
+            ("jev_v3", NoContext),
+            ("jev_v3", V2),
+            ("deterministic_v1", NoContext),
+            ("deterministic_v1", V3),
+            ("deterministic_v2", NoContext),
+            ("deterministic_v2", V2),
+        ] {
+            assert!(validate_generation_capture(Some(mode), context).is_err(), "{mode}/{context:?}");
+        }
+    }
+
+    fn summary(
+        id: &str,
+        delegation: ato_formation::generation_context::v2::Delegation,
+        imports: &[ato_formation::generation_context::ImportMarker],
+        handler: bool,
+        listen: bool,
+        guard: bool,
+    ) -> ato_formation::generation_context::v2::EntryPointSummary {
+        use ato_formation::generation_context::v2::{Encoding, SourceScan};
+        use ato_formation::generation_context::{CountBucket, Language, SizeBucket};
+        ato_formation::generation_context::v2::EntryPointSummary {
+            id: id.into(),
+            language: Language::Python,
+            size_bucket: SizeBucket::UpTo8Kib,
+            source_scan: SourceScan::Complete,
+            encoding: Encoding::Utf8,
+            delegation,
+            imports: imports.to_vec(),
+            frameworks: vec![],
+            functions: CountBucket::Zero,
+            classes: CountBucket::Zero,
+            main_guard: guard,
+            server_listen: listen,
+            custom_http_handler: handler,
+        }
+    }
+
+    #[test]
+    fn selector_v2_scores_only_closed_lexical_markers() {
+        use ato_formation::generation_context::v2::Delegation;
+        use ato_formation::generation_context::ImportMarker;
+        let server = summary("b1", Delegation::None, &[ImportMarker::HttpServer], true, true, true);
+        let wrapper = summary("a0", Delegation::PythonMain, &[], false, false, false);
+        let cli = summary("c2", Delegation::None, &[], false, false, false);
+        // HTTP-looking entrypoint outranks delegation evidence and CLI entries.
+        assert_eq!(efficacy_entrypoint_v2(&[wrapper.clone(), server.clone(), cli.clone()]), Some("b1"));
+        // Without server markers the delegation evidence still beats an empty summary.
+        assert_eq!(efficacy_entrypoint_v2(&[wrapper.clone(), cli.clone()]), Some("a0"));
+        // Positive score is required; an all-zero domain declines.
+        let empty = summary("a0", Delegation::None, &[], false, false, false);
+        assert_eq!(efficacy_entrypoint_v2(&[empty, cli]), None);
+        // Ties resolve by ascending opaque ID, never by input order.
+        let first = summary("a0", Delegation::None, &[], true, false, false);
+        let second = summary("b1", Delegation::None, &[], true, false, false);
+        assert_eq!(efficacy_entrypoint_v2(&[second, first]), Some("a0"));
     }
 }
 
