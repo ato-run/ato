@@ -1414,6 +1414,7 @@ impl Client {
     }
 
     pub fn submit(&self, submission: &Submission) -> Result<serde_json::Value> {
+        submission.validate_proposal_submission()?;
         let source = &submission.request.source;
         let pending: serde_json::Value = self.send(self.http.post(self.url("/sources")).json(&serde_json::json!({
             "archive_digest": source.archive_digest, "archive_bytes": source.archive_bytes,

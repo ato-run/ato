@@ -168,7 +168,36 @@ impl Submission {
         Ok(())
     }
 
+    pub(super) fn validate_proposal_submission(&self) -> Result<()> {
+        match (&self.proposal_state, &self.request.policy.proposal) {
+            (None, None) => Ok(()),
+            (Some(local), Some(_)) => {
+                anyhow::ensure!(
+                    frozen_request(&self.request)? == local.frozen
+                        && self
+                            .request
+                            .initial_source
+                            .as_ref()
+                            .is_some_and(|source| source.closure_ref
+                                == self.request.source.closure_ref
+                                && source.archive_digest == self.request.source.archive_digest),
+                    "local proposal authorization changed"
+                );
+                let bases: BTreeMap<_, _> = self
+                    .request
+                    .authorized_derivations
+                    .iter()
+                    .map(|d| (d.derivation_ref.clone(), d.capsule_toml.clone()))
+                    .collect();
+                anyhow::ensure!(bases == local.bases, "original proposal bases changed");
+                Ok(())
+            }
+            _ => anyhow::bail!("CandidateProducer requires explicit verified enablement"),
+        }
+    }
+
     fn proposal_search(&self, status: &Value) -> Result<SearchStateV1> {
+        self.validate_proposal_submission()?;
         let local = self
             .proposal_state
             .as_ref()
