@@ -751,6 +751,7 @@ fn form_on_runtime_network(args: FormArgs) -> Result<()> {
             allow_managed: args.allow_managed,
             decision: decision_policy.clone(),
             generation: None,
+            proposal: None,
         },
         SatisfyBudget {
             max_attempts: u32::try_from(args.max_attempts)
