@@ -559,8 +559,13 @@ pub struct ProposalBudget {
 
 /// Implementations propose only. Caller must claim durably before invocation
 /// and enforce timeout; this trait is not authorization to call an external LLM.
-pub trait CandidateProducer {
-    fn propose(&self, request: &ProposalRequest) -> Result<ProducerOutput, ProducerError>;
+pub trait CandidateProducer<
+    Request = ProposalRequest,
+    Output = ProducerOutput,
+    Error = ProducerError,
+>
+{
+    fn propose(&self, request: &Request) -> Result<Output, Error>;
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ProducerError {
