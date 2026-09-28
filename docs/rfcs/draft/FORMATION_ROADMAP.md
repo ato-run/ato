@@ -3,6 +3,20 @@
 Updated 2026-09-28: architecture correction after #1420 merged. Stage numbers are retained; the historical 5b-a–c1 track is not canonical Candidate Generation. See [ADR-041](ADR-041-formation-provider-split.md).
 This is an implementation plan; pending rows are not shipped functionality.
 
+## Original Phase correspondence
+
+The complete downloaded original Formation §10 has **Phase 3 = Jev Decision
+Layer**, **Phase 4 = LLM Candidate Generation**, **Phase 5 = Continuous
+Adaptation**. Our 5a ≒ Phase 3, 5b ≒ Phase 4, 5c ≒ Phase 5. Our 6a/6b/6c
+are additional product coverage implementation tracks, not original Phase
+numbers. See [source pins and section mapping](Formation.md#original-formation-correspondence).
+
+The minimum 5b / original Phase 4 completion path is: **no Preset, zero known
+D**, small OSS fixture → CandidateProducer → canonical new D → admission →
+actual Runtime → Verifier → same K PASS. An existing-D entrypoint switch is not
+completion. Core B0–B12 tests and fixed fixtures precede, but do not replace,
+that actual acceptance.
+
 ## Milestones
 
 - Through 4: Formation foundation v1. Known D exploration uses the common
