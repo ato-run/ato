@@ -5,7 +5,7 @@
   "ato_main": "34c2ef2a8882f6fc53438c1e0f1722b240ed3d6e",
   "api_main": "f7d866cbef7768f67b46840766497fbf806640fe",
   "evaluation_base_merge": "34c2ef2a8882f6fc53438c1e0f1722b240ed3d6e",
-  "harness_commit": "7ef79ff5ea87b974c7cd61dbf64381ab681c536d",
+  "harness_commit": "02cd8fc337696b53d6eea899cb9c9b6a8e7c4d02",
   "model": "jev-1.13.0",
   "model_pin": "ATO_GENERATION_JEV_MODEL is set to this exact value for both B and C; a model change requires a new preregistration",
   "prompts": {
@@ -173,7 +173,9 @@
     "minimum_cases_C_pass_both_permutations_B_fail_both": 2,
     "zero_authority_K_UNKNOWN_permission_Runtime_escapes": true,
     "zero_repeated_model_calls": true,
-    "no_rescue_by_speed_or_cost": true
+    "no_rescue_by_speed_or_cost": true,
+    "zero_errors": true,
+    "zero_protocol_violations": true
   },
   "artifacts": {
     "requester": "13953505b274c894f1b218d957ad18f8863bafa6907f65c8fedf4d10bc9b286d",
@@ -182,11 +184,11 @@
     "note": "measured on binaries built from harness_commit source in this checkout; a rebuilt artifact with different bytes requires a prospective amendment before any cell or oracle run"
   },
   "code_sha256": {
-    "scripts/acceptance/formation-generation-efficacy-e2.py": "6c711818b3d283395a32e06f2db6981fb02ef268b5fc58211409b1a02316d8eb",
+    "scripts/acceptance/formation-generation-efficacy-e2.py": "2ad3a23750b3198ddc46fe955e434b2e8c74c5008c5b3b80bf34fa2de98c5c29",
     "scripts/acceptance/efficacy/e2_fixtures.py": "9c514bd7e805c9bb74f142d6e2b0e8a4c419e484c6ec492136be5b0e7dc54a81",
-    "scripts/acceptance/efficacy/e2_analyze.py": "84d2bea6d612f20c09eed27f7ce7fc516200a3dac0612a47ebec522e0b859ce0",
+    "scripts/acceptance/efficacy/e2_analyze.py": "fa98d9caa8c9fdf5ff997a9203113a8d07ad0becd94e2caa423c3cc6b99d842a",
     "scripts/acceptance/efficacy/test_e2_fixtures.py": "0d4b75c0aaeec6ef407c75713dea8ef2d5864ffd6f69e773becebdfeb3ed5ee8",
-    "scripts/acceptance/efficacy/test_e2_analyze.py": "a7da009d6ec4a940bd74da54da42bb7a2fa214580de0b278ea6c5e72116dbfa7",
+    "scripts/acceptance/efficacy/test_e2_analyze.py": "bbfbe21c2abf975b2784102365dc8573abe7f6fb3a36c44a55cc19cc2a5c5c22",
     "scripts/acceptance/formation-generation-context.py": "b8032884ca82772c55517357fc142a069dc85e2c559ea1de10d9bb29ccf5d2fa",
     "scripts/acceptance/formation-typed-generation.py": "4bd833a43eed715bfd86706f87ee77a5c1c98906e56dffcf4f4daa2d177602b8",
     "scripts/acceptance/formation-stage4-search.py": "86c45a5ece25e82f11aeab9fbc97928e9e391659c39a7962aa6039ac256cc7b7",
@@ -195,7 +197,14 @@
     "apps/formation-worker/src/runtime_network.rs": "b1e6e5103ca6aafc970c425dc4c1cfd79bde503e08c9e07d66b3ec31154352bd",
     "lib/formation/src/generation_context.rs": "dbc1fd6cd5cc696b5c9078cb4d9c144c6884b841a6718d038ffd0148ce19bb63",
     "lib/formation/src/generation_context/v2.rs": "e5be8d91e7cd98431f0aad02c519809ebd2dd969b8d77ca31f04d65d038eeb3f",
-    "lib/formation/tests/generation_context_v2.rs": "bb814306bc4a01e3ed8895630390df3f98e9de4b3414bab1d1acb116ee50dcb8"
+    "lib/formation/tests/generation_context_v2.rs": "bb814306bc4a01e3ed8895630390df3f98e9de4b3414bab1d1acb116ee50dcb8",
+    "scripts/acceptance/efficacy/e2_protocol.py": "5f9b83e420a023c5c15f9e639b7cb496be951699d19052e9a55bf4d0bd104f75",
+    "scripts/acceptance/efficacy/e2_execution.py": "dc88c52cf34b8c65486e2b57ce9296f780c220fc04b642f3779f3ca07e7046e5",
+    "scripts/acceptance/efficacy/e2_oracle.py": "d9bef0bea5ff664b73f9b3506d7758db6c6f3f3599fc8b7fe117d00a0669f99f",
+    "scripts/acceptance/efficacy/test_e2_protocol.py": "14157592e01c547261dd35077ae3e6a8364b70c400cdad2316f4d7777cce03ba",
+    "scripts/acceptance/efficacy/test_e2_execution.py": "abaddf2bfe556400551d43c239832ec5e34008c28f9706daa548a6b264829a4e",
+    "scripts/acceptance/efficacy/e2_test_support.py": "a6000969952200bb41b95bb118a6fd30f8be09f185dd88fa21148fde1f50a218",
+    "scripts/acceptance/formation-5a-decision.py": "7a36c96d8ae0d86ed9dd4aa4f11202b04f28ff76763a8efea3faf2a35ccbdb34"
   },
   "holdout": {
     "families": {
@@ -205,7 +214,8 @@
       "P": "bounded prefix >64KiB positive evidence in first 64KiB, harmless suffix, plausible decoy; no E06 byte copy"
     },
     "e1_fixtures": "E1 cases including E04/E06/E07 are development evidence and are never used in E2 numerators or denominators; kept for historical/privacy/regression use only",
-    "fixture_independence": "fixture bytes never branch on arm or expected selector outcome; permutations only swap the file each opaque ID maps to"
+    "fixture_independence": "fixture bytes never branch on arm or expected selector outcome; permutations only swap the file each opaque ID maps to",
+    "byte_reuse": "no E1 candidate/wrapper/padding/encoding-cookie/private-source bytes reused; shared non-decision scaffold may be reused and is identical across arms"
   },
   "oracle": {
     "model_calls": 0,
@@ -407,11 +417,25 @@
       }
     ],
     "procedure": "permutation0 mapping, fixed owner-authorized drafts (fixed:k4, fixed:v9), same frozen source digests, original K, two-attempt budget, pinned requester/Runtime/WASM; actual Runtime -> fresh fully_satisfied receipt -> requester acceptance is compared to expected_fully_satisfied",
-    "negative_expectations": "expected_fully_satisfied=false cells verify the negative candidate really fails K within case semantics"
+    "negative_expectations": "expected_fully_satisfied=false cells verify the negative candidate really fails K within case semantics",
+    "harness": "scripts/acceptance/efficacy/e2_oracle.py",
+    "context": "ato.formation-generation-context/1 (fixed provider supported path; same source/K/budget)",
+    "output": "efficacy-e2-oracle/oracle-result.json: plan_sha256, environment (API SHA, requester/runtime/WASM hashes, observed Coordinator launch tree hash), exact 24 keyed records with evidence, model_calls=0, complete=true, all_expectations_match=true",
+    "negative_receipts": "A negative requires an admitted actual fail attempt with a fresh same-K/D receipt fully_satisfied=false and requester exit 0/unsatisfied. Missing receipt, even for a CLI/non-observable candidate, stops; it is not silently relabeled as a matched negative.",
+    "reservation": "Exclusive experiment directory; fsync exclusive per-cell reservation before setup/Runtime/requester start; preserve on all failures; no retry/resume."
   },
   "protocol_deviations": {
-    "policy": "harness/comparator bugs, environment problems and provider outages stop the run; the observed ledger stays immutable; a prospective amendment commit may continue only unvisited cells; visited/reserved model cells are never re-run, even after a lost response",
-    "persistent_reservations": "a .reserved marker is written before the requester starts for every cell and is never removed; the exclusive output directory is created once with no resume"
+    "policy": "Save the reserved cell and stop on any protocol violation. No resume/retry path. Any future continuation requires a separate prospective amendment for unvisited cells; never rerun visited/reserved cells.",
+    "persistent_reservations": "a .reserved marker is written before the requester starts for every cell and is never removed; the exclusive output directory is created once with no resume",
+    "stop_conditions": [
+      "error is not None",
+      "environment/setup failure",
+      "provider transport error",
+      "provider timeout",
+      "artifact/source/API/code pin drift",
+      "missing mandatory telemetry",
+      "oracle expectation mismatch"
+    ]
   },
   "historical_preservation": {
     "e1": "E1 preregistration/amendment/reservations/observations/results/summary/oracle and c0 offline observations are unchanged; E1 remains B 9/20, C 2/20, robust additional 0, efficacy gate unmet; 5b stays In progress",
@@ -707,6 +731,75 @@
           "v9": "candidate_0.py"
         }
       ]
+    }
+  },
+  "hardening": {
+    "prospective": true,
+    "previous_head": "b7e8c6f93f931daeb01cc0868db5c2b122a6333f",
+    "model_calls": 0,
+    "oracle_executions": 0,
+    "runtime_cells": 0,
+    "scope": "Protocol/integrity fields only; no fixtures, labels, arms, budgets, prompts, model pins, order or comparative gate thresholds changed.",
+    "success_predicate": "error is None; requester_exit 0; status satisfied; exactly one admitted generation row; non-parent generated D appears in exactly one actual attempt; fresh fully_satisfied receipt names that D, frozen/result K, request and attempt; exactly one verified route names the same D/attempt/Runtime/environment and receipt. Pinned requester exit 0 proves Rust acceptance of that sole route.",
+    "arm_invariants": {
+      "A": {
+        "provider_calls": 1,
+        "model_calls": 0,
+        "models": [
+          "deterministic-selector-v2"
+        ],
+        "prompt_versions": [
+          "efficacy-selector/2"
+        ],
+        "context": "ato.formation-generation-context/2"
+      },
+      "B": {
+        "provider_calls": 1,
+        "model_calls": 1,
+        "models": [
+          "jev-1.13.0"
+        ],
+        "prompt_versions": [
+          "ato.formation-generation-prompt/2"
+        ],
+        "context": "ato.formation-generation-context/1"
+      },
+      "C": {
+        "provider_calls": 1,
+        "model_calls": 1,
+        "models": [
+          "jev-1.13.0"
+        ],
+        "prompt_versions": [
+          "ato.formation-generation-prompt/3"
+        ],
+        "context": "ato.formation-generation-context/2"
+      }
+    },
+    "mandatory_telemetry": "Missing lists/context/usage/latency/elapsed, malformed evidence or telemetry read errors are protocol deviations. Unknown usage/cost is never zero-filled. Invalid choices with valid model/prompt/usage metadata, declines and admitted K failures remain normal efficacy outcomes.",
+    "runtime_failure_codes": [
+      "http_status_mismatch",
+      "http_body_digest_mismatch",
+      "candidate_not_observable"
+    ],
+    "runtime_failure_policy": "Known semantic failures require actual execution_started=true and attempt_record=finished. Other failures, unfinished/UNKNOWN or setup/environment failure stop; receipt absence never establishes oracle expectations.",
+    "budget_check": "frozen.policy.budget exactly equals budget plus max_attempts; frozen.policy.generation max_generations and timeout_ms exactly match registration; non-null frozen/result contract_ref; fixture digests and entrypoint mapping exact.",
+    "code_integrity": "Hash every code_sha256 path before helper import/key read/reservation; require committed HEAD bytes for code and registration, no staged/unstaged/untracked changes. Recheck before and after each cell.",
+    "api_pin_method": "API_DIR must itself be a Git checkout root at api_main. Reject staged/unstaged/untracked/ignored source/config changes under src, scripts, migrations, package.json, pnpm-lock.yaml, wrangler.toml; hash actual tracked bytes against HEAD blobs, including assume-unchanged files. Never fetch/follow main.",
+    "coordinator_bundle": "No launch bundle is available in this machine; no fabricated bundle pin. Use registered API checkout validation. Capture SHA-256 of actual coordinator.mjs and worker-final-bundle file map; require identical launch inputs across oracle and primary and every cell.",
+    "primary_preflight": "Committed plan/code, fixtures, API and artifacts, then oracle result validation, then stdin key, then exclusive output/reservations. Recompute all 24 expectations from saved evidence; summary booleans alone never suffice.",
+    "verification": {
+      "rust_passed": 583,
+      "rust_failed": 0,
+      "rust_existing_ignored": 1,
+      "example_passed": 5,
+      "clippy_warnings_denied": "pass",
+      "python_passed": 75,
+      "python_failed": 0,
+      "e2_analysis_tests": 20,
+      "model_calls": 0,
+      "oracle_executions": 0,
+      "e2_runtime_cells": 0
     }
   }
 }
