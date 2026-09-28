@@ -72,7 +72,7 @@ pub fn plan_candidate(
     }
     let facts = InputFacts::capture(evidence);
     let bound = bind_candidate(draft, closure_ref)?;
-    let plan = lower_execution(
+    let mut plan = lower_execution(
         &bound.derivation,
         facts,
         RuntimeBinding {
@@ -83,6 +83,7 @@ pub fn plan_candidate(
     .map_err(|error| {
         FormationFailure::new(error.code(), FailureStage::Projection, error.to_string())
     })?;
+    crate::cached_toolchain::resolve_python(&mut plan, triple);
     Ok(PlannedCandidate { bound, plan })
 }
 
