@@ -1,4 +1,5 @@
-//! Fixed / loopback-mock actual acceptance driver. Never reads a live model key.
+//! Fixed / loopback-mock driver with explicit preregistered live opt-in.
+//! Offline preregistration returns before constructing any network client.
 //! Reuses production requester/DecisionProvider/receipt authority and Runtime API.
 use anyhow::{Context, Result};
 use ato_formation::{authoring::BoundContract, proposal::*};
@@ -28,7 +29,13 @@ use std::{
 #[serde(deny_unknown_fields)]
 struct Config {
     #[serde(default)]
+    preregister_only: bool,
+    #[serde(default)]
     mock_llm: Option<MockLlm>,
+    #[serde(default)]
+    live_llm: Option<MockLlm>,
+    #[serde(default)]
+    expected_preregistration: Option<serde_json::Value>,
     api: String,
     token_file: PathBuf,
     source: PathBuf,
@@ -142,7 +149,6 @@ fn main() -> Result<()> {
         .nth(1)
         .context("usage: proposal_search CONFIG_JSON")?;
     let config: Config = serde_json::from_slice(&std::fs::read(path)?)?;
-    let client = Client::new(&config.api, &std::fs::read_to_string(&config.token_file)?)?;
     let mut submission = if config.routes.is_empty() {
         prepare_proposal_submission(
             &config.source,
@@ -177,18 +183,48 @@ fn main() -> Result<()> {
         }
         s
     };
+    if config.preregister_only {
+        anyhow::ensure!(
+            config.mock_llm.is_none() && config.live_llm.is_none() && config.resume.is_none(),
+            "preregistration is offline only"
+        );
+        std::fs::write(
+            &config.result,
+            serde_json::to_vec_pretty(&submission.proposal_preregistration()?)?,
+        )?;
+        return Ok(());
+    }
+    let client = Client::new(&config.api, &std::fs::read_to_string(&config.token_file)?)?;
+    anyhow::ensure!(
+        config.mock_llm.is_none() || config.live_llm.is_none(),
+        "ambiguous producer mode"
+    );
+    let live = config.live_llm.is_some();
+    if live {
+        let expected = config
+            .expected_preregistration
+            .as_ref()
+            .context("live input pin required")?;
+        anyhow::ensure!(
+            expected == &submission.proposal_preregistration()?,
+            "live input drift"
+        );
+    }
     let general = config
         .mock_llm
+        .or(config.live_llm)
         .map(|m| -> Result<_> {
-            let guard = if m.journal.exists() {
+            let guard = if live || m.journal.exists() {
+                // Live journal must have been explicitly initialized by preflight.
                 CallBudget::reopen(&m.journal, m.budget)?
             } else {
                 CallBudget::create(&m.journal, m.budget)?
             };
-            let producer = Arc::new(DeepSeekCandidateProducer::new_mock(
-                m.config,
-                Arc::new(guard),
-            )?);
+            let producer = Arc::new(if live {
+                DeepSeekCandidateProducer::new(m.config, "DEEPSEEK_API_KEY", Arc::new(guard))?
+            } else {
+                DeepSeekCandidateProducer::new_mock(m.config, Arc::new(guard))?
+            });
             submission.configure_general_producer(producer.identity())?;
             Ok(producer)
         })
