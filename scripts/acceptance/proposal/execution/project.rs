@@ -6,7 +6,6 @@ use ato_formation_worker::runtime_network::{
     RuntimeConstraintWire, Submission, prepare_submission, proposal::prepare_proposal_submission,
 };
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::{fs, path::PathBuf};
 
 fn submission(config: &Value) -> Result<Submission> {
@@ -62,10 +61,7 @@ fn main() -> Result<()> {
         .proposal
         .as_ref()
         .context("authorization")?;
-    let bytes = request.canonical_bytes(auth)?;
     let evidence = json!({"kind":"independently_reproduced_preclaim_view",
-        "provider_wire_sha256":null,
-        "preclaim_request_sha256":format!("{:x}",Sha256::digest(&bytes)),
         "failure_evidence":request.failure_evidence,"inspection_evidence":request.inspection_evidence,
         "source_context_sha256":request.source_context_sha256(auth)?,
         "known_derivations":request.known_derivations,

@@ -1,5 +1,7 @@
 """Acceptance evidence checks, not a new Contract evaluator."""
 import base64
+import re
+import time
 from .preflight import require, digest, load, helper
 
 
@@ -53,23 +55,55 @@ def before_claim(cell, status, claim):
     return known_failure(cell,status) if cell['id']=='G2' else None
 
 
-def journal_state(path, plan, completed_searches):
-    """Read operational evidence only; create/reopen/validate budget stays Rust-owned."""
-    raw=path.read_bytes()
-    require(raw.endswith(b'\n') and len(raw)<=65536, 'corrupt journal')
-    import json
-    entries=[json.loads(line) for line in raw.splitlines()]
-    require(entries[0]==plan['budget'], 'journal budget drift')
-    cells=[entry for entry in entries[1:] if isinstance(entry,str)]
-    require(cells==completed_searches, 'journal order/count mismatch or pending reservation')
-    require(not any(isinstance(e,dict) and e.get('halt') for e in entries[1:]), 'run STOP recorded')
-    responses=[e['response'] for e in entries[1:] if isinstance(e,dict) and 'response' in e]
-    require([r['cell'] for r in responses]==cells, 'unresolved provider response')
-    for response in responses:
-        require(response['finish_reason']=='stop' and response['model_matches'] is True and
-                response['input_tokens']<=plan['budget']['input_token_cap'] and
-                response['output_tokens']<=plan['budget']['output_token_cap'], 'provider protocol violation')
+def journal_state(binary, plan_path, journal, completed_searches):
+    """No Python journal parser: fail closed on the pinned Rust parser's result."""
+    saved = helper(binary, 'snapshot', plan_path, journal)
+    require(not saved['stopped'], 'run STOP recorded')
+    calls = saved['cells']
+    require(set(calls) == set(completed_searches) and len(calls) == len(completed_searches),
+            'journal count mismatch or pending reservation')
+    responses = []
+    for cell in completed_searches:
+        require(calls[cell]['request'] is not None, 'RequestEvidence absent')
+        require(calls[cell]['response'] is not None, 'unresolved provider response')
+        response = calls[cell]['response']
+        require(response['finish_reason']=='stop' and response['model_matches'] is True,
+                'provider protocol violation')
+        responses.append(response)
     return responses
+
+
+def request_evidence(binary, plan_path, journal, search_id, window, expected=None, require_response=True):
+    saved = helper(binary, 'inspect-request', plan_path, journal, search_id)
+    require(saved and saved.get('cell') == search_id, 'RequestEvidence absent')
+    fields = {'cell', 'proposal_request_sha256', 'provider_body_sha256', 'timeout_ms',
+              'proposal_request_bytes', 'provider_body_bytes', 'response_resolved'}
+    require(set(saved) == fields and type(saved['response_resolved']) is bool, 'invalid RequestEvidence schema')
+    if require_response:
+        require(saved['response_resolved'], 'unresolved RequestEvidence')
+    for name in ('proposal_request_sha256', 'provider_body_sha256'):
+        require(isinstance(saved[name], str) and re.fullmatch(r'sha256:[0-9a-f]{64}', saved[name]), 'invalid request hash')
+    require(all(type(saved[k]) is int and saved[k] > 0 for k in ('proposal_request_bytes','provider_body_bytes')), 'invalid request lengths')
+    timeout = saved['timeout_ms']
+    require(type(timeout) is int and 0 < timeout <= 30000, 'timeout outside registered bounds')
+    # The exact formula is source-pinned. This same-host observation interval
+    # additionally proves the recorded timeout is possible after claim delivery,
+    # not a preclaim value. No request or provider body is reconstructed here.
+    require(window is not None, 'claim timing observation absent')
+    lower = window['claim_delivery_not_before_ms']
+    upper = int(time.time() * 1000)
+    expires = window['expires_at_ms']
+    require(lower <= upper, 'wall clock moved backwards')
+    maximum = min(max(0, expires-lower), 30000)-500
+    minimum = max(1, min(max(0, expires-upper), 30000)-500)
+    require(minimum <= timeout <= maximum, 'timeout outside registered formula interval')
+    if expected is not None:
+        require(saved == expected, 'journal/controller request evidence mismatch')
+    return saved
+
+
+def unchanged_after_restart(before, after):
+    require(before == after, 'restart changed Request events or response evidence')
 
 
 def cell_result(cell, result, responses, loss=False):

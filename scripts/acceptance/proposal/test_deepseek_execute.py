@@ -1,4 +1,4 @@
-"""D3-E offline E0–E14. Synthetic transport is Coordinator-only, never DeepSeek."""
+"""D3-E offline E0–E19. Synthetic transport is Coordinator-only, never DeepSeek."""
 import copy
 import http.client
 import http.server
@@ -19,7 +19,7 @@ from execution.proxy import create_proxy
 from execution.runner import recover_after_completion_loss
 
 ROOT=pathlib.Path(__file__).resolve().parents[3]
-PLAN_PATH=ROOT/'docs/ops/formation-deepseek-d3-plan.json'
+PLAN_PATH=ROOT/'docs/ops/formation-deepseek-d3-plan-v2.json'
 PLAN=p.approved_plan(PLAN_PATH)
 
 
@@ -27,7 +27,7 @@ def status(cell):
     frozen=cell['projection']['frozen']
     return dict(contract_ref=frozen['contract_ref'],search_state=dict(frozen=frozen,attempts=[],revision=1,owner_stopped=False),
                 attempts=[],proposal_point=dict(revision=1,round_seq=1,claimed=False),
-                proposal_round=dict(status='open'),status='running')
+                proposal_round=dict(status='open',expires_at_ms=int(datetime.now(timezone.utc).timestamp()*1000)+30000),status='running')
 
 
 def failed_known(cell):
@@ -112,9 +112,9 @@ class Offline(unittest.TestCase):
         if case=='prompt':prompt.write_bytes(b'changed')
         if case=='journal':args.journal.write_bytes(b'corrupt\n')
         if case=='order':plan['cell_order']=list(reversed(plan['cell_order']))
-        with patch.object(p,'approved_plan',return_value=plan),patch.object(p,'pin'),patch.object(p,'prereg_module',return_value=module),\
+        with patch.object(p,'approved_plan',return_value=plan),patch.object(p,'pin'),patch.object(p,'evidence_contract'),patch.object(p,'prereg_module',return_value=module),\
              patch.object(p,'WASM_SHA',p.digest(b'wrong' if case=='wasm' else b'wasm')),\
-             patch.object(p,'helper',return_value=dict(per_call_usd_micros=81102,total_usd_micros=486612)),\
+             patch.object(p,'helper',return_value=dict(per_call=81102,total=486612)),\
              patch.object(p,'verify_binaries'):
             return p.check(args,fetch=fetch)
 
@@ -200,17 +200,63 @@ class Offline(unittest.TestCase):
             proxy.shutdown();proxy.server_close();upstream.shutdown();upstream.server_close()
 
     def test_E14_STOP_prevents_next_cell_and_never_resets(self):
-        path=self.root/'journal'
-        path.write_text(json.dumps(PLAN['budget'])+'\n'+json.dumps({'halt':True})+'\n')
-        before=path.read_bytes()
-        with self.assertRaisesRegex(p.Stop,'run STOP'):gates.journal_state(path,PLAN,[])
-        self.assertEqual(path.read_bytes(),before)
-        with self.assertRaisesRegex(p.Stop,'no post-claim'):p.require_exact_request_capture()
+        journal=self.root/'journal'
+        with patch.object(gates,'helper',return_value={'stopped':True,'cells':{}}):
+            with self.assertRaisesRegex(p.Stop,'run STOP'):
+                gates.journal_state('not-run',PLAN_PATH,journal,[])
+        self.assertFalse(journal.exists())
+
+    def request_fixture(self):
+        now=int(datetime.now(timezone.utc).timestamp()*1000)
+        window={'expires_at_ms':now+28000,'claim_delivery_not_before_ms':now-5}
+        saved={'cell':'G0','proposal_request_sha256':'sha256:'+'a'*64,
+               'provider_body_sha256':'sha256:'+'b'*64,'timeout_ms':27500,
+               'proposal_request_bytes':1000,'provider_body_bytes':2000,'response_resolved':True}
+        return saved,window
+
+    def inspect(self,saved,window,expected=None):
+        with patch.object(gates,'helper',return_value=saved):
+            return gates.request_evidence('not-run',PLAN_PATH,self.root/'journal','G0',window,expected)
+
+    def test_E15_absent_request_STOP_no_live_send(self):
+        _,window=self.request_fixture()
+        with self.assertRaisesRegex(p.Stop,'RequestEvidence absent'):
+            self.inspect({},window)
+        self.assertFalse((self.root/'journal').exists())
+
+    def test_E16_duplicate_request_parser_error_STOP(self):
+        _,window=self.request_fixture()
+        import subprocess
+        with patch.object(gates,'helper',side_effect=subprocess.CalledProcessError(1,'Rust inspect-request')):
+            with self.assertRaises(subprocess.CalledProcessError):
+                gates.request_evidence('not-run',PLAN_PATH,self.root/'journal','G0',window)
+
+    def test_E17_journal_controller_hash_mismatch_STOP(self):
+        saved,window=self.request_fixture()
+        for field in ('proposal_request_sha256','provider_body_sha256'):
+            expected=copy.deepcopy(saved);expected[field]='sha256:'+'c'*64
+            with self.subTest(field=field),self.assertRaisesRegex(p.Stop,'evidence mismatch'):
+                self.inspect(saved,window,expected)
+
+    def test_E18_timeout_formula_and_bounds(self):
+        saved,window=self.request_fixture()
+        self.assertEqual(self.inspect(saved,window),saved)
+        for timeout in (0,30001,29500,1,True):
+            changed={**saved,'timeout_ms':timeout}
+            with self.subTest(timeout=timeout),self.assertRaises(p.Stop):
+                self.inspect(changed,window)
+
+    def test_E19_restart_request_event_increase_STOP(self):
+        before={'cells':{'G5':{'request':self.request_fixture()[0],'response':{}}},'stopped':False}
+        gates.unchanged_after_restart(before,copy.deepcopy(before))
+        after=copy.deepcopy(before);after['cells']['second']={}
+        with self.assertRaisesRegex(p.Stop,'restart changed'):
+            gates.unchanged_after_restart(before,after)
 
     def test_ordered_A_through_M_offline(self):
         result=self.world('valid')
         self.assertEqual(result[3]['trace'],list('ABCDEFGHIJKLM'))
-        self.assertFalse(result[3]['execution_ready'])
+        self.assertTrue(result[3]['execution_ready'])
 
     def test_no_key_inspection_or_model_transport(self):
         for file in (ROOT/'scripts/acceptance/proposal/execution').glob('*.py'):
