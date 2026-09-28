@@ -1,0 +1,712 @@
+{
+  "schema": "ato.formation-efficacy-preregistration/1",
+  "experiment": "E2",
+  "registered_date": "2026-09-28",
+  "ato_main": "34c2ef2a8882f6fc53438c1e0f1722b240ed3d6e",
+  "api_main": "f7d866cbef7768f67b46840766497fbf806640fe",
+  "evaluation_base_merge": "34c2ef2a8882f6fc53438c1e0f1722b240ed3d6e",
+  "harness_commit": "7ef79ff5ea87b974c7cd61dbf64381ab681c536d",
+  "model": "jev-1.13.0",
+  "model_pin": "ATO_GENERATION_JEV_MODEL is set to this exact value for both B and C; a model change requires a new preregistration",
+  "prompts": {
+    "ato.formation-generation-prompt/2": {
+      "sha256": "0c2e571364a0c2d5ca85203cfc832eb22decd92aa63fdbc18d6d639eb2028979",
+      "bytes": 893,
+      "arm": "B"
+    },
+    "ato.formation-generation-prompt/3": {
+      "sha256": "55dc35c0c1a870477f1bfbc50bb6a7ce88ec8fa6c434f14980d278ef2518ffc0",
+      "bytes": 867,
+      "arm": "C"
+    }
+  },
+  "cells": 72,
+  "max_model_calls": 48,
+  "model_call_arms": [
+    "B",
+    "C"
+  ],
+  "retry": false,
+  "case_count": 12,
+  "permutations": 2,
+  "opaque_ids": [
+    "k4",
+    "v9"
+  ],
+  "arms": [
+    "A",
+    "B",
+    "C"
+  ],
+  "arm_definitions": {
+    "A": {
+      "provider": "deterministic_v2",
+      "point": "ato.formation-generation-point/3",
+      "context": "ato.formation-generation-context/2",
+      "prompt": null,
+      "model_calls": 0,
+      "selector": {
+        "version": "efficacy-selector/2",
+        "recorded_model": "deterministic-selector-v2",
+        "inputs": "closed typed context/2 entry summaries only (opaque id, language, size_bucket, source_scan, encoding, delegation, imports, frameworks, functions, classes, main_guard, server_listen, custom_http_handler)",
+        "rule": "score = 4*custom_http_handler + 2*server_listen + 2*(delegation==python_main) + 1*(any import marker in {http_server,flask,fastapi,uvicorn,aiohttp,tornado,wsgiref,django}) + 1*main_guard",
+        "decline_threshold": "score <= 0 declines",
+        "tie_break": "descending score, then ascending opaque ID",
+        "excluded": "encoding and source_scan are provenance and add no score; no source bytes, paths, filenames, oracle labels or outcome feedback"
+      },
+      "production_default": false
+    },
+    "B": {
+      "provider": "jev_v2",
+      "point": "ato.formation-generation-point/2",
+      "context": "ato.formation-generation-context/1",
+      "prompt": "ato.formation-generation-prompt/2",
+      "model": "jev-1.13.0"
+    },
+    "C": {
+      "provider": "jev_v3",
+      "point": "ato.formation-generation-point/3",
+      "context": "ato.formation-generation-context/2",
+      "prompt": "ato.formation-generation-prompt/3",
+      "model": "jev-1.13.0"
+    }
+  },
+  "cell_order": "case ascending C01..P03; permutation0 arms A,B,C; permutation1 arms C,B,A",
+  "cell_keys": [
+    "C01p0A",
+    "C01p0B",
+    "C01p0C",
+    "C01p1C",
+    "C01p1B",
+    "C01p1A",
+    "C02p0A",
+    "C02p0B",
+    "C02p0C",
+    "C02p1C",
+    "C02p1B",
+    "C02p1A",
+    "C03p0A",
+    "C03p0B",
+    "C03p0C",
+    "C03p1C",
+    "C03p1B",
+    "C03p1A",
+    "C04p0A",
+    "C04p0B",
+    "C04p0C",
+    "C04p1C",
+    "C04p1B",
+    "C04p1A",
+    "D01p0A",
+    "D01p0B",
+    "D01p0C",
+    "D01p1C",
+    "D01p1B",
+    "D01p1A",
+    "D02p0A",
+    "D02p0B",
+    "D02p0C",
+    "D02p1C",
+    "D02p1B",
+    "D02p1A",
+    "D03p0A",
+    "D03p0B",
+    "D03p0C",
+    "D03p1C",
+    "D03p1B",
+    "D03p1A",
+    "L01p0A",
+    "L01p0B",
+    "L01p0C",
+    "L01p1C",
+    "L01p1B",
+    "L01p1A",
+    "L02p0A",
+    "L02p0B",
+    "L02p0C",
+    "L02p1C",
+    "L02p1B",
+    "L02p1A",
+    "P01p0A",
+    "P01p0B",
+    "P01p0C",
+    "P01p1C",
+    "P01p1B",
+    "P01p1A",
+    "P02p0A",
+    "P02p0B",
+    "P02p0C",
+    "P02p1C",
+    "P02p1B",
+    "P02p1A",
+    "P03p0A",
+    "P03p0B",
+    "P03p0C",
+    "P03p1C",
+    "P03p1B",
+    "P03p1A"
+  ],
+  "comparisons": {
+    "A_vs_C": "fixed closed-rule value: same-K success of the deterministic context/2 selector vs context/2 prompt/3 model",
+    "B_vs_C": "c0/c1 intervention effect: identical model, point/2+context/1+prompt/2 vs point/3+context/2+prompt/3"
+  },
+  "known_derivations_per_cell": 1,
+  "max_attempts": 2,
+  "budget": {
+    "deadline_seconds": 604800,
+    "max_transfer_bytes": 10737418240,
+    "max_expanded_bytes": 10737418240,
+    "max_stored_bytes": 10737418240
+  },
+  "max_generations": 1,
+  "generation_timeout_ms": 30000,
+  "provider_timeout_ms": 20000,
+  "harness_settle_seconds": 180,
+  "harness_wait_seconds": 240,
+  "success_definition": "actual generated D -> actual Runtime execution -> fresh receipt -> same frozen effective K -> fully_satisfied=true -> requester acceptance; model choice, admission and HTTP startup alone are not success",
+  "completeness_rule": "recorded cell-key set must equal the preregistered cell_keys set exactly; count-only matching, duplicate, unknown or substituted cells are errors",
+  "gate": {
+    "complete_exact_cell_set": true,
+    "C_same_k_successes_must_exceed_A": true,
+    "C_same_k_successes_must_exceed_B": true,
+    "minimum_cases_C_pass_both_permutations_A_fail_both": 2,
+    "minimum_cases_C_pass_both_permutations_B_fail_both": 2,
+    "zero_authority_K_UNKNOWN_permission_Runtime_escapes": true,
+    "zero_repeated_model_calls": true,
+    "no_rescue_by_speed_or_cost": true
+  },
+  "artifacts": {
+    "requester": "13953505b274c894f1b218d957ad18f8863bafa6907f65c8fedf4d10bc9b286d",
+    "runtime": "38c8c14f0350c1a0c0ad9667486d28ab6a850fb6a43f41640c080378b0a4e0e6",
+    "wasm": "75b3a0d0aaf062e151e837a070423f5fc07bf9f94837e6a7b08e61fe0fed758b",
+    "note": "measured on binaries built from harness_commit source in this checkout; a rebuilt artifact with different bytes requires a prospective amendment before any cell or oracle run"
+  },
+  "code_sha256": {
+    "scripts/acceptance/formation-generation-efficacy-e2.py": "6c711818b3d283395a32e06f2db6981fb02ef268b5fc58211409b1a02316d8eb",
+    "scripts/acceptance/efficacy/e2_fixtures.py": "9c514bd7e805c9bb74f142d6e2b0e8a4c419e484c6ec492136be5b0e7dc54a81",
+    "scripts/acceptance/efficacy/e2_analyze.py": "84d2bea6d612f20c09eed27f7ce7fc516200a3dac0612a47ebec522e0b859ce0",
+    "scripts/acceptance/efficacy/test_e2_fixtures.py": "0d4b75c0aaeec6ef407c75713dea8ef2d5864ffd6f69e773becebdfeb3ed5ee8",
+    "scripts/acceptance/efficacy/test_e2_analyze.py": "a7da009d6ec4a940bd74da54da42bb7a2fa214580de0b278ea6c5e72116dbfa7",
+    "scripts/acceptance/formation-generation-context.py": "b8032884ca82772c55517357fc142a069dc85e2c559ea1de10d9bb29ccf5d2fa",
+    "scripts/acceptance/formation-typed-generation.py": "4bd833a43eed715bfd86706f87ee77a5c1c98906e56dffcf4f4daa2d177602b8",
+    "scripts/acceptance/formation-stage4-search.py": "86c45a5ece25e82f11aeab9fbc97928e9e391659c39a7962aa6039ac256cc7b7",
+    "apps/formation-worker/examples/formation_search.rs": "436451d7d7ca357040bc74d082721a2359c88aff2c8d21459e87da7b7c5727b7",
+    "apps/formation-worker/src/generation_provider.rs": "f0a6e09ea922db02395a76fe013222661d3ef2549619434d504c1ae05c8954a4",
+    "apps/formation-worker/src/runtime_network.rs": "b1e6e5103ca6aafc970c425dc4c1cfd79bde503e08c9e07d66b3ec31154352bd",
+    "lib/formation/src/generation_context.rs": "dbc1fd6cd5cc696b5c9078cb4d9c144c6884b841a6718d038ffd0148ce19bb63",
+    "lib/formation/src/generation_context/v2.rs": "e5be8d91e7cd98431f0aad02c519809ebd2dd969b8d77ca31f04d65d038eeb3f",
+    "lib/formation/tests/generation_context_v2.rs": "bb814306bc4a01e3ed8895630390df3f98e9de4b3414bab1d1acb116ee50dcb8"
+  },
+  "holdout": {
+    "families": {
+      "C": "control: context/1-identifiable (C01), both-valid (C02), both-invalid (C03), intentionally indistinguishable (C04)",
+      "D": "delegation generalization: runpy wrapper positive, HTTP-looking negative; no E04 byte copy",
+      "L": "explicit supported Latin-1 positive, plausible negative; no E07 byte pattern reuse",
+      "P": "bounded prefix >64KiB positive evidence in first 64KiB, harmless suffix, plausible decoy; no E06 byte copy"
+    },
+    "e1_fixtures": "E1 cases including E04/E06/E07 are development evidence and are never used in E2 numerators or denominators; kept for historical/privacy/regression use only",
+    "fixture_independence": "fixture bytes never branch on arm or expected selector outcome; permutations only swap the file each opaque ID maps to"
+  },
+  "oracle": {
+    "model_calls": 0,
+    "required_before_any_model_call": true,
+    "stop_on_failure": true,
+    "purpose": "verify intended positive/negative labels against the actual Runtime under the same frozen K before the primary run; failures stop the run and require a new commit, never silent continuation",
+    "cells": [
+      {
+        "case": "C01",
+        "permutation": 0,
+        "provider": "fixed:k4",
+        "draft_entrypoint_id": "k4",
+        "mapped_file": "candidate_0.py",
+        "expected_fully_satisfied": true
+      },
+      {
+        "case": "C01",
+        "permutation": 0,
+        "provider": "fixed:v9",
+        "draft_entrypoint_id": "v9",
+        "mapped_file": "candidate_1.py",
+        "expected_fully_satisfied": false
+      },
+      {
+        "case": "C02",
+        "permutation": 0,
+        "provider": "fixed:k4",
+        "draft_entrypoint_id": "k4",
+        "mapped_file": "candidate_0.py",
+        "expected_fully_satisfied": true
+      },
+      {
+        "case": "C02",
+        "permutation": 0,
+        "provider": "fixed:v9",
+        "draft_entrypoint_id": "v9",
+        "mapped_file": "candidate_1.py",
+        "expected_fully_satisfied": true
+      },
+      {
+        "case": "C03",
+        "permutation": 0,
+        "provider": "fixed:k4",
+        "draft_entrypoint_id": "k4",
+        "mapped_file": "candidate_0.py",
+        "expected_fully_satisfied": false
+      },
+      {
+        "case": "C03",
+        "permutation": 0,
+        "provider": "fixed:v9",
+        "draft_entrypoint_id": "v9",
+        "mapped_file": "candidate_1.py",
+        "expected_fully_satisfied": false
+      },
+      {
+        "case": "C04",
+        "permutation": 0,
+        "provider": "fixed:k4",
+        "draft_entrypoint_id": "k4",
+        "mapped_file": "candidate_0.py",
+        "expected_fully_satisfied": true
+      },
+      {
+        "case": "C04",
+        "permutation": 0,
+        "provider": "fixed:v9",
+        "draft_entrypoint_id": "v9",
+        "mapped_file": "candidate_1.py",
+        "expected_fully_satisfied": false
+      },
+      {
+        "case": "D01",
+        "permutation": 0,
+        "provider": "fixed:k4",
+        "draft_entrypoint_id": "k4",
+        "mapped_file": "candidate_0.py",
+        "expected_fully_satisfied": true
+      },
+      {
+        "case": "D01",
+        "permutation": 0,
+        "provider": "fixed:v9",
+        "draft_entrypoint_id": "v9",
+        "mapped_file": "candidate_1.py",
+        "expected_fully_satisfied": false
+      },
+      {
+        "case": "D02",
+        "permutation": 0,
+        "provider": "fixed:k4",
+        "draft_entrypoint_id": "k4",
+        "mapped_file": "candidate_0.py",
+        "expected_fully_satisfied": true
+      },
+      {
+        "case": "D02",
+        "permutation": 0,
+        "provider": "fixed:v9",
+        "draft_entrypoint_id": "v9",
+        "mapped_file": "candidate_1.py",
+        "expected_fully_satisfied": false
+      },
+      {
+        "case": "D03",
+        "permutation": 0,
+        "provider": "fixed:k4",
+        "draft_entrypoint_id": "k4",
+        "mapped_file": "candidate_0.py",
+        "expected_fully_satisfied": true
+      },
+      {
+        "case": "D03",
+        "permutation": 0,
+        "provider": "fixed:v9",
+        "draft_entrypoint_id": "v9",
+        "mapped_file": "candidate_1.py",
+        "expected_fully_satisfied": false
+      },
+      {
+        "case": "L01",
+        "permutation": 0,
+        "provider": "fixed:k4",
+        "draft_entrypoint_id": "k4",
+        "mapped_file": "candidate_0.py",
+        "expected_fully_satisfied": true
+      },
+      {
+        "case": "L01",
+        "permutation": 0,
+        "provider": "fixed:v9",
+        "draft_entrypoint_id": "v9",
+        "mapped_file": "candidate_1.py",
+        "expected_fully_satisfied": false
+      },
+      {
+        "case": "L02",
+        "permutation": 0,
+        "provider": "fixed:k4",
+        "draft_entrypoint_id": "k4",
+        "mapped_file": "candidate_0.py",
+        "expected_fully_satisfied": true
+      },
+      {
+        "case": "L02",
+        "permutation": 0,
+        "provider": "fixed:v9",
+        "draft_entrypoint_id": "v9",
+        "mapped_file": "candidate_1.py",
+        "expected_fully_satisfied": false
+      },
+      {
+        "case": "P01",
+        "permutation": 0,
+        "provider": "fixed:k4",
+        "draft_entrypoint_id": "k4",
+        "mapped_file": "candidate_0.py",
+        "expected_fully_satisfied": true
+      },
+      {
+        "case": "P01",
+        "permutation": 0,
+        "provider": "fixed:v9",
+        "draft_entrypoint_id": "v9",
+        "mapped_file": "candidate_1.py",
+        "expected_fully_satisfied": false
+      },
+      {
+        "case": "P02",
+        "permutation": 0,
+        "provider": "fixed:k4",
+        "draft_entrypoint_id": "k4",
+        "mapped_file": "candidate_0.py",
+        "expected_fully_satisfied": true
+      },
+      {
+        "case": "P02",
+        "permutation": 0,
+        "provider": "fixed:v9",
+        "draft_entrypoint_id": "v9",
+        "mapped_file": "candidate_1.py",
+        "expected_fully_satisfied": false
+      },
+      {
+        "case": "P03",
+        "permutation": 0,
+        "provider": "fixed:k4",
+        "draft_entrypoint_id": "k4",
+        "mapped_file": "candidate_0.py",
+        "expected_fully_satisfied": true
+      },
+      {
+        "case": "P03",
+        "permutation": 0,
+        "provider": "fixed:v9",
+        "draft_entrypoint_id": "v9",
+        "mapped_file": "candidate_1.py",
+        "expected_fully_satisfied": false
+      }
+    ],
+    "procedure": "permutation0 mapping, fixed owner-authorized drafts (fixed:k4, fixed:v9), same frozen source digests, original K, two-attempt budget, pinned requester/Runtime/WASM; actual Runtime -> fresh fully_satisfied receipt -> requester acceptance is compared to expected_fully_satisfied",
+    "negative_expectations": "expected_fully_satisfied=false cells verify the negative candidate really fails K within case semantics"
+  },
+  "protocol_deviations": {
+    "policy": "harness/comparator bugs, environment problems and provider outages stop the run; the observed ledger stays immutable; a prospective amendment commit may continue only unvisited cells; visited/reserved model cells are never re-run, even after a lost response",
+    "persistent_reservations": "a .reserved marker is written before the requester starts for every cell and is never removed; the exclusive output directory is created once with no resume"
+  },
+  "historical_preservation": {
+    "e1": "E1 preregistration/amendment/reservations/observations/results/summary/oracle and c0 offline observations are unchanged; E1 remains B 9/20, C 2/20, robust additional 0, efficacy gate unmet; 5b stays In progress",
+    "namespace": "formation-efficacy-e2-*"
+  },
+  "fixtures": {
+    "C01": {
+      "files": {
+        "app.py": "f6e8110ef4e68613eca4c131a61a08be7cc94a254e6ce5e02fefd2a5b6c5b45e",
+        "bad.py": "801967341a36283cd7046c80737f8cc6f5413a8b3f3ef93ff9d9e1a6dce69277",
+        "candidate_0.py": "4c00849900901797d1dbdc34a670aa161aff97b0224bb206d9353a920b80a523",
+        "candidate_1.py": "461336b6164a3dd3420d0b19625298bf8e20a31b2a9b95eb5db9a20b1308c08b",
+        "capsule.toml": "6058ddc619885c98d6ae0f79dafed6f5b269829ed0c3d2c6b153dbdd08a030c2",
+        "index.html": "99328877aa0b7dd171d2fe10574036ca85dec1931465277930678bdc05125793",
+        "private-source.txt": "320eae87142306eec04a997a3f783c8cab19a620ff92e06e04f9512676b0be9c"
+      },
+      "correct_candidate_indices": [
+        0
+      ],
+      "permutations": [
+        {
+          "k4": "candidate_0.py",
+          "v9": "candidate_1.py"
+        },
+        {
+          "k4": "candidate_1.py",
+          "v9": "candidate_0.py"
+        }
+      ]
+    },
+    "C02": {
+      "files": {
+        "app.py": "f6e8110ef4e68613eca4c131a61a08be7cc94a254e6ce5e02fefd2a5b6c5b45e",
+        "bad.py": "801967341a36283cd7046c80737f8cc6f5413a8b3f3ef93ff9d9e1a6dce69277",
+        "candidate_0.py": "57d7d78efddc61f4144a384f9526ccbde13fe4c7183b6b5d795b5646e6958e40",
+        "candidate_1.py": "bd9e13157768ce2ae975a210752b55ccb2f20387dbbf635aa54e086bf4914bbf",
+        "capsule.toml": "6058ddc619885c98d6ae0f79dafed6f5b269829ed0c3d2c6b153dbdd08a030c2",
+        "index.html": "99328877aa0b7dd171d2fe10574036ca85dec1931465277930678bdc05125793",
+        "private-source.txt": "320eae87142306eec04a997a3f783c8cab19a620ff92e06e04f9512676b0be9c"
+      },
+      "correct_candidate_indices": [
+        0,
+        1
+      ],
+      "permutations": [
+        {
+          "k4": "candidate_0.py",
+          "v9": "candidate_1.py"
+        },
+        {
+          "k4": "candidate_1.py",
+          "v9": "candidate_0.py"
+        }
+      ]
+    },
+    "C03": {
+      "files": {
+        "app.py": "f6e8110ef4e68613eca4c131a61a08be7cc94a254e6ce5e02fefd2a5b6c5b45e",
+        "bad.py": "801967341a36283cd7046c80737f8cc6f5413a8b3f3ef93ff9d9e1a6dce69277",
+        "candidate_0.py": "95c5fb9ef4a4bb8dba9514ebbd66d43eb1c692e34bb6f28fdea55d882ea619c2",
+        "candidate_1.py": "461336b6164a3dd3420d0b19625298bf8e20a31b2a9b95eb5db9a20b1308c08b",
+        "capsule.toml": "6058ddc619885c98d6ae0f79dafed6f5b269829ed0c3d2c6b153dbdd08a030c2",
+        "index.html": "99328877aa0b7dd171d2fe10574036ca85dec1931465277930678bdc05125793",
+        "private-source.txt": "320eae87142306eec04a997a3f783c8cab19a620ff92e06e04f9512676b0be9c"
+      },
+      "correct_candidate_indices": [],
+      "permutations": [
+        {
+          "k4": "candidate_0.py",
+          "v9": "candidate_1.py"
+        },
+        {
+          "k4": "candidate_1.py",
+          "v9": "candidate_0.py"
+        }
+      ]
+    },
+    "C04": {
+      "files": {
+        "app.py": "f6e8110ef4e68613eca4c131a61a08be7cc94a254e6ce5e02fefd2a5b6c5b45e",
+        "bad.py": "801967341a36283cd7046c80737f8cc6f5413a8b3f3ef93ff9d9e1a6dce69277",
+        "candidate_0.py": "d4966271432db3cedfdef66d549737f38e82b5ab9f44ae86291efb6b7640c32c",
+        "candidate_1.py": "6359289b8e50b6627e0c8a4946fadb9df1d17ead9d62566195042bcfdbcbf4c4",
+        "capsule.toml": "6058ddc619885c98d6ae0f79dafed6f5b269829ed0c3d2c6b153dbdd08a030c2",
+        "index.html": "99328877aa0b7dd171d2fe10574036ca85dec1931465277930678bdc05125793",
+        "private-source.txt": "320eae87142306eec04a997a3f783c8cab19a620ff92e06e04f9512676b0be9c"
+      },
+      "correct_candidate_indices": [
+        0
+      ],
+      "permutations": [
+        {
+          "k4": "candidate_0.py",
+          "v9": "candidate_1.py"
+        },
+        {
+          "k4": "candidate_1.py",
+          "v9": "candidate_0.py"
+        }
+      ]
+    },
+    "D01": {
+      "files": {
+        "app.py": "f6e8110ef4e68613eca4c131a61a08be7cc94a254e6ce5e02fefd2a5b6c5b45e",
+        "bad.py": "801967341a36283cd7046c80737f8cc6f5413a8b3f3ef93ff9d9e1a6dce69277",
+        "candidate_0.py": "0c499a0996a53d87b01b25df3f31ef7a568935a56ed8ca910731fd039707acad",
+        "candidate_1.py": "56ce78d7bcf145fea972f6065d16f87ae18dc439ac020a2798560c671fd6a292",
+        "capsule.toml": "6058ddc619885c98d6ae0f79dafed6f5b269829ed0c3d2c6b153dbdd08a030c2",
+        "index.html": "99328877aa0b7dd171d2fe10574036ca85dec1931465277930678bdc05125793",
+        "notes_app.py": "bee751fef54d898612efd3c31bb5634079047fc9efb2f7abe564fdac90839e4d",
+        "private-source.txt": "320eae87142306eec04a997a3f783c8cab19a620ff92e06e04f9512676b0be9c"
+      },
+      "correct_candidate_indices": [
+        0
+      ],
+      "permutations": [
+        {
+          "k4": "candidate_0.py",
+          "v9": "candidate_1.py"
+        },
+        {
+          "k4": "candidate_1.py",
+          "v9": "candidate_0.py"
+        }
+      ]
+    },
+    "D02": {
+      "files": {
+        "app.py": "f6e8110ef4e68613eca4c131a61a08be7cc94a254e6ce5e02fefd2a5b6c5b45e",
+        "bad.py": "801967341a36283cd7046c80737f8cc6f5413a8b3f3ef93ff9d9e1a6dce69277",
+        "candidate_0.py": "12c9f12fc03944954202a773b2c28cb161ea061ab0b4a0a523b41bc0f7ee7c7a",
+        "candidate_1.py": "253d2e4ae45c1fca99a938bb7fdc1d68b2d1182826ebc90b42f089952019b329",
+        "capsule.toml": "6058ddc619885c98d6ae0f79dafed6f5b269829ed0c3d2c6b153dbdd08a030c2",
+        "index.html": "99328877aa0b7dd171d2fe10574036ca85dec1931465277930678bdc05125793",
+        "private-source.txt": "320eae87142306eec04a997a3f783c8cab19a620ff92e06e04f9512676b0be9c",
+        "site_server.py": "9ca0ba382109d2d0f28c1916adf94d172bea5bd9f91b9cc9e718c6447747968d"
+      },
+      "correct_candidate_indices": [
+        0
+      ],
+      "permutations": [
+        {
+          "k4": "candidate_0.py",
+          "v9": "candidate_1.py"
+        },
+        {
+          "k4": "candidate_1.py",
+          "v9": "candidate_0.py"
+        }
+      ]
+    },
+    "D03": {
+      "files": {
+        "app.py": "f6e8110ef4e68613eca4c131a61a08be7cc94a254e6ce5e02fefd2a5b6c5b45e",
+        "bad.py": "801967341a36283cd7046c80737f8cc6f5413a8b3f3ef93ff9d9e1a6dce69277",
+        "candidate_0.py": "770cff6f9178c54e8fe6742ea7a073b1185b32530c71c982de4cb69340d18301",
+        "candidate_1.py": "1c5d2c53ac8d35647a9d1d15c5fe2436abbf10bec3af06da4cf0de7ec7b13340",
+        "capsule.toml": "6058ddc619885c98d6ae0f79dafed6f5b269829ed0c3d2c6b153dbdd08a030c2",
+        "health_service.py": "400b5ab13b8737191dfbfe02abf68d11f28da935d9ce5ad12d9830ea58339c1b",
+        "index.html": "99328877aa0b7dd171d2fe10574036ca85dec1931465277930678bdc05125793",
+        "private-source.txt": "320eae87142306eec04a997a3f783c8cab19a620ff92e06e04f9512676b0be9c"
+      },
+      "correct_candidate_indices": [
+        0
+      ],
+      "permutations": [
+        {
+          "k4": "candidate_0.py",
+          "v9": "candidate_1.py"
+        },
+        {
+          "k4": "candidate_1.py",
+          "v9": "candidate_0.py"
+        }
+      ]
+    },
+    "L01": {
+      "files": {
+        "app.py": "f6e8110ef4e68613eca4c131a61a08be7cc94a254e6ce5e02fefd2a5b6c5b45e",
+        "bad.py": "801967341a36283cd7046c80737f8cc6f5413a8b3f3ef93ff9d9e1a6dce69277",
+        "candidate_0.py": "99d545f8f2ce5c95c86e5a6482ba20d77293e96858148840a0cb18bb8792867c",
+        "candidate_1.py": "253d2e4ae45c1fca99a938bb7fdc1d68b2d1182826ebc90b42f089952019b329",
+        "capsule.toml": "6058ddc619885c98d6ae0f79dafed6f5b269829ed0c3d2c6b153dbdd08a030c2",
+        "index.html": "99328877aa0b7dd171d2fe10574036ca85dec1931465277930678bdc05125793",
+        "private-source.txt": "320eae87142306eec04a997a3f783c8cab19a620ff92e06e04f9512676b0be9c"
+      },
+      "correct_candidate_indices": [
+        0
+      ],
+      "permutations": [
+        {
+          "k4": "candidate_0.py",
+          "v9": "candidate_1.py"
+        },
+        {
+          "k4": "candidate_1.py",
+          "v9": "candidate_0.py"
+        }
+      ]
+    },
+    "L02": {
+      "files": {
+        "app.py": "f6e8110ef4e68613eca4c131a61a08be7cc94a254e6ce5e02fefd2a5b6c5b45e",
+        "bad.py": "801967341a36283cd7046c80737f8cc6f5413a8b3f3ef93ff9d9e1a6dce69277",
+        "candidate_0.py": "3b3666246b1b30bdf9de29d53014b7809988d8e223df225039ae9c34f541cff0",
+        "candidate_1.py": "1c5d2c53ac8d35647a9d1d15c5fe2436abbf10bec3af06da4cf0de7ec7b13340",
+        "capsule.toml": "6058ddc619885c98d6ae0f79dafed6f5b269829ed0c3d2c6b153dbdd08a030c2",
+        "index.html": "99328877aa0b7dd171d2fe10574036ca85dec1931465277930678bdc05125793",
+        "private-source.txt": "320eae87142306eec04a997a3f783c8cab19a620ff92e06e04f9512676b0be9c"
+      },
+      "correct_candidate_indices": [
+        0
+      ],
+      "permutations": [
+        {
+          "k4": "candidate_0.py",
+          "v9": "candidate_1.py"
+        },
+        {
+          "k4": "candidate_1.py",
+          "v9": "candidate_0.py"
+        }
+      ]
+    },
+    "P01": {
+      "files": {
+        "app.py": "f6e8110ef4e68613eca4c131a61a08be7cc94a254e6ce5e02fefd2a5b6c5b45e",
+        "bad.py": "801967341a36283cd7046c80737f8cc6f5413a8b3f3ef93ff9d9e1a6dce69277",
+        "candidate_0.py": "34db5aa9bd628fd4eee8a39236b1925c34c5296b83e92691bd4a3d9372ff9633",
+        "candidate_1.py": "e2f8ce794423a9e7a209b2128e1ed7823d1faa34b600dfae88953ef72947549f",
+        "capsule.toml": "6058ddc619885c98d6ae0f79dafed6f5b269829ed0c3d2c6b153dbdd08a030c2",
+        "index.html": "99328877aa0b7dd171d2fe10574036ca85dec1931465277930678bdc05125793",
+        "private-source.txt": "320eae87142306eec04a997a3f783c8cab19a620ff92e06e04f9512676b0be9c"
+      },
+      "correct_candidate_indices": [
+        0
+      ],
+      "permutations": [
+        {
+          "k4": "candidate_0.py",
+          "v9": "candidate_1.py"
+        },
+        {
+          "k4": "candidate_1.py",
+          "v9": "candidate_0.py"
+        }
+      ]
+    },
+    "P02": {
+      "files": {
+        "app.py": "f6e8110ef4e68613eca4c131a61a08be7cc94a254e6ce5e02fefd2a5b6c5b45e",
+        "bad.py": "801967341a36283cd7046c80737f8cc6f5413a8b3f3ef93ff9d9e1a6dce69277",
+        "candidate_0.py": "bff004ff6a07c8f5adcb5b3ea54d17cbae14daeb0d2d3a4c6515b2adcbb68657",
+        "candidate_1.py": "56ce78d7bcf145fea972f6065d16f87ae18dc439ac020a2798560c671fd6a292",
+        "capsule.toml": "6058ddc619885c98d6ae0f79dafed6f5b269829ed0c3d2c6b153dbdd08a030c2",
+        "index.html": "99328877aa0b7dd171d2fe10574036ca85dec1931465277930678bdc05125793",
+        "private-source.txt": "320eae87142306eec04a997a3f783c8cab19a620ff92e06e04f9512676b0be9c"
+      },
+      "correct_candidate_indices": [
+        0
+      ],
+      "permutations": [
+        {
+          "k4": "candidate_0.py",
+          "v9": "candidate_1.py"
+        },
+        {
+          "k4": "candidate_1.py",
+          "v9": "candidate_0.py"
+        }
+      ]
+    },
+    "P03": {
+      "files": {
+        "app.py": "f6e8110ef4e68613eca4c131a61a08be7cc94a254e6ce5e02fefd2a5b6c5b45e",
+        "bad.py": "801967341a36283cd7046c80737f8cc6f5413a8b3f3ef93ff9d9e1a6dce69277",
+        "candidate_0.py": "ebb8fa0ff9243b2fbf482dd4cf2ce9964359311ae56246b1bddd4428e14acfb2",
+        "candidate_1.py": "6b64df382dd849fe1e9ac3bb6405b8fad9772371e8b9a1cb8a8a3186277cfbf7",
+        "capsule.toml": "6058ddc619885c98d6ae0f79dafed6f5b269829ed0c3d2c6b153dbdd08a030c2",
+        "index.html": "99328877aa0b7dd171d2fe10574036ca85dec1931465277930678bdc05125793",
+        "private-source.txt": "320eae87142306eec04a997a3f783c8cab19a620ff92e06e04f9512676b0be9c"
+      },
+      "correct_candidate_indices": [
+        0
+      ],
+      "permutations": [
+        {
+          "k4": "candidate_0.py",
+          "v9": "candidate_1.py"
+        },
+        {
+          "k4": "candidate_1.py",
+          "v9": "candidate_0.py"
+        }
+      ]
+    }
+  }
+}
