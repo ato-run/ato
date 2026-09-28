@@ -179,15 +179,16 @@ class LossProxy(http.server.BaseHTTPRequestHandler):
                 body+=self.rfile.read(n);self.rfile.read(2)
         headers={k:v for k,v in self.headers.items() if k.lower() not in ['host','connection','transfer-encoding','content-length']}
         headers['content-length']=str(len(body));conn=http.client.HTTPConnection('127.0.0.1',19544,timeout=60)
-        conn.request(self.command,self.path,body,headers);r=conn.getresponse();data=r.read();status=r.status;response_headers=r.getheaders();conn.close()
+        conn.request(self.command,self.path,body,headers);r=conn.getresponse();data=r.read();status=r.status;conn.close()
         with self.server.lock:
             lose=self.path.endswith(self.server.suffix) and status==200 and not self.server.dropped
             if lose:self.server.dropped=True;self.server.event.set()
         if lose:
             self.connection.shutdown(socket.SHUT_RDWR);self.connection.close();return
         self.send_response(status)
-        for k,v in response_headers:
-            if k.lower() not in ['content-length','connection','transfer-encoding']:self.send_header(k,v)
+        # This proxy serves only JSON API responses. Never propagate upstream
+        # header names or values into the downstream HTTP response.
+        self.send_header('Content-Type','application/json')
         self.send_header('Content-Length',str(len(data)));self.end_headers()
         try:self.wfile.write(data)
         except (BrokenPipeError,ConnectionResetError):
