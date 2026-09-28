@@ -106,7 +106,8 @@ D1 API #701 merged at `9fa4be45adf7dbda1fa68689c365a1806921569f`;
 D2-A ato #1426 at `c4bb53564669065aa6c47d1ed283e02ac6fa68ae`;
 D2-B API #703 at `38668a97e7632256b33074b0d223670c16b76bfd`.
 D2-C is the [requester-owned DeepSeek adapter](FORMATION_DEEPSEEK_REQUESTER.md),
-implemented and mock-integration verified, not merged/deployed. No live model
+implemented and mock-integration verified; #1427 merged at
+`8980ab8aef353cd5e33dadce4a8dbf7367f4afa2`, not deployed. No live model
 calls or G0–G5 acceptance yet; D3 needs a separately approved preregistration.
 The receiver-first merge order is preserved. PR D separately adds a general LLM adapter and source-context
 opt-in after fixed-producer acceptance. Migrations, deployments and model calls
