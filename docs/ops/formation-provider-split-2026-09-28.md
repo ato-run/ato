@@ -149,3 +149,21 @@ Next: finish original-document correspondence; implement PR C durable receiver
 and immutable source/requester integration in PR B; run fixed-producer actual
 P0–P11 before declaring the full path complete. Merge receiver before requester
 only after explicit approval. Keep live LLM adapter in separate PR D.
+
+## CI observation (not a local regression result)
+
+[PR A Rust CI run 36368536659](https://github.com/ato-run/ato/actions/runs/36368536659)
+failed after actual steps ran; this is **not** a billing/spending-limit exception.
+Logs identify Windows `browser_sandbox.rs` Unix-only imports, Ubuntu
+`hosted_python_and_node_use_the_common_process_runtime`, and macOS CLI
+`a_process_run_is_owned_by_its_run_until_stopped` plus five
+`hosted_validator_verification` tests (candidate never listened).
+These paths were not edited by PR A. An equivalent baseline CI reproduction
+has not been performed here, so this record does not assert the failures are
+proven pre-existing, nor mark CI green. No skips/fixes/reruns were added.
+PR B checks were still running at the last observation; only local results
+above are confirmed. Both PRs remain Draft and unmerged.
+
+PR B: [#1423](https://github.com/ato-run/ato/pull/1423), base PR A branch.
+Local WASM compile artifact SHA-256 (not installed into ato-api):
+`6a689cacbbe77ed7c171e02018e9058960bb635748c39c555f09482d454d8c84`.
