@@ -1,17 +1,24 @@
-//! Explicit, fixed-producer requester integration. The receiver grants a call;
+//! Explicit, bounded requester integration. The receiver grants a call;
 //! neither its saved candidates nor its compiler verdict grant receipt authority.
+pub mod budget;
+pub mod deepseek;
+pub mod provenance;
+
 use super::*;
 use ato_formation::{
     authoring::BoundContract,
     generation_context::{project_failures, project_inspections},
     proposal::{
-        CandidateProducer, CandidateRegistry, PROPOSAL_REQUEST_SCHEMA, ProducerError,
-        ProducerOutput, ProducerProvenance, ProposalAuthorization, ProposalBudget, ProposalOutcome,
-        ProposalRequest,
+        AuthorizedSourceText, CandidateProducer, CandidateRegistry, PROPOSAL_REQUEST_SCHEMA,
+        ProducerError, ProducerOutput, ProducerProvenance, ProposalAuthorization, ProposalBudget,
+        ProposalOutcome, ProposalRequest, ProposalRequestV2, ProposalRequestV2Schema,
+        SourceContextEntry, SourceContextKind, build_source_context,
     },
     search::{FrozenSearchV1, InitialSource, SearchStateV1},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use deepseek::{DeepSeekCandidateProducer, GeneralFailure, GeneralOutput};
+use provenance::{CallStatus, ErrorClass, ProviderCall, ProviderIdentity};
 use serde_json::{Value, json};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -21,6 +28,9 @@ pub(super) struct RequesterProposal {
     attempted_claim: bool,
     accepted_round: Option<Value>,
     recipes: BTreeMap<String, String>,
+    source_context: Vec<SourceContextEntry>,
+    provider_identity: Option<ProviderIdentity>,
+    observed_call: Option<ProviderCall>,
 }
 
 /// No preset, route or placeholder D is planned. K is supplied explicitly by
@@ -144,6 +154,44 @@ impl Submission {
                 "module entrypoint is not in frozen source"
             );
         }
+        // Read only the independent digest-verified extraction, never the user's
+        // mutable working tree. No read/crawl at all when source text is disabled.
+        let source_context = if authorization.policy.allow_source_text {
+            let mut texts = Vec::new();
+            for (id, path) in &authorization.source_domain.entrypoints {
+                texts.push((
+                    SourceContextKind::Entrypoint,
+                    id.as_str(),
+                    std::fs::read(inventory.root.join(path))?,
+                ));
+            }
+            for (id, module) in &authorization.source_domain.modules {
+                let path = module.replace('.', "/");
+                let file = if files.contains(&format!("{path}.py")) {
+                    format!("{path}.py")
+                } else {
+                    format!("{path}/__main__.py")
+                };
+                texts.push((
+                    SourceContextKind::Module,
+                    id.as_str(),
+                    std::fs::read(inventory.root.join(file))?,
+                ));
+            }
+            build_source_context(
+                &authorization,
+                &texts
+                    .iter()
+                    .map(|(kind, id, bytes)| AuthorizedSourceText {
+                        kind: *kind,
+                        logical_id: id,
+                        bytes,
+                    })
+                    .collect::<Vec<_>>(),
+            )?
+        } else {
+            vec![]
+        };
         let mut request = self.request.clone();
         request.initial_source = Some(InitialSource {
             closure_ref: request.source.closure_ref.clone(),
@@ -163,6 +211,9 @@ impl Submission {
             attempted_claim: false,
             accepted_round: None,
             recipes: BTreeMap::new(),
+            source_context,
+            provider_identity: None,
+            observed_call: None,
         });
         self.request = request;
         Ok(())
@@ -265,6 +316,67 @@ impl Submission {
         })
     }
 
+    /// Pin the operational provider identity before sending or rehydrating a
+    /// general round. Restarts must supply the same explicit configuration.
+    pub fn configure_general_producer(&mut self, identity: ProviderIdentity) -> Result<()> {
+        identity.validate()?;
+        self.validate_proposal_submission()?;
+        let local = self
+            .proposal_state
+            .as_mut()
+            .context("producer not enabled")?;
+        anyhow::ensure!(
+            local
+                .frozen
+                .policy
+                .proposal
+                .as_ref()
+                .is_some_and(|a| a.policy.allow_source_text),
+            "source opt-in required"
+        );
+        anyhow::ensure!(
+            local
+                .provider_identity
+                .as_ref()
+                .is_none_or(|old| old == &identity),
+            "configured provider changed"
+        );
+        anyhow::ensure!(
+            !local.attempted_claim || local.provider_identity.as_ref() == Some(&identity),
+            "provider configured after claim"
+        );
+        local.provider_identity = Some(identity);
+        Ok(())
+    }
+    pub fn proposal_request_v2(&self, status: &Value) -> Result<ProposalRequestV2> {
+        let request = self.proposal_request(status)?;
+        let local = self
+            .proposal_state
+            .as_ref()
+            .context("producer not enabled")?;
+        let value = ProposalRequestV2 {
+            schema: ProposalRequestV2Schema::V2,
+            search_id: request.search_id,
+            frozen_contract: request.frozen_contract,
+            runtime_constraint: request.runtime_constraint,
+            known_derivations: request.known_derivations,
+            failure_evidence: request.failure_evidence,
+            inspection_evidence: request.inspection_evidence,
+            operation_catalog: request.operation_catalog,
+            remaining_budget: request.remaining_budget,
+            source_context: local.source_context.clone(),
+        };
+        value.validate(
+            local
+                .frozen
+                .policy
+                .proposal
+                .as_ref()
+                .context("policy missing")?,
+        )?;
+        Ok(value)
+    }
+
     /// Independently compile exact saved bytes before expanding receipt/recipe
     /// authorization. All comparisons finish before any local admission occurs.
     pub fn accept_proposal_round(&mut self, status: &Value) -> Result<()> {
@@ -291,6 +403,32 @@ impl Submission {
         if let Some(prior) = &local.accepted_round {
             anyhow::ensure!(prior == round, "durable proposal changed");
         }
+        let call: Option<ProviderCall> = round
+            .get("provider_call")
+            .map(|v| serde_json::from_value(v.clone()))
+            .transpose()?;
+        if let Some(call) = &call {
+            call.validate(
+                local
+                    .provider_identity
+                    .as_ref()
+                    .context("unexpected general provider evidence")?,
+            )?;
+            anyhow::ensure!(
+                if round["raw_output_base64"].is_string() {
+                    call.status == CallStatus::Success
+                } else {
+                    serde_json::to_value(call.status)? == round["status"]
+                },
+                "durable provider status mismatch"
+            );
+        }
+        if let Some(observed) = &local.observed_call {
+            anyhow::ensure!(
+                call.as_ref() == Some(observed),
+                "persisted provider evidence changed"
+            );
+        }
         let mut registry = CandidateRegistry::new(&local.frozen)?;
         let outcomes = if let Some(base64) = round["raw_output_base64"].as_str() {
             anyhow::ensure!(base64.len() <= 21848, "raw output too large");
@@ -301,18 +439,28 @@ impl Submission {
                 "raw output changed"
             );
             let provenance = &round["provenance"];
-            anyhow::ensure!(
-                provenance == &json!({"provider":"fixed"})
-                    || provenance == &json!({"provider":"fixed","model":null}),
-                "invalid provenance"
-            );
-            let output = ProducerOutput::new(
-                raw,
+            let output_provenance = if let Some(call) = &call {
+                anyhow::ensure!(
+                    serde_json::to_value(&call.provenance)? == *provenance,
+                    "raw provenance differs from call evidence"
+                );
+                ProducerProvenance {
+                    provider: call.provenance.provider.clone(),
+                    model: Some(call.provenance.model.clone()),
+                }
+            } else {
+                anyhow::ensure!(
+                    local.provider_identity.is_none()
+                        && (provenance == &json!({"provider":"fixed"})
+                            || provenance == &json!({"provider":"fixed","model":null})),
+                    "invalid or downgraded provenance"
+                );
                 ProducerProvenance {
                     provider: "fixed".into(),
                     model: None,
-                },
-            )?;
+                }
+            };
+            let output = ProducerOutput::new(raw, output_provenance)?;
             match registry.validate_batch(&local.bases, &output) {
                 Ok(outcomes) => {
                     anyhow::ensure!(
@@ -429,6 +577,47 @@ pub fn serve_proposal(
     claimant_id: &str,
     producer: Arc<dyn CandidateProducer + Send + Sync>,
 ) -> Result<bool> {
+    serve_proposal_inner(
+        client,
+        id,
+        status,
+        submission,
+        claimant_id,
+        Invocation::Fixed(producer),
+    )
+}
+
+/// Same durable claim/completion engine; no separate generated-D executor.
+pub fn serve_general_proposal(
+    client: &Client,
+    id: &str,
+    status: &Value,
+    submission: &mut Submission,
+    claimant_id: &str,
+    producer: Arc<DeepSeekCandidateProducer>,
+) -> Result<bool> {
+    submission.configure_general_producer(producer.identity())?;
+    serve_proposal_inner(
+        client,
+        id,
+        status,
+        submission,
+        claimant_id,
+        Invocation::General(producer),
+    )
+}
+enum Invocation {
+    Fixed(Arc<dyn CandidateProducer + Send + Sync>),
+    General(Arc<DeepSeekCandidateProducer>),
+}
+fn serve_proposal_inner(
+    client: &Client,
+    id: &str,
+    status: &Value,
+    submission: &mut Submission,
+    claimant_id: &str,
+    producer: Invocation,
+) -> Result<bool> {
     if submission.proposal_state.is_none() {
         return Ok(false);
     }
@@ -438,6 +627,19 @@ pub fn serve_proposal(
         return Ok(false);
     }
     let request = submission.proposal_request(status)?;
+    let general_request = match &producer {
+        Invocation::General(_) => Some(submission.proposal_request_v2(status)?),
+        Invocation::Fixed(_) => {
+            anyhow::ensure!(
+                submission
+                    .proposal_state
+                    .as_ref()
+                    .is_none_or(|s| s.provider_identity.is_none()),
+                "general round cannot use fixed producer"
+            );
+            None
+        }
+    };
     let state = submission.proposal_search(status)?;
     let local = submission
         .proposal_state
@@ -486,25 +688,76 @@ pub fn serve_proposal(
     if remaining == 0 {
         return Ok(false);
     }
-    let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    std::thread::spawn(move || {
-        let _ = tx.send(producer.propose(&request));
-    });
-    let answer = match rx.recv_timeout(Duration::from_millis(remaining)) {
-        Ok(answer) => answer,
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(ProducerError::Timeout),
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(ProducerError::ProviderError),
-    };
     let mut completion = json!({"revision":revision,"fence":fence});
-    match answer {
-        Ok(output)
-            if output.provenance().provider == "fixed" && output.provenance().model.is_none() =>
-        {
-            completion["raw_output_base64"] = json!(BASE64.encode(output.raw()));
-            completion["provenance"] = json!({"provider":"fixed"});
+    match producer {
+        Invocation::Fixed(producer) => {
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            std::thread::spawn(move || {
+                let _ = tx.send(producer.propose(&request));
+            });
+            let answer = match rx.recv_timeout(Duration::from_millis(remaining)) {
+                Ok(answer) => answer,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(ProducerError::Timeout),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    Err(ProducerError::ProviderError)
+                }
+            };
+            match answer {
+                Ok(output)
+                    if output.provenance().provider == "fixed"
+                        && output.provenance().model.is_none() =>
+                {
+                    completion["raw_output_base64"] = json!(BASE64.encode(output.raw()));
+                    completion["provenance"] = json!({"provider":"fixed"});
+                }
+                Err(ProducerError::Timeout) => completion["outcome"] = json!("timeout"),
+                _ => completion["outcome"] = json!("provider_error"),
+            }
         }
-        Err(ProducerError::Timeout) => completion["outcome"] = json!("timeout"),
-        _ => completion["outcome"] = json!("provider_error"),
+        Invocation::General(producer) => {
+            // Leave time for the single completion. A bounded blocking transport
+            // owns its timeout, so no background model call survives this return.
+            let Some(call_time) = remaining.checked_sub(500).filter(|n| *n > 0) else {
+                return Ok(false);
+            };
+            let mut request = general_request.context("general request missing")?;
+            request.remaining_budget.timeout_ms = call_time;
+            let (raw, call) = match producer.propose(&request) {
+                Ok(GeneralOutput { output, provenance }) => (
+                    Some(output),
+                    ProviderCall {
+                        provenance,
+                        status: CallStatus::Success,
+                        error_class: None,
+                    },
+                ),
+                Err(GeneralFailure { class, provenance }) => (
+                    None,
+                    ProviderCall {
+                        provenance,
+                        status: if class == ErrorClass::Timeout {
+                            CallStatus::Timeout
+                        } else {
+                            CallStatus::ProviderError
+                        },
+                        error_class: Some(class),
+                    },
+                ),
+            };
+            call.validate(&producer.identity())?;
+            completion["provenance"] = serde_json::to_value(&call.provenance)?;
+            if let Some(raw) = raw {
+                completion["raw_output_base64"] = json!(BASE64.encode(raw.raw()));
+            } else {
+                completion["outcome"] = serde_json::to_value(call.status)?;
+                completion["error_class"] = serde_json::to_value(call.error_class)?;
+            }
+            submission
+                .proposal_state
+                .as_mut()
+                .context("producer missing")?
+                .observed_call = Some(call);
+        }
     }
     let bytes = serde_json::to_vec(&completion)?;
     // A lost completion response is recovered by the caller's next GET. Never
