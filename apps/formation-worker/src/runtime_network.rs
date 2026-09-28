@@ -547,22 +547,17 @@ pub fn derivation_requirements(planned: &PlannedCandidate) -> (Vec<Requirement>,
             ),
         });
     }
-    if planned.plan.lane.is_process() {
-        requirements.push(Requirement {
-            fact: "runtime.process".to_owned(),
-            one_of: Some(vec!["true".to_owned()]),
-        });
-    }
-    if !planned.plan.actions.is_empty() || planned.plan.lane.is_process() {
-        requirements.push(Requirement {
-            fact: "containment".to_owned(),
-            one_of: Some(vec!["bwrap+landlock".to_owned()]),
-        });
-        requirements.push(Requirement {
-            fact: "toolchain.root".to_owned(),
-            one_of: None,
-        });
-    }
+    requirements.extend(
+        ato_formation::search::execution_requirements(
+            planned.plan.lane.is_process(),
+            !planned.plan.actions.is_empty(),
+        )
+        .into_iter()
+        .map(|r| Requirement {
+            fact: r.fact,
+            one_of: r.one_of,
+        }),
+    );
     let mut provisions: Vec<String> = planned
         .plan
         .toolchains
