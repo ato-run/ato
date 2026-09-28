@@ -2,11 +2,36 @@
 
 Status: architecture contract for the correction in ADR-041; not a claim that
 CandidateProducer or durable proposal rounds are already implemented. This
-repository companion records the user's 2026-09-28 requirements. The original
-[Formation note](https://cinst-tfgnfdkubznb7xh2.stg-app.ato.run/#root/iuv9VgcYHeL3/FIVzrv4ni7q2/WwsYaQA5nRAT?ntxId=CVDlt5)
-and Continuation Model remain design sources; this is not a replacement or an
-edit of those documents. The note required sign-in during this correction, so
-its full text and the named Continuation Model attachment have not been checked.
+repository companion has now been checked against the complete downloaded
+`docs/Continuation_Model_rewritten/Continuation Model/Formation.md` (workspace
+path; 330 lines, SHA-256
+`7d8a4187db2910eeeb3e34cc8d0325dd19f8588442d34e00a5e5ef8aa12af043`).
+The original [hosted note](https://cinst-tfgnfdkubznb7xh2.stg-app.ato.run/#root/iuv9VgcYHeL3/FIVzrv4ni7q2/WwsYaQA5nRAT?ntxId=CVDlt5)
+is not edited or replaced. The downloaded Continuation Model was also read
+(SHA-256 `ce0f0e3c91cefaf0fafe2ce4a48cbcca801739a96cd906b30d13ea4c136d15fb`).
+The earlier sign-in/full-text-unverified limitation is resolved by these files.
+
+## Original Formation correspondence
+
+| Original section | Repository implementation interpretation |
+|---|---|
+| §1, §9: I / fixed K / known D[] | I is an independent search input DTO; zero known D is possible, not a fake base D |
+| §2–3: invariants and authority | Frozen K/Runtime/policy, effect UNKNOWN barrier, Ato authorization, only Verifier decides K |
+| §4: exploration and Network loop | One bounded frontier/budget; no separate unbounded Runtime retry loop |
+| §5: formation/freeze/seal/receipts | Candidate generation cannot recapture K; compiler output is not a verified receipt |
+| §6: Jev finite choices / LLM proposals | DecisionProvider != CandidateProducer; structured proposals are untrusted until Ato validation |
+| §7–8: exact Runtime and implementation ownership | Preserve Exact Runtime, common execution/admission, no Coordinator model calls |
+| §10 Phase 3: Jev Decision Layer | Roadmap **5a ≒ original Phase 3** |
+| §10 Phase 4: LLM Candidate Generation | Roadmap **5b ≒ original Phase 4**; must include a no-Preset/no-known-D small OSS acceptance |
+| §10 Phase 5: Continuous Adaptation | Roadmap **5c ≒ original Phase 5**; bounded evidence-driven adaptation, not a completed capability |
+| §11: evidence and acceptance | Unit/mock/actual Runtime/hosted acceptance are reported separately |
+| §12: unresolved representation/API decisions | Do not invent CapsuleRef or reinterpret existing v2/v3/v4 identity |
+
+Roadmap **6a/6b/6c are an added product coverage implementation track**, not
+original Phase numbering. In particular, 6c is the product rollout/measurement
+of continuous adaptation, not a renaming of original Phase 5.
+The original is a design proposal: its undecided Capsule identity is not a
+request to change existing ContractRef/ComputationRef wire semantics here.
 
 ## Authority boundaries
 
@@ -40,10 +65,11 @@ Verifier implementation, not the DecisionProvider.
 ## Provider-neutral proposal contract
 
 ```text
-CandidateProducer::propose(ProposalRequest) -> ProposalBatch
+CandidateProducer::propose(ProposalRequest) -> ProducerOutput { bounded raw bytes, provenance }
+Ato ProposalValidator: raw bytes -> strict per-proposal parse -> typed proposals
 ProposalRequest {
   schema, search_id, frozen_contract, runtime_constraint, known_derivations,
-  source_context, failure_evidence, inspection_evidence, operation_catalog,
+  failure_evidence, inspection_evidence, operation_catalog,
   remaining_budget
 }
 ProposalBatch { schema: "ato.formation-proposal/1", proposals: Proposal[] }
@@ -54,12 +80,18 @@ Proposal {
 ```
 
 K, Runtime constraint and policy are read-only, never provider outputs. Ato
-computes proposal identity and DerivationRef from validated canonical bytes;
+computes a search-scoped proposal content ID and canonical DerivationRef;
 the provider must not supply them. Modification may reference only an
-already-authorized base. Unsupported carries no executable operation.
+already-authorized known base explicitly named in the proposal. ProposeDerivation
+is base-free: I + frozen K + Ato's catalog are sufficient, even with no known D.
+Unsupported carries no executable operation. Proposal IDs identify proposal bytes
+within one frozen search domain, not global semantic objects; DerivationRef is
+D's semantic identity. The explicit base is included in Modify's hashed bytes.
 
 Ato issues a per-search OperationCatalog of typed parameter domains, e.g.
-`python_script@1 {entrypoint_id}`, `python_module@1 {module_id}` and
+`python_http_process@1 {entrypoint_id}` for base-free construction,
+`python_script@1 {entrypoint_id}` / `python_module@1 {module_id}` for explicit
+Modify, and
 `static_http@1 {root_id, spa_fallback: boolean}`. These are examples of reviewed
 vocabulary, not a claim all are implemented. IDs are opaque owner-authorized
 logical references, resolved privately against immutable source. Providers
@@ -87,7 +119,8 @@ DecisionProvider use one effective iterator: known D plus admitted generated D.
 CandidateProducer context need not share Jev's compact finite-choice privacy
 projection. Explicit policy may allow bounded README/manifest/relevant source
 excerpts, K, Runtime facts, known D summaries and failure/inspection evidence.
-External source transmission requires explicit opt-in. Never send credentials,
+v0 has no source_context/text field in its provider request schema.
+External source transmission requires explicit opt-in, introduced only in PR D. Never send credentials,
 secret values, unrelated files or arbitrary host identity.
 
 Policy names provider, allow_source_text, max_source_bytes, max_proposals,
@@ -114,6 +147,14 @@ and attempt issue recheck the same fences. Durable state is orchestration and
 evidence, never Capsule identity.
 
 ## Acceptance
+
+Original Phase 4 / roadmap 5b minimum gate: **no Preset, no known D**, small OSS
+fixture → CandidateProducer → new D → admission → actual Runtime → Verifier →
+same frozen K PASS. Entrypoint replacement in an existing D does not complete
+this gate. The original also requires multiple D for the same K, rejection of
+invalid/unsafe proposals and UNKNOWN stopping; pure-core tests alone do not
+close any actual acceptance gate.
+
 
 First use FixedCandidateProducer and fixed DecisionProvider (or Jev in a
 separately authorized live run), not mandatory live LLM. Record actual Runtime,
