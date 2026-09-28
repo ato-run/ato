@@ -17,6 +17,14 @@ repeating all 312 receiver tests. D2-C branch starts at D2-A merge. Actual
 implementation/harness pin: `be6acd8a547ae4077035e2a551b3c0a78cc84bc4`.
 Following documentation/ledger commits do not change tested runtime/harness.
 
+D2-C review PR: [ato #1427](https://github.com/ato-run/ato/pull/1427), Draft/open.
+At creation, live PR base advanced to
+`f91cccd556cf2b7406eaabd68ae8d082ddfa59b1` (#1425, only connected-realization-worker
+lib/recovery/slot_state). This is distinct from the tested branch start above.
+No main-tracking change was mixed into acceptance; that future merge result is
+not claimed integration-tested. CI is pending, not green.
+
+
 Receiver pinned to **D2-B merge**, not moving main. Rust WASM source is D2-A
 merge; SHA256 `d4732b46f1ce5ab3d1193d957d7bcb2d24f0469ffaa80e267c6cfda5bccb8a46`.
 No D2 migration. Isolated Miniflare/D1 initialized from that pin's bootstrap
