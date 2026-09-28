@@ -1,7 +1,7 @@
 //! Requester-only, one HTTP send. No repair, fallback, SDK parsing authority,
 //! reasoning persistence or external credentials in a ProposalRequest.
 use super::{
-    budget::{CallBudget, FinishReason, ResponseEvidence},
+    budget::{CallBudget, FinishReason, RequestEvidence, ResponseEvidence},
     provenance::*,
 };
 use anyhow::{Result, ensure};
@@ -71,6 +71,8 @@ pub struct DeepSeekCandidateProducer {
     credentials: Credentials,
     budget: Arc<CallBudget>,
     http: reqwest::blocking::Client,
+    #[cfg(test)]
+    pub(super) credential_reads: std::sync::atomic::AtomicUsize,
 }
 pub struct GeneralOutput {
     pub output: ProducerOutput,
@@ -140,6 +142,8 @@ impl DeepSeekCandidateProducer {
             credentials,
             budget,
             http,
+            #[cfg(test)]
+            credential_reads: std::sync::atomic::AtomicUsize::new(0),
         })
     }
     pub fn identity(&self) -> ProviderIdentity {
@@ -157,16 +161,6 @@ impl DeepSeekCandidateProducer {
         if input_bound > self.budget.plan().input_token_cap {
             return Err(ErrorClass::MalformedResponse);
         }
-        self.budget
-            .reserve(&request.search_id)
-            .map_err(|_| ErrorClass::ProviderRefused)?;
-        // Reservation is durable before this first credential read.
-        let key = match &self.credentials {
-            Credentials::Environment(name) => {
-                std::env::var(name).map_err(|_| ErrorClass::TransportError)?
-            }
-            Credentials::Mock => "synthetic-mock-key".into(),
-        };
         let mut body = json!({"model":self.config.model,"stream":false,"max_tokens":self.config.max_output_tokens,
             "response_format":{"type":"json_object"},"messages":[{"role":"system","content":PROMPT},{"role":"user","content":canonical}]});
         match self.config.thinking {
@@ -180,6 +174,29 @@ impl DeepSeekCandidateProducer {
                 });
             }
         }
+        // Serialize once. These exact bytes are both hashed and passed to reqwest.
+        let provider_body = serde_json::to_vec(&body).map_err(|_| ErrorClass::MalformedResponse)?;
+        let evidence = RequestEvidence {
+            cell: request.search_id.clone(),
+            proposal_request_sha256: format!("sha256:{:x}", Sha256::digest(canonical.as_bytes())),
+            provider_body_sha256: format!("sha256:{:x}", Sha256::digest(&provider_body)),
+            timeout_ms: request.remaining_budget.timeout_ms,
+            proposal_request_bytes: canonical.len() as u64,
+            provider_body_bytes: provider_body.len() as u64,
+        };
+        self.budget
+            .reserve_request(evidence)
+            .map_err(|_| ErrorClass::ProviderRefused)?;
+        // The atomic request/reservation event is durable before any credential access.
+        #[cfg(test)]
+        self.credential_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let key = match &self.credentials {
+            Credentials::Environment(name) => {
+                std::env::var(name).map_err(|_| ErrorClass::TransportError)?
+            }
+            Credentials::Mock => "synthetic-mock-key".into(),
+        };
         let response = self
             .http
             .post(format!(
@@ -192,7 +209,8 @@ impl DeepSeekCandidateProducer {
                     .timeout_ms
                     .min(request.remaining_budget.timeout_ms),
             ))
-            .json(&body)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(provider_body)
             .send()
             .map_err(|e| {
                 if e.is_timeout() {
