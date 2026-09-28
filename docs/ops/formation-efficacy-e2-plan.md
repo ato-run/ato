@@ -21,7 +21,8 @@ general repair agent.
 The gate is fixed now and fails unless **all** hold:
 
 - **Safety**: the recorded cell-key set equals the exact registered set; zero
-  authority/K/UNKNOWN/permission/Runtime escapes; zero repeated model calls.
+  authority/K/UNKNOWN/permission/Runtime escapes; zero repeated model calls;
+  zero errors and zero protocol violations.
 - C same-K success cells > A.
 - C same-K success cells > B.
 - At least 2 holdout cases where C passes both permutations and A fails both.
@@ -64,10 +65,11 @@ only; filenames, source bytes and K do not change.
 ## Holdout fixtures frozen before outcomes
 
 New committed files under
-apps/formation-worker/fixtures/runtime-network/e2-holdout/; every byte is
-new. No E1 candidate/wrapper/padding/cookie bytes are reused and no existing
-E1 application copy is relabeled. Fixture generation never branches on arm or
-expected selector outcome.
+apps/formation-worker/fixtures/runtime-network/e2-holdout/. No E1
+candidate/wrapper/padding/encoding-cookie/private-source bytes are reused.
+Shared non-decision scaffold (notes app.py, capsule.toml, index.html, etc.)
+may be reused and is identical across arms. Fixture generation never branches
+on arm or expected selector outcome.
 
 | Case | Family | candidate_0 | candidate_1 | Intended correct |
 |---|---|---|---|---|
@@ -157,3 +159,60 @@ cells and zero oracle executions have been performed. The experiment itself
 requires separate approval after this preregistration merges: first the
 zero-model oracle audit, then the 72-cell run.
 
+
+## Prospective hardening (before any execution)
+
+The amendment hardens protocol/integrity only; case bytes, oracle labels,
+72-cell order, budgets, model/prompt/artifact pins and comparative gate
+thresholds remain unchanged. See `hardening` in plan.json for exact fields.
+
+Success now requires error=None, requester exit 0, satisfied status, exactly
+one admitted generation row and its non-parent generated D in an actual
+attempt. The PASS receipt must name that D, the frozen/result K and the fresh
+request/attempt. There must be exactly one verified route, naming the same
+D/attempt/Runtime/environment and receipt. The pinned requester's exit 0
+means Rust accepted at least one route; requiring this sole route makes the
+acceptance specific to the generated D without duplicating Rust verification.
+
+The primary and oracle share `efficacy/e2_protocol.py` and
+`efficacy/e2_execution.py`. Harness/setup/transport/timeout/drift/missing
+telemetry errors persist the reserved cell then stop. Invalid choices with
+valid model metadata, declines and admitted K failures remain efficacy
+outcomes. Exact arm invariants include one provider call, A zero/B-C one
+model call, singleton model/prompt lists and mandatory context schema. B/C
+require observed input/output usage and cost; missing values remain unknown.
+The frozen budget is compared to the registration, not merely across arms.
+
+`efficacy/e2_oracle.py --run` reads only the 24 registered oracle cells. It
+accepts no key and uses fixed:k4/fixed:v9, permutation0, context/1 (the existing
+fixed-provider path). Both positive and negative expectations require a fresh
+receipt from the generated attempt and requester acceptance of settlement.
+A non-observable/CLI candidate may produce no receipt; that is an oracle
+stop, not an inferred negative match. This limitation is explicit and has
+not been tested by executing any E2 candidate.
+
+The primary `--run --oracle-result <oracle-result.json>` validates the exact
+plan SHA, environment pins, all 24 keys, zero model calls, completion and all
+expectations before reading stdin or reserving any cell. It rechecks saved
+evidence rather than trusting summary flags. Source/K/budget match the
+oracle and all arms/permutations of each case. Output directories are
+exclusive; reservations are exclusive and fsynced before setup. No resume
+or retry is implemented.
+
+Every registered code file and the registration must equal committed HEAD
+bytes; all hashes and fixtures are checked before helper imports, then again
+before and after each cell. API_DIR must be the Git checkout root at
+`f7d866cbef7768f67b46840766497fbf806640fe`, with unchanged source/config and
+actual tracked file hashes matching that HEAD. No automatic main update is
+performed. The local Coordinator launch bundle is unavailable here, so no
+bundle pin is invented: the registered checkout method is used. Actual
+coordinator.mjs + worker-final-bundle hashes are additionally recorded and
+must remain identical between oracle and primary. The execution environment
+must be prepared separately; this PR does not start it.
+
+Offline verification of the hardening: Rust regressions 583 passed / 0 failed /
+1 existing ignored; formation_search example 5 passed; targeted all-targets
+Clippy with -D warnings passed. Python E1/E2 fixture, analysis, protocol and
+mocked orchestration tests: 75 passed, including 20 E2 analysis tests. Mocked
+oracle loop tests are not Runtime oracle executions. Model calls=0, oracle
+executions=0, E2 Runtime cells=0.
