@@ -1,14 +1,30 @@
 # Formation roadmap — foundation, exploration, then adaptation
 
-Updated 2026-09-27 against live GitHub state after merging 5a-a, 5a-b and the 5a live-acceptance follow-up #1411. Stage numbers are retained.
+Updated 2026-09-28: architecture correction after #1420 merged. Stage numbers are retained; the historical 5b-a–c1 track is not canonical Candidate Generation. See [ADR-041](ADR-041-formation-provider-split.md).
 This is an implementation plan; pending rows are not shipped functionality.
+
+## Original Phase correspondence
+
+The complete downloaded original Formation §10 has **Phase 3 = Jev Decision
+Layer**, **Phase 4 = LLM Candidate Generation**, **Phase 5 = Continuous
+Adaptation**. Our 5a ≒ Phase 3, 5b ≒ Phase 4, 5c ≒ Phase 5. Our 6a/6b/6c
+are additional product coverage implementation tracks, not original Phase
+numbers. See [source pins and section mapping](Formation.md#original-formation-correspondence).
+
+The minimum 5b / original Phase 4 completion path is: **no Preset, zero known
+D**, small OSS fixture → CandidateProducer → canonical new D → admission →
+actual Runtime → Verifier → same K PASS. An existing-D entrypoint switch is not
+completion. Core B0–B12 tests and fixed fixtures precede, but do not replace,
+that actual acceptance.
 
 ## Milestones
 
 - Through 4: Formation foundation v1. Known D exploration uses the common
   execution/verification substrate; stop/resume and retained-result reuse work.
-- Through 5b: AI-assisted Formation. Proposals use the same frozen K, Runtime
-  constraints, policy and cumulative search budget.
+- 5b: Candidate Generation through a provider-neutral CandidateProducer and Ato
+  ProposalValidator. K, Runtime constraints and policy stay frozen.
+- 5c: bounded adaptive integration of selection, proposals and actual evidence.
+- 6a can start with known-D Formation now; neither 5b nor E2 blocks measurement.
 - Through 6: practical coverage and continuous operation. Count usable retained
   software, not registered repositories, toward 20 → 50 → 100 applications.
 
@@ -27,8 +43,12 @@ This is an implementation plan; pending rows are not shipped functionality.
 | 3d | Retained objects → validated closure/tree → new Run → same K → new receipt without source/scratch | Merged: API #692 `23d69735` → ato #1407 `4697b3b0` (migration 0299 not applied remotely); actual Coordinator replay Static/Python/Node after source deletion; not deployed |
 | 4 | Durable deterministic SearchState; D1 failure→evidence→authorized D2; restart preserves search/attempt identity | Merged: API #693 `18fe2c75` → ato #1408 `a46fd62d` (migration 0300 not applied remotely); actual Coordinator restart acceptance cases 1–7, restart points 1–9, review hardening H1–H4; not deployed |
 | 5a | Optional finite AllowedChoices DecisionProvider; deterministic fallback under the same permissions and budget; compare attempts, elapsed time, provider usage and cost | **Completed (implemented and locally/integration verified)**. 5a-a merged: ato #1409 / API #694 (ADR-035, migration 0301). 5a-b merged: API #695 `1853f280` → ato #1410 `c883087e` (ADR-036, migration 0302): Inspect / Stop and independent decision sequence; B0–B8 verified. Probe deferred (no safe existing primitive). Live Jev acceptance and same-fixture/same-budget comparison: passed (2026-09-26); both arms 2 attempts / PASS; deterministic 3.573 s, Jev 3.022 s, 1 call, 1612 input / 134 output tokens, estimated $0.000067704. Not deployed; migrations not applied remotely |
-| 5b | Typed new-D generation first, then evidence-based D improvement; reject privilege/K/UNKNOWN escape | **In progress; completion gate open**. 5b-a bounded Python-entrypoint draft compiler/requester and receiver 0303 implemented. Fixed-draft actual D1 FAIL → Dnew same-K PASS, dedup/Exact/restart/concurrency verified. Historical live v1 validly declined (record preserved). Live v2 now generated Dnew with same-K PASS in one call; **overall 5b remains in progress**. Core ato #1412 / API #696 / requester ato #1413 merged; not deployed. 5b-b bounded source evidence merged as ato #1414 core / #1415 requester and API #697 compatibility: fixed-vocabulary Python lexical summaries and prompt v2, unchanged draft authority. G0–G9 passed, including one live v2 call (1100 input / 75 output tokens); overall gate stays open. See [typed generation ledger](../../ops/formation-typed-generation-2026-09-26.md) and [5b-b acceptance ledger](../../ops/formation-generation-context-2026-09-27.md) / [ADR-038](ADR-038-formation-generation-context.md) |
-| 6 | Measure 20, expand to 50 then 100; known-D revalidation on new authorized Runtime/Adapter/D | Pending |
+| 5b | **Candidate Generation**: general LLM CandidateProducer → typed proposal → Ato ProposalValidator/compiler → candidate-pool expansion | **Next implementation target**, fixed producer first. Existing 5b-a–c1 compiler, evidence and durable fences are reusable infrastructure, not completion of this gate. E1/E2 selection efficacy is not a prerequisite |
+| 5c | **Adaptive Formation Loop**: DecisionProvider ↔ CandidateProducer ↔ Runtime/Verifier evidence, bounded iterative adaptation | Pending; no unbounded generation/execution loop |
+| 6a | **Real-world coverage measurement**: 20 real applications using current known-D Formation | Can start independently of 5b efficacy; measurement not yet performed by this correction |
+| 6b | **Capability expansion**: 20 → 50 → 100, measured Runtime/Adapter/build/service gaps | Pending; prioritize observed blockers, not repository registration count |
+| 6c | **Continuous adaptation**: revalidate on new authorized Runtime, verified D, Adapter or evidence | Pending; triggers never expand execution/data permissions |
+
 
 **Formation foundation v1 complete** (2026-09-26): all twelve Stage 4 gates are
 met on the stack ato #1406 → #1407 → #1408 and ato-api #692 → #693 — implemented
@@ -42,38 +62,60 @@ not applied to any remote database.
 [live Jev acceptance and comparison ledger](https://github.com/ato-run/ato/blob/7be9c53514f2e01d37d7f049e8892df798981b27/docs/ops/formation-live-jev-2026-09-26.md).
 This single pair establishes bounded integration and records cost; it does not
 show an attempt-count improvement or a statistically meaningful speedup.
-Probe is deferred until a safe typed primitive exists. 5b-a has started as a
-local/integration track, not a deployment. Its fixed typed-draft execution works,
-while its single prompt-v1 live call declined. The separate 5b-b prompt-v2 run
-now passes the minimal live-generation gate; overall 5b remains In progress.
-The 5a gate stays closed; its result must not be conflated with 5b.
-5b-b adds bounded source-derived evidence without code/patch/argv/path generation.
-The demonstrated operation is bounded parameter synthesis over existing,
-owner-authorized Python entrypoints, not general repair. See the
-[stack review and correction record](../../ops/formation-generation-stack-review-2026-09-27.md).
-The stack was merged after explicit approval in the recorded dependency order.
-Merge does not close 5b. The separate [E1 efficacy preregistration](../../ops/formation-efficacy-e1-plan.md)
-fixes 10 cases, two ID permutations and three arms. Its
-[comparator-only repair amendment](../../ops/formation-efficacy-e1-amendment.md)
-preserves every prior model outcome and permits no repeat C calls. Evidence-based
-D improvement remains unproven; Stage 6 coverage expansion is separate.
-[E1 amended efficacy results](../../ops/formation-efficacy-e1-results.md): 60 cells,
-A 0/20, deterministic B 9/20, Jev C 2/20 same-K successes; 20 model calls,
-no C retry and zero robust additional-success cases. **Efficacy gate NOT met;
-5b remains In progress.** E1 evidence-preservation PR #1417 merged at
-`c9fc25fea5ed474c3d24ab64750645190b0f608a`; this does not promote either selector.
-The separate [5b-c0 offline information recovery](../../ops/formation-context-recovery-c0-2026-09-27.md)
-merged as #1419 at `660dbf6eaedc3384017137f1f20282a359d423aa`: context/2 delegation,
-bounded-prefix and limited encoding facts, plus audited failure codes.
-[5b-c1 Provider integration](ADR-040-formation-context-provider-v3.md) is implemented,
-unmerged: explicit local point/3 + prompt/3 opt-in using cached context/2; old
-v1/v2 paths remain unchanged. Offline verification is not efficacy verification.
-**E2 not started**; its preregistration requires merged exact c1 artifacts and
-separate approval. General repair/5b-c expansion remains on hold. Overall 5b
-remains In progress. No deployment or remote migration.
-Exact Runtime now exhausts known Ds within that placement before generation;
-no-policy semantics remain unchanged. Prompt-v1 decline remains historical;
-prompt-v2 acceptance is recorded separately, never retried until success.
+Probe remains deferred until a safe typed primitive exists. The 5a gate stays
+closed and is separate from Candidate Generation.
+
+### Historical 5b-a–c1 and selection evaluation (preserved)
+
+The former “5b = Jev typed generation → efficacy → coverage” reading is replaced
+by **5a selection / 5b Candidate Generation / 5c adaptive loop**, with independent
+6a measurement. No historical evidence is deleted or relabeled as a new result.
+
+- ADR-037–040, GenerationDraft compiler, same-K checks, durable claim,
+  restart/concurrency fences, migration 0303, context/1–2, point/1–3,
+  prompt/1–3 and failure/inspection projections remain reusable bounded
+  selection / proposal-validation infrastructure.
+- #1412/#1413, API #696 and #1414/#1415, API #697 are merged. Fixed-draft and
+  prompt-v2 same-K PASS are recorded in the [generation ledger](../../ops/formation-typed-generation-2026-09-26.md)
+  and [context ledger](../../ops/formation-generation-context-2026-09-27.md).
+  Prompt-v1 decline remains historical. These are not proof of a general LLM
+  CandidateProducer or general repair.
+- [E1 results](../../ops/formation-efficacy-e1-results.md) remain 60 cells,
+  A 0/20, deterministic B 9/20, Jev C 2/20, 20 model calls, zero robust
+  additional-success cases. The historical efficacy criterion was not met.
+  This measures the finite selector, not LLM CandidateProducer efficacy.
+- #1419 context recovery merged at `660dbf6eaedc3384017137f1f20282a359d423aa`.
+  #1420 point/3 + prompt/3 merged at
+  `34c2ef2a8882f6fc53438c1e0f1722b240ed3d6e`; ADR-040 remains the original
+  pre-merge design record, not a current status dashboard.
+- #1421 E2 is **OPEN and nonblocking**, observed head
+  `dc0fba4e0ecdd585985320551b52b72768002a5c`. Preserve its preregistration,
+  fixtures and ledgers as an evaluation asset for finite-choice selection.
+  Do not merge, execute oracle/model/72 cells, rewrite history, or further
+  harden it as a 5b completion gate. Any later evaluation needs separate scope.
+
+### Corrected implementation order and completion evidence
+
+PR A is this documentation correction (no behavior change). PR B adds the
+proposal core, OperationCatalog, validator/compiler and effective candidate
+registry with a fixed producer. PR C adds an additive durable proposal receiver
+in ato-api; merge **receiver before requester/core integration**, only after
+explicit approval. PR D separately adds a general LLM adapter and source-context
+opt-in after fixed-producer acceptance. Migrations, deployments and model calls
+are not implied by this order.
+
+P0–P11 in [Formation](Formation.md#acceptance) are the integration acceptance
+contract. Unit/mock tests are not actual Runtime/Verifier acceptance. No corrected
+P0–P11 execution is claimed by PR A. No rollout or remote migration.
+
+### 6a measurement taxonomy
+
+Classify each of the first 20 real-application failures as known-D/authoring,
+CandidateProducer-solvable hypothesis, build capability, runtime/toolchain,
+Adapter, multi-service, dependency/network, verifier, Browser/UI, or
+retention/replay. Record actual evidence and uncertainty separately. Prioritize
+6b by this distribution and use it to extend CandidateProducer vocabulary.
+Do not wait for CandidateProducer efficacy to start measuring known-D coverage.
 
 The sequential track's [integration record](../../ops/formation-integrated-2026-09-25.md)
 separates implementation, integration checks, merge and deployment. 64/128 MiB
@@ -115,8 +157,10 @@ streaming digest checks and bounded expansion, not larger base64 JSON.
 Distinguish verified, candidates_exhausted, budget_exhausted and effect_unknown.
 At this gate, explicitly record “Formation foundation v1 complete”.
 
-5a selection Jev is separate from the Browser evidence judge. 5b outputs typed
-proposals, not arbitrary shell; no source patching, universal computer-use or
+5a Jev selects only finite choices; 5b general LLM proposes typed operations.
+Only Ato validates/authorizes/compiles D; only Verifier decides K.
+EscalateToCandidateProducer is not offered until implemented and within budget.
+See [Formation authority boundaries](Formation.md). Proposals are not arbitrary shell; no source patching, universal computer-use or
 unbounded repair loop in the first slices. Existing attempts never change.
 
 6 separates D-generation/selection failures from Runtime capability failures.
