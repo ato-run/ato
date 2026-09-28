@@ -1,6 +1,7 @@
 import json
 import unittest
 from pathlib import Path
+from e2_test_support import record
 from e2_analyze import REGISTERED_CELLS, REGISTERED_CASES, summarize
 
 
@@ -10,16 +11,14 @@ class Analysis(unittest.TestCase):
         for case in REGISTERED_CASES:
             for p in (0, 1):
                 for arm in 'ABC':
-                    rows.append(dict(case=case, permutation=p, arm=arm, same_k_success=False,
-                        draft_proposed=False, admitted=False, declined=True, invalid_rejected=False,
-                        attempts=1, attempts_to_pass=None, provider_calls=1,
-                        model_calls=int(arm in 'BC'),
-                        usage=[], cost_usd=None, elapsed_seconds=1, provider_latency_ms=[],
-                        error=None, violations=[]))
+                    rows.append(record(arm, case, p, passed=False, outcome='declined'))
         return rows
 
     def test_declines_remain_in_denominator_and_missing_usage_is_not_zero(self):
-        rows = self.rows(); rows[2]['usage'] = [None]
+        rows = self.rows()
+        for row in rows:
+            if row['arm'] in 'BC':
+                row['usage'] = [None]
         result = summarize(rows)
         self.assertFalse(result['efficacy_gate_passed'])
         self.assertEqual(result['arms']['C']['decline_rate'], 1)
@@ -31,7 +30,7 @@ class Analysis(unittest.TestCase):
         rows = self.rows()
         for r in rows:
             if r['arm'] == 'C' and r['case'] in ('D01', 'D02', 'P02', 'L01'):
-                r['same_k_success'] = True
+                r.update(record(r['arm'], r['case'], r['permutation']))
         return rows
 
     def test_gate_requires_all_conditions(self):
@@ -44,14 +43,14 @@ class Analysis(unittest.TestCase):
         rows = self.winning_rows()
         for r in rows:
             if r['arm'] == 'A':
-                r['same_k_success'] = True  # A ties C: no excess value
+                r.update(record(r['arm'], r['case'], r['permutation']))  # A ties C: no excess value
         self.assertFalse(summarize(rows)['efficacy_gate_passed'])
 
     def test_gate_needs_c_over_b_aggregate(self):
         rows = self.winning_rows()
         for r in rows:
             if r['arm'] == 'B':
-                r['same_k_success'] = True
+                r.update(record(r['arm'], r['case'], r['permutation']))
         self.assertFalse(summarize(rows)['efficacy_gate_passed'])
 
     def test_robust_case_requires_both_permutations(self):
@@ -122,12 +121,58 @@ class Analysis(unittest.TestCase):
         rows = self.rows()
         for r in rows:
             if r['arm'] == 'C' and r['case'] in ('D01', 'D02'):
-                r['same_k_success'] = True
+                r.update(record(r['arm'], r['case'], r['permutation']))
         # Only two robust pairs exist; dropping A/B records cannot fabricate more.
         rows = [r for r in rows if not (r['arm'] == 'A' and r['case'] == 'P02')]
         result = summarize(rows)
         self.assertFalse(result['complete'])
         self.assertFalse(result['efficacy_gate_passed'])
+
+
+    def test_error_row_blocks_even_without_violations(self):
+        rows = self.winning_rows()
+        rows[0]['error'] = ''  # is-not-None, not truthiness
+        result = summarize(rows)
+        self.assertEqual(result['total_errors'], 1)
+        self.assertFalse(result['efficacy_gate_passed'])
+
+    def test_missing_model_metadata_blocks(self):
+        rows = self.winning_rows()
+        rows[1].pop('models')
+        self.assertFalse(summarize(rows)['efficacy_gate_passed'])
+
+    def test_wrong_prompt_blocks(self):
+        rows = self.winning_rows()
+        rows[2]['prompt_versions'] = ['ato.formation-generation-prompt/2']
+        self.assertFalse(summarize(rows)['efficacy_gate_passed'])
+
+    def test_missing_context_blocks(self):
+        rows = self.winning_rows()
+        rows[0]['context'] = None
+        self.assertFalse(summarize(rows)['efficacy_gate_passed'])
+
+    def test_provider_error_and_timeout_block(self):
+        for outcome in ('provider_error', 'timeout'):
+            with self.subTest(outcome=outcome):
+                rows = self.winning_rows()
+                rows[1]['generation_outcome'] = outcome
+                self.assertFalse(summarize(rows)['efficacy_gate_passed'])
+
+    def test_parent_only_pass_does_not_count(self):
+        rows = self.winning_rows()
+        for row in rows:
+            if row['same_k_success']:
+                row['evidence']['result']['attempts'] = row['evidence']['result']['attempts'][:1]
+        result = summarize(rows)
+        self.assertEqual(result['arms']['C']['same_k_successes'], 0)
+        self.assertFalse(result['efficacy_gate_passed'])
+
+    def test_receipt_derivation_mismatch_does_not_count(self):
+        rows = self.winning_rows()
+        for row in rows:
+            if row['same_k_success']:
+                row['evidence']['result']['attempts'][-1]['formation_attempt']['receipt']['derivation_ref'] = 'wrong'
+        self.assertFalse(summarize(rows)['efficacy_gate_passed'])
 
 
 if __name__ == '__main__':
