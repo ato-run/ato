@@ -219,7 +219,7 @@ enum SearchRequest {
     /// Strict batch bytes are validated by Rust, never canonicalized by TS.
     CompileProposals {
         frozen: Box<ato_formation::search::FrozenSearchV1>,
-        base_capsule_toml: String,
+        base_recipes: std::collections::BTreeMap<String, String>,
         batch_json: String,
     },
     CompileGeneration {
@@ -258,18 +258,23 @@ pub fn evaluate_search(bytes: &[u8]) -> Value {
         match request {
             SearchRequest::CompileProposals {
                 frozen,
-                base_capsule_toml,
+                base_recipes,
                 batch_json,
             } => {
-                use ato_formation::proposal::{CandidateRegistry, ProposalOutcome};
-                let authorization = frozen
-                    .policy
-                    .proposal
-                    .as_ref()
-                    .ok_or("proposal_without_policy")?;
+                use ato_formation::proposal::{
+                    CandidateRegistry, ProducerOutput, ProducerProvenance, ProposalOutcome,
+                };
+                let output = ProducerOutput::new(
+                    batch_json.into_bytes(),
+                    ProducerProvenance {
+                        provider: "requester".into(),
+                        model: None,
+                    },
+                )
+                .map_err(|e| e.0.to_owned())?;
                 let mut registry = CandidateRegistry::new(&frozen).map_err(|e| e.0.to_owned())?;
                 let outcomes = registry
-                    .validate_batch(authorization, &base_capsule_toml, batch_json.as_bytes())
+                    .validate_batch(&base_recipes, &output)
                     .map_err(|e| e.0.to_owned())?;
                 let outcomes: Vec<_> = outcomes
                     .into_iter()
@@ -525,18 +530,22 @@ mod proposal_tests {
         state.frozen.candidates[0].materialization =
             ato_formation::search::CandidateInput::Source {
                 closure_ref: closure.clone(),
-                archive_digest: closure,
+                archive_digest: closure.clone(),
             };
+        state.frozen.initial_source = Some(ato_formation::search::InitialSource {
+            closure_ref: closure.clone(),
+            archive_digest: closure,
+        });
         state.frozen.policy.proposal=Some(serde_json::from_value(serde_json::json!({
-            "base_derivation_ref":d.derivation_ref().unwrap(),"entrypoints":{"e":"working.py"},"modules":{"m":"pkg.server"},
+            "modifiable_derivation_refs":[d.derivation_ref().unwrap()],"source_domain":{"entrypoints":{"e":"working.py"},"modules":{"m":"pkg.server"}}, "python_http_process":null,
             "policy":{"max_proposal_rounds":1,"max_proposals":4,"timeout_ms":5000,"allow_source_text":false,"max_source_bytes":0}
         })).unwrap());
-        serde_json::json!({"operation":"compile_proposals","frozen":state.frozen,"base_capsule_toml":BASE,
+        serde_json::json!({"operation":"compile_proposals","frozen":state.frozen,"base_recipes":{(d.derivation_ref().unwrap()):BASE},
             "batch_json":serde_json::json!({"schema":"ato.formation-proposal/1","proposals":[
-                {"kind":"propose_derivation","operations":[{"operation":"python_script@1","entrypoint_id":"e"}]},
-                {"kind":"propose_derivation","operations":[{"operation":"python_module@1","module_id":"m"}]},
-                {"kind":"propose_derivation","operations":[{"operation":"python_script@1","entrypoint_id":"e"}]},
-                {"kind":"propose_derivation","operations":[{"operation":"shell@1","secret":"do-not-echo"}]}
+                {"kind":"modify_derivation","base_derivation_ref":d.derivation_ref().unwrap(),"operations":[{"operation":"python_script@1","entrypoint_id":"e"}]},
+                {"kind":"modify_derivation","base_derivation_ref":d.derivation_ref().unwrap(),"operations":[{"operation":"python_module@1","module_id":"m"}]},
+                {"kind":"modify_derivation","base_derivation_ref":d.derivation_ref().unwrap(),"operations":[{"operation":"python_script@1","entrypoint_id":"e"}]},
+                {"kind":"modify_derivation","base_derivation_ref":d.derivation_ref().unwrap(),"operations":[{"operation":"shell@1","secret":"do-not-echo"}]}
             ]}).to_string()})
     }
     #[test]
@@ -572,6 +581,43 @@ mod proposal_tests {
             );
             assert_eq!(d.derivation_ref().unwrap(), outcome["derivation_ref"]);
         }
+    }
+    #[test]
+    fn base_free_abi_needs_initial_source_but_no_known_d_or_base_recipe() {
+        let mut request = request();
+        request["frozen"]["candidates"] = serde_json::json!([]);
+        request["frozen"]["policy"]["proposal"]["modifiable_derivation_refs"] =
+            serde_json::json!([]);
+        request["frozen"]["policy"]["proposal"]["python_http_process"] =
+            serde_json::json!({"python_version":"3.12.7","http_port":"app.http","guest_port":8000});
+        request["base_recipes"] = serde_json::json!({});
+        request["batch_json"] = serde_json::json!({"schema":"ato.formation-proposal/1","proposals":[{"kind":"propose_derivation","operations":[{"operation":"python_http_process@1","entrypoint_id":"e"}]}]}).to_string().into();
+        let result = evaluate_search(&serde_json::to_vec(&request).unwrap());
+        assert_eq!(result["outcomes"][0]["status"], "admitted", "{result}");
+        let compiled = &result["outcomes"][0];
+        let (k, d) = bind(
+            &parse_capsule_toml(compiled["capsule_toml"].as_str().unwrap()).unwrap(),
+            &BindingContext {
+                source_closure_ref: request["frozen"]["initial_source"]["closure_ref"]
+                    .as_str()
+                    .unwrap(),
+            },
+        )
+        .unwrap();
+        assert_eq!(k.contract_ref().unwrap(), request["frozen"]["contract_ref"]);
+        assert_eq!(d.derivation_ref().unwrap(), compiled["derivation_ref"]);
+        assert!(matches!(
+            evaluate(&serde_json::to_vec(&result).unwrap()),
+            Decision::Rejected { .. }
+        ));
+        request["frozen"]
+            .as_object_mut()
+            .unwrap()
+            .remove("initial_source");
+        assert_eq!(
+            evaluate_search(&serde_json::to_vec(&request).unwrap())["status"],
+            "rejected"
+        );
     }
     #[test]
     fn missing_policy_or_unknown_abi_field_rejects_without_echoing_input() {

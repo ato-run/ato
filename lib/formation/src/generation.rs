@@ -94,7 +94,7 @@ pub(crate) fn is_sha256(value: &str) -> bool {
     })
 }
 
-fn logical_id(value: &str) -> bool {
+pub(crate) fn logical_id(value: &str) -> bool {
     !value.is_empty()
         && value != "none"
         && value.len() <= 32
@@ -104,7 +104,7 @@ fn logical_id(value: &str) -> bool {
 }
 
 /// A deliberately narrow source-relative path grammar, not URL or shell text.
-fn entry_path(value: &str) -> bool {
+pub(crate) fn entry_path(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 256
         && value.ends_with(".py")
