@@ -5,7 +5,7 @@ import {unstable_splitSqlQuery} from 'wrangler';
 import {readFileSync,writeFileSync,existsSync,mkdirSync,readdirSync} from 'node:fs';
 import path from 'node:path';
 const bundle=path.resolve('bundle');
-const modules=[{type:'ESModule',path:path.join(bundle,'worker.js')},...readdirSync(bundle).filter(f=>f.endsWith('.wasm')).map(f=>({type:'CompiledWasm',path:path.join(bundle,f)}))];
+const modules=[{type:'ESModule',path:path.join(bundle,'worker.js')},...readdirSync(bundle).filter(f=>!f.startsWith('.')&&f.endsWith('.wasm')).map(f=>({type:'CompiledWasm',path:path.join(bundle,f)}))];
 const mf=new Miniflare({modules,compatibilityDate:'2025-09-01',compatibilityFlags:['nodejs_compat'],host:'127.0.0.1',port:Number(process.env.C2_PORT??19544),d1Databases:['DB'],r2Buckets:['STORE_BUCKET'],d1Persist:'state/d1',r2Persist:'state/r2',bindings:{BETTER_AUTH_SECRET:'isolated-c2-local-only'}});
 const db=await mf.getD1Database('DB');
 if(!existsSync('initialized')){

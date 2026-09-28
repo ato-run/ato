@@ -12,7 +12,7 @@ if(execFileSync('git',['status','--porcelain','--untracked-files=no'],{cwd:api,e
 const require=createRequire(path.join(api,'package.json'));const {build}=require('esbuild');
 mkdirSync(out,{recursive:true});
 writeFileSync(path.join(out,'entry.ts'),`import {Hono} from ${JSON.stringify(path.join(api,'node_modules/hono/dist/index.js'))};\nimport {runtimeNetworkRoutes} from ${JSON.stringify(path.join(api,'src/routes/runtime_network.ts'))};\nconst app=new Hono();app.route('/v1/runtime-network',runtimeNetworkRoutes);export default app;\n`);
-await build({entryPoints:[path.join(out,'entry.ts')],outfile:path.join(out,'worker.js'),bundle:true,format:'esm',platform:'browser',conditions:['workerd','worker','browser'],external:['node:*'],
+await build({entryPoints:[path.join(out,'entry.ts')],outfile:path.join(out,'worker.js'),bundle:true,format:'esm',platform:'browser',conditions:['workerd','worker','browser'],external:['node:*','crypto'],
  banner:{js:'import * as nodeCrypto from "node:crypto"; var require=name=>{if(name==="crypto")return nodeCrypto;throw new Error(`unbundled require ${name}`)};'},
  plugins:[{name:'wasm',setup(b){b.onResolve({filter:/\.wasm$/},args=>{const input=path.resolve(args.resolveDir,args.path);const name=path.basename(input);copyFileSync(input,path.join(out,name));return{path:'./'+name,external:true};});}}]});
 for(const f of ['schema.sql','schema-baseline.sql','schema-baseline.json'])copyFileSync(path.join(api,'schema',f),path.join(out,f));

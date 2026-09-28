@@ -87,21 +87,32 @@ impl CandidateProducer for RecordingFixedCandidateProducer {
         }
     }
 }
-struct FixedDecision {
+struct FixedDecision<'a> {
     preferred: Option<String>,
+    failed: BTreeSet<String>,
+    evidence: serde_json::Value,
+    log: &'a std::cell::RefCell<Vec<serde_json::Value>>,
 }
-impl DecisionProvider for FixedDecision {
+impl DecisionProvider for FixedDecision<'_> {
     fn decide(&self, point: &DecisionPoint) -> ProviderAnswer {
         let choice = self
             .preferred
             .as_ref()
             .and_then(|wanted| {
-                point
-                    .choices
-                    .iter()
-                    .find(|c| c.attempt().is_some_and(|(d, _, _)| d == wanted))
+                point.choices.iter().find(|c| {
+                    c.attempt()
+                        .is_some_and(|(d, _, _)| d == wanted && !self.failed.contains(d))
+                })
             })
-            .or_else(|| point.choices.iter().find(|c| c.attempt().is_some()));
+            .or_else(|| {
+                point.choices.iter().find(|c| {
+                    c.attempt()
+                        .is_some_and(|(d, _, _)| !self.failed.contains(d))
+                })
+            });
+        self.log.borrow_mut().push(json!({"seq":point.seq,"failed_derivations":self.failed,
+            "failure_evidence":self.evidence,"selected":choice.and_then(|c|c.attempt().map(|(d,_,_)|d)),
+            "offered":point.choices.iter().filter_map(|c|c.attempt().map(|(d,_,_)|d)).collect::<Vec<_>>() }));
         match choice {
             Some(c) => ProviderAnswer::Choice {
                 choice_id: c.choice_id.clone(),
@@ -169,6 +180,7 @@ fn main() -> Result<()> {
     });
     let deadline = Instant::now() + Duration::from_secs(config.settle_seconds);
     let mut answered = BTreeSet::new();
+    let decisions = std::cell::RefCell::new(Vec::new());
     while Instant::now() < deadline {
         if let Ok(status) = client.satisfy_status(id) {
             submission.accept_proposal_round(&status)?;
@@ -191,12 +203,25 @@ fn main() -> Result<()> {
                     &client,
                     id,
                     &status,
-                    &FixedDecision { preferred },
+                    &FixedDecision {
+                        preferred,
+                        failed: status["search_state"]["attempts"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter(|a| a["status"] == "fail")
+                            .filter_map(|a| a["derivation_ref"].as_str().map(str::to_owned))
+                            .collect(),
+                        evidence: json!(ato_formation::generation_context::project_failures(
+                            &status["search_state"]["attempts"]
+                        )),
+                        log: &decisions,
+                    },
                     &mut answered,
                 );
             }
             let (accepted, refused) = accept_verified_routes(&submission, id, &status);
-            let result = json!({"status":status,"accepted":accepted,"refused":refused,
+            let result = json!({"decisions":*decisions.borrow(),"status":status,"accepted":accepted,"refused":refused,
                 "contract_ref":submission.request.contract_ref,"frozen_contract":submission.request.base_contract,
                 "recipes":submission.proposal_recipes().collect::<std::collections::BTreeMap<_,_>>()});
             std::fs::write(&config.result, serde_json::to_vec_pretty(&result)?)?;
