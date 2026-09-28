@@ -12,10 +12,10 @@ The roadmap incorrectly made its efficacy progression the Candidate Generation
 critical path. A new canonical digest after finite selection is not evidence
 that a general LLM CandidateProducer has been implemented or is effective.
 
-The original hosted note required sign-in and was not readable in this work.
-[Formation](Formation.md) records the explicit user-supplied correction, including
-this source limitation; it does not purport to replace the original note or the
-Continuation Model. No unseen document is cited as independently verified.
+The complete downloaded original Formation (330 lines) and Continuation Model
+were read on 2026-09-28. [Formation correspondence](Formation.md#original-formation-correspondence)
+records the source paths, SHA-256 pins and section mapping. This supersedes the
+earlier sign-in limitation; the original documents remain unchanged.
 
 ## Decision
 
@@ -29,9 +29,19 @@ The precise proposal/policy/persistence and P0–P11 contract is in
 [Formation](Formation.md).
 
 Reclassify 5a as completed Decision Layer, 5b as Candidate Generation next,
-5c as pending Adaptive Formation Loop. Split 6 into independent 6a coverage
+5c as pending Adaptive Formation Loop. These correspond approximately to
+original Phase 3 (Jev Decision Layer), Phase 4 (LLM Candidate Generation),
+and Phase 5 (Continuous Adaptation), respectively. Split 6 into independent 6a coverage
 measurement, 6b capability expansion and 6c continuous adaptation. Known-D
-20-app measurement may start without 5b or E2 efficacy.
+20-app measurement may start without 5b or E2 efficacy. 6a/6b/6c are an added
+product coverage track, not the original Phase numbering.
+
+ProposeDerivation must work from I + frozen K + catalog with zero known D;
+ModifyDerivation must explicitly identify an authorized known base. The
+producer returns bounded untrusted bytes and provenance, not trusted proposals.
+Ato owns the only strict parsing/validation boundary. Source text is absent
+from v0 provider requests. Proposal IDs are scoped to the frozen search domain;
+only canonical DerivationRef identifies D semantically.
 
 ## Preserve history, do not reinterpret wire/storage
 
@@ -49,6 +59,13 @@ model call, 72-cell run, history rewrite or further 5b-gate hardening.
 E1/E2 results do not measure general LLM CandidateProducer efficacy.
 
 ## Delivery and consequences
+
+Current sequence: correct PR A source correspondence → correct/review PR B
+core semantics → review and explicitly approved PR A merge → retarget/review
+PR B against main → PR C durable receiver/migration → requester integration →
+fixed-producer actual P0–P11 → separate PR D. No automatic merge is authorized.
+PR C and migration 0304 must not start until these semantics are reviewed.
+
 
 - PR A: this ADR, roadmap and repository Formation boundary companion only.
 - PR B: proposal schema/catalog, validator/compiler, registry integration and
