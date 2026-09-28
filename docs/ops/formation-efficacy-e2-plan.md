@@ -92,17 +92,78 @@ same frozen K (GET /health -> 200, GET / -> 200, captured workspace digest).
 
 ## Oracle plan (registered, not yet executed)
 
-Before any model call, a zero-model audit verifies the intended labels against
-the actual Runtime: 24 fixed cells, permutation0, providers fixed:k4 and
-fixed:v9 on the same frozen source digests, original K, two-attempt budget,
-pinned requester/Runtime/WASM. Actual execution -> fresh receipt ->
-fully_satisfied -> requester acceptance must equal each registered
-expected_fully_satisfied in plan.json -> oracle.cells, including negative
-expectations where case semantics require the decoy to fail. Any oracle or
-preflight failure stops the run; fixtures are then fixed in a new
-commit/version, never silently continued. Once a model call begins, fixture
-changes are prohibited. The no-generation path needs no primary arm; the
-oracle also sanity-checks expected failure behavior.
+The oracle asks: **Does this fixed candidate produce the preregistered
+terminal same-K outcome under the actual Runtime?** It reads the exact 24
+cells in plan.json, permutation0, providers fixed:k4/fixed:v9, the same frozen
+source/K/budget and pinned requester/Runtime/WASM/API. Each cell has one
+`expected_result` from a closed enum; no alternative outcome sets are allowed.
+
+- `verified_pass`: admitted generated D, actual finished attempt, fresh same
+  K/D/request/attempt receipt with fully_satisfied=true and requester-accepted
+  verified route. This is the unchanged primary success definition.
+- `verified_k_fail`: admitted generated D, actual finished attempt, fresh same
+  K/D/request/attempt receipt with fully_satisfied=false, no verified route,
+  requester exit 0 and unsatisfied.
+- `terminal_not_observable`: exactly one admitted non-parent generated D and
+  its actual attempt; request/search/attempt/Runtime/K/D identities agree;
+  execution_started=true, attempt_record=finished, fail status and the exact
+  candidate_not_observable verification failure; no receipt/verification,
+  verified route or UNKNOWN; cleanup succeeded and realization.destroyed=true;
+  requester exit 0 and unsatisfied. Process realization must name app.http:
+  the pinned launcher populates this evidence only after successful launch,
+  excluding setup/launch errors that can share the same failure code.
+
+Receipt absence, raw error text, a generic process/setup failure or timeout
+alone proves no oracle class. formation_failed, dependency_unavailable,
+runtime offline, unfinished records and UNKNOWN remain protocol failures.
+A terminal_not_observable proof matches only cells registered for that class;
+primary records it as a normal failure, never in the success numerator.
+
+### Static evidence audit (no candidate or Runtime execution)
+
+The fixed python_script route runs the candidate as a script, with no inferred
+Flask server command or dependency-install step. Each of the 24 classes below
+is registered from the committed source and Runtime control flow only:
+
+| Case | k4 / candidate_0 | v9 / candidate_1 | Static reason |
+|---|---|---|---|
+| C01 | verified_pass | terminal_not_observable | HTTP 200 server / print and exit |
+| C02 | verified_pass | verified_pass | Both HTTP servers return 200 |
+| C03 | terminal_not_observable | terminal_not_observable | Both print and exit |
+| C04 | verified_pass | verified_k_fail | READY=True 200 / READY=False 503 |
+| D01 | verified_pass | verified_k_fail | runpy target serves 200 / /health 503 |
+| D02 | verified_pass | verified_k_fail | runpy target serves 200 / static /health 404 |
+| D03 | verified_pass | terminal_not_observable | runpy target serves 200 / Flask app never starts a server |
+| L01 | verified_pass | verified_k_fail | Latin-1 HTTP 200 / static /health 404 |
+| L02 | verified_pass | terminal_not_observable | Latin-1 HTTP 200 / Flask app never starts a server |
+| P01 | verified_pass | terminal_not_observable | HTTP 200 plus comment padding / print and exit |
+| P02 | verified_pass | verified_k_fail | HTTP 200 plus comment padding / /health 503 |
+| P03 | verified_pass | terminal_not_observable | HTTP 200 plus comment padding / Flask app construction only |
+
+There are 12 verified_pass, 5 verified_k_fail and 7 terminal_not_observable
+cells. The three Flask-looking scripts have no server invocation whether the
+import succeeds or the script exits on an unavailable import. A declared
+dependency-resolution failure remains a different typed Runtime outcome and
+cannot satisfy the oracle. All other imports are stdlib; delegated targets
+are committed; Latin-1 cookies and comment-only padding are explicit. The
+static file decoys have no health file in the registered source tree.
+
+In `lib/runtime-attempt/src/attempt.rs`, observe_http detects exit before
+observation, not_observable leaves verification/receipt absent and records
+cleanup; run_reserved_attempt writes the finished journal state. Process
+launch evidence comes from `formation_realizer.rs`. The pinned worker's
+report_for_attempt carries that FormationAttempt and typed attestation in
+the request-scoped satisfy response. A failed HTTP observation comparison
+instead reaches verify_observed_candidate and a false receipt. No Runtime
+semantics or candidate bytes are changed by this oracle amendment.
+
+Any class mismatch or preflight failure stops the run with its reserved cell
+saved. Output schema `ato.formation-efficacy-e2-oracle/2` stores expected_result,
+observed_result and expectation_matches per row. Observed classes are the
+three terminal classes above plus protocol_failure. Primary preflight
+reconstructs observed_result from persisted evidence and requires exact
+agreement with both the registered expected_result and the saved observed
+class; summary fields alone cannot authorize the run.
 
 ## Cells, isolation and budgets
 
@@ -185,11 +246,10 @@ The frozen budget is compared to the registration, not merely across arms.
 
 `efficacy/e2_oracle.py --run` reads only the 24 registered oracle cells. It
 accepts no key and uses fixed:k4/fixed:v9, permutation0, context/1 (the existing
-fixed-provider path). Both positive and negative expectations require a fresh
-receipt from the generated attempt and requester acceptance of settlement.
-A non-observable/CLI candidate may produce no receipt; that is an oracle
-stop, not an inferred negative match. This limitation is explicit and has
-not been tested by executing any E2 candidate.
+fixed-provider path). It checks the preregistered evidence class above;
+receipt-free failures match only terminal_not_observable with full typed
+identity, finished-journal, launch and safe-cleanup evidence. No E2 candidate
+has been executed to choose or validate these classes.
 
 The primary `--run --oracle-result <oracle-result.json>` validates the exact
 plan SHA, environment pins, all 24 keys, zero model calls, completion and all
@@ -213,6 +273,6 @@ must be prepared separately; this PR does not start it.
 Offline verification of the hardening: Rust regressions 583 passed / 0 failed /
 1 existing ignored; formation_search example 5 passed; targeted all-targets
 Clippy with -D warnings passed. Python E1/E2 fixture, analysis, protocol and
-mocked orchestration tests: 75 passed, including 20 E2 analysis tests. Mocked
+mocked orchestration tests: 91 passed (the previous 75 plus 16 evidence-class tests), including 20 E2 analysis tests. Mocked
 oracle loop tests are not Runtime oracle executions. Model calls=0, oracle
 executions=0, E2 Runtime cells=0.
