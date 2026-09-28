@@ -43,7 +43,7 @@ that actual acceptance.
 | 3d | Retained objects → validated closure/tree → new Run → same K → new receipt without source/scratch | Merged: API #692 `23d69735` → ato #1407 `4697b3b0` (migration 0299 not applied remotely); actual Coordinator replay Static/Python/Node after source deletion; not deployed |
 | 4 | Durable deterministic SearchState; D1 failure→evidence→authorized D2; restart preserves search/attempt identity | Merged: API #693 `18fe2c75` → ato #1408 `a46fd62d` (migration 0300 not applied remotely); actual Coordinator restart acceptance cases 1–7, restart points 1–9, review hardening H1–H4; not deployed |
 | 5a | Optional finite AllowedChoices DecisionProvider; deterministic fallback under the same permissions and budget; compare attempts, elapsed time, provider usage and cost | **Completed (implemented and locally/integration verified)**. 5a-a merged: ato #1409 / API #694 (ADR-035, migration 0301). 5a-b merged: API #695 `1853f280` → ato #1410 `c883087e` (ADR-036, migration 0302): Inspect / Stop and independent decision sequence; B0–B8 verified. Probe deferred (no safe existing primitive). Live Jev acceptance and same-fixture/same-budget comparison: passed (2026-09-26); both arms 2 attempts / PASS; deterministic 3.573 s, Jev 3.022 s, 1 call, 1612 input / 134 output tokens, estimated $0.000067704. Not deployed; migrations not applied remotely |
-| 5b | **Candidate Generation**: general LLM CandidateProducer → typed proposal → Ato ProposalValidator/compiler → candidate-pool expansion | **Fixed CandidateProducer path: implemented, actual integration verified, merged, not deployed.** C2 #1424 merged at `d4fa39a693eb253949c65486288908e9ae47cf57`. General LLM CandidateProducer is the **next implementation target** (PR D); general LLM efficacy and real-world coverage are separate from fixed-path completion. [Actual ledger](../../ops/formation-proposal-requester-2026-09-28.md): zero-known-D/no-Preset same-K PASS, P0–P11 and L1–L3. E1/E2 selection efficacy is not a prerequisite |
+| 5b | **Candidate Generation**: general LLM CandidateProducer → typed proposal → Ato ProposalValidator/compiler → candidate-pool expansion | **Fixed CandidateProducer path: implemented, actual integration verified, merged, not deployed.** C2 #1424 merged at `d4fa39a693eb253949c65486288908e9ae47cf57`. General LLM CandidateProducer is **in progress** (PR D: receiver/core compatibility merged; requester adapter mock-verified, live gate pending); general LLM efficacy and real-world coverage are separate from fixed-path completion. [Actual ledger](../../ops/formation-proposal-requester-2026-09-28.md): zero-known-D/no-Preset same-K PASS, P0–P11 and L1–L3. E1/E2 selection efficacy is not a prerequisite |
 | 5c | **Adaptive Formation Loop**: DecisionProvider ↔ CandidateProducer ↔ Runtime/Verifier evidence, bounded iterative adaptation | Pending; no unbounded generation/execution loop |
 | 6a | **Real-world coverage measurement**: 20 real applications using current known-D Formation | Can start independently of 5b efficacy; measurement not yet performed by this correction |
 | 6b | **Capability expansion**: 20 → 50 → 100, measured Runtime/Adapter/build/service gaps | Pending; prioritize observed blockers, not repository registration count |
@@ -102,6 +102,12 @@ after explicit exact-head approval. C2 #1424 connects requester/source inventory
 actual acceptance; merged at `d4fa39a693eb253949c65486288908e9ae47cf57`,
 not deployed. PR D proceeds receiver provenance (D1), requester/source context
 (D2), then separately preregistered bounded live acceptance (D3).
+D1 API #701 merged at `9fa4be45adf7dbda1fa68689c365a1806921569f`;
+D2-A ato #1426 at `c4bb53564669065aa6c47d1ed283e02ac6fa68ae`;
+D2-B API #703 at `38668a97e7632256b33074b0d223670c16b76bfd`.
+D2-C is the [requester-owned DeepSeek adapter](FORMATION_DEEPSEEK_REQUESTER.md),
+implemented and mock-integration verified, not merged/deployed. No live model
+calls or G0–G5 acceptance yet; D3 needs a separately approved preregistration.
 The receiver-first merge order is preserved. PR D separately adds a general LLM adapter and source-context
 opt-in after fixed-producer acceptance. Migrations, deployments and model calls
 are not implied by this order.
