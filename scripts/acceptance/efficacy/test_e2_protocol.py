@@ -8,10 +8,11 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from e2_protocol import (ROOT, ARM_IDENTITY, digest, oracle_expectation, oracle_key,
+from e2_protocol import (ROOT, ARM_IDENTITY, ORACLE_RESULT_SCHEMA, digest, oracle_expectation, oracle_key,
+                         oracle_observed_result, terminal_generated_failure, validate_oracle_cells,
                          safe_record, same_k_success, validate_oracle_result,
                          verify_api_pin, verify_registration, write_json)
-from e2_test_support import PLAN_DATA, record, snapshot
+from e2_test_support import PLAN_DATA, record, snapshot, terminal_snapshot, oracle_record
 
 
 class Evidence(unittest.TestCase):
@@ -149,13 +150,14 @@ class OraclePreflight(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.path = Path(self.tmp.name) / 'oracle-result.json'
         self.environment = {'api_sha': PLAN_DATA['api_main'], 'artifacts': {'requester': 'r', 'runtime': 't', 'wasm': 'w', 'coordinator_tree': 'c'}}
-        self.output = {'plan_sha256': 'plan', 'environment': self.environment, 'model_calls': 0,
+        self.output = {'schema': ORACLE_RESULT_SCHEMA, 'plan_sha256': 'plan', 'environment': self.environment, 'model_calls': 0,
                        'complete': True, 'all_expectations_match': True, 'results': []}
         for cell in PLAN_DATA['oracle']['cells']:
-            r = record('oracle', cell['case'], 0, cell['expected_fully_satisfied'])
+            r = oracle_record(cell)
             r['evidence']['selected_entrypoint'] = r['selected_entrypoint'] = cell['draft_entrypoint_id']
             self.output['results'].append({'cell_key': oracle_key(cell), 'record': r,
-                                          'expected_fully_satisfied': cell['expected_fully_satisfied'],
+                                          'expected_result': cell['expected_result'],
+                                          'observed_result': oracle_observed_result(r),
                                           'expectation_matches': True})
 
     def validate(self):
@@ -181,7 +183,7 @@ class OraclePreflight(unittest.TestCase):
                 self.validate()
 
     def test_wrong_expectation_rejected(self):
-        self.output['results'][0]['expected_fully_satisfied'] = False
+        self.output['results'][0]['expected_result'] = 'verified_k_fail'
         with self.assertRaisesRegex(RuntimeError, 'expectation'):
             self.validate()
 
@@ -200,13 +202,152 @@ class OraclePreflight(unittest.TestCase):
             with self.assertRaises(RuntimeError, msg=field):
                 self.validate()
 
-    def test_negative_oracle_requires_fresh_receipt(self):
-        cell = next(c for c in PLAN_DATA['oracle']['cells'] if not c['expected_fully_satisfied'])
+    def test_verified_k_fail_oracle_requires_fresh_receipt(self):
+        cell = next(c for c in PLAN_DATA['oracle']['cells'] if c['expected_result'] == 'verified_k_fail')
         r = record('oracle', cell['case'], 0, False)
         r['selected_entrypoint'] = cell['draft_entrypoint_id']
         self.assertTrue(oracle_expectation(r, cell))
         r['evidence']['result']['attempts'][-1]['formation_attempt']['receipt'] = None
         self.assertFalse(oracle_expectation(r, cell))
+
+    def test_forged_observed_result_rejected(self):
+        self.output['results'][0]['observed_result'] = 'terminal_not_observable'
+        with self.assertRaisesRegex(RuntimeError, 'expectation/evidence'):
+            self.validate()
+
+    def test_terminal_proof_cannot_fill_verified_k_fail_cell(self):
+        row = next(r for r in self.output['results'] if r['expected_result'] == 'terminal_not_observable')
+        row['expected_result'] = row['observed_result'] = 'verified_k_fail'
+        with self.assertRaisesRegex(RuntimeError, 'expectation/evidence'):
+            self.validate()
+
+    def test_result_schema_must_be_current(self):
+        self.output['schema'] = 'ato.formation-efficacy-e2-oracle/1'
+        with self.assertRaisesRegex(RuntimeError, 'schema'):
+            self.validate()
+
+
+class OracleEvidenceClasses(unittest.TestCase):
+    def cell(self, expected):
+        return next(c for c in PLAN_DATA['oracle']['cells'] if c['expected_result'] == expected)
+
+    def test_preregistered_classes_are_closed_and_labels_unchanged(self):
+        from collections import Counter
+        from e2_fixtures import CORRECT
+        counts = Counter(c['expected_result'] for c in validate_oracle_cells(PLAN_DATA))
+        self.assertEqual(counts, {'verified_pass': 12, 'verified_k_fail': 5, 'terminal_not_observable': 7})
+        for c in PLAN_DATA['oracle']['cells']:
+            self.assertNotIn('expected_fully_satisfied', c)
+            positive = int(c['mapped_file'].split('_')[1].split('.')[0]) in CORRECT[c['case']]
+            self.assertEqual(c['expected_result'] == 'verified_pass', positive)
+        for bad in ('protocol_failure', 'unknown', ['verified_k_fail', 'terminal_not_observable']):
+            p = deepcopy(PLAN_DATA)
+            p['oracle']['cells'][0]['expected_result'] = bad
+            with self.assertRaises(RuntimeError):
+                validate_oracle_cells(p)
+
+    def test_cli_terminal_proof_matches_without_becoming_primary_success(self):
+        cell = self.cell('terminal_not_observable')
+        r = oracle_record(cell)
+        self.assertEqual(r['violations'], [])
+        self.assertIsNotNone(terminal_generated_failure(r['evidence']))
+        self.assertEqual(oracle_observed_result(r), 'terminal_not_observable')
+        self.assertTrue(oracle_expectation(r, cell))
+        self.assertFalse(same_k_success(r['evidence']))
+
+    def test_receipt_classes_match(self):
+        for expected in ('verified_pass', 'verified_k_fail'):
+            cell = self.cell(expected)
+            r = oracle_record(cell)
+            self.assertEqual(oracle_observed_result(r), expected)
+            self.assertTrue(oracle_expectation(r, cell))
+
+    def test_unfinished_attempt_record_rejected(self):
+        s = terminal_snapshot()
+        s['result']['attempts'][-1]['attestation']['attempt_record'] = 'started_unfinished'
+        self.assertIsNone(terminal_generated_failure(s))
+
+    def test_unknown_is_not_negative_proof(self):
+        for field in ('status', 'unknown_attempts'):
+            s = terminal_snapshot()
+            if field == 'status':
+                s['result']['attempts'][-1]['status'] = 'unknown'
+            else:
+                s['result']['unknown_attempts'] = [{'attempt_id': 'attempt-generated'}]
+            self.assertIsNone(terminal_generated_failure(s))
+
+    def test_generated_d_mismatch_or_parent_d_rejected(self):
+        for location in ('row', 'attempt', 'formation', 'attestation', 'snapshot'):
+            s = terminal_snapshot()
+            attempt = s['result']['attempts'][-1]
+            target = {'row': s['generation_rows'][0], 'attempt': attempt,
+                      'formation': attempt['formation_attempt'], 'attestation': attempt['attestation'],
+                      'snapshot': s}[location]
+            target['generated_derivation_ref' if location == 'snapshot' else 'derivation_ref'] = 'sha256:parent'
+            self.assertIsNone(terminal_generated_failure(s), location)
+
+    def test_missing_or_duplicate_attempt_rejected(self):
+        for duplicate in (False, True):
+            s = terminal_snapshot()
+            if duplicate:
+                s['result']['attempts'].append(deepcopy(s['result']['attempts'][-1]))
+            else:
+                s['result']['attempts'].pop()
+            self.assertIsNone(terminal_generated_failure(s))
+
+    def test_request_search_and_formation_attempt_identity_must_agree(self):
+        for location, field in [('result', 'satisfy_id'), ('result', 'search_id'),
+                                ('formation', 'attempt_id'), ('formation', 'runtime_id'),
+                                ('formation', 'contract_ref'), ('attestation', 'contract_ref')]:
+            s = terminal_snapshot()
+            attempt = s['result']['attempts'][-1]
+            target = {'result': s['result'], 'formation': attempt['formation_attempt'],
+                      'attestation': attempt['attestation']}[location]
+            target[field] = 'wrong'
+            self.assertIsNone(terminal_generated_failure(s), (location, field))
+
+    def test_setup_dependency_timeout_and_generic_failures_are_not_proof(self):
+        for code in ('formation_failed', 'dependency_unavailable', 'runtime_offline', 'timeout', 'attempt_record_unfinished'):
+            s = terminal_snapshot()
+            s['result']['attempts'][-1]['failure']['code'] = code
+            s['result']['attempts'][-1]['formation_attempt']['failure']['code'] = code
+            self.assertIsNone(terminal_generated_failure(s), code)
+
+    def test_receipt_absence_and_message_alone_are_not_proof(self):
+        s = terminal_snapshot()
+        s['result']['attempts'][-1]['attestation']['execution_started'] = False
+        s['result']['attempts'][-1]['failure']['message'] = 'candidate_not_observable finished cleanup succeeded'
+        self.assertIsNone(terminal_generated_failure(s))
+        s = terminal_snapshot()
+        s['result']['attempts'][-1]['failure']['message'] = 'irrelevant text'
+        self.assertIsNotNone(terminal_generated_failure(s))
+
+    def test_unsafe_or_missing_cleanup_cannot_prove_terminal_outcome(self):
+        for mutation in ('failed', 'missing', 'not_destroyed', 'receipt', 'route'):
+            s = terminal_snapshot()
+            f = s['result']['attempts'][-1]['formation_attempt']
+            if mutation == 'failed':
+                f['outcomes']['cleanup']['state'] = 'failed'
+            elif mutation == 'missing':
+                f['outcomes'].pop('cleanup')
+            elif mutation == 'not_destroyed':
+                f['realization']['destroyed'] = False
+            elif mutation == 'receipt':
+                f['receipt'] = {'fully_satisfied': False}
+            else:
+                s['result']['verified_routes'] = [{}]
+            self.assertIsNone(terminal_generated_failure(s), mutation)
+
+    def test_launch_setup_failure_with_same_code_is_not_terminal_proof(self):
+        s = terminal_snapshot()
+        s['result']['attempts'][-1]['formation_attempt']['realization']['endpoints'] = {}
+        self.assertIsNone(terminal_generated_failure(s))
+
+    def test_class_is_allowed_only_for_registered_cell(self):
+        terminal = oracle_record(self.cell('terminal_not_observable'))
+        for expected in ('verified_pass', 'verified_k_fail'):
+            cell = dict(self.cell('terminal_not_observable'), expected_result=expected)
+            self.assertFalse(oracle_expectation(terminal, cell))
 
 
 class Integrity(unittest.TestCase):

@@ -59,3 +59,38 @@ def record(arm='C', case='D01', permutation=0, passed=True, outcome='admitted'):
     run = SimpleNamespace(root=Path('/nonexistent-e2-test-record'),
                           fixture_sha256=digest(PLAN_DATA['fixtures'][case]['files']))
     return safe_record(run, observed, case, permutation, arm, PLAN_DATA)
+
+
+def terminal_snapshot(case='C01', entry='v9'):
+    observed = snapshot('oracle', case, 0, False)
+    observed['search_id'] = observed['result']['search_id'] = 'search'
+    observed['generation_rows'][0]['search_id'] = 'search'
+    observed['selected_entrypoint'] = entry
+    observed['result']['unknown_attempts'] = []
+    attempt = observed['result']['attempts'][-1]
+    attempt['metadata_mismatch'] = []
+    attempt['failure'] = {'code': 'candidate_not_observable', 'stage': 'verification', 'message': 'not used'}
+    contract = observed['result']['contract_ref']
+    attempt['attestation'].update(contract_ref=contract, derivation_ref=attempt['derivation_ref'])
+    attempt['formation_attempt'] = {
+        'attempt_id': attempt['attempt_id'], 'runtime_id': attempt['runtime_id'],
+        'contract_ref': contract, 'derivation_ref': attempt['derivation_ref'], 'status': 'failed',
+        'receipt': None, 'verification': None, 'failure': deepcopy(attempt['failure']),
+        'realization': {'destroyed': True, 'executor': 'runtime-process',
+                        'endpoints': {'app.http': 'guest 8000 -> host 8000'}},
+        'outcomes': {'seal': {'state': 'failed', 'reason': 'candidate_not_observable'},
+                     'runtime_verification': {'state': 'failed', 'reason': 'candidate_not_observable'},
+                     'cleanup': {'state': 'succeeded'}},
+    }
+    return observed
+
+
+def oracle_record(cell):
+    if cell['expected_result'] != 'terminal_not_observable':
+        r = record('oracle', cell['case'], 0, cell['expected_result'] == 'verified_pass')
+        r['selected_entrypoint'] = r['evidence']['selected_entrypoint'] = cell['draft_entrypoint_id']
+        return r
+    observed = terminal_snapshot(cell['case'], cell['draft_entrypoint_id'])
+    run = SimpleNamespace(root=Path('/nonexistent-e2-test-record'),
+                          fixture_sha256=digest(PLAN_DATA['fixtures'][cell['case']]['files']))
+    return safe_record(run, observed, cell['case'], 0, 'oracle', PLAN_DATA)
