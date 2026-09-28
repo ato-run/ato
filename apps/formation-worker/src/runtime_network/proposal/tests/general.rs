@@ -165,7 +165,7 @@ fn enabled() -> (tempfile::TempDir, Submission) {
     (root, sub)
 }
 fn envelope(content: &str) -> Value {
-    json!({"choices":[{"index":0,"message":{"role":"assistant","content":content,"reasoning_content":"DO_NOT_PERSIST_REASONING"}}],"usage":{"prompt_tokens":123,"completion_tokens":45}})
+    json!({"model":"mock-pinned-model","choices":[{"finish_reason":"stop","index":0,"message":{"role":"assistant","content":content,"reasoning_content":"DO_NOT_PERSIST_REASONING"}}],"usage":{"prompt_tokens":123,"completion_tokens":45}})
 }
 fn adapter(root: &Path, mock: &Mock) -> DeepSeekCandidateProducer {
     let budget = Arc::new(CallBudget::create(&root.join("budget.jsonl"), plan()).unwrap());
@@ -586,4 +586,97 @@ fn general_error_timeout_durable_evidence_without_k_evidence() {
                 .is_empty()
         );
     }
+}
+
+#[test]
+fn d3_finish_model_and_usage_fail_closed_and_halt_across_restart() {
+    for mutation in 0..7 {
+        let (root, sub) = enabled();
+        let mut reply = envelope(std::str::from_utf8(output().raw()).unwrap());
+        match mutation {
+            0 => reply["choices"][0]["finish_reason"] = json!("length"),
+            1 => reply["choices"][0]["finish_reason"] = json!("tool_calls"),
+            2 => {
+                reply["choices"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("finish_reason");
+            }
+            3 => reply["usage"]["prompt_tokens"] = json!(20001),
+            4 => reply["usage"]["completion_tokens"] = json!(2049),
+            5 => reply["model"] = json!("unexpected-model"),
+            _ => {
+                reply.as_object_mut().unwrap().remove("model");
+            }
+        }
+        let mock = Mock::new(move |_, _| Reply::json(reply.clone()));
+        let mut budget = plan();
+        budget.max_calls = 6;
+        let path = root.path().join("d3-journal");
+        let guard = Arc::new(CallBudget::create(&path, budget.clone()).unwrap());
+        let producer = DeepSeekCandidateProducer::new_mock(config(&mock.endpoint), guard).unwrap();
+        let request = sub.proposal_request_v2(&status(&sub)).unwrap();
+        assert_eq!(
+            producer.propose(&request).err().unwrap().class,
+            ErrorClass::MalformedResponse
+        );
+        let reopened = Arc::new(CallBudget::reopen(&path, budget).unwrap());
+        let restarted =
+            DeepSeekCandidateProducer::new_mock(config(&mock.endpoint), reopened).unwrap();
+        let mut next = request;
+        next.search_id = "next_cell".into();
+        assert!(restarted.propose(&next).is_err());
+        assert_eq!(mock.count(), 1, "mutation {mutation}");
+        let journal = std::fs::read_to_string(path).unwrap();
+        assert!(!journal.contains("unexpected-model"));
+        assert!(!journal.contains("DO_NOT_PERSIST_REASONING"));
+    }
+}
+
+#[test]
+fn d3_peak_reservation_rounds_each_side_up_and_bounds_total() {
+    let budget = BudgetPlan {
+        max_calls: 6,
+        input_token_cap: 262144,
+        output_token_cap: 2048,
+        input_price: 300000,
+        output_price: 1200000,
+        ceiling_usd_micros: 5000000,
+    };
+    assert_eq!(budget.cost(262144, 0).unwrap(), 78644);
+    assert_eq!(budget.cost(0, 2048).unwrap(), 2458);
+    assert_eq!(budget.validate().unwrap(), 81102);
+    assert_eq!(budget.validate().unwrap() * 6, 486612);
+}
+
+#[test]
+fn preregistration_uses_exact_frozen_source_without_provider_or_status() {
+    let (root, sub) = enabled();
+    let evidence = sub.proposal_preregistration().unwrap();
+    let request = sub.proposal_request_v2(&status(&sub)).unwrap();
+    assert_eq!(evidence["source_context"], json!(request.source_context));
+    assert_eq!(
+        evidence["source_context_sha256"],
+        json!(
+            request
+                .source_context_sha256(sub.request.policy.proposal.as_ref().unwrap())
+                .unwrap()
+        )
+    );
+    std::fs::write(root.path().join("input/app.py"), "changed").unwrap();
+    assert_eq!(evidence, sub.proposal_preregistration().unwrap());
+}
+
+#[test]
+fn d3_unresolved_reservation_blocks_next_cell_without_refund() {
+    let (root, _) = enabled();
+    let mut budget = plan();
+    budget.max_calls = 6;
+    let path = root.path().join("pending");
+    let guard = CallBudget::create(&path, budget.clone()).unwrap();
+    guard.reserve("G0").unwrap();
+    assert!(guard.reserve("G1").is_err());
+    let restarted = CallBudget::reopen(&path, budget).unwrap();
+    assert!(restarted.reserve("G0").is_err());
+    assert!(restarted.reserve("G1").is_err());
 }
