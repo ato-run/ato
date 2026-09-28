@@ -1,4 +1,4 @@
-//! Fixed-only actual acceptance driver. No external model adapter or transport.
+//! Fixed / loopback-mock actual acceptance driver. Never reads a live model key.
 //! Reuses production requester/DecisionProvider/receipt authority and Runtime API.
 use anyhow::{Context, Result};
 use ato_formation::{authoring::BoundContract, proposal::*};
@@ -7,7 +7,11 @@ use ato_formation_worker::{
     runtime_network::{
         Client, RuntimeConstraintWire, SatisfyBudget, SatisfyPolicy, accept_verified_routes,
         prepare_submission,
-        proposal::{prepare_proposal_submission, serve_proposal},
+        proposal::{
+            budget::{BudgetPlan, CallBudget},
+            deepseek::{DeepSeekCandidateProducer, DeepSeekConfig},
+            prepare_proposal_submission, serve_general_proposal, serve_proposal,
+        },
     },
 };
 use serde::Deserialize;
@@ -23,6 +27,8 @@ use std::{
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
+    #[serde(default)]
+    mock_llm: Option<MockLlm>,
     api: String,
     token_file: PathBuf,
     source: PathBuf,
@@ -46,6 +52,13 @@ struct Config {
     prefer_member: Option<usize>,
     #[serde(default = "settle_seconds")]
     settle_seconds: u64,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MockLlm {
+    config: DeepSeekConfig,
+    budget: BudgetPlan,
+    journal: PathBuf,
 }
 fn settle_seconds() -> u64 {
     180
@@ -164,6 +177,22 @@ fn main() -> Result<()> {
         }
         s
     };
+    let general = config
+        .mock_llm
+        .map(|m| -> Result<_> {
+            let guard = if m.journal.exists() {
+                CallBudget::reopen(&m.journal, m.budget)?
+            } else {
+                CallBudget::create(&m.journal, m.budget)?
+            };
+            let producer = Arc::new(DeepSeekCandidateProducer::new_mock(
+                m.config,
+                Arc::new(guard),
+            )?);
+            submission.configure_general_producer(producer.identity())?;
+            Ok(producer)
+        })
+        .transpose()?;
     let created = match &config.resume {
         Some(id) => json!({"satisfy_id":id}),
         None => client.submit(&submission)?,
@@ -184,14 +213,25 @@ fn main() -> Result<()> {
     while Instant::now() < deadline {
         if let Ok(status) = client.satisfy_status(id) {
             submission.accept_proposal_round(&status)?;
-            serve_proposal(
-                &client,
-                id,
-                &status,
-                &mut submission,
-                &config.claimant_id,
-                producer.clone(),
-            )?;
+            if let Some(producer) = &general {
+                serve_general_proposal(
+                    &client,
+                    id,
+                    &status,
+                    &mut submission,
+                    &config.claimant_id,
+                    producer.clone(),
+                )?;
+            } else {
+                serve_proposal(
+                    &client,
+                    id,
+                    &status,
+                    &mut submission,
+                    &config.claimant_id,
+                    producer.clone(),
+                )?;
+            }
             if config.authorization.is_some() || submission.request.policy.decision.is_some() {
                 let preferred = config
                     .prefer_member
