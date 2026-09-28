@@ -339,15 +339,54 @@ pub struct RecoveryResult {
     /// reached the control plane: runtime work may be accepted.
     pub clean: bool,
     pub reports: Vec<LeaseRecoveryReport>,
+    /// `leases/` entries whose names are not lease ids at all. They are
+    /// never touched, but they keep the slot quarantined until a human
+    /// inspects them: an unidentifiable leftover could be anything.
+    pub quarantined: Vec<String>,
 }
 
-/// Find, stop and report everything this slot owns. Journal entries are
-/// removed only for leases confirmed stopped AND acknowledged.
+/// Move a settled lease's leftover workspace out of `leases/` and into the
+/// sibling `leases.resolved/` directory. Preserved, never deleted: the
+/// workspace may hold state whose commit outcome is uncertain, so recovery
+/// parks it where operators can inspect it instead of reclaiming the bytes.
+fn preserve_lease_dir(leases_dir: &Path, lease_id: &str) -> Result<()> {
+    let source = leases_dir.join(lease_id);
+    if !source.exists() {
+        return Ok(());
+    }
+    let resolved = leases_dir
+        .parent()
+        .unwrap_or(leases_dir)
+        .join("leases.resolved");
+    fs::create_dir_all(&resolved).context("create the resolved lease directory")?;
+    let mut target = resolved.join(lease_id);
+    if target.exists() {
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis())
+            .unwrap_or_default();
+        target = resolved.join(format!("{lease_id}-{millis}"));
+    }
+    fs::rename(&source, &target)
+        .with_context(|| format!("preserve lease workspace {}", source.display()))?;
+    fs::File::open(&resolved)
+        .and_then(|directory| directory.sync_all())
+        .context("sync the resolved lease directory")?;
+    Ok(())
+}
+
+/// Find, stop and report everything this slot owns — journal entries,
+/// labelled containers/networks AND leftover `leases/` directories — then
+/// forget only what the control plane acknowledged. A lease directory that
+/// outlived its worker is evidence of an unfinished teardown, never a reason
+/// to refuse to run recovery: the lock in `slot_state` guarantees no second
+/// process is still serving it.
 pub fn recover_slot(
     journal: &RunJournal,
     scanner: Option<&OwnedResourceScanner>,
     reporter: &dyn RecoveryReporter,
     budget: StopBudget,
+    leases_dir: &Path,
 ) -> Result<RecoveryResult> {
     let entries = journal.load()?;
     let owned = match scanner {
@@ -355,8 +394,32 @@ pub fn recover_slot(
         None => None,
     };
 
+    // Reconcile leftover lease directories with the journal and the resource
+    // scan: a directory may exist for a lease the journal never recorded
+    // (the worker died between mkdir and record, or the lease kind never
+    // journaled). Names that are not lease ids cannot be matched to
+    // anything; they are quarantined rather than touched.
+    let mut residue: BTreeMap<String, PathBuf> = BTreeMap::new();
+    let mut quarantined = Vec::new();
+    match fs::read_dir(leases_dir) {
+        Ok(dir_entries) => {
+            for entry in dir_entries {
+                let entry = entry.context("read a lease directory entry")?;
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if !valid_lease_id(&name) {
+                    quarantined.push(name.clone());
+                    continue;
+                }
+                residue.insert(name, entry.path());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("read the lease directory"),
+    }
+
     let mut leases = BTreeSet::new();
     leases.extend(entries.iter().map(|entry| entry.lease_id.clone()));
+    leases.extend(residue.keys().cloned());
     if let Some(owned) = &owned {
         leases.extend(
             owned
@@ -413,6 +476,12 @@ pub fn recover_slot(
         };
         let acknowledged = reporter.report_recovery(&report).is_ok();
         if stop.is_confirmed() && acknowledged {
+            // The workspace survives the journal: park it before forgetting
+            // the entry, so a crash between the two still leaves a directory
+            // the next recovery reports and preserves.
+            if residue.contains_key(&lease_id) {
+                preserve_lease_dir(leases_dir, &lease_id)?;
+            }
             journal.remove(&lease_id)?;
         } else {
             clean = false;
@@ -426,7 +495,14 @@ pub fn recover_slot(
         }
         reports.push(report);
     }
-    Ok(RecoveryResult { clean, reports })
+    if !quarantined.is_empty() {
+        clean = false;
+    }
+    Ok(RecoveryResult {
+        clean,
+        reports,
+        quarantined,
+    })
 }
 
 #[cfg(test)]
@@ -465,6 +541,113 @@ mod tests {
         fs::write(&path, script).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         path
+    }
+
+    fn leases_dir(work_root: &Path) -> PathBuf {
+        work_root.join("leases")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_leftover_lease_dir_is_reported_and_preserved_once_acknowledged() {
+        let root = tempfile::tempdir().unwrap();
+        let lease = leases_dir(root.path()).join("L4");
+        fs::create_dir_all(&lease).unwrap();
+        fs::write(lease.join("state"), b"uncommitted").unwrap();
+        let docker = fake_docker(root.path(), "#!/bin/sh\nexit 0\n");
+        let scanner = OwnedResourceScanner::with_docker(docker, "runner1", "slot1");
+        let journal = RunJournal::new(root.path(), "runner1", "slot1").unwrap();
+        let reporter = Reporter::default();
+        let result = recover_slot(
+            &journal,
+            Some(&scanner),
+            &reporter,
+            StopBudget::DEFAULT,
+            &leases_dir(root.path()),
+        )
+        .unwrap();
+        assert!(result.clean);
+        assert_eq!(
+            (
+                reporter.reports.borrow()[0].lease_id.as_str(),
+                reporter.reports.borrow()[0].outcome
+            ),
+            ("L4", "stopped")
+        );
+        // The workspace is preserved, never deleted: its commit outcome is
+        // unknown, so recovery parks it under leases.resolved/.
+        assert!(!lease.exists());
+        assert_eq!(
+            fs::read(root.path().join("leases.resolved/L4/state"),).unwrap(),
+            b"uncommitted"
+        );
+    }
+
+    #[test]
+    fn without_docker_a_leftover_lease_dir_stays_unconfirmed() {
+        // A residue-only lease could have created containers the journal
+        // never recorded; with no scanner there is nothing to disprove that,
+        // so the report stays honest about the uncertainty and the slot
+        // remains quarantined until it can check.
+        let root = tempfile::tempdir().unwrap();
+        let lease = leases_dir(root.path()).join("L6");
+        fs::create_dir_all(&lease).unwrap();
+        let journal = RunJournal::new(root.path(), "runner1", "slot1").unwrap();
+        let reporter = Reporter::default();
+        let result = recover_slot(
+            &journal,
+            None,
+            &reporter,
+            StopBudget::DEFAULT,
+            &leases_dir(root.path()),
+        )
+        .unwrap();
+        assert!(!result.clean);
+        assert_eq!(result.reports[0].outcome, "unconfirmed");
+        assert!(lease.exists());
+    }
+
+    #[test]
+    fn a_leftover_lease_dir_outlives_an_unacknowledged_report() {
+        let root = tempfile::tempdir().unwrap();
+        let lease = leases_dir(root.path()).join("L5");
+        fs::create_dir_all(&lease).unwrap();
+        let journal = RunJournal::new(root.path(), "runner1", "slot1").unwrap();
+        let reporter = Reporter {
+            fail: true,
+            ..Reporter::default()
+        };
+        let result = recover_slot(
+            &journal,
+            None,
+            &reporter,
+            StopBudget::DEFAULT,
+            &leases_dir(root.path()),
+        )
+        .unwrap();
+        assert!(!result.clean);
+        assert!(lease.exists());
+    }
+
+    #[test]
+    fn an_unidentifiable_residue_name_quarantines_the_slot_untouched() {
+        let root = tempfile::tempdir().unwrap();
+        let foreign = leases_dir(root.path()).join("not.a.lease");
+        fs::create_dir_all(&foreign).unwrap();
+        let journal = RunJournal::new(root.path(), "runner1", "slot1").unwrap();
+        let reporter = Reporter::default();
+        let result = recover_slot(
+            &journal,
+            None,
+            &reporter,
+            StopBudget::DEFAULT,
+            &leases_dir(root.path()),
+        )
+        .unwrap();
+        assert!(!result.clean);
+        assert_eq!(result.quarantined, vec!["not.a.lease".to_owned()]);
+        assert!(foreign.exists());
+        assert!(reporter.reports.borrow().is_empty());
     }
 
     #[test]
@@ -506,7 +689,16 @@ mod tests {
         let journal = RunJournal::new(root.path(), "runner1", "slot1").unwrap();
         fs::create_dir_all(&journal.dir).unwrap();
         fs::write(journal.dir.join("L1.json"), b"{not json").unwrap();
-        assert!(recover_slot(&journal, None, &Reporter::default(), StopBudget::DEFAULT).is_err());
+        assert!(
+            recover_slot(
+                &journal,
+                None,
+                &Reporter::default(),
+                StopBudget::DEFAULT,
+                &leases_dir(root.path()),
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -515,7 +707,14 @@ mod tests {
         let journal = RunJournal::new(root.path(), "runner1", "slot1").unwrap();
         journal.record(&RunJournalEntry::new(&owner("L1"))).unwrap();
         let reporter = Reporter::default();
-        let result = recover_slot(&journal, None, &reporter, StopBudget::DEFAULT).unwrap();
+        let result = recover_slot(
+            &journal,
+            None,
+            &reporter,
+            StopBudget::DEFAULT,
+            &leases_dir(root.path()),
+        )
+        .unwrap();
         assert!(!result.clean);
         assert_eq!(result.reports[0].outcome, "unconfirmed");
         assert_eq!(journal.load().unwrap()[0].phase, RunPhase::StopUnconfirmed);
@@ -544,15 +743,28 @@ mod tests {
             fail: true,
             ..Reporter::default()
         };
-        let result = recover_slot(&journal, Some(&scanner), &failing, StopBudget::DEFAULT).unwrap();
+        let result = recover_slot(
+            &journal,
+            Some(&scanner),
+            &failing,
+            StopBudget::DEFAULT,
+            &leases_dir(root.path()),
+        )
+        .unwrap();
         assert!(
             !result.clean,
             "an unacknowledged report is not a clean slot"
         );
 
         let reporter = Reporter::default();
-        let result =
-            recover_slot(&journal, Some(&scanner), &reporter, StopBudget::DEFAULT).unwrap();
+        let result = recover_slot(
+            &journal,
+            Some(&scanner),
+            &reporter,
+            StopBudget::DEFAULT,
+            &leases_dir(root.path()),
+        )
+        .unwrap();
         assert!(result.clean);
         let report = &reporter.reports.borrow()[0];
         assert_eq!(
@@ -583,8 +795,14 @@ mod tests {
         let journal = RunJournal::new(root.path(), "runner1", "slot1").unwrap();
         journal.record(&RunJournalEntry::new(&owner("L3"))).unwrap();
         let reporter = Reporter::default();
-        let result =
-            recover_slot(&journal, Some(&scanner), &reporter, StopBudget::DEFAULT).unwrap();
+        let result = recover_slot(
+            &journal,
+            Some(&scanner),
+            &reporter,
+            StopBudget::DEFAULT,
+            &leases_dir(root.path()),
+        )
+        .unwrap();
         assert!(result.clean);
         assert_eq!(reporter.reports.borrow()[0].outcome, "stopped");
         assert!(journal.load().unwrap().is_empty());
