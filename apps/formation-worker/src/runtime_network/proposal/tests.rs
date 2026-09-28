@@ -253,3 +253,5 @@ fn policy_cannot_bypass_enablement_or_change_after_source_verification() {
     sub.request.source.archive_digest = format!("sha256:{}", "a".repeat(64));
     assert!(sub.validate_proposal_submission().is_err());
 }
+
+mod general;
