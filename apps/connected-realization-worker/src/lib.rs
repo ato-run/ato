@@ -1234,6 +1234,11 @@ impl ConnectedWorker {
                         "[runtime-launch-recovery] quarantined unidentifiable lease residue: {name}"
                     );
                 }
+                for name in &result.foreign {
+                    eprintln!(
+                        "[runtime-launch-recovery] left sibling-or-live lease residue untouched: {name}"
+                    );
+                }
                 runtime_launch::recovery::mark_slot_recovered(result.clean);
             }
             Err(error) => {
@@ -1303,11 +1308,13 @@ impl ConnectedWorker {
     }
 
     pub fn run(&self) -> Result<()> {
-        // One process owns this work root. Leftover lease state is NOT a
-        // reason to refuse to start: only a running worker can settle it.
-        // The slot stays recovering — no new claims — until recovery proves
-        // every leftover stopped and its report reached the control plane.
-        let _slot = slot_state::SlotGuard::acquire(&self.config.work_root)?;
+        // One process owns this slot on the work root. Sibling slots may
+        // share the root — the lock is scoped by slot id. Leftover lease
+        // state is NOT a reason to refuse to start: only a running worker
+        // can settle it. The slot stays recovering — no new claims — until
+        // recovery proves every leftover stopped and its report reached the
+        // control plane.
+        let _slot = slot_state::SlotGuard::acquire(&self.config.work_root, &self.config.slot_id)?;
         self.recover_runtime_launch();
         // Advertise capabilities before the first claim — the scheduler only
         // dispatches what the last heartbeat proved this Runner can do.
@@ -1402,6 +1409,17 @@ impl ConnectedWorker {
 
         let lease_root = self.config.work_root.join("leases").join(&lease.id);
         fs::create_dir(&lease_root)?;
+        // Persist which slot owns this directory before anything else can
+        // land in it: several slots share one work root, so a leftover dir
+        // without a marker cannot be attributed by a restarting sibling.
+        runtime_launch::recovery::write_lease_owner(
+            &lease_root,
+            &runtime_launch::recovery::LeaseOwner::new(
+                &self.config.runner_id,
+                &self.config.slot_id,
+                &lease.id,
+            ),
+        )?;
         let result = match &lease.command {
             LeaseCommand::Portable(command) => {
                 self.execute_portable_lease(lease, command, &lease_root)
@@ -4252,6 +4270,40 @@ impl runtime_launch::recovery::RecoveryReporter for HttpRunnerApi {
             .context("recovery report retry set is empty")?
             .into())
     }
+
+    /// The terminal-or-live answer recovery needs to attribute a markerless
+    /// leftover dir on a shared work root. The control poll endpoint already
+    /// carries the lease's status; 404 means the lease is not ours (or never
+    /// existed), which leaves nothing live for a dir to belong to.
+    fn lease_liveness(&self, lease_id: &str) -> Result<runtime_launch::recovery::LeaseLiveness> {
+        use runtime_launch::recovery::LeaseLiveness;
+        let response = self
+            .authorized(
+                self.client
+                    .get(format!("{}/v1/runner-leases/{lease_id}/control", self.base)),
+            )
+            .send()?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(LeaseLiveness::Terminal);
+        }
+        let probe: LeaseStatusProbe = response.error_for_status()?.json()?;
+        match probe.status.as_deref() {
+            // Mirror of the control plane's LEASE_TERMINAL_STATUSES plus the
+            // owner-abort end state: no writer is bound to any of these.
+            Some("failed") | Some("stopped") | Some("expired") | Some("revoked")
+            | Some("cancelled") | Some("aborted") => Ok(LeaseLiveness::Terminal),
+            Some(_) => Ok(LeaseLiveness::Live),
+            // A lease answer without a status cannot be attributed either
+            // way — retry it next round rather than guess.
+            None => Err(anyhow::anyhow!("lease control response carried no status")),
+        }
+    }
+}
+
+/// The one field recovery reads from the lease control poll.
+#[derive(Debug, Deserialize)]
+struct LeaseStatusProbe {
+    status: Option<String>,
 }
 
 fn supported_lease_kinds(config: &WorkerConfig, persistent_volumes: bool) -> Vec<&'static str> {
@@ -5031,7 +5083,7 @@ mod tests {
         // up so recovery can report and settle the residue. New claims stay
         // closed until recovery confirms the stop is acknowledged — covered by
         // runtime_launch::recovery tests.
-        assert!(slot_state::SlotGuard::acquire(temporary.path()).is_ok());
+        assert!(slot_state::SlotGuard::acquire(temporary.path(), "slot-1").is_ok());
     }
 
     #[test]
