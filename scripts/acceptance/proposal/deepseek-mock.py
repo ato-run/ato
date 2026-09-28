@@ -30,7 +30,7 @@ class Model(http.server.BaseHTTPRequestHandler):
         if case=='M4':content='x'*16385
         if case=='M11':content=json.dumps({'schema':'ato.formation-proposal/1','proposals':[{'kind':'propose_derivation','contract':{},'operations':[{'operation':'shell','argv':['echo','escape']}]}]})
         if case=='M12':content=json.dumps({'schema':'ato.formation-proposal/1','proposals':[c.member('bad'),c.member('good')]})
-        result={'choices':[{'index':0,'message':{'role':'assistant','content':content,'reasoning_content':'PRIVATE_REASONING'}}], 'usage':{'prompt_tokens':321,'completion_tokens':123}}
+        result={'model':'mock-deepseek-d2','choices':[{'finish_reason':'stop','index':0,'message':{'role':'assistant','content':content,'reasoning_content':'PRIVATE_REASONING'}}], 'usage':{'prompt_tokens':321,'completion_tokens':123}}
         if case=='M2':result={'choices':'malformed'}
         if case=='M10':del result['usage']
         if case=='M9':time.sleep(1.3)
@@ -66,7 +66,7 @@ def run(case):
             assert proxy.event.wait(45);c.stop(p);p=c.requester(item,True,{'api':c.API})
         result=c.finished(item,p);view=result['status'];round=view['proposal_round']
         assert len(model.calls)==(0 if case=='M8' else 1)
-        assert len((item['root']/'spend.jsonl').read_text().splitlines())==2 # durable invocation reservation even connect failure
+        assert sum(isinstance(json.loads(line),str) for line in (item['root']/'spend.jsonl').read_text().splitlines())==1 # exactly one reservation, plus operational response/halt events
         assert c.count(item)==0 # no fixed producer was called
         call=round['provider_call'];assert call['provenance']['provider']=='deepseek' and call['provenance']['model']=='mock-deepseek-d2'
         if case in ['M0','M12','M13']:
