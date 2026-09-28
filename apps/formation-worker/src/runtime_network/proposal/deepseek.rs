@@ -1,6 +1,9 @@
 //! Requester-only, one HTTP send. No repair, fallback, SDK parsing authority,
 //! reasoning persistence or external credentials in a ProposalRequest.
-use super::{budget::CallBudget, provenance::*};
+use super::{
+    budget::{CallBudget, FinishReason, ResponseEvidence},
+    provenance::*,
+};
 use anyhow::{Result, ensure};
 use ato_formation::proposal::{
     CandidateProducer, MAX_BATCH_BYTES, ProducerOutput, ProducerProvenance, ProposalRequestV2,
@@ -223,6 +226,31 @@ impl DeepSeekCandidateProducer {
         }
         let envelope: Envelope =
             serde_json::from_slice(&bytes).map_err(|_| ErrorClass::MalformedResponse)?;
+        if envelope.choices.len() != 1 {
+            return Err(ErrorClass::MalformedResponse);
+        }
+        let choice = envelope
+            .choices
+            .into_iter()
+            .next()
+            .ok_or(ErrorClass::MalformedResponse)?;
+        let evidence = ResponseEvidence {
+            cell: request.search_id.clone(),
+            finish_reason: match choice.finish_reason.as_str() {
+                "stop" => FinishReason::Stop,
+                "length" => FinishReason::Length,
+                _ => FinishReason::Other,
+            },
+            model_matches: envelope.model == self.config.model,
+            input_tokens: envelope.usage.prompt_tokens,
+            output_tokens: envelope.usage.completion_tokens,
+        };
+        if !evidence.within(self.budget.plan()) {
+            self.budget
+                .record_response(evidence)
+                .map_err(|_| ErrorClass::TransportError)?;
+            return Err(ErrorClass::MalformedResponse);
+        }
         if envelope.usage.prompt_tokens > 9_007_199_254_740_991
             || envelope.usage.completion_tokens > 9_007_199_254_740_991
         {
@@ -241,11 +269,6 @@ impl DeepSeekCandidateProducer {
                 envelope.usage.completion_tokens,
             )
             .ok();
-        let choice = envelope
-            .choices
-            .into_iter()
-            .next()
-            .ok_or(ErrorClass::MalformedResponse)?;
         if choice.index != 0 || choice.message.role != "assistant" {
             return Err(ErrorClass::MalformedResponse);
         }
@@ -260,14 +283,20 @@ impl DeepSeekCandidateProducer {
         if raw.len() > MAX_BATCH_BYTES {
             return Err(ErrorClass::ResponseTooLarge);
         }
-        ProducerOutput::new(
+        let output = ProducerOutput::new(
             raw,
             ProducerProvenance {
                 provider: self.config.provider.clone(),
                 model: Some(self.config.model.clone()),
             },
         )
-        .map_err(|_| ErrorClass::MalformedResponse)
+        .map_err(|_| ErrorClass::MalformedResponse)?;
+        // Release the next reservation only after the complete envelope passes.
+        // Until then the prior response remains unresolved, including crashes.
+        self.budget
+            .record_response(evidence)
+            .map_err(|_| ErrorClass::TransportError)?;
+        Ok(output)
     }
 }
 impl CandidateProducer<ProposalRequestV2, GeneralOutput, GeneralFailure>
@@ -280,17 +309,24 @@ impl CandidateProducer<ProposalRequestV2, GeneralOutput, GeneralFailure>
         let mut provenance = self.identity().unknown_usage();
         match self.call(request, &mut provenance) {
             Ok(output) => Ok(GeneralOutput { output, provenance }),
-            Err(class) => Err(GeneralFailure { class, provenance }),
+            Err(class) => {
+                // Even across processes, a protocol/infrastructure error cannot
+                // silently advance the next live cell. No refund or retry.
+                let _ = self.budget.halt();
+                Err(GeneralFailure { class, provenance })
+            }
         }
     }
 }
 #[derive(Deserialize)]
 struct Envelope {
+    model: String,
     choices: Vec<Choice>,
     usage: EnvelopeUsage,
 }
 #[derive(Deserialize)]
 struct Choice {
+    finish_reason: String,
     index: u64,
     message: Message,
 }
