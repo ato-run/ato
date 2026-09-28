@@ -6,7 +6,8 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from efficacy.e2_protocol import (PLAN, oracle_key, oracle_expectation, require, sha256,
+from efficacy.e2_protocol import (PLAN, ORACLE_RESULT_SCHEMA, oracle_key, oracle_expectation,
+                                  oracle_observed_result, require, sha256,
                                   validate_oracle_cells, write_json)
 from efficacy.e2_execution import (ORACLE_OUTPUT, check_peers, execute_cell,
                                    load_execution, preflight)
@@ -16,7 +17,7 @@ def run_oracle(plan, environment):
     cells = validate_oracle_cells(plan)
     ORACLE_OUTPUT.mkdir(parents=True, exist_ok=False)
     write_json(ORACLE_OUTPUT / 'registration.json', plan, exclusive=True)
-    output = {'plan_sha256': sha256(PLAN), 'environment': environment, 'results': [],
+    output = {'schema': ORACLE_RESULT_SCHEMA, 'plan_sha256': sha256(PLAN), 'environment': environment, 'results': [],
               'model_calls': 0, 'complete': False, 'all_expectations_match': False}
     context = None
     try:
@@ -30,7 +31,8 @@ def run_oracle(plan, environment):
                                  if r['record']['case'] == cell['case']])
             matched = oracle_expectation(record, cell)
             output['results'].append({'cell_key': key, 'record': record,
-                                      'expected_fully_satisfied': cell['expected_fully_satisfied'],
+                                      'expected_result': cell['expected_result'],
+                                      'observed_result': oracle_observed_result(record),
                                       'expectation_matches': matched})
             output['model_calls'] += record['model_calls']
             write_json(ORACLE_OUTPUT / 'oracle-result.json', output)
