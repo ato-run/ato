@@ -1024,5 +1024,13 @@
     "apps/formation-worker/examples/proposal_search.rs": "24d966b5b723a82617ca0f760069053e1032245c450be149c2ddf3c5721e0546",
     ".tmp/d2c/evidence/runs/1790586337333674589/summary.json": "3a6ee48a1f5367cad4480614d84b7045c40920852a240d64db4e1377f154bd21",
     ".tmp/d2c/evidence/runs/1790586462299575469/summary.json": "2ac36b5276772812cb47c425367985254d0ef5652e4307039fa8b8613051525a"
+  },
+  "d2c": {
+    "pr": "https://github.com/ato-run/ato/pull/1427",
+    "branch_start": "c4bb53564669065aa6c47d1ed283e02ac6fa68ae",
+    "live_pr_base": "f91cccd556cf2b7406eaabd68ae8d082ddfa59b1",
+    "status": "Draft/open; not merged",
+    "ci": "pending; no green claim",
+    "base_advance": "concurrent #1425 changes only connected-realization-worker; not integrated into tested source"
   }
 }
