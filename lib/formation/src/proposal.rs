@@ -2,7 +2,9 @@
 //! verification evidence. Ato alone resolves logical IDs and compiles canonical D.
 //! This core has no provider transport, durable storage or execution authority.
 mod python_http;
+mod source_context;
 pub use python_http::PythonHttpProcess;
+pub use source_context::*;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -23,8 +25,8 @@ pub const MAX_BATCH_BYTES: usize = 16 * 1024;
 #[error("{0}")]
 pub struct ProposalError(pub &'static str);
 
-/// v0 has one bounded round. External source text is disabled until the source
-/// policy/transport adapter is implemented; having a field is not an opt-in.
+/// One bounded round. Source text is a separate, explicit observation opt-in;
+/// it never expands the operation catalog or compiler/Verifier authority.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CandidateProducerPolicy {
@@ -39,8 +41,8 @@ impl CandidateProducerPolicy {
         if self.max_proposal_rounds != 1
             || !(1..=MAX_PROPOSALS).contains(&self.max_proposals)
             || !(1..=30_000).contains(&self.timeout_ms)
-            || self.allow_source_text
-            || self.max_source_bytes != 0
+            || (!self.allow_source_text && self.max_source_bytes != 0)
+            || (self.allow_source_text && !(1..=MAX_SOURCE_BYTES).contains(&self.max_source_bytes))
         {
             return Err(ProposalError("proposal_policy_bounds"));
         }
