@@ -6,6 +6,10 @@ duplicate cells, unknown cases/permutations/arms and unfinished ledgers can
 never close the efficacy gate.
 """
 import json
+try:
+    from .e2_protocol import arm_violations, same_k_success
+except ImportError:
+    from e2_protocol import arm_violations, same_k_success
 from collections import Counter
 import statistics
 import sys
@@ -29,6 +33,12 @@ REGISTERED_CELLS = frozenset(
 
 
 def summarize(rows):
+    # Independently enforce telemetry even if a hand-edited row cleared violations.
+    rows = [dict(r, violations=list(r.get('violations') or []) + arm_violations(r)) for r in rows]
+    for row in rows:
+        if row.get('same_k_success') and not same_k_success(row.get('evidence') or {}, row.get('error')):
+            row['same_k_success'] = False
+            row['violations'].append('unproven_generated_success')
     keys = [(r['case'], r['permutation'], r['arm']) for r in rows]
     if len(set(keys)) != len(keys):
         raise ValueError('duplicate cell')
@@ -39,6 +49,7 @@ def summarize(rows):
         drafts = sum(r['draft_proposed'] for r in subset)
         latencies = [ms for r in subset for ms in (r.get('provider_latency_ms') or []) if ms is not None]
         timings = [r['elapsed_seconds'] for r in subset if r.get('elapsed_seconds') is not None]
+        costs = [r['cost_usd'] for r in subset if r.get('cost_usd') is not None]
         totals[arm] = {
             'registered_cells': CELLS_PER_ARM, 'recorded_cells': len(subset),
             'missing_cells': CELLS_PER_ARM - len(subset),
@@ -54,24 +65,24 @@ def summarize(rows):
             'invalid_rejected_rate': sum(r['invalid_rejected'] for r in subset) / CELLS_PER_ARM,
             'attempts_total': sum(r['attempts'] for r in subset),
             'attempts_to_pass': [r['attempts_to_pass'] for r in subset if r['same_k_success']],
-            'provider_calls': sum(r['provider_calls'] for r in subset),
-            'model_calls': sum(r['model_calls'] for r in subset),
-            'observed_input_tokens': sum(u.get('input_tokens', 0) for u in usage),
-            'observed_output_tokens': sum(u.get('output_tokens', 0) for u in usage),
+            'provider_calls': sum(r.get('provider_calls') or 0 for r in subset),
+            'model_calls': sum(r.get('model_calls') or 0 for r in subset),
+            'observed_input_tokens': sum(u['input_tokens'] for u in usage) if usage and all(type(u.get('input_tokens')) is int for u in usage) else None,
+            'observed_output_tokens': sum(u['output_tokens'] for u in usage) if usage and all(type(u.get('output_tokens')) is int for u in usage) else None,
             'missing_usage_cells': sum(
-                r['model_calls'] > 0 and (
+                arm in 'BC' and (
                     not r.get('usage')
                     or any(not isinstance(u, dict)
                           or not isinstance(u.get('input_tokens'), int)
                           or not isinstance(u.get('output_tokens'), int)
                           for u in r['usage']))
                 for r in subset),
-            'observed_cost_usd': sum(r['cost_usd'] for r in subset if r.get('cost_usd') is not None),
-            'missing_cost_cells': sum(r['model_calls'] > 0 and r.get('cost_usd') is None for r in subset),
+            'observed_cost_usd': sum(costs) if costs else None,
+            'missing_cost_cells': sum(arm in 'BC' and r.get('cost_usd') is None for r in subset),
             'elapsed_seconds_total': round(sum(timings), 3),
             'elapsed_seconds_median': statistics.median(timings) if timings else None,
             'provider_latency_ms_median': statistics.median(latencies) if latencies else None,
-            'errors': sum(bool(r.get('error')) for r in subset),
+            'errors': sum(r.get('error') is not None for r in subset),
             'violations': [v for r in subset for v in r['violations']],
         }
     index = {k: r for k, r in zip(keys, rows)}
@@ -89,13 +100,18 @@ def summarize(rows):
                           for p in (0, 1)):
             robust_vs_b.append(case)
     complete = set(keys) == REGISTERED_CELLS
+    total_errors = sum(v['errors'] for v in totals.values())
+    protocol_violations = sum(len(v['violations']) for v in totals.values())
     gate = (complete
+            and total_errors == 0
+            and protocol_violations == 0
             and totals['C']['same_k_successes'] > totals['A']['same_k_successes']
             and totals['C']['same_k_successes'] > totals['B']['same_k_successes']
             and len(robust_vs_a) >= 2
             and len(robust_vs_b) >= 2
             and not any(v['violations'] for v in totals.values()))
     return {'protocol': 'E2 prospective holdout preregistration',
+            'total_errors': total_errors, 'protocol_violations': protocol_violations,
             'complete': complete, 'arms': totals, 'by_case': cases,
             'robust_c_over_a_cases': robust_vs_a,
             'robust_c_over_b_cases': robust_vs_b,
