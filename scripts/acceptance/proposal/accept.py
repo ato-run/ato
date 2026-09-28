@@ -141,7 +141,7 @@ def finished(c,p=None):
 def assert_pass(c,result,attempts,calls=1):
     v=result['status'];assert v['status']=='satisfied',v
     assert len(v['attempts'])==attempts and count(c)==calls,(v['attempts'],count(c))
-    assert result['accepted'] and not result['refused']
+    assert result['accepted'] and not result['refused'] and result['receipt_required_checked']
     for route in v['verified_routes']:
         assert route['effective_contract_ref']==c['frozen']['contract_ref']
         receipts=[x['receipt'] for x in route['verifier_receipts'] if x['kind']=='contract_verification']
@@ -188,7 +188,11 @@ class LossProxy(http.server.BaseHTTPRequestHandler):
         self.send_response(status)
         for k,v in response_headers:
             if k.lower() not in ['content-length','connection','transfer-encoding']:self.send_header(k,v)
-        self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
+        self.send_header('Content-Length',str(len(data)));self.end_headers()
+        try:self.wfile.write(data)
+        except (BrokenPipeError,ConnectionResetError):
+            # The loss/restart cases intentionally terminate the HTTP client.
+            pass
     do_GET=do_POST=do_PUT=forward
 
 def cases(case):

@@ -221,7 +221,24 @@ fn main() -> Result<()> {
                 );
             }
             let (accepted, refused) = accept_verified_routes(&submission, id, &status);
-            let result = json!({"decisions":*decisions.borrow(),"status":status,"accepted":accepted,"refused":refused,
+            // Negative control over a COPY of an actual reply, never submitted
+            // to the Coordinator: status/choice/compiler success is not a receipt.
+            if !accepted.is_empty() {
+                let mut without_receipt = status.clone();
+                for route in without_receipt["verified_routes"]
+                    .as_array_mut()
+                    .context("routes")?
+                {
+                    route["verifier_receipts"] = json!([]);
+                }
+                anyhow::ensure!(
+                    accept_verified_routes(&submission, id, &without_receipt)
+                        .0
+                        .is_empty(),
+                    "route accepted without an actual Verifier receipt"
+                );
+            }
+            let result = json!({"receipt_required_checked":!accepted.is_empty(),"decisions":*decisions.borrow(),"status":status,"accepted":accepted,"refused":refused,
                 "contract_ref":submission.request.contract_ref,"frozen_contract":submission.request.base_contract,
                 "recipes":submission.proposal_recipes().collect::<std::collections::BTreeMap<_,_>>()});
             std::fs::write(&config.result, serde_json::to_vec_pretty(&result)?)?;
