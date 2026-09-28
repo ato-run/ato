@@ -5,7 +5,7 @@
   "ato_main": "34c2ef2a8882f6fc53438c1e0f1722b240ed3d6e",
   "api_main": "f7d866cbef7768f67b46840766497fbf806640fe",
   "evaluation_base_merge": "34c2ef2a8882f6fc53438c1e0f1722b240ed3d6e",
-  "harness_commit": "02cd8fc337696b53d6eea899cb9c9b6a8e7c4d02",
+  "harness_commit": "4a531fa7abd3f24d329d041b2a036b39f5e92f02",
   "model": "jev-1.13.0",
   "model_pin": "ATO_GENERATION_JEV_MODEL is set to this exact value for both B and C; a model change requires a new preregistration",
   "prompts": {
@@ -198,12 +198,12 @@
     "lib/formation/src/generation_context.rs": "dbc1fd6cd5cc696b5c9078cb4d9c144c6884b841a6718d038ffd0148ce19bb63",
     "lib/formation/src/generation_context/v2.rs": "e5be8d91e7cd98431f0aad02c519809ebd2dd969b8d77ca31f04d65d038eeb3f",
     "lib/formation/tests/generation_context_v2.rs": "bb814306bc4a01e3ed8895630390df3f98e9de4b3414bab1d1acb116ee50dcb8",
-    "scripts/acceptance/efficacy/e2_protocol.py": "5f9b83e420a023c5c15f9e639b7cb496be951699d19052e9a55bf4d0bd104f75",
+    "scripts/acceptance/efficacy/e2_protocol.py": "4efd79c9dcece006c69c8846c784ef3b4b478802570b5ebc72f1cf46acce8afc",
     "scripts/acceptance/efficacy/e2_execution.py": "dc88c52cf34b8c65486e2b57ce9296f780c220fc04b642f3779f3ca07e7046e5",
-    "scripts/acceptance/efficacy/e2_oracle.py": "d9bef0bea5ff664b73f9b3506d7758db6c6f3f3599fc8b7fe117d00a0669f99f",
-    "scripts/acceptance/efficacy/test_e2_protocol.py": "14157592e01c547261dd35077ae3e6a8364b70c400cdad2316f4d7777cce03ba",
-    "scripts/acceptance/efficacy/test_e2_execution.py": "abaddf2bfe556400551d43c239832ec5e34008c28f9706daa548a6b264829a4e",
-    "scripts/acceptance/efficacy/e2_test_support.py": "a6000969952200bb41b95bb118a6fd30f8be09f185dd88fa21148fde1f50a218",
+    "scripts/acceptance/efficacy/e2_oracle.py": "d1e08ad2d64b81ef7ae1564b1ec44ca39d9bc00ef4ddf8f310c8302dc48d0c51",
+    "scripts/acceptance/efficacy/test_e2_protocol.py": "254b04e9072834e816b6325aac51be9bd4c571075458011c4d8eed2bb0d59a97",
+    "scripts/acceptance/efficacy/test_e2_execution.py": "fd9fe0650c955387d1b6170aa15a295f086bef9a785a63efb3e6327098c729a7",
+    "scripts/acceptance/efficacy/e2_test_support.py": "c9c66a35924885c325ca6dec1668351e95f86ecd20c34e4b29b88bef48cddb7a",
     "scripts/acceptance/formation-5a-decision.py": "7a36c96d8ae0d86ed9dd4aa4f11202b04f28ff76763a8efea3faf2a35ccbdb34"
   },
   "holdout": {
@@ -221,7 +221,7 @@
     "model_calls": 0,
     "required_before_any_model_call": true,
     "stop_on_failure": true,
-    "purpose": "verify intended positive/negative labels against the actual Runtime under the same frozen K before the primary run; failures stop the run and require a new commit, never silent continuation",
+    "purpose": "Does this fixed candidate produce the preregistered terminal same-K outcome under the actual Runtime?",
     "cells": [
       {
         "case": "C01",
@@ -229,7 +229,7 @@
         "provider": "fixed:k4",
         "draft_entrypoint_id": "k4",
         "mapped_file": "candidate_0.py",
-        "expected_fully_satisfied": true
+        "expected_result": "verified_pass"
       },
       {
         "case": "C01",
@@ -237,7 +237,7 @@
         "provider": "fixed:v9",
         "draft_entrypoint_id": "v9",
         "mapped_file": "candidate_1.py",
-        "expected_fully_satisfied": false
+        "expected_result": "terminal_not_observable"
       },
       {
         "case": "C02",
@@ -245,7 +245,7 @@
         "provider": "fixed:k4",
         "draft_entrypoint_id": "k4",
         "mapped_file": "candidate_0.py",
-        "expected_fully_satisfied": true
+        "expected_result": "verified_pass"
       },
       {
         "case": "C02",
@@ -253,7 +253,7 @@
         "provider": "fixed:v9",
         "draft_entrypoint_id": "v9",
         "mapped_file": "candidate_1.py",
-        "expected_fully_satisfied": true
+        "expected_result": "verified_pass"
       },
       {
         "case": "C03",
@@ -261,7 +261,7 @@
         "provider": "fixed:k4",
         "draft_entrypoint_id": "k4",
         "mapped_file": "candidate_0.py",
-        "expected_fully_satisfied": false
+        "expected_result": "terminal_not_observable"
       },
       {
         "case": "C03",
@@ -269,7 +269,7 @@
         "provider": "fixed:v9",
         "draft_entrypoint_id": "v9",
         "mapped_file": "candidate_1.py",
-        "expected_fully_satisfied": false
+        "expected_result": "terminal_not_observable"
       },
       {
         "case": "C04",
@@ -277,7 +277,7 @@
         "provider": "fixed:k4",
         "draft_entrypoint_id": "k4",
         "mapped_file": "candidate_0.py",
-        "expected_fully_satisfied": true
+        "expected_result": "verified_pass"
       },
       {
         "case": "C04",
@@ -285,7 +285,7 @@
         "provider": "fixed:v9",
         "draft_entrypoint_id": "v9",
         "mapped_file": "candidate_1.py",
-        "expected_fully_satisfied": false
+        "expected_result": "verified_k_fail"
       },
       {
         "case": "D01",
@@ -293,7 +293,7 @@
         "provider": "fixed:k4",
         "draft_entrypoint_id": "k4",
         "mapped_file": "candidate_0.py",
-        "expected_fully_satisfied": true
+        "expected_result": "verified_pass"
       },
       {
         "case": "D01",
@@ -301,7 +301,7 @@
         "provider": "fixed:v9",
         "draft_entrypoint_id": "v9",
         "mapped_file": "candidate_1.py",
-        "expected_fully_satisfied": false
+        "expected_result": "verified_k_fail"
       },
       {
         "case": "D02",
@@ -309,7 +309,7 @@
         "provider": "fixed:k4",
         "draft_entrypoint_id": "k4",
         "mapped_file": "candidate_0.py",
-        "expected_fully_satisfied": true
+        "expected_result": "verified_pass"
       },
       {
         "case": "D02",
@@ -317,7 +317,7 @@
         "provider": "fixed:v9",
         "draft_entrypoint_id": "v9",
         "mapped_file": "candidate_1.py",
-        "expected_fully_satisfied": false
+        "expected_result": "verified_k_fail"
       },
       {
         "case": "D03",
@@ -325,7 +325,7 @@
         "provider": "fixed:k4",
         "draft_entrypoint_id": "k4",
         "mapped_file": "candidate_0.py",
-        "expected_fully_satisfied": true
+        "expected_result": "verified_pass"
       },
       {
         "case": "D03",
@@ -333,7 +333,7 @@
         "provider": "fixed:v9",
         "draft_entrypoint_id": "v9",
         "mapped_file": "candidate_1.py",
-        "expected_fully_satisfied": false
+        "expected_result": "terminal_not_observable"
       },
       {
         "case": "L01",
@@ -341,7 +341,7 @@
         "provider": "fixed:k4",
         "draft_entrypoint_id": "k4",
         "mapped_file": "candidate_0.py",
-        "expected_fully_satisfied": true
+        "expected_result": "verified_pass"
       },
       {
         "case": "L01",
@@ -349,7 +349,7 @@
         "provider": "fixed:v9",
         "draft_entrypoint_id": "v9",
         "mapped_file": "candidate_1.py",
-        "expected_fully_satisfied": false
+        "expected_result": "verified_k_fail"
       },
       {
         "case": "L02",
@@ -357,7 +357,7 @@
         "provider": "fixed:k4",
         "draft_entrypoint_id": "k4",
         "mapped_file": "candidate_0.py",
-        "expected_fully_satisfied": true
+        "expected_result": "verified_pass"
       },
       {
         "case": "L02",
@@ -365,7 +365,7 @@
         "provider": "fixed:v9",
         "draft_entrypoint_id": "v9",
         "mapped_file": "candidate_1.py",
-        "expected_fully_satisfied": false
+        "expected_result": "terminal_not_observable"
       },
       {
         "case": "P01",
@@ -373,7 +373,7 @@
         "provider": "fixed:k4",
         "draft_entrypoint_id": "k4",
         "mapped_file": "candidate_0.py",
-        "expected_fully_satisfied": true
+        "expected_result": "verified_pass"
       },
       {
         "case": "P01",
@@ -381,7 +381,7 @@
         "provider": "fixed:v9",
         "draft_entrypoint_id": "v9",
         "mapped_file": "candidate_1.py",
-        "expected_fully_satisfied": false
+        "expected_result": "terminal_not_observable"
       },
       {
         "case": "P02",
@@ -389,7 +389,7 @@
         "provider": "fixed:k4",
         "draft_entrypoint_id": "k4",
         "mapped_file": "candidate_0.py",
-        "expected_fully_satisfied": true
+        "expected_result": "verified_pass"
       },
       {
         "case": "P02",
@@ -397,7 +397,7 @@
         "provider": "fixed:v9",
         "draft_entrypoint_id": "v9",
         "mapped_file": "candidate_1.py",
-        "expected_fully_satisfied": false
+        "expected_result": "verified_k_fail"
       },
       {
         "case": "P03",
@@ -405,7 +405,7 @@
         "provider": "fixed:k4",
         "draft_entrypoint_id": "k4",
         "mapped_file": "candidate_0.py",
-        "expected_fully_satisfied": true
+        "expected_result": "verified_pass"
       },
       {
         "case": "P03",
@@ -413,16 +413,44 @@
         "provider": "fixed:v9",
         "draft_entrypoint_id": "v9",
         "mapped_file": "candidate_1.py",
-        "expected_fully_satisfied": false
+        "expected_result": "terminal_not_observable"
       }
     ],
-    "procedure": "permutation0 mapping, fixed owner-authorized drafts (fixed:k4, fixed:v9), same frozen source digests, original K, two-attempt budget, pinned requester/Runtime/WASM; actual Runtime -> fresh fully_satisfied receipt -> requester acceptance is compared to expected_fully_satisfied",
-    "negative_expectations": "expected_fully_satisfied=false cells verify the negative candidate really fails K within case semantics",
+    "procedure": "permutation0 mapping, fixed:k4/fixed:v9, same frozen source/K/budget and pinned artifacts; compare the actual generated attempt evidence class exactly with expected_result. Receipt-based outcomes require fresh same-K/D receipts; terminal_not_observable requires a finished, safely cleaned up candidate_not_observable failure without a receipt.",
+    "negative_expectations": "Negative labels remain unchanged: verified_k_fail proves fresh receipt fully_satisfied=false; terminal_not_observable proves the registered receipt-free terminal failure. Neither is primary success.",
     "harness": "scripts/acceptance/efficacy/e2_oracle.py",
     "context": "ato.formation-generation-context/1 (fixed provider supported path; same source/K/budget)",
-    "output": "efficacy-e2-oracle/oracle-result.json: plan_sha256, environment (API SHA, requester/runtime/WASM hashes, observed Coordinator launch tree hash), exact 24 keyed records with evidence, model_calls=0, complete=true, all_expectations_match=true",
-    "negative_receipts": "A negative requires an admitted actual fail attempt with a fresh same-K/D receipt fully_satisfied=false and requester exit 0/unsatisfied. Missing receipt, even for a CLI/non-observable candidate, stops; it is not silently relabeled as a matched negative.",
-    "reservation": "Exclusive experiment directory; fsync exclusive per-cell reservation before setup/Runtime/requester start; preserve on all failures; no retry/resume."
+    "output": "efficacy-e2-oracle/oracle-result.json schema ato.formation-efficacy-e2-oracle/2: plan_sha256, environment pins, exact 24 rows (expected_result, observed_result, expectation_matches, persisted evidence), model_calls=0, complete=true, all_expectations_match=true",
+    "reservation": "Exclusive experiment directory; fsync exclusive per-cell reservation before setup/Runtime/requester start; preserve on all failures; no retry/resume.",
+    "expected_result_enum": [
+      "verified_pass",
+      "verified_k_fail",
+      "terminal_not_observable"
+    ],
+    "observed_result_enum": [
+      "verified_pass",
+      "verified_k_fail",
+      "terminal_not_observable",
+      "protocol_failure"
+    ],
+    "evidence_classes": {
+      "verified_pass": "Exactly one admitted generated D and actual finished attempt; fresh same-K/D/request/attempt receipt fully_satisfied=true; requester accepts the generated verified route. Unchanged primary success predicate.",
+      "verified_k_fail": "Exactly one admitted generated D and actual finished attempt; fresh same-K/D/request/attempt receipt fully_satisfied=false; no verified route; requester exit 0 and unsatisfied.",
+      "terminal_not_observable": "Exactly one admitted non-parent generated D and exactly one generated attempt; request/search/attempt/Runtime/K/D identities agree across requester status, generation row, FormationAttempt and attestation. execution_started=true, attempt_record=finished, status=fail/FormationAttempt failed, exact candidate_not_observable at verification stage, no receipt/verification/route/UNKNOWN, cleanup succeeded and realization.destroyed=true; requester exit 0 and unsatisfied. No raw error text is used. Process realization must have executor=runtime-process and an app.http endpoint recorded only after successful launch, excluding setup/launch errors sharing candidate_not_observable."
+    },
+    "static_audit": {
+      "method": "Source and pinned Runtime code review only; no candidate imported, no Runtime/oracle/model execution. Declaration is python_script, with no generated Flask server command or dependency install.",
+      "verified_pass": "C01 k4; C02 k4/v9; C04 k4; D01-D03 k4; L01-L02 k4; P01-P03 k4. Stdlib HTTP servers serve /health and / with 200; D wrappers execute committed targets via runpy, bounded padding is comments, Latin-1 cookies decode explicitly.",
+      "verified_k_fail": "C04/D01/P02 v9 serve /health 503; D02/L01 v9 use SimpleHTTPRequestHandler with no health file and return /health 404. HTTP observations reach receipt verification.",
+      "terminal_not_observable": "C01 v9, C03 k4/v9 and P01 v9 print then exit. D03/L02/P03 v9 construct Flask apps but never call run or any server; an absent Flask import also exits the script, not the declared dependency-resolution path. All seven offer no HTTP endpoint in the registered python_script route.",
+      "runtime_paths": [
+        "lib/runtime-attempt/src/attempt.rs:run_reserved_attempt (finished journal)",
+        "lib/runtime-attempt/src/attempt.rs:observe_http (exit before observation)",
+        "lib/runtime-attempt/src/attempt.rs:not_observable (no receipt, cleanup/stop evidence)",
+        "apps/formation-worker/src/runtime_network.rs:report_for_attempt (typed attestation and FormationAttempt)"
+      ],
+      "unclassified_cells": []
+    }
   },
   "protocol_deviations": {
     "policy": "Save the reserved cell and stop on any protocol violation. No resume/retry path. Any future continuation requires a separate prospective amendment for unvisited cells; never rerun visited/reserved cells.",
@@ -782,7 +810,7 @@
       "http_body_digest_mismatch",
       "candidate_not_observable"
     ],
-    "runtime_failure_policy": "Known semantic failures require actual execution_started=true and attempt_record=finished. Other failures, unfinished/UNKNOWN or setup/environment failure stop; receipt absence never establishes oracle expectations.",
+    "runtime_failure_policy": "Known semantic failures require actual execution_started=true and attempt_record=finished. Other failures, unfinished/UNKNOWN or setup/environment failure stop. Oracle receipt absence proves nothing by itself; only a preregistered terminal_not_observable with exact typed identity/failure/cleanup evidence may match without a receipt.",
     "budget_check": "frozen.policy.budget exactly equals budget plus max_attempts; frozen.policy.generation max_generations and timeout_ms exactly match registration; non-null frozen/result contract_ref; fixture digests and entrypoint mapping exact.",
     "code_integrity": "Hash every code_sha256 path before helper import/key read/reservation; require committed HEAD bytes for code and registration, no staged/unstaged/untracked changes. Recheck before and after each cell.",
     "api_pin_method": "API_DIR must itself be a Git checkout root at api_main. Reject staged/unstaged/untracked/ignored source/config changes under src, scripts, migrations, package.json, pnpm-lock.yaml, wrangler.toml; hash actual tracked bytes against HEAD blobs, including assume-unchanged files. Never fetch/follow main.",
@@ -800,6 +828,24 @@
       "model_calls": 0,
       "oracle_executions": 0,
       "e2_runtime_cells": 0
+    }
+  },
+  "oracle_semantics_amendment": {
+    "prospective": true,
+    "previous_head": "621eb5923ed374fca6b981679746c0c464bf9b60",
+    "scope": "Oracle evidence classes only. Primary success numerator, candidate bytes, cases, positive/negative labels, permutations, arms, model/prompts/comparator, 72-cell order, budgets and efficacy gate thresholds unchanged.",
+    "model_calls": 0,
+    "oracle_executions": 0,
+    "e2_runtime_cells": 0,
+    "verification": {
+      "rust_passed": 583,
+      "rust_failed": 0,
+      "rust_existing_ignored": 1,
+      "example_passed": 5,
+      "clippy_warnings_denied": "pass",
+      "python_passed": 91,
+      "python_failed": 0,
+      "e2_analysis_tests": 20
     }
   }
 }
