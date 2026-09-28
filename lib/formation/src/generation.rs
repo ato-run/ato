@@ -94,7 +94,7 @@ pub(crate) fn is_sha256(value: &str) -> bool {
     })
 }
 
-fn logical_id(value: &str) -> bool {
+pub(crate) fn logical_id(value: &str) -> bool {
     !value.is_empty()
         && value != "none"
         && value.len() <= 32
@@ -104,7 +104,7 @@ fn logical_id(value: &str) -> bool {
 }
 
 /// A deliberately narrow source-relative path grammar, not URL or shell text.
-fn entry_path(value: &str) -> bool {
+pub(crate) fn entry_path(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 256
         && value.ends_with(".py")
@@ -157,6 +157,29 @@ pub fn compile(
         .entrypoints
         .get(&draft.entrypoint_id)
         .ok_or(GenerationError("generation_entrypoint_unauthorized"))?;
+    compile_invocation(
+        policy,
+        base_capsule_toml,
+        closure_ref,
+        base_contract_ref,
+        PythonInvocation::Script(path),
+    )
+}
+
+/// Private compiler vocabulary. No provider-supplied executable or argv.
+pub(crate) enum PythonInvocation<'a> {
+    Script(&'a str),
+    Module(&'a str),
+}
+
+pub(crate) fn compile_invocation(
+    policy: &GenerationPolicy,
+    base_capsule_toml: &str,
+    closure_ref: &str,
+    base_contract_ref: &str,
+    invocation: PythonInvocation<'_>,
+) -> Result<CompiledGeneration, GenerationError> {
+    policy.validate()?;
     if !is_sha256(closure_ref) || !is_sha256(base_contract_ref) {
         return Err(GenerationError("generation_reference_invalid"));
     }
@@ -224,7 +247,12 @@ pub fn compile(
     {
         return Err(unsupported);
     }
-    let argv = vec![executable, "-B".into(), format!("/app/{path}")];
+    let argv = match invocation {
+        PythonInvocation::Script(path) => vec![executable, "-B".into(), format!("/app/{path}")],
+        PythonInvocation::Module(module) => {
+            vec![executable, "-B".into(), "-m".into(), module.into()]
+        }
+    };
     authoring.derivation.steps[0].argv = argv.clone();
     let (generated_contract, derivation) =
         bind(&authoring, &context).map_err(|_| GenerationError("generation_base_invalid"))?;
