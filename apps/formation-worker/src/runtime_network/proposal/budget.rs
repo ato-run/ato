@@ -25,14 +25,17 @@ pub struct BudgetPlan {
 }
 impl BudgetPlan {
     pub fn cost(&self, input: u64, output: u64) -> Result<u64> {
-        let numerator = (u128::from(input) * u128::from(self.input_price))
-            .checked_add(u128::from(output) * u128::from(self.output_price))
-            .ok_or_else(|| anyhow::anyhow!("cost overflow"))?;
-        Ok(u64::try_from(numerator.div_ceil(1_000_000))?)
+        let input = (u128::from(input) * u128::from(self.input_price)).div_ceil(1_000_000);
+        let output = (u128::from(output) * u128::from(self.output_price)).div_ceil(1_000_000);
+        Ok(u64::try_from(
+            input
+                .checked_add(output)
+                .ok_or_else(|| anyhow::anyhow!("cost overflow"))?,
+        )?)
     }
     pub fn validate(&self) -> Result<u64> {
         ensure!(
-            self.max_calls > 0
+            (1..=6).contains(&self.max_calls)
                 && self.input_token_cap > 0
                 && (1..=2048).contains(&self.output_token_cap)
                 && self.input_price > 0
@@ -73,16 +76,24 @@ impl CallBudget {
             path: path.into(),
             plan,
         };
-        guard.inspect(None)?;
+        guard.inspect(None, None)?;
         Ok(guard)
     }
     pub fn plan(&self) -> &BudgetPlan {
         &self.plan
     }
     pub fn reserve(&self, cell: &str) -> Result<()> {
-        self.inspect(Some(cell))
+        self.inspect(Some(cell), None)
     }
-    fn inspect(&self, cell: Option<&str>) -> Result<()> {
+    /// Stop is operational and persistent across requester restarts. It never
+    /// changes K or the Coordinator's existing closed error classes.
+    pub fn halt(&self) -> Result<()> {
+        self.inspect(None, Some(JournalEvent::Halt { halt: true }))
+    }
+    pub fn record_response(&self, response: ResponseEvidence) -> Result<()> {
+        self.inspect(None, Some(JournalEvent::Response { response }))
+    }
+    fn inspect(&self, cell: Option<&str>, event: Option<JournalEvent>) -> Result<()> {
         self.plan.validate()?;
         let mut f = OpenOptions::new()
             .read(true)
@@ -105,15 +116,46 @@ impl CallBudget {
         )?;
         ensure!(saved == self.plan, "reservation plan changed");
         let mut cells = BTreeSet::new();
+        let mut stopped = false;
+        let mut responses = BTreeSet::new();
         for line in lines {
-            let id: String = serde_json::from_str(line)?;
-            ensure!(cells.insert(id), "duplicate reservation");
+            match serde_json::from_str::<JournalEvent>(line)? {
+                JournalEvent::Cell(id) => {
+                    ensure!(cells.insert(id), "duplicate reservation");
+                }
+                JournalEvent::Halt { halt } => {
+                    ensure!(halt, "invalid halt");
+                    stopped = true;
+                }
+                JournalEvent::Response { response } => {
+                    ensure!(
+                        cells.contains(&response.cell) && responses.insert(response.cell.clone()),
+                        "unclaimed or duplicate provider response"
+                    );
+                    stopped |= !response.within(&self.plan);
+                }
+            }
         }
         ensure!(
             cells.len() <= self.plan.max_calls as usize,
             "reservation count exceeded"
         );
+        if let Some(JournalEvent::Response { response }) = &event {
+            ensure!(
+                cells.contains(&response.cell) && !responses.contains(&response.cell),
+                "unclaimed or duplicate provider response"
+            );
+        }
+        if let Some(event) = event {
+            writeln!(f, "{}", serde_json::to_string(&event)?)?;
+            f.sync_all()?;
+        }
         if let Some(id) = cell {
+            ensure!(!stopped, "provider protocol violation: run stopped");
+            ensure!(
+                cells.len() == responses.len(),
+                "prior call response unresolved"
+            );
             ensure!(
                 !id.is_empty()
                     && id.len() <= 128
@@ -131,4 +173,38 @@ impl CallBudget {
         }
         Ok(()) // File drop releases cross-process lock, including every error.
     }
+}
+
+/// Only closed finish categories, usage and a model-match boolean are stored;
+/// never arbitrary vendor strings, reasoning, headers or raw error bodies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FinishReason {
+    Stop,
+    Length,
+    Other,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResponseEvidence {
+    pub cell: String,
+    pub finish_reason: FinishReason,
+    pub model_matches: bool,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+impl ResponseEvidence {
+    pub fn within(&self, plan: &BudgetPlan) -> bool {
+        self.finish_reason == FinishReason::Stop
+            && self.model_matches
+            && self.input_tokens <= plan.input_token_cap
+            && self.output_tokens <= plan.output_token_cap
+    }
+}
+#[derive(Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+enum JournalEvent {
+    Cell(String),
+    Halt { halt: bool },
+    Response { response: ResponseEvidence },
 }

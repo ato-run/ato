@@ -377,6 +377,31 @@ impl Submission {
         Ok(value)
     }
 
+    /// Owner-local preregistration evidence, NOT a provider request or a search
+    /// observation. Exports only immutable inputs, never invents failure evidence.
+    pub fn proposal_preregistration(&self) -> Result<Value> {
+        self.validate_proposal_submission()?;
+        let local = self
+            .proposal_state
+            .as_ref()
+            .context("producer not enabled")?;
+        let auth = local
+            .frozen
+            .policy
+            .proposal
+            .as_ref()
+            .context("policy missing")?;
+        let context_bytes = serde_jcs::to_vec(&local.source_context)?;
+        Ok(json!({
+            "frozen": local.frozen,
+            "operation_catalog": auth.catalog()?,
+            "source_context": local.source_context,
+            "source_context_sha256": format!("sha256:{:x}", Sha256::digest(&context_bytes)),
+            "source_context_bytes": context_bytes.len(),
+            "source_text_bytes": local.source_context.iter().map(|e| e.text.len()).sum::<usize>()
+        }))
+    }
+
     /// Independently compile exact saved bytes before expanding receipt/recipe
     /// authorization. All comparisons finish before any local admission occurs.
     pub fn accept_proposal_round(&mut self, status: &Value) -> Result<()> {
