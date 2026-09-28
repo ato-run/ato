@@ -5,7 +5,7 @@ use anyhow::{Result, ensure};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeSet,
+    collections::BTreeMap,
     fs::OpenOptions,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -76,24 +76,50 @@ impl CallBudget {
             path: path.into(),
             plan,
         };
-        guard.inspect(None, None)?;
+        guard.snapshot()?;
         Ok(guard)
     }
     pub fn plan(&self) -> &BudgetPlan {
         &self.plan
     }
+    /// Historical reservation API. New model calls must use reserve_request.
     pub fn reserve(&self, cell: &str) -> Result<()> {
-        self.inspect(Some(cell), None)
+        self.transact(Some(JournalEvent::Cell(cell.into())))
+            .map(|_| ())
     }
-    /// Stop is operational and persistent across requester restarts. It never
-    /// changes K or the Coordinator's existing closed error classes.
+    /// Evidence IS the reservation: one locked append + fsync, before credentials.
+    pub fn reserve_request(&self, request: RequestEvidence) -> Result<()> {
+        self.transact(Some(JournalEvent::Request { request }))
+            .map(|_| ())
+    }
+    /// Stop is operational and persistent across requester restarts.
     pub fn halt(&self) -> Result<()> {
-        self.inspect(None, Some(JournalEvent::Halt { halt: true }))
+        self.transact(Some(JournalEvent::Halt { halt: true }))
+            .map(|_| ())
     }
     pub fn record_response(&self, response: ResponseEvidence) -> Result<()> {
-        self.inspect(None, Some(JournalEvent::Response { response }))
+        self.transact(Some(JournalEvent::Response { response }))
+            .map(|_| ())
     }
-    fn inspect(&self, cell: Option<&str>, event: Option<JournalEvent>) -> Result<()> {
+    /// Controllers consume this validated view, never reinterpret journal JSON.
+    pub fn snapshot(&self) -> Result<BudgetSnapshot> {
+        self.transact(None)
+    }
+    pub fn inspect_request(&self, cell: &str) -> Result<RequestInspection> {
+        let state = self.snapshot()?;
+        let saved = state
+            .cells
+            .get(cell)
+            .ok_or_else(|| anyhow::anyhow!("request absent"))?;
+        Ok(RequestInspection {
+            request: saved
+                .request
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("historical reservation has no request evidence"))?,
+            response_resolved: saved.response.is_some(),
+        })
+    }
+    fn transact(&self, event: Option<JournalEvent>) -> Result<BudgetSnapshot> {
         self.plan.validate()?;
         let mut f = OpenOptions::new()
             .read(true)
@@ -115,63 +141,135 @@ impl CallBudget {
                 .ok_or_else(|| anyhow::anyhow!("missing plan"))?,
         )?;
         ensure!(saved == self.plan, "reservation plan changed");
-        let mut cells = BTreeSet::new();
-        let mut stopped = false;
-        let mut responses = BTreeSet::new();
+        let mut state = BudgetSnapshot::default();
         for line in lines {
-            match serde_json::from_str::<JournalEvent>(line)? {
-                JournalEvent::Cell(id) => {
-                    ensure!(cells.insert(id), "duplicate reservation");
-                }
-                JournalEvent::Halt { halt } => {
-                    ensure!(halt, "invalid halt");
-                    stopped = true;
-                }
-                JournalEvent::Response { response } => {
-                    ensure!(
-                        cells.contains(&response.cell) && responses.insert(response.cell.clone()),
-                        "unclaimed or duplicate provider response"
-                    );
-                    stopped |= !response.within(&self.plan);
-                }
-            }
-        }
-        ensure!(
-            cells.len() <= self.plan.max_calls as usize,
-            "reservation count exceeded"
-        );
-        if let Some(JournalEvent::Response { response }) = &event {
-            ensure!(
-                cells.contains(&response.cell) && !responses.contains(&response.cell),
-                "unclaimed or duplicate provider response"
-            );
+            state.apply(serde_json::from_str(line)?, &self.plan, true)?;
         }
         if let Some(event) = event {
-            writeln!(f, "{}", serde_json::to_string(&event)?)?;
+            let encoded = serde_json::to_string(&event)?;
+            state.apply(event, &self.plan, false)?;
+            ensure!(bytes.len() + encoded.len() < 64 * 1024, "journal full");
+            writeln!(f, "{encoded}")?;
             f.sync_all()?;
         }
-        if let Some(id) = cell {
-            ensure!(!stopped, "provider protocol violation: run stopped");
+        Ok(state) // File drop releases cross-process lock, including every error.
+    }
+}
+
+/// Lengths only, never request/source bodies or credential/header material.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestEvidence {
+    pub cell: String,
+    pub proposal_request_sha256: String,
+    pub provider_body_sha256: String,
+    /// Final provider-visible request timeout, after Requester completion reserve.
+    pub timeout_ms: u64,
+    pub proposal_request_bytes: u64,
+    pub provider_body_bytes: u64,
+}
+impl RequestEvidence {
+    fn validate(&self) -> Result<()> {
+        for hash in [&self.proposal_request_sha256, &self.provider_body_sha256] {
             ensure!(
-                cells.len() == responses.len(),
-                "prior call response unresolved"
+                hash.strip_prefix("sha256:").is_some_and(|s| s.len() == 64
+                    && s.bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))),
+                "invalid request digest"
             );
-            ensure!(
-                !id.is_empty()
-                    && id.len() <= 128
-                    && id
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b)),
-                "invalid cell"
-            );
-            ensure!(
-                !cells.contains(id) && cells.len() < self.plan.max_calls as usize,
-                "cell already consumed or call budget exhausted"
-            );
-            writeln!(f, "{}", serde_json::to_string(id)?)?;
-            f.sync_all()?;
         }
-        Ok(()) // File drop releases cross-process lock, including every error.
+        ensure!(
+            (1..=30_000).contains(&self.timeout_ms)
+                && self.proposal_request_bytes > 0
+                && self.provider_body_bytes > 0,
+            "invalid request evidence"
+        );
+        Ok(())
+    }
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct RequestInspection {
+    #[serde(flatten)]
+    pub request: RequestEvidence,
+    pub response_resolved: bool,
+}
+#[derive(Debug, Default, Serialize)]
+pub struct BudgetSnapshot {
+    pub cells: BTreeMap<String, CallEvidence>,
+    pub stopped: bool,
+}
+#[derive(Debug, Serialize)]
+pub struct CallEvidence {
+    /// None only for a historical Cell reservation. Not acceptable for D3 v2.
+    pub request: Option<RequestEvidence>,
+    pub response: Option<ResponseEvidence>,
+}
+impl BudgetSnapshot {
+    fn reserve(
+        &mut self,
+        cell: String,
+        request: Option<RequestEvidence>,
+        plan: &BudgetPlan,
+    ) -> Result<()> {
+        ensure!(!self.stopped, "provider protocol violation: run stopped");
+        ensure!(
+            self.cells.values().all(|c| c.response.is_some()),
+            "prior call response unresolved"
+        );
+        ensure!(
+            !cell.is_empty()
+                && cell.len() <= 128
+                && cell
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b)),
+            "invalid cell"
+        );
+        ensure!(
+            !self.cells.contains_key(&cell) && self.cells.len() < plan.max_calls as usize,
+            "cell already consumed or call budget exhausted"
+        );
+        self.cells.insert(
+            cell,
+            CallEvidence {
+                request,
+                response: None,
+            },
+        );
+        Ok(())
+    }
+    fn apply(
+        &mut self,
+        event: JournalEvent,
+        plan: &BudgetPlan,
+        historical_read: bool,
+    ) -> Result<()> {
+        match event {
+            JournalEvent::Cell(cell) => self.reserve(cell, None, plan)?,
+            JournalEvent::Request { request } => {
+                request.validate()?;
+                self.reserve(request.cell.clone(), Some(request), plan)?;
+            }
+            JournalEvent::Halt { halt } => {
+                ensure!(halt, "invalid halt");
+                self.stopped = true;
+            }
+            JournalEvent::Response { response } => {
+                let call = self
+                    .cells
+                    .get_mut(&response.cell)
+                    .ok_or_else(|| anyhow::anyhow!("unclaimed provider response"))?;
+                // Existing Cell/Response journals remain readable. New responses
+                // require atomic Request reservations; legacy writes cannot opt in.
+                ensure!(
+                    historical_read || call.request.is_some(),
+                    "response without request evidence"
+                );
+                ensure!(call.response.is_none(), "duplicate provider response");
+                self.stopped |= !response.within(plan);
+                call.response = Some(response);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -205,6 +303,7 @@ impl ResponseEvidence {
 #[serde(untagged, deny_unknown_fields)]
 enum JournalEvent {
     Cell(String),
+    Request { request: RequestEvidence },
     Halt { halt: bool },
     Response { response: ResponseEvidence },
 }
