@@ -1315,7 +1315,13 @@ impl ConnectedWorker {
         // recovery proves every leftover stopped and its report reached the
         // control plane.
         let _slot = slot_state::SlotGuard::acquire(&self.config.work_root, &self.config.slot_id)?;
-        self.recover_runtime_launch();
+        {
+            // Lease directories are shared. Serialize only the startup pass
+            // so sibling processes cannot race to settle the same legacy,
+            // markerless residue; release it before normal serving begins.
+            let _recovery = slot_state::RecoveryGuard::acquire(&self.config.work_root)?;
+            self.recover_runtime_launch();
+        }
         // Advertise capabilities before the first claim — the scheduler only
         // dispatches what the last heartbeat proved this Runner can do.
         self.heartbeat_with_retry(0)?;
