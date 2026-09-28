@@ -169,7 +169,7 @@ def check(args, fetch=fetch_pricing):
     verify_binaries(manifest); trace.append('M')
     evidence = dict(trace=trace, plan_sha256=PLAN_SHA, execution_sha=ATO_SHA, api_sha=API_SHA,
                     wasm_sha256=WASM_SHA, pricing={**fetched, **price}, reservation=reservation,
-                    binaries=manifest, live_calls=0, key_read=False, execution_ready=True,
+                    binaries=manifest, live_calls=0, controller_key_read=False, execution_ready=True,
                     request_evidence_contract=plan['request_evidence'])
     write_new(args.run/'preflight.json', evidence)
     return plan, configs, manifest, evidence
