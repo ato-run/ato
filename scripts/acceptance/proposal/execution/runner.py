@@ -29,25 +29,22 @@ class LocalRun:
         self.home=args.run/'home';self.home.mkdir()
         self.port=19544
         # Never copy/enumerate the controller environment. All processes get this
-        # non-secret map; only the requester injector receives the sealed fd.
+        # non-secret map; only the requester injector connects to the secret broker.
         self.environment={'PATH':'/opt/ato/toolchains/node/22.14.0/bin:/opt/ato/toolchains/python/3.12.7/bin:/usr/local/bin:/usr/bin:/bin',
                           'HOME':str(self.home),'TMPDIR':str(self.scratch)}
 
     def start(self,argv,log,cwd=None,requester=False):
         verify_binaries(self.manifest)
         argv = [str(x) for x in argv]
-        inherited_fds = ()
         environment = self.environment
-        credential_fd = getattr(self.args,'credential_fd',None)
-        if requester and credential_fd is not None:
+        credential_socket = getattr(self.args,'credential_socket',None)
+        if requester and credential_socket is not None:
             # Never read/check/hash the credential here, including its existence.
-            # The separately authorized injector supplied sealed anonymous memory
-            # after preflight. Only the requester wrapper inherits that descriptor.
-            argv = [sys.executable,self.manifest['credential_wrapper']['path'],str(credential_fd),*argv]
-            inherited_fds = (credential_fd,)
-            environment = self.environment
+            # The separate broker retains the sealed memory fd. This controller
+            # receives neither its bytes nor its fd, only the non-secret socket path.
+            argv = [sys.executable,self.manifest['credential_wrapper']['path'],str(credential_socket),*argv]
         with log.open('xb') as stream:
-            proc=subprocess.Popen(argv,cwd=cwd,env=environment,pass_fds=inherited_fds,
+            proc=subprocess.Popen(argv,cwd=cwd,env=environment,close_fds=True,
                                   stdin=subprocess.DEVNULL,stdout=stream,stderr=subprocess.STDOUT,start_new_session=True)
         self.processes.append(proc)
         return proc
