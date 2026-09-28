@@ -1,5 +1,5 @@
 use super::super::{
-    budget::{BudgetPlan, CallBudget},
+    budget::{BudgetPlan, CallBudget, FinishReason, RequestEvidence, ResponseEvidence},
     deepseek::*,
     provenance::*,
 };
@@ -17,6 +17,7 @@ use std::{
 struct Mock {
     endpoint: String,
     seen: Arc<Mutex<Vec<(String, Value)>>>,
+    raw_seen: Arc<Mutex<Vec<Vec<u8>>>>,
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -45,6 +46,8 @@ impl Mock {
         let done = stop.clone();
         let seen = Arc::new(Mutex::new(vec![]));
         let log = seen.clone();
+        let raw_seen = Arc::new(Mutex::new(vec![]));
+        let raw_log = raw_seen.clone();
         let thread = thread::spawn(move || {
             while !done.load(Ordering::SeqCst) {
                 let Ok((mut s, _)) = listener.accept() else {
@@ -80,6 +83,10 @@ impl Mock {
                     }
                     bytes.extend_from_slice(&buffer[..n]);
                 }
+                raw_log
+                    .lock()
+                    .unwrap()
+                    .push(bytes[end..end + length].to_vec());
                 let body = if length == 0 {
                     Value::Null
                 } else {
@@ -109,6 +116,7 @@ impl Mock {
         Self {
             endpoint,
             seen,
+            raw_seen,
             stop,
             thread: Some(thread),
         }
@@ -679,4 +687,201 @@ fn d3_unresolved_reservation_blocks_next_cell_without_refund() {
     let restarted = CallBudget::reopen(&path, budget).unwrap();
     assert!(restarted.reserve("G0").is_err());
     assert!(restarted.reserve("G1").is_err());
+}
+
+fn request_evidence(cell: &str) -> RequestEvidence {
+    RequestEvidence {
+        cell: cell.into(),
+        proposal_request_sha256: format!("sha256:{}", "a".repeat(64)),
+        provider_body_sha256: format!("sha256:{}", "b".repeat(64)),
+        timeout_ms: 29481,
+        proposal_request_bytes: 1837,
+        provider_body_bytes: 4261,
+    }
+}
+fn response_evidence(cell: &str) -> ResponseEvidence {
+    ResponseEvidence {
+        cell: cell.into(),
+        finish_reason: FinishReason::Stop,
+        model_matches: true,
+        input_tokens: 123,
+        output_tokens: 45,
+    }
+}
+fn capture_request(
+    request: &ato_formation::proposal::ProposalRequestV2,
+) -> (RequestEvidence, Vec<u8>, String) {
+    let root = tempfile::tempdir().unwrap();
+    let reply = envelope(std::str::from_utf8(output().raw()).unwrap());
+    let mock = Mock::new(move |_, _| Reply::json(reply.clone()));
+    let producer = adapter(root.path(), &mock);
+    producer.propose(request).unwrap();
+    let path = root.path().join("budget.jsonl");
+    let guard = CallBudget::reopen(&path, plan()).unwrap();
+    let evidence = guard.inspect_request(&request.search_id).unwrap();
+    assert!(evidence.response_resolved);
+    let raw = mock.raw_seen.lock().unwrap()[0].clone();
+    (
+        evidence.request,
+        raw,
+        std::fs::read_to_string(path).unwrap(),
+    )
+}
+#[test]
+fn r1_dynamic_final_timeout_changes_request_hash() {
+    let (_root, sub) = enabled();
+    let mut request = sub.proposal_request_v2(&status(&sub)).unwrap();
+    request.remaining_budget.timeout_ms = 29481;
+    let first = capture_request(&request).0;
+    request.remaining_budget.timeout_ms -= 1;
+    let second = capture_request(&request).0;
+    assert_ne!(
+        first.proposal_request_sha256,
+        second.proposal_request_sha256
+    );
+    assert_ne!(first.provider_body_sha256, second.provider_body_sha256);
+    assert_eq!(first.timeout_ms, 29481);
+    assert_eq!(second.timeout_ms, 29480);
+}
+#[test]
+fn r2_same_final_request_has_same_hash() {
+    let (_root, sub) = enabled();
+    let request = sub.proposal_request_v2(&status(&sub)).unwrap();
+    assert_eq!(capture_request(&request).0, capture_request(&request).0);
+}
+#[test]
+fn r3_exact_received_http_body_matches_durable_hash() {
+    use sha2::{Digest, Sha256};
+    let (_root, sub) = enabled();
+    let request = sub.proposal_request_v2(&status(&sub)).unwrap();
+    let (evidence, raw, _) = capture_request(&request);
+    assert_eq!(
+        evidence.provider_body_sha256,
+        format!("sha256:{:x}", Sha256::digest(&raw))
+    );
+    assert_eq!(evidence.provider_body_bytes, raw.len() as u64);
+    let body: Value = serde_json::from_slice(&raw).unwrap();
+    let canonical = body["messages"][1]["content"].as_str().unwrap();
+    assert_eq!(canonical, serde_jcs::to_string(&request).unwrap());
+    assert_eq!(evidence.proposal_request_bytes, canonical.len() as u64);
+    assert_eq!(
+        evidence.proposal_request_sha256,
+        format!("sha256:{:x}", Sha256::digest(canonical.as_bytes()))
+    );
+}
+#[test]
+fn r4_evidence_write_failure_reads_no_credential_and_sends_no_http() {
+    let (root, sub) = enabled();
+    let mock = Mock::new(|_, _| panic!("HTTP forbidden"));
+    let producer = adapter(root.path(), &mock);
+    let path = root.path().join("budget.jsonl");
+    // Force journal open/append failure without relying on user permissions.
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    assert!(
+        producer
+            .propose(&sub.proposal_request_v2(&status(&sub)).unwrap())
+            .is_err()
+    );
+    assert_eq!(producer.credential_reads.load(Ordering::SeqCst), 0);
+    assert_eq!(mock.count(), 0);
+}
+#[test]
+fn r5_duplicate_request_and_legacy_request_mix_reject() {
+    for legacy in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("budget");
+        let guard = CallBudget::create(&path, plan()).unwrap();
+        if legacy {
+            guard.reserve("G0").unwrap();
+        } else {
+            guard.reserve_request(request_evidence("G0")).unwrap();
+        }
+        assert!(guard.reserve_request(request_evidence("G0")).is_err());
+        // Tampering is also rejected when reopening, not just when appending.
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(f, "{}", json!({"request":request_evidence("G0")})).unwrap();
+        assert!(CallBudget::reopen(&path, plan()).is_err());
+    }
+}
+#[test]
+fn r6_response_requires_request_and_is_write_once() {
+    let root = tempfile::tempdir().unwrap();
+    let guard = CallBudget::create(&root.path().join("budget"), plan()).unwrap();
+    assert!(guard.record_response(response_evidence("G0")).is_err());
+    guard.reserve_request(request_evidence("G0")).unwrap();
+    guard.record_response(response_evidence("G0")).unwrap();
+    assert!(guard.record_response(response_evidence("G0")).is_err());
+    let historical = CallBudget::create(&root.path().join("historical"), plan()).unwrap();
+    historical.reserve("G0").unwrap();
+    assert!(historical.record_response(response_evidence("G0")).is_err());
+}
+#[test]
+fn r7_crash_reopen_preserves_request_and_consumes_reservation() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("budget");
+    let request = request_evidence("G0");
+    CallBudget::create(&path, plan())
+        .unwrap()
+        .reserve_request(request.clone())
+        .unwrap();
+    let reopened = CallBudget::reopen(&path, plan()).unwrap();
+    let saved = reopened.inspect_request("G0").unwrap();
+    assert_eq!(saved.request, request);
+    assert!(!saved.response_resolved);
+    assert!(reopened.reserve_request(request_evidence("G1")).is_err());
+    assert!(reopened.reserve_request(request).is_err());
+}
+#[test]
+fn r8_provider_body_never_contains_auth_header_or_key() {
+    let (_root, sub) = enabled();
+    let (_, raw, _) = capture_request(&sub.proposal_request_v2(&status(&sub)).unwrap());
+    let text = String::from_utf8(raw).unwrap();
+    for secret in [
+        "Authorization",
+        "Bearer",
+        "synthetic-mock-key",
+        "DEEPSEEK_API_KEY",
+    ] {
+        assert!(!text.contains(secret));
+    }
+}
+#[test]
+fn r9_source_bodies_are_not_stored_in_request_journal() {
+    let (_root, sub) = enabled();
+    let (_, _, journal) = capture_request(&sub.proposal_request_v2(&status(&sub)).unwrap());
+    for private in [
+        "authorized frozen source",
+        "other source",
+        "source_context",
+        "messages",
+        "synthetic-mock-key",
+        "DO_NOT_PERSIST_REASONING",
+    ] {
+        assert!(!journal.contains(private));
+    }
+    let event: Value = serde_json::from_str(journal.lines().nth(1).unwrap()).unwrap();
+    assert!(event["request"]["proposal_request_bytes"].is_u64());
+    assert!(event["request"]["provider_body_bytes"].is_u64());
+    assert_eq!(event["request"].as_object().unwrap().len(), 6);
+}
+#[test]
+fn historical_cell_response_journal_remains_readable() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("budget");
+    std::fs::write(
+        &path,
+        format!(
+            "{}\n\"G0\"\n{}\n",
+            serde_json::to_string(&plan()).unwrap(),
+            json!({"response": response_evidence("G0")})
+        ),
+    )
+    .unwrap();
+    let saved = CallBudget::reopen(&path, plan()).unwrap();
+    assert!(saved.snapshot().unwrap().cells["G0"].response.is_some());
+    assert!(saved.inspect_request("G0").is_err());
 }
