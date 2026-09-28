@@ -5,6 +5,7 @@ import json
 import socket
 import threading
 import time
+from datetime import datetime
 from .gates import before_claim
 from .preflight import Stop, require
 
@@ -94,7 +95,7 @@ class CoordinatorProxy(http.server.BaseHTTPRequestHandler):
                 return
             if claim and status == 200:
                 self.server.claim_window = {
-                    'expires_at_ms': cached['proposal_round']['expires_at_ms'],
+                    'expires_at_ms': round(datetime.fromisoformat(cached['proposal_point']['expires_at'].replace('Z','+00:00')).timestamp() * 1000),
                     'claim_delivery_not_before_ms': int(time.time() * 1000),
                 }
             self.send_response(status)
@@ -109,6 +110,7 @@ class CoordinatorProxy(http.server.BaseHTTPRequestHandler):
 
     do_GET=handle_request
     do_POST=handle_request
+    do_PUT=handle_request  # Verified source archive upload, not provider traffic.
 
 
 def create_proxy(cell,port,before,before_complete=lambda window: None):

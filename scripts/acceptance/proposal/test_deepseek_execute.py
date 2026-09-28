@@ -26,7 +26,7 @@ PLAN=p.approved_plan(PLAN_PATH)
 def status(cell):
     frozen=cell['projection']['frozen']
     return dict(contract_ref=frozen['contract_ref'],search_state=dict(frozen=frozen,attempts=[],revision=1,owner_stopped=False),
-                attempts=[],proposal_point=dict(revision=1,round_seq=1,claimed=False),
+                attempts=[],proposal_point=dict(revision=1,round_seq=1,claimed=False,expires_at=(datetime.now(timezone.utc)+timedelta(seconds=30)).isoformat()),
                 proposal_round=dict(status='open',expires_at_ms=int(datetime.now(timezone.utc).timestamp()*1000)+30000),status='running')
 
 
@@ -166,6 +166,9 @@ class Offline(unittest.TestCase):
             def reply(self,value):
                 data=json.dumps(value).encode();self.send_response(200);self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
             def do_GET(self):self.reply(durable if self.server.committed else initial)
+            def do_PUT(self):
+                data=self.rfile.read(int(self.headers.get('content-length','0')))
+                self.reply({'uploaded':len(data)})
             def do_POST(self):
                 self.rfile.read(int(self.headers.get('content-length','0')))
                 if self.path.endswith('/claim'):
@@ -183,6 +186,7 @@ class Offline(unittest.TestCase):
                 response=conn.getresponse();return response.status,response.read()
             finally:conn.close()
         try:
+            self.assertEqual(request('PUT','/source/content',{'archive':'synthetic'})[0],200)
             self.assertEqual(request('GET','')[0],200)
             self.assertEqual(request('POST','/proposal/claim',{'revision':1})[0],200)
             with self.assertRaises(http.client.RemoteDisconnected):request('POST','/proposal/complete',{})
