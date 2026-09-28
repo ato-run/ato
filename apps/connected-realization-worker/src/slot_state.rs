@@ -19,6 +19,13 @@ pub struct SlotGuard {
     _lock: File,
 }
 
+/// Serializes the short startup reconciliation pass across sibling slots that
+/// share a work root. Unlike `SlotGuard`, this lock is released as soon as
+/// recovery finishes; it never reduces the number of slots that can serve.
+pub struct RecoveryGuard {
+    _lock: File,
+}
+
 impl SlotGuard {
     pub fn acquire(work_root: &Path, slot_id: &str) -> Result<Self> {
         fs::create_dir_all(work_root)?;
@@ -35,6 +42,21 @@ impl SlotGuard {
         lock.try_lock().context("worker slot is already in use")?;
         let leases = work_root.join("leases");
         fs::create_dir_all(&leases)?;
+        Ok(Self { _lock: lock })
+    }
+}
+
+impl RecoveryGuard {
+    pub fn acquire(work_root: &Path) -> Result<Self> {
+        fs::create_dir_all(work_root)?;
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(work_root.join("recovery.lock"))?;
+        lock.lock()
+            .context("wait for sibling slot startup recovery")?;
         Ok(Self { _lock: lock })
     }
 }
@@ -63,6 +85,27 @@ mod tests {
         assert!(root.path().join("slot-slot-2.lock").exists());
         drop(first);
         drop(second);
+    }
+
+    #[test]
+    fn sibling_startup_recovery_is_serialized_then_released() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let root = tempfile::tempdir().unwrap();
+        let first = RecoveryGuard::acquire(root.path()).unwrap();
+        let path = root.path().to_owned();
+        let (sender, receiver) = mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let second = RecoveryGuard::acquire(&path).unwrap();
+            sender.send(second).unwrap();
+        });
+
+        assert!(receiver.recv_timeout(Duration::from_millis(50)).is_err());
+        drop(first);
+        let second = receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+        drop(second);
+        waiter.join().unwrap();
     }
 
     #[test]
