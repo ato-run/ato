@@ -1,6 +1,10 @@
 # Formation provider split — partial implementation checkpoint
 
-Date: 2026-09-28. **Overall request remains incomplete.** This records PR A
+Date: 2026-09-28. **Historical first-slice checkpoint, superseded by the
+[core-semantics correction](formation-producer-core-correction-2026-09-28.md).**
+The typed producer return, implicit-base Propose behavior and CI uncertainty
+below describe the earlier heads, not the current implementation.
+**Overall end-to-end request remains incomplete.** This records PR A
 architecture correction and the first PR B pure-core slice, not full 5b
 acceptance. Nothing was merged or deployed by this work.
 
@@ -17,15 +21,13 @@ acceptance. Nothing was merged or deployed by this work.
 - [#1421](https://github.com/ato-run/ato/pull/1421) remains OPEN at
   `dc0fba4e0ecdd585985320551b52b72768002a5c`. No changes or execution.
 
-The original hosted Formation URL redirected to a sign-in page. Neither its
-full text nor the named Continuation Model / contract-identity attachments were
-available for independent reading. The explicit user-provided correction is
-implemented in [ADR-041](../rfcs/draft/ADR-041-formation-provider-split.md),
-[Formation companion](../rfcs/draft/Formation.md) and the
-[roadmap](../rfcs/draft/FORMATION_ROADMAP.md). The companion is not a replacement
-for the original note. Full-text correspondence remains to be checked once the
-original is accessible. Continuation Model and historical ADR-037–040 are not
-edited. No implementation/RFC mismatch was silently declared normative.
+Original-document correspondence is now verified from the downloaded full
+330-line `Continuation Model/Formation.md` and the parent Continuation Model.
+See the [correction record](formation-producer-core-correction-2026-09-28.md)
+for hashes and phase correspondence. The earlier hosted URL access limitation
+no longer applies. The original documents and historical ADR-037–040 are not
+edited. The [Formation companion](../rfcs/draft/Formation.md) remains a
+repository mapping, not a replacement for the original note.
 
 ## Roadmap before / after
 
@@ -145,10 +147,9 @@ configured. No API/PWA modification, migration application, flag change or deplo
 | merged | Neither PR A nor PR B merged by this work |
 | deployed | Nothing deployed; no remote migration |
 
-Next: finish original-document correspondence; implement PR C durable receiver
-and immutable source/requester integration in PR B; run fixed-producer actual
-P0–P11 before declaring the full path complete. Merge receiver before requester
-only after explicit approval. Keep live LLM adapter in separate PR D.
+The subsequent instruction changes the next boundary: correct and review PR A/B
+core semantics first. PR C, migration and requester integration must not start
+until that review. See the correction record for current state.
 
 ## CI observation (not a local regression result)
 
