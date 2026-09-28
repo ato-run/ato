@@ -344,6 +344,7 @@ fn main() -> Result<()> {
             network: "dependency-resolution".into(),
             allow_managed: false,
             generation: None,
+            proposal: None,
             // ATO_ACCEPTANCE_DECISION_POLICY="MAX_DECISIONS,TIMEOUT_MS"
             decision: std::env::var("ATO_ACCEPTANCE_DECISION_POLICY")
                 .ok()

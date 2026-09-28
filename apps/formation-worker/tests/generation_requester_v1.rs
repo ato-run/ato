@@ -43,6 +43,7 @@ fn submission_with_source(edit: impl FnOnce(&Path)) -> (tempfile::TempDir, Submi
             allow_managed: false,
             decision: None,
             generation: None,
+            proposal: None,
         },
         SatisfyBudget::ceilings(2, "first_pass"),
         "generation_requester_test",
