@@ -1239,13 +1239,115 @@ impl ConnectedWorker {
                         "[runtime-launch-recovery] left sibling-or-live lease residue untouched: {name}"
                     );
                 }
-                runtime_launch::recovery::mark_slot_recovered(result.clean);
+                let control_plane_clean = if result.clean {
+                    self.recover_control_plane_leases(&journal)
+                } else {
+                    false
+                };
+                runtime_launch::recovery::mark_slot_recovered(result.clean && control_plane_clean);
             }
             Err(error) => {
                 eprintln!("[runtime-launch-recovery] blocked: {error:#}");
                 runtime_launch::recovery::mark_slot_recovered(false);
             }
         }
+    }
+
+    /// Reconcile leases that survived only in the control plane. The local
+    /// journal/resource pass cannot discover these after a work-root loss.
+    /// Persist an intent first so a crash anywhere in this pass resumes safely.
+    fn recover_control_plane_leases(&self, journal: &runtime_launch::recovery::RunJournal) -> bool {
+        use runtime_launch::recovery::{LeaseRecoveryReport, RecoveryReporter, RunJournalEntry};
+
+        // runner_leases currently records the Runner but not the owning slot.
+        // With more than one slot, an API-only lease could still belong to a
+        // live sibling and this slot must not infer ownership. Single-slot
+        // Runners have an unambiguous ownership boundary and can self-heal.
+        if self.config.max_slots != 1 {
+            return true;
+        }
+
+        let leases = match self.api.open_leases() {
+            Ok(leases) => leases,
+            Err(error) => {
+                eprintln!(
+                    "[runtime-launch-recovery] could not list control-plane leases: {error:#}"
+                );
+                return false;
+            }
+        };
+        let mut clean = true;
+        for lease in leases {
+            let owner = ato_adapter_oci::OciOwner {
+                runner_id: self.config.runner_id.clone(),
+                slot_id: self.config.slot_id.clone(),
+                lease_id: lease.id.clone(),
+                run_id: lease.run_id.clone(),
+                incarnation: runtime_launch::recovery::incarnation().to_owned(),
+            };
+            let mut entry = RunJournalEntry::new(&owner);
+            entry.phase = runtime_launch::recovery::RunPhase::StopUnconfirmed;
+            entry.process_identity_required = lease.recovery_kind != "oci_labeled";
+            if let Err(error) = journal.record(&entry) {
+                eprintln!(
+                    "[runtime-launch-recovery] could not journal API-only lease {}: {error:#}",
+                    lease.id
+                );
+                clean = false;
+                continue;
+            }
+
+            let stop = if lease.recovery_kind == "oci_labeled" {
+                runtime_launch::recovery::settle_lease(&owner, ato_adapter_oci::StopBudget::DEFAULT)
+            } else {
+                ato_adapter_oci::StopOutcome::Unconfirmed {
+                    reason: if lease.recovery_kind == "process_requires_journal" {
+                        "process recovery requires the missing pid/start-time journal".to_owned()
+                    } else {
+                        format!(
+                            "control plane returned unsupported recovery kind {:?}",
+                            lease.recovery_kind
+                        )
+                    },
+                }
+            };
+            let report = LeaseRecoveryReport {
+                lease_id: lease.id.clone(),
+                run_id: Some(lease.run_id),
+                incarnation: runtime_launch::recovery::incarnation().to_owned(),
+                outcome: if stop.is_confirmed() {
+                    "stopped"
+                } else {
+                    "unconfirmed"
+                },
+                stop: stop.clone(),
+                writer_fences: std::collections::BTreeMap::new(),
+            };
+            eprintln!(
+                "[runtime-launch-recovery] API-only lease {}",
+                serde_json::to_string(&report).unwrap_or_default()
+            );
+            if let Err(error) = self.api.report_recovery(&report) {
+                eprintln!(
+                    "[runtime-launch-recovery] report for API-only lease {} was not accepted: {error:#}",
+                    lease.id
+                );
+                clean = false;
+                continue;
+            }
+            if stop.is_confirmed() {
+                if let Err(error) = journal.remove(&lease.id) {
+                    eprintln!(
+                        "[runtime-launch-recovery] could not retire API-only lease {}: {error:#}",
+                        lease.id
+                    );
+                    clean = false;
+                }
+            } else {
+                clean = false;
+            }
+        }
+        clean
     }
 
     /// Heartbeat that rides out a control-plane outage. A transient failure
@@ -3754,6 +3856,18 @@ struct ClaimResponse {
     next_poll_seconds: u64,
 }
 
+#[derive(Debug, Deserialize)]
+struct OpenLeasesResponse {
+    leases: Vec<OpenLease>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenLease {
+    id: String,
+    run_id: String,
+    recovery_kind: String,
+}
+
 fn default_poll_seconds() -> u64 {
     2
 }
@@ -4054,6 +4168,18 @@ impl HttpRunnerApi {
             .send()?
             .error_for_status()?
             .json()?)
+    }
+
+    fn open_leases(&self) -> Result<Vec<OpenLease>> {
+        Ok(self
+            .authorized(self.client.get(format!(
+                "{}/v1/runners/{}/leases/open",
+                self.base, self.runner_id
+            )))
+            .send()?
+            .error_for_status()?
+            .json::<OpenLeasesResponse>()?
+            .leases)
     }
 
     fn report_status(&self, lease_id: &str, status: &str) -> Result<()> {
