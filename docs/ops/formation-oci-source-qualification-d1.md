@@ -12,11 +12,16 @@ every Dockerfile in the same pinned archives
 `scripts/acceptance/coverage/dockerfile-qualification-facts.py`). Ledger
 generator: `scripts/acceptance/coverage/oci-source-qualification-d1.py`.
 
+The Dockerfile parser is a static survey extractor (256 KiB reads, simplified
+instruction parsing); it is not a safety validator and never authorizes a
+build. D0 input: #1444 merged `2ce9a0eb` (runtime in catalog 17/41 =
+declared 13 + Ato default 4).
+
 Current code facts: the OCI Adapter runs a **verified, digest-pinned image
 archive** offline; no path forms an image from a source Dockerfile. A
 Dockerfile is an untrusted build program; this document only classifies.
 
-## OCI v0 subset (strict)
+## OCI v0 structural checks (strict)
 
 - docker-default root Dockerfile selected (no variant choice)
 - final stage = default target
@@ -53,32 +58,49 @@ Precedence fixed before counting: external service > OCI v0 eligible > native bl
 Route-level views: native blocked_runtime_catalog 16, blocked_external_service 13, blocked_port_binding 6, blocked_launch_undeclared 6;
 OCI blocked_external_service 13, ambiguous_selection 9, v0_eligible 7, no_dockerfile 5, ambiguous_port 3, no_port 2, requires_binding 2.
 
-## OCI v0-eligible (7)
+## Structural OCI candidates (static only)
 
-| App | Runtime | EXPOSE | Stages | Bases digest-pinned | Flags |
+These are **static candidates, not executable-verified apps**: nothing has been
+built, started, answered HTTP or passed a safety review.
+
+- structural_candidate: **9** (all structural checks pass)
+- without a startup Binding or external dependency: **7**
+  (the count reported by the first revision; the primary bucket above)
+- with no unresolved requirement at all: **6**
+
+`EXPOSE` is recorded as `declared_transport_port`: port metadata, not proof of
+an HTTP service, a response or permission to publish. HTTP suitability is
+decided by the Runtime and the Verifier. Unresolved requirements are typed
+(`startup_binding`, `external_dependency`, `privilege`) and must be resolved
+before execution; none is treated as passed.
+
+| App | Runtime | Declared transport port | Stages | Bases digest-pinned | Unresolved requirements |
 |---|---|---|---|---|---|
 | WBO | node | 80 | 1 | no (tag) | – |
-| changedetection.io | python | 5000 | 2 | no (tag) | FROM uses ARG PYTHON_VERSION with default 3.11 |
-| Etherpad | node — outside catalog | 9001 | 6 | no (tag) | final stage chosen by ARG BUILD_ENV=git default (build_${BUILD_ENV}) |
+| changedetection.io | python | 5000 | 2 | no (tag) | – |
+| Etherpad | node — outside catalog | 9001 | 6 | no (tag) | – |
 | Vikunja | go — outside catalog | 3456 | 3 | yes | – |
-| Grist core | node — outside catalog | 8484 | 6 | no (tag) | runtime sandbox (gVisor via sandbox/run.sh) may assume extra container privileges; unverified |
+| Grist core | node — outside catalog | 8484 | 6 | no (tag) | privilege: runtime sandbox (gVisor via sandbox/run.sh) may require container privileges beyond the OCI Adapter default; unverified |
 | File Browser | go — outside catalog | 80 | 2 | no (tag) | – |
-| Kutt | node | 3000 | 1 | no (tag) | shell-form CMD runs `npm run migrate && npm start` inside the container |
+| Kutt | node | 3000 | 1 | no (tag) | – |
+| PrivateGPT | python | 8080 | 6 | no (tag) | external_dependency: settings.yaml defaults select a RabbitMQ task broker (PGPT_TASKS_RESULTS_BROKER_MODE:rabbitmq) and an external LLM; startup without them is unverified |
+| Glance | go — outside catalog | 8080/tcp | 2 | no (tag) | startup_binding: ENTRYPOINT reads /app/config/glance.yml, which the final stage does not copy (only the binary) |
 
-Four of the seven (Etherpad Node 24, Vikunja Go, Grist Node 22.12, File Browser
-Go) are **blocked on the native route by the runtime catalog**; the image brings
-its own runtime. WBO and Kutt are eligible on both routes; changedetection.io
-has no native launch declaration but a Dockerfile CMD.
+Four of the primary-bucket seven (Etherpad Node 24, Vikunja Go, Grist Node 22.12,
+File Browser Go) are **blocked on the native route by the runtime catalog**; the
+image would bring its own runtime. Grist stays in the bucket only as a
+structural observation: its container-privilege question is unresolved.
 
 ## Comparison
 
 - Native route after a new port-binding primitive: at most **6** (WBO, Kutt,
   JupyterLab, Radicale, Calibre-Web, PrivateGPT) — all Node/Python; the other 35
   stay blocked by catalog, undeclared launch or external services.
-- OCI route after a bounded Dockerfile build: **7** v0-eligible, spanning Node,
+- OCI route after a bounded Dockerfile build: **7** structural candidates in the primary bucket (6 without any unresolved requirement), spanning Node,
   Python and Go, without widening the language runtime catalog. Nine more have
   Dockerfiles but no docker-default root file (ambiguous selection), three have
-  zero/multiple/variable ports, two need a startup Binding.
+  multiple/variable ports and two declare none; Glance needs a startup Binding
+  and PrivateGPT an unverified external dependency.
 - Union of both: 11. External services (13) block both routes equally.
 
 Costs and risks recorded, not solved: an OCI build route needs a contained
