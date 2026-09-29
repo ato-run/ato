@@ -1,0 +1,418 @@
+{
+  "schema": "ato.formation-node-build-qualification/1",
+  "baseline_merge": "d63345cc236f6eb036b25fdf56383e71c680cdc2",
+  "cohort_plan_sha256": "09dd673a79b73e561dc872e75268008c4703615097a1019495ed652e51e7f556",
+  "qualification_only": true,
+  "build_or_install_executed": false,
+  "live_model_calls": 0,
+  "existing_detection": "Reuse NodeEvidence; npm/pnpm/yarn/bun lock detection already exists. This is downstream authoring/provisioning work, not another detector.",
+  "existing_package_manager_resolution": "Reuse ResolvedPackageManager and resolve_toolchains; assess StaticBuildProfileV1 and execution::InputFacts plumbing before creating another description.",
+  "applications": [
+    {
+      "name": "Excalidraw",
+      "repo": "https://github.com/excalidraw/excalidraw",
+      "ref": "5a406e51875157bece389b9bc92d41ff241d5f3d",
+      "archive_sha256": "94603a7879307fd68bd993b4758a1ccdcf1ff068222bf98a9f5b6c5bdaca56a3",
+      "old_blocker": "preset_node_static_needs_lockfile",
+      "lockfile_kinds": [
+        "yarn.lock"
+      ],
+      "packageManager": "yarn@1.22.22",
+      "devEngines_packageManager": null,
+      "exact_declared_manager": "yarn@1.22.22",
+      "yarn_generation": "classic",
+      "workspaces": [
+        "excalidraw-app",
+        "packages/*",
+        "examples/*"
+      ],
+      "pnpm_workspace_file": false,
+      "build_script": "yarn --cwd ./excalidraw-app build",
+      "expected_output_directories_from_source": [
+        "excalidraw-app/build"
+      ],
+      "static_qualification": "static frontend candidate; root build delegates into a workspace; collaboration/services not verified",
+      "dependency_network": {
+        "required_on_empty_cache": true,
+        "actual_install_executed": false,
+        "reason": "External dependencies are declared; no offline cache is preregistered. Source inspection, not an installation measurement."
+      },
+      "evidence_files": [
+        {
+          "path": "package.json",
+          "sha256": "7b7a3a1ac12b2a3d15ee280c02abce3fb4beafdd7156a05b4e9c5446aa66bb1c"
+        },
+        {
+          "path": "yarn.lock",
+          "sha256": "2fceed8bdb8180b2d14ab0db6010f48b05da0f3a772e218a7024e88ca7a7c76e"
+        },
+        {
+          "path": "excalidraw-app/vite.config.mts",
+          "sha256": "6d1bf30b76c0cfe3dd697a10029c54a1167652cb91508c266a609651431ae3b6"
+        },
+        {
+          "path": "excalidraw-app/package.json",
+          "sha256": "8f205d668b7e09fb3c1878688d285c7ed51571434cd53caf27a556d2a5d4038b"
+        }
+      ]
+    },
+    {
+      "name": "SearXNG",
+      "repo": "https://github.com/searxng/searxng",
+      "ref": "12f8b6515ca77c3c3bc1498584950ef5daca1433",
+      "archive_sha256": "13dbc1adeff80145c439686b2a7588aca89604bd1d86cd5623d029376e4a59bb",
+      "old_blocker": "preset_node_static_needs_lockfile",
+      "lockfile_kinds": [],
+      "packageManager": null,
+      "devEngines_packageManager": null,
+      "exact_declared_manager": null,
+      "yarn_generation": null,
+      "workspaces": null,
+      "pnpm_workspace_file": false,
+      "build_script": null,
+      "expected_output_directories_from_source": [
+        "searx/static/themes/simple"
+      ],
+      "static_qualification": "not a standalone static app; Python service plus theme assets; root package has no lock or build script",
+      "dependency_network": {
+        "required_on_empty_cache": true,
+        "actual_install_executed": false,
+        "reason": "External dependencies are declared; no offline cache is preregistered. Source inspection, not an installation measurement."
+      },
+      "evidence_files": [
+        {
+          "path": "package.json",
+          "sha256": "9457088d12bc047e8c867373e8b99f0ebc6ae6ebfb6c4e8042deb80f6972ead2"
+        },
+        {
+          "path": "client/simple/vite.config.ts",
+          "sha256": "2baab99608258c614a5f499779bcd9498d2f4162665ec59ef1de05650fd8d2e8"
+        }
+      ]
+    },
+    {
+      "name": "Etherpad",
+      "repo": "https://github.com/ether/etherpad",
+      "ref": "c080707dcd3e3dfa730bb699970ad1abf33aaf42",
+      "archive_sha256": "268168f1f5e6644f86e6c514d1f90068d01d56a1a290e5762f4ffcd1e0097ec0",
+      "old_blocker": "preset_node_static_needs_lockfile",
+      "lockfile_kinds": [
+        "pnpm-lock.yaml"
+      ],
+      "packageManager": "pnpm@12.4.2",
+      "devEngines_packageManager": null,
+      "exact_declared_manager": "pnpm@12.4.2",
+      "yarn_generation": null,
+      "workspaces": null,
+      "pnpm_workspace_file": true,
+      "build_script": null,
+      "expected_output_directories_from_source": [
+        "src/templates/admin",
+        "src/static/oidc"
+      ],
+      "static_qualification": "not a standalone static app; Node service plus frontend workspaces; no root build script",
+      "dependency_network": {
+        "required_on_empty_cache": true,
+        "actual_install_executed": false,
+        "reason": "External dependencies are declared; no offline cache is preregistered. Source inspection, not an installation measurement."
+      },
+      "evidence_files": [
+        {
+          "path": "package.json",
+          "sha256": "f604cf11344ee679768d258300f19eca41dd07e01ef5e73c1845a0ba697873b7"
+        },
+        {
+          "path": "pnpm-lock.yaml",
+          "sha256": "2eff47b065022ff52e9aabea8f25a0e4889941e77f7f5f9d33fc2ee59836d23e"
+        },
+        {
+          "path": "admin/vite.config.ts",
+          "sha256": "97a9bb8d6e3e29a6a0fbbd59209d5178e9b178f5361aef9863e0b1dab70ceddf"
+        },
+        {
+          "path": "ui/vite.config.ts",
+          "sha256": "b34d69ad42b7f2c831cef48134cf321587f1d77a725554a06f6dba6c3938f860"
+        },
+        {
+          "path": "pnpm-workspace.yaml",
+          "sha256": "86e1ee9bd441b6be20ae25cbf0ce205e0794201768fce0e4699cd73d7990cd12"
+        }
+      ]
+    },
+    {
+      "name": "Gitea",
+      "repo": "https://github.com/go-gitea/gitea",
+      "ref": "fba8d7eaceeed3f8bbc364386d2a35aa672285a2",
+      "archive_sha256": "8e2f5281daf1ec18427319ae7d61ccbc12038310bd44fb72ecc66d43b1c061f8",
+      "old_blocker": "preset_node_static_needs_lockfile",
+      "lockfile_kinds": [
+        "pnpm-lock.yaml"
+      ],
+      "packageManager": "pnpm@12.6.0",
+      "devEngines_packageManager": null,
+      "exact_declared_manager": "pnpm@12.6.0",
+      "yarn_generation": null,
+      "workspaces": null,
+      "pnpm_workspace_file": true,
+      "build_script": null,
+      "expected_output_directories_from_source": [
+        "public/assets"
+      ],
+      "static_qualification": "not a standalone static app; Go server; Makefile frontend/backend build, no package build script",
+      "dependency_network": {
+        "required_on_empty_cache": true,
+        "actual_install_executed": false,
+        "reason": "External dependencies are declared; no offline cache is preregistered. Source inspection, not an installation measurement."
+      },
+      "evidence_files": [
+        {
+          "path": "package.json",
+          "sha256": "fb43d92d45f356dd8fa8c031f7b8d420bf698a627db581415dfc6d4b9cd47982"
+        },
+        {
+          "path": "pnpm-lock.yaml",
+          "sha256": "189e4d22c66a01e091317f51a1a2848afa376c337c0da5352cdad4da4ccb47bb"
+        },
+        {
+          "path": "Makefile",
+          "sha256": "7de1f3bcf4f3619aa81f9e448f7443116ec0fc60874d78932aaaf00795a25052"
+        },
+        {
+          "path": "vite.config.ts",
+          "sha256": "e6a34c3284a9c1903eb65e2e2a1bbb3197a87ed554686c253679fab355173775"
+        }
+      ]
+    },
+    {
+      "name": "HedgeDoc",
+      "repo": "https://github.com/hedgedoc/hedgedoc",
+      "ref": "5dd94d5449e52835ab034d4da21773cad08ebf51",
+      "archive_sha256": "6b99ac59a4ce6990f9a9e20d4b44b405c255900943c5bfaa868fc8a526e7720d",
+      "old_blocker": "preset_node_static_needs_lockfile",
+      "lockfile_kinds": [
+        "pnpm-lock.yaml"
+      ],
+      "packageManager": null,
+      "devEngines_packageManager": {
+        "name": "pnpm",
+        "version": "11.24.0",
+        "onFail": "error"
+      },
+      "exact_declared_manager": "pnpm@11.24.0",
+      "yarn_generation": null,
+      "workspaces": null,
+      "pnpm_workspace_file": true,
+      "build_script": "dotenv -c production -- turbo run build",
+      "expected_output_directories_from_source": [
+        "frontend/dist/frontend",
+        "backend/dist"
+      ],
+      "static_qualification": "not a standalone static app; frontend server + backend, turbo monorepo",
+      "dependency_network": {
+        "required_on_empty_cache": true,
+        "actual_install_executed": false,
+        "reason": "External dependencies are declared; no offline cache is preregistered. Source inspection, not an installation measurement."
+      },
+      "evidence_files": [
+        {
+          "path": "package.json",
+          "sha256": "49d4f22f29ae8e404ae9c713cdd49b02d4bb42f2a8eaf857a87f546c479f5fa6"
+        },
+        {
+          "path": "pnpm-lock.yaml",
+          "sha256": "0f966f9dde97e65cccc98cda63b768433c8f9cd40e892a0a81e8399abab50799"
+        },
+        {
+          "path": "frontend/package.json",
+          "sha256": "fc9c9b504570e3de207c41ee140bf6d7bac03e63f3cd54fdfa43ec2aa0dcfb5c"
+        },
+        {
+          "path": "backend/package.json",
+          "sha256": "7710085b95d74fa81bba274d18b358af350312e303a69afd2913b71aebd5ee2e"
+        },
+        {
+          "path": "pnpm-workspace.yaml",
+          "sha256": "2a0b5cc7ed005fec7f208e99e80cc526c3c1fd9ecdd3760b1161a6ec8d91508a"
+        }
+      ]
+    },
+    {
+      "name": "Actual Budget",
+      "repo": "https://github.com/actualbudget/actual",
+      "ref": "eb28966d6ca549236dd08b163ffc8570c710e712",
+      "archive_sha256": "23659e0cc54128ac20e459ddb7a7524c96148f906dcb74dfe66342ce84ddb8a5",
+      "old_blocker": "preset_node_static_needs_lockfile",
+      "lockfile_kinds": [
+        "yarn.lock"
+      ],
+      "packageManager": "yarn@4.17.1",
+      "devEngines_packageManager": null,
+      "exact_declared_manager": "yarn@4.17.1",
+      "yarn_generation": "berry",
+      "workspaces": {
+        "packages": [
+          "packages/*"
+        ]
+      },
+      "pnpm_workspace_file": false,
+      "build_script": "lage build",
+      "expected_output_directories_from_source": [
+        "packages/desktop-client/build"
+      ],
+      "static_qualification": "browser frontend candidate, but root lage build includes multiple products/services; output must be explicitly qualified",
+      "dependency_network": {
+        "required_on_empty_cache": true,
+        "actual_install_executed": false,
+        "reason": "External dependencies are declared; no offline cache is preregistered. Source inspection, not an installation measurement."
+      },
+      "evidence_files": [
+        {
+          "path": "package.json",
+          "sha256": "9969c499ad99df364cd02b81411979e8da1e40c46fa85fa9352592b8b61859cd"
+        },
+        {
+          "path": "yarn.lock",
+          "sha256": "0326284066b6f9f9297c671eb792b034f4435cb26c8b5bfbc89fb7fa5aebb5f9"
+        },
+        {
+          "path": "packages/desktop-client/vite.config.mts",
+          "sha256": "52ec288af3f999f1c6f5cc3765bf2dd7e6f7081fa53488b1f46f794b2b6c460b"
+        },
+        {
+          "path": "packages/desktop-client/package.json",
+          "sha256": "befb1cbb992b02161007de5206be132741c8669399d2cbe93a5b842121d0c8d2"
+        },
+        {
+          "path": ".yarnrc.yml",
+          "sha256": "0d71cb2b9e27b6d36fd0319f0c16c96698ced674036ffc6ae5bed01511763ff9"
+        }
+      ]
+    },
+    {
+      "name": "JupyterLab",
+      "repo": "https://github.com/jupyterlab/jupyterlab",
+      "ref": "bb166a775cba8911fa157c1ff4858b12766d6ede",
+      "archive_sha256": "af39846f2016b0d0a4220123ba13b69180ab11b64c8ec893572018157b2c56c5",
+      "old_blocker": "preset_node_static_needs_lockfile",
+      "lockfile_kinds": [
+        "yarn.lock"
+      ],
+      "packageManager": "yarn@3.5.0",
+      "devEngines_packageManager": null,
+      "exact_declared_manager": "yarn@3.5.0",
+      "yarn_generation": "berry",
+      "workspaces": [
+        "dev_mode",
+        "examples/*",
+        "examples/federated/*",
+        "packages/*",
+        "packages/services/examples/node",
+        "packages/services/examples/browser",
+        "packages/services/examples/typescript-browser-with-output",
+        "packages/ui-components/examples/*",
+        "buildutils",
+        "buildutils/template",
+        "buildutils/test-template",
+        "galata",
+        "galata/extension",
+        "tests",
+        "tests/test-*",
+        "testutils",
+        "jupyterlab/tests/mock_packages/extension",
+        "jupyterlab/tests/mock_packages/service-manager-extension",
+        "jupyterlab/tests/mock_packages/interop/*"
+      ],
+      "pnpm_workspace_file": false,
+      "build_script": "npm run build:dev",
+      "expected_output_directories_from_source": [
+        "dev_mode/static"
+      ],
+      "static_qualification": "not a standalone static app; browser assets require Python Jupyter server/kernel",
+      "dependency_network": {
+        "required_on_empty_cache": true,
+        "actual_install_executed": false,
+        "reason": "External dependencies are declared; no offline cache is preregistered. Source inspection, not an installation measurement."
+      },
+      "evidence_files": [
+        {
+          "path": "package.json",
+          "sha256": "3dd9fa51481e7daf8c9fe50e3d304021ddd2f24e397368c5d38d1551a8480215"
+        },
+        {
+          "path": "yarn.lock",
+          "sha256": "dfdb01e934593adb0c153da83ce85550de7eaa561d106eb1e0a6c918a4a9ae1d"
+        },
+        {
+          "path": "dev_mode/webpack.config.js",
+          "sha256": "f45912a03fc05e0e301995f238e29e1c9693d4e4f6ac35e844ea41a0d843af5b"
+        },
+        {
+          "path": "dev_mode/package.json",
+          "sha256": "940c9f045b9383e2fd161f1e16841c44ec55f03cfbfc86004fc1774cafdb2fbc"
+        },
+        {
+          "path": ".yarnrc.yml",
+          "sha256": "9fa4d2ba6359c2867a06f23635878bfc9455705e256addde8f752f365c0b85b3"
+        }
+      ]
+    },
+    {
+      "name": "Grist core",
+      "repo": "https://github.com/gristlabs/grist-core",
+      "ref": "b4ccc892202a3aefd6e565f0bc0c01081433a53c",
+      "archive_sha256": "0fb3e9be24032f710a401717a80f41dbb7e247d050a578f6214f7f0d0919083a",
+      "old_blocker": "preset_node_static_needs_lockfile",
+      "lockfile_kinds": [
+        "yarn.lock"
+      ],
+      "packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e",
+      "devEngines_packageManager": null,
+      "exact_declared_manager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e",
+      "yarn_generation": "classic",
+      "workspaces": null,
+      "pnpm_workspace_file": false,
+      "build_script": "buildtools/build.sh",
+      "expected_output_directories_from_source": [
+        "static",
+        "_build"
+      ],
+      "static_qualification": "not a standalone static app; Node/Python server and storage, frontend assets alone insufficient",
+      "dependency_network": {
+        "required_on_empty_cache": true,
+        "actual_install_executed": false,
+        "reason": "External dependencies are declared; no offline cache is preregistered. Source inspection, not an installation measurement."
+      },
+      "evidence_files": [
+        {
+          "path": "package.json",
+          "sha256": "0f10238b678de4cc9c4e183899b0e4e42e93aa79e5399e125a0c85e0fafaeb1b"
+        },
+        {
+          "path": "yarn.lock",
+          "sha256": "7ea86cdc1cbb2e8c2f0a52393c1f179067ed2e280579bccc1466ba0a36114b8b"
+        },
+        {
+          "path": "buildtools/build.sh",
+          "sha256": "ca8cb8c83257391507d6a45a6cada77054df05ec1944027b0db4a581fa01448f"
+        },
+        {
+          "path": "buildtools/webpack.config.js",
+          "sha256": "3ee9d1b7f0693da2fb542f31f9f029df7b6d4bf9ba4072f8f52eb6eb372b633f"
+        },
+        {
+          "path": ".yarnrc",
+          "sha256": "bfc1ddfba196b13b17c9c2dc2be681a88e6934851836f891ecc435269beb970c"
+        }
+      ]
+    }
+  ],
+  "next_slice_constraints": [
+    "npm/node-static/v1 semantics unchanged",
+    "Exact packageManager or devEngines.packageManager only; ambiguous versions/generation refuse typed",
+    "Reuse existing toolchain provisioning; no unversioned Corepack or host binary fallback",
+    "Workspace/build/output qualification explicit; do not admit server products as NodeStatic from a lockfile",
+    "Keep network denied; authoring reach and verified success are separate",
+    "Bun deferred",
+    "Remeasure same eight pins; no new apps or app-specific derivations"
+  ]
+}
