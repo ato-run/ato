@@ -27,7 +27,11 @@ fn static_ws(root: &Path, dir: &str, name: &str) {
             "scripts":{"build":"vite build","preview":"vite preview"}})
         .to_string(),
     );
-    write(root, &format!("{dir}/index.html"), "<!doctype html><title>w</title>");
+    write(
+        root,
+        &format!("{dir}/index.html"),
+        "<!doctype html><title>w</title>",
+    );
 }
 fn server_ws(root: &Path, dir: &str) {
     write(
@@ -180,7 +184,14 @@ fn w1_one_static_workspace_is_one_opaque_id_and_no_path_reaches_the_provider() {
         },
     })
     .unwrap();
-    for private in ["apps/web", "dist", "yarn", "1.22.22", "20.20.2", "frozen-lockfile"] {
+    for private in [
+        "apps/web",
+        "dist",
+        "yarn",
+        "1.22.22",
+        "20.20.2",
+        "frozen-lockfile",
+    ] {
         assert!(!request.contains(private), "{private} leaked");
     }
 }
@@ -197,13 +208,30 @@ fn w1_fixed_selection_compiles_the_canonical_route_with_separate_scopes() {
         .derivation
         .steps
         .iter()
-        .map(|s| (s.id.as_str(), s.argv.clone(), s.cwd.as_str(), s.root.clone()))
+        .map(|s| {
+            (
+                s.id.as_str(),
+                s.argv.clone(),
+                s.cwd.as_str(),
+                s.root.clone(),
+            )
+        })
         .collect();
     assert_eq!(
         steps,
         vec![
-            ("install", vec!["yarn".into(), "install".into(), "--frozen-lockfile".into()], ".", None),
-            ("build", vec!["yarn".into(), "run".into(), "build".into()], "apps/web", None),
+            (
+                "install",
+                vec!["yarn".into(), "install".into(), "--frozen-lockfile".into()],
+                ".",
+                None
+            ),
+            (
+                "build",
+                vec!["yarn".into(), "run".into(), "build".into()],
+                "apps/web",
+                None
+            ),
             ("site", vec![], ".", Some("apps/web/dist".into())),
         ]
     );
@@ -389,7 +417,10 @@ fn w7_ambiguous_output_or_unproven_static_build_is_excluded() {
     let excluded = |code: &str| Qualification::Excluded { code: code.into() };
     assert_eq!(codes["apps/web"], excluded("workspace_output_ambiguous"));
     assert_eq!(codes["apps/escape"], excluded("workspace_output_ambiguous"));
-    assert_eq!(codes["apps/compound"], excluded("workspace_static_unproven"));
+    assert_eq!(
+        codes["apps/compound"],
+        excluded("workspace_static_unproven")
+    );
     assert_eq!(codes["apps/noentry"], excluded("workspace_entry_missing"));
     assert!(inv.authorization().is_none());
 }
@@ -410,7 +441,11 @@ fn w8_manager_or_version_conflicts_are_excluded() {
     static_ws(dir.path(), "apps/lock", "lock");
     write(dir.path(), "apps/lock/package-lock.json", "{}");
     static_ws(dir.path(), "apps/rc", "rc");
-    write(dir.path(), "apps/rc/.npmrc", "registry=https://example.invalid\n");
+    write(
+        dir.path(),
+        "apps/rc/.npmrc",
+        "registry=https://example.invalid\n",
+    );
     let inv = inventory(dir.path()).unwrap();
     let codes: BTreeMap<_, _> = inv
         .workspaces
@@ -419,7 +454,10 @@ fn w8_manager_or_version_conflicts_are_excluded() {
         .collect();
     let excluded = |code: &str| Qualification::Excluded { code: code.into() };
     assert_eq!(codes["apps/web"], excluded("workspace_manager_conflict"));
-    assert_eq!(codes["apps/node"], excluded("workspace_node_version_conflict"));
+    assert_eq!(
+        codes["apps/node"],
+        excluded("workspace_node_version_conflict")
+    );
     assert_eq!(codes["apps/lock"], excluded("workspace_nested_lock"));
     assert_eq!(codes["apps/rc"], excluded("workspace_manager_config"));
     assert!(inv.authorization().is_none());
@@ -548,10 +586,13 @@ fn authorization_bounds_and_grammar_are_validated() {
     let mut bad = good.clone();
     let build = bad.workspaces["w_0"].clone();
     for n in 1..=MAX_WORKSPACE_CANDIDATES {
-        bad.workspaces.insert(format!("w_x{n}"), WorkspaceStaticBuild {
-            cwd: format!("{}{n}", build.cwd),
-            output_root: format!("{}{n}/dist", build.cwd),
-        });
+        bad.workspaces.insert(
+            format!("w_x{n}"),
+            WorkspaceStaticBuild {
+                cwd: format!("{}{n}", build.cwd),
+                output_root: format!("{}{n}/dist", build.cwd),
+            },
+        );
     }
     assert_eq!(bad.validate().unwrap_err().0, "proposal_domain_bounds");
 }

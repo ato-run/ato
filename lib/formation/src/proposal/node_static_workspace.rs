@@ -55,9 +55,8 @@ pub struct WorkspaceStaticBuild {
 }
 
 fn exact(version: &str) -> bool {
-    semver::Version::parse(version).is_ok_and(|v| {
-        v.pre.is_empty() && v.build.is_empty() && v.to_string() == version
-    })
+    semver::Version::parse(version)
+        .is_ok_and(|v| v.pre.is_empty() && v.build.is_empty() && v.to_string() == version)
 }
 
 /// A normalized, non-empty source-relative path. No `.`, `..`, empty segments,
