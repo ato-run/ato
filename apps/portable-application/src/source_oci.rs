@@ -3,28 +3,37 @@
 //! Ato owns the inputs (digest-verified source closure, the docker-default
 //! root `Dockerfile`, platform, frozen base-image archives, build policy) and
 //! the verification of the output. Dockerfile semantics belong to an existing
-//! builder (BuildKit through a *private* Docker daemon); nothing here parses a
-//! Dockerfile or rewrites it. The produced archive is checked with the same
-//! `verify_oci_archive` the portable OCI route already uses, and the image's
-//! own config (Cmd, ExposedPorts, WorkingDir, Volumes) is read from the
-//! verified artifact, never from Dockerfile text.
+//! builder (BuildKit through a *private* Docker daemon session, see
+//! [`session`]); nothing here parses a Dockerfile or rewrites it. The produced
+//! archive is checked with the same `verify_oci_archive` the portable OCI
+//! route already uses, and the image's own config (Cmd, ExposedPorts,
+//! WorkingDir, Volumes) is read from the verified artifact, never from
+//! Dockerfile text.
 //!
 //! Identity: inputs are recorded before the build; manifest/config/layer and
 //! archive digests are recorded only after it. Reproducibility is not claimed.
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Read;
+use std::fmt;
+use std::fs::File;
+use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use ato_formation::source::{DownloadedArchive, SourceLimits};
+use ato_formation::source::{DownloadedArchive, SourceLimits, TreeVerifiedArchive};
 use ato_objects::PortableOciArchive;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::oci_archive::verify_oci_archive;
+use crate::oci_archive::{
+    BaseGraph, MAX_BASE_ARCHIVE_BYTES, ScanLimits, blob_path, member_json, scan_members,
+    verify_base_archive, verify_oci_archive,
+};
+
+pub mod isolation;
+#[cfg(target_os = "linux")]
+pub mod session;
 
 pub const SOURCE_OCI_REQUEST_SCHEMA: &str = "ato.source-oci-request/1";
 pub const SOURCE_OCI_PROVENANCE_SCHEMA: &str = "ato.source-oci-materialization/1";
@@ -32,23 +41,42 @@ pub const SOURCE_OCI_PROVENANCE_SCHEMA: &str = "ato.source-oci-materialization/1
 pub const MAX_ARCHIVE_BYTES: u64 = 128 * 1024 * 1024;
 pub const MAX_BUILD_TIMEOUT_SECONDS: u64 = 3600;
 pub const MAX_BASE_IMAGES: usize = 8;
+/// Build progress output kept by the client before the build is aborted.
+pub const MAX_BUILD_LOG_BYTES: u64 = 4 * 1024 * 1024;
+pub const MIN_BUILD_DISK_BYTES: u64 = 512 * 1024 * 1024;
+pub const MAX_BUILD_DISK_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+pub const MIN_BUILD_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
+pub const MIN_BUILD_PIDS: u64 = 64;
 /// Only the docker-default selection is authorized in v0.
 pub const SELECTED_DOCKERFILE: &str = "Dockerfile";
-const PRODUCTION_SOCKETS: &[&str] = &["/var/run/docker.sock", "/run/docker.sock"];
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{code}: {detail}")]
+/// A typed refusal. When releasing the builder also failed, that second
+/// failure is kept next to the original one instead of replacing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceOciError {
     pub code: &'static str,
     pub detail: String,
+    pub cleanup: Option<Box<SourceOciError>>,
 }
-fn err(code: &'static str, detail: impl Into<String>) -> SourceOciError {
+impl fmt::Display for SourceOciError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.code, self.detail)?;
+        if let Some(cleanup) = &self.cleanup {
+            write!(f, "; cleanup: {cleanup}")?;
+        }
+        Ok(())
+    }
+}
+impl std::error::Error for SourceOciError {}
+
+pub(crate) fn err(code: &'static str, detail: impl Into<String>) -> SourceOciError {
     SourceOciError {
         code,
         detail: detail.into(),
+        cleanup: None,
     }
 }
-type Result<T> = std::result::Result<T, SourceOciError>;
+pub type Result<T> = std::result::Result<T, SourceOciError>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -86,6 +114,25 @@ pub struct SourceOciPolicy {
     pub network: String,
     pub build_timeout_seconds: u64,
     pub max_archive_bytes: u64,
+    /// Limits of the whole private builder session (daemon, BuildKit and
+    /// every RUN step), enforced while the build runs.
+    pub build: BuildLimits,
+    /// Limits the authored OCI route runs with.
+    pub runtime: RuntimeLimits,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuildLimits {
+    pub memory_bytes: u64,
+    pub cpu_limit_millis: u64,
+    pub pids_limit: u64,
+    pub disk_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeLimits {
     pub memory_bytes: u64,
     pub cpu_limit_millis: u64,
     pub pids_limit: u64,
@@ -167,11 +214,17 @@ impl SourceOciRequest {
                 "build network must be \"none\"; online acquisition needs its own explicit policy",
             ));
         }
+        let b = &p.build;
+        let r = &p.runtime;
         if !(1..=MAX_BUILD_TIMEOUT_SECONDS).contains(&p.build_timeout_seconds)
             || !(1..=MAX_ARCHIVE_BYTES).contains(&p.max_archive_bytes)
-            || p.memory_bytes == 0
-            || p.cpu_limit_millis == 0
-            || p.pids_limit == 0
+            || b.memory_bytes < MIN_BUILD_MEMORY_BYTES
+            || !(100..=64_000).contains(&b.cpu_limit_millis)
+            || b.pids_limit < MIN_BUILD_PIDS
+            || !(MIN_BUILD_DISK_BYTES..=MAX_BUILD_DISK_BYTES).contains(&b.disk_bytes)
+            || r.memory_bytes == 0
+            || r.cpu_limit_millis == 0
+            || r.pids_limit == 0
         {
             return bad("policy bounds");
         }
@@ -183,12 +236,20 @@ impl SourceOciRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuildOutcome {
     Built,
-    Failed { log_tail: String },
+    Failed {
+        log_tail: String,
+    },
     TimedOut,
+    /// The build wrote more progress output than [`MAX_BUILD_LOG_BYTES`].
+    LogExceeded,
 }
 
-/// The narrow surface Ato needs from an existing builder.
+/// The narrow surface Ato needs from an existing builder. Every method after
+/// `scratch` may change builder state; [`OciBuilder::release`] must stop all
+/// build work and confirm that no resource the builder owns remains.
 pub trait OciBuilder {
+    /// Bounded, builder-owned working directory for this one job.
+    fn scratch(&self) -> &Path;
     fn identity(&self) -> Result<Value>;
     fn image_ids(&self) -> Result<Vec<String>>;
     fn load(&self, archive: &Path) -> Result<()>;
@@ -202,65 +263,14 @@ pub trait OciBuilder {
         timeout: Duration,
     ) -> Result<BuildOutcome>;
     fn image_id(&self, reference: &str) -> Result<String>;
+    /// Uncompressed size the builder reports; checked before any save.
+    fn image_size(&self, image_id: &str) -> Result<u64>;
     fn save(&self, image_id: &str, output: &Path) -> Result<()>;
-    fn clear(&self) -> Result<()>;
+    fn release(&self) -> Result<()>;
 }
 
-/// BuildKit through a caller-provided *private* Docker daemon. The production
-/// daemon sockets are refused; the store must be empty before a build.
-pub struct DockerCliBuilder {
-    docker: PathBuf,
-    host: String,
-}
-
-impl DockerCliBuilder {
-    pub fn new(docker: PathBuf, host: &str) -> Result<Self> {
-        let path = host.strip_prefix("unix://").ok_or_else(|| {
-            err(
-                "source_oci_builder_socket_refused",
-                "the builder needs an explicit private unix:// Docker socket",
-            )
-        })?;
-        if !path.starts_with('/') || PRODUCTION_SOCKETS.contains(&path) {
-            return Err(err(
-                "source_oci_builder_socket_refused",
-                "the host's production Docker socket is never given to a source build",
-            ));
-        }
-        Ok(Self {
-            docker,
-            host: host.to_owned(),
-        })
-    }
-    fn command(&self) -> Command {
-        let mut command = Command::new(&self.docker);
-        // Only the private daemon; never inherit proxies or another context.
-        command
-            .env_clear()
-            .env("PATH", "/usr/local/bin:/usr/bin:/bin")
-            .env("DOCKER_HOST", &self.host)
-            .env("HOME", std::env::temp_dir())
-            .env("DOCKER_BUILDKIT", "1");
-        command
-    }
-    fn run(&self, args: &[&str]) -> Result<String> {
-        let output = self
-            .command()
-            .args(args)
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| err("source_oci_builder_unavailable", e.to_string()))?;
-        if !output.status.success() {
-            return Err(err(
-                "source_oci_builder_failed",
-                tail(&String::from_utf8_lossy(&output.stderr), 2000),
-            ));
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-    }
-}
-
-fn tail(text: &str, bytes: usize) -> String {
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn tail(text: &str, bytes: usize) -> String {
     let start = text.len().saturating_sub(bytes);
     let start = (start..=text.len())
         .find(|i| text.is_char_boundary(*i))
@@ -268,159 +278,70 @@ fn tail(text: &str, bytes: usize) -> String {
     text[start..].to_owned()
 }
 
-impl OciBuilder for DockerCliBuilder {
-    fn identity(&self) -> Result<Value> {
-        let server = self.run(&["version", "--format", "{{.Server.Version}}"])?;
-        let buildx = self.run(&["buildx", "version"])?;
-        Ok(
-            json!({"docker_server": server.trim(), "buildx": buildx.trim(),
-            "driver": "docker (private daemon, classic image store)"}),
-        )
-    }
-    fn image_ids(&self) -> Result<Vec<String>> {
-        Ok(self
-            .run(&["image", "ls", "--all", "--quiet", "--no-trunc"])?
-            .lines()
-            .map(str::to_owned)
-            .collect())
-    }
-    fn load(&self, archive: &Path) -> Result<()> {
-        self.run(&["load", "--quiet", "--input", &archive.display().to_string()])
-            .map(|_| ())
-    }
-    fn tag(&self, image: &str, tag: &str) -> Result<()> {
-        self.run(&["tag", image, tag]).map(|_| ())
-    }
-    fn build(
-        &self,
-        context: &Path,
-        platform: &str,
-        named_contexts: &[(String, String)],
-        tag: &str,
-        timeout: Duration,
-    ) -> Result<BuildOutcome> {
-        let mut command = self.command();
-        command.args([
-            "buildx",
-            "build",
-            "--builder",
-            "default",
-            "--network=none",
-            "--pull=false",
-            "--provenance=false",
-            "--sbom=false",
-            "--progress=plain",
-            "--platform",
-            platform,
-            "--file",
-        ]);
-        command.arg(context.join(SELECTED_DOCKERFILE));
-        for (name, target) in named_contexts {
-            command
-                .arg("--build-context")
-                .arg(format!("{name}={target}"));
-        }
-        command.args(["--tag", tag, "--load"]).arg(context);
-        let log = tempfile::NamedTempFile::new()
-            .map_err(|e| err("source_oci_builder_unavailable", e.to_string()))?;
-        let mut child = command
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(
-                log.reopen()
-                    .map_err(|e| err("source_oci_builder_unavailable", e.to_string()))?,
-            )
-            .spawn()
-            .map_err(|e| err("source_oci_builder_unavailable", e.to_string()))?;
-        let deadline = Instant::now() + timeout;
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) if Instant::now() >= deadline => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Ok(BuildOutcome::TimedOut);
-                }
-                Ok(None) => std::thread::sleep(Duration::from_millis(100)),
-                Err(e) => return Err(err("source_oci_builder_unavailable", e.to_string())),
-            }
-        };
-        let mut text = String::new();
-        let _ = log.reopen().and_then(|mut f| f.read_to_string(&mut text));
-        Ok(if status.success() {
-            BuildOutcome::Built
-        } else {
-            BuildOutcome::Failed {
-                log_tail: tail(&text, 4000),
-            }
-        })
-    }
-    fn image_id(&self, reference: &str) -> Result<String> {
-        Ok(self
-            .run(&["image", "inspect", "--format", "{{.Id}}", reference])?
-            .trim()
-            .to_owned())
-    }
-    fn save(&self, image_id: &str, output: &Path) -> Result<()> {
-        // By image ID: the archive carries no repository tags.
-        self.run(&["save", "--output", &output.display().to_string(), image_id])
-            .map(|_| ())
-    }
-    fn clear(&self) -> Result<()> {
-        let ids = self.image_ids()?;
-        if !ids.is_empty() {
-            let mut args = vec!["image", "rm", "--force"];
-            args.extend(ids.iter().map(String::as_str));
-            self.run(&args)?;
-        }
-        self.run(&["builder", "prune", "--all", "--force"])
-            .map(|_| ())
-    }
-}
-
-fn sha256_file(path: &Path) -> Result<String> {
-    let bytes = std::fs::read(path).map_err(|e| {
+fn sha256_file(path: &Path) -> Result<(String, u64)> {
+    let file = File::open(path).map_err(|e| {
         err(
             "source_oci_input_unreadable",
             format!("{}: {e}", path.display()),
         )
     })?;
-    Ok(format!("sha256:{:x}", Sha256::digest(&bytes)))
-}
-
-fn tar_members(path: &Path, wanted: &dyn Fn(&str) -> bool) -> Result<BTreeMap<String, Vec<u8>>> {
-    let file =
-        std::fs::File::open(path).map_err(|e| err("source_oci_input_unreadable", e.to_string()))?;
-    let mut archive = tar::Archive::new(file);
-    let mut out = BTreeMap::new();
-    for entry in archive
-        .entries()
-        .map_err(|e| err("source_oci_archive_invalid", e.to_string()))?
-    {
-        let mut entry = entry.map_err(|e| err("source_oci_archive_invalid", e.to_string()))?;
-        let name = entry
-            .path()
-            .map_err(|e| err("source_oci_archive_invalid", e.to_string()))?
-            .to_string_lossy()
-            .into_owned();
-        if entry.header().entry_type().is_file() && wanted(&name) {
-            if entry.size() > 64 * 1024 * 1024 {
-                return Err(err("source_oci_archive_invalid", "member exceeds bound"));
-            }
-            let mut bytes = Vec::new();
-            entry
-                .read_to_end(&mut bytes)
-                .map_err(|e| err("source_oci_archive_invalid", e.to_string()))?;
-            out.insert(name, bytes);
+    let mut reader = BufReader::new(file);
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut size = 0_u64;
+    loop {
+        let n = reader
+            .read(&mut buffer)
+            .map_err(|e| err("source_oci_input_unreadable", e.to_string()))?;
+        if n == 0 {
+            break;
         }
+        size += n as u64;
+        hasher.update(&buffer[..n]);
     }
-    Ok(out)
+    Ok((format!("sha256:{:x}", hasher.finalize()), size))
 }
 
-/// The base archive's OCI index must name exactly the pinned reference digest
-/// and carry that blob. Returns the config image ID Docker assigns on load.
-fn check_base_archive(base: &BaseImageInput) -> Result<String> {
-    if sha256_file(&base.archive)? != base.archive_sha256 {
+/// Copy `from` to `to` while hashing, refusing more than `max` bytes.
+fn copy_hashed(from: &Path, to: &Path, max: u64) -> Result<String> {
+    let input = File::open(from).map_err(|e| err("source_oci_input_unreadable", e.to_string()))?;
+    let mut reader = BufReader::new(input);
+    let mut output =
+        File::create(to).map_err(|e| err("source_oci_scratch_failed", e.to_string()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut size = 0_u64;
+    loop {
+        let n = reader
+            .read(&mut buffer)
+            .map_err(|e| err("source_oci_input_unreadable", e.to_string()))?;
+        if n == 0 {
+            break;
+        }
+        size += n as u64;
+        if size > max {
+            return Err(err(
+                "source_oci_base_digest_mismatch",
+                "base archive exceeds its bound",
+            ));
+        }
+        hasher.update(&buffer[..n]);
+        output
+            .write_all(&buffer[..n])
+            .map_err(|e| err("source_oci_scratch_failed", e.to_string()))?;
+    }
+    output
+        .sync_all()
+        .map_err(|e| err("source_oci_scratch_failed", e.to_string()))?;
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+/// The archive bytes must equal the frozen digest, and the pinned root must
+/// reach (through the selected platform manifest) exactly the config and
+/// layers the Docker load manifest names.
+fn check_base_archive(base: &BaseImageInput, path: &Path, platform: &str) -> Result<BaseGraph> {
+    let (digest, _) = sha256_file(path)?;
+    if digest != base.archive_sha256 {
         return Err(err(
             "source_oci_base_digest_mismatch",
             format!(
@@ -429,46 +350,55 @@ fn check_base_archive(base: &BaseImageInput) -> Result<String> {
             ),
         ));
     }
-    let digest = base.pinned_digest.as_str();
-    let blob = format!("blobs/sha256/{}", &digest[7..]);
-    let members = tar_members(&base.archive, &|n| {
-        n == "index.json" || n == "manifest.json" || n == blob
-    })?;
-    let index: Value = serde_json::from_slice(members.get("index.json").ok_or_else(|| {
+    let file = File::open(path).map_err(|e| err("source_oci_input_unreadable", e.to_string()))?;
+    verify_base_archive(BufReader::new(file), &base.pinned_digest, platform).map_err(|e| {
         err(
-            "source_oci_base_digest_mismatch",
-            "base archive has no OCI index",
+            "source_oci_base_graph_invalid",
+            format!("{}: {e:#}", base.reference),
         )
-    })?)
-    .map_err(|e| err("source_oci_base_digest_mismatch", e.to_string()))?;
-    let root = index["manifests"].as_array().filter(|m| m.len() == 1);
-    let pinned = members
-        .get(&blob)
-        .is_some_and(|bytes| format!("sha256:{:x}", Sha256::digest(bytes)) == digest);
-    if root.is_none_or(|m| m[0]["digest"] != digest) || !pinned {
-        return Err(err(
-            "source_oci_base_digest_mismatch",
-            format!("{} is not the root of its frozen archive", base.reference),
-        ));
+    })
+}
+
+/// Inputs verified before any builder exists: request bounds, the source
+/// archive digest and tree, and every base archive's pinned graph.
+pub struct Prepared {
+    request: SourceOciRequest,
+    source: TreeVerifiedArchive,
+    closure: String,
+    bases: Vec<BaseGraph>,
+}
+
+impl Prepared {
+    pub fn request(&self) -> &SourceOciRequest {
+        &self.request
     }
-    let legacy: Value = serde_json::from_slice(members.get("manifest.json").ok_or_else(|| {
-        err(
-            "source_oci_base_digest_mismatch",
-            "base archive is not docker-loadable",
-        )
-    })?)
-    .map_err(|e| err("source_oci_base_digest_mismatch", e.to_string()))?;
-    let config = legacy[0]["Config"]
+}
+
+pub fn prepare(request: &SourceOciRequest) -> Result<Prepared> {
+    request.validate()?;
+    let bytes = std::fs::read(&request.source_archive)
+        .map_err(|e| err("source_oci_input_unreadable", e.to_string()))?;
+    let limits = SourceLimits::default();
+    let source = DownloadedArchive::new(bytes)
+        .verify_archive_digest(&request.source_archive_sha256)
+        .and_then(|a| a.verify_tree_digest(None, limits))
+        .map_err(|e| err("source_oci_source_invalid", e.to_string()))?;
+    let closure = source
+        .closure_ref("")
+        .map_err(|e| err("source_oci_source_invalid", e.to_string()))?
         .as_str()
-        .and_then(|p| p.strip_prefix("blobs/sha256/"))
-        .filter(|_| legacy.as_array().is_some_and(|a| a.len() == 1))
-        .ok_or_else(|| {
-            err(
-                "source_oci_base_digest_mismatch",
-                "one loadable image required",
-            )
-        })?;
-    Ok(format!("sha256:{config}"))
+        .to_owned();
+    let bases = request
+        .base_images
+        .iter()
+        .map(|base| check_base_archive(base, &base.archive, &request.platform))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Prepared {
+        request: request.clone(),
+        source,
+        closure,
+        bases,
+    })
 }
 
 /// What the verified artifact itself says; never read from Dockerfile text.
@@ -487,34 +417,66 @@ pub struct ImageFacts {
     pub user: String,
 }
 
-pub fn image_facts(archive: &Path) -> Result<ImageFacts> {
-    let members = tar_members(archive, &|n| {
-        n == "index.json" || n.starts_with("blobs/sha256/")
-    })?;
-    let invalid = |d: &str| err("source_oci_artifact_invalid", d.to_owned());
-    let index: Value = serde_json::from_slice(
-        members
-            .get("index.json")
-            .ok_or_else(|| invalid("no index"))?,
+fn scan_saved(path: &Path, max_bytes: u64) -> Result<BTreeMap<String, crate::oci_archive::Member>> {
+    let file = File::open(path).map_err(|e| err("source_oci_artifact_invalid", e.to_string()))?;
+    scan_members(
+        BufReader::new(file),
+        &ScanLimits {
+            max_members: 1024,
+            max_member_bytes: max_bytes,
+            max_total_bytes: max_bytes,
+            keep_bytes_up_to: 4 * 1024 * 1024,
+        },
     )
-    .map_err(|e| invalid(&e.to_string()))?;
+    .map_err(|e| err("source_oci_artifact_invalid", format!("{e:#}")))
+}
+
+/// The one manifest the index names, and the config and layer digests it
+/// references (descriptor digests only; bytes are checked by the validator).
+fn saved_graph(
+    members: &BTreeMap<String, crate::oci_archive::Member>,
+) -> Result<(String, Value, String, Vec<String>)> {
+    let invalid = |d: String| err("source_oci_artifact_invalid", d);
+    let index =
+        member_json(members, "index.json", "OCI index").map_err(|e| invalid(format!("{e:#}")))?;
     let manifest_digest = index["manifests"][0]["digest"]
         .as_str()
         .filter(|d| is_digest(d) && index["manifests"].as_array().is_some_and(|m| m.len() == 1))
-        .ok_or_else(|| invalid("index must name one manifest"))?
+        .ok_or_else(|| invalid("index must name one manifest".into()))?
         .to_owned();
-    let blob = |d: &str| members.get(&format!("blobs/sha256/{}", &d[7..]));
-    let manifest: Value =
-        serde_json::from_slice(blob(&manifest_digest).ok_or_else(|| invalid("manifest missing"))?)
-            .map_err(|e| invalid(&e.to_string()))?;
-    let config_digest = manifest["config"]["digest"]
+    let path = blob_path(&manifest_digest).map_err(|e| invalid(format!("{e:#}")))?;
+    let manifest =
+        member_json(members, &path, "OCI manifest").map_err(|e| invalid(format!("{e:#}")))?;
+    let config = manifest["config"]["digest"]
         .as_str()
         .filter(|d| is_digest(d))
-        .ok_or_else(|| invalid("config digest"))?
+        .ok_or_else(|| invalid("config digest".into()))?
         .to_owned();
-    let config: Value =
-        serde_json::from_slice(blob(&config_digest).ok_or_else(|| invalid("config missing"))?)
-            .map_err(|e| invalid(&e.to_string()))?;
+    let layers = manifest["layers"]
+        .as_array()
+        .ok_or_else(|| invalid("layers".into()))?
+        .iter()
+        .map(|l| {
+            l["digest"]
+                .as_str()
+                .filter(|d| is_digest(d))
+                .map(str::to_owned)
+                .ok_or_else(|| invalid("layer digest".into()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok((manifest_digest, manifest, config, layers))
+}
+
+pub fn image_facts(archive: &Path) -> Result<ImageFacts> {
+    let members = scan_saved(archive, MAX_ARCHIVE_BYTES)?;
+    let (manifest_digest, _, config_digest, layer_digests) = saved_graph(&members)?;
+    let config = member_json(
+        &members,
+        &blob_path(&config_digest)
+            .map_err(|e| err("source_oci_artifact_invalid", format!("{e:#}")))?,
+        "OCI config",
+    )
+    .map_err(|e| err("source_oci_artifact_invalid", format!("{e:#}")))?;
     let strings = |v: &Value| -> Vec<String> {
         v.as_array()
             .map(|a| {
@@ -531,14 +493,7 @@ pub fn image_facts(archive: &Path) -> Result<ImageFacts> {
     };
     let c = &config["config"];
     Ok(ImageFacts {
-        layer_digests: manifest["layers"]
-            .as_array()
-            .map(|l| {
-                l.iter()
-                    .filter_map(|x| x["digest"].as_str().map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default(),
+        layer_digests,
         manifest_digest,
         config_digest,
         os: config["os"].as_str().unwrap_or_default().to_owned(),
@@ -555,58 +510,82 @@ pub fn image_facts(archive: &Path) -> Result<ImageFacts> {
     })
 }
 
+/// Writer that refuses to grow past a bound.
+struct Bounded<W> {
+    inner: W,
+    written: u64,
+    max: u64,
+}
+impl<W: Write> Write for Bounded<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.written + buf.len() as u64 > self.max {
+            return Err(std::io::Error::other("archive bound exceeded"));
+        }
+        let n = self.inner.write(buf)?;
+        self.written += n as u64;
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Reader that hashes what passes through it.
+struct Hashing<R> {
+    inner: R,
+    hasher: Sha256,
+}
+impl<R: Read> Read for Hashing<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.hasher.update(&buf[..n]);
+        Ok(n)
+    }
+}
+
 /// Repack a private-daemon `docker save` into the portable transport form:
 /// only `oci-layout`, `index.json`, `manifest.json` and the blobs the single
 /// OCI manifest references (manifest, config, layers). A classic image store
 /// also writes legacy v1 per-layer JSON blobs that nothing references; the
-/// portable validator refuses those. Blob bytes are content-addressed and
-/// copied unchanged, so the manifest digest does not change. Returns how many
-/// unreferenced members were dropped.
-pub fn repack_saved_archive(saved: &Path, output: &Path) -> Result<usize> {
-    let members = tar_members(saved, &|_| true)?;
-    let invalid = |d: &str| err("source_oci_artifact_invalid", d.to_owned());
-    let index: Value = serde_json::from_slice(
-        members
-            .get("index.json")
-            .ok_or_else(|| invalid("no index"))?,
-    )
-    .map_err(|e| invalid(&e.to_string()))?;
-    let manifest_digest = index["manifests"][0]["digest"]
-        .as_str()
-        .filter(|d| is_digest(d) && index["manifests"].as_array().is_some_and(|m| m.len() == 1))
-        .ok_or_else(|| invalid("index must name one manifest"))?;
-    let path = |d: &str| format!("blobs/sha256/{}", &d[7..]);
-    let manifest: Value = serde_json::from_slice(
-        members
-            .get(&path(manifest_digest))
-            .ok_or_else(|| invalid("manifest missing"))?,
-    )
-    .map_err(|e| invalid(&e.to_string()))?;
+/// portable validator refuses those. Blob bytes are streamed unchanged and
+/// re-hashed while copied, so the manifest digest does not change. The output
+/// never grows past `max_bytes`. Returns how many members were dropped.
+pub fn repack_saved_archive(saved: &Path, output: &Path, max_bytes: u64) -> Result<usize> {
+    let saved_len = std::fs::metadata(saved)
+        .map_err(|e| err("source_oci_artifact_invalid", e.to_string()))?
+        .len();
+    let members = scan_saved(saved, saved_len.max(1))?;
+    let (manifest_digest, _, config, layers) = saved_graph(&members)?;
+    let invalid = |d: String| err("source_oci_artifact_invalid", d);
     let mut keep: BTreeSet<String> = ["oci-layout", "index.json", "manifest.json"]
         .into_iter()
         .map(str::to_owned)
         .collect();
-    keep.insert(path(manifest_digest));
-    let config = manifest["config"]["digest"]
-        .as_str()
-        .filter(|d| is_digest(d))
-        .ok_or_else(|| invalid("config"))?;
-    keep.insert(path(config));
-    for layer in manifest["layers"]
-        .as_array()
-        .ok_or_else(|| invalid("layers"))?
+    for digest in std::iter::once(&manifest_digest)
+        .chain(std::iter::once(&config))
+        .chain(layers.iter())
     {
-        let d = layer["digest"]
-            .as_str()
-            .filter(|d| is_digest(d))
-            .ok_or_else(|| invalid("layer"))?;
-        keep.insert(path(d));
+        keep.insert(blob_path(digest).map_err(|e| invalid(format!("{e:#}")))?);
     }
     if let Some(missing) = keep.iter().find(|k| !members.contains_key(*k)) {
-        return Err(invalid(&format!("referenced member {missing} missing")));
+        return Err(invalid(format!("referenced member {missing} missing")));
     }
-    let file = std::fs::File::create(output).map_err(|e| invalid(&e.to_string()))?;
-    let mut tar = tar::Builder::new(file);
+    let bounds = |e: std::io::Error| {
+        if e.to_string().contains("archive bound exceeded") {
+            err(
+                "source_oci_artifact_bounds",
+                format!("repacked archive exceeds {max_bytes} bytes"),
+            )
+        } else {
+            invalid(e.to_string())
+        }
+    };
+    let file = File::create(output).map_err(|e| invalid(e.to_string()))?;
+    let mut tar = tar::Builder::new(Bounded {
+        inner: std::io::BufWriter::new(file),
+        written: 0,
+        max: max_bytes,
+    });
     for dir in ["blobs/", "blobs/sha256/"] {
         let mut header = tar::Header::new_ustar();
         header.set_entry_type(tar::EntryType::Directory);
@@ -615,19 +594,44 @@ pub fn repack_saved_archive(saved: &Path, output: &Path) -> Result<usize> {
         header.set_size(0);
         header.set_cksum();
         tar.append_data(&mut header, dir, std::io::empty())
-            .map_err(|e| invalid(&e.to_string()))?;
+            .map_err(bounds)?;
     }
-    for name in &keep {
-        let bytes = &members[name];
+    // Streamed in the saved archive's order; each kept member is re-hashed
+    // while copied and must be the member the scan verified.
+    let source = File::open(saved).map_err(|e| invalid(e.to_string()))?;
+    let mut archive = tar::Archive::new(BufReader::new(source));
+    let mut written = BTreeSet::new();
+    for entry in archive.entries().map_err(|e| invalid(e.to_string()))? {
+        let entry = entry.map_err(|e| invalid(e.to_string()))?;
+        let name = entry
+            .path()
+            .map_err(|e| invalid(e.to_string()))?
+            .to_string_lossy()
+            .into_owned();
+        if !entry.header().entry_type().is_file() || !keep.contains(&name) {
+            continue;
+        }
         let mut header = tar::Header::new_ustar();
         header.set_mode(0o644);
         header.set_mtime(0);
-        header.set_size(bytes.len() as u64);
+        header.set_size(entry.size());
         header.set_cksum();
-        tar.append_data(&mut header, name, bytes.as_slice())
-            .map_err(|e| invalid(&e.to_string()))?;
+        let mut reader = Hashing {
+            inner: entry,
+            hasher: Sha256::new(),
+        };
+        tar.append_data(&mut header, &name, &mut reader)
+            .map_err(bounds)?;
+        let digest = format!("sha256:{:x}", reader.hasher.finalize());
+        if members.get(&name).is_none_or(|m| m.digest != digest) || !written.insert(name.clone()) {
+            return Err(invalid(format!("{name} changed between passes")));
+        }
     }
-    tar.into_inner().map_err(|e| invalid(&e.to_string()))?;
+    if written != keep {
+        return Err(invalid("repacked members differ from the scan".into()));
+    }
+    let mut writer = tar.into_inner().map_err(bounds)?;
+    writer.flush().map_err(bounds)?;
     Ok(members.len() - keep.len())
 }
 
@@ -639,6 +643,8 @@ pub const PROFILE_WORKING_DIR: &str = "/app";
 /// Written next to the authored capsule.toml; it is the route's (read-only)
 /// workspace content, since the packer requires at least one workspace file.
 pub const PROVENANCE_FILE: &str = "source-oci-provenance.json";
+/// Published artifact name inside the output directory.
+pub const ARCHIVE_FILE: &str = "image.tar";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Materialized {
@@ -648,30 +654,48 @@ pub struct Materialized {
     pub archive: PathBuf,
 }
 
-/// Build one source into one verified OCI archive plus an authored
-/// `ato.capsule/2` OCI route. `out` must be a new directory.
+/// Build one prepared source into one verified OCI archive plus an authored
+/// `ato.capsule/2` OCI route. `out` must be a new directory. The builder is
+/// released on every path; if that release cannot be confirmed, the result
+/// is a failure that also carries the original outcome, and no artifact is
+/// left in `out`.
 pub fn materialize(
-    request: &SourceOciRequest,
+    prepared: &Prepared,
     builder: &dyn OciBuilder,
     out: &Path,
 ) -> Result<Materialized> {
-    request.validate()?;
-    std::fs::create_dir(out).map_err(|e| err("source_oci_output_invalid", e.to_string()))?;
-    // 1. Frozen source closure, from digest-verified bytes only.
-    let bytes = std::fs::read(&request.source_archive)
-        .map_err(|e| err("source_oci_input_unreadable", e.to_string()))?;
+    let created =
+        std::fs::create_dir(out).map_err(|e| err("source_oci_output_invalid", e.to_string()));
+    let result = created.and_then(|()| build_and_verify(prepared, builder, out));
+    let released = builder.release();
+    let outcome = match (result, released) {
+        (Ok(m), Ok(())) => Ok(m),
+        (Err(e), Ok(())) => Err(e),
+        (Ok(_), Err(cleanup)) => Err(cleanup),
+        (Err(mut e), Err(cleanup)) => {
+            e.cleanup = Some(Box::new(cleanup));
+            Err(e)
+        }
+    };
+    if outcome.is_err() && out.exists() {
+        // Nothing is published from a failed or unconfirmed job.
+        let _ = std::fs::remove_dir_all(out);
+    }
+    outcome
+}
+
+fn build_and_verify(
+    prepared: &Prepared,
+    builder: &dyn OciBuilder,
+    out: &Path,
+) -> Result<Materialized> {
+    let request = &prepared.request;
+    let scratch = builder.scratch().to_path_buf();
+    // 1. Frozen source closure, materialized inside the bounded scratch.
     let limits = SourceLimits::default();
-    let verified = DownloadedArchive::new(bytes)
-        .verify_archive_digest(&request.source_archive_sha256)
-        .and_then(|a| a.verify_tree_digest(None, limits))
-        .map_err(|e| err("source_oci_source_invalid", e.to_string()))?;
-    let closure = verified
-        .closure_ref("")
-        .map_err(|e| err("source_oci_source_invalid", e.to_string()))?
-        .as_str()
-        .to_owned();
-    let context = verified
-        .materialize(&out.join("context"), "", limits)
+    let context = prepared
+        .source
+        .materialize(&scratch.join("context"), "", limits)
         .map_err(|e| err("source_oci_source_invalid", e.to_string()))?;
     let dockerfile = context.join(SELECTED_DOCKERFILE);
     let meta = std::fs::symlink_metadata(&dockerfile).map_err(|_| {
@@ -690,7 +714,7 @@ pub fn materialize(
     let dockerignore_sha256 = std::fs::symlink_metadata(&dockerignore)
         .ok()
         .filter(|m| m.file_type().is_file())
-        .map(|_| sha256_file(&dockerignore))
+        .map(|_| sha256_file(&dockerignore).map(|(d, _)| d))
         .transpose()?;
     // 2. Private, empty builder only.
     if !builder.image_ids()?.is_empty() {
@@ -700,19 +724,46 @@ pub fn materialize(
         ));
     }
     let identity = builder.identity()?;
-    // 3. Frozen external image references.
+    // 3. Frozen external images: the exact bytes that were verified are the
+    // bytes loaded (a private copy, re-verified), and the store must then
+    // hold exactly the verified configs.
     let mut named = Vec::new();
     let mut bases = Vec::new();
-    for (n, base) in request.base_images.iter().enumerate() {
-        let config = check_base_archive(base)?;
-        builder.load(&base.archive)?;
+    for (n, (base, graph)) in request.base_images.iter().zip(&prepared.bases).enumerate() {
+        let copy = scratch.join(format!("base-{n}.tar"));
+        let copied = copy_hashed(&base.archive, &copy, MAX_BASE_ARCHIVE_BYTES)?;
+        if copied != base.archive_sha256 {
+            return Err(err(
+                "source_oci_base_digest_mismatch",
+                format!("{} changed after it was verified", base.reference),
+            ));
+        }
+        if check_base_archive(base, &copy, &request.platform)? != *graph {
+            return Err(err(
+                "source_oci_base_graph_invalid",
+                format!("{} graph changed after it was verified", base.reference),
+            ));
+        }
+        builder.load(&copy)?;
         let tag = format!("ato-base/b{n}:frozen");
-        builder.tag(&config, &tag)?;
+        builder.tag(&graph.config, &tag)?;
         named.push((base.reference.clone(), format!("docker-image://{tag}")));
-        bases.push(
-            json!({"reference":base.reference,"archive_sha256":base.archive_sha256,
-            "pinned_digest":base.pinned_digest,"config_digest":config}),
-        );
+        bases.push(json!({
+            "reference": base.reference,
+            "archive_sha256": base.archive_sha256,
+            "pinned_digest": base.pinned_digest,
+            "platform_manifest_digest": graph.platform_manifest,
+            "config_digest": graph.config,
+            "layer_digests": graph.layers,
+        }));
+    }
+    let loaded: BTreeSet<String> = builder.image_ids()?.into_iter().collect();
+    let expected: BTreeSet<String> = prepared.bases.iter().map(|g| g.config.clone()).collect();
+    if loaded != expected {
+        return Err(err(
+            "source_oci_base_graph_invalid",
+            format!("store holds {loaded:?} after loading; verified configs are {expected:?}"),
+        ));
     }
     // 4. Build with the existing builder; semantics are BuildKit's.
     let tag = "ato-source/build:materialize";
@@ -725,158 +776,146 @@ pub fn materialize(
         Duration::from_secs(request.policy.build_timeout_seconds),
     )?;
     let elapsed_ms = started.elapsed().as_millis() as u64;
-    let cleanup = |result: Result<Materialized>| -> Result<Materialized> {
-        let cleared = builder.clear().and_then(|()| {
-            if builder.image_ids()?.is_empty() {
-                Ok(())
-            } else {
-                Err(err(
-                    "source_oci_cleanup_unconfirmed",
-                    "private store not empty after cleanup",
-                ))
-            }
-        });
-        match (result, cleared) {
-            (Ok(m), Ok(())) => Ok(m),
-            (Err(e), _) => Err(e),
-            (Ok(_), Err(e)) => Err(e),
-        }
-    };
     match outcome {
         BuildOutcome::Built => {}
         BuildOutcome::TimedOut => {
-            return cleanup(Err(err(
+            return Err(err(
                 "source_oci_build_timeout",
                 format!("build exceeded {} s", request.policy.build_timeout_seconds),
-            )));
+            ));
+        }
+        BuildOutcome::LogExceeded => {
+            return Err(err(
+                "source_oci_log_bound",
+                format!("build output exceeded {MAX_BUILD_LOG_BYTES} bytes"),
+            ));
         }
         BuildOutcome::Failed { log_tail } => {
-            return cleanup(Err(err("source_oci_build_failed", log_tail)));
+            return Err(err("source_oci_build_failed", log_tail));
         }
     }
-    let result = (|| -> Result<Materialized> {
-        // 5. Export and verify with the existing portable OCI validator.
-        let image_id = builder.image_id(tag)?;
-        let saved = out.join("image.saved.tar");
-        builder.save(&image_id, &saved)?;
-        let archive = out.join("image.tar");
-        let dropped = repack_saved_archive(&saved, &archive)?;
-        std::fs::remove_file(&saved)
-            .map_err(|e| err("source_oci_artifact_invalid", e.to_string()))?;
-        let size = std::fs::metadata(&archive)
-            .map_err(|e| err("source_oci_artifact_invalid", e.to_string()))?
-            .len();
-        if size > request.policy.max_archive_bytes {
-            return Err(err(
-                "source_oci_artifact_bounds",
-                format!("{size} bytes exceeds the archive bound"),
-            ));
-        }
-        let facts = image_facts(&archive)?;
-        if facts.config_digest != image_id {
-            return Err(err(
-                "source_oci_artifact_digest_mismatch",
-                "saved config differs from the built image",
-            ));
-        }
-        let short = &closure[7..19];
-        let image_reference = format!("ato-source/{short}@{}", facts.manifest_digest);
-        let portable = PortableOciArchive {
-            image: image_reference.clone(),
-            platform: request.platform.clone(),
-            bytes: base64::engine::general_purpose::STANDARD.encode(
-                std::fs::read(&archive)
-                    .map_err(|e| err("source_oci_artifact_invalid", e.to_string()))?,
+    // 5. Export within bounds and verify with the existing portable validator.
+    let max = request.policy.max_archive_bytes;
+    let image_id = builder.image_id(tag)?;
+    let reported = builder.image_size(&image_id)?;
+    if reported > max {
+        return Err(err(
+            "source_oci_artifact_bounds",
+            format!("image is {reported} bytes; the archive bound is {max}; not saved"),
+        ));
+    }
+    let saved = scratch.join("image.saved.tar");
+    builder.save(&image_id, &saved)?;
+    let partial = out.join("image.tar.partial");
+    let dropped = repack_saved_archive(&saved, &partial, max)?;
+    std::fs::remove_file(&saved).map_err(|e| err("source_oci_artifact_invalid", e.to_string()))?;
+    let (archive_sha256, size) = sha256_file(&partial)?;
+    let facts = image_facts(&partial)?;
+    if facts.config_digest != image_id {
+        return Err(err(
+            "source_oci_artifact_digest_mismatch",
+            "saved config differs from the built image",
+        ));
+    }
+    let short = &prepared.closure[7..19];
+    let image_reference = format!("ato-source/{short}@{}", facts.manifest_digest);
+    let (os, arch) = request.platform.split_once('/').expect("validated");
+    if facts.os != os || facts.architecture != arch {
+        return Err(err(
+            "source_oci_platform_mismatch",
+            format!("{}/{}", facts.os, facts.architecture),
+        ));
+    }
+    let portable = PortableOciArchive {
+        image: image_reference.clone(),
+        platform: request.platform.clone(),
+        bytes: base64::engine::general_purpose::STANDARD.encode(
+            std::fs::read(&partial)
+                .map_err(|e| err("source_oci_artifact_invalid", e.to_string()))?,
+        ),
+    };
+    let validated = verify_oci_archive(&portable)
+        .map_err(|e| err("source_oci_artifact_digest_mismatch", format!("{e:#}")))?;
+    if validated.config_reference != facts.config_digest {
+        return Err(err(
+            "source_oci_artifact_digest_mismatch",
+            "validator config reference differs",
+        ));
+    }
+    // 6. Explicit port binding against the artifact's own declaration.
+    let expected = format!("{}/tcp", request.declared_transport_port);
+    if facts.exposed_ports != [expected.clone()] {
+        return Err(err(
+            "source_oci_port_unmatched",
+            format!(
+                "image declares {:?}; the explicit binding is {expected}",
+                facts.exposed_ports
             ),
-        };
-        let (os, arch) = request.platform.split_once('/').expect("validated");
-        if facts.os != os || facts.architecture != arch {
-            return Err(err(
-                "source_oci_platform_mismatch",
-                format!("{}/{}", facts.os, facts.architecture),
-            ));
-        }
-        let validated = verify_oci_archive(&portable)
-            .map_err(|e| err("source_oci_artifact_digest_mismatch", format!("{e:#}")))?;
-        if validated.config_reference != facts.config_digest {
-            return Err(err(
-                "source_oci_artifact_digest_mismatch",
-                "validator config reference differs",
-            ));
-        }
-        // 6. Explicit port binding against the artifact's own declaration.
-        let expected = format!("{}/tcp", request.declared_transport_port);
-        if facts.exposed_ports != [expected.clone()] {
-            return Err(err(
-                "source_oci_port_unmatched",
-                format!(
-                    "image declares {:?}; the explicit binding is {expected}",
-                    facts.exposed_ports
-                ),
-            ));
-        }
-        // The portable OCI profile requires argv; copy the artifact's own Cmd
-        // verbatim (OCI semantics; its ENTRYPOINT still applies). Never parse
-        // Dockerfile text or translate it into a native process.
-        if facts.cmd.is_empty() {
-            return Err(err(
-                "source_oci_cmd_absent",
-                "the image has no Cmd; the current OCI profile needs argv (profile design gap)",
-            ));
-        }
-        let mut profile_divergences = Vec::new();
-        if !facts.working_dir.is_empty() && facts.working_dir != PROFILE_WORKING_DIR {
-            profile_divergences.push(json!({"kind":"working_dir","image":facts.working_dir,
-                "profile":PROFILE_WORKING_DIR,"effect":"the current OCI route runs with --workdir /app; relative Cmd paths resolve there"}));
-        }
-        if !facts.volumes.is_empty() {
-            profile_divergences.push(json!({"kind":"volume","image":facts.volumes,
-                "effect":"root filesystem is read-only and no state slot is bound; writes to these paths fail"}));
-        }
-        let capsule_toml = authored_route(request, &image_reference, &facts);
-        let provenance = json!({
-            "schema": SOURCE_OCI_PROVENANCE_SCHEMA,
-            "inputs": {
-                "source_archive_sha256": request.source_archive_sha256,
-                "source_closure_ref": closure,
-                "dockerfile": SELECTED_DOCKERFILE,
-                "dockerfile_sha256": sha256_file(&dockerfile)?,
-                "dockerignore_sha256": dockerignore_sha256,
-                "build_context": ".",
-                "target": "default (last stage)",
-                "build_args": {},
-                "platform": request.platform,
-                "base_images": bases,
-                "builder": identity,
-                "policy": request.policy,
-            },
-            "outputs": {
-                "image_reference": image_reference,
-                "manifest_digest": facts.manifest_digest,
-                "config_digest": facts.config_digest,
-                "layer_digests": facts.layer_digests,
-                "archive_sha256": sha256_file(&archive)?,
-                "archive_bytes": size,
-                "repack": {"dropped_unreferenced_members": dropped,
-                    "rule": "keep oci-layout, index.json, manifest.json and blobs referenced by the one OCI manifest; blob bytes unchanged"},
-                "image_config": {"cmd":facts.cmd,"entrypoint":facts.entrypoint,
-                    "exposed_ports":facts.exposed_ports,"working_dir":facts.working_dir,
-                    "volumes":facts.volumes,"user":facts.user},
-            },
-            "declared_transport_port": request.declared_transport_port,
-            "http_suitability": "unverified until the Runtime and Verifier observe it",
-            "profile_divergences": profile_divergences,
-            "build_elapsed_ms": elapsed_ms,
-            "reproducibility": "not claimed; outputs are observed digests of this build",
-        });
-        Ok(Materialized {
-            provenance,
-            capsule_toml,
-            image_reference,
-            archive,
-        })
-    })();
-    cleanup(result)
+        ));
+    }
+    // The portable OCI profile requires argv; copy the artifact's own Cmd
+    // verbatim (OCI semantics; its ENTRYPOINT still applies). Never parse
+    // Dockerfile text or translate it into a native process.
+    if facts.cmd.is_empty() {
+        return Err(err(
+            "source_oci_cmd_absent",
+            "the image has no Cmd; the current OCI profile needs argv (profile design gap)",
+        ));
+    }
+    let mut profile_divergences = Vec::new();
+    if !facts.working_dir.is_empty() && facts.working_dir != PROFILE_WORKING_DIR {
+        profile_divergences.push(json!({"kind":"working_dir","image":facts.working_dir,
+            "profile":PROFILE_WORKING_DIR,"effect":"the current OCI route runs with --workdir /app; relative Cmd paths resolve there"}));
+    }
+    if !facts.volumes.is_empty() {
+        profile_divergences.push(json!({"kind":"volume","image":facts.volumes,
+            "effect":"root filesystem is read-only and no state slot is bound; writes to these paths fail"}));
+    }
+    let capsule_toml = authored_route(request, &image_reference, &facts);
+    let archive = out.join(ARCHIVE_FILE);
+    std::fs::rename(&partial, &archive)
+        .map_err(|e| err("source_oci_artifact_invalid", e.to_string()))?;
+    let provenance = json!({
+        "schema": SOURCE_OCI_PROVENANCE_SCHEMA,
+        "inputs": {
+            "source_archive_sha256": request.source_archive_sha256,
+            "source_closure_ref": prepared.closure,
+            "dockerfile": SELECTED_DOCKERFILE,
+            "dockerfile_sha256": sha256_file(&dockerfile)?.0,
+            "dockerignore_sha256": dockerignore_sha256,
+            "build_context": ".",
+            "target": "default (last stage)",
+            "build_args": {},
+            "platform": request.platform,
+            "base_images": bases,
+            "builder": identity,
+            "policy": request.policy,
+        },
+        "outputs": {
+            "image_reference": image_reference,
+            "manifest_digest": facts.manifest_digest,
+            "config_digest": facts.config_digest,
+            "layer_digests": facts.layer_digests,
+            "archive_sha256": archive_sha256,
+            "archive_bytes": size,
+            "repack": {"dropped_unreferenced_members": dropped,
+                "rule": "keep oci-layout, index.json, manifest.json and blobs referenced by the one OCI manifest; blob bytes unchanged"},
+            "image_config": {"cmd":facts.cmd,"entrypoint":facts.entrypoint,
+                "exposed_ports":facts.exposed_ports,"working_dir":facts.working_dir,
+                "volumes":facts.volumes,"user":facts.user},
+        },
+        "declared_transport_port": request.declared_transport_port,
+        "http_suitability": "unverified until the Runtime and Verifier observe it",
+        "profile_divergences": profile_divergences,
+        "build_elapsed_ms": elapsed_ms,
+        "reproducibility": "not claimed; outputs are observed digests of this build",
+    });
+    Ok(Materialized {
+        provenance,
+        capsule_toml,
+        image_reference,
+        archive,
+    })
 }
 
 fn toml_string(value: &str) -> String {
@@ -886,7 +925,7 @@ fn toml_string(value: &str) -> String {
 /// The Ato-owned authored route: one OCI serving step over the verified image.
 /// K observes only GET / = 200 on the Surface; it is not a functional claim.
 fn authored_route(request: &SourceOciRequest, image: &str, facts: &ImageFacts) -> String {
-    let p = &request.policy;
+    let p = &request.policy.runtime;
     let argv = facts
         .cmd
         .iter()
