@@ -1,0 +1,257 @@
+{
+  "schema": "ato.formation-source-oci-d2/1",
+  "wave": "6b-D2 (offline integration)",
+  "host": {
+    "name": "ubuntu-sugamo",
+    "kernel": "Linux 7.0.0-27-generic x86_64 GNU/Linux",
+    "docker": "29.1.3",
+    "platform": "linux/amd64",
+    "note": "x86_64 chosen by the user because the existing OCI executor needs Docker; aarch64 deferred"
+  },
+  "code": {
+    "source_sha": "b6a3ee784bef95b21245ba5cbd7864eb3e3086d1",
+    "ato_sha256": "sha256:6c15d42abe0beaab6bb38b115106f00276591e1372bcda8c0bfa2d6b6449ad70",
+    "note": "binary built from b6a3ee78; later commits change acceptance scripts/docs only"
+  },
+  "base_image": {
+    "reference": "python:3.12-alpine@sha256:c4634f578a412db396771b61b064c6e546c9d6414c7fb5b1b05d5871f1885f7b",
+    "archive_sha256": "sha256:4efd64c75d1eedff33fc854438d8e55476c3a78435ba041a23c006270256425b",
+    "acquisition": "read-only docker save from the host daemon before the build (host daemon never given to the builder); host image/container counts 67/5 before and after"
+  },
+  "materialization": {
+    "build_elapsed_ms": 3306,
+    "declared_transport_port": 8080,
+    "http_suitability": "unverified until the Runtime and Verifier observe it",
+    "inputs": {
+      "base_images": [
+        {
+          "archive_sha256": "sha256:4efd64c75d1eedff33fc854438d8e55476c3a78435ba041a23c006270256425b",
+          "config_digest": "sha256:8614a50e05881ad79bcf2d4f82028b65a463c03d2d666d255a4332e3d2a0c0ba",
+          "pinned_digest": "sha256:c4634f578a412db396771b61b064c6e546c9d6414c7fb5b1b05d5871f1885f7b",
+          "reference": "python:3.12-alpine@sha256:c4634f578a412db396771b61b064c6e546c9d6414c7fb5b1b05d5871f1885f7b"
+        }
+      ],
+      "build_args": {},
+      "build_context": ".",
+      "builder": {
+        "buildx": "github.com/docker/buildx 0.30.1 0.30.1-0ubuntu1",
+        "docker_server": "29.1.3",
+        "driver": "docker (private daemon, classic image store)"
+      },
+      "dockerfile": "Dockerfile",
+      "dockerfile_sha256": "sha256:78f8fe80843e5b052574ab3bfa9aa3e04eac70ff26137fe006f9d6ab19642107",
+      "dockerignore_sha256": null,
+      "platform": "linux/amd64",
+      "policy": {
+        "build_timeout_seconds": 600,
+        "cpu_limit_millis": 500,
+        "max_archive_bytes": 134217728,
+        "memory_bytes": 268435456,
+        "network": "none",
+        "pids_limit": 128
+      },
+      "source_archive_sha256": "sha256:8dbc6967850b4732d43e833101a469b0fcf3340888ee3a8f06d0326d05f1cc83",
+      "source_closure_ref": "sha256:2e483639041e96f1551b441eb7954620a5a15ec4ad402e52a4b15824d154fcc6",
+      "target": "default (last stage)"
+    },
+    "outputs": {
+      "archive_bytes": 51189760,
+      "archive_sha256": "sha256:d3d2cec402b37d33a959e506003b925a287fadb30414558dd238f662792f20f9",
+      "config_digest": "sha256:544ae56d0f542f45ead37bbbc63ba33b94c34282a19cb9c116ac764bfcd10680",
+      "image_config": {
+        "cmd": [
+          "python3",
+          "-m",
+          "http.server",
+          "8080",
+          "--directory",
+          "/srv"
+        ],
+        "entrypoint": [],
+        "exposed_ports": [
+          "8080/tcp"
+        ],
+        "user": "",
+        "volumes": [],
+        "working_dir": "/srv"
+      },
+      "image_reference": "ato-source/2e483639041e@sha256:356bb232dd7ed005605e38c28f297600083579e385550119e5f88301a217772c",
+      "layer_digests": [
+        "sha256:74d97c428c51a828f9051a7a40a53ff1fc99e54fc30323ce36760701b0b7f711",
+        "sha256:d1475f57bfeb95f8d89bad4de04d7af788036223b8505b2b5791158c8d885ff0",
+        "sha256:90630b4239d75c9daa2f10f7bb6bfe9b45cfc1419783384dd9873dbf2b732fc3",
+        "sha256:23d9641aa36e31a0b3699cec59ff9f51478b65b47f5f2c7de83d48293d4d4852",
+        "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+        "sha256:34edfe4d9295588e8ca24ca0e078ae8d0a55158c146e26e06e96d005aadf8a6a"
+      ],
+      "manifest_digest": "sha256:356bb232dd7ed005605e38c28f297600083579e385550119e5f88301a217772c",
+      "repack": {
+        "dropped_unreferenced_members": 6,
+        "rule": "keep oci-layout, index.json, manifest.json and blobs referenced by the one OCI manifest; blob bytes unchanged"
+      }
+    },
+    "profile_divergences": [
+      {
+        "effect": "the current OCI route runs with --workdir /app; relative Cmd paths resolve there",
+        "image": "/srv",
+        "kind": "working_dir",
+        "profile": "/app"
+      }
+    ],
+    "reproducibility": "not claimed; outputs are observed digests of this build",
+    "schema": "ato.source-oci-materialization/1"
+  },
+  "pack": {
+    "bundle_sha256": "sha256:449601045b8a94f1b50e45dfc3b0d7978409701d3b69a243895345c235e07640",
+    "contract_ref": "sha256:9bf1dde591e75171e28f258321116dff9a877d190d8ddad3da524c08b42227e5",
+    "derivation_ref": "sha256:ddb304a0a7d008f118102a7c312d36c495b41df025a9a458e8aa9f70a5a8d7f7"
+  },
+  "export_bytes": 68260837,
+  "runs": [
+    {
+      "run": 1,
+      "receipt_sha256": "sha256:624a777db3f3500a3d3d35e10adc8ef2e93790cc469ca0d0f5bbb50b50aab489",
+      "fully_satisfied": true,
+      "bundle_sha256": "sha256:d5bbb4a7947175aed89ce854112c879571cc2f63abc91f813b3e0765939497a0",
+      "contract_ref": "sha256:9bf1dde591e75171e28f258321116dff9a877d190d8ddad3da524c08b42227e5",
+      "derivation_ref": "sha256:ddb304a0a7d008f118102a7c312d36c495b41df025a9a458e8aa9f70a5a8d7f7",
+      "portability_profile": "offline",
+      "embedded_oci_image_loaded": "ato-source/2e483639041e@sha256:356bb232dd7ed005605e38c28f297600083579e385550119e5f88301a217772c",
+      "observations": [
+        {
+          "id": "root",
+          "outcome": "satisfied",
+          "status": 200
+        }
+      ],
+      "private_store_final_image_count": 0,
+      "remaining_containers": 0
+    },
+    {
+      "run": 2,
+      "receipt_sha256": "sha256:6bd0b2c08b765351ac2f9cdc3151d31f1b84f53f05fc1a83aa87465f4f201aee",
+      "fully_satisfied": true,
+      "bundle_sha256": "sha256:d5bbb4a7947175aed89ce854112c879571cc2f63abc91f813b3e0765939497a0",
+      "contract_ref": "sha256:9bf1dde591e75171e28f258321116dff9a877d190d8ddad3da524c08b42227e5",
+      "derivation_ref": "sha256:ddb304a0a7d008f118102a7c312d36c495b41df025a9a458e8aa9f70a5a8d7f7",
+      "portability_profile": "offline",
+      "embedded_oci_image_loaded": "ato-source/2e483639041e@sha256:356bb232dd7ed005605e38c28f297600083579e385550119e5f88301a217772c",
+      "observations": [
+        {
+          "id": "root",
+          "outcome": "satisfied",
+          "status": 200
+        }
+      ],
+      "private_store_final_image_count": 0,
+      "remaining_containers": 0
+    }
+  ],
+  "negatives": [
+    {
+      "case": "archive_bound",
+      "exit": 1,
+      "code": "source_oci_artifact_bounds",
+      "cause": "error: source_oci_artifact_bounds: 51189760 bytes exceeds the archive bound",
+      "private_store_images_after": 0,
+      "containers_after": 0,
+      "default_route": 0
+    },
+    {
+      "case": "base_digest_mismatch",
+      "exit": 1,
+      "code": "source_oci_base_digest_mismatch",
+      "cause": "error: source_oci_base_digest_mismatch: python:3.12-alpine@sha256:c4634f578a412db396771b61b064c6e546c9d6414c7fb5b1b05d5871f1885f7b archive bytes differ from the frozen digest",
+      "private_store_images_after": 0,
+      "containers_after": 0,
+      "default_route": 0
+    },
+    {
+      "case": "build_network",
+      "exit": 1,
+      "code": "source_oci_build_failed",
+      "cause": "5.274 wget: bad address 'example.com'",
+      "private_store_images_after": 0,
+      "containers_after": 0,
+      "default_route": 0
+    },
+    {
+      "case": "build_timeout",
+      "exit": 1,
+      "code": "source_oci_build_timeout",
+      "cause": "error: source_oci_build_timeout: build exceeded 5 s",
+      "private_store_images_after": 0,
+      "containers_after": 0,
+      "default_route": 0
+    },
+    {
+      "case": "context_escape",
+      "exit": 1,
+      "code": "source_oci_build_failed",
+      "cause": "ERROR: failed to build: failed to solve: failed to compute cache key: failed to calculate checksum of ref e37b4b9d-3424-4662-9aa0-4ef0b696ebef::ia4knphas0nfdr459f6lqsxt6: \"/outside.txt\": not found",
+      "private_store_images_after": 0,
+      "containers_after": 0,
+      "default_route": 0
+    },
+    {
+      "case": "host_network_run",
+      "exit": 1,
+      "code": "source_oci_build_failed",
+      "cause": "ERROR: failed to build: failed to solve: failed to load LLB: network.host is not allowed",
+      "private_store_images_after": 0,
+      "containers_after": 0,
+      "default_route": 0
+    },
+    {
+      "case": "privileged_run",
+      "exit": 1,
+      "code": "source_oci_build_failed",
+      "cause": "ERROR: failed to build: failed to solve: failed to load LLB: security.insecure is not allowed",
+      "private_store_images_after": 0,
+      "containers_after": 0,
+      "default_route": 0
+    },
+    {
+      "case": "production_socket",
+      "exit": 1,
+      "code": "source_oci_builder_socket_refused",
+      "cause": "error: source_oci_builder_socket_refused: the host's production Docker socket is never given to a source build",
+      "private_store_images_after": 0,
+      "containers_after": 0,
+      "default_route": 0
+    },
+    {
+      "case": "store_not_empty",
+      "exit": 1,
+      "code": "source_oci_builder_store_not_empty",
+      "cause": "error: source_oci_builder_store_not_empty: the private builder store must be empty; no other job's images or cache",
+      "private_store_images_after": 0,
+      "containers_after": 0,
+      "default_route": 0
+    },
+    {
+      "case": "unauthorized_external_input",
+      "exit": 1,
+      "code": "source_oci_build_failed",
+      "cause": "ERROR: failed to build: failed to solve: alpine:3.20@sha256:0000000000000000000000000000000000000000000000000000000000000000: failed to resolve source metadata for docker.io/library/alpine:3.20@sha256:000000000000000000000000000000000000000",
+      "private_store_images_after": 0,
+      "containers_after": 0,
+      "default_route": 0
+    }
+  ],
+  "states": {
+    "implemented": true,
+    "unit_tests": "7 PASS (fake builder)",
+    "offline_integration_actual": true,
+    "wbo_actual": false,
+    "merged": false,
+    "deployed": false
+  },
+  "not_claimed": [
+    "functional application success",
+    "reproducible builds",
+    "aarch64",
+    "online builds",
+    "WBO"
+  ]
+}
