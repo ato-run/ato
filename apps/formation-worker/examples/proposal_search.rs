@@ -4,7 +4,9 @@
 use anyhow::{Context, Result};
 use ato_formation::{authoring::BoundContract, proposal::*};
 use ato_formation_worker::{
-    decision_provider::{DecisionPoint, DecisionProvider, ProviderAnswer, serve_decision},
+    decision_provider::{
+        DecisionPoint, DecisionProvider, OfferedAction, ProviderAnswer, serve_decision,
+    },
     runtime_network::{
         Client, RuntimeConstraintWire, SatisfyBudget, SatisfyPolicy, accept_verified_routes,
         prepare_submission,
@@ -129,9 +131,15 @@ impl DecisionProvider for FixedDecision<'_> {
                     c.attempt()
                         .is_some_and(|(d, _, _)| !self.failed.contains(d))
                 })
+            })
+            .or_else(|| {
+                point
+                    .choices
+                    .iter()
+                    .find(|c| matches!(c.action, OfferedAction::EscalateToCandidateProducer {}))
             });
         self.log.borrow_mut().push(json!({"seq":point.seq,"failed_derivations":self.failed,
-            "failure_evidence":self.evidence,"selected":choice.and_then(|c|c.attempt().map(|(d,_,_)|d)),
+            "failure_evidence":self.evidence,"escalated":choice.is_some_and(|c| matches!(c.action, OfferedAction::EscalateToCandidateProducer {})),"selected":choice.and_then(|c|c.attempt().map(|(d,_,_)|d)),
             "offered":point.choices.iter().filter_map(|c|c.attempt().map(|(d,_,_)|d)).collect::<Vec<_>>() }));
         match choice {
             Some(c) => ProviderAnswer::Choice {

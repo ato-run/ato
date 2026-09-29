@@ -156,6 +156,7 @@ fn action_kind(choice: &ato_formation_worker::decision_provider::OfferedChoice) 
         OfferedAction::Attempt { .. } => "attempt",
         OfferedAction::Inspect { .. } => "inspect",
         OfferedAction::Stop { .. } => "stop",
+        OfferedAction::EscalateToCandidateProducer {} => "escalate_to_candidate_producer",
     }
 }
 
