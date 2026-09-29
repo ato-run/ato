@@ -1470,3 +1470,227 @@ fn d2a_mutated_hash_budget_or_context_fails_closed() {
         assert!(serde_json::from_value::<ProposalRequestV2>(wire).is_err());
     }
 }
+
+fn adaptive(mut s: SearchStateV1) -> SearchStateV1 {
+    s.frozen.policy.decision = Some(DecisionPolicy {
+        provider: ProviderLocation::Requester,
+        max_decisions: 8,
+        decision_timeout_ms: 1000,
+    });
+    s
+}
+fn open_adaptive_point(s: &mut SearchStateV1) {
+    let SearchAction::OpenDecision {
+        seq,
+        default_id,
+        choices,
+    } = decide_next(s, &placements(s), 10).unwrap()
+    else {
+        panic!("expected decision")
+    };
+    assert_eq!(
+        choices[0].action,
+        ChoiceAction::EscalateToCandidateProducer {}
+    );
+    assert_eq!(default_id, choices[0].choice_id);
+    assert!(matches!(
+        choices.last().unwrap().action,
+        ChoiceAction::Stop { .. }
+    ));
+    assert!(
+        choices[1..choices.len() - 1]
+            .iter()
+            .all(|c| matches!(c.action, ChoiceAction::Inspect { .. }))
+    );
+    s.decisions.push(DecisionRecord {
+        seq,
+        attempt_seq: s.attempts.len() as u64,
+        opened_at_ms: 10,
+        default_id,
+        choices,
+        outcome: None,
+        chosen_id: None,
+    });
+    s.budget.decisions_used += 1;
+}
+fn settle_adaptive_point(s: &mut SearchStateV1, outcome: DecisionOutcome) {
+    let r = s.decisions.last_mut().unwrap();
+    r.outcome = Some(outcome);
+    r.chosen_id = (outcome == DecisionOutcome::Chosen).then(|| r.default_id.clone());
+}
+#[test]
+fn adaptive_escalation_has_no_arguments_and_stable_identity() {
+    let action = ChoiceAction::EscalateToCandidateProducer {};
+    let wire = json!({"kind":"escalate_to_candidate_producer"});
+    assert_eq!(serde_json::to_value(&action).unwrap(), wire);
+    assert_eq!(
+        serde_json::from_value::<ChoiceAction>(wire.clone()).unwrap(),
+        action
+    );
+    assert_eq!(choice_id(0, &action), choice_id(0, &action));
+    assert_ne!(choice_id(0, &action), choice_id(1, &action));
+    for field in [
+        "prompt",
+        "path",
+        "operation",
+        "runtime",
+        "K",
+        "source_id",
+        "args",
+    ] {
+        let mut bad = wire.clone();
+        bad[field] = json!("injected");
+        assert!(
+            serde_json::from_value::<ChoiceAction>(bad).is_err(),
+            "{field}"
+        );
+    }
+}
+#[test]
+fn adaptive_zero_and_failed_frontiers_offer_escalation_only_after_core_admission() {
+    for mut s in [adaptive(empty_frontier()), adaptive(state())] {
+        open_adaptive_point(&mut s);
+        assert!(matches!(
+            decide_next(&s, &placements(&s), 11).unwrap(),
+            SearchAction::WaitForDecision { .. }
+        ));
+        settle_adaptive_point(&mut s, DecisionOutcome::Chosen);
+        assert!(matches!(
+            decide_next(&s, &placements(&s), 12).unwrap(),
+            SearchAction::OpenProposalRound { .. }
+        ));
+        let restored: SearchStateV1 =
+            serde_json::from_slice(&serde_json::to_vec(&s).unwrap()).unwrap();
+        assert_eq!(
+            decide_next(&s, &placements(&s), 12).unwrap(),
+            decide_next(&restored, &placements(&restored), 12).unwrap()
+        );
+    }
+}
+#[test]
+fn adaptive_fallback_releases_proposal_then_next_generated_decision() {
+    for outcome in [
+        DecisionOutcome::Chosen,
+        DecisionOutcome::Timeout,
+        DecisionOutcome::ProviderError,
+        DecisionOutcome::Invalid,
+        DecisionOutcome::OutOfSet,
+    ] {
+        let mut s = adaptive(empty_frontier());
+        open_adaptive_point(&mut s);
+        settle_adaptive_point(&mut s, outcome);
+        assert!(matches!(
+            decide_next(&s, &[], 12).unwrap(),
+            SearchAction::OpenProposalRound { .. }
+        ));
+        let candidates = first_candidates(&s);
+        s.proposal_round = Some(ProposalRoundRecord {
+            opened_at_ms: 12,
+            expires_at_ms: 5012,
+            outcome: Some(ProposalRoundOutcome::Completed),
+            candidates: candidates.iter().map(|c| c.candidate().clone()).collect(),
+        });
+        let SearchAction::OpenDecision { seq, choices, .. } =
+            decide_next(&s, &placements(&s), 13).unwrap()
+        else {
+            panic!("generated decision missing after {outcome:?}")
+        };
+        assert_eq!(seq, 1);
+        assert!(matches!(choices[0].action, ChoiceAction::Attempt { .. }));
+        assert!(
+            !choices
+                .iter()
+                .any(|c| matches!(c.action, ChoiceAction::EscalateToCandidateProducer {}))
+        );
+        assert!(s.attempts.is_empty()); // Compilation/decision never establish PASS.
+    }
+}
+#[test]
+fn adaptive_open_decision_timeout_uses_existing_fallback_record() {
+    let mut s = adaptive(empty_frontier());
+    open_adaptive_point(&mut s);
+    assert_eq!(
+        decide_next(&s, &[], 1010).unwrap(),
+        SearchAction::RecordFallback {
+            seq: 0,
+            reason: DecisionOutcome::Timeout
+        }
+    );
+}
+#[test]
+fn adaptive_inspect_and_stop_remain_effective_at_proposal_frontier() {
+    for stop in [false, true] {
+        let mut s = adaptive(state());
+        open_adaptive_point(&mut s);
+        let record = &mut s.decisions[0];
+        let selected = record
+            .choices
+            .iter()
+            .find(|c| {
+                if stop {
+                    matches!(c.action, ChoiceAction::Stop { .. })
+                } else {
+                    matches!(c.action, ChoiceAction::Inspect { .. })
+                }
+            })
+            .unwrap();
+        record.chosen_id = Some(selected.choice_id.clone());
+        record.outcome = Some(DecisionOutcome::Chosen);
+        let action = decide_next(&s, &placements(&s), 12).unwrap();
+        if stop {
+            assert_eq!(
+                action,
+                SearchAction::Finish {
+                    reason: Termination::DecisionStopped
+                }
+            );
+        } else {
+            assert!(matches!(action, SearchAction::RunInspection { .. }));
+        }
+    }
+}
+#[test]
+fn adaptive_proposal_fences_are_the_deterministic_fences() {
+    for fence in [
+        "owner",
+        "deadline",
+        "attempt_budget",
+        "transfer",
+        "stored",
+        "unknown_source",
+        "unknown",
+        "inflight",
+        "effect",
+    ] {
+        let mut s = state();
+        match fence {
+            "owner" => s.owner_stopped = true,
+            "deadline" => s.deadline_ms = 10,
+            "attempt_budget" => s.budget.attempts_used = s.frozen.policy.budget.max_attempts,
+            "transfer" => s.budget.transfer_used = s.frozen.policy.budget.max_transfer_bytes,
+            "stored" => s.budget.stored_used = s.frozen.policy.budget.max_stored_bytes,
+            "unknown_source" => s.source_archive_bytes = None,
+            "unknown" => {
+                s.attempts[0].status = DurableAttemptStatus::Unknown;
+                s.attempts[0].record = Some(ExecutionRecord::StartedUnfinished);
+            }
+            "inflight" => {
+                s.attempts[0].status = DurableAttemptStatus::Claimed;
+                s.attempts[0].record = None;
+            }
+            "effect" => s.attempts[0].record = Some(ExecutionRecord::HistoryUnavailable),
+            _ => unreachable!(),
+        }
+        let expected = decide_next(&s, &placements(&s), 10).unwrap();
+        assert!(
+            !matches!(expected, SearchAction::OpenProposalRound { .. }),
+            "{fence}"
+        );
+        let s = adaptive(s);
+        assert_eq!(
+            decide_next(&s, &placements(&s), 10).unwrap(),
+            expected,
+            "{fence}"
+        );
+    }
+}

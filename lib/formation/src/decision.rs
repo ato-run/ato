@@ -97,6 +97,8 @@ pub enum StopReasonClass {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ChoiceAction {
+    /// Release the existing bounded proposal round; never carries producer input.
+    EscalateToCandidateProducer {},
     /// Issue the next attempt: a frozen D on an admissible, untried placement.
     Attempt {
         candidate_id: String,
@@ -360,6 +362,24 @@ pub fn allowed_choices(s: &SearchStateV1, placements: &[Placement]) -> Vec<Choic
             break;
         }
     }
+    append_inspections_and_stop(s, &mut out);
+    out
+}
+
+/// Called only after the deterministic core has admitted OpenProposalRound.
+/// Authorization, source cost and safety fences remain owned by default_next.
+fn proposal_choices(s: &SearchStateV1) -> Vec<Choice> {
+    let action = ChoiceAction::EscalateToCandidateProducer {};
+    let mut out = vec![Choice {
+        choice_id: choice_id(s.decisions.len() as u64, &action),
+        action,
+    }];
+    append_inspections_and_stop(s, &mut out);
+    out
+}
+
+fn append_inspections_and_stop(s: &SearchStateV1, out: &mut Vec<Choice>) {
+    let seq = s.decisions.len() as u64;
     // Inspections whose evidence is not recorded yet, in frozen D order.
     // attempt_failures exists only for a D with a finished non-pass attempt.
     if out.len() < MAX_CHOICES - 1 {
@@ -411,7 +431,6 @@ pub fn allowed_choices(s: &SearchStateV1, placements: &[Placement]) -> Vec<Choic
         choice_id: choice_id(seq, &stop),
         action: stop,
     });
-    out
 }
 
 fn issue(s: &SearchStateV1, c: &ChoiceAction) -> SearchAction {
@@ -460,7 +479,9 @@ pub(crate) fn apply(
     };
     if !matches!(
         default,
-        SearchAction::IssueAttempt { .. } | SearchAction::ReplayRetained { .. }
+        SearchAction::IssueAttempt { .. }
+            | SearchAction::ReplayRetained { .. }
+            | SearchAction::OpenProposalRound { .. }
     ) {
         return default;
     }
@@ -541,6 +562,14 @@ pub(crate) fn apply(
                         }
                         // Evidence recorded: consumed.
                     }
+                    Some(ChoiceAction::EscalateToCandidateProducer {}) => {
+                        if s.proposal_round.is_none() {
+                            // The default has already rechecked all fences. It
+                            // alone may authorize opening the proposal round.
+                            return default;
+                        }
+                        // Durable round exists: consumed, including after restart.
+                    }
                     Some(ChoiceAction::Stop { .. }) => {
                         return SearchAction::Finish {
                             reason: Termination::DecisionStopped,
@@ -554,15 +583,27 @@ pub(crate) fn apply(
             Some(_) => {
                 // A fallback releases the deterministic default exactly once:
                 // pending while no attempt was issued past the point.
-                if s.attempts.len() as u64 == record.attempt_seq {
+                let pending = if matches!(
+                    record.released(),
+                    Some(ChoiceAction::EscalateToCandidateProducer {})
+                ) {
+                    s.proposal_round.is_none()
+                } else {
+                    s.attempts.len() as u64 == record.attempt_seq
+                };
+                if pending {
                     return default;
                 }
-                // Issued: consumed.
+                // Attempt issued or proposal round persisted: consumed.
             }
         }
     }
     let seq = s.decisions.len() as u64;
-    let choices = allowed_choices(s, placements);
+    let choices = if matches!(default, SearchAction::OpenProposalRound { .. }) {
+        proposal_choices(s)
+    } else {
+        allowed_choices(s, placements)
+    };
     if choices.len() < 2 || s.budget.decisions_used >= u64::from(policy.max_decisions) {
         default
     } else {
