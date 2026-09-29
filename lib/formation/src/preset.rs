@@ -491,3 +491,28 @@ pub fn synthesize_authoring(preset: AppPreset) -> AuthoringDraft {
         },
     }
 }
+
+mod node_static_v2;
+pub use node_static_v2::{NODE_STATIC_V2, synthesize_node_static_v2};
+
+/// Canonical known-D frontend. The v1 selector and its draft bytes remain fixed.
+/// Non-npm sources use a separate, source-qualified v2 authoring contract.
+pub fn candidate_authoring(
+    evidence: &DetectorEvidence,
+) -> Result<Vec<AuthoringDraft>, PresetMismatch> {
+    if evidence.node.as_ref().is_some_and(|n| {
+        n.has_package_json
+            && (n.has_pnpm_lock
+                || n.has_yarn_lock
+                || n.has_bun_lock
+                || n.package_manager
+                    .as_deref()
+                    .is_some_and(|p| p.split('@').next() != Some("npm"))
+                || n.dev_engines_package_manager
+                    .as_ref()
+                    .is_some_and(|p| p.get("name").and_then(|n| n.as_str()) != Some("npm")))
+    }) {
+        return synthesize_node_static_v2(evidence).map(|draft| vec![draft]);
+    }
+    candidates(evidence).map(|presets| presets.into_iter().map(synthesize_authoring).collect())
+}

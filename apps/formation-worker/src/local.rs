@@ -26,7 +26,7 @@ use ato_formation::browser::{BrowserBudget, effective_contract_ref};
 use ato_formation::capsule_toml::{parse_capsule_toml, read_capsule_toml};
 use ato_formation::detect::{DetectorEvidence, detect};
 use ato_formation::failure::{FailureStage, FormationFailure};
-use ato_formation::preset::candidates;
+use ato_formation::preset::candidate_authoring;
 use ato_formation::request::{
     AttemptFailure, AttemptOutcomes, AttemptStatus, ContractSource, FormationAttempt,
     FormationNetworkPolicy, FormationRequest, FormationResult, InitialCondition, Outcome,
@@ -157,8 +157,8 @@ fn run_as(
         ContractSource::Infer => {
             match read_capsule_toml(&source_root).map_err(FormationFailure::from)? {
                 Some(text) => vec![parse_capsule_toml(&text).map_err(FormationFailure::from)?],
-                None => match candidates(&evidence) {
-                    Ok(list) => list.into_iter().map(synthesize).collect(),
+                None => match candidate_authoring(&evidence) {
+                    Ok(list) => list,
                     Err(mismatch) => {
                         return Ok(FormationResult::NoVerifiedRoute {
                             attempted_contract_refs: Vec::new(),
@@ -804,8 +804,4 @@ pub fn host_triple() -> String {
         other => other,
     };
     format!("{arch}-{os}")
-}
-
-fn synthesize(preset: ato_formation::preset::AppPreset) -> AuthoringDraft {
-    ato_formation::preset::synthesize_authoring(preset)
 }
