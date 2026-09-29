@@ -7,9 +7,13 @@ This is an implementation plan; pending rows are not shipped functionality.
 
 The complete downloaded original Formation §10 has **Phase 3 = Jev Decision
 Layer**, **Phase 4 = LLM Candidate Generation**, **Phase 5 = Continuous
-Adaptation**. Our 5a ≒ Phase 3, 5b ≒ Phase 4, 5c ≒ Phase 5. Our 6a/6b/6c
-are additional product coverage implementation tracks, not original Phase
-numbers. See [source pins and section mapping](Formation.md#original-formation-correspondence).
+Adaptation**. Our 5a ≒ Phase 3 and 5b ≒ Phase 4. Stage 5c closes
+Phase 4 within one search through bounded DecisionProvider ↔ CandidateProducer
+↔ Runtime/Verifier integration; it is not original Phase 5. Stage 6a is independent
+real-world coverage measurement and 6b is measured capability expansion.
+Stage **6c corresponds to original Phase 5**: external Runtime / verified D /
+Adapter / evidence triggers drive authorized, known-D-first background
+revalidation. These implementation stage numbers are not original Phase numbers. See [source pins and section mapping](Formation.md#original-formation-correspondence).
 
 The minimum 5b / original Phase 4 completion path is: **no Preset, zero known
 D**, small OSS fixture → CandidateProducer → canonical new D → admission →
