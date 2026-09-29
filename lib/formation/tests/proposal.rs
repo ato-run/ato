@@ -44,6 +44,7 @@ fn state() -> SearchStateV1 {
             http_port: "app.http".into(),
             guest_port: 8000,
         }),
+        node_static_workspace: None,
         source_domain: SourceDomain {
             entrypoints: BTreeMap::from([("entry_a".into(), "working.py".into())]),
             modules: BTreeMap::from([("module_a".into(), "pkg.server".into())]),
@@ -706,6 +707,7 @@ fn empty_frontier() -> SearchStateV1 {
             http_port: "app.http".into(),
             guest_port: 8000,
         }),
+        node_static_workspace: None,
         policy: CandidateProducerPolicy {
             max_proposal_rounds: 1,
             max_proposals: 4,

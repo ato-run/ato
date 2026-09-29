@@ -13,6 +13,63 @@ use crate::{
     search::{InitialSource, SearchCandidate, execution_requirements},
 };
 
+/// Frozen K projected into `[[contract.require]]`, field for field.
+pub(super) fn contract_requirements(k: &BoundContract) -> Vec<Value> {
+    k.requirements.iter().map(|r| {
+        if r.verifier == HTTP_CONTRACT_VERIFIER {
+            let mut expect = json!({"status": r.status.unwrap()});
+            if let Some(digest) = &r.body_digest { expect["body_digest"] = json!(digest); }
+            json!({"id":r.id,"use":r.verifier,"port":r.port,"method":r.method,"path":r.path,"expect":expect})
+        } else {
+            json!({"id":r.id,"use":r.verifier,"input":r.input,"expect":{"digest":r.digest}})
+        }
+    }).collect()
+}
+
+/// Exact HTTP conditions on `port` plus optional frozen source identity.
+pub(super) fn validate_http_contract(
+    k: &BoundContract,
+    source: &InitialSource,
+    port: &str,
+) -> Result<(), ProposalError> {
+    let invalid = ProposalError("proposal_contract_unsupported");
+    if k.schema != "ato.contract/1"
+        || !is_sha256(&source.closure_ref)
+        || !k
+            .requirements
+            .iter()
+            .any(|r| r.verifier == HTTP_CONTRACT_VERIFIER)
+        || k.requirements.windows(2).any(|w| w[0].id >= w[1].id)
+    {
+        return Err(invalid);
+    }
+    for r in &k.requirements {
+        if r.id.is_empty() {
+            return Err(invalid);
+        }
+        match r.verifier.as_str() {
+            HTTP_CONTRACT_VERIFIER
+                if r.port.as_deref() == Some(port)
+                    && r.method.as_deref() == Some("GET")
+                    && r.path.as_ref().is_some_and(|p| p.starts_with('/'))
+                    && r.status.is_some_and(|s| (100..=599).contains(&s))
+                    && r.body_digest.as_ref().is_none_or(|d| is_sha256(d))
+                    && r.input.is_none()
+                    && r.digest.is_none() => {}
+            WORKSPACE_CONTRACT_VERIFIER
+                if r.input.as_deref() == Some("workspace")
+                    && r.digest.as_ref() == Some(&source.closure_ref)
+                    && r.port.is_none()
+                    && r.method.is_none()
+                    && r.path.is_none()
+                    && r.status.is_none()
+                    && r.body_digest.is_none() => {}
+            _ => return Err(invalid),
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PythonHttpProcess {
@@ -49,42 +106,7 @@ impl PythonHttpProcess {
         source: &InitialSource,
     ) -> Result<(), ProposalError> {
         self.validate()?;
-        let invalid = ProposalError("proposal_contract_unsupported");
-        if k.schema != "ato.contract/1"
-            || !is_sha256(&source.closure_ref)
-            || !k
-                .requirements
-                .iter()
-                .any(|r| r.verifier == HTTP_CONTRACT_VERIFIER)
-            || k.requirements.windows(2).any(|w| w[0].id >= w[1].id)
-        {
-            return Err(invalid);
-        }
-        for r in &k.requirements {
-            if r.id.is_empty() {
-                return Err(invalid);
-            }
-            match r.verifier.as_str() {
-                HTTP_CONTRACT_VERIFIER
-                    if r.port.as_ref() == Some(&self.http_port)
-                        && r.method.as_deref() == Some("GET")
-                        && r.path.as_ref().is_some_and(|p| p.starts_with('/'))
-                        && r.status.is_some_and(|s| (100..=599).contains(&s))
-                        && r.body_digest.as_ref().is_none_or(|d| is_sha256(d))
-                        && r.input.is_none()
-                        && r.digest.is_none() => {}
-                WORKSPACE_CONTRACT_VERIFIER
-                    if r.input.as_deref() == Some("workspace")
-                        && r.digest.as_ref() == Some(&source.closure_ref)
-                        && r.port.is_none()
-                        && r.method.is_none()
-                        && r.path.is_none()
-                        && r.status.is_none()
-                        && r.body_digest.is_none() => {}
-                _ => return Err(invalid),
-            }
-        }
-        Ok(())
+        validate_http_contract(k, source, &self.http_port)
     }
 
     pub(super) fn compile(
@@ -96,15 +118,7 @@ impl PythonHttpProcess {
         self.validate_contract(k, source)?;
         // All text below is Ato-owned or taken from frozen K/authorization.
         // Provider paths, ports, executables and runtime versions never enter.
-        let requirements: Vec<Value> = k.requirements.iter().map(|r| {
-            if r.verifier == HTTP_CONTRACT_VERIFIER {
-                let mut expect = json!({"status": r.status.unwrap()});
-                if let Some(digest) = &r.body_digest { expect["body_digest"] = json!(digest); }
-                json!({"id":r.id,"use":r.verifier,"port":r.port,"method":r.method,"path":r.path,"expect":expect})
-            } else {
-                json!({"id":r.id,"use":r.verifier,"input":r.input,"expect":{"digest":r.digest}})
-            }
-        }).collect();
+        let requirements = contract_requirements(k);
         let document = json!({
             "schema":"ato.capsule/1",
             "input":[{"id":"workspace","use":"ato.workspace@1","path":"."}],
