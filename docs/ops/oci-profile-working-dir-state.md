@@ -44,3 +44,53 @@ directory, the run user uid 1000) and coincides with the image's
 effective identity, which this K would then report as unsatisfied.
 
 K (`sha256:778d5380…`) observes HTTP only; this is not a functional claim.
+
+That first run used the earlier "at or above" coverage rule (source
+`70189cc4`) and is kept as recorded. The rule was then narrowed to exact
+destinations, because a parent mount does not stop Docker from creating the
+anonymous volume. Re-run on the exact rule (source `6a5b1952`, `ato` sha256
+`34bdfe23068aed51…`): declared `fully_satisfied=true` (root and whoami
+satisfied, 0 store volumes); no_state refused with `oci_volume_unauthorized`;
+legacy exits under `/app`. Host daemon 68/5/67 unchanged.
+
+## VOLUME coverage on the real daemon (exact destination rule)
+
+`scripts/acceptance/oci-profile/volumes.sh` (same source and binary). Images
+from `volume-fixtures/` are built by the 6b-D2 session. While each run is live,
+the private daemon's containers are inspected (`.Mounts`); afterwards its
+volumes are listed.
+
+| Case | Image VOLUME | Declared mounts | Result | Containers | Volume mounts / store volumes |
+|---|---|---|---|---|---|
+| exact_state | `/data` | state `/data` | `fully_satisfied=true` | 1 | 0 / 0 |
+| exact_wbo_fixture | `/opt/app/server-data` | state at that path | `fully_satisfied=true` | 1 | 0 / 0 |
+| exact_tmp | `/tmp` | `/tmp` tmpfs | `fully_satisfied=true` | 1 | 0 / 0 |
+| parent_state | `/data/sub` | state `/data` | `oci_volume_unauthorized` | 0 | 0 / 0 |
+| tmp_child | `/tmp/cache` | `/tmp` tmpfs | `oci_volume_unauthorized` | 0 | 0 / 0 |
+| workspace_child | `/.ato-workspace/x` | workspace `/.ato-workspace` | `oci_volume_unauthorized` | 0 | 0 / 0 |
+| child_mount_only | `/data` | state `/data/sub` | `oci_volume_unauthorized` | 0 | 0 / 0 |
+
+Refusals happen before `docker run`: no container was ever created.
+
+## Hosted projection reaching the Adapter
+
+`lib/ipc/tests/fixtures/runtime-launch-spec-v1/portable-oci-working-dir.json`
+holds the exact bytes that ato-api's `portableRouteRealization` produces (ato-api
+node contract test). `lib/runtime-attempt` parses them and maps them with
+`container_oci_spec` to the common Adapter spec:
+- `working_dir` is `/opt/app`
+- the workspace mount is `/.ato-workspace`
+- there is one writable state mount, at the VOLUME path
+- `validate_oci_spec` accepts the result
+
+With the fact removed, the spec keeps `/app`. A Hosted Runner launch on Docker
+was not executed, because the fixture image is not in a pullable registry. The
+Docker behaviour is that of the same Adapter, verified above through the CLI.
+
+## Before production deployment (a gate, not a merge blocker)
+
+Enumerate the existing Hosted OCI apps read-only: image digest,
+`Config.Volumes` and declared mounts. List the apps this rule would refuse. Do
+not stop running containers or delete existing anonymous volumes, since they
+may hold data. Migrate each affected app to an explicit state slot once its
+data is preserved, then restart it.
