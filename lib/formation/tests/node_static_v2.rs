@@ -312,3 +312,35 @@ fn npm_lock_with_foreign_manager_is_not_silently_v1() {
         "preset_node_static_v2_lock_conflict"
     );
 }
+
+#[test]
+fn legacy_source_only_manager_binding_is_not_reinterpreted() {
+    let (facts, _, mut d) = v2("pnpm@9.1.0", "pnpm-lock.yaml");
+    d.runtimes.remove("pnpm");
+    let p = plan(&d, &facts);
+    assert_eq!(
+        p.steps(&d)
+            .unwrap()
+            .iter()
+            .find(|s| s.name == "install")
+            .unwrap()
+            .argv[0],
+        "pnpm"
+    );
+}
+
+#[test]
+fn explicit_authored_path_is_not_overridden_by_default_binding() {
+    let (facts, _, mut d) = v2("pnpm@9.1.0", "pnpm-lock.yaml");
+    d.steps[0].env.insert("PATH".into(), "/app/bin".into());
+    let p = plan(&d, &facts);
+    assert_eq!(
+        p.steps(&d)
+            .unwrap()
+            .iter()
+            .find(|s| s.name == "install")
+            .unwrap()
+            .argv[0],
+        "pnpm"
+    );
+}
