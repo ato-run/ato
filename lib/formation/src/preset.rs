@@ -492,7 +492,7 @@ pub fn synthesize_authoring(preset: AppPreset) -> AuthoringDraft {
     }
 }
 
-mod node_static_v2;
+pub(crate) mod node_static_v2;
 pub use node_static_v2::{NODE_STATIC_V2, synthesize_node_static_v2};
 
 /// Canonical known-D frontend. The v1 selector and its draft bytes remain fixed.

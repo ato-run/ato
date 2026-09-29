@@ -154,6 +154,16 @@ impl Submission {
                 "module entrypoint is not in frozen source"
             );
         }
+        // Workspace IDs resolve only to the inventory of this verified extraction.
+        if let Some(domain) = &authorization.node_static_workspace {
+            let recomputed = ato_formation::workspace::inventory(&inventory.root)
+                .ok()
+                .and_then(|inventory| inventory.authorization());
+            anyhow::ensure!(
+                recomputed.as_ref() == Some(domain),
+                "workspace domain differs from the frozen source inventory"
+            );
+        }
         // Read only the independent digest-verified extraction, never the user's
         // mutable working tree. No read/crawl at all when source text is disabled.
         let source_context = if authorization.policy.allow_source_text {
