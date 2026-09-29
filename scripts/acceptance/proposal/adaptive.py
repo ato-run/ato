@@ -12,10 +12,13 @@ class InvalidDecisionProxy(a.LossProxy):
         try:
             if self.path.endswith('/decisions') and not self.server.injected:
                 data=json.loads(self.rfile.read(int(self.headers.get('content-length','0'))))
-                if self.server.malformed:
+                if self.server.mode == 'malformed':
                     body=b'{"seq":'
+                elif self.server.mode in ['invalid', 'provider_error']:
+                    body=json.dumps({'seq':data['seq'],'fallback':self.server.mode}).encode()
                 else:
-                    data['choice_id']='not_an_offered_choice';body=json.dumps(data).encode()
+                    data['choice_id']='c0000000000000000' if self.server.mode == 'out_of_set' else 'not_an_offered_choice'
+                    body=json.dumps(data).encode()
                 self.headers.replace_header('Content-Length',str(len(body)))
                 self.rfile=io.BytesIO(body);self.server.injected=True
             super().forward()
@@ -41,17 +44,26 @@ def run(case):
             assert len(a.sql('SELECT * FROM satisfy_proposal_rounds WHERE search_id=?',c['config']['search_id']))==1
             frozen=r['status']['search_state']['frozen']
             assert frozen['policy']['runtime_constraint']==c['frozen']['runtime_constraint']
-        elif case in ['A8_out_of_set','A8_malformed']:
+        elif case.startswith('A8_'):
             c=a.setup(case,decision=True,proposals=[a.member('good')],prefer=0)
             proxy=http.server.ThreadingHTTPServer(('127.0.0.1',0),InvalidDecisionProxy)
             proxy.lock=threading.Lock();proxy.event=threading.Event();proxy.dropped=False
-            proxy.suffix='/never-drop';proxy.injected=False;proxy.malformed=case.endswith('malformed')
+            proxy.suffix='/never-drop';proxy.injected=False;proxy.mode=case.removeprefix('A8_')
             threading.Thread(target=proxy.serve_forever,daemon=True).start()
             c['config']['api']=f'http://127.0.0.1:{proxy.server_port}'
             rt=a.runtime(c);a.requester(c);r=a.finished(c);a.assert_pass(c,r,1)
             assert proxy.injected
             rows=escalation_rows(c)
-            assert rows[0]['outcome'] in ['out_of_set','timeout','invalid'],rows
+            expected={'out_of_set':'out_of_set','malformed':'timeout','wire_invalid':'timeout','invalid':'invalid','provider_error':'provider_error'}[proxy.mode]
+            assert rows[0]['outcome']==expected,rows
+            assert rows[0]['attempt_seq']==0 and rows[1]['seq']==1 and rows[1]['attempt_seq']==0
+            assert rows[1]['outcome']=='chosen' and len(rows)==2
+            assert rows[0]['chosen_choice'] is None
+            rounds=a.sql('SELECT round_seq,status FROM satisfy_proposal_rounds WHERE search_id=?',c['config']['search_id'])
+            assert rounds==[{'round_seq':1,'status':'completed'}],rounds
+            assert len(r['status']['proposal_round']['outcomes'])==1
+            assert r['status']['proposal_round']['outcomes'][0]['status']=='admitted'
+            (c['root']/'decision-release.json').write_text(json.dumps({'decisions':rows,'rounds':rounds,'fixed_calls':a.count(c),'attempts_before_next_decision':rows[1]['attempt_seq']},indent=2))
         elif case == 'A6_deadline':
             c=a.setup(case,known=True,decision=True)
             c['config']['budget']['deadline_seconds']=1
@@ -113,7 +125,7 @@ if __name__=='__main__':
     import sys
     try:
         a.start_coordinator()
-        for case in (sys.argv[1:] or ['A0','A1_A2_A3_A9','A4','A5','A6','A6_deadline','A7','A8_out_of_set','A8_malformed']):run(case)
+        for case in (sys.argv[1:] or ['A0','A1_A2_A3_A9','A4','A5','A6','A6_deadline','A7','A8_wire_invalid','A8_out_of_set','A8_malformed','A8_invalid','A8_provider_error']):run(case)
         (a.OUT/'adaptive-summary.json').write_text(json.dumps({'receiver':json.loads((a.RECEIVER/'bundle/receiver-pin.json').read_text()),'results':a.SUMMARY,'model_calls':0},indent=2))
         a.note('all',result='PASS',run=str(a.OUT))
     finally:
