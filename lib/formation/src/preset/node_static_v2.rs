@@ -53,16 +53,15 @@ pub fn synthesize_node_static_v2(
     }
     // Reuse the existing narrow static-artifact detector, not a second inference engine.
     // Do not normalize an absolute output path into an apparently relative one.
-    if let ViteOutDir::Literal(root) = &node.vite_out_dir {
-        if root.is_empty()
+    if let ViteOutDir::Literal(root) = &node.vite_out_dir
+        && (root.is_empty()
             || root.starts_with('/')
-            || crate::projection::workspace_relative_cwd(root).map_or(true, |p| p.is_empty())
-        {
-            return Err(refuse(
-                "preset_node_static_v2_output",
-                "Static output must be a relative workspace subtree.",
-            ));
-        }
+            || crate::projection::workspace_relative_cwd(root).map_or(true, |p| p.is_empty()))
+    {
+        return Err(refuse(
+            "preset_node_static_v2_output",
+            "Static output must be a relative workspace subtree.",
+        ));
     }
     let profile = intent::detect_static_build(evidence)
         .map_err(|e| PresetMismatch::new(e.code(), e.to_string()))?
