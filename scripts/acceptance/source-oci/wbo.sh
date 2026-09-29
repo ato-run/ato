@@ -2,9 +2,11 @@
 # WBO: the approved isolated online build and runs of its saved artifact.
 # Expectations are fixed in docs/ops/formation-wbo-expectations.json.
 #
-# usage: sudo wbo.sh ATO_BIN OUT_ROOT RUN_USER WBO_ARCHIVE
+# usage: sudo wbo.sh ATO_BIN OUT_ROOT RUN_USER WBO_ARCHIVE [FROZEN_BASE_DIR]
+#   FROZEN_BASE_DIR: an earlier run holding base-node.tar and 1-acquire.txt;
+#   the base is then reused and not acquired again.
 set -euo pipefail
-ATO="$1"; OUT="$2"; RUN_USER="$3"; WBO="$4"
+ATO="$1"; OUT="$2"; RUN_USER="$3"; WBO="$4"; FROZEN="${5:-}"
 HERE="$(cd "$(dirname "$0")" && pwd)"; REPO="$(cd "$HERE/../../.." && pwd)"
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 77; }
 [[ -e "$OUT" ]] && { echo "refusing to reuse $OUT" >&2; exit 73; }
@@ -23,18 +25,25 @@ AVAIL=$(df --output=avail -B1 / | tail -1)
 } > "$OUT/environment.txt"
 [[ "$(sed -n 's/^wbo_archive_sha256=//p' "$OUT/environment.txt")" == "sha256:8af51caaa6b8434a06e7a41753ae54381ba1595c362050e8c1d1836dfd604d65" ]] \
   || { echo "WBO archive is not the pinned bytes" >&2; exit 65; }
-# 5 GiB job disk + 128 MiB archive + bundles + base, and 4 GiB for teardown.
-(( AVAIL > 12 * 1024 * 1024 * 1024 )) || { echo "not enough disk headroom ($AVAIL)" >&2; exit 75; }
+# 5 GiB job disk + 512 MiB archive + ~1.5 GiB of bundles + base, and 4 GiB for teardown.
+(( AVAIL > 14 * 1024 * 1024 * 1024 )) || { echo "not enough disk headroom ($AVAIL)" >&2; exit 75; }
 cp "$WBO" "$OUT/wbo-source.tar.gz"; chown "$RUN_USER" "$OUT/wbo-source.tar.gz"
 
 # 1. Base acquisition: its own phase and allowlist, once.
+if [[ -n "$FROZEN" ]]; then
+  cp "$FROZEN/base-node.tar" "$FROZEN/base-node.json" "$FROZEN/1-acquire.txt" "$OUT/"
+  chown "$RUN_USER" "$OUT/base-node.tar" "$OUT/base-node.json"
+  echo "base reused from $FROZEN (no acquisition)" | tee "$OUT/summary.txt"
+  RC=0
+else
 set +e
 as_user "$ATO" __source-oci-acquire-base --reference docker.io/library/node:24-alpine \
   --platform linux/amd64 --max-bytes 209715200 \
   --out "$OUT/base-node.tar" --provenance "$OUT/base-node.json" > "$OUT/1-acquire.txt" 2>&1
 RC=$?
 set -e
-echo "acquire exit=$RC" | tee "$OUT/summary.txt"
+fi
+echo "acquire exit=$RC" | tee -a "$OUT/summary.txt"
 [[ $RC -eq 0 ]] || exit 0
 ROOT=$(sed -n 's/^root_digest=//p' "$OUT/1-acquire.txt")
 BASE_SHA=$(sed -n 's/^archive_sha256=//p' "$OUT/1-acquire.txt")
@@ -52,7 +61,7 @@ cat > "$OUT/request.json" <<JSON
  "authorized_state":[{"id":"server_data","mount":"/opt/app/server-data"}],
  "policy":{"network":"egress_allowlist",
    "egress":{"hosts":["dl-cdn.alpinelinux.org","registry.npmjs.org"],"ports":[443],"max_transfer_bytes":$REMAINING},
-   "build_timeout_seconds":900,"max_archive_bytes":134217728,
+   "build_timeout_seconds":900,"max_archive_bytes":536870912,
    "build":{"memory_bytes":4294967296,"cpu_limit_millis":4000,"pids_limit":2048,"disk_bytes":5368709120},
    "runtime":{"memory_bytes":536870912,"cpu_limit_millis":1000,"pids_limit":256}}}
 JSON
