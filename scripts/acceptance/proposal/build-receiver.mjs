@@ -7,7 +7,7 @@ import path from 'node:path';
 const [apiArg,outArg,requestedPin]=process.argv.slice(2);
 const api=path.resolve(apiArg),out=path.resolve(outArg);
 const pin=requestedPin??'b81ef143caac3f8e478b0954e9a5db2932c99f19';
-if(!['b81ef143caac3f8e478b0954e9a5db2932c99f19','38668a97e7632256b33074b0d223670c16b76bfd'].includes(pin))throw Error('unregistered receiver pin');
+if(!['b81ef143caac3f8e478b0954e9a5db2932c99f19','38668a97e7632256b33074b0d223670c16b76bfd','0eb8eb5caaa24d3889cea5481e6005d3bb8b603d'].includes(pin))throw Error('unregistered receiver pin');
 if(execFileSync('git',['rev-parse','HEAD'],{cwd:api,encoding:'utf8'}).trim()!==pin)throw Error('C1 pin mismatch');
 if(execFileSync('git',['status','--porcelain','--untracked-files=no'],{cwd:api,encoding:'utf8'}).trim())throw Error('dirty receiver');
 const require=createRequire(path.join(api,'package.json'));const {build}=require('esbuild');

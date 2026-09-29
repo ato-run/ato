@@ -1,0 +1,1255 @@
+{
+  "schema": "ato.formation-adaptive-acceptance/1",
+  "core_sha": "20d825bd5ff09e1e2238a4975299e896093c545c",
+  "api_sha": "0eb8eb5caaa24d3889cea5481e6005d3bb8b603d",
+  "api_base": "7d61b969a2a0dbf075539c066913eb686a95bb1e",
+  "ato_base": "857cb1ed4d71c99fde95a0302e0acf6952cdc7e8",
+  "wasm_sha256": "eff1969064bd1a5a102c532fb5a757eb718913b9430dad4dc4982a46bfe6e342",
+  "harness_sha256": "80bfbe6c0fdb236c257b25dbe239d6f5f95dfa5a2d66167ae3b1be05b2a78cea",
+  "model_calls": 0,
+  "regression": {
+    "rust_passed": 675,
+    "rust_failed": 0,
+    "rust_ignored": 1,
+    "receiver_passed": 318,
+    "receiver_failed": 0,
+    "clippy": "PASS",
+    "fmt": "PASS",
+    "diff_check": "PASS",
+    "c2_fixed_15_current_integration": "not run: stopped on A8 DB-trigger blocker"
+  },
+  "actual_gate": "BLOCKED; not all A0-A9 PASS",
+  "cases": {
+    "A0": {
+      "status": "satisfied",
+      "termination_reason": "verified",
+      "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+      "frozen_contract": {
+        "requirements": [
+          {
+            "body_digest": "sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999",
+            "id": "health",
+            "method": "GET",
+            "path": "/health",
+            "port": "app.http",
+            "status": 200,
+            "verifier": "ato.contract.http@1"
+          }
+        ],
+        "schema": "ato.contract/1"
+      },
+      "runtime_constraint": {
+        "kind": "any"
+      },
+      "decisions": [],
+      "decision_provider_observations": [],
+      "attempts": [
+        {
+          "attempt_id": "01M3NFWW4PHVEB0E2RDGSH9YTH",
+          "claimed": true,
+          "derivation_ref": "sha256:c61059a60cdfe06367318fdf61043a21fbe5c95530e5cd83a4bf07cc6b994bbf",
+          "effects": "pure",
+          "environment_id": "native",
+          "failure_code": null,
+          "materialization_ref": "sha256:28e9551f11c9409df366089455bcc33a4b145838361aeb6cd5af8459ea58c7f5",
+          "record": "finished",
+          "retained_ref": "sha256:3bd373375b0b241308aabd268155435c2ef6b5d688fdd6dd2f16c54e1c61f12c",
+          "route_accepted": true,
+          "runtime_id": "rnr_A0_1790648935065203913",
+          "status": "pass",
+          "unknown_resolved": false
+        }
+      ],
+      "accepted_route_count": 1,
+      "actual_verifier_receipts": [
+        {
+          "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+          "derivation_ref": "sha256:c61059a60cdfe06367318fdf61043a21fbe5c95530e5cd83a4bf07cc6b994bbf",
+          "execution": {
+            "attempt_id": "01M3NFWW4PHVEB0E2RDGSH9YTH",
+            "endpoint": "http://127.0.0.1:8000/",
+            "platform": "linux/aarch64",
+            "realization": "process",
+            "request_id": "01M3NFWVBANTCM79Z6EX98Q5RA"
+          },
+          "fully_satisfied": true,
+          "observations": [
+            {
+              "evidence": {
+                "body_sha256": "sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999",
+                "method": "GET",
+                "path": "/health",
+                "status": 200
+              },
+              "id": "health",
+              "outcome": "satisfied"
+            }
+          ],
+          "schema": "ato.contract-verification-receipt/1",
+          "target": {
+            "kind": "formation-runtime"
+          }
+        }
+      ],
+      "proposal_status": "completed",
+      "generated_D": [
+        "sha256:c61059a60cdfe06367318fdf61043a21fbe5c95530e5cd83a4bf07cc6b994bbf"
+      ],
+      "result_sha256": "ccc94ecb5ea841dd1da8f6ee761b9de57eb0230959eab84d84bdde784060d992"
+    },
+    "A1_A2_A3_A9": {
+      "status": "satisfied",
+      "termination_reason": "verified",
+      "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+      "frozen_contract": {
+        "requirements": [
+          {
+            "body_digest": "sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999",
+            "id": "health",
+            "method": "GET",
+            "path": "/health",
+            "port": "app.http",
+            "status": 200,
+            "verifier": "ato.contract.http@1"
+          }
+        ],
+        "schema": "ato.contract/1"
+      },
+      "runtime_constraint": {
+        "kind": "any"
+      },
+      "decisions": [
+        {
+          "attempt_seq": 0,
+          "choices": [
+            {
+              "action": {
+                "candidate_id": "01M3NFWYF88CYHN4WMY7KVJFVR",
+                "derivation_ref": "sha256:6cd166b86c669a31eb234d5fa9230b3aaffc08aa70262ebdacdb4ccfc3da01dc",
+                "environment_id": "native",
+                "kind": "attempt",
+                "runtime_id": "rnr_A1_A2_A3_A9_1790648935065203913"
+              },
+              "choice_id": "c9f1ece988eb4fb72"
+            },
+            {
+              "action": {
+                "inspection": "candidate_refusals",
+                "kind": "inspect",
+                "target_ref": "sha256:6cd166b86c669a31eb234d5fa9230b3aaffc08aa70262ebdacdb4ccfc3da01dc"
+              },
+              "choice_id": "cee7af1229dfcd094"
+            },
+            {
+              "action": {
+                "kind": "stop",
+                "reason_class": "no_promising_action"
+              },
+              "choice_id": "cfcf67d365478c47f"
+            }
+          ],
+          "chosen_id": "c9f1ece988eb4fb72",
+          "default_id": "c9f1ece988eb4fb72",
+          "opened_at_ms": 1790648940967,
+          "outcome": "chosen",
+          "seq": 0
+        },
+        {
+          "attempt_seq": 1,
+          "choices": [
+            {
+              "action": {
+                "kind": "escalate_to_candidate_producer"
+              },
+              "choice_id": "ce5dc3af56db16ea7"
+            },
+            {
+              "action": {
+                "inspection": "candidate_refusals",
+                "kind": "inspect",
+                "target_ref": "sha256:6cd166b86c669a31eb234d5fa9230b3aaffc08aa70262ebdacdb4ccfc3da01dc"
+              },
+              "choice_id": "c0c9570d428241d77"
+            },
+            {
+              "action": {
+                "inspection": "attempt_failures",
+                "kind": "inspect",
+                "target_ref": "sha256:6cd166b86c669a31eb234d5fa9230b3aaffc08aa70262ebdacdb4ccfc3da01dc"
+              },
+              "choice_id": "cf648c1b6c0bce99d"
+            },
+            {
+              "action": {
+                "kind": "stop",
+                "reason_class": "no_promising_action"
+              },
+              "choice_id": "cfe24b5510567e308"
+            }
+          ],
+          "chosen_id": "ce5dc3af56db16ea7",
+          "default_id": "ce5dc3af56db16ea7",
+          "opened_at_ms": 1790648942158,
+          "outcome": "chosen",
+          "seq": 1
+        },
+        {
+          "attempt_seq": 1,
+          "choices": [
+            {
+              "action": {
+                "candidate_id": "01M3NFX19Y8Z3S4DEGC3YT8DDQ",
+                "derivation_ref": "sha256:6eaf24f9db2ba60406d9c9131709cf181d2fafb4cfb2e0d02dd0096f1243fcd7",
+                "environment_id": "native",
+                "kind": "attempt",
+                "runtime_id": "rnr_A1_A2_A3_A9_1790648935065203913"
+              },
+              "choice_id": "c89fab704b665523b"
+            },
+            {
+              "action": {
+                "candidate_id": "01M3NFX1CCJSHDACRYN4K9Y1NC",
+                "derivation_ref": "sha256:e256bb67248204a9444318462d74ca8da274e77382aab95bbc398f349d4f4e45",
+                "environment_id": "native",
+                "kind": "attempt",
+                "runtime_id": "rnr_A1_A2_A3_A9_1790648935065203913"
+              },
+              "choice_id": "c5a371fad6541ce1d"
+            },
+            {
+              "action": {
+                "inspection": "candidate_refusals",
+                "kind": "inspect",
+                "target_ref": "sha256:6cd166b86c669a31eb234d5fa9230b3aaffc08aa70262ebdacdb4ccfc3da01dc"
+              },
+              "choice_id": "c8153758896d7574e"
+            },
+            {
+              "action": {
+                "inspection": "attempt_failures",
+                "kind": "inspect",
+                "target_ref": "sha256:6cd166b86c669a31eb234d5fa9230b3aaffc08aa70262ebdacdb4ccfc3da01dc"
+              },
+              "choice_id": "cbb5f11b50e4783c1"
+            },
+            {
+              "action": {
+                "inspection": "candidate_refusals",
+                "kind": "inspect",
+                "target_ref": "sha256:6eaf24f9db2ba60406d9c9131709cf181d2fafb4cfb2e0d02dd0096f1243fcd7"
+              },
+              "choice_id": "cd846c7229067cbdc"
+            },
+            {
+              "action": {
+                "inspection": "candidate_refusals",
+                "kind": "inspect",
+                "target_ref": "sha256:e256bb67248204a9444318462d74ca8da274e77382aab95bbc398f349d4f4e45"
+              },
+              "choice_id": "cd46cbd3d56bfe95b"
+            },
+            {
+              "action": {
+                "kind": "stop",
+                "reason_class": "no_promising_action"
+              },
+              "choice_id": "c698f4c5a587a8bbb"
+            }
+          ],
+          "chosen_id": "c89fab704b665523b",
+          "default_id": "c89fab704b665523b",
+          "opened_at_ms": 1790648943550,
+          "outcome": "chosen",
+          "seq": 2
+        },
+        {
+          "attempt_seq": 2,
+          "choices": [
+            {
+              "action": {
+                "candidate_id": "01M3NFX1CCJSHDACRYN4K9Y1NC",
+                "derivation_ref": "sha256:e256bb67248204a9444318462d74ca8da274e77382aab95bbc398f349d4f4e45",
+                "environment_id": "native",
+                "kind": "attempt",
+                "runtime_id": "rnr_A1_A2_A3_A9_1790648935065203913"
+              },
+              "choice_id": "cf593f4e0cabd7564"
+            },
+            {
+              "action": {
+                "inspection": "candidate_refusals",
+                "kind": "inspect",
+                "target_ref": "sha256:6cd166b86c669a31eb234d5fa9230b3aaffc08aa70262ebdacdb4ccfc3da01dc"
+              },
+              "choice_id": "c278de6e8f1d7b7de"
+            },
+            {
+              "action": {
+                "inspection": "attempt_failures",
+                "kind": "inspect",
+                "target_ref": "sha256:6cd166b86c669a31eb234d5fa9230b3aaffc08aa70262ebdacdb4ccfc3da01dc"
+              },
+              "choice_id": "c04c0e5d7974af43a"
+            },
+            {
+              "action": {
+                "inspection": "candidate_refusals",
+                "kind": "inspect",
+                "target_ref": "sha256:6eaf24f9db2ba60406d9c9131709cf181d2fafb4cfb2e0d02dd0096f1243fcd7"
+              },
+              "choice_id": "c3092edc38135f55d"
+            },
+            {
+              "action": {
+                "inspection": "attempt_failures",
+                "kind": "inspect",
+                "target_ref": "sha256:6eaf24f9db2ba60406d9c9131709cf181d2fafb4cfb2e0d02dd0096f1243fcd7"
+              },
+              "choice_id": "c3001c2fbd54c2613"
+            },
+            {
+              "action": {
+                "inspection": "candidate_refusals",
+                "kind": "inspect",
+                "target_ref": "sha256:e256bb67248204a9444318462d74ca8da274e77382aab95bbc398f349d4f4e45"
+              },
+              "choice_id": "c9aaee9fff544de23"
+            },
+            {
+              "action": {
+                "kind": "stop",
+                "reason_class": "no_promising_action"
+              },
+              "choice_id": "c1a5f359cacbf3496"
+            }
+          ],
+          "chosen_id": "cf593f4e0cabd7564",
+          "default_id": "cf593f4e0cabd7564",
+          "opened_at_ms": 1790648946111,
+          "outcome": "chosen",
+          "seq": 3
+        }
+      ],
+      "decision_provider_observations": [
+        {
+          "escalated": false,
+          "failed_derivations": [],
+          "failure_evidence": [],
+          "offered": [
+            "sha256:6cd166b86c669a31eb234d5fa9230b3aaffc08aa70262ebdacdb4ccfc3da01dc"
+          ],
+          "selected": "sha256:6cd166b86c669a31eb234d5fa9230b3aaffc08aa70262ebdacdb4ccfc3da01dc",
+          "seq": 0
+        },
+        {
+          "escalated": true,
+          "failed_derivations": [
+            "sha256:6cd166b86c669a31eb234d5fa9230b3aaffc08aa70262ebdacdb4ccfc3da01dc"
+          ],
+          "failure_evidence": [
+            {
+              "code": "http_status_mismatch",
+              "status": "fail"
+            }
+          ],
+          "offered": [],
+          "selected": null,
+          "seq": 1
+        },
+        {
+          "escalated": false,
+          "failed_derivations": [
+            "sha256:6cd166b86c669a31eb234d5fa9230b3aaffc08aa70262ebdacdb4ccfc3da01dc"
+          ],
+          "failure_evidence": [
+            {
+              "code": "http_status_mismatch",
+              "status": "fail"
+            }
+          ],
+          "offered": [
+            "sha256:6eaf24f9db2ba60406d9c9131709cf181d2fafb4cfb2e0d02dd0096f1243fcd7",
+            "sha256:e256bb67248204a9444318462d74ca8da274e77382aab95bbc398f349d4f4e45"
+          ],
+          "selected": "sha256:6eaf24f9db2ba60406d9c9131709cf181d2fafb4cfb2e0d02dd0096f1243fcd7",
+          "seq": 2
+        },
+        {
+          "escalated": false,
+          "failed_derivations": [
+            "sha256:6cd166b86c669a31eb234d5fa9230b3aaffc08aa70262ebdacdb4ccfc3da01dc",
+            "sha256:6eaf24f9db2ba60406d9c9131709cf181d2fafb4cfb2e0d02dd0096f1243fcd7"
+          ],
+          "failure_evidence": [
+            {
+              "code": "http_status_mismatch",
+              "status": "fail"
+            },
+            {
+              "code": "http_status_mismatch",
+              "status": "fail"
+            }
+          ],
+          "offered": [
+            "sha256:e256bb67248204a9444318462d74ca8da274e77382aab95bbc398f349d4f4e45"
+          ],
+          "selected": "sha256:e256bb67248204a9444318462d74ca8da274e77382aab95bbc398f349d4f4e45",
+          "seq": 3
+        }
+      ],
+      "attempts": [
+        {
+          "attempt_id": "01M3NFWZ5YE1SP8E734GB65SXS",
+          "claimed": true,
+          "derivation_ref": "sha256:6cd166b86c669a31eb234d5fa9230b3aaffc08aa70262ebdacdb4ccfc3da01dc",
+          "effects": "pure",
+          "environment_id": "native",
+          "failure_code": "http_status_mismatch",
+          "materialization_ref": null,
+          "record": "finished",
+          "retained_ref": null,
+          "route_accepted": false,
+          "runtime_id": "rnr_A1_A2_A3_A9_1790648935065203913",
+          "status": "fail",
+          "unknown_resolved": false
+        },
+        {
+          "attempt_id": "01M3NFX2S31REX5WDKAJAX0G8J",
+          "claimed": true,
+          "derivation_ref": "sha256:6eaf24f9db2ba60406d9c9131709cf181d2fafb4cfb2e0d02dd0096f1243fcd7",
+          "effects": "pure",
+          "environment_id": "native",
+          "failure_code": "http_status_mismatch",
+          "materialization_ref": null,
+          "record": "finished",
+          "retained_ref": null,
+          "route_accepted": false,
+          "runtime_id": "rnr_A1_A2_A3_A9_1790648935065203913",
+          "status": "fail",
+          "unknown_resolved": false
+        },
+        {
+          "attempt_id": "01M3NFX4YJ5VQYQWVDQ7JR9CHQ",
+          "claimed": true,
+          "derivation_ref": "sha256:e256bb67248204a9444318462d74ca8da274e77382aab95bbc398f349d4f4e45",
+          "effects": "pure",
+          "environment_id": "native",
+          "failure_code": null,
+          "materialization_ref": "sha256:7098e9b442334dcdd867b12d9ca68ed9b4894f71748efbecaf9adb923eab1d1f",
+          "record": "finished",
+          "retained_ref": "sha256:997a77835a17efc4ceed85e75aac0d53343bd375775335cbd88b5f0d21204eef",
+          "route_accepted": true,
+          "runtime_id": "rnr_A1_A2_A3_A9_1790648935065203913",
+          "status": "pass",
+          "unknown_resolved": false
+        }
+      ],
+      "accepted_route_count": 1,
+      "actual_verifier_receipts": [
+        {
+          "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+          "derivation_ref": "sha256:e256bb67248204a9444318462d74ca8da274e77382aab95bbc398f349d4f4e45",
+          "execution": {
+            "attempt_id": "01M3NFX4YJ5VQYQWVDQ7JR9CHQ",
+            "endpoint": "http://127.0.0.1:8000/",
+            "platform": "linux/aarch64",
+            "realization": "process",
+            "request_id": "01M3NFWYDRES13XBQFZMVXXP5E"
+          },
+          "fully_satisfied": true,
+          "observations": [
+            {
+              "evidence": {
+                "body_sha256": "sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999",
+                "method": "GET",
+                "path": "/health",
+                "status": 200
+              },
+              "id": "health",
+              "outcome": "satisfied"
+            }
+          ],
+          "schema": "ato.contract-verification-receipt/1",
+          "target": {
+            "kind": "formation-runtime"
+          }
+        }
+      ],
+      "proposal_status": "completed",
+      "generated_D": [
+        "sha256:6eaf24f9db2ba60406d9c9131709cf181d2fafb4cfb2e0d02dd0096f1243fcd7",
+        "sha256:e256bb67248204a9444318462d74ca8da274e77382aab95bbc398f349d4f4e45"
+      ],
+      "result_sha256": "ff50f112bc5c0bcc749cde13bb0eb2547a7f7022b9a37c3a63f6a8f542a9bf5c"
+    },
+    "A4": {
+      "status": "unknown",
+      "termination_reason": null,
+      "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+      "frozen_contract": {
+        "requirements": [
+          {
+            "body_digest": "sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999",
+            "id": "health",
+            "method": "GET",
+            "path": "/health",
+            "port": "app.http",
+            "status": 200,
+            "verifier": "ato.contract.http@1"
+          }
+        ],
+        "schema": "ato.contract/1"
+      },
+      "runtime_constraint": {
+        "kind": "any"
+      },
+      "decisions": [
+        {
+          "attempt_seq": 0,
+          "choices": [
+            {
+              "action": {
+                "candidate_id": "01M3NFX7TQ143FB2B4SWFMZTAB",
+                "derivation_ref": "sha256:770fa93b678f263aa29384d3e1b326ee9d94e10546f3def23839fc82383d1e87",
+                "environment_id": "native",
+                "kind": "attempt",
+                "runtime_id": "rnr_A4_1790648935065203913"
+              },
+              "choice_id": "cae7a3c39cf58c3e7"
+            },
+            {
+              "action": {
+                "inspection": "candidate_refusals",
+                "kind": "inspect",
+                "target_ref": "sha256:770fa93b678f263aa29384d3e1b326ee9d94e10546f3def23839fc82383d1e87"
+              },
+              "choice_id": "c832cfb66ae9dec7a"
+            },
+            {
+              "action": {
+                "kind": "stop",
+                "reason_class": "no_promising_action"
+              },
+              "choice_id": "cfcf67d365478c47f"
+            }
+          ],
+          "chosen_id": "cae7a3c39cf58c3e7",
+          "default_id": "cae7a3c39cf58c3e7",
+          "opened_at_ms": 1790648950550,
+          "outcome": "chosen",
+          "seq": 0
+        }
+      ],
+      "decision_provider_observations": [
+        {
+          "escalated": false,
+          "failed_derivations": [],
+          "failure_evidence": [],
+          "offered": [
+            "sha256:770fa93b678f263aa29384d3e1b326ee9d94e10546f3def23839fc82383d1e87"
+          ],
+          "selected": "sha256:770fa93b678f263aa29384d3e1b326ee9d94e10546f3def23839fc82383d1e87",
+          "seq": 0
+        }
+      ],
+      "attempts": [
+        {
+          "attempt_id": "01M3NFX8SGP9584RNWWZKAPV6M",
+          "claimed": true,
+          "derivation_ref": "sha256:770fa93b678f263aa29384d3e1b326ee9d94e10546f3def23839fc82383d1e87",
+          "effects": null,
+          "environment_id": "native",
+          "failure_code": "attempt_history_unavailable",
+          "materialization_ref": null,
+          "record": "history_unavailable",
+          "retained_ref": null,
+          "route_accepted": false,
+          "runtime_id": "rnr_A4_1790648935065203913",
+          "status": "unknown",
+          "unknown_resolved": false
+        }
+      ],
+      "accepted_route_count": 0,
+      "actual_verifier_receipts": [],
+      "proposal_status": null,
+      "generated_D": [],
+      "result_sha256": "2cba5a0791f24ba29d73dbe64a51769a702409ed30c0959911a300b17018926e"
+    },
+    "A5": {
+      "status": "unsatisfied",
+      "termination_reason": "effect_unknown",
+      "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+      "frozen_contract": {
+        "requirements": [
+          {
+            "body_digest": "sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999",
+            "id": "health",
+            "method": "GET",
+            "path": "/health",
+            "port": "app.http",
+            "status": 200,
+            "verifier": "ato.contract.http@1"
+          }
+        ],
+        "schema": "ato.contract/1"
+      },
+      "runtime_constraint": {
+        "kind": "any"
+      },
+      "decisions": [
+        {
+          "attempt_seq": 0,
+          "choices": [
+            {
+              "action": {
+                "candidate_id": "01M3NFXB4K6FJ897HZSZCYJZGD",
+                "derivation_ref": "sha256:773eb7b6972d92e635a12e581a57c844043096d27e488ae900d4149b2c478d47",
+                "environment_id": "native",
+                "kind": "attempt",
+                "runtime_id": "rnr_A5_1790648935065203913"
+              },
+              "choice_id": "c27d3094a964a0ab6"
+            },
+            {
+              "action": {
+                "inspection": "candidate_refusals",
+                "kind": "inspect",
+                "target_ref": "sha256:773eb7b6972d92e635a12e581a57c844043096d27e488ae900d4149b2c478d47"
+              },
+              "choice_id": "c430373574a7bc68d"
+            },
+            {
+              "action": {
+                "kind": "stop",
+                "reason_class": "no_promising_action"
+              },
+              "choice_id": "cfcf67d365478c47f"
+            }
+          ],
+          "chosen_id": "c27d3094a964a0ab6",
+          "default_id": "c27d3094a964a0ab6",
+          "opened_at_ms": 1790648953937,
+          "outcome": "chosen",
+          "seq": 0
+        }
+      ],
+      "decision_provider_observations": [
+        {
+          "escalated": false,
+          "failed_derivations": [],
+          "failure_evidence": [],
+          "offered": [
+            "sha256:773eb7b6972d92e635a12e581a57c844043096d27e488ae900d4149b2c478d47"
+          ],
+          "selected": "sha256:773eb7b6972d92e635a12e581a57c844043096d27e488ae900d4149b2c478d47",
+          "seq": 0
+        }
+      ],
+      "attempts": [
+        {
+          "attempt_id": "01M3NFXBVMQWRY7TFRY746CDZ0",
+          "claimed": true,
+          "derivation_ref": "sha256:773eb7b6972d92e635a12e581a57c844043096d27e488ae900d4149b2c478d47",
+          "effects": "pure",
+          "environment_id": "native",
+          "failure_code": "http_status_mismatch",
+          "materialization_ref": null,
+          "record": "history_unavailable",
+          "retained_ref": null,
+          "route_accepted": false,
+          "runtime_id": "rnr_A5_1790648935065203913",
+          "status": "fail",
+          "unknown_resolved": false
+        }
+      ],
+      "accepted_route_count": 0,
+      "actual_verifier_receipts": [],
+      "proposal_status": null,
+      "generated_D": [],
+      "result_sha256": "88f6ad547e1e467ceb751e0eecc092e00af90dab1de8f247b7678c7fba5143f4"
+    },
+    "A6": {
+      "status": "exhausted",
+      "termination_reason": "budget_exhausted",
+      "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+      "frozen_contract": {
+        "requirements": [
+          {
+            "body_digest": "sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999",
+            "id": "health",
+            "method": "GET",
+            "path": "/health",
+            "port": "app.http",
+            "status": 200,
+            "verifier": "ato.contract.http@1"
+          }
+        ],
+        "schema": "ato.contract/1"
+      },
+      "runtime_constraint": {
+        "kind": "any"
+      },
+      "decisions": [
+        {
+          "attempt_seq": 0,
+          "choices": [
+            {
+              "action": {
+                "candidate_id": "01M3NFXDQ0HYQHS5GKJK35PBEQ",
+                "derivation_ref": "sha256:93ed056783ffd122601af0912159fe7ef8a0b0187d777a9a55e528ad684cc1f9",
+                "environment_id": "native",
+                "kind": "attempt",
+                "runtime_id": "rnr_A6_1790648935065203913"
+              },
+              "choice_id": "c8c4ca0e7075d3392"
+            },
+            {
+              "action": {
+                "inspection": "candidate_refusals",
+                "kind": "inspect",
+                "target_ref": "sha256:93ed056783ffd122601af0912159fe7ef8a0b0187d777a9a55e528ad684cc1f9"
+              },
+              "choice_id": "cd81e98f444efb5d5"
+            },
+            {
+              "action": {
+                "kind": "stop",
+                "reason_class": "no_promising_action"
+              },
+              "choice_id": "cfcf67d365478c47f"
+            }
+          ],
+          "chosen_id": "c8c4ca0e7075d3392",
+          "default_id": "c8c4ca0e7075d3392",
+          "opened_at_ms": 1790648956572,
+          "outcome": "chosen",
+          "seq": 0
+        }
+      ],
+      "decision_provider_observations": [
+        {
+          "escalated": false,
+          "failed_derivations": [],
+          "failure_evidence": [],
+          "offered": [
+            "sha256:93ed056783ffd122601af0912159fe7ef8a0b0187d777a9a55e528ad684cc1f9"
+          ],
+          "selected": "sha256:93ed056783ffd122601af0912159fe7ef8a0b0187d777a9a55e528ad684cc1f9",
+          "seq": 0
+        }
+      ],
+      "attempts": [
+        {
+          "attempt_id": "01M3NFXEE9HCWVZ3BF4D9JZ52G",
+          "claimed": true,
+          "derivation_ref": "sha256:93ed056783ffd122601af0912159fe7ef8a0b0187d777a9a55e528ad684cc1f9",
+          "effects": "pure",
+          "environment_id": "native",
+          "failure_code": "http_status_mismatch",
+          "materialization_ref": null,
+          "record": "finished",
+          "retained_ref": null,
+          "route_accepted": false,
+          "runtime_id": "rnr_A6_1790648935065203913",
+          "status": "fail",
+          "unknown_resolved": false
+        }
+      ],
+      "accepted_route_count": 0,
+      "actual_verifier_receipts": [],
+      "proposal_status": null,
+      "generated_D": [],
+      "result_sha256": "7079fe29080a1fc0df4de88cb0c55bb0443ff9dc9463d66174820c9830b715f3"
+    },
+    "A6_deadline": {
+      "status": "exhausted",
+      "termination_reason": "budget_exhausted",
+      "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+      "frozen_contract": {
+        "requirements": [
+          {
+            "body_digest": "sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999",
+            "id": "health",
+            "method": "GET",
+            "path": "/health",
+            "port": "app.http",
+            "status": 200,
+            "verifier": "ato.contract.http@1"
+          }
+        ],
+        "schema": "ato.contract/1"
+      },
+      "runtime_constraint": {
+        "kind": "any"
+      },
+      "decisions": [],
+      "decision_provider_observations": [],
+      "attempts": [],
+      "accepted_route_count": 0,
+      "actual_verifier_receipts": [],
+      "proposal_status": null,
+      "generated_D": [],
+      "result_sha256": "b0cf494cd388fda6d1794018f7c21fc05d0631646fbf148ca03a8122a12fec3d"
+    },
+    "A7": {
+      "status": "satisfied",
+      "termination_reason": "verified",
+      "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+      "frozen_contract": {
+        "requirements": [
+          {
+            "body_digest": "sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999",
+            "id": "health",
+            "method": "GET",
+            "path": "/health",
+            "port": "app.http",
+            "status": 200,
+            "verifier": "ato.contract.http@1"
+          }
+        ],
+        "schema": "ato.contract/1"
+      },
+      "runtime_constraint": {
+        "kind": "any"
+      },
+      "decisions": [
+        {
+          "attempt_seq": 0,
+          "choices": [
+            {
+              "action": {
+                "candidate_id": "01M3NFXHGEXSDZ2B654FQ84DWD",
+                "derivation_ref": "sha256:7787fc04ae9479ff392aa3c4e051a5e2c4051755868352f8935d79efb9bf2d29",
+                "environment_id": "native",
+                "kind": "attempt",
+                "runtime_id": "rnr_A7_1790648935065203913"
+              },
+              "choice_id": "c28c5f7b1ecbb6452"
+            },
+            {
+              "action": {
+                "inspection": "candidate_refusals",
+                "kind": "inspect",
+                "target_ref": "sha256:7787fc04ae9479ff392aa3c4e051a5e2c4051755868352f8935d79efb9bf2d29"
+              },
+              "choice_id": "c648b72623e754652"
+            },
+            {
+              "action": {
+                "kind": "stop",
+                "reason_class": "no_promising_action"
+              },
+              "choice_id": "cfcf67d365478c47f"
+            }
+          ],
+          "chosen_id": "c28c5f7b1ecbb6452",
+          "default_id": "c28c5f7b1ecbb6452",
+          "opened_at_ms": 1790648960455,
+          "outcome": "chosen",
+          "seq": 0
+        },
+        {
+          "attempt_seq": 1,
+          "choices": [
+            {
+              "action": {
+                "kind": "escalate_to_candidate_producer"
+              },
+              "choice_id": "ce5dc3af56db16ea7"
+            },
+            {
+              "action": {
+                "inspection": "candidate_refusals",
+                "kind": "inspect",
+                "target_ref": "sha256:7787fc04ae9479ff392aa3c4e051a5e2c4051755868352f8935d79efb9bf2d29"
+              },
+              "choice_id": "c6b18def5e2027b10"
+            },
+            {
+              "action": {
+                "inspection": "attempt_failures",
+                "kind": "inspect",
+                "target_ref": "sha256:7787fc04ae9479ff392aa3c4e051a5e2c4051755868352f8935d79efb9bf2d29"
+              },
+              "choice_id": "ce5f26f7d65af1be8"
+            },
+            {
+              "action": {
+                "kind": "stop",
+                "reason_class": "no_promising_action"
+              },
+              "choice_id": "cfe24b5510567e308"
+            }
+          ],
+          "chosen_id": "ce5dc3af56db16ea7",
+          "default_id": "ce5dc3af56db16ea7",
+          "opened_at_ms": 1790648961720,
+          "outcome": "chosen",
+          "seq": 1
+        },
+        {
+          "attempt_seq": 1,
+          "choices": [
+            {
+              "action": {
+                "candidate_id": "01M3NFXN26H3T10HTW0BRF4T64",
+                "derivation_ref": "sha256:f1bedac4c4956382acf70d97cda854b13e9dba7a2826530f56ccd7f608bfe97d",
+                "environment_id": "native",
+                "kind": "attempt",
+                "runtime_id": "rnr_A7_1790648935065203913"
+              },
+              "choice_id": "c718ed72e70e92985"
+            },
+            {
+              "action": {
+                "candidate_id": "01M3NFXN59BEE43WBND2V3WKVM",
+                "derivation_ref": "sha256:9422a037cf1de1675ecde19b842e7552fa4e68a64fd7b677e7b616cd381ad996",
+                "environment_id": "native",
+                "kind": "attempt",
+                "runtime_id": "rnr_A7_1790648935065203913"
+              },
+              "choice_id": "cc3d683181d5efb05"
+            },
+            {
+              "action": {
+                "inspection": "candidate_refusals",
+                "kind": "inspect",
+                "target_ref": "sha256:7787fc04ae9479ff392aa3c4e051a5e2c4051755868352f8935d79efb9bf2d29"
+              },
+              "choice_id": "ce3213a4057d59996"
+            },
+            {
+              "action": {
+                "inspection": "attempt_failures",
+                "kind": "inspect",
+                "target_ref": "sha256:7787fc04ae9479ff392aa3c4e051a5e2c4051755868352f8935d79efb9bf2d29"
+              },
+              "choice_id": "cc6a20b9b29ddb38e"
+            },
+            {
+              "action": {
+                "inspection": "candidate_refusals",
+                "kind": "inspect",
+                "target_ref": "sha256:f1bedac4c4956382acf70d97cda854b13e9dba7a2826530f56ccd7f608bfe97d"
+              },
+              "choice_id": "c4801fb50cb1ab193"
+            },
+            {
+              "action": {
+                "inspection": "candidate_refusals",
+                "kind": "inspect",
+                "target_ref": "sha256:9422a037cf1de1675ecde19b842e7552fa4e68a64fd7b677e7b616cd381ad996"
+              },
+              "choice_id": "cdff76271c6e6ec6b"
+            },
+            {
+              "action": {
+                "kind": "stop",
+                "reason_class": "no_promising_action"
+              },
+              "choice_id": "c698f4c5a587a8bbb"
+            }
+          ],
+          "chosen_id": "c718ed72e70e92985",
+          "default_id": "c718ed72e70e92985",
+          "opened_at_ms": 1790648963736,
+          "outcome": "chosen",
+          "seq": 2
+        },
+        {
+          "attempt_seq": 2,
+          "choices": [
+            {
+              "action": {
+                "candidate_id": "01M3NFXN59BEE43WBND2V3WKVM",
+                "derivation_ref": "sha256:9422a037cf1de1675ecde19b842e7552fa4e68a64fd7b677e7b616cd381ad996",
+                "environment_id": "native",
+                "kind": "attempt",
+                "runtime_id": "rnr_A7_1790648935065203913"
+              },
+              "choice_id": "c2863d96e13e19382"
+            },
+            {
+              "action": {
+                "inspection": "candidate_refusals",
+                "kind": "inspect",
+                "target_ref": "sha256:7787fc04ae9479ff392aa3c4e051a5e2c4051755868352f8935d79efb9bf2d29"
+              },
+              "choice_id": "cc235101df47ecef8"
+            },
+            {
+              "action": {
+                "inspection": "attempt_failures",
+                "kind": "inspect",
+                "target_ref": "sha256:7787fc04ae9479ff392aa3c4e051a5e2c4051755868352f8935d79efb9bf2d29"
+              },
+              "choice_id": "c21c8eb4ea473c603"
+            },
+            {
+              "action": {
+                "inspection": "candidate_refusals",
+                "kind": "inspect",
+                "target_ref": "sha256:f1bedac4c4956382acf70d97cda854b13e9dba7a2826530f56ccd7f608bfe97d"
+              },
+              "choice_id": "caf9a99992c19da18"
+            },
+            {
+              "action": {
+                "inspection": "attempt_failures",
+                "kind": "inspect",
+                "target_ref": "sha256:f1bedac4c4956382acf70d97cda854b13e9dba7a2826530f56ccd7f608bfe97d"
+              },
+              "choice_id": "c3d8f614b8935b80c"
+            },
+            {
+              "action": {
+                "inspection": "candidate_refusals",
+                "kind": "inspect",
+                "target_ref": "sha256:9422a037cf1de1675ecde19b842e7552fa4e68a64fd7b677e7b616cd381ad996"
+              },
+              "choice_id": "c6b03bad94c19252b"
+            },
+            {
+              "action": {
+                "kind": "stop",
+                "reason_class": "no_promising_action"
+              },
+              "choice_id": "c1a5f359cacbf3496"
+            }
+          ],
+          "chosen_id": "c2863d96e13e19382",
+          "default_id": "c2863d96e13e19382",
+          "opened_at_ms": 1790648966599,
+          "outcome": "chosen",
+          "seq": 3
+        }
+      ],
+      "decision_provider_observations": [
+        {
+          "escalated": false,
+          "failed_derivations": [
+            "sha256:7787fc04ae9479ff392aa3c4e051a5e2c4051755868352f8935d79efb9bf2d29"
+          ],
+          "failure_evidence": [
+            {
+              "code": "http_status_mismatch",
+              "status": "fail"
+            }
+          ],
+          "offered": [
+            "sha256:f1bedac4c4956382acf70d97cda854b13e9dba7a2826530f56ccd7f608bfe97d",
+            "sha256:9422a037cf1de1675ecde19b842e7552fa4e68a64fd7b677e7b616cd381ad996"
+          ],
+          "selected": "sha256:f1bedac4c4956382acf70d97cda854b13e9dba7a2826530f56ccd7f608bfe97d",
+          "seq": 2
+        },
+        {
+          "escalated": false,
+          "failed_derivations": [
+            "sha256:7787fc04ae9479ff392aa3c4e051a5e2c4051755868352f8935d79efb9bf2d29",
+            "sha256:f1bedac4c4956382acf70d97cda854b13e9dba7a2826530f56ccd7f608bfe97d"
+          ],
+          "failure_evidence": [
+            {
+              "code": "http_status_mismatch",
+              "status": "fail"
+            },
+            {
+              "code": "http_status_mismatch",
+              "status": "fail"
+            }
+          ],
+          "offered": [
+            "sha256:9422a037cf1de1675ecde19b842e7552fa4e68a64fd7b677e7b616cd381ad996"
+          ],
+          "selected": "sha256:9422a037cf1de1675ecde19b842e7552fa4e68a64fd7b677e7b616cd381ad996",
+          "seq": 3
+        }
+      ],
+      "attempts": [
+        {
+          "attempt_id": "01M3NFXJ8DCZ420G5TTZYF9MSD",
+          "claimed": true,
+          "derivation_ref": "sha256:7787fc04ae9479ff392aa3c4e051a5e2c4051755868352f8935d79efb9bf2d29",
+          "effects": "pure",
+          "environment_id": "native",
+          "failure_code": "http_status_mismatch",
+          "materialization_ref": null,
+          "record": "finished",
+          "retained_ref": null,
+          "route_accepted": false,
+          "runtime_id": "rnr_A7_1790648935065203913",
+          "status": "fail",
+          "unknown_resolved": false
+        },
+        {
+          "attempt_id": "01M3NFXPQBWKHDE50HHTQ3MK0T",
+          "claimed": true,
+          "derivation_ref": "sha256:f1bedac4c4956382acf70d97cda854b13e9dba7a2826530f56ccd7f608bfe97d",
+          "effects": "pure",
+          "environment_id": "native",
+          "failure_code": "http_status_mismatch",
+          "materialization_ref": null,
+          "record": "finished",
+          "retained_ref": null,
+          "route_accepted": false,
+          "runtime_id": "rnr_A7_1790648935065203913",
+          "status": "fail",
+          "unknown_resolved": false
+        },
+        {
+          "attempt_id": "01M3NFXS7077DF15SV31QSTSAE",
+          "claimed": true,
+          "derivation_ref": "sha256:9422a037cf1de1675ecde19b842e7552fa4e68a64fd7b677e7b616cd381ad996",
+          "effects": "pure",
+          "environment_id": "native",
+          "failure_code": null,
+          "materialization_ref": "sha256:04be7dc8dcbad2d121bdb6393547a08ffe2cdd5795f258b926bd7a0a4660a787",
+          "record": "finished",
+          "retained_ref": "sha256:e0dd8234e54e7ede17a38c8bb105a6745bb432a8789b39c44626da139b690e88",
+          "route_accepted": true,
+          "runtime_id": "rnr_A7_1790648935065203913",
+          "status": "pass",
+          "unknown_resolved": false
+        }
+      ],
+      "accepted_route_count": 1,
+      "actual_verifier_receipts": [
+        {
+          "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+          "derivation_ref": "sha256:9422a037cf1de1675ecde19b842e7552fa4e68a64fd7b677e7b616cd381ad996",
+          "execution": {
+            "attempt_id": "01M3NFXS7077DF15SV31QSTSAE",
+            "endpoint": "http://127.0.0.1:8000/",
+            "platform": "linux/aarch64",
+            "realization": "process",
+            "request_id": "01M3NFXHEQWSKX9NWMBQMRVAXQ"
+          },
+          "fully_satisfied": true,
+          "observations": [
+            {
+              "evidence": {
+                "body_sha256": "sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999",
+                "method": "GET",
+                "path": "/health",
+                "status": 200
+              },
+              "id": "health",
+              "outcome": "satisfied"
+            }
+          ],
+          "schema": "ato.contract-verification-receipt/1",
+          "target": {
+            "kind": "formation-runtime"
+          }
+        }
+      ],
+      "proposal_status": "completed",
+      "generated_D": [
+        "sha256:f1bedac4c4956382acf70d97cda854b13e9dba7a2826530f56ccd7f608bfe97d",
+        "sha256:9422a037cf1de1675ecde19b842e7552fa4e68a64fd7b677e7b616cd381ad996"
+      ],
+      "result_sha256": "839cdbcf2961dd91fbc3353bbe92ed016618a6102aa3900c78271d8f44c53ddb"
+    },
+    "A8_out_of_set": {
+      "status": "running",
+      "termination_reason": null,
+      "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+      "frozen_contract": {
+        "requirements": [
+          {
+            "body_digest": "sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999",
+            "id": "health",
+            "method": "GET",
+            "path": "/health",
+            "port": "app.http",
+            "status": 200,
+            "verifier": "ato.contract.http@1"
+          }
+        ],
+        "schema": "ato.contract/1"
+      },
+      "runtime_constraint": {
+        "kind": "any"
+      },
+      "decisions": [
+        {
+          "attempt_seq": 0,
+          "choices": [
+            {
+              "action": {
+                "kind": "escalate_to_candidate_producer"
+              },
+              "choice_id": "c92baa0880c9875a1"
+            },
+            {
+              "action": {
+                "kind": "stop",
+                "reason_class": "no_promising_action"
+              },
+              "choice_id": "cfcf67d365478c47f"
+            }
+          ],
+          "chosen_id": null,
+          "default_id": "c92baa0880c9875a1",
+          "opened_at_ms": 1790648971600,
+          "outcome": "timeout",
+          "seq": 0
+        }
+      ],
+      "decision_provider_observations": [
+        {
+          "escalated": true,
+          "failed_derivations": [],
+          "failure_evidence": [],
+          "offered": [],
+          "selected": null,
+          "seq": 0
+        }
+      ],
+      "attempts": [],
+      "accepted_route_count": 0,
+      "actual_verifier_receipts": [],
+      "proposal_status": "completed",
+      "generated_D": [
+        "sha256:b693f5bc492e8fc57026feebbeeee0be816d221bba9c7e53027355abaed8b4f2"
+      ],
+      "result_sha256": "c2c12226735e0b47502ced433176b22b7ec0298ba3dbc47fe1ed41c8754e99ea"
+    }
+  },
+  "interpretation": {
+    "A0": "PASS no decision policy; actual receipt",
+    "A1_A2_A3": "PASS chosen escalation, actual known FAIL / generated FAIL / generated PASS",
+    "A4": "PASS actual UNKNOWN, producer 0",
+    "A5": "PASS controlled D1 history-unavailable fault after actual known FAIL; not a claim of naturally observed external effect uncertainty",
+    "A6": "PASS actual one-attempt budget exhaustion, producer 0",
+    "A6_deadline": "PASS local Coordinator deadline while no Runtime available; attempts/producer 0",
+    "A7": "PASS controlled pause after durable chosen escalation, restart; producer exactly 1",
+    "A8": "BLOCKED: injected invalid label is rejected at HTTP boundary, timeout fallback persisted, proposal completed, then DB guard suppresses next decision",
+    "A9": "same-K actual receipts and frozen runtime constraint observed in positive runs; full combined acceptance not closed"
+  },
+  "blocker": {
+    "migration": "existing 0302 trg_decision_open_guard",
+    "predicate": "d.outcome IS NOT 'chosen' AND d.attempt_seq = current_attempt_count",
+    "effect": "completed escalation round does not increment attempt count, so SQL refuses the next generated-candidate decision although Rust consumes the escalation",
+    "required": "additive trigger migration, separately reviewed; do not edit historical migrations or bypass SQL",
+    "action": "STOP as instructed; no migration created; both 5c PRs remain Draft/unmerged"
+  },
+  "ci": {
+    "ato_run": 36511389959,
+    "base_run": 36510579404,
+    "classification": "Rust failure set is a subset of same-base/same-workflow/platform failures (Windows Unix API, Ubuntu hosted Python/Node, macOS portable ownership/hosted validator). Not green. CodeQL PASS at implementation head.",
+    "api_run": 36511529096,
+    "api_classification": "Activity jobs not started: billing/spending-limit annotation, steps empty; full-serial skipped. Not green."
+  },
+  "state": {
+    "implemented": true,
+    "locally_verified": true,
+    "actual_integration_verified": "partial, DB fallback blocker",
+    "merged": false,
+    "deployed": false
+  },
+  "remote_migration_applied": false,
+  "new_migration_created": false,
+  "1421": "untouched"
+}
