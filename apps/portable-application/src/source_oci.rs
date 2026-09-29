@@ -93,7 +93,28 @@ pub struct SourceOciRequest {
     pub base_images: Vec<BaseImageInput>,
     /// Explicit port binding; must equal the built image's single ExposedPort.
     pub declared_transport_port: u16,
+    /// State slots explicitly authorized for the image's VOLUMEs; each must
+    /// be exactly one VOLUME path of the built image and vice versa.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authorized_state: Vec<AuthorizedState>,
     pub policy: SourceOciPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorizedState {
+    pub id: String,
+    pub mount: String,
+}
+
+/// Explicit build-time egress: exact host names, ports and a byte budget.
+/// RUN steps reach them only through the session's egress gate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuildEgress {
+    pub hosts: Vec<String>,
+    pub ports: Vec<u16>,
+    pub max_transfer_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,8 +133,10 @@ pub struct BaseImageInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceOciPolicy {
-    /// v0 accepts only "none": build-time acquisition is a separate opt-in.
+    /// "none", or "egress_allowlist" with `egress`.
     pub network: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress: Option<BuildEgress>,
     pub build_timeout_seconds: u64,
     pub max_archive_bytes: u64,
     /// Limits of the whole private builder session (daemon, BuildKit and
@@ -138,6 +161,59 @@ pub struct RuntimeLimits {
     pub memory_bytes: u64,
     pub cpu_limit_millis: u64,
     pub pids_limit: u64,
+}
+
+/// At most this much may cross the build egress gate (base acquisition is
+/// accounted separately and counts toward the same approved total).
+pub const MAX_BUILD_EGRESS_BYTES: u64 = 500 * 1024 * 1024;
+
+fn validate_egress(egress: &BuildEgress) -> Result<()> {
+    let host = |h: &String| {
+        !h.is_empty()
+            && h.len() <= 253
+            && h.parse::<std::net::IpAddr>().is_err()
+            && h.split('.').count() >= 2
+            && h.split('.').all(|label| {
+                !label.is_empty()
+                    && label.len() <= 63
+                    && !label.starts_with('-')
+                    && !label.ends_with('-')
+                    && label
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            })
+    };
+    let mut seen = BTreeSet::new();
+    if egress.hosts.is_empty()
+        || egress.hosts.len() > 16
+        || !egress.hosts.iter().all(|h| host(h) && seen.insert(h))
+        || egress.ports.is_empty()
+        || !egress.ports.iter().all(|p| matches!(p, 80 | 443))
+        || !(1..=MAX_BUILD_EGRESS_BYTES).contains(&egress.max_transfer_bytes)
+    {
+        return Err(err(
+            "source_oci_network_unauthorized",
+            "egress allowlist: 1..=16 exact lowercase host names (no IP, no wildcard), ports 80/443, 1..=500 MiB",
+        ));
+    }
+    Ok(())
+}
+
+fn valid_state_key(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    matches!(bytes.next(), Some(b'a'..=b'z'))
+        && value.len() <= 64
+        && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+fn valid_guest_path(path: &str) -> bool {
+    path.starts_with('/')
+        && path != "/"
+        && !path.contains(['\0', '\\', ','])
+        && path
+            .split('/')
+            .skip(1)
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
 }
 
 fn is_digest(value: &str) -> bool {
@@ -210,11 +286,31 @@ impl SourceOciRequest {
             }
         }
         let p = &self.policy;
-        if p.network != "none" {
-            return Err(err(
-                "source_oci_network_unauthorized",
-                "build network must be \"none\"; online acquisition needs its own explicit policy",
-            ));
+        match (p.network.as_str(), &p.egress) {
+            ("none", None) => {}
+            ("egress_allowlist", Some(egress)) => validate_egress(egress)?,
+            _ => {
+                return Err(err(
+                    "source_oci_network_unauthorized",
+                    "build network must be \"none\", or \"egress_allowlist\" with an explicit egress allowlist",
+                ));
+            }
+        }
+        let mut ids = BTreeSet::new();
+        if self.authorized_state.len() > 1 {
+            return bad("the single-container route authorizes at most one state slot");
+        }
+        for state in &self.authorized_state {
+            if !valid_state_key(&state.id)
+                || !ids.insert(&state.id)
+                || !valid_guest_path(&state.mount)
+                || matches!(
+                    state.mount.as_str(),
+                    PROFILE_WORKING_DIR | SOURCE_OCI_WORKSPACE_MOUNT | "/tmp"
+                )
+            {
+                return bad("authorized state needs a state key and an absolute guest mount");
+            }
         }
         let b = &p.build;
         let r = &p.runtime;
@@ -269,6 +365,26 @@ pub trait OciBuilder {
     fn image_size(&self, image_id: &str) -> Result<u64>;
     fn save(&self, image_id: &str, output: &Path) -> Result<()>;
     fn release(&self) -> Result<()>;
+    /// Prove, from a container of `image` on the build network, that the
+    /// egress gate cannot be bypassed. Builders without egress refuse.
+    fn preflight_egress(&self, _image: &str) -> Result<Value> {
+        Err(err(
+            "source_oci_network_unauthorized",
+            "this builder has no egress gate",
+        ))
+    }
+    /// What crossed the egress gate so far, if the builder has one.
+    fn egress_report(&self) -> Option<Value> {
+        None
+    }
+    fn egress_exhausted(&self) -> bool {
+        false
+    }
+    /// Installed OS packages of a built image, when it can list them
+    /// offline (recorded as observed; never a reproducibility claim).
+    fn package_inventory(&self, _image: &str) -> Result<Option<Vec<String>>> {
+        Ok(None)
+    }
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -770,6 +886,19 @@ fn build_and_verify(
             format!("store holds {loaded:?} after loading; verified configs are {expected:?}"),
         ));
     }
+    // Online builds start only after the gate is proven unbypassable from
+    // the build network, using the first frozen base as the probe image.
+    let egress_preflight = if request.policy.egress.is_some() {
+        let probe = prepared.bases.first().ok_or_else(|| {
+            err(
+                "source_oci_egress_preflight_unavailable",
+                "an online build needs a frozen base image to probe the gate from",
+            )
+        })?;
+        Some(builder.preflight_egress(&probe.config)?)
+    } else {
+        None
+    };
     // 4. Build with the existing builder; semantics are BuildKit's.
     let tag = "ato-source/build:materialize";
     let started = Instant::now();
@@ -781,6 +910,12 @@ fn build_and_verify(
         Duration::from_secs(request.policy.build_timeout_seconds),
     )?;
     let elapsed_ms = started.elapsed().as_millis() as u64;
+    if builder.egress_exhausted() {
+        return Err(err(
+            "source_oci_egress_bound",
+            "build egress exceeded its transfer budget; the gate cut every tunnel",
+        ));
+    }
     match outcome {
         BuildOutcome::Built => {}
         BuildOutcome::TimedOut => {
@@ -867,16 +1002,39 @@ fn build_and_verify(
             "the image has no Cmd; the current OCI profile needs argv (profile design gap)",
         ));
     }
-    let mut profile_divergences = Vec::new();
-    if !facts.working_dir.is_empty() && facts.working_dir != PROFILE_WORKING_DIR {
-        profile_divergences.push(json!({"kind":"working_dir","image":facts.working_dir,
-            "profile":PROFILE_WORKING_DIR,"effect":"the current OCI route runs with --workdir /app; relative Cmd paths resolve there"}));
+    // Every image VOLUME needs an explicitly authorized state slot at
+    // exactly its path, and every authorized slot must be such a VOLUME.
+    let volumes: BTreeSet<&str> = facts
+        .volumes
+        .iter()
+        .map(|v| v.strip_suffix('/').filter(|v| !v.is_empty()).unwrap_or(v))
+        .collect();
+    let authorized: BTreeSet<&str> = request
+        .authorized_state
+        .iter()
+        .map(|s| s.mount.as_str())
+        .collect();
+    if volumes != authorized {
+        return Err(err(
+            "source_oci_volume_unauthorized",
+            format!(
+                "image VOLUMEs {volumes:?}; authorized state mounts {authorized:?}; they must be equal"
+            ),
+        ));
     }
-    if !facts.volumes.is_empty() {
-        profile_divergences.push(json!({"kind":"volume","image":facts.volumes,
-            "effect":"no state slot is authorized for these paths; Docker would create anonymous writable volumes, which the route must not rely on"}));
+    let working_dir = (!facts.working_dir.is_empty() && facts.working_dir != PROFILE_WORKING_DIR)
+        .then(|| facts.working_dir.clone());
+    if working_dir.as_deref().is_some_and(|w| !valid_guest_path(w)) {
+        return Err(err(
+            "source_oci_artifact_invalid",
+            format!(
+                "image WorkingDir {:?} is not an absolute guest path",
+                facts.working_dir
+            ),
+        ));
     }
-    let capsule_toml = authored_route(request, &image_reference, &facts);
+    let capsule_toml = authored_route(request, &image_reference, &facts, working_dir.as_deref());
+    let package_inventory = builder.package_inventory(&image_id)?;
     let archive = out.join(ARCHIVE_FILE);
     std::fs::rename(&partial, &archive)
         .map_err(|e| err("source_oci_artifact_invalid", e.to_string()))?;
@@ -911,7 +1069,14 @@ fn build_and_verify(
         },
         "declared_transport_port": request.declared_transport_port,
         "http_suitability": "unverified until the Runtime and Verifier observe it",
-        "profile_divergences": profile_divergences,
+        "working_dir": working_dir.as_deref().unwrap_or(PROFILE_WORKING_DIR),
+        "authorized_state": request.authorized_state,
+        "egress": {
+            "policy": request.policy.egress,
+            "preflight": egress_preflight,
+            "report": builder.egress_report(),
+        },
+        "package_inventory": package_inventory,
         "build_elapsed_ms": elapsed_ms,
         "reproducibility": "not claimed; outputs are observed digests of this build",
     });
@@ -929,7 +1094,12 @@ fn toml_string(value: &str) -> String {
 
 /// The Ato-owned authored route: one OCI serving step over the verified image.
 /// K observes only GET / = 200 on the Surface; it is not a functional claim.
-fn authored_route(request: &SourceOciRequest, image: &str, facts: &ImageFacts) -> String {
+fn authored_route(
+    request: &SourceOciRequest,
+    image: &str,
+    facts: &ImageFacts,
+    working_dir: Option<&str>,
+) -> String {
     let p = &request.policy.runtime;
     let argv = facts
         .cmd
@@ -937,6 +1107,20 @@ fn authored_route(request: &SourceOciRequest, image: &str, facts: &ImageFacts) -
         .map(|a| toml_string(a))
         .collect::<Vec<_>>()
         .join(", ");
+    let state = request
+        .authorized_state
+        .iter()
+        .map(|s| {
+            format!(
+                "\n[[state]]\nid = {}\nuse = \"ato.state.filesystem@1\"\nmount = {}\naccess = \"read-write\"\n",
+                toml_string(&s.id),
+                toml_string(&s.mount)
+            )
+        })
+        .collect::<String>();
+    let working_dir = working_dir
+        .map(|w| format!(", \"oci.working_dir\" = {}", toml_string(w)))
+        .unwrap_or_default();
     format!(
         r#"schema = "ato.capsule/2"
 
@@ -948,7 +1132,7 @@ surface_path = "/"
 id = "workspace"
 use = "ato.workspace@1"
 path = "."
-
+{state}
 [contract]
 mode = "all"
 
@@ -965,7 +1149,7 @@ use = "ato.oci@1"
 argv = [{argv}]
 cwd = "."
 guest_port = {port}
-runtimes = {{ "oci.image" = {image}, "oci.platform" = {platform}, "oci.memory_bytes" = "{memory}", "oci.cpu_limit_millis" = "{cpu}", "oci.pids_limit" = "{pids}", "oci.workspace_mount" = "{mount}" }}
+runtimes = {{ "oci.image" = {image}, "oci.platform" = {platform}, "oci.memory_bytes" = "{memory}", "oci.cpu_limit_millis" = "{cpu}", "oci.pids_limit" = "{pids}", "oci.workspace_mount" = "{mount}"{working_dir} }}
 
 [effects]
 default = "pure"
