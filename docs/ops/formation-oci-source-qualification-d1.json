@@ -1,0 +1,1712 @@
+{
+  "schema": "ato.formation-oci-source-qualification-d1/1",
+  "wave": "6b-D1",
+  "base": "233bda52e7e1f3c9acd4a67d41974f2152f87f9d",
+  "inputs": {
+    "d0": "docs/ops/formation-service-qualification-d0.json (revision 2b8e3fcf)",
+    "dockerfile_facts": "docs/ops/formation-oci-source-qualification-d1-facts.json"
+  },
+  "method": "static parse of every Dockerfile/Containerfile (depth<=4, no node_modules) in the same 41 pinned archives; no build, pull, run or network",
+  "oci_v0_subset": [
+    "docker-default root Dockerfile selected (no variant choice)",
+    "final stage = default target",
+    "FROM ARGs only with in-file defaults; no platform-injected ARGs",
+    "no remote ADD, no privileged/host-network/device RUN, no secret/ssh mounts",
+    "final stage CMD or ENTRYPOINT (left to OCI semantics, never converted to native argv)",
+    "exactly one literal TCP EXPOSE",
+    "no mandatory external service",
+    "no Binding needed for startup (e.g. config absent from the image)"
+  ],
+  "primary_precedence": "external service > OCI v0 eligible > native blocked only by port binding > runtime catalog > ambiguous",
+  "distribution": {
+    "native_process_possible_now": 0,
+    "dockerfile_oci_possible_if_build_added": 7,
+    "blocked_runtime_catalog": 12,
+    "blocked_port_binding": 4,
+    "blocked_external_service": 13,
+    "blocked_dependency_network": 0,
+    "ambiguous": 5
+  },
+  "native_route_distribution": {
+    "blocked_runtime_catalog": 16,
+    "blocked_external_service": 13,
+    "blocked_port_binding": 6,
+    "blocked_launch_undeclared": 6
+  },
+  "oci_route_distribution": {
+    "blocked_external_service": 13,
+    "ambiguous_selection": 9,
+    "v0_eligible": 7,
+    "no_dockerfile": 5,
+    "ambiguous_port": 3,
+    "no_port": 2,
+    "requires_binding": 2
+  },
+  "oci_v0_eligible": [
+    {
+      "name": "WBO",
+      "runtime": "node",
+      "runtime_in_catalog": true,
+      "port": "80",
+      "stages": 1,
+      "digest_pinned": false,
+      "flags": []
+    },
+    {
+      "name": "changedetection.io",
+      "runtime": "python",
+      "runtime_in_catalog": true,
+      "port": "5000",
+      "stages": 2,
+      "digest_pinned": false,
+      "flags": [
+        "FROM uses ARG PYTHON_VERSION with default 3.11"
+      ]
+    },
+    {
+      "name": "Etherpad",
+      "runtime": "node",
+      "runtime_in_catalog": false,
+      "port": "9001",
+      "stages": 6,
+      "digest_pinned": false,
+      "flags": [
+        "final stage chosen by ARG BUILD_ENV=git default (build_${BUILD_ENV})"
+      ]
+    },
+    {
+      "name": "Vikunja",
+      "runtime": "go",
+      "runtime_in_catalog": false,
+      "port": "3456",
+      "stages": 3,
+      "digest_pinned": true,
+      "flags": []
+    },
+    {
+      "name": "Grist core",
+      "runtime": "node",
+      "runtime_in_catalog": false,
+      "port": "8484",
+      "stages": 6,
+      "digest_pinned": false,
+      "flags": [
+        "runtime sandbox (gVisor via sandbox/run.sh) may assume extra container privileges; unverified"
+      ]
+    },
+    {
+      "name": "File Browser",
+      "runtime": "go",
+      "runtime_in_catalog": false,
+      "port": "80",
+      "stages": 2,
+      "digest_pinned": false,
+      "flags": []
+    },
+    {
+      "name": "Kutt",
+      "runtime": "node",
+      "runtime_in_catalog": true,
+      "port": "3000",
+      "stages": 1,
+      "digest_pinned": false,
+      "flags": [
+        "shell-form CMD runs `npm run migrate && npm start` inside the container"
+      ]
+    }
+  ],
+  "universal_gates": {
+    "dependency_network": "41/41 need dependency resolution (native install or image build: base pull + RUN installs); network stays denied",
+    "base_image_identity": "19 of 20 root Dockerfiles pull bases by tag; an OCI build route must resolve and freeze digests as Ato-owned facts"
+  },
+  "not_decided_here": "6b-D2 target; no implementation, no network change",
+  "model_calls": 0,
+  "deploy": "none",
+  "remote_migration": "none",
+  "applications": [
+    {
+      "index": 2,
+      "name": "WBO",
+      "family": "Node service",
+      "primary_runtime_kind": "node",
+      "runtime_in_current_catalog": true,
+      "native_route": "blocked_port_binding",
+      "oci_route": "v0_eligible",
+      "primary_bucket": "dockerfile_oci_possible_if_build_added",
+      "dependency_network_gate": true,
+      "dockerfiles": [
+        ".devcontainer/Dockerfile",
+        "Dockerfile"
+      ],
+      "selected_dockerfile": "Dockerfile",
+      "root_dockerfile": {
+        "stages": 1,
+        "multi_stage": false,
+        "final_stage_is_default_target": true,
+        "all_bases_digest_pinned": false,
+        "arg_in_from": false,
+        "global_args": [],
+        "remote_add": [],
+        "buildkit_mounts": [],
+        "privileged_or_host_network": [],
+        "platforms": [],
+        "run_instructions": 4,
+        "run_needing_network": 2,
+        "copy_sources_sample": [
+          ".",
+          "package-lock.json",
+          "package.json"
+        ],
+        "final": {
+          "cmd": "[\"/usr/local/bin/node\", \"server/server.mjs\"]",
+          "entrypoint": null,
+          "expose": [
+            "80"
+          ],
+          "from": "node:24-alpine",
+          "healthcheck": false,
+          "user": "1000:1000",
+          "volume": [
+            "/opt/app/server-data"
+          ],
+          "workdir": "/opt/app"
+        }
+      },
+      "external_services": "none",
+      "flags": [],
+      "build_network_requirement": "base image pull by tag (no digest pin); 2 RUN steps install/fetch dependencies"
+    },
+    {
+      "index": 4,
+      "name": "FreshRSS",
+      "family": "PHP",
+      "primary_runtime_kind": "php",
+      "runtime_in_current_catalog": false,
+      "native_route": "blocked_runtime_catalog",
+      "oci_route": "ambiguous_selection",
+      "primary_bucket": "blocked_runtime_catalog",
+      "dependency_network_gate": true,
+      "dockerfiles": [
+        ".devcontainer/Dockerfile",
+        "Docker/Dockerfile",
+        "Docker/Dockerfile-Alpine",
+        "Docker/Dockerfile-Arch",
+        "Docker/Dockerfile-Newest",
+        "Docker/Dockerfile-Oldest"
+      ],
+      "selected_dockerfile": null,
+      "root_dockerfile": null,
+      "external_services": "optional postgres/mysql (SQLite default)",
+      "flags": [],
+      "build_network_requirement": null
+    },
+    {
+      "index": 5,
+      "name": "linkding",
+      "family": "Python service",
+      "primary_runtime_kind": "python",
+      "runtime_in_current_catalog": true,
+      "native_route": "blocked_launch_undeclared",
+      "oci_route": "ambiguous_selection",
+      "primary_bucket": "ambiguous",
+      "dependency_network_gate": true,
+      "dockerfiles": [
+        "docker/alpine.Dockerfile",
+        "docker/default.Dockerfile"
+      ],
+      "selected_dockerfile": null,
+      "root_dockerfile": null,
+      "external_services": "none",
+      "flags": [],
+      "build_network_requirement": null
+    },
+    {
+      "index": 6,
+      "name": "SearXNG",
+      "family": "Python service",
+      "primary_runtime_kind": "python",
+      "runtime_in_current_catalog": true,
+      "native_route": "blocked_launch_undeclared",
+      "oci_route": "ambiguous_selection",
+      "primary_bucket": "ambiguous",
+      "dependency_network_gate": true,
+      "dockerfiles": [
+        ".devcontainer/Dockerfile",
+        "container/builder.dockerfile",
+        "container/dist.dockerfile"
+      ],
+      "selected_dockerfile": null,
+      "root_dockerfile": null,
+      "external_services": "valkey optional",
+      "flags": [],
+      "build_network_requirement": null
+    },
+    {
+      "index": 7,
+      "name": "changedetection.io",
+      "family": "Python service",
+      "primary_runtime_kind": "python",
+      "runtime_in_current_catalog": true,
+      "native_route": "blocked_launch_undeclared",
+      "oci_route": "v0_eligible",
+      "primary_bucket": "dockerfile_oci_possible_if_build_added",
+      "dependency_network_gate": true,
+      "dockerfiles": [
+        ".github/test/Dockerfile-alpine",
+        "Dockerfile"
+      ],
+      "selected_dockerfile": "Dockerfile",
+      "root_dockerfile": {
+        "stages": 2,
+        "multi_stage": true,
+        "final_stage_is_default_target": true,
+        "all_bases_digest_pinned": false,
+        "arg_in_from": true,
+        "global_args": [
+          "PYTHON_VERSION=3.11"
+        ],
+        "remote_add": [],
+        "buildkit_mounts": [
+          "cache"
+        ],
+        "privileged_or_host_network": [],
+        "platforms": [],
+        "run_instructions": 12,
+        "run_needing_network": 5,
+        "copy_sources_sample": [
+          "/dependencies",
+          "changedetection.py",
+          "changedetectionio",
+          "docker-entrypoint.sh",
+          "docs/api-spec.yaml",
+          "requirements.txt"
+        ],
+        "final": {
+          "cmd": "[\"python\", \"./changedetection.py\", \"-d\", \"/datastore\"]",
+          "entrypoint": "[\"/docker-entrypoint.sh\"]",
+          "expose": [
+            "5000"
+          ],
+          "from": "python:${PYTHON_VERSION}-slim-bookworm",
+          "healthcheck": false,
+          "user": null,
+          "volume": [],
+          "workdir": "/app"
+        }
+      },
+      "external_services": "none (ollama optional)",
+      "flags": [
+        "FROM uses ARG PYTHON_VERSION with default 3.11"
+      ],
+      "build_network_requirement": "base image pull by tag (no digest pin); 5 RUN steps install/fetch dependencies"
+    },
+    {
+      "index": 8,
+      "name": "Etherpad",
+      "family": "Node service",
+      "primary_runtime_kind": "node",
+      "runtime_in_current_catalog": false,
+      "native_route": "blocked_runtime_catalog",
+      "oci_route": "v0_eligible",
+      "primary_bucket": "dockerfile_oci_possible_if_build_added",
+      "dependency_network_gate": true,
+      "dockerfiles": [
+        "Dockerfile",
+        "src/tests/ratelimit/Dockerfile.anotherip",
+        "src/tests/ratelimit/Dockerfile.nginx"
+      ],
+      "selected_dockerfile": "Dockerfile",
+      "root_dockerfile": {
+        "stages": 6,
+        "multi_stage": true,
+        "final_stage_is_default_target": true,
+        "all_bases_digest_pinned": false,
+        "arg_in_from": true,
+        "global_args": [
+          "BUILD_ENV=git",
+          "PnpmVersion=12.4.2"
+        ],
+        "remote_add": [],
+        "buildkit_mounts": [],
+        "privileged_or_host_network": [],
+        "platforms": [],
+        "run_instructions": 15,
+        "run_needing_network": 9,
+        "copy_sources_sample": [
+          "${SETTINGS}",
+          ".",
+          "./bin",
+          "./local_plugin[s]",
+          "./package.json",
+          "./pnpm-workspace.yaml",
+          "./src",
+          "./src/",
+          "./var",
+          "/opt/etherpad-lite/src/static/oidc",
+          "/opt/etherpad-lite/src/templates/admin"
+        ],
+        "final": {
+          "cmd": "[\"sh\", \"-c\", \"cd src && exec node --require tsx/cjs node/server.ts\"]",
+          "entrypoint": null,
+          "expose": [
+            "9001"
+          ],
+          "from": "build_${BUILD_ENV}",
+          "healthcheck": true,
+          "user": "etherpad",
+          "volume": [],
+          "workdir": null
+        }
+      },
+      "external_services": "none required (mysql/postgres optional)",
+      "flags": [
+        "final stage chosen by ARG BUILD_ENV=git default (build_${BUILD_ENV})"
+      ],
+      "build_network_requirement": "base image pull by tag (no digest pin); 9 RUN steps install/fetch dependencies"
+    },
+    {
+      "index": 9,
+      "name": "Miniflux",
+      "family": "Go",
+      "primary_runtime_kind": "go",
+      "runtime_in_current_catalog": false,
+      "native_route": "blocked_external_service",
+      "oci_route": "blocked_external_service",
+      "primary_bucket": "blocked_external_service",
+      "dependency_network_gate": true,
+      "dockerfiles": [
+        "packaging/debian/Dockerfile",
+        "packaging/docker/alpine/Dockerfile",
+        "packaging/docker/distroless/Dockerfile",
+        "packaging/rpm/Dockerfile"
+      ],
+      "selected_dockerfile": null,
+      "root_dockerfile": null,
+      "external_services": "postgres required",
+      "flags": [],
+      "build_network_requirement": null
+    },
+    {
+      "index": 10,
+      "name": "Gitea",
+      "family": "Go",
+      "primary_runtime_kind": "go",
+      "runtime_in_current_catalog": false,
+      "native_route": "blocked_runtime_catalog",
+      "oci_route": "ambiguous_port",
+      "primary_bucket": "blocked_runtime_catalog",
+      "dependency_network_gate": true,
+      "dockerfiles": [
+        "Dockerfile",
+        "Dockerfile.rootless"
+      ],
+      "selected_dockerfile": "Dockerfile",
+      "root_dockerfile": {
+        "stages": 3,
+        "multi_stage": true,
+        "final_stage_is_default_target": true,
+        "all_bases_digest_pinned": false,
+        "arg_in_from": false,
+        "global_args": [],
+        "remote_add": [],
+        "buildkit_mounts": [
+          "bind",
+          "cache"
+        ],
+        "privileged_or_host_network": [],
+        "platforms": [
+          "$BUILDPLATFORM"
+        ],
+        "run_instructions": 9,
+        "run_needing_network": 5,
+        "copy_sources_sample": [
+          ".",
+          "/go/src/gitea.dev/gitea",
+          "/src/public/assets",
+          "/tmp/local",
+          "docker/root",
+          "go.mod",
+          "go.sum",
+          "package.json",
+          "pnpm-lock.yaml",
+          "pnpm-workspace.yaml"
+        ],
+        "final": {
+          "cmd": "[\"/usr/bin/s6-svscan\", \"/etc/s6\"]",
+          "entrypoint": "[\"/usr/bin/entrypoint\"]",
+          "expose": [
+            "22",
+            "3000"
+          ],
+          "from": "docker.io/library/alpine:3.24",
+          "healthcheck": false,
+          "user": null,
+          "volume": [
+            "[\"/data\"]"
+          ],
+          "workdir": null
+        }
+      },
+      "external_services": "none required (SQLite possible)",
+      "flags": [],
+      "build_network_requirement": "base image pull by tag (no digest pin); 5 RUN steps install/fetch dependencies"
+    },
+    {
+      "index": 11,
+      "name": "Vikunja",
+      "family": "Go",
+      "primary_runtime_kind": "go",
+      "runtime_in_current_catalog": false,
+      "native_route": "blocked_runtime_catalog",
+      "oci_route": "v0_eligible",
+      "primary_bucket": "dockerfile_oci_possible_if_build_added",
+      "dependency_network_gate": true,
+      "dockerfiles": [
+        "Dockerfile"
+      ],
+      "selected_dockerfile": "Dockerfile",
+      "root_dockerfile": {
+        "stages": 3,
+        "multi_stage": true,
+        "final_stage_is_default_target": true,
+        "all_bases_digest_pinned": true,
+        "arg_in_from": false,
+        "global_args": [],
+        "remote_add": [],
+        "buildkit_mounts": [],
+        "privileged_or_host_network": [],
+        "platforms": [
+          "$BUILDPLATFORM"
+        ],
+        "run_instructions": 5,
+        "run_needing_network": 3,
+        "copy_sources_sample": [
+          ".",
+          "/build/dist",
+          "/build/vikunja-*",
+          "/etc/ssl/certs/ca-certificates.crt",
+          "/tmp",
+          "frontend/",
+          "frontend/package.json",
+          "frontend/pnpm-lock.yaml",
+          "frontend/pnpm-workspace.yaml"
+        ],
+        "final": {
+          "cmd": null,
+          "entrypoint": "[ \"/app/vikunja/vikunja\" ]",
+          "expose": [
+            "3456"
+          ],
+          "from": "scratch",
+          "healthcheck": false,
+          "user": "1000",
+          "volume": [],
+          "workdir": "/app/vikunja"
+        }
+      },
+      "external_services": "none required (SQLite default)",
+      "flags": [],
+      "build_network_requirement": "digest-pinned bases; 3 RUN steps install/fetch dependencies"
+    },
+    {
+      "index": 12,
+      "name": "Mealie",
+      "family": "Python service",
+      "primary_runtime_kind": "python",
+      "runtime_in_current_catalog": false,
+      "native_route": "blocked_runtime_catalog",
+      "oci_route": "ambiguous_selection",
+      "primary_bucket": "blocked_runtime_catalog",
+      "dependency_network_gate": true,
+      "dockerfiles": [
+        ".devcontainer/Dockerfile",
+        "docker/Dockerfile"
+      ],
+      "selected_dockerfile": null,
+      "root_dockerfile": null,
+      "external_services": "none required (postgres optional)",
+      "flags": [],
+      "build_network_requirement": null
+    },
+    {
+      "index": 13,
+      "name": "HedgeDoc",
+      "family": "multi-service",
+      "primary_runtime_kind": "node",
+      "runtime_in_current_catalog": false,
+      "native_route": "blocked_external_service",
+      "oci_route": "blocked_external_service",
+      "primary_bucket": "blocked_external_service",
+      "dependency_network_gate": true,
+      "dockerfiles": [
+        "backend/docker/Dockerfile",
+        "frontend/docker/Dockerfile"
+      ],
+      "selected_dockerfile": null,
+      "root_dockerfile": null,
+      "external_services": "postgres/mariadb required",
+      "flags": [],
+      "build_network_requirement": null
+    },
+    {
+      "index": 15,
+      "name": "JupyterLab",
+      "family": "Python service",
+      "primary_runtime_kind": "python",
+      "runtime_in_current_catalog": true,
+      "native_route": "blocked_port_binding",
+      "oci_route": "ambiguous_selection",
+      "primary_bucket": "blocked_port_binding",
+      "dependency_network_gate": true,
+      "dockerfiles": [
+        "docker/Dockerfile"
+      ],
+      "selected_dockerfile": null,
+      "root_dockerfile": null,
+      "external_services": "kernel processes",
+      "flags": [],
+      "build_network_requirement": null
+    },
+    {
+      "index": 16,
+      "name": "LibreChat",
+      "family": "multi-service",
+      "primary_runtime_kind": "node",
+      "runtime_in_current_catalog": false,
+      "native_route": "blocked_external_service",
+      "oci_route": "blocked_external_service",
+      "primary_bucket": "blocked_external_service",
+      "dependency_network_gate": true,
+      "dockerfiles": [
+        ".devcontainer/Dockerfile",
+        "Dockerfile",
+        "Dockerfile.multi",
+        "otel/langfuse-fanout/Dockerfile"
+      ],
+      "selected_dockerfile": "Dockerfile",
+      "root_dockerfile": {
+        "stages": 1,
+        "multi_stage": false,
+        "final_stage_is_default_target": true,
+        "all_bases_digest_pinned": false,
+        "arg_in_from": false,
+        "global_args": [],
+        "remote_add": [],
+        "buildkit_mounts": [],
+        "privileged_or_host_network": [],
+        "platforms": [],
+        "run_instructions": 7,
+        "run_needing_network": 4,
+        "copy_sources_sample": [
+          ".",
+          "/usr/local/bin/uv",
+          "/usr/local/bin/uvx",
+          "api/package.json",
+          "client/package.json",
+          "package-lock.json",
+          "package.json",
+          "packages/api/package.json",
+          "packages/data-provider/package.json",
+          "packages/data-schemas/package.json"
+        ],
+        "final": {
+          "cmd": "[\"npm\", \"run\", \"backend\"]",
+          "entrypoint": null,
+          "expose": [
+            "3080"
+          ],
+          "from": "node:24.16.0-alpine",
+          "healthcheck": false,
+          "user": "node",
+          "volume": [],
+          "workdir": "/app"
+        }
+      },
+      "external_services": "mongo required (+ meilisearch/rag optional)",
+      "flags": [],
+      "build_network_requirement": "base image pull by tag (no digest pin); 4 RUN steps install/fetch dependencies"
+    },
+    {
+      "index": 17,
+      "name": "ComfyUI",
+      "family": "Python service",
+      "primary_runtime_kind": "python",
+      "runtime_in_current_catalog": true,
+      "native_route": "blocked_launch_undeclared",
+      "oci_route": "no_dockerfile",
+      "primary_bucket": "ambiguous",
+      "dependency_network_gate": true,
+      "dockerfiles": [],
+      "selected_dockerfile": null,
+      "root_dockerfile": null,
+      "external_services": "none",
+      "flags": [],
+      "build_network_requirement": null
+    },
+    {
+      "index": 18,
+      "name": "PdfDing",
+      "family": "Python service",
+      "primary_runtime_kind": "python",
+      "runtime_in_current_catalog": true,
+      "native_route": "blocked_launch_undeclared",
+      "oci_route": "no_port",
+      "primary_bucket": "ambiguous",
+      "dependency_network_gate": true,
+      "dockerfiles": [
+        "Dockerfile"
+      ],
+      "selected_dockerfile": "Dockerfile",
+      "root_dockerfile": {
+        "stages": 4,
+        "multi_stage": true,
+        "final_stage_is_default_target": true,
+        "all_bases_digest_pinned": false,
+        "arg_in_from": false,
+        "global_args": [],
+        "remote_add": [],
+        "buildkit_mounts": [],
+        "privileged_or_host_network": [],
+        "platforms": [],
+        "run_instructions": 16,
+        "run_needing_network": 9,
+        "copy_sources_sample": [
+          "/app/.venv",
+          "/app/pdfding",
+          "/build/pdfding",
+          "entrypoint.sh",
+          "package-lock.json",
+          "package.json",
+          "pdfding",
+          "poetry.lock",
+          "pyproject.toml"
+        ],
+        "final": {
+          "cmd": "[\"./entrypoint.sh\"]",
+          "entrypoint": null,
+          "expose": [],
+          "from": "python-base",
+          "healthcheck": false,
+          "user": "$USERNAME",
+          "volume": [],
+          "workdir": "/home/$USERNAME"
+        }
+      },
+      "external_services": "none required (postgres optional)",
+      "flags": [],
+      "build_network_requirement": "base image pull by tag (no digest pin); 9 RUN steps install/fetch dependencies"
+    },
+    {
+      "index": 19,
+      "name": "Grist core",
+      "family": "multi-service",
+      "primary_runtime_kind": "node",
+      "runtime_in_current_catalog": false,
+      "native_route": "blocked_runtime_catalog",
+      "oci_route": "v0_eligible",
+      "primary_bucket": "dockerfile_oci_possible_if_build_added",
+      "dependency_network_gate": true,
+      "dockerfiles": [
+        "Dockerfile",
+        "sandbox/docker/Dockerfile"
+      ],
+      "selected_dockerfile": "Dockerfile",
+      "root_dockerfile": {
+        "stages": 6,
+        "multi_stage": true,
+        "final_stage_is_default_target": true,
+        "all_bases_digest_pinned": false,
+        "arg_in_from": false,
+        "global_args": [],
+        "remote_add": [],
+        "buildkit_mounts": [],
+        "privileged_or_host_network": [],
+        "platforms": [],
+        "run_instructions": 12,
+        "run_needing_network": 6,
+        "copy_sources_sample": [
+          "/",
+          "/grist/_build",
+          "/grist/app/cli.sh",
+          "/grist/ext/asset[s]",
+          "/grist/node_modules",
+          "/grist/sandbox/pyodide",
+          "/grist/static",
+          "/node_modules",
+          "/runsc",
+          "/usr/local/bin/python3.11",
+          "/usr/local/lib/libpython3.11.*",
+          "/usr/local/lib/python3.11"
+        ],
+        "final": {
+          "cmd": "[\"./sandbox/run.sh\"]",
+          "entrypoint": "[\"./sandbox/docker_entrypoint.sh\"]",
+          "expose": [
+            "8484"
+          ],
+          "from": "node:22-trixie-slim",
+          "healthcheck": false,
+          "user": null,
+          "volume": [],
+          "workdir": "/grist"
+        }
+      },
+      "external_services": "python sandbox (gvisor) process",
+      "flags": [
+        "runtime sandbox (gVisor via sandbox/run.sh) may assume extra container privileges; unverified"
+      ],
+      "build_network_requirement": "base image pull by tag (no digest pin); 6 RUN steps install/fetch dependencies"
+    },
+    {
+      "index": 20,
+      "name": "File Browser",
+      "family": "Go",
+      "primary_runtime_kind": "go",
+      "runtime_in_current_catalog": false,
+      "native_route": "blocked_runtime_catalog",
+      "oci_route": "v0_eligible",
+      "primary_bucket": "dockerfile_oci_possible_if_build_added",
+      "dependency_network_gate": true,
+      "dockerfiles": [
+        "Dockerfile",
+        "Dockerfile.s6"
+      ],
+      "selected_dockerfile": "Dockerfile",
+      "root_dockerfile": {
+        "stages": 2,
+        "multi_stage": true,
+        "final_stage_is_default_target": true,
+        "all_bases_digest_pinned": false,
+        "arg_in_from": false,
+        "global_args": [],
+        "remote_add": [],
+        "buildkit_mounts": [],
+        "privileged_or_host_network": [],
+        "platforms": [],
+        "run_instructions": 3,
+        "run_needing_network": 1,
+        "copy_sources_sample": [
+          "/JSON.sh",
+          "/etc/ca-certificates",
+          "/etc/ca-certificates.conf",
+          "/etc/mime.types",
+          "/etc/ssl",
+          "/sbin/tini-static",
+          "docker/alpine/",
+          "docker/common/",
+          "filebrowser"
+        ],
+        "final": {
+          "cmd": null,
+          "entrypoint": "[ \"tini\", \"--\", \"/init.sh\" ]",
+          "expose": [
+            "80"
+          ],
+          "from": "busybox:1.37.0-musl",
+          "healthcheck": true,
+          "user": "user",
+          "volume": [
+            "/srv /config /database"
+          ],
+          "workdir": null
+        }
+      },
+      "external_services": "none (redis optional)",
+      "flags": [],
+      "build_network_requirement": "base image pull by tag (no digest pin); 1 RUN steps install/fetch dependencies"
+    },
+    {
+      "index": 27,
+      "name": "Wiki.js",
+      "family": "Node service",
+      "primary_runtime_kind": "node",
+      "runtime_in_current_catalog": false,
+      "native_route": "blocked_runtime_catalog",
+      "oci_route": "ambiguous_selection",
+      "primary_bucket": "blocked_runtime_catalog",
+      "dependency_network_gate": true,
+      "dockerfiles": [
+        "dev/build-arm/Dockerfile",
+        "dev/build/Dockerfile",
+        "dev/containers/Dockerfile",
+        "dev/openshift/Dockerfile"
+      ],
+      "selected_dockerfile": null,
+      "root_dockerfile": null,
+      "external_services": "postgres (config.yml; SQLite optional)",
+      "flags": [],
+      "build_network_requirement": null
+    },
+    {
+      "index": 28,
+      "name": "Kutt",
+      "family": "Node service",
+      "primary_runtime_kind": "node",
+      "runtime_in_current_catalog": true,
+      "native_route": "blocked_port_binding",
+      "oci_route": "v0_eligible",
+      "primary_bucket": "dockerfile_oci_possible_if_build_added",
+      "dependency_network_gate": true,
+      "dockerfiles": [
+        "Dockerfile"
+      ],
+      "selected_dockerfile": "Dockerfile",
+      "root_dockerfile": {
+        "stages": 1,
+        "multi_stage": false,
+        "final_stage_is_default_target": true,
+        "all_bases_digest_pinned": false,
+        "arg_in_from": false,
+        "global_args": [],
+        "remote_add": [],
+        "buildkit_mounts": [
+          "bind",
+          "cache"
+        ],
+        "privileged_or_host_network": [],
+        "platforms": [],
+        "run_instructions": 2,
+        "run_needing_network": 1,
+        "copy_sources_sample": [
+          "."
+        ],
+        "final": {
+          "cmd": "npm run migrate && npm start",
+          "entrypoint": null,
+          "expose": [
+            "3000"
+          ],
+          "from": "node:22-alpine",
+          "healthcheck": false,
+          "user": null,
+          "volume": [],
+          "workdir": "/kutt"
+        }
+      },
+      "external_services": "none required (redis optional)",
+      "flags": [
+        "shell-form CMD runs `npm run migrate && npm start` inside the container"
+      ],
+      "build_network_requirement": "base image pull by tag (no digest pin); 1 RUN steps install/fetch dependencies"
+    },
+    {
+      "index": 29,
+      "name": "Umami",
+      "family": "multi-service",
+      "primary_runtime_kind": "node",
+      "runtime_in_current_catalog": true,
+      "native_route": "blocked_external_service",
+      "oci_route": "blocked_external_service",
+      "primary_bucket": "blocked_external_service",
+      "dependency_network_gate": true,
+      "dockerfiles": [
+        "Dockerfile"
+      ],
+      "selected_dockerfile": "Dockerfile",
+      "root_dockerfile": {
+        "stages": 3,
+        "multi_stage": true,
+        "final_stage_is_default_target": true,
+        "all_bases_digest_pinned": false,
+        "arg_in_from": true,
+        "global_args": [
+          "NODE_IMAGE_VERSION=\"22-alpine\"",
+          "PNPM_VERSION=\"12.3.4\"",
+          "PRISMA_VERSION=\"7.10.0\""
+        ],
+        "remote_add": [],
+        "buildkit_mounts": [],
+        "privileged_or_host_network": [],
+        "platforms": [],
+        "run_instructions": 13,
+        "run_needing_network": 10,
+        "copy_sources_sample": [
+          ".",
+          "/app/.next/standalone",
+          "/app/.next/static",
+          "/app/generated",
+          "/app/node_modules",
+          "/app/packages/api-client/node_modules",
+          "/app/packages/mcp/node_modules",
+          "/app/prisma",
+          "/app/prisma.config.ts",
+          "/app/public",
+          "/app/scripts",
+          "docker/proxy.ts"
+        ],
+        "final": {
+          "cmd": "[\"sh\", \"scripts/start-docker.sh\"]",
+          "entrypoint": null,
+          "expose": [
+            "3000"
+          ],
+          "from": "node:${NODE_IMAGE_VERSION}",
+          "healthcheck": false,
+          "user": "nextjs",
+          "volume": [],
+          "workdir": "/app"
+        }
+      },
+      "external_services": "postgres required (clickhouse optional)",
+      "flags": [],
+      "build_network_requirement": "base image pull by tag (no digest pin); 10 RUN steps install/fetch dependencies"
+    },
+    {
+      "index": 30,
+      "name": "Ghost",
+      "family": "multi-service",
+      "primary_runtime_kind": "node",
+      "runtime_in_current_catalog": false,
+      "native_route": "blocked_external_service",
+      "oci_route": "blocked_external_service",
+      "primary_bucket": "blocked_external_service",
+      "dependency_network_gate": true,
+      "dockerfiles": [
+        "Dockerfile.production",
+        "docker/dev-gateway/Dockerfile",
+        "docker/fake-mailgun/Dockerfile",
+        "docker/ghost-dev/Dockerfile",
+        "docker/tb-cli/Dockerfile",
+        "docker/tinybird-local-slim/Dockerfile",
+        "e2e/Dockerfile.e2e",
+        "e2e/Dockerfile.runner"
+      ],
+      "selected_dockerfile": null,
+      "root_dockerfile": null,
+      "external_services": "mysql required in production (SQLite dev)",
+      "flags": [],
+      "build_network_requirement": null
+    },
+    {
+      "index": 31,
+      "name": "Radicale",
+      "family": "Python service",
+      "primary_runtime_kind": "python",
+      "runtime_in_current_catalog": true,
+      "native_route": "blocked_port_binding",
+      "oci_route": "no_port",
+      "primary_bucket": "blocked_port_binding",
+      "dependency_network_gate": true,
+      "dockerfiles": [
+        "Dockerfile",
+        "Dockerfile.dev"
+      ],
+      "selected_dockerfile": "Dockerfile",
+      "root_dockerfile": {
+        "stages": 2,
+        "multi_stage": true,
+        "final_stage_is_default_target": true,
+        "all_bases_digest_pinned": false,
+        "arg_in_from": false,
+        "global_args": [],
+        "remote_add": [],
+        "buildkit_mounts": [],
+        "privileged_or_host_network": [],
+        "platforms": [],
+        "run_instructions": 2,
+        "run_needing_network": 2,
+        "copy_sources_sample": [
+          "/app/venv"
+        ],
+        "final": {
+          "cmd": "[\"--hosts\", \"0.0.0.0:5232,[::]:5232\"]",
+          "entrypoint": "[ \"/app/bin/python\", \"/app/bin/radicale\"]",
+          "expose": [],
+          "from": "python:3-alpine",
+          "healthcheck": false,
+          "user": "radicale",
+          "volume": [
+            "/var/lib/radicale"
+          ],
+          "workdir": "/app"
+        }
+      },
+      "external_services": "none",
+      "flags": [],
+      "build_network_requirement": "base image pull by tag (no digest pin); 2 RUN steps install/fetch dependencies"
+    },
+    {
+      "index": 32,
+      "name": "Calibre-Web",
+      "family": "Python service",
+      "primary_runtime_kind": "python",
+      "runtime_in_current_catalog": true,
+      "native_route": "blocked_port_binding",
+      "oci_route": "no_dockerfile",
+      "primary_bucket": "blocked_port_binding",
+      "dependency_network_gate": true,
+      "dockerfiles": [],
+      "selected_dockerfile": null,
+      "root_dockerfile": null,
+      "external_services": "none",
+      "flags": [],
+      "build_network_requirement": null
+    },
+    {
+      "index": 33,
+      "name": "Shynet",
+      "family": "Python service",
+      "primary_runtime_kind": "python",
+      "runtime_in_current_catalog": true,
+      "native_route": "blocked_external_service",
+      "oci_route": "blocked_external_service",
+      "primary_bucket": "blocked_external_service",
+      "dependency_network_gate": true,
+      "dockerfiles": [
+        ".devcontainer/Dockerfile",
+        "Dockerfile"
+      ],
+      "selected_dockerfile": "Dockerfile",
+      "root_dockerfile": {
+        "stages": 1,
+        "multi_stage": false,
+        "final_stage_is_default_target": true,
+        "all_bases_digest_pinned": false,
+        "arg_in_from": false,
+        "global_args": [],
+        "remote_add": [],
+        "buildkit_mounts": [],
+        "privileged_or_host_network": [],
+        "platforms": [],
+        "run_instructions": 6,
+        "run_needing_network": 3,
+        "copy_sources_sample": [
+          "assets/GeoLite2-ASN_20191224.tar.gz",
+          "assets/GeoLite2-City_20191224.tar.gz",
+          "package-lock.json",
+          "package.json",
+          "poetry.lock",
+          "pyproject.toml",
+          "shynet"
+        ],
+        "final": {
+          "cmd": "[ \"./entrypoint.sh\" ]",
+          "entrypoint": null,
+          "expose": [
+            "8080"
+          ],
+          "from": "python:alpine3.14",
+          "healthcheck": true,
+          "user": "appuser",
+          "volume": [],
+          "workdir": "/usr/src/shynet"
+        }
+      },
+      "external_services": "postgres required",
+      "flags": [],
+      "build_network_requirement": "base image pull by tag (no digest pin); 3 RUN steps install/fetch dependencies"
+    },
+    {
+      "index": 34,
+      "name": "text-generation-webui",
+      "family": "Python service",
+      "primary_runtime_kind": "python",
+      "runtime_in_current_catalog": true,
+      "native_route": "blocked_launch_undeclared",
+      "oci_route": "ambiguous_selection",
+      "primary_bucket": "ambiguous",
+      "dependency_network_gate": true,
+      "dockerfiles": [
+        "docker/TensorRT-LLM/Dockerfile",
+        "docker/amd/Dockerfile",
+        "docker/cpu/Dockerfile",
+        "docker/intel/Dockerfile",
+        "docker/nvidia/Dockerfile"
+      ],
+      "selected_dockerfile": null,
+      "root_dockerfile": null,
+      "external_services": "none",
+      "flags": [],
+      "build_network_requirement": null
+    },
+    {
+      "index": 35,
+      "name": "PrivateGPT",
+      "family": "multi-service",
+      "primary_runtime_kind": "python",
+      "runtime_in_current_catalog": true,
+      "native_route": "blocked_port_binding",
+      "oci_route": "requires_binding",
+      "primary_bucket": "blocked_port_binding",
+      "dependency_network_gate": true,
+      "dockerfiles": [
+        "Dockerfile"
+      ],
+      "selected_dockerfile": "Dockerfile",
+      "root_dockerfile": {
+        "stages": 6,
+        "multi_stage": true,
+        "final_stage_is_default_target": true,
+        "all_bases_digest_pinned": false,
+        "arg_in_from": false,
+        "global_args": [
+          "EXTRAS=\"core\"",
+          "PLAYWRIGHT_VERSION=\"1.60.0\""
+        ],
+        "remote_add": [],
+        "buildkit_mounts": [
+          "cache"
+        ],
+        "privileged_or_host_network": [],
+        "platforms": [],
+        "run_instructions": 11,
+        "run_needing_network": 7,
+        "copy_sources_sample": [
+          "/home/worker/app/",
+          "/home/worker/app/.local-browsers/",
+          "/home/worker/app/.venv/",
+          "/home/worker/app/encodings/",
+          "/home/worker/app/models/nltk_cache/",
+          "/home/worker/app/pyproject.toml",
+          "/home/worker/app/tiktoken_cache/",
+          "/home/worker/app/uv.lock",
+          "/uv",
+          "private_gpt/",
+          "pyproject.toml",
+          "scripts/worker_entrypoint"
+        ],
+        "final": {
+          "cmd": "[\"serve\"]",
+          "entrypoint": "[\"private-gpt\"]",
+          "expose": [
+            "8080"
+          ],
+          "from": "os-deps",
+          "healthcheck": false,
+          "user": null,
+          "volume": [],
+          "workdir": "/home/worker/app"
+        }
+      },
+      "external_services": "rabbitmq task broker by default; LLM provider",
+      "flags": [
+        "settings.yaml defaults select a RabbitMQ task broker (PGPT_TASKS_RESULTS_BROKER_MODE:rabbitmq) and an external LLM; startup without them is unverified"
+      ],
+      "build_network_requirement": "base image pull by tag (no digest pin); 7 RUN steps install/fetch dependencies"
+    },
+    {
+      "index": 36,
+      "name": "Gotify",
+      "family": "Go",
+      "primary_runtime_kind": "go",
+      "runtime_in_current_catalog": false,
+      "native_route": "blocked_runtime_catalog",
+      "oci_route": "ambiguous_selection",
+      "primary_bucket": "blocked_runtime_catalog",
+      "dependency_network_gate": true,
+      "dockerfiles": [
+        "docker/Dockerfile"
+      ],
+      "selected_dockerfile": null,
+      "root_dockerfile": null,
+      "external_services": "none",
+      "flags": [],
+      "build_network_requirement": null
+    },
+    {
+      "index": 37,
+      "name": "Navidrome",
+      "family": "Go",
+      "primary_runtime_kind": "go",
+      "runtime_in_current_catalog": false,
+      "native_route": "blocked_runtime_catalog",
+      "oci_route": "ambiguous_port",
+      "primary_bucket": "blocked_runtime_catalog",
+      "dependency_network_gate": true,
+      "dockerfiles": [
+        ".devcontainer/Dockerfile",
+        "Dockerfile",
+        "release/wix/msitools.dockerfile"
+      ],
+      "selected_dockerfile": "Dockerfile",
+      "root_dockerfile": {
+        "stages": 11,
+        "multi_stage": true,
+        "final_stage_is_default_target": true,
+        "all_bases_digest_pinned": false,
+        "arg_in_from": false,
+        "global_args": [],
+        "remote_add": [],
+        "buildkit_mounts": [
+          "bind",
+          "cache"
+        ],
+        "privileged_or_host_network": [],
+        "platforms": [
+          "$BUILDPLATFORM"
+        ],
+        "run_instructions": 22,
+        "run_needing_network": 14,
+        "copy_sources_sample": [
+          "/",
+          "/build",
+          "/out",
+          "/out/",
+          "/out/navidrome",
+          "ui/",
+          "ui/bin/",
+          "ui/package-lock.json",
+          "ui/package.json"
+        ],
+        "final": {
+          "cmd": null,
+          "entrypoint": "[\"/app/navidrome\"]",
+          "expose": [
+            "${ND_PORT}"
+          ],
+          "from": "alpine:3.22",
+          "healthcheck": false,
+          "user": null,
+          "volume": [
+            "[\"/data\", \"/music\"]"
+          ],
+          "workdir": "/app"
+        }
+      },
+      "external_services": "none",
+      "flags": [],
+      "build_network_requirement": "base image pull by tag (no digest pin); 14 RUN steps install/fetch dependencies"
+    },
+    {
+      "index": 38,
+      "name": "PocketBase",
+      "family": "Go",
+      "primary_runtime_kind": "go",
+      "runtime_in_current_catalog": false,
+      "native_route": "blocked_runtime_catalog",
+      "oci_route": "no_dockerfile",
+      "primary_bucket": "blocked_runtime_catalog",
+      "dependency_network_gate": true,
+      "dockerfiles": [],
+      "selected_dockerfile": null,
+      "root_dockerfile": null,
+      "external_services": "none",
+      "flags": [],
+      "build_network_requirement": null
+    },
+    {
+      "index": 39,
+      "name": "Glance",
+      "family": "Go",
+      "primary_runtime_kind": "go",
+      "runtime_in_current_catalog": false,
+      "native_route": "blocked_runtime_catalog",
+      "oci_route": "requires_binding",
+      "primary_bucket": "blocked_runtime_catalog",
+      "dependency_network_gate": true,
+      "dockerfiles": [
+        "Dockerfile",
+        "Dockerfile.goreleaser"
+      ],
+      "selected_dockerfile": "Dockerfile",
+      "root_dockerfile": {
+        "stages": 2,
+        "multi_stage": true,
+        "final_stage_is_default_target": true,
+        "all_bases_digest_pinned": false,
+        "arg_in_from": false,
+        "global_args": [],
+        "remote_add": [],
+        "buildkit_mounts": [],
+        "privileged_or_host_network": [],
+        "platforms": [],
+        "run_instructions": 1,
+        "run_needing_network": 1,
+        "copy_sources_sample": [
+          ".",
+          "/app/glance"
+        ],
+        "final": {
+          "cmd": null,
+          "entrypoint": "[\"/app/glance\", \"--config\", \"/app/config/glance.yml\"]",
+          "expose": [
+            "8080/tcp"
+          ],
+          "from": "alpine:3.24.1",
+          "healthcheck": false,
+          "user": null,
+          "volume": [],
+          "workdir": "/app"
+        }
+      },
+      "external_services": "none",
+      "flags": [
+        "ENTRYPOINT reads /app/config/glance.yml, which the final stage does not copy (only the binary): a config Binding is required"
+      ],
+      "build_network_requirement": "base image pull by tag (no digest pin); 1 RUN steps install/fetch dependencies"
+    },
+    {
+      "index": 40,
+      "name": "Shiori",
+      "family": "Go",
+      "primary_runtime_kind": "go",
+      "runtime_in_current_catalog": false,
+      "native_route": "blocked_runtime_catalog",
+      "oci_route": "ambiguous_port",
+      "primary_bucket": "blocked_runtime_catalog",
+      "dependency_network_gate": true,
+      "dockerfiles": [
+        "Dockerfile",
+        "Dockerfile.alpine",
+        "Dockerfile.compose",
+        "Dockerfile.e2e"
+      ],
+      "selected_dockerfile": "Dockerfile",
+      "root_dockerfile": {
+        "stages": 2,
+        "multi_stage": true,
+        "final_stage_is_default_target": true,
+        "all_bases_digest_pinned": false,
+        "arg_in_from": true,
+        "global_args": [
+          "ALPINE_VERSION=3.19"
+        ],
+        "remote_add": [],
+        "buildkit_mounts": [],
+        "privileged_or_host_network": [],
+        "platforms": [],
+        "run_instructions": 1,
+        "run_needing_network": 1,
+        "copy_sources_sample": [
+          "/etc/ssl/certs/ca-certificates.crt",
+          "/tmp",
+          "/usr/bin/shiori",
+          "/usr/share/zoneinfo",
+          "dist/shiori_${TARGETOS}_${TARGETARCH}${TARGETVARIANT}/shiori"
+        ],
+        "final": {
+          "cmd": "[\"server\"]",
+          "entrypoint": "[\"/usr/bin/shiori\"]",
+          "expose": [
+            "${PORT}"
+          ],
+          "from": "scratch",
+          "healthcheck": false,
+          "user": null,
+          "volume": [],
+          "workdir": "${SHIORI_DIR}"
+        }
+      },
+      "external_services": "none required (SQLite default)",
+      "flags": [],
+      "build_network_requirement": "base image pull by tag (no digest pin); 1 RUN steps install/fetch dependencies"
+    },
+    {
+      "index": 41,
+      "name": "Vaultwarden",
+      "family": "Rust",
+      "primary_runtime_kind": "rust",
+      "runtime_in_current_catalog": false,
+      "native_route": "blocked_runtime_catalog",
+      "oci_route": "ambiguous_selection",
+      "primary_bucket": "blocked_runtime_catalog",
+      "dependency_network_gate": true,
+      "dockerfiles": [
+        "docker/Dockerfile.alpine",
+        "docker/Dockerfile.debian",
+        "docker/Dockerfile.j2",
+        "playwright/compose/keycloak/Dockerfile",
+        "playwright/compose/playwright/Dockerfile",
+        "playwright/compose/warden/Dockerfile"
+      ],
+      "selected_dockerfile": null,
+      "root_dockerfile": null,
+      "external_services": "none required (SQLite default)",
+      "flags": [],
+      "build_network_requirement": null
+    },
+    {
+      "index": 42,
+      "name": "Lemmy",
+      "family": "multi-service",
+      "primary_runtime_kind": "rust",
+      "runtime_in_current_catalog": false,
+      "native_route": "blocked_external_service",
+      "oci_route": "blocked_external_service",
+      "primary_bucket": "blocked_external_service",
+      "dependency_network_gate": true,
+      "dockerfiles": [
+        "docker/Dockerfile"
+      ],
+      "selected_dockerfile": null,
+      "root_dockerfile": null,
+      "external_services": "postgres required",
+      "flags": [],
+      "build_network_requirement": null
+    },
+    {
+      "index": 43,
+      "name": "Paperless-ngx",
+      "family": "multi-service",
+      "primary_runtime_kind": "python",
+      "runtime_in_current_catalog": true,
+      "native_route": "blocked_external_service",
+      "oci_route": "blocked_external_service",
+      "primary_bucket": "blocked_external_service",
+      "dependency_network_gate": true,
+      "dockerfiles": [
+        ".devcontainer/Dockerfile",
+        "Dockerfile"
+      ],
+      "selected_dockerfile": "Dockerfile",
+      "root_dockerfile": {
+        "stages": 3,
+        "multi_stage": true,
+        "final_stage_is_default_target": true,
+        "all_bases_digest_pinned": false,
+        "arg_in_from": false,
+        "global_args": [],
+        "remote_add": [],
+        "buildkit_mounts": [],
+        "privileged_or_host_network": [],
+        "platforms": [
+          "$BUILDPLATFORM"
+        ],
+        "run_instructions": 7,
+        "run_needing_network": 4,
+        "copy_sources_sample": [
+          "\"uv.lock\",",
+          "./docker/rootfs",
+          "./src",
+          "./src-ui",
+          "/src/src/documents/static/frontend/",
+          "[\"pyproject.toml\","
+        ],
+        "final": {
+          "cmd": null,
+          "entrypoint": "[\"/init\"]",
+          "expose": [
+            "8000"
+          ],
+          "from": "s6-overlay-base",
+          "healthcheck": true,
+          "user": null,
+          "volume": [
+            "[\"/usr/src/paperless/data\",  \"/usr/src/paperless/media\",  \"/usr/src/paperless/consume\",  \"/usr/src/paperless/export\"]"
+          ],
+          "workdir": "/usr/src/paperless/src/"
+        }
+      },
+      "external_services": "redis required (+ DB, tika/gotenberg optional)",
+      "flags": [],
+      "build_network_requirement": "base image pull by tag (no digest pin); 4 RUN steps install/fetch dependencies"
+    },
+    {
+      "index": 44,
+      "name": "Mastodon",
+      "family": "multi-service",
+      "primary_runtime_kind": "ruby",
+      "runtime_in_current_catalog": false,
+      "native_route": "blocked_external_service",
+      "oci_route": "blocked_external_service",
+      "primary_bucket": "blocked_external_service",
+      "dependency_network_gate": true,
+      "dockerfiles": [
+        ".devcontainer/Dockerfile",
+        "Dockerfile",
+        "streaming/Dockerfile"
+      ],
+      "selected_dockerfile": "Dockerfile",
+      "root_dockerfile": {
+        "stages": 9,
+        "multi_stage": true,
+        "final_stage_is_default_target": true,
+        "all_bases_digest_pinned": false,
+        "arg_in_from": true,
+        "global_args": [
+          "TARGETPLATFORM=${TARGETPLATFORM}",
+          "BUILDPLATFORM=${BUILDPLATFORM}",
+          "BASE_REGISTRY=\"docker.io\"",
+          "RUBY_VERSION=\"4.0.7\"",
+          "NODE_MAJOR_VERSION=\"24\"",
+          "DEBIAN_VERSION=\"trixie\""
+        ],
+        "remote_add": [],
+        "buildkit_mounts": [
+          "cache"
+        ],
+        "privileged_or_host_network": [],
+        "platforms": [],
+        "run_instructions": 18,
+        "run_needing_network": 3,
+        "copy_sources_sample": [
+          "${FFMPEG_URL}/n${FFMPEG_VERSION}.tar.gz",
+          "${VIPS_URL}/v${VIPS_VERSION}/vips-${VIPS_VERSION}.tar.xz",
+          ".",
+          "/opt/mastodon",
+          "/opt/mastodon/public/assets",
+          "/opt/mastodon/public/packs",
+          "/usr/local/bin",
+          "/usr/local/bundle/",
+          "/usr/local/ffmpeg/bin",
+          "/usr/local/ffmpeg/lib",
+          "/usr/local/lib",
+          "/usr/local/libvips/bin"
+        ],
+        "final": {
+          "cmd": null,
+          "entrypoint": "[\"/usr/bin/tini\", \"--\"]",
+          "expose": [
+            "3000"
+          ],
+          "from": "ruby",
+          "healthcheck": false,
+          "user": "mastodon",
+          "volume": [],
+          "workdir": null
+        }
+      },
+      "external_services": "postgres + redis required (+ elasticsearch optional)",
+      "flags": [],
+      "build_network_requirement": "base image pull by tag (no digest pin); 3 RUN steps install/fetch dependencies"
+    },
+    {
+      "index": 45,
+      "name": "Linkwarden",
+      "family": "multi-service",
+      "primary_runtime_kind": "node",
+      "runtime_in_current_catalog": true,
+      "native_route": "blocked_external_service",
+      "oci_route": "blocked_external_service",
+      "primary_bucket": "blocked_external_service",
+      "dependency_network_gate": true,
+      "dockerfiles": [
+        "Dockerfile"
+      ],
+      "selected_dockerfile": "Dockerfile",
+      "root_dockerfile": {
+        "stages": 3,
+        "multi_stage": true,
+        "final_stage_is_default_target": true,
+        "all_bases_digest_pinned": false,
+        "arg_in_from": false,
+        "global_args": [],
+        "remote_add": [],
+        "buildkit_mounts": [
+          "cache"
+        ],
+        "privileged_or_host_network": [],
+        "platforms": [],
+        "run_instructions": 9,
+        "run_needing_network": 8,
+        "copy_sources_sample": [
+          ".",
+          ".yarnrc.yml",
+          "/data/.yarnrc.yml",
+          "/data/apps/web",
+          "/data/apps/worker",
+          "/data/node_modules",
+          "/data/package.json",
+          "/data/packages",
+          "/data/yarn.lock",
+          "/usr/local/cargo/bin/monolith",
+          "apps/web/package.json",
+          "apps/worker/package.json"
+        ],
+        "final": {
+          "cmd": "[\"sh\", \"-c\", \"export PATH=/data/node_modules/.bin:$PATH && prisma migrate deploy --schema=/data/packages/prisma/schema.prisma && exec concurrently -k -n web,worker \\\"cd /data/apps/web && exec next sta",
+          "entrypoint": null,
+          "expose": [
+            "3000"
+          ],
+          "from": "node:22.23-bookworm-slim",
+          "healthcheck": true,
+          "user": null,
+          "volume": [],
+          "workdir": "/data"
+        }
+      },
+      "external_services": "postgres required (+ meilisearch optional)",
+      "flags": [],
+      "build_network_requirement": "base image pull by tag (no digest pin); 8 RUN steps install/fetch dependencies"
+    },
+    {
+      "index": 46,
+      "name": "NetBox",
+      "family": "multi-service",
+      "primary_runtime_kind": "python",
+      "runtime_in_current_catalog": true,
+      "native_route": "blocked_external_service",
+      "oci_route": "blocked_external_service",
+      "primary_bucket": "blocked_external_service",
+      "dependency_network_gate": true,
+      "dockerfiles": [],
+      "selected_dockerfile": null,
+      "root_dockerfile": null,
+      "external_services": "postgres + redis required",
+      "flags": [],
+      "build_network_requirement": null
+    },
+    {
+      "index": 47,
+      "name": "BookStack",
+      "family": "PHP",
+      "primary_runtime_kind": "php",
+      "runtime_in_current_catalog": false,
+      "native_route": "blocked_external_service",
+      "oci_route": "blocked_external_service",
+      "primary_bucket": "blocked_external_service",
+      "dependency_network_gate": true,
+      "dockerfiles": [
+        "dev/docker/Dockerfile",
+        "dev/docker/db-testing/Dockerfile"
+      ],
+      "selected_dockerfile": null,
+      "root_dockerfile": null,
+      "external_services": "mysql required",
+      "flags": [],
+      "build_network_requirement": null
+    },
+    {
+      "index": 48,
+      "name": "Firefly III",
+      "family": "PHP",
+      "primary_runtime_kind": "php",
+      "runtime_in_current_catalog": false,
+      "native_route": "blocked_external_service",
+      "oci_route": "blocked_external_service",
+      "primary_bucket": "blocked_external_service",
+      "dependency_network_gate": true,
+      "dockerfiles": [],
+      "selected_dockerfile": null,
+      "root_dockerfile": null,
+      "external_services": "DB required (SQLite possible)",
+      "flags": [],
+      "build_network_requirement": null
+    },
+    {
+      "index": 49,
+      "name": "OpenRefine",
+      "family": "JVM",
+      "primary_runtime_kind": "jvm",
+      "runtime_in_current_catalog": false,
+      "native_route": "blocked_runtime_catalog",
+      "oci_route": "no_dockerfile",
+      "primary_bucket": "blocked_runtime_catalog",
+      "dependency_network_gate": true,
+      "dockerfiles": [],
+      "selected_dockerfile": null,
+      "root_dockerfile": null,
+      "external_services": "none",
+      "flags": [],
+      "build_network_requirement": null
+    },
+    {
+      "index": 50,
+      "name": "Jellyfin",
+      "family": ".NET",
+      "primary_runtime_kind": "dotnet",
+      "runtime_in_current_catalog": false,
+      "native_route": "blocked_runtime_catalog",
+      "oci_route": "no_dockerfile",
+      "primary_bucket": "blocked_runtime_catalog",
+      "dependency_network_gate": true,
+      "dockerfiles": [],
+      "selected_dockerfile": null,
+      "root_dockerfile": null,
+      "external_services": "none (ffmpeg process)",
+      "flags": [],
+      "build_network_requirement": null
+    }
+  ]
+}
