@@ -91,7 +91,9 @@ null unless actually observed. Cost is an explicit cache-miss upper estimate
 from the configured snapshot, not a provider billing receipt or identity.
 
 Protocol reference: [DeepSeek Chat Completions](https://api-docs.deepseek.com/api/create-chat-completion/).
-No live model/version or real pricing snapshot has been preregistered.
+D3 v2 now pins the live model, prompt and peak price caps; see the
+[preregistered plan](../../ops/formation-deepseek-d3-plan-v2.md) and
+[actual live results](../../ops/formation-deepseek-d3-results.md).
 
 ## Durable requester path and restart
 
@@ -113,7 +115,7 @@ match persisted evidence. On restart, independently unknown usage is not
 invented: config, D1 consistency, and Rust raw recompilation are checked.
 Fixed/general downgrade or unexpected general provenance fails closed.
 
-## USD 5 guard (synthetic tests only here)
+## USD 5 guard (D2 synthetic tests; D3 live evidence recorded separately)
 
 `CallBudget` is an acceptance-side, append-only reservation journal, not a new
 Formation semantic budget. Explicit peak/cache-miss prices and input/output
@@ -126,8 +128,9 @@ unknown usage or timeouts. Reopening verifies the exact plan; duplicate cells,
 exhausted calls, changed prices/plans and partial/corrupt writes fail closed.
 Creating over an existing journal is refused. Caller must retain this one
 journal for the whole authorized run; it is not an adversarial billing service.
-D3 still requires an approved preregistration and current price recheck before
-reading any credential. Mock prices/usages are **synthetic**, not live spend.
+D3 requires an approved preregistration and current price recheck before
+reading any credential; the v2 live run satisfied both. D2 mock prices/usages
+remain **synthetic**, separate from the observed D3 usage and cost estimates.
 
 ## Verification and current state
 
@@ -136,9 +139,12 @@ and [acceptance report](../../ops/formation-deepseek-d2-2026-09-28.md).
 
 - D2-C implemented and locally verified; actual integration uses loopback
   mock model + real pinned Coordinator/D1 + Python Runtime/Verifier.
-- No D2-C merge or deployment is implied by these results.
-- D1/D2-A/D2-B merged; no remote 0304/0305/0306 apply or deployment in this task.
-- Live calls = 0, spend = $0; `.dev.vars` / DEEPSEEK_API_KEY value not read.
-- D3 G0–G5: not run; exact live model is not preregistered.
-- #1421 untouched; 6a stays independent; 5b is not yet closed as live general
-  LLM integration, and no efficacy/production-ready claim is made.
+- D2-C #1427 and D3 controller #1431 are merged; no deployment is implied.
+- D1/D2-A/D2-B merged; no remote migration or deployment in this task.
+- [D3 v2 actual live acceptance](../../ops/formation-deepseek-d3-results.md):
+  G0–G5 PASS, six calls, no retry; 5428 input / 276 output tokens,
+  $0.001967 peak-equivalent estimate, $0.486612 reserved maximum.
+  Actual account billing was not measured. Credential read occurred only after
+  full preflight through the explicitly authorized limited injector.
+- 5b is completed as bounded general-LLM Candidate Generation integration.
+- #1421 untouched; 6a stays independent; no general efficacy or production-ready claim.
