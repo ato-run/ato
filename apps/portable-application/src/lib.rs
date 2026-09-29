@@ -41,6 +41,7 @@ pub mod local_instance;
 pub mod oci_archive;
 pub mod portability_export;
 pub mod portability_plan;
+pub mod source_oci;
 pub mod validator_agent;
 
 use instance_snapshot::{
