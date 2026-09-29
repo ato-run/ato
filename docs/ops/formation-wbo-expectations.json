@@ -22,7 +22,8 @@
         "production.cloudfront.docker.com"
       ],
       "max_bytes": 209715200,
-      "endpoint_change": "2026-09-30: blob endpoint replaced by the exact host production.cloudfront.docker.com observed in run 1 (user-approved; no wildcard). Any other unlisted redirect stops the phase."
+      "endpoint_change": "2026-09-30: blob endpoint replaced by the exact host production.cloudfront.docker.com observed in run 1 (user-approved; no wildcard). Any other unlisted redirect stops the phase.",
+      "reuse": "runs after run 2 reuse the base archive frozen in run 2 (root sha256:ebfe2f90...); no second acquisition"
     },
     "build_egress": {
       "hosts": [
@@ -41,10 +42,11 @@
       "build_memory_bytes": 4294967296,
       "build_cpu_limit_millis": 4000,
       "build_pids_limit": 2048,
-      "max_archive_bytes": 134217728,
+      "max_archive_bytes": 536870912,
       "runtime_memory_bytes": 536870912,
       "runtime_cpu_limit_millis": 1000,
-      "runtime_pids_limit": 256
+      "runtime_pids_limit": 256,
+      "archive_bound_change": "2026-09-30: raised from 128 MiB to 512 MiB after run 2 built a 372,919,274-byte image (user decision); portable bundles may now reach 768 MiB. Hosted import keeps its own limits and is out of scope."
     },
     "declared_transport_port": 80,
     "authorized_state": [
@@ -60,7 +62,7 @@
     "note": "D and E below are functional checks outside K; GET / = 200 is never a functional success"
   },
   "results_reported_separately": {
-    "A_image_build": "ato __source-oci-build exits 0 with a verified archive <= 128 MiB, oci.working_dir /opt/app and [[state]] server_data; any failure is its typed code (e.g. source_oci_egress_bound, source_oci_build_failed, source_oci_artifact_bounds)",
+    "A_image_build": "ato __source-oci-build exits 0 with a verified archive <= 512 MiB, oci.working_dir /opt/app and [[state]] server_data; any failure is its typed code (e.g. source_oci_egress_bound, source_oci_build_failed, source_oci_artifact_bounds)",
     "B_container_start": "ato app start reaches an active Run on an offline private store, without adding capabilities, root or network; the image's setcap on node gives nothing under cap-drop ALL + no-new-privileges, so an exec or bind failure is a typed start failure and the run stops there",
     "C_fresh_receipt": "the Run's receipt has fully_satisfied = true for the K above",
     "D_client_reflection": "two headless Chrome clients open /boards/ato-wbo-check; client A draws one pencil line with id ato-wbo-probe-1 through WBO's own client API; client B renders an element with that id within 10 s, and it was absent before",

@@ -10,8 +10,10 @@ use base64::Engine;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-const MAX_ARCHIVE_BYTES: usize = 128 * 1024 * 1024;
-const MAX_MEMBER_BYTES: u64 = 64 * 1024 * 1024;
+/// Portable OCI transport bound (raised from 128 MiB to 512 MiB on
+/// 2026-09-30 for the WBO source build; user-approved).
+pub const MAX_ARCHIVE_BYTES: usize = 512 * 1024 * 1024;
+const MAX_MEMBER_BYTES: u64 = MAX_ARCHIVE_BYTES as u64;
 const MAX_MEMBERS: usize = 32;
 
 pub struct ValidatedOciArchive {
