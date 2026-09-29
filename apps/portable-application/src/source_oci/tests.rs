@@ -182,6 +182,7 @@ fn request(dir: &Path) -> SourceOciRequest {
         platform: "linux/amd64".into(),
         base_images: vec![BaseImageInput {
             reference: format!("base:1@{root}"),
+            pinned_digest: root.clone(),
             archive: base_path.clone(),
             archive_sha256: digest(&std::fs::read(&base_path).unwrap()),
         }],
@@ -273,7 +274,7 @@ fn request_bounds_and_selection() {
         "source_oci_dockerfile_unselected"
     );
     let mut r = request(dir.path());
-    r.base_images[0].reference = "base:1".into();
+    r.base_images[0].reference = "base:1 ${TAG}".into();
     assert_eq!(
         code(materialize(&r, &b, &dir.path().join("o3"))),
         "source_oci_base_reference_invalid"
@@ -343,7 +344,9 @@ fn a_non_empty_store_and_unverified_base_inputs_are_refused_before_any_build() {
         "source_oci_base_digest_mismatch"
     );
     let mut r = request(dir.path());
-    r.base_images[0].reference = format!("base:1@sha256:{}", "2".repeat(64));
+    let other = format!("sha256:{}", "2".repeat(64));
+    r.base_images[0].reference = format!("base:1@{other}");
+    r.base_images[0].pinned_digest = other;
     assert_eq!(
         code(materialize(&r, &b, &dir.path().join("o3"))),
         "source_oci_base_digest_mismatch"
@@ -431,5 +434,35 @@ fn artifact_checks_bounds_port_cmd_and_platform() {
     assert_eq!(
         code(materialize(&r, &b, &dir.path().join("o9"))),
         "source_oci_artifact_digest_mismatch"
+    );
+}
+
+#[test]
+fn a_tag_reference_is_resolved_only_through_an_explicit_pinned_digest() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = request(dir.path());
+    r.base_images[0].reference = "base:1".into();
+    let b = fake(ok_config(), BuildOutcome::Built);
+    let m = materialize(&r, &b, &dir.path().join("out")).unwrap();
+    assert_eq!(
+        m.provenance["inputs"]["base_images"][0]["reference"],
+        "base:1"
+    );
+    assert_eq!(
+        m.provenance["inputs"]["base_images"][0]["pinned_digest"],
+        r.base_images[0].pinned_digest
+    );
+    assert!(
+        b.calls
+            .borrow()
+            .iter()
+            .any(|c| c.contains("(\"base:1\", \"docker-image://ato-base/b0:frozen\")"))
+    );
+    // A written digest that differs from the pinned one is refused.
+    let mut r = request(dir.path());
+    r.base_images[0].pinned_digest = format!("sha256:{}", "4".repeat(64));
+    assert_eq!(
+        code(materialize(&r, &b, &dir.path().join("o"))),
+        "source_oci_base_reference_invalid"
     );
 }

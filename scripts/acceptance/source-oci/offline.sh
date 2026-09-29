@@ -51,7 +51,7 @@ SRC_SHA="sha256:$(sha256sum "$W/source.tar.gz" | cut -d' ' -f1)"
 cat > "$W/request.json" <<JSON
 {"schema":"ato.source-oci-request/1","title":"source-to-OCI fixture","source_archive":"$W/source.tar.gz",
  "source_archive_sha256":"$SRC_SHA","dockerfile":"Dockerfile","platform":"linux/amd64",
- "base_images":[{"reference":"$REF","archive":"$BASE_ARCHIVE","archive_sha256":"$BASE_SHA"}],
+ "base_images":[{"reference":"$REF","pinned_digest":"sha256:c4634f578a412db396771b61b064c6e546c9d6414c7fb5b1b05d5871f1885f7b","archive":"$BASE_ARCHIVE","archive_sha256":"$BASE_SHA"}],
  "declared_transport_port":8080,
  "policy":{"network":"none","build_timeout_seconds":$TIMEOUT,"max_archive_bytes":$MAXB,
    "memory_bytes":268435456,"cpu_limit_millis":500,"pids_limit":128}}
