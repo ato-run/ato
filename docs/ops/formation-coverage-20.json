@@ -1,0 +1,1797 @@
+{
+  "schema": "ato.formation-coverage-results/1",
+  "cohort_plan_sha256": "09dd673a79b73e561dc872e75268008c4703615097a1019495ed652e51e7f556",
+  "preregistration_commit": "91ae0145",
+  "execution_helper_sha": "84ef8ae009cfd778d1195b10a3812292a98de427",
+  "semantic_implementation_sha": "857cb1ed4d71c99fde95a0302e0acf6952cdc7e8",
+  "execution": "existing local::run on isolated Linux/aarch64; not mock, not an app-specific D; not a multi-environment Runtime Network coverage claim",
+  "completed_app_classifications": 20,
+  "typed_contract_successes": 1,
+  "functional_application_successes_established": 0,
+  "model_calls": 0,
+  "primary_distribution": {
+    "known-D/authoring": 16,
+    "success": 1,
+    "effect/policy": 3
+  },
+  "failure_code_distribution": {
+    "preset_node_static_needs_lockfile": 8,
+    "preset_node_static_needs_build_script": 2,
+    "network_denied": 3,
+    "preset_no_match": 6
+  },
+  "binary_hashes": {
+    "coverage_baseline": "61038dd4f7bcecbbfdb73505cef98be6db60afb0dad214ee009e95b518649d2d",
+    "ato-formation-worker": "d09168a291da8df73e1dd94c462114b0c4792ffe5b4b3c5f7f582c07d6199a3d"
+  },
+  "applications": [
+    {
+      "index": 1,
+      "name": "Excalidraw",
+      "seed_candidate": "Excalidraw",
+      "repo": "https://github.com/excalidraw/excalidraw",
+      "ref": "5a406e51875157bece389b9bc92d41ff241d5f3d",
+      "ref_selection": "default branch HEAD at source/license-only review",
+      "archive_url": "https://codeload.github.com/excalidraw/excalidraw/tar.gz/5a406e51875157bece389b9bc92d41ff241d5f3d",
+      "archive_sha256": "94603a7879307fd68bd993b4758a1ccdcf1ff068222bf98a9f5b6c5bdaca56a3",
+      "archive_bytes": 36404974,
+      "license": "MIT",
+      "license_file": "LICENSE",
+      "license_sha256": "1352d204fdb90d5e482c13139d848bc2c9300a9a7de358a0a558a23e72d0d8be",
+      "primary_language": "TypeScript",
+      "framework": "React",
+      "category": "whiteboard",
+      "primary_blocker": "known-D/authoring",
+      "secondary_blockers": [],
+      "confidence": "high for observed typed boundary; downstream capability not measured",
+      "manual_intervention": false,
+      "execution_scope": "Actual existing Formation typed terminal result before a runnable candidate/verification; no guessed K/D.",
+      "K": {
+        "contract_ref": null,
+        "source": "existing authored/preset compiler",
+        "missing_reason": "No bound K at the recorded terminal boundary"
+      },
+      "known_candidate_D": [],
+      "runtime_requirements": {
+        "constraint": "exact local",
+        "observed_profile": {
+          "formation.containment": "bwrap+landlock",
+          "formation.toolchain_root": "/opt/ato/toolchains",
+          "platform.arch": "aarch64",
+          "platform.os": "linux"
+        },
+        "network_policy": "denied"
+      },
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_node_static_needs_lockfile",
+            "message": "A built web app needs a package-lock.json so the build is reproducible. Run `npm install` once and include the lockfile.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_node_static_needs_lockfile",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_node_static_needs_lockfile",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_node_static_needs_lockfile",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_node_static_needs_lockfile",
+          "message": "A built web app needs a package-lock.json so the build is reproducible. Run `npm install` once and include the lockfile.",
+          "stage": "preset"
+        }
+      ],
+      "receipts": [],
+      "retained_refs": [],
+      "observation_sha256": "c80db3b85970d54254750782d29f9a00a12ce38590b51bba0e6d6efe7b3c3bba",
+      "raw_formation_status": "no_verified_route"
+    },
+    {
+      "index": 2,
+      "name": "WBO",
+      "seed_candidate": "tldraw",
+      "repo": "https://github.com/lovasoa/whitebophir",
+      "ref": "06e675c5cd8a25900f0b7aa771933e29f551f96a",
+      "ref_selection": "default branch HEAD at source/license-only review",
+      "archive_url": "https://codeload.github.com/lovasoa/whitebophir/tar.gz/06e675c5cd8a25900f0b7aa771933e29f551f96a",
+      "archive_sha256": "8af51caaa6b8434a06e7a41753ae54381ba1595c362050e8c1d1836dfd604d65",
+      "archive_bytes": 648475,
+      "license": "AGPL-3.0",
+      "license_file": "LICENSE",
+      "license_sha256": "8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef",
+      "primary_language": "JavaScript",
+      "framework": "Node.js/browser JavaScript",
+      "category": "whiteboard",
+      "replacement": {
+        "original_repo": "https://github.com/tldraw/tldraw",
+        "original_ref": "fdd9b4dee0d968cb92b52db2b6e0d37ffc906d74",
+        "reason": "Production and standalone distribution restrictions in current tldraw license; replace with AGPL WBO before measurement.",
+        "original_license_url": "https://github.com/tldraw/tldraw/blob/fdd9b4dee0d968cb92b52db2b6e0d37ffc906d74/LICENSE.md"
+      },
+      "primary_blocker": "known-D/authoring",
+      "secondary_blockers": [],
+      "confidence": "high for observed typed boundary; downstream capability not measured",
+      "manual_intervention": false,
+      "execution_scope": "Actual existing Formation typed terminal result before a runnable candidate/verification; no guessed K/D.",
+      "K": {
+        "contract_ref": null,
+        "source": "existing authored/preset compiler",
+        "missing_reason": "No bound K at the recorded terminal boundary"
+      },
+      "known_candidate_D": [],
+      "runtime_requirements": {
+        "constraint": "exact local",
+        "observed_profile": {
+          "formation.containment": "bwrap+landlock",
+          "formation.toolchain_root": "/opt/ato/toolchains",
+          "platform.arch": "aarch64",
+          "platform.os": "linux"
+        },
+        "network_policy": "denied"
+      },
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_node_static_needs_build_script",
+            "message": "A built web app needs a `build` script in package.json. Ato runs `npm run build` and publishes what it writes to `dist/`.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_node_static_needs_build_script",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_node_static_needs_build_script",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_node_static_needs_build_script",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_node_static_needs_build_script",
+          "message": "A built web app needs a `build` script in package.json. Ato runs `npm run build` and publishes what it writes to `dist/`.",
+          "stage": "preset"
+        }
+      ],
+      "receipts": [],
+      "retained_refs": [],
+      "observation_sha256": "2d3fe76bdbc364174481d7fd5a1782ee1ecb480c084b821b2308e8d9476a83ed",
+      "raw_formation_status": "no_verified_route"
+    },
+    {
+      "index": 3,
+      "name": "Uptime Kuma",
+      "seed_candidate": "Uptime Kuma",
+      "repo": "https://github.com/louislam/uptime-kuma",
+      "ref": "b6adc19d00e4e6700f4b6ffc64a5c4e105e8004c",
+      "ref_selection": "default branch HEAD at source/license-only review",
+      "archive_url": "https://codeload.github.com/louislam/uptime-kuma/tar.gz/b6adc19d00e4e6700f4b6ffc64a5c4e105e8004c",
+      "archive_sha256": "a113adca092614c99c868961bbab1936b36a39685d4584c6863b64c6902671d6",
+      "archive_bytes": 2239785,
+      "license": "MIT",
+      "license_file": "LICENSE",
+      "license_sha256": "a0e4fe6bed45a817794411c8ddf2deffbe010ac3a2b2f47e5b8d2fe2f9486883",
+      "primary_language": "JavaScript",
+      "framework": "Vue/Node.js",
+      "category": "monitoring",
+      "primary_blocker": "success",
+      "secondary_blockers": [
+        "runtime/toolchain",
+        "browser/ui"
+      ],
+      "confidence": "high for observed typed boundary; downstream capability not measured",
+      "manual_intervention": false,
+      "execution_scope": "Typed static-files Contract only (GET / 200 and frozen source identity). This does NOT establish the Uptime Kuma monitoring application is functional; no Browser/UI, backend, persistence or monitoring behavior gate was run.",
+      "K": {
+        "contract_ref": "sha256:c6d3a140b92484e956e6f43f5774acccd986d2ec8d119373f266849eb75777f3",
+        "source": "existing authored/preset compiler",
+        "missing_reason": null
+      },
+      "known_candidate_D": [
+        "sha256:72b42150e37ae426360a3339a1875a39015ff00429e57a1c272aa904a4b86520"
+      ],
+      "runtime_requirements": {
+        "constraint": "exact local",
+        "observed_profile": {
+          "formation.containment": "bwrap+landlock",
+          "formation.toolchain_root": "/opt/ato/toolchains",
+          "platform.arch": "aarch64",
+          "platform.os": "linux"
+        },
+        "network_policy": "denied"
+      },
+      "attempts": [
+        {
+          "attempt_id": "local-2065136-3",
+          "candidate": "node-static/v1",
+          "failure": {
+            "code": "intent_unsupported_node",
+            "message": "node >= 26.2.0 is not satisfied by any version this resolver provisions",
+            "stage": "projection"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "intent_unsupported_node",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "intent_unsupported_node",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "intent_unsupported_node",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "failed"
+        },
+        {
+          "attempt_id": "local-2065136-4",
+          "candidate": "static-files/v1",
+          "contract_ref": "sha256:c6d3a140b92484e956e6f43f5774acccd986d2ec8d119373f266849eb75777f3",
+          "derivation_ref": "sha256:72b42150e37ae426360a3339a1875a39015ff00429e57a1c272aa904a4b86520",
+          "outcomes": {
+            "cleanup": {
+              "state": "succeeded"
+            },
+            "publication": {
+              "state": "succeeded"
+            },
+            "runtime_verification": {
+              "state": "succeeded"
+            },
+            "seal": {
+              "state": "succeeded"
+            }
+          },
+          "realization": {
+            "build_network": "n/a",
+            "candidate_network": "loopback only",
+            "containment": "none; serves the produced bundle's files, runs nothing",
+            "destroyed": true,
+            "endpoints": {
+              "app.http": "loopback static server"
+            },
+            "executor": "runtime-static-loopback",
+            "workspace": "the produced static web bundle, read-only"
+          },
+          "receipt": {
+            "contract_ref": "sha256:c6d3a140b92484e956e6f43f5774acccd986d2ec8d119373f266849eb75777f3",
+            "derivation_ref": "sha256:72b42150e37ae426360a3339a1875a39015ff00429e57a1c272aa904a4b86520",
+            "execution": {
+              "attempt_id": "local-2065136-4",
+              "endpoint": "http://127.0.0.1:46603/",
+              "platform": "linux/aarch64",
+              "realization": "static_web",
+              "request_id": "local-2065136-2-1790648681255151174"
+            },
+            "fully_satisfied": true,
+            "observations": [
+              {
+                "evidence": {
+                  "body_sha256": "sha256:a6c88434385326072390e99f97dc3cac7949dea7a4d5f770a7ce8fb46fc36c93",
+                  "method": "GET",
+                  "path": "/",
+                  "status": 200
+                },
+                "id": "root",
+                "outcome": "satisfied"
+              },
+              {
+                "evidence": {
+                  "digest": "sha256:ede8a1c9d2b2b5d90c6f11b7ccbe32329d4e391b1089d8709a1eb9628371d297",
+                  "input": "workspace"
+                },
+                "id": "source-identity",
+                "outcome": "satisfied"
+              }
+            ],
+            "schema": "ato.contract-verification-receipt/1",
+            "target": {
+              "kind": "formation-runtime"
+            }
+          },
+          "runtime_id": "local",
+          "status": "verified",
+          "verification": {
+            "verdicts": [
+              {
+                "id": "root",
+                "outcome": {
+                  "result": "satisfied"
+                }
+              },
+              {
+                "id": "source-identity",
+                "outcome": {
+                  "result": "satisfied"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "intent_unsupported_node",
+          "message": "node >= 26.2.0 is not satisfied by any version this resolver provisions",
+          "stage": "projection"
+        }
+      ],
+      "receipts": [
+        {
+          "contract_ref": "sha256:c6d3a140b92484e956e6f43f5774acccd986d2ec8d119373f266849eb75777f3",
+          "derivation_ref": "sha256:72b42150e37ae426360a3339a1875a39015ff00429e57a1c272aa904a4b86520",
+          "execution": {
+            "attempt_id": "local-2065136-4",
+            "endpoint": "http://127.0.0.1:46603/",
+            "platform": "linux/aarch64",
+            "realization": "static_web",
+            "request_id": "local-2065136-2-1790648681255151174"
+          },
+          "fully_satisfied": true,
+          "observations": [
+            {
+              "evidence": {
+                "body_sha256": "sha256:a6c88434385326072390e99f97dc3cac7949dea7a4d5f770a7ce8fb46fc36c93",
+                "method": "GET",
+                "path": "/",
+                "status": 200
+              },
+              "id": "root",
+              "outcome": "satisfied"
+            },
+            {
+              "evidence": {
+                "digest": "sha256:ede8a1c9d2b2b5d90c6f11b7ccbe32329d4e391b1089d8709a1eb9628371d297",
+                "input": "workspace"
+              },
+              "id": "source-identity",
+              "outcome": "satisfied"
+            }
+          ],
+          "schema": "ato.contract-verification-receipt/1",
+          "target": {
+            "kind": "formation-runtime"
+          }
+        }
+      ],
+      "retained_refs": [
+        "sha256:b9e64e2bf7ebb104c466ce08354476941ccddeca53f628b9f178e38b3044b704"
+      ],
+      "observation_sha256": "8a99fbbdf8bb227d351f522150e67477249770a33a630d7c4686f42e8b9ce22e",
+      "raw_formation_status": "formed"
+    },
+    {
+      "index": 4,
+      "name": "FreshRSS",
+      "seed_candidate": "FreshRSS",
+      "repo": "https://github.com/FreshRSS/FreshRSS",
+      "ref": "a8e5e6300b80514d5a14140566c2386a80cf8450",
+      "ref_selection": "default branch HEAD at source/license-only review",
+      "archive_url": "https://codeload.github.com/FreshRSS/FreshRSS/tar.gz/a8e5e6300b80514d5a14140566c2386a80cf8450",
+      "archive_sha256": "f4da8a27006221c4c7fb77c5417cff067a842e29b1d215b0491a82c8e079d117",
+      "archive_bytes": 4838817,
+      "license": "AGPL-3.0",
+      "license_file": "LICENSE.txt",
+      "license_sha256": "e9df4c4e4e64b8168a71c3c67668dcffabbe8fca11d4ac4a7d5482562cd1679c",
+      "primary_language": "PHP",
+      "framework": "PHP",
+      "category": "feed-reader",
+      "primary_blocker": "known-D/authoring",
+      "secondary_blockers": [],
+      "confidence": "high for observed typed boundary; downstream capability not measured",
+      "manual_intervention": false,
+      "execution_scope": "Actual existing Formation typed terminal result before a runnable candidate/verification; no guessed K/D.",
+      "K": {
+        "contract_ref": null,
+        "source": "existing authored/preset compiler",
+        "missing_reason": "No bound K at the recorded terminal boundary"
+      },
+      "known_candidate_D": [],
+      "runtime_requirements": {
+        "constraint": "exact local",
+        "observed_profile": {
+          "formation.containment": "bwrap+landlock",
+          "formation.toolchain_root": "/opt/ato/toolchains",
+          "platform.arch": "aarch64",
+          "platform.os": "linux"
+        },
+        "network_policy": "denied"
+      },
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_node_static_needs_build_script",
+            "message": "A built web app needs a `build` script in package.json. Ato runs `npm run build` and publishes what it writes to `dist/`.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_node_static_needs_build_script",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_node_static_needs_build_script",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_node_static_needs_build_script",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_node_static_needs_build_script",
+          "message": "A built web app needs a `build` script in package.json. Ato runs `npm run build` and publishes what it writes to `dist/`.",
+          "stage": "preset"
+        }
+      ],
+      "receipts": [],
+      "retained_refs": [],
+      "observation_sha256": "2d3fe76bdbc364174481d7fd5a1782ee1ecb480c084b821b2308e8d9476a83ed",
+      "raw_formation_status": "no_verified_route"
+    },
+    {
+      "index": 5,
+      "name": "linkding",
+      "seed_candidate": "linkding",
+      "repo": "https://github.com/sissbruecker/linkding",
+      "ref": "27b7303baf41bb28babc610ac8eaa486e1ddfab5",
+      "ref_selection": "default branch HEAD at source/license-only review",
+      "archive_url": "https://codeload.github.com/sissbruecker/linkding/tar.gz/27b7303baf41bb28babc610ac8eaa486e1ddfab5",
+      "archive_sha256": "c0cba0ea042b67ca68edef38edc9c40608bf62b0c2a8d32194ae2d5f3a14236c",
+      "archive_bytes": 3207161,
+      "license": "MIT",
+      "license_file": "LICENSE.txt",
+      "license_sha256": "96dfab90f973f8f6faaf7f98e51178bd1acb188b8f80a3060a7c60e483a20699",
+      "primary_language": "Python",
+      "framework": "Django",
+      "category": "bookmarks",
+      "primary_blocker": "effect/policy",
+      "secondary_blockers": [
+        "dependency/network"
+      ],
+      "confidence": "high for observed typed boundary; downstream capability not measured",
+      "manual_intervention": false,
+      "execution_scope": "Actual existing Formation typed terminal result before a runnable candidate/verification; no guessed K/D.",
+      "K": {
+        "contract_ref": null,
+        "source": "existing authored/preset compiler",
+        "missing_reason": "No bound K at the recorded terminal boundary"
+      },
+      "known_candidate_D": [
+        "sha256:c36fb518fbadc85ff0493372470bb4f2ed34dda5eec97511e1f0557a162c8b30"
+      ],
+      "runtime_requirements": {
+        "constraint": "exact local",
+        "observed_profile": {
+          "formation.containment": "bwrap+landlock",
+          "formation.toolchain_root": "/opt/ato/toolchains",
+          "platform.arch": "aarch64",
+          "platform.os": "linux"
+        },
+        "network_policy": "denied"
+      },
+      "attempts": [
+        {
+          "attempt_id": "local-2065147-3",
+          "candidate": "node-static/v1",
+          "contract_ref": "sha256:a8f859925fba9ad0fce1b175ba9cd1289243da0604b9e2bb20cea2c4466f5f5c",
+          "derivation_ref": "sha256:c36fb518fbadc85ff0493372470bb4f2ed34dda5eec97511e1f0557a162c8b30",
+          "failure": {
+            "code": "network_denied",
+            "message": "this candidate's build resolves dependencies from the network and the request denies it; it was not attempted",
+            "stage": "admission"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "network_denied",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "network_denied",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "network_denied",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "network_denied",
+          "message": "this candidate's build resolves dependencies from the network and the request denies it; it was not attempted",
+          "stage": "admission"
+        }
+      ],
+      "receipts": [],
+      "retained_refs": [],
+      "observation_sha256": "7ed9bb96b3388898af39ad3bd6e8c5716c048d2eed7f3954b30afc0beaeb28a0",
+      "raw_formation_status": "no_verified_route"
+    },
+    {
+      "index": 6,
+      "name": "SearXNG",
+      "seed_candidate": "SearXNG",
+      "repo": "https://github.com/searxng/searxng",
+      "ref": "12f8b6515ca77c3c3bc1498584950ef5daca1433",
+      "ref_selection": "default branch HEAD at source/license-only review",
+      "archive_url": "https://codeload.github.com/searxng/searxng/tar.gz/12f8b6515ca77c3c3bc1498584950ef5daca1433",
+      "archive_sha256": "13dbc1adeff80145c439686b2a7588aca89604bd1d86cd5623d029376e4a59bb",
+      "archive_bytes": 6238696,
+      "license": "AGPL-3.0",
+      "license_file": "LICENSE",
+      "license_sha256": "57c8ff33c9c0cfc3ef00e650a1cc910d7ee479a8bc509f6c9209a7c2a11399d6",
+      "primary_language": "Python",
+      "framework": "Flask",
+      "category": "search",
+      "primary_blocker": "known-D/authoring",
+      "secondary_blockers": [],
+      "confidence": "high for observed typed boundary; downstream capability not measured",
+      "manual_intervention": false,
+      "execution_scope": "Actual existing Formation typed terminal result before a runnable candidate/verification; no guessed K/D.",
+      "K": {
+        "contract_ref": null,
+        "source": "existing authored/preset compiler",
+        "missing_reason": "No bound K at the recorded terminal boundary"
+      },
+      "known_candidate_D": [],
+      "runtime_requirements": {
+        "constraint": "exact local",
+        "observed_profile": {
+          "formation.containment": "bwrap+landlock",
+          "formation.toolchain_root": "/opt/ato/toolchains",
+          "platform.arch": "aarch64",
+          "platform.os": "linux"
+        },
+        "network_policy": "denied"
+      },
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_node_static_needs_lockfile",
+            "message": "A built web app needs a package-lock.json so the build is reproducible. Run `npm install` once and include the lockfile.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_node_static_needs_lockfile",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_node_static_needs_lockfile",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_node_static_needs_lockfile",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_node_static_needs_lockfile",
+          "message": "A built web app needs a package-lock.json so the build is reproducible. Run `npm install` once and include the lockfile.",
+          "stage": "preset"
+        }
+      ],
+      "receipts": [],
+      "retained_refs": [],
+      "observation_sha256": "c80db3b85970d54254750782d29f9a00a12ce38590b51bba0e6d6efe7b3c3bba",
+      "raw_formation_status": "no_verified_route"
+    },
+    {
+      "index": 7,
+      "name": "changedetection.io",
+      "seed_candidate": "changedetection.io",
+      "repo": "https://github.com/dgtlmoon/changedetection.io",
+      "ref": "0e0566721b1c483dcf7ae548210ee10532d9b181",
+      "ref_selection": "default branch HEAD at source/license-only review",
+      "archive_url": "https://codeload.github.com/dgtlmoon/changedetection.io/tar.gz/0e0566721b1c483dcf7ae548210ee10532d9b181",
+      "archive_sha256": "e2ff3e6bce58e9ea229d3769acf2fd1c9602f50a2c05009c7e0442809c364183",
+      "archive_bytes": 6044832,
+      "license": "Apache-2.0",
+      "license_file": "LICENSE",
+      "license_sha256": "94819497b44fbfbbc93198af0eb1b20144098a96c10ab577e9a868bab26d3705",
+      "primary_language": "Python",
+      "framework": "Flask",
+      "category": "change-monitor",
+      "primary_blocker": "known-D/authoring",
+      "secondary_blockers": [],
+      "confidence": "high for observed typed boundary; downstream capability not measured",
+      "manual_intervention": false,
+      "execution_scope": "Actual existing Formation typed terminal result before a runnable candidate/verification; no guessed K/D.",
+      "K": {
+        "contract_ref": null,
+        "source": "existing authored/preset compiler",
+        "missing_reason": "No bound K at the recorded terminal boundary"
+      },
+      "known_candidate_D": [],
+      "runtime_requirements": {
+        "constraint": "exact local",
+        "observed_profile": {
+          "formation.containment": "bwrap+landlock",
+          "formation.toolchain_root": "/opt/ato/toolchains",
+          "platform.arch": "aarch64",
+          "platform.os": "linux"
+        },
+        "network_policy": "denied"
+      },
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_no_match",
+            "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_no_match",
+          "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+          "stage": "preset"
+        }
+      ],
+      "receipts": [],
+      "retained_refs": [],
+      "observation_sha256": "d2ac6f1d700235df5dad70ea810b7025724176878b7acee227294041352de172",
+      "raw_formation_status": "no_verified_route"
+    },
+    {
+      "index": 8,
+      "name": "Etherpad",
+      "seed_candidate": "Etherpad",
+      "repo": "https://github.com/ether/etherpad",
+      "ref": "c080707dcd3e3dfa730bb699970ad1abf33aaf42",
+      "ref_selection": "default branch HEAD at source/license-only review",
+      "archive_url": "https://codeload.github.com/ether/etherpad/tar.gz/c080707dcd3e3dfa730bb699970ad1abf33aaf42",
+      "archive_sha256": "268168f1f5e6644f86e6c514d1f90068d01d56a1a290e5762f4ffcd1e0097ec0",
+      "archive_bytes": 7067527,
+      "license": "Apache-2.0",
+      "license_file": "LICENSE",
+      "license_sha256": "9bb380ff448a820820bf4351a3dbc68355d81e2bd936187f15528ae52cf12fc3",
+      "primary_language": "TypeScript",
+      "framework": "Node.js",
+      "category": "collaborative-editor",
+      "primary_blocker": "known-D/authoring",
+      "secondary_blockers": [],
+      "confidence": "high for observed typed boundary; downstream capability not measured",
+      "manual_intervention": false,
+      "execution_scope": "Actual existing Formation typed terminal result before a runnable candidate/verification; no guessed K/D.",
+      "K": {
+        "contract_ref": null,
+        "source": "existing authored/preset compiler",
+        "missing_reason": "No bound K at the recorded terminal boundary"
+      },
+      "known_candidate_D": [],
+      "runtime_requirements": {
+        "constraint": "exact local",
+        "observed_profile": {
+          "formation.containment": "bwrap+landlock",
+          "formation.toolchain_root": "/opt/ato/toolchains",
+          "platform.arch": "aarch64",
+          "platform.os": "linux"
+        },
+        "network_policy": "denied"
+      },
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_node_static_needs_lockfile",
+            "message": "A built web app needs a package-lock.json so the build is reproducible. Run `npm install` once and include the lockfile.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_node_static_needs_lockfile",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_node_static_needs_lockfile",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_node_static_needs_lockfile",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_node_static_needs_lockfile",
+          "message": "A built web app needs a package-lock.json so the build is reproducible. Run `npm install` once and include the lockfile.",
+          "stage": "preset"
+        }
+      ],
+      "receipts": [],
+      "retained_refs": [],
+      "observation_sha256": "c80db3b85970d54254750782d29f9a00a12ce38590b51bba0e6d6efe7b3c3bba",
+      "raw_formation_status": "no_verified_route"
+    },
+    {
+      "index": 9,
+      "name": "Miniflux",
+      "seed_candidate": "Miniflux",
+      "repo": "https://github.com/miniflux/v2",
+      "ref": "4e6d7f93b2e9c036bd7a0b5299d0bd70f36718b4",
+      "ref_selection": "default branch HEAD at source/license-only review",
+      "archive_url": "https://codeload.github.com/miniflux/v2/tar.gz/4e6d7f93b2e9c036bd7a0b5299d0bd70f36718b4",
+      "archive_sha256": "20abe9e20a415e8d7f3b7cab393620fc034204826c9d63f110a6da6dad7a1d5d",
+      "archive_bytes": 986720,
+      "license": "Apache-2.0",
+      "license_file": "LICENSE",
+      "license_sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594",
+      "primary_language": "Go",
+      "framework": "Go",
+      "category": "feed-reader",
+      "primary_blocker": "known-D/authoring",
+      "secondary_blockers": [],
+      "confidence": "high for observed typed boundary; downstream capability not measured",
+      "manual_intervention": false,
+      "execution_scope": "Actual existing Formation typed terminal result before a runnable candidate/verification; no guessed K/D.",
+      "K": {
+        "contract_ref": null,
+        "source": "existing authored/preset compiler",
+        "missing_reason": "No bound K at the recorded terminal boundary"
+      },
+      "known_candidate_D": [],
+      "runtime_requirements": {
+        "constraint": "exact local",
+        "observed_profile": {
+          "formation.containment": "bwrap+landlock",
+          "formation.toolchain_root": "/opt/ato/toolchains",
+          "platform.arch": "aarch64",
+          "platform.os": "linux"
+        },
+        "network_policy": "denied"
+      },
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_no_match",
+            "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_no_match",
+          "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+          "stage": "preset"
+        }
+      ],
+      "receipts": [],
+      "retained_refs": [],
+      "observation_sha256": "d2ac6f1d700235df5dad70ea810b7025724176878b7acee227294041352de172",
+      "raw_formation_status": "no_verified_route"
+    },
+    {
+      "index": 10,
+      "name": "Gitea",
+      "seed_candidate": "Gitea",
+      "repo": "https://github.com/go-gitea/gitea",
+      "ref": "fba8d7eaceeed3f8bbc364386d2a35aa672285a2",
+      "ref_selection": "default branch HEAD at source/license-only review",
+      "archive_url": "https://codeload.github.com/go-gitea/gitea/tar.gz/fba8d7eaceeed3f8bbc364386d2a35aa672285a2",
+      "archive_sha256": "8e2f5281daf1ec18427319ae7d61ccbc12038310bd44fb72ecc66d43b1c061f8",
+      "archive_bytes": 7472433,
+      "license": "MIT",
+      "license_file": "LICENSE",
+      "license_sha256": "ed2f10a9d78b8c6c9ef33f1420d0eb266981891caf2f15d630553f02dc60d3ae",
+      "primary_language": "Go",
+      "framework": "Go",
+      "category": "git-forge",
+      "primary_blocker": "known-D/authoring",
+      "secondary_blockers": [],
+      "confidence": "high for observed typed boundary; downstream capability not measured",
+      "manual_intervention": false,
+      "execution_scope": "Actual existing Formation typed terminal result before a runnable candidate/verification; no guessed K/D.",
+      "K": {
+        "contract_ref": null,
+        "source": "existing authored/preset compiler",
+        "missing_reason": "No bound K at the recorded terminal boundary"
+      },
+      "known_candidate_D": [],
+      "runtime_requirements": {
+        "constraint": "exact local",
+        "observed_profile": {
+          "formation.containment": "bwrap+landlock",
+          "formation.toolchain_root": "/opt/ato/toolchains",
+          "platform.arch": "aarch64",
+          "platform.os": "linux"
+        },
+        "network_policy": "denied"
+      },
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_node_static_needs_lockfile",
+            "message": "A built web app needs a package-lock.json so the build is reproducible. Run `npm install` once and include the lockfile.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_node_static_needs_lockfile",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_node_static_needs_lockfile",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_node_static_needs_lockfile",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_node_static_needs_lockfile",
+          "message": "A built web app needs a package-lock.json so the build is reproducible. Run `npm install` once and include the lockfile.",
+          "stage": "preset"
+        }
+      ],
+      "receipts": [],
+      "retained_refs": [],
+      "observation_sha256": "c80db3b85970d54254750782d29f9a00a12ce38590b51bba0e6d6efe7b3c3bba",
+      "raw_formation_status": "no_verified_route"
+    },
+    {
+      "index": 11,
+      "name": "Vikunja",
+      "seed_candidate": "Vikunja",
+      "repo": "https://github.com/go-vikunja/vikunja",
+      "ref": "7b2dddd9133a27539d7e782b795b5e9752040a70",
+      "ref_selection": "default branch HEAD at source/license-only review",
+      "archive_url": "https://codeload.github.com/go-vikunja/vikunja/tar.gz/7b2dddd9133a27539d7e782b795b5e9752040a70",
+      "archive_sha256": "ca94ccdd17d2acf552a878d317ff88fc4d3265d4277a7027e422a7b3126e826b",
+      "archive_bytes": 11257276,
+      "license": "AGPL-3.0",
+      "license_file": "LICENSE",
+      "license_sha256": "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0",
+      "primary_language": "Go",
+      "framework": "Go/Vue",
+      "category": "tasks",
+      "primary_blocker": "known-D/authoring",
+      "secondary_blockers": [],
+      "confidence": "high for observed typed boundary; downstream capability not measured",
+      "manual_intervention": false,
+      "execution_scope": "Actual existing Formation typed terminal result before a runnable candidate/verification; no guessed K/D.",
+      "K": {
+        "contract_ref": null,
+        "source": "existing authored/preset compiler",
+        "missing_reason": "No bound K at the recorded terminal boundary"
+      },
+      "known_candidate_D": [],
+      "runtime_requirements": {
+        "constraint": "exact local",
+        "observed_profile": {
+          "formation.containment": "bwrap+landlock",
+          "formation.toolchain_root": "/opt/ato/toolchains",
+          "platform.arch": "aarch64",
+          "platform.os": "linux"
+        },
+        "network_policy": "denied"
+      },
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_no_match",
+            "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_no_match",
+          "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+          "stage": "preset"
+        }
+      ],
+      "receipts": [],
+      "retained_refs": [],
+      "observation_sha256": "d2ac6f1d700235df5dad70ea810b7025724176878b7acee227294041352de172",
+      "raw_formation_status": "no_verified_route"
+    },
+    {
+      "index": 12,
+      "name": "Mealie",
+      "seed_candidate": "Mealie",
+      "repo": "https://github.com/mealie-recipes/mealie",
+      "ref": "9f0e221fe9b2ca1ec89d9af1c7b8a785d5b0e048",
+      "ref_selection": "default branch HEAD at source/license-only review",
+      "archive_url": "https://codeload.github.com/mealie-recipes/mealie/tar.gz/9f0e221fe9b2ca1ec89d9af1c7b8a785d5b0e048",
+      "archive_sha256": "fe5a6ac44db117a5848fbf2f57b632464f7868b5703f22b33be994ced58941a4",
+      "archive_bytes": 18370921,
+      "license": "AGPL-3.0",
+      "license_file": "LICENSE",
+      "license_sha256": "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0",
+      "primary_language": "Python",
+      "framework": "FastAPI/Vue",
+      "category": "recipes",
+      "primary_blocker": "known-D/authoring",
+      "secondary_blockers": [],
+      "confidence": "high for observed typed boundary; downstream capability not measured",
+      "manual_intervention": false,
+      "execution_scope": "Actual existing Formation typed terminal result before a runnable candidate/verification; no guessed K/D.",
+      "K": {
+        "contract_ref": null,
+        "source": "existing authored/preset compiler",
+        "missing_reason": "No bound K at the recorded terminal boundary"
+      },
+      "known_candidate_D": [],
+      "runtime_requirements": {
+        "constraint": "exact local",
+        "observed_profile": {
+          "formation.containment": "bwrap+landlock",
+          "formation.toolchain_root": "/opt/ato/toolchains",
+          "platform.arch": "aarch64",
+          "platform.os": "linux"
+        },
+        "network_policy": "denied"
+      },
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_no_match",
+            "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_no_match",
+          "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+          "stage": "preset"
+        }
+      ],
+      "receipts": [],
+      "retained_refs": [],
+      "observation_sha256": "d2ac6f1d700235df5dad70ea810b7025724176878b7acee227294041352de172",
+      "raw_formation_status": "no_verified_route"
+    },
+    {
+      "index": 13,
+      "name": "HedgeDoc",
+      "seed_candidate": "HedgeDoc",
+      "repo": "https://github.com/hedgedoc/hedgedoc",
+      "ref": "5dd94d5449e52835ab034d4da21773cad08ebf51",
+      "ref_selection": "default branch HEAD at source/license-only review",
+      "archive_url": "https://codeload.github.com/hedgedoc/hedgedoc/tar.gz/5dd94d5449e52835ab034d4da21773cad08ebf51",
+      "archive_sha256": "6b99ac59a4ce6990f9a9e20d4b44b405c255900943c5bfaa868fc8a526e7720d",
+      "archive_bytes": 6231545,
+      "license": "AGPL-3.0",
+      "license_file": "LICENSE",
+      "license_sha256": "25c13c3f83b44f31c5dff5c5e8b716b5cbdde89d985f22290692f5b3dc15a12e",
+      "primary_language": "TypeScript",
+      "framework": "Node.js",
+      "category": "collaborative-editor",
+      "primary_blocker": "known-D/authoring",
+      "secondary_blockers": [],
+      "confidence": "high for observed typed boundary; downstream capability not measured",
+      "manual_intervention": false,
+      "execution_scope": "Actual existing Formation typed terminal result before a runnable candidate/verification; no guessed K/D.",
+      "K": {
+        "contract_ref": null,
+        "source": "existing authored/preset compiler",
+        "missing_reason": "No bound K at the recorded terminal boundary"
+      },
+      "known_candidate_D": [],
+      "runtime_requirements": {
+        "constraint": "exact local",
+        "observed_profile": {
+          "formation.containment": "bwrap+landlock",
+          "formation.toolchain_root": "/opt/ato/toolchains",
+          "platform.arch": "aarch64",
+          "platform.os": "linux"
+        },
+        "network_policy": "denied"
+      },
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_node_static_needs_lockfile",
+            "message": "A built web app needs a package-lock.json so the build is reproducible. Run `npm install` once and include the lockfile.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_node_static_needs_lockfile",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_node_static_needs_lockfile",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_node_static_needs_lockfile",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_node_static_needs_lockfile",
+          "message": "A built web app needs a package-lock.json so the build is reproducible. Run `npm install` once and include the lockfile.",
+          "stage": "preset"
+        }
+      ],
+      "receipts": [],
+      "retained_refs": [],
+      "observation_sha256": "c80db3b85970d54254750782d29f9a00a12ce38590b51bba0e6d6efe7b3c3bba",
+      "raw_formation_status": "no_verified_route"
+    },
+    {
+      "index": 14,
+      "name": "Actual Budget",
+      "seed_candidate": "Actual Budget",
+      "repo": "https://github.com/actualbudget/actual",
+      "ref": "eb28966d6ca549236dd08b163ffc8570c710e712",
+      "ref_selection": "default branch HEAD at source/license-only review",
+      "archive_url": "https://codeload.github.com/actualbudget/actual/tar.gz/eb28966d6ca549236dd08b163ffc8570c710e712",
+      "archive_sha256": "23659e0cc54128ac20e459ddb7a7524c96148f906dcb74dfe66342ce84ddb8a5",
+      "archive_bytes": 58270642,
+      "license": "MIT",
+      "license_file": "LICENSE.txt",
+      "license_sha256": "71e4b3053e4622e1f5fc5d8aa5336350de32ead39247924c596d659b89b47b6f",
+      "primary_language": "TypeScript",
+      "framework": "React/Node.js",
+      "category": "budget",
+      "primary_blocker": "known-D/authoring",
+      "secondary_blockers": [],
+      "confidence": "high for observed typed boundary; downstream capability not measured",
+      "manual_intervention": false,
+      "execution_scope": "Actual existing Formation typed terminal result before a runnable candidate/verification; no guessed K/D.",
+      "K": {
+        "contract_ref": null,
+        "source": "existing authored/preset compiler",
+        "missing_reason": "No bound K at the recorded terminal boundary"
+      },
+      "known_candidate_D": [],
+      "runtime_requirements": {
+        "constraint": "exact local",
+        "observed_profile": {
+          "formation.containment": "bwrap+landlock",
+          "formation.toolchain_root": "/opt/ato/toolchains",
+          "platform.arch": "aarch64",
+          "platform.os": "linux"
+        },
+        "network_policy": "denied"
+      },
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_node_static_needs_lockfile",
+            "message": "A built web app needs a package-lock.json so the build is reproducible. Run `npm install` once and include the lockfile.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_node_static_needs_lockfile",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_node_static_needs_lockfile",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_node_static_needs_lockfile",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_node_static_needs_lockfile",
+          "message": "A built web app needs a package-lock.json so the build is reproducible. Run `npm install` once and include the lockfile.",
+          "stage": "preset"
+        }
+      ],
+      "receipts": [],
+      "retained_refs": [],
+      "observation_sha256": "c80db3b85970d54254750782d29f9a00a12ce38590b51bba0e6d6efe7b3c3bba",
+      "raw_formation_status": "no_verified_route"
+    },
+    {
+      "index": 15,
+      "name": "JupyterLab",
+      "seed_candidate": "JupyterLab",
+      "repo": "https://github.com/jupyterlab/jupyterlab",
+      "ref": "bb166a775cba8911fa157c1ff4858b12766d6ede",
+      "ref_selection": "default branch HEAD at source/license-only review",
+      "archive_url": "https://codeload.github.com/jupyterlab/jupyterlab/tar.gz/bb166a775cba8911fa157c1ff4858b12766d6ede",
+      "archive_sha256": "af39846f2016b0d0a4220123ba13b69180ab11b64c8ec893572018157b2c56c5",
+      "archive_bytes": 24532904,
+      "license": "BSD-3-Clause",
+      "license_file": "LICENSE",
+      "license_sha256": "56b2e89eae0571033d778a9790872f17ee219c723b826399052522ddb94b2853",
+      "primary_language": "TypeScript",
+      "framework": "Jupyter/TypeScript",
+      "category": "notebooks",
+      "primary_blocker": "known-D/authoring",
+      "secondary_blockers": [],
+      "confidence": "high for observed typed boundary; downstream capability not measured",
+      "manual_intervention": false,
+      "execution_scope": "Actual existing Formation typed terminal result before a runnable candidate/verification; no guessed K/D.",
+      "K": {
+        "contract_ref": null,
+        "source": "existing authored/preset compiler",
+        "missing_reason": "No bound K at the recorded terminal boundary"
+      },
+      "known_candidate_D": [],
+      "runtime_requirements": {
+        "constraint": "exact local",
+        "observed_profile": {
+          "formation.containment": "bwrap+landlock",
+          "formation.toolchain_root": "/opt/ato/toolchains",
+          "platform.arch": "aarch64",
+          "platform.os": "linux"
+        },
+        "network_policy": "denied"
+      },
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_node_static_needs_lockfile",
+            "message": "A built web app needs a package-lock.json so the build is reproducible. Run `npm install` once and include the lockfile.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_node_static_needs_lockfile",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_node_static_needs_lockfile",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_node_static_needs_lockfile",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_node_static_needs_lockfile",
+          "message": "A built web app needs a package-lock.json so the build is reproducible. Run `npm install` once and include the lockfile.",
+          "stage": "preset"
+        }
+      ],
+      "receipts": [],
+      "retained_refs": [],
+      "observation_sha256": "c80db3b85970d54254750782d29f9a00a12ce38590b51bba0e6d6efe7b3c3bba",
+      "raw_formation_status": "no_verified_route"
+    },
+    {
+      "index": 16,
+      "name": "LibreChat",
+      "seed_candidate": "Open WebUI",
+      "repo": "https://github.com/LibreChat-AI/LibreChat",
+      "ref": "40bb16edfd4698b6239eaafd6714f6e57faf1bc6",
+      "ref_selection": "default branch HEAD at source/license-only review",
+      "archive_url": "https://codeload.github.com/LibreChat-AI/LibreChat/tar.gz/40bb16edfd4698b6239eaafd6714f6e57faf1bc6",
+      "archive_sha256": "1114382fda778a90cd301df821cfd1b4cfdb345457517695db525a579be3328e",
+      "archive_bytes": 15863831,
+      "license": "MIT",
+      "license_file": "LICENSE",
+      "license_sha256": "1ce5c9d51e5ab764b44142cd44d1e687f5bfe32f807c7221c14d061007309b97",
+      "primary_language": "TypeScript",
+      "framework": "React/Node.js",
+      "category": "llm-interface",
+      "replacement": {
+        "original_repo": "https://github.com/open-webui/open-webui",
+        "original_ref": "8bd8b4fac5e059578ac0c74b3c18d11139f88b7d",
+        "reason": "Current license includes conditional branding restrictions; replace with MIT LibreChat before measurement.",
+        "original_license_url": "https://github.com/open-webui/open-webui/blob/8bd8b4fac5e059578ac0c74b3c18d11139f88b7d/LICENSE"
+      },
+      "primary_blocker": "effect/policy",
+      "secondary_blockers": [
+        "dependency/network"
+      ],
+      "confidence": "high for observed typed boundary; downstream capability not measured",
+      "manual_intervention": false,
+      "execution_scope": "Actual existing Formation typed terminal result before a runnable candidate/verification; no guessed K/D.",
+      "K": {
+        "contract_ref": null,
+        "source": "existing authored/preset compiler",
+        "missing_reason": "No bound K at the recorded terminal boundary"
+      },
+      "known_candidate_D": [
+        "sha256:ec2bd43cc45b787e454fe9abf2f463f0911f46574ec01dc63e468f96346573d0"
+      ],
+      "runtime_requirements": {
+        "constraint": "exact local",
+        "observed_profile": {
+          "formation.containment": "bwrap+landlock",
+          "formation.toolchain_root": "/opt/ato/toolchains",
+          "platform.arch": "aarch64",
+          "platform.os": "linux"
+        },
+        "network_policy": "denied"
+      },
+      "attempts": [
+        {
+          "attempt_id": "local-2065271-3",
+          "candidate": "node-static/v1",
+          "contract_ref": "sha256:cf51a8d3c02b035d0bc22b2d7274a2ac3e2ad3ac73a0184e8a18076f458af69e",
+          "derivation_ref": "sha256:ec2bd43cc45b787e454fe9abf2f463f0911f46574ec01dc63e468f96346573d0",
+          "failure": {
+            "code": "network_denied",
+            "message": "this candidate's build resolves dependencies from the network and the request denies it; it was not attempted",
+            "stage": "admission"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "network_denied",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "network_denied",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "network_denied",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "network_denied",
+          "message": "this candidate's build resolves dependencies from the network and the request denies it; it was not attempted",
+          "stage": "admission"
+        }
+      ],
+      "receipts": [],
+      "retained_refs": [],
+      "observation_sha256": "4fe3c9bc641dd4aa5e92ed06d847056625e808d5b8ae7dc3e8f5db472afe3564",
+      "raw_formation_status": "no_verified_route"
+    },
+    {
+      "index": 17,
+      "name": "ComfyUI",
+      "seed_candidate": "ComfyUI",
+      "repo": "https://github.com/Comfy-Org/ComfyUI",
+      "ref": "491bf3b928db565328292f83268d00af57867786",
+      "ref_selection": "default branch HEAD at source/license-only review",
+      "archive_url": "https://codeload.github.com/Comfy-Org/ComfyUI/tar.gz/491bf3b928db565328292f83268d00af57867786",
+      "archive_sha256": "e4ff265c22d44b9bec71d560c7982c6c7d66c5f84dde23f06d7aca55703ee014",
+      "archive_bytes": 12568478,
+      "license": "GPL-3.0",
+      "license_file": "LICENSE",
+      "license_sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+      "primary_language": "Python",
+      "framework": "Python/PyTorch",
+      "category": "node-graph-generation",
+      "primary_blocker": "known-D/authoring",
+      "secondary_blockers": [],
+      "confidence": "high for observed typed boundary; downstream capability not measured",
+      "manual_intervention": false,
+      "execution_scope": "Actual existing Formation typed terminal result before a runnable candidate/verification; no guessed K/D.",
+      "K": {
+        "contract_ref": null,
+        "source": "existing authored/preset compiler",
+        "missing_reason": "No bound K at the recorded terminal boundary"
+      },
+      "known_candidate_D": [],
+      "runtime_requirements": {
+        "constraint": "exact local",
+        "observed_profile": {
+          "formation.containment": "bwrap+landlock",
+          "formation.toolchain_root": "/opt/ato/toolchains",
+          "platform.arch": "aarch64",
+          "platform.os": "linux"
+        },
+        "network_policy": "denied"
+      },
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_no_match",
+            "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_no_match",
+          "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+          "stage": "preset"
+        }
+      ],
+      "receipts": [],
+      "retained_refs": [],
+      "observation_sha256": "d2ac6f1d700235df5dad70ea810b7025724176878b7acee227294041352de172",
+      "raw_formation_status": "no_verified_route"
+    },
+    {
+      "index": 18,
+      "name": "PdfDing",
+      "seed_candidate": "Stirling-PDF",
+      "repo": "https://codeberg.org/mrmn/PdfDing",
+      "ref": "7505a64997177097a20ece83b0506f7be52a480b",
+      "ref_selection": "default branch HEAD at source/license-only review",
+      "archive_url": "https://codeberg.org/mrmn/PdfDing/archive/7505a64997177097a20ece83b0506f7be52a480b.tar.gz",
+      "archive_sha256": "f60d3c2d0af8f71dae6d750b55118b1e99b47ac85b20cae8e062d1927c7b03ee",
+      "archive_bytes": 360169,
+      "license": "AGPL-3.0",
+      "license_file": "LICENSE",
+      "license_sha256": "8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef",
+      "primary_language": "Python",
+      "framework": "Django",
+      "category": "pdf-management",
+      "replacement": {
+        "original_repo": "https://github.com/Stirling-Tools/Stirling-PDF",
+        "original_ref": "a9ae1283714769b11fd000c94a0e6b4ac29962c8",
+        "reason": "Root MIT license excludes multiple proprietary/saas/engine subtrees; choose unambiguous AGPL PDF manager before measurement. PdfDing upstream moved from GitHub to Codeberg; use canonical Codeberg archive.",
+        "original_license_url": "https://github.com/Stirling-Tools/Stirling-PDF/blob/a9ae1283714769b11fd000c94a0e6b4ac29962c8/LICENSE"
+      },
+      "primary_blocker": "effect/policy",
+      "secondary_blockers": [
+        "dependency/network"
+      ],
+      "confidence": "high for observed typed boundary; downstream capability not measured",
+      "manual_intervention": false,
+      "execution_scope": "Actual existing Formation typed terminal result before a runnable candidate/verification; no guessed K/D.",
+      "K": {
+        "contract_ref": null,
+        "source": "existing authored/preset compiler",
+        "missing_reason": "No bound K at the recorded terminal boundary"
+      },
+      "known_candidate_D": [
+        "sha256:6a54c2865259e42f801f5d0a55e980e0e93ae1340df7880dcf6275ef6baf0eb5"
+      ],
+      "runtime_requirements": {
+        "constraint": "exact local",
+        "observed_profile": {
+          "formation.containment": "bwrap+landlock",
+          "formation.toolchain_root": "/opt/ato/toolchains",
+          "platform.arch": "aarch64",
+          "platform.os": "linux"
+        },
+        "network_policy": "denied"
+      },
+      "attempts": [
+        {
+          "attempt_id": "local-2065489-3",
+          "candidate": "node-static/v1",
+          "contract_ref": "sha256:4a3d6d67f50bfabaaf5594814c4c83a531e3630953e2c2e0be94834e21851f29",
+          "derivation_ref": "sha256:6a54c2865259e42f801f5d0a55e980e0e93ae1340df7880dcf6275ef6baf0eb5",
+          "failure": {
+            "code": "network_denied",
+            "message": "this candidate's build resolves dependencies from the network and the request denies it; it was not attempted",
+            "stage": "admission"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "network_denied",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "network_denied",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "network_denied",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "network_denied",
+          "message": "this candidate's build resolves dependencies from the network and the request denies it; it was not attempted",
+          "stage": "admission"
+        }
+      ],
+      "receipts": [],
+      "retained_refs": [],
+      "observation_sha256": "787e0c913e0a9c033661e12d57b8c24c6c70a75f4ef2b5e7caa8f388d086f5a4",
+      "raw_formation_status": "no_verified_route"
+    },
+    {
+      "index": 19,
+      "name": "Grist core",
+      "seed_candidate": "NocoDB",
+      "repo": "https://github.com/gristlabs/grist-core",
+      "ref": "b4ccc892202a3aefd6e565f0bc0c01081433a53c",
+      "ref_selection": "default branch HEAD at source/license-only review",
+      "archive_url": "https://codeload.github.com/gristlabs/grist-core/tar.gz/b4ccc892202a3aefd6e565f0bc0c01081433a53c",
+      "archive_sha256": "0fb3e9be24032f710a401717a80f41dbb7e247d050a578f6214f7f0d0919083a",
+      "archive_bytes": 22097971,
+      "license": "Apache-2.0",
+      "license_file": "LICENSE.txt",
+      "license_sha256": "b294d13c309ff8634417ff8fe133dbb7447d33245bce801db158f38d7fa40d50",
+      "primary_language": "TypeScript",
+      "framework": "TypeScript/Python",
+      "category": "data-table",
+      "replacement": {
+        "original_repo": "https://github.com/nocodb/nocodb",
+        "original_ref": "e6817c2c9573f6d5076b8cf388920f9311522db8",
+        "reason": "Current Sustainable Use License limits usage and distribution; replace with Apache-2.0 Grist core before measurement.",
+        "original_license_url": "https://github.com/nocodb/nocodb/blob/e6817c2c9573f6d5076b8cf388920f9311522db8/LICENSE.md"
+      },
+      "primary_blocker": "known-D/authoring",
+      "secondary_blockers": [],
+      "confidence": "high for observed typed boundary; downstream capability not measured",
+      "manual_intervention": false,
+      "execution_scope": "Actual existing Formation typed terminal result before a runnable candidate/verification; no guessed K/D.",
+      "K": {
+        "contract_ref": null,
+        "source": "existing authored/preset compiler",
+        "missing_reason": "No bound K at the recorded terminal boundary"
+      },
+      "known_candidate_D": [],
+      "runtime_requirements": {
+        "constraint": "exact local",
+        "observed_profile": {
+          "formation.containment": "bwrap+landlock",
+          "formation.toolchain_root": "/opt/ato/toolchains",
+          "platform.arch": "aarch64",
+          "platform.os": "linux"
+        },
+        "network_policy": "denied"
+      },
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_node_static_needs_lockfile",
+            "message": "A built web app needs a package-lock.json so the build is reproducible. Run `npm install` once and include the lockfile.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_node_static_needs_lockfile",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_node_static_needs_lockfile",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_node_static_needs_lockfile",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_node_static_needs_lockfile",
+          "message": "A built web app needs a package-lock.json so the build is reproducible. Run `npm install` once and include the lockfile.",
+          "stage": "preset"
+        }
+      ],
+      "receipts": [],
+      "retained_refs": [],
+      "observation_sha256": "c80db3b85970d54254750782d29f9a00a12ce38590b51bba0e6d6efe7b3c3bba",
+      "raw_formation_status": "no_verified_route"
+    },
+    {
+      "index": 20,
+      "name": "File Browser",
+      "seed_candidate": "File Browser",
+      "repo": "https://github.com/filebrowser/filebrowser",
+      "ref": "833d908884d5c801f30f5c098d7977177eb3a36b",
+      "ref_selection": "default branch HEAD at source/license-only review",
+      "archive_url": "https://codeload.github.com/filebrowser/filebrowser/tar.gz/833d908884d5c801f30f5c098d7977177eb3a36b",
+      "archive_sha256": "605bc6166fd38cc7429478f55b0f50ceea1ab1eb1ba7da8936d0d480a3c159ef",
+      "archive_bytes": 5466190,
+      "license": "Apache-2.0",
+      "license_file": "LICENSE",
+      "license_sha256": "4a1946819f24b20b3144360151a4dc1ed1b8e407bfb11045a74884abd6816100",
+      "primary_language": "Go",
+      "framework": "Go/Vue",
+      "category": "files",
+      "primary_blocker": "known-D/authoring",
+      "secondary_blockers": [],
+      "confidence": "high for observed typed boundary; downstream capability not measured",
+      "manual_intervention": false,
+      "execution_scope": "Actual existing Formation typed terminal result before a runnable candidate/verification; no guessed K/D.",
+      "K": {
+        "contract_ref": null,
+        "source": "existing authored/preset compiler",
+        "missing_reason": "No bound K at the recorded terminal boundary"
+      },
+      "known_candidate_D": [],
+      "runtime_requirements": {
+        "constraint": "exact local",
+        "observed_profile": {
+          "formation.containment": "bwrap+landlock",
+          "formation.toolchain_root": "/opt/ato/toolchains",
+          "platform.arch": "aarch64",
+          "platform.os": "linux"
+        },
+        "network_policy": "denied"
+      },
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_no_match",
+            "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_no_match",
+          "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+          "stage": "preset"
+        }
+      ],
+      "receipts": [],
+      "retained_refs": [],
+      "observation_sha256": "d2ac6f1d700235df5dad70ea810b7025724176878b7acee227294041352de172",
+      "raw_formation_status": "no_verified_route"
+    }
+  ],
+  "state": {
+    "implemented": true,
+    "locally_verified": true,
+    "integration_verified": "20 actual local Formation terminal outcomes; one real static Runtime/Verifier receipt only",
+    "merged": false,
+    "deployed": false
+  },
+  "next_generic_fix": {
+    "selection": "Explicit version-pinned Yarn/pnpm lockfile-aware Node build provisioning and authoring",
+    "basis": "Largest shared concrete refusal is preset_node_static_needs_lockfile (8 apps). Excalidraw, Actual Budget and Grist have upstream Yarn locks; multiple apps can benefit from a generic package-manager primitive. Need qualify actual build output/service semantics, not assume all Node manifests are static apps.",
+    "permissions": "Keep network denied by default; no implicit permission expansion. In this baseline profile later dependency/network blockers may remain and incremental verified gain may be zero.",
+    "status": "selected for design; not implemented or claimed effective"
+  }
+}
