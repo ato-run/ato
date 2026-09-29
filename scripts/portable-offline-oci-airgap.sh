@@ -191,6 +191,8 @@ if [[ $RUN_STATUS -ne 0 ]]; then
   fi
   docker --host "unix://$SOCKET" ps --all --no-trunc \
     >"$WORK_ROOT/failure-containers.txt" 2>&1 || true
+  docker --host "unix://$SOCKET" volume ls --quiet \
+    >"$WORK_ROOT/failure-volumes.txt" 2>&1 || true
   mapfile -t failed_containers < <(docker --host "unix://$SOCKET" ps -aq 2>/dev/null)
   if [[ ${#failed_containers[@]} -gt 0 ]]; then
     docker --host "unix://$SOCKET" inspect "${failed_containers[@]}" \
@@ -216,6 +218,7 @@ fi
 {
   printf 'final_image_count=%s\n' "$(docker --host "unix://$SOCKET" image ls -q | sort -u | wc -l)"
   printf 'remaining_container_count=0\n'
+  printf 'volume_count=%s\n' "$(docker --host "unix://$SOCKET" volume ls -q | wc -l)"
   jq '{bundle_sha256,contract_ref,derivation_ref,fully_satisfied,execution,observations}' "$RECEIPT"
 } >"$WORK_ROOT/result.txt"
 
