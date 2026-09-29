@@ -296,7 +296,12 @@ fn qualify(
     // Every file the detector reads must be a regular file of this directory.
     for name in [".nvmrc", ".node-version", "index.html"]
         .into_iter()
-        .chain(["vite.config.ts", "vite.config.js", "vite.config.mts", "vite.config.mjs"])
+        .chain([
+            "vite.config.ts",
+            "vite.config.js",
+            "vite.config.mts",
+            "vite.config.mjs",
+        ])
     {
         if std::fs::symlink_metadata(dir.join(name)).is_ok_and(|m| m.file_type().is_symlink()) {
             return Err("workspace_symlink_input");
@@ -329,15 +334,22 @@ fn qualify(
         if node.package_manager.as_deref().is_some_and(|declared| {
             let (name, version) = declared.split_once('@').unwrap_or((declared, ""));
             !pin(name, version)
-        }) || node.dev_engines_package_manager.as_ref().is_some_and(|value| {
-            !pin(
-                value.get("name").and_then(|v| v.as_str()).unwrap_or_default(),
-                value
-                    .get("version")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default(),
-            )
-        }) {
+        }) || node
+            .dev_engines_package_manager
+            .as_ref()
+            .is_some_and(|value| {
+                !pin(
+                    value
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default(),
+                    value
+                        .get("version")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default(),
+                )
+            })
+        {
             return Err("workspace_manager_conflict");
         }
         if declares_node(node)
@@ -398,7 +410,11 @@ pub fn inventory(root: &Path) -> Result<WorkspaceInventory, InventoryError> {
         .node
         .as_ref()
         .ok_or_else(|| InventoryError::Unreadable("no package.json".into()))?;
-    if evidence.present_files.iter().any(|f| f == "pnpm-workspace.yaml") {
+    if evidence
+        .present_files
+        .iter()
+        .any(|f| f == "pnpm-workspace.yaml")
+    {
         return Err(InventoryError::PnpmDeferred);
     }
     let declared = manifest.get("workspaces").ok_or(InventoryError::Absent)?;

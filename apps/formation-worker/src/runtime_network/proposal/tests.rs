@@ -326,5 +326,8 @@ fn prompt_v1_bytes_stay_pinned_and_v2_names_the_workspace_operation() {
     assert!(PROMPT_V2.contains("node_static_workspace@1"));
     assert!(PROMPT_V2.contains("never a path or package name"));
     assert_eq!(prompt_for(PROMPT_VERSION_V2), Some(PROMPT_V2));
-    assert_eq!(prompt_for("ato.formation-candidate-producer-prompt/3"), None);
+    assert_eq!(
+        prompt_for("ato.formation-candidate-producer-prompt/3"),
+        None
+    );
 }
