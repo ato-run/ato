@@ -1,0 +1,4973 @@
+{
+  "schema": "ato.formation-coverage-50/1",
+  "wave": "6b-C",
+  "preregistration_commit": "57b063b9b15c6ff7182d7f9af1bcc8aea0eca5e8",
+  "classification_rules_commit": "5f57437f",
+  "measurement_pin": "c4c285f3e9a751975286ccd78ba49e76e483fa83",
+  "checkout": "57b063b9b15c6ff7182d7f9af1bcc8aea0eca5e8",
+  "plan_sha256": "222533282a12c8a3e9694c9fd672e74c07b6e3c24c10a6b931fd4c2d6a56289f",
+  "raw_results_sha256": "bd80e70bf3d448e812259dbea8d12475b44dbf00190bf9e89fb982ff72f6b7c3",
+  "binary_hashes": {
+    "coverage_baseline": "cabca856fe6f2c6a1bc8b28e2867c1482a6144155d467a6f38a813558e216428",
+    "ato-formation-worker": "ee2c1e402e6111fac9e7d8e002d29b76eb70769d46e41b5d36b4925ea3e89092"
+  },
+  "host": "oci-linux-test linux/aarch64 bwrap+landlock",
+  "model_calls": 0,
+  "network": "denied",
+  "deploy": "none",
+  "remote_migration": "none",
+  "pr_1441": {
+    "reviewed_head": "bf4e66d4a52261cd121da800b7eca37330e4609b",
+    "merge": "c4c285f3e9a751975286ccd78ba49e76e483fa83"
+  },
+  "terminal_classifications": 50,
+  "funnel": {
+    "original_20": {
+      "A_source_recognized": 20,
+      "B_K_formed": 3,
+      "C_D_available": 3,
+      "D_admitted": 1,
+      "E_executed": 1,
+      "F_verifier_ran": 1,
+      "G_K_fully_satisfied": 1,
+      "H_retained": 1,
+      "I_functional_success": 0
+    },
+    "new_30": {
+      "A_source_recognized": 30,
+      "B_K_formed": 4,
+      "C_D_available": 4,
+      "D_admitted": 2,
+      "E_executed": 2,
+      "F_verifier_ran": 2,
+      "G_K_fully_satisfied": 2,
+      "H_retained": 2,
+      "I_functional_success": 0
+    },
+    "all_50": {
+      "A_source_recognized": 50,
+      "B_K_formed": 7,
+      "C_D_available": 7,
+      "D_admitted": 3,
+      "E_executed": 3,
+      "F_verifier_ran": 3,
+      "G_K_fully_satisfied": 3,
+      "H_retained": 3,
+      "I_functional_success": 0
+    }
+  },
+  "primary_distribution": {
+    "original_20": {
+      "known-D/authoring": 17,
+      "effect/policy": 2,
+      "success": 1
+    },
+    "new_30": {
+      "known-D/authoring": 26,
+      "success": 2,
+      "effect/policy": 2
+    },
+    "all_50": {
+      "known-D/authoring": 43,
+      "effect/policy": 4,
+      "success": 3
+    }
+  },
+  "terminal_code_distribution": {
+    "original_20": {
+      "preset_node_static_v2_workspace": 6,
+      "preset_no_match": 6,
+      "preset_node_static_needs_build_script": 2,
+      "network_denied": 2,
+      "fully_satisfied": 1,
+      "preset_node_static_needs_lockfile": 1,
+      "preset_node_static_v2_bun_deferred": 1,
+      "preset_node_static_v2_manager_config": 1
+    },
+    "new_30": {
+      "preset_no_match": 14,
+      "preset_node_static_v2_workspace": 5,
+      "preset_node_static_needs_build_script": 3,
+      "fully_satisfied": 2,
+      "network_denied": 2,
+      "intent_malformed": 1,
+      "preset_node_static_v2_static_unproven": 1,
+      "preset_node_static_v2_manager_config": 1,
+      "preset_node_static_v2_bun_deferred": 1
+    },
+    "all_50": {
+      "preset_no_match": 20,
+      "preset_node_static_v2_workspace": 11,
+      "preset_node_static_needs_build_script": 5,
+      "network_denied": 4,
+      "fully_satisfied": 3,
+      "preset_node_static_v2_bun_deferred": 2,
+      "preset_node_static_v2_manager_config": 2,
+      "preset_node_static_needs_lockfile": 1,
+      "intent_malformed": 1,
+      "preset_node_static_v2_static_unproven": 1
+    }
+  },
+  "secondary_hypothesis_distribution": {
+    "original_20": {
+      "dependency/network": 15,
+      "runtime/toolchain": 7,
+      "multi-service": 3,
+      "Browser/UI": 2,
+      "effect/policy": 1
+    },
+    "new_30": {
+      "dependency/network": 16,
+      "runtime/toolchain": 14,
+      "multi-service": 13,
+      "Browser/UI": 2
+    },
+    "all_50": {
+      "dependency/network": 31,
+      "runtime/toolchain": 21,
+      "multi-service": 16,
+      "Browser/UI": 4,
+      "effect/policy": 1
+    }
+  },
+  "candidate_producer_plausible": {
+    "false": 30,
+    "unknown": 17,
+    "None": 3
+  },
+  "applications": [
+    {
+      "index": 1,
+      "name": "Excalidraw",
+      "group": "original_20",
+      "repo": "https://github.com/excalidraw/excalidraw",
+      "ref": "5a406e51875157bece389b9bc92d41ff241d5f3d",
+      "archive_sha256": "94603a7879307fd68bd993b4758a1ccdcf1ff068222bf98a9f5b6c5bdaca56a3",
+      "license": "MIT",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_node_static_v2_workspace",
+            "message": "Workspace target/build/output require explicit authoring.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_node_static_v2_workspace",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_node_static_v2_workspace",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_node_static_v2_workspace",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_node_static_v2_workspace",
+          "message": "Workspace target/build/output require explicit authoring.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_node_static_v2_workspace",
+      "secondary_blockers_hypothesis": [
+        "dependency/network"
+      ],
+      "candidate_producer_solving_plausible": "unknown",
+      "candidate_producer_basis": "a proposal could name an entrypoint/workspace, but dependency resolution/service semantics still gate execution; not tested (no model calls)",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "469a3030208360c79010ecbd08760874538c55d37c5fcbfcdba3fd7d51adf794",
+      "execution_scope": null,
+      "trajectory": {
+        "6a": "preset_node_static_needs_lockfile",
+        "6a_primary": "known-D/authoring",
+        "after_6b_A": "preset_node_static_v2_workspace",
+        "current": "preset_node_static_v2_workspace",
+        "change": "diagnostic refinement",
+        "derivation_refs_6a": [],
+        "derivation_refs_equal_to_6a": true
+      }
+    },
+    {
+      "index": 2,
+      "name": "WBO",
+      "group": "original_20",
+      "repo": "https://github.com/lovasoa/whitebophir",
+      "ref": "06e675c5cd8a25900f0b7aa771933e29f551f96a",
+      "archive_sha256": "8af51caaa6b8434a06e7a41753ae54381ba1595c362050e8c1d1836dfd604d65",
+      "license": "AGPL-3.0",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_node_static_needs_build_script",
+            "message": "A built web app needs a `build` script in package.json. Ato runs `npm run build` and publishes what it writes to `dist/`.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_node_static_needs_build_script",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_node_static_needs_build_script",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_node_static_needs_build_script",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_node_static_needs_build_script",
+          "message": "A built web app needs a `build` script in package.json. Ato runs `npm run build` and publishes what it writes to `dist/`.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_node_static_needs_build_script",
+      "secondary_blockers_hypothesis": [
+        "dependency/network"
+      ],
+      "candidate_producer_solving_plausible": "unknown",
+      "candidate_producer_basis": "a proposal could name an entrypoint/workspace, but dependency resolution/service semantics still gate execution; not tested (no model calls)",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "2d3fe76bdbc364174481d7fd5a1782ee1ecb480c084b821b2308e8d9476a83ed",
+      "execution_scope": null,
+      "trajectory": {
+        "6a": "preset_node_static_needs_build_script",
+        "6a_primary": "known-D/authoring",
+        "after_6b_A": "preset_node_static_needs_build_script (not remeasured in 6b-A)",
+        "current": "preset_node_static_needs_build_script",
+        "change": "unchanged",
+        "derivation_refs_6a": [],
+        "derivation_refs_equal_to_6a": true
+      }
+    },
+    {
+      "index": 3,
+      "name": "Uptime Kuma",
+      "group": "original_20",
+      "repo": "https://github.com/louislam/uptime-kuma",
+      "ref": "b6adc19d00e4e6700f4b6ffc64a5c4e105e8004c",
+      "archive_sha256": "a113adca092614c99c868961bbab1936b36a39685d4584c6863b64c6902671d6",
+      "license": "MIT",
+      "source_closure": "sha256:ede8a1c9d2b2b5d90c6f11b7ccbe32329d4e391b1089d8709a1eb9628371d297",
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [
+        "sha256:c6d3a140b92484e956e6f43f5774acccd986d2ec8d119373f266849eb75777f3"
+      ],
+      "attempted_derivation_refs": [
+        "sha256:72b42150e37ae426360a3339a1875a39015ff00429e57a1c272aa904a4b86520"
+      ],
+      "attempts": [
+        {
+          "attempt_id": "local-2146880-3",
+          "candidate": "node-static/v1",
+          "failure": {
+            "code": "intent_unsupported_node",
+            "message": "node >= 26.2.0 is not satisfied by any version this resolver provisions",
+            "stage": "projection"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "intent_unsupported_node",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "intent_unsupported_node",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "intent_unsupported_node",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "failed"
+        },
+        {
+          "attempt_id": "local-2146880-4",
+          "candidate": "static-files/v1",
+          "contract_ref": "sha256:c6d3a140b92484e956e6f43f5774acccd986d2ec8d119373f266849eb75777f3",
+          "derivation_ref": "sha256:72b42150e37ae426360a3339a1875a39015ff00429e57a1c272aa904a4b86520",
+          "outcomes": {
+            "cleanup": {
+              "state": "succeeded"
+            },
+            "publication": {
+              "state": "succeeded"
+            },
+            "runtime_verification": {
+              "state": "succeeded"
+            },
+            "seal": {
+              "state": "succeeded"
+            }
+          },
+          "realization": {
+            "build_network": "n/a",
+            "candidate_network": "loopback only",
+            "containment": "none; serves the produced bundle's files, runs nothing",
+            "destroyed": true,
+            "endpoints": {
+              "app.http": "loopback static server"
+            },
+            "executor": "runtime-static-loopback",
+            "workspace": "the produced static web bundle, read-only"
+          },
+          "receipt": {
+            "contract_ref": "sha256:c6d3a140b92484e956e6f43f5774acccd986d2ec8d119373f266849eb75777f3",
+            "derivation_ref": "sha256:72b42150e37ae426360a3339a1875a39015ff00429e57a1c272aa904a4b86520",
+            "execution": {
+              "attempt_id": "local-2146880-4",
+              "endpoint": "http://127.0.0.1:39707/",
+              "platform": "linux/aarch64",
+              "realization": "static_web",
+              "request_id": "local-2146880-2-1790671685198326862"
+            },
+            "fully_satisfied": true,
+            "observations": [
+              {
+                "evidence": {
+                  "body_sha256": "sha256:a6c88434385326072390e99f97dc3cac7949dea7a4d5f770a7ce8fb46fc36c93",
+                  "method": "GET",
+                  "path": "/",
+                  "status": 200
+                },
+                "id": "root",
+                "outcome": "satisfied"
+              },
+              {
+                "evidence": {
+                  "digest": "sha256:ede8a1c9d2b2b5d90c6f11b7ccbe32329d4e391b1089d8709a1eb9628371d297",
+                  "input": "workspace"
+                },
+                "id": "source-identity",
+                "outcome": "satisfied"
+              }
+            ],
+            "schema": "ato.contract-verification-receipt/1",
+            "target": {
+              "kind": "formation-runtime"
+            }
+          },
+          "runtime_id": "local",
+          "status": "verified",
+          "verification": {
+            "verdicts": [
+              {
+                "id": "root",
+                "outcome": {
+                  "result": "satisfied"
+                }
+              },
+              {
+                "id": "source-identity",
+                "outcome": {
+                  "result": "satisfied"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "intent_unsupported_node",
+          "message": "node >= 26.2.0 is not satisfied by any version this resolver provisions",
+          "stage": "projection"
+        }
+      ],
+      "receipt": {
+        "contract_ref": "sha256:c6d3a140b92484e956e6f43f5774acccd986d2ec8d119373f266849eb75777f3",
+        "derivation_ref": "sha256:72b42150e37ae426360a3339a1875a39015ff00429e57a1c272aa904a4b86520",
+        "execution": {
+          "attempt_id": "local-2146880-4",
+          "endpoint": "http://127.0.0.1:39707/",
+          "platform": "linux/aarch64",
+          "realization": "static_web",
+          "request_id": "local-2146880-2-1790671685198326862"
+        },
+        "fully_satisfied": true,
+        "observations": [
+          {
+            "evidence": {
+              "body_sha256": "sha256:a6c88434385326072390e99f97dc3cac7949dea7a4d5f770a7ce8fb46fc36c93",
+              "method": "GET",
+              "path": "/",
+              "status": 200
+            },
+            "id": "root",
+            "outcome": "satisfied"
+          },
+          {
+            "evidence": {
+              "digest": "sha256:ede8a1c9d2b2b5d90c6f11b7ccbe32329d4e391b1089d8709a1eb9628371d297",
+              "input": "workspace"
+            },
+            "id": "source-identity",
+            "outcome": "satisfied"
+          }
+        ],
+        "schema": "ato.contract-verification-receipt/1",
+        "target": {
+          "kind": "formation-runtime"
+        }
+      },
+      "retained_ref": "sha256:2fce0460ba3f1cdd8dce598c8b80faf791b8c984b5c3f77fcd77d60f72d8ecb0",
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": true,
+        "D_admitted": true,
+        "E_executed": true,
+        "F_verifier_ran": true,
+        "G_K_fully_satisfied": true,
+        "H_retained": true,
+        "I_functional_success": false
+      },
+      "primary_class": "success",
+      "terminal_code": "fully_satisfied",
+      "secondary_blockers_hypothesis": [
+        "runtime/toolchain",
+        "Browser/UI"
+      ],
+      "candidate_producer_solving_plausible": null,
+      "candidate_producer_basis": null,
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "43bc11515057f1f968bad82a777c34bc24f3e311d2450302dd875284583ac88c",
+      "execution_scope": "typed K only (GET / 200 + source identity); application functionality NOT established",
+      "trajectory": {
+        "6a": "fully_satisfied",
+        "6a_primary": "success",
+        "after_6b_A": "fully_satisfied (not remeasured in 6b-A)",
+        "current": "fully_satisfied",
+        "change": "unchanged",
+        "derivation_refs_6a": [
+          "sha256:72b42150e37ae426360a3339a1875a39015ff00429e57a1c272aa904a4b86520"
+        ],
+        "derivation_refs_equal_to_6a": true
+      }
+    },
+    {
+      "index": 4,
+      "name": "FreshRSS",
+      "group": "original_20",
+      "repo": "https://github.com/FreshRSS/FreshRSS",
+      "ref": "a8e5e6300b80514d5a14140566c2386a80cf8450",
+      "archive_sha256": "f4da8a27006221c4c7fb77c5417cff067a842e29b1d215b0491a82c8e079d117",
+      "license": "AGPL-3.0",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_node_static_needs_build_script",
+            "message": "A built web app needs a `build` script in package.json. Ato runs `npm run build` and publishes what it writes to `dist/`.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_node_static_needs_build_script",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_node_static_needs_build_script",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_node_static_needs_build_script",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_node_static_needs_build_script",
+          "message": "A built web app needs a `build` script in package.json. Ato runs `npm run build` and publishes what it writes to `dist/`.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_node_static_needs_build_script",
+      "secondary_blockers_hypothesis": [
+        "runtime/toolchain"
+      ],
+      "candidate_producer_solving_plausible": "false",
+      "candidate_producer_basis": "missing execution capability or policy (runtime catalog, multi-service, network), not missing knowledge",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "2d3fe76bdbc364174481d7fd5a1782ee1ecb480c084b821b2308e8d9476a83ed",
+      "execution_scope": null,
+      "trajectory": {
+        "6a": "preset_node_static_needs_build_script",
+        "6a_primary": "known-D/authoring",
+        "after_6b_A": "preset_node_static_needs_build_script (not remeasured in 6b-A)",
+        "current": "preset_node_static_needs_build_script",
+        "change": "unchanged",
+        "derivation_refs_6a": [],
+        "derivation_refs_equal_to_6a": true
+      }
+    },
+    {
+      "index": 5,
+      "name": "linkding",
+      "group": "original_20",
+      "repo": "https://github.com/sissbruecker/linkding",
+      "ref": "27b7303baf41bb28babc610ac8eaa486e1ddfab5",
+      "archive_sha256": "c0cba0ea042b67ca68edef38edc9c40608bf62b0c2a8d32194ae2d5f3a14236c",
+      "license": "MIT",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [
+        "sha256:a8f859925fba9ad0fce1b175ba9cd1289243da0604b9e2bb20cea2c4466f5f5c"
+      ],
+      "attempted_derivation_refs": [
+        "sha256:c36fb518fbadc85ff0493372470bb4f2ed34dda5eec97511e1f0557a162c8b30"
+      ],
+      "attempts": [
+        {
+          "attempt_id": "local-2146892-3",
+          "candidate": "node-static/v1",
+          "contract_ref": "sha256:a8f859925fba9ad0fce1b175ba9cd1289243da0604b9e2bb20cea2c4466f5f5c",
+          "derivation_ref": "sha256:c36fb518fbadc85ff0493372470bb4f2ed34dda5eec97511e1f0557a162c8b30",
+          "failure": {
+            "code": "network_denied",
+            "message": "this candidate's build resolves dependencies from the network and the request denies it; it was not attempted",
+            "stage": "admission"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "network_denied",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "network_denied",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "network_denied",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "network_denied",
+          "message": "this candidate's build resolves dependencies from the network and the request denies it; it was not attempted",
+          "stage": "admission"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": true,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "effect/policy",
+      "terminal_code": "network_denied",
+      "secondary_blockers_hypothesis": [
+        "dependency/network"
+      ],
+      "candidate_producer_solving_plausible": "false",
+      "candidate_producer_basis": "missing execution capability or policy (runtime catalog, multi-service, network), not missing knowledge",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "dd50d395c938a13adc918e08f65d52f49f3577bba15435419d109cbcf8b184ca",
+      "execution_scope": null,
+      "trajectory": {
+        "6a": "network_denied",
+        "6a_primary": "effect/policy",
+        "after_6b_A": "network_denied (not remeasured in 6b-A)",
+        "current": "network_denied",
+        "change": "unchanged",
+        "derivation_refs_6a": [
+          "sha256:c36fb518fbadc85ff0493372470bb4f2ed34dda5eec97511e1f0557a162c8b30"
+        ],
+        "derivation_refs_equal_to_6a": true
+      }
+    },
+    {
+      "index": 6,
+      "name": "SearXNG",
+      "group": "original_20",
+      "repo": "https://github.com/searxng/searxng",
+      "ref": "12f8b6515ca77c3c3bc1498584950ef5daca1433",
+      "archive_sha256": "13dbc1adeff80145c439686b2a7588aca89604bd1d86cd5623d029376e4a59bb",
+      "license": "AGPL-3.0",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_node_static_needs_lockfile",
+            "message": "A built web app needs a package-lock.json so the build is reproducible. Run `npm install` once and include the lockfile.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_node_static_needs_lockfile",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_node_static_needs_lockfile",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_node_static_needs_lockfile",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_node_static_needs_lockfile",
+          "message": "A built web app needs a package-lock.json so the build is reproducible. Run `npm install` once and include the lockfile.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_node_static_needs_lockfile",
+      "secondary_blockers_hypothesis": [
+        "dependency/network"
+      ],
+      "candidate_producer_solving_plausible": "unknown",
+      "candidate_producer_basis": "a proposal could name an entrypoint/workspace, but dependency resolution/service semantics still gate execution; not tested (no model calls)",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "c80db3b85970d54254750782d29f9a00a12ce38590b51bba0e6d6efe7b3c3bba",
+      "execution_scope": null,
+      "trajectory": {
+        "6a": "preset_node_static_needs_lockfile",
+        "6a_primary": "known-D/authoring",
+        "after_6b_A": "preset_node_static_needs_lockfile",
+        "current": "preset_node_static_needs_lockfile",
+        "change": "unchanged",
+        "derivation_refs_6a": [],
+        "derivation_refs_equal_to_6a": true
+      }
+    },
+    {
+      "index": 7,
+      "name": "changedetection.io",
+      "group": "original_20",
+      "repo": "https://github.com/dgtlmoon/changedetection.io",
+      "ref": "0e0566721b1c483dcf7ae548210ee10532d9b181",
+      "archive_sha256": "e2ff3e6bce58e9ea229d3769acf2fd1c9602f50a2c05009c7e0442809c364183",
+      "license": "Apache-2.0",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_no_match",
+            "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_no_match",
+          "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_no_match",
+      "secondary_blockers_hypothesis": [
+        "dependency/network",
+        "Browser/UI"
+      ],
+      "candidate_producer_solving_plausible": "unknown",
+      "candidate_producer_basis": "a proposal could name an entrypoint/workspace, but dependency resolution/service semantics still gate execution; not tested (no model calls)",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "d2ac6f1d700235df5dad70ea810b7025724176878b7acee227294041352de172",
+      "execution_scope": null,
+      "trajectory": {
+        "6a": "preset_no_match",
+        "6a_primary": "known-D/authoring",
+        "after_6b_A": "preset_no_match (not remeasured in 6b-A)",
+        "current": "preset_no_match",
+        "change": "unchanged",
+        "derivation_refs_6a": [],
+        "derivation_refs_equal_to_6a": true
+      }
+    },
+    {
+      "index": 8,
+      "name": "Etherpad",
+      "group": "original_20",
+      "repo": "https://github.com/ether/etherpad",
+      "ref": "c080707dcd3e3dfa730bb699970ad1abf33aaf42",
+      "archive_sha256": "268168f1f5e6644f86e6c514d1f90068d01d56a1a290e5762f4ffcd1e0097ec0",
+      "license": "Apache-2.0",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_node_static_v2_workspace",
+            "message": "Workspace target/build/output require explicit authoring.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_node_static_v2_workspace",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_node_static_v2_workspace",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_node_static_v2_workspace",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_node_static_v2_workspace",
+          "message": "Workspace target/build/output require explicit authoring.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_node_static_v2_workspace",
+      "secondary_blockers_hypothesis": [
+        "dependency/network"
+      ],
+      "candidate_producer_solving_plausible": "unknown",
+      "candidate_producer_basis": "a proposal could name an entrypoint/workspace, but dependency resolution/service semantics still gate execution; not tested (no model calls)",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "469a3030208360c79010ecbd08760874538c55d37c5fcbfcdba3fd7d51adf794",
+      "execution_scope": null,
+      "trajectory": {
+        "6a": "preset_node_static_needs_lockfile",
+        "6a_primary": "known-D/authoring",
+        "after_6b_A": "preset_node_static_v2_workspace",
+        "current": "preset_node_static_v2_workspace",
+        "change": "diagnostic refinement",
+        "derivation_refs_6a": [],
+        "derivation_refs_equal_to_6a": true
+      }
+    },
+    {
+      "index": 9,
+      "name": "Miniflux",
+      "group": "original_20",
+      "repo": "https://github.com/miniflux/v2",
+      "ref": "4e6d7f93b2e9c036bd7a0b5299d0bd70f36718b4",
+      "archive_sha256": "20abe9e20a415e8d7f3b7cab393620fc034204826c9d63f110a6da6dad7a1d5d",
+      "license": "Apache-2.0",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_no_match",
+            "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_no_match",
+          "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_no_match",
+      "secondary_blockers_hypothesis": [
+        "runtime/toolchain"
+      ],
+      "candidate_producer_solving_plausible": "false",
+      "candidate_producer_basis": "missing execution capability or policy (runtime catalog, multi-service, network), not missing knowledge",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "d2ac6f1d700235df5dad70ea810b7025724176878b7acee227294041352de172",
+      "execution_scope": null,
+      "trajectory": {
+        "6a": "preset_no_match",
+        "6a_primary": "known-D/authoring",
+        "after_6b_A": "preset_no_match (not remeasured in 6b-A)",
+        "current": "preset_no_match",
+        "change": "unchanged",
+        "derivation_refs_6a": [],
+        "derivation_refs_equal_to_6a": true
+      }
+    },
+    {
+      "index": 10,
+      "name": "Gitea",
+      "group": "original_20",
+      "repo": "https://github.com/go-gitea/gitea",
+      "ref": "fba8d7eaceeed3f8bbc364386d2a35aa672285a2",
+      "archive_sha256": "8e2f5281daf1ec18427319ae7d61ccbc12038310bd44fb72ecc66d43b1c061f8",
+      "license": "MIT",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_node_static_v2_workspace",
+            "message": "Workspace target/build/output require explicit authoring.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_node_static_v2_workspace",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_node_static_v2_workspace",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_node_static_v2_workspace",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_node_static_v2_workspace",
+          "message": "Workspace target/build/output require explicit authoring.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_node_static_v2_workspace",
+      "secondary_blockers_hypothesis": [
+        "runtime/toolchain",
+        "dependency/network"
+      ],
+      "candidate_producer_solving_plausible": "false",
+      "candidate_producer_basis": "missing execution capability or policy (runtime catalog, multi-service, network), not missing knowledge",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "469a3030208360c79010ecbd08760874538c55d37c5fcbfcdba3fd7d51adf794",
+      "execution_scope": null,
+      "trajectory": {
+        "6a": "preset_node_static_needs_lockfile",
+        "6a_primary": "known-D/authoring",
+        "after_6b_A": "preset_node_static_v2_workspace",
+        "current": "preset_node_static_v2_workspace",
+        "change": "diagnostic refinement",
+        "derivation_refs_6a": [],
+        "derivation_refs_equal_to_6a": true
+      }
+    },
+    {
+      "index": 11,
+      "name": "Vikunja",
+      "group": "original_20",
+      "repo": "https://github.com/go-vikunja/vikunja",
+      "ref": "7b2dddd9133a27539d7e782b795b5e9752040a70",
+      "archive_sha256": "ca94ccdd17d2acf552a878d317ff88fc4d3265d4277a7027e422a7b3126e826b",
+      "license": "AGPL-3.0",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_no_match",
+            "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_no_match",
+          "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_no_match",
+      "secondary_blockers_hypothesis": [
+        "runtime/toolchain"
+      ],
+      "candidate_producer_solving_plausible": "false",
+      "candidate_producer_basis": "missing execution capability or policy (runtime catalog, multi-service, network), not missing knowledge",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "d2ac6f1d700235df5dad70ea810b7025724176878b7acee227294041352de172",
+      "execution_scope": null,
+      "trajectory": {
+        "6a": "preset_no_match",
+        "6a_primary": "known-D/authoring",
+        "after_6b_A": "preset_no_match (not remeasured in 6b-A)",
+        "current": "preset_no_match",
+        "change": "unchanged",
+        "derivation_refs_6a": [],
+        "derivation_refs_equal_to_6a": true
+      }
+    },
+    {
+      "index": 12,
+      "name": "Mealie",
+      "group": "original_20",
+      "repo": "https://github.com/mealie-recipes/mealie",
+      "ref": "9f0e221fe9b2ca1ec89d9af1c7b8a785d5b0e048",
+      "archive_sha256": "fe5a6ac44db117a5848fbf2f57b632464f7868b5703f22b33be994ced58941a4",
+      "license": "AGPL-3.0",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_no_match",
+            "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_no_match",
+          "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_no_match",
+      "secondary_blockers_hypothesis": [
+        "multi-service",
+        "dependency/network"
+      ],
+      "candidate_producer_solving_plausible": "false",
+      "candidate_producer_basis": "missing execution capability or policy (runtime catalog, multi-service, network), not missing knowledge",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "d2ac6f1d700235df5dad70ea810b7025724176878b7acee227294041352de172",
+      "execution_scope": null,
+      "trajectory": {
+        "6a": "preset_no_match",
+        "6a_primary": "known-D/authoring",
+        "after_6b_A": "preset_no_match (not remeasured in 6b-A)",
+        "current": "preset_no_match",
+        "change": "unchanged",
+        "derivation_refs_6a": [],
+        "derivation_refs_equal_to_6a": true
+      }
+    },
+    {
+      "index": 13,
+      "name": "HedgeDoc",
+      "group": "original_20",
+      "repo": "https://github.com/hedgedoc/hedgedoc",
+      "ref": "5dd94d5449e52835ab034d4da21773cad08ebf51",
+      "archive_sha256": "6b99ac59a4ce6990f9a9e20d4b44b405c255900943c5bfaa868fc8a526e7720d",
+      "license": "AGPL-3.0",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_node_static_v2_workspace",
+            "message": "Workspace target/build/output require explicit authoring.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_node_static_v2_workspace",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_node_static_v2_workspace",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_node_static_v2_workspace",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_node_static_v2_workspace",
+          "message": "Workspace target/build/output require explicit authoring.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_node_static_v2_workspace",
+      "secondary_blockers_hypothesis": [
+        "multi-service",
+        "dependency/network"
+      ],
+      "candidate_producer_solving_plausible": "false",
+      "candidate_producer_basis": "missing execution capability or policy (runtime catalog, multi-service, network), not missing knowledge",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "469a3030208360c79010ecbd08760874538c55d37c5fcbfcdba3fd7d51adf794",
+      "execution_scope": null,
+      "trajectory": {
+        "6a": "preset_node_static_needs_lockfile",
+        "6a_primary": "known-D/authoring",
+        "after_6b_A": "preset_node_static_v2_workspace",
+        "current": "preset_node_static_v2_workspace",
+        "change": "diagnostic refinement",
+        "derivation_refs_6a": [],
+        "derivation_refs_equal_to_6a": true
+      }
+    },
+    {
+      "index": 14,
+      "name": "Actual Budget",
+      "group": "original_20",
+      "repo": "https://github.com/actualbudget/actual",
+      "ref": "eb28966d6ca549236dd08b163ffc8570c710e712",
+      "archive_sha256": "23659e0cc54128ac20e459ddb7a7524c96148f906dcb74dfe66342ce84ddb8a5",
+      "license": "MIT",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_node_static_v2_workspace",
+            "message": "Workspace target/build/output require explicit authoring.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_node_static_v2_workspace",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_node_static_v2_workspace",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_node_static_v2_workspace",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_node_static_v2_workspace",
+          "message": "Workspace target/build/output require explicit authoring.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_node_static_v2_workspace",
+      "secondary_blockers_hypothesis": [
+        "effect/policy",
+        "dependency/network"
+      ],
+      "candidate_producer_solving_plausible": "unknown",
+      "candidate_producer_basis": "a proposal could name an entrypoint/workspace, but dependency resolution/service semantics still gate execution; not tested (no model calls)",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "469a3030208360c79010ecbd08760874538c55d37c5fcbfcdba3fd7d51adf794",
+      "execution_scope": null,
+      "trajectory": {
+        "6a": "preset_node_static_needs_lockfile",
+        "6a_primary": "known-D/authoring",
+        "after_6b_A": "preset_node_static_v2_workspace",
+        "current": "preset_node_static_v2_workspace",
+        "change": "diagnostic refinement",
+        "derivation_refs_6a": [],
+        "derivation_refs_equal_to_6a": true
+      }
+    },
+    {
+      "index": 15,
+      "name": "JupyterLab",
+      "group": "original_20",
+      "repo": "https://github.com/jupyterlab/jupyterlab",
+      "ref": "bb166a775cba8911fa157c1ff4858b12766d6ede",
+      "archive_sha256": "af39846f2016b0d0a4220123ba13b69180ab11b64c8ec893572018157b2c56c5",
+      "license": "BSD-3-Clause",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_node_static_v2_workspace",
+            "message": "Workspace target/build/output require explicit authoring.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_node_static_v2_workspace",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_node_static_v2_workspace",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_node_static_v2_workspace",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_node_static_v2_workspace",
+          "message": "Workspace target/build/output require explicit authoring.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_node_static_v2_workspace",
+      "secondary_blockers_hypothesis": [
+        "dependency/network"
+      ],
+      "candidate_producer_solving_plausible": "unknown",
+      "candidate_producer_basis": "a proposal could name an entrypoint/workspace, but dependency resolution/service semantics still gate execution; not tested (no model calls)",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "469a3030208360c79010ecbd08760874538c55d37c5fcbfcdba3fd7d51adf794",
+      "execution_scope": null,
+      "trajectory": {
+        "6a": "preset_node_static_needs_lockfile",
+        "6a_primary": "known-D/authoring",
+        "after_6b_A": "preset_node_static_v2_workspace",
+        "current": "preset_node_static_v2_workspace",
+        "change": "diagnostic refinement",
+        "derivation_refs_6a": [],
+        "derivation_refs_equal_to_6a": true
+      }
+    },
+    {
+      "index": 16,
+      "name": "LibreChat",
+      "group": "original_20",
+      "repo": "https://github.com/LibreChat-AI/LibreChat",
+      "ref": "40bb16edfd4698b6239eaafd6714f6e57faf1bc6",
+      "archive_sha256": "1114382fda778a90cd301df821cfd1b4cfdb345457517695db525a579be3328e",
+      "license": "MIT",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_node_static_v2_bun_deferred",
+            "message": "Bun authoring is deferred.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_node_static_v2_bun_deferred",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_node_static_v2_bun_deferred",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_node_static_v2_bun_deferred",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_node_static_v2_bun_deferred",
+          "message": "Bun authoring is deferred.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_node_static_v2_bun_deferred",
+      "secondary_blockers_hypothesis": [
+        "multi-service",
+        "dependency/network"
+      ],
+      "candidate_producer_solving_plausible": "false",
+      "candidate_producer_basis": "missing execution capability or policy (runtime catalog, multi-service, network), not missing knowledge",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "c4b5ab40416af0b3feb62590df293aeb286284cdb0e5365f01c94a1d3525c86c",
+      "execution_scope": null,
+      "trajectory": {
+        "6a": "network_denied",
+        "6a_primary": "effect/policy",
+        "after_6b_A": "not remeasured in 6b-A; the refusal comes from #1440 routing (bun.lock present -> node-static/v2 -> Bun deferred), which drops the npm v1 route",
+        "current": "preset_node_static_v2_bun_deferred",
+        "change": "regression (reach lost: 6a formed K/D, now refused before K)",
+        "derivation_refs_6a": [
+          "sha256:ec2bd43cc45b787e454fe9abf2f463f0911f46574ec01dc63e468f96346573d0"
+        ],
+        "derivation_refs_equal_to_6a": false
+      }
+    },
+    {
+      "index": 17,
+      "name": "ComfyUI",
+      "group": "original_20",
+      "repo": "https://github.com/Comfy-Org/ComfyUI",
+      "ref": "491bf3b928db565328292f83268d00af57867786",
+      "archive_sha256": "e4ff265c22d44b9bec71d560c7982c6c7d66c5f84dde23f06d7aca55703ee014",
+      "license": "GPL-3.0",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_no_match",
+            "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_no_match",
+          "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_no_match",
+      "secondary_blockers_hypothesis": [
+        "dependency/network",
+        "runtime/toolchain"
+      ],
+      "candidate_producer_solving_plausible": "unknown",
+      "candidate_producer_basis": "a proposal could name an entrypoint/workspace, but dependency resolution/service semantics still gate execution; not tested (no model calls)",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "d2ac6f1d700235df5dad70ea810b7025724176878b7acee227294041352de172",
+      "execution_scope": null,
+      "trajectory": {
+        "6a": "preset_no_match",
+        "6a_primary": "known-D/authoring",
+        "after_6b_A": "preset_no_match (not remeasured in 6b-A)",
+        "current": "preset_no_match",
+        "change": "unchanged",
+        "derivation_refs_6a": [],
+        "derivation_refs_equal_to_6a": true
+      }
+    },
+    {
+      "index": 18,
+      "name": "PdfDing",
+      "group": "original_20",
+      "repo": "https://codeberg.org/mrmn/PdfDing",
+      "ref": "7505a64997177097a20ece83b0506f7be52a480b",
+      "archive_sha256": "f60d3c2d0af8f71dae6d750b55118b1e99b47ac85b20cae8e062d1927c7b03ee",
+      "license": "AGPL-3.0",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [
+        "sha256:4a3d6d67f50bfabaaf5594814c4c83a531e3630953e2c2e0be94834e21851f29"
+      ],
+      "attempted_derivation_refs": [
+        "sha256:6a54c2865259e42f801f5d0a55e980e0e93ae1340df7880dcf6275ef6baf0eb5"
+      ],
+      "attempts": [
+        {
+          "attempt_id": "local-2147378-3",
+          "candidate": "node-static/v1",
+          "contract_ref": "sha256:4a3d6d67f50bfabaaf5594814c4c83a531e3630953e2c2e0be94834e21851f29",
+          "derivation_ref": "sha256:6a54c2865259e42f801f5d0a55e980e0e93ae1340df7880dcf6275ef6baf0eb5",
+          "failure": {
+            "code": "network_denied",
+            "message": "this candidate's build resolves dependencies from the network and the request denies it; it was not attempted",
+            "stage": "admission"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "network_denied",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "network_denied",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "network_denied",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "network_denied",
+          "message": "this candidate's build resolves dependencies from the network and the request denies it; it was not attempted",
+          "stage": "admission"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": true,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "effect/policy",
+      "terminal_code": "network_denied",
+      "secondary_blockers_hypothesis": [
+        "dependency/network"
+      ],
+      "candidate_producer_solving_plausible": "false",
+      "candidate_producer_basis": "missing execution capability or policy (runtime catalog, multi-service, network), not missing knowledge",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "0dc4ed4227bcc927f340f1207f32719df47d98622c6d02d544985e59b87ddfb9",
+      "execution_scope": null,
+      "trajectory": {
+        "6a": "network_denied",
+        "6a_primary": "effect/policy",
+        "after_6b_A": "network_denied (not remeasured in 6b-A)",
+        "current": "network_denied",
+        "change": "unchanged",
+        "derivation_refs_6a": [
+          "sha256:6a54c2865259e42f801f5d0a55e980e0e93ae1340df7880dcf6275ef6baf0eb5"
+        ],
+        "derivation_refs_equal_to_6a": true
+      }
+    },
+    {
+      "index": 19,
+      "name": "Grist core",
+      "group": "original_20",
+      "repo": "https://github.com/gristlabs/grist-core",
+      "ref": "b4ccc892202a3aefd6e565f0bc0c01081433a53c",
+      "archive_sha256": "0fb3e9be24032f710a401717a80f41dbb7e247d050a578f6214f7f0d0919083a",
+      "license": "Apache-2.0",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_node_static_v2_manager_config",
+            "message": "Package-manager configuration requires explicit authoring.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_node_static_v2_manager_config",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_node_static_v2_manager_config",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_node_static_v2_manager_config",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_node_static_v2_manager_config",
+          "message": "Package-manager configuration requires explicit authoring.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_node_static_v2_manager_config",
+      "secondary_blockers_hypothesis": [
+        "dependency/network"
+      ],
+      "candidate_producer_solving_plausible": "unknown",
+      "candidate_producer_basis": "a proposal could name an entrypoint/workspace, but dependency resolution/service semantics still gate execution; not tested (no model calls)",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "fcb4dadf604815b77783aea47ac481acc1b1af03256796019e9737025cc61d30",
+      "execution_scope": null,
+      "trajectory": {
+        "6a": "preset_node_static_needs_lockfile",
+        "6a_primary": "known-D/authoring",
+        "after_6b_A": "preset_node_static_v2_manager_config",
+        "current": "preset_node_static_v2_manager_config",
+        "change": "diagnostic refinement",
+        "derivation_refs_6a": [],
+        "derivation_refs_equal_to_6a": true
+      }
+    },
+    {
+      "index": 20,
+      "name": "File Browser",
+      "group": "original_20",
+      "repo": "https://github.com/filebrowser/filebrowser",
+      "ref": "833d908884d5c801f30f5c098d7977177eb3a36b",
+      "archive_sha256": "605bc6166fd38cc7429478f55b0f50ceea1ab1eb1ba7da8936d0d480a3c159ef",
+      "license": "Apache-2.0",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_no_match",
+            "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_no_match",
+          "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_no_match",
+      "secondary_blockers_hypothesis": [
+        "runtime/toolchain"
+      ],
+      "candidate_producer_solving_plausible": "false",
+      "candidate_producer_basis": "missing execution capability or policy (runtime catalog, multi-service, network), not missing knowledge",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "d2ac6f1d700235df5dad70ea810b7025724176878b7acee227294041352de172",
+      "execution_scope": null,
+      "trajectory": {
+        "6a": "preset_no_match",
+        "6a_primary": "known-D/authoring",
+        "after_6b_A": "preset_no_match (not remeasured in 6b-A)",
+        "current": "preset_no_match",
+        "change": "unchanged",
+        "derivation_refs_6a": [],
+        "derivation_refs_equal_to_6a": true
+      }
+    },
+    {
+      "index": 21,
+      "name": "2048",
+      "group": "new_30",
+      "repo": "https://github.com/gabrielecirulli/2048",
+      "ref": "478b6ec346e3787f589e4af751378d06ded4cbbc",
+      "archive_sha256": "4f3e35b3b9124c5a5c16231b71684288d8d781c2d534754f6b36119336231e2e",
+      "license": "MIT",
+      "source_closure": "sha256:1b92a5799e48141d70e3f0246626833c985e51885f2a037e5ebdfefc1c5f1aa4",
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [
+        "sha256:13c013fe68ab460c3d3a360574f5a9fb53969860fb457ca3aef4ee0ae38abfa0"
+      ],
+      "attempted_derivation_refs": [
+        "sha256:9fc21a1dc0b4b2d87bd7657e81d12ce5bce6fbfa29bac45f88ba5d7126ce285c"
+      ],
+      "attempts": [
+        {
+          "attempt_id": "local-2147452-3",
+          "candidate": "static-files/v1",
+          "contract_ref": "sha256:13c013fe68ab460c3d3a360574f5a9fb53969860fb457ca3aef4ee0ae38abfa0",
+          "derivation_ref": "sha256:9fc21a1dc0b4b2d87bd7657e81d12ce5bce6fbfa29bac45f88ba5d7126ce285c",
+          "outcomes": {
+            "cleanup": {
+              "state": "succeeded"
+            },
+            "publication": {
+              "state": "succeeded"
+            },
+            "runtime_verification": {
+              "state": "succeeded"
+            },
+            "seal": {
+              "state": "succeeded"
+            }
+          },
+          "realization": {
+            "build_network": "n/a",
+            "candidate_network": "loopback only",
+            "containment": "none; serves the produced bundle's files, runs nothing",
+            "destroyed": true,
+            "endpoints": {
+              "app.http": "loopback static server"
+            },
+            "executor": "runtime-static-loopback",
+            "workspace": "the produced static web bundle, read-only"
+          },
+          "receipt": {
+            "contract_ref": "sha256:13c013fe68ab460c3d3a360574f5a9fb53969860fb457ca3aef4ee0ae38abfa0",
+            "derivation_ref": "sha256:9fc21a1dc0b4b2d87bd7657e81d12ce5bce6fbfa29bac45f88ba5d7126ce285c",
+            "execution": {
+              "attempt_id": "local-2147452-3",
+              "endpoint": "http://127.0.0.1:44609/",
+              "platform": "linux/aarch64",
+              "realization": "static_web",
+              "request_id": "local-2147452-2-1790671796169068351"
+            },
+            "fully_satisfied": true,
+            "observations": [
+              {
+                "evidence": {
+                  "body_sha256": "sha256:db92ec6fea128ee54890be3409cbbb1a573542f39f9f7c02db3152e5d327891b",
+                  "method": "GET",
+                  "path": "/",
+                  "status": 200
+                },
+                "id": "root",
+                "outcome": "satisfied"
+              },
+              {
+                "evidence": {
+                  "digest": "sha256:1b92a5799e48141d70e3f0246626833c985e51885f2a037e5ebdfefc1c5f1aa4",
+                  "input": "workspace"
+                },
+                "id": "source-identity",
+                "outcome": "satisfied"
+              }
+            ],
+            "schema": "ato.contract-verification-receipt/1",
+            "target": {
+              "kind": "formation-runtime"
+            }
+          },
+          "runtime_id": "local",
+          "status": "verified",
+          "verification": {
+            "verdicts": [
+              {
+                "id": "root",
+                "outcome": {
+                  "result": "satisfied"
+                }
+              },
+              {
+                "id": "source-identity",
+                "outcome": {
+                  "result": "satisfied"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "typed_failures": [],
+      "receipt": {
+        "contract_ref": "sha256:13c013fe68ab460c3d3a360574f5a9fb53969860fb457ca3aef4ee0ae38abfa0",
+        "derivation_ref": "sha256:9fc21a1dc0b4b2d87bd7657e81d12ce5bce6fbfa29bac45f88ba5d7126ce285c",
+        "execution": {
+          "attempt_id": "local-2147452-3",
+          "endpoint": "http://127.0.0.1:44609/",
+          "platform": "linux/aarch64",
+          "realization": "static_web",
+          "request_id": "local-2147452-2-1790671796169068351"
+        },
+        "fully_satisfied": true,
+        "observations": [
+          {
+            "evidence": {
+              "body_sha256": "sha256:db92ec6fea128ee54890be3409cbbb1a573542f39f9f7c02db3152e5d327891b",
+              "method": "GET",
+              "path": "/",
+              "status": 200
+            },
+            "id": "root",
+            "outcome": "satisfied"
+          },
+          {
+            "evidence": {
+              "digest": "sha256:1b92a5799e48141d70e3f0246626833c985e51885f2a037e5ebdfefc1c5f1aa4",
+              "input": "workspace"
+            },
+            "id": "source-identity",
+            "outcome": "satisfied"
+          }
+        ],
+        "schema": "ato.contract-verification-receipt/1",
+        "target": {
+          "kind": "formation-runtime"
+        }
+      },
+      "retained_ref": "sha256:53ba1b1cff58f964e2e76c2b1ed6d54e713860c756afaa863f1d7662a4a9b932",
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": true,
+        "D_admitted": true,
+        "E_executed": true,
+        "F_verifier_ran": true,
+        "G_K_fully_satisfied": true,
+        "H_retained": true,
+        "I_functional_success": false
+      },
+      "primary_class": "success",
+      "terminal_code": "fully_satisfied",
+      "secondary_blockers_hypothesis": [
+        "Browser/UI"
+      ],
+      "candidate_producer_solving_plausible": null,
+      "candidate_producer_basis": null,
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "23d360510b4669244de3fd866d3b1250344d1a6abc72f944ec7adf4ba97846ca",
+      "execution_scope": "typed K only (GET / 200 + source identity); application functionality NOT established"
+    },
+    {
+      "index": 22,
+      "name": "reveal.js",
+      "group": "new_30",
+      "repo": "https://github.com/hakimel/reveal.js",
+      "ref": "f8c9ec3bb3b288e061b166fba5e4975920dd5cd4",
+      "archive_sha256": "b695207d618d628b888f403a26f599322018fe81311cbb2f9ad84b0dad8d842f",
+      "license": "MIT",
+      "source_closure": "sha256:8cb73cfaf666bcc045d70b9f9ab4dcd63e6a32605bea3d6ff8170dee1b1694c0",
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [
+        "sha256:fd914e5b069707d5c6c0723cfbbd2cfe8733f6f06554f6d8e40a77b7bf08eb24"
+      ],
+      "attempted_derivation_refs": [
+        "sha256:05c93137349d4ad4f104025a057bae0696bbfe44e0f35f632d76afe08a4dc557",
+        "sha256:5173440aff1098a28b887614ecd5b36ec529c4fc637deec39e6f6604c616e25a"
+      ],
+      "attempts": [
+        {
+          "attempt_id": "local-2147459-3",
+          "candidate": "node-static/v1",
+          "contract_ref": "sha256:fd914e5b069707d5c6c0723cfbbd2cfe8733f6f06554f6d8e40a77b7bf08eb24",
+          "derivation_ref": "sha256:5173440aff1098a28b887614ecd5b36ec529c4fc637deec39e6f6604c616e25a",
+          "failure": {
+            "code": "network_denied",
+            "message": "this candidate's build resolves dependencies from the network and the request denies it; it was not attempted",
+            "stage": "admission"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "network_denied",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "network_denied",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "network_denied",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        },
+        {
+          "attempt_id": "local-2147459-4",
+          "candidate": "static-files/v1",
+          "contract_ref": "sha256:fd914e5b069707d5c6c0723cfbbd2cfe8733f6f06554f6d8e40a77b7bf08eb24",
+          "derivation_ref": "sha256:05c93137349d4ad4f104025a057bae0696bbfe44e0f35f632d76afe08a4dc557",
+          "outcomes": {
+            "cleanup": {
+              "state": "succeeded"
+            },
+            "publication": {
+              "state": "succeeded"
+            },
+            "runtime_verification": {
+              "state": "succeeded"
+            },
+            "seal": {
+              "state": "succeeded"
+            }
+          },
+          "realization": {
+            "build_network": "n/a",
+            "candidate_network": "loopback only",
+            "containment": "none; serves the produced bundle's files, runs nothing",
+            "destroyed": true,
+            "endpoints": {
+              "app.http": "loopback static server"
+            },
+            "executor": "runtime-static-loopback",
+            "workspace": "the produced static web bundle, read-only"
+          },
+          "receipt": {
+            "contract_ref": "sha256:fd914e5b069707d5c6c0723cfbbd2cfe8733f6f06554f6d8e40a77b7bf08eb24",
+            "derivation_ref": "sha256:05c93137349d4ad4f104025a057bae0696bbfe44e0f35f632d76afe08a4dc557",
+            "execution": {
+              "attempt_id": "local-2147459-4",
+              "endpoint": "http://127.0.0.1:37145/",
+              "platform": "linux/aarch64",
+              "realization": "static_web",
+              "request_id": "local-2147459-2-1790671798858171565"
+            },
+            "fully_satisfied": true,
+            "observations": [
+              {
+                "evidence": {
+                  "body_sha256": "sha256:909168ace5a3c3fbda2e4f1c4909b3becd40916f1394f03f9d93b94f3cd0c451",
+                  "method": "GET",
+                  "path": "/",
+                  "status": 200
+                },
+                "id": "root",
+                "outcome": "satisfied"
+              },
+              {
+                "evidence": {
+                  "digest": "sha256:8cb73cfaf666bcc045d70b9f9ab4dcd63e6a32605bea3d6ff8170dee1b1694c0",
+                  "input": "workspace"
+                },
+                "id": "source-identity",
+                "outcome": "satisfied"
+              }
+            ],
+            "schema": "ato.contract-verification-receipt/1",
+            "target": {
+              "kind": "formation-runtime"
+            }
+          },
+          "runtime_id": "local",
+          "status": "verified",
+          "verification": {
+            "verdicts": [
+              {
+                "id": "root",
+                "outcome": {
+                  "result": "satisfied"
+                }
+              },
+              {
+                "id": "source-identity",
+                "outcome": {
+                  "result": "satisfied"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "network_denied",
+          "message": "this candidate's build resolves dependencies from the network and the request denies it; it was not attempted",
+          "stage": "admission"
+        }
+      ],
+      "receipt": {
+        "contract_ref": "sha256:fd914e5b069707d5c6c0723cfbbd2cfe8733f6f06554f6d8e40a77b7bf08eb24",
+        "derivation_ref": "sha256:05c93137349d4ad4f104025a057bae0696bbfe44e0f35f632d76afe08a4dc557",
+        "execution": {
+          "attempt_id": "local-2147459-4",
+          "endpoint": "http://127.0.0.1:37145/",
+          "platform": "linux/aarch64",
+          "realization": "static_web",
+          "request_id": "local-2147459-2-1790671798858171565"
+        },
+        "fully_satisfied": true,
+        "observations": [
+          {
+            "evidence": {
+              "body_sha256": "sha256:909168ace5a3c3fbda2e4f1c4909b3becd40916f1394f03f9d93b94f3cd0c451",
+              "method": "GET",
+              "path": "/",
+              "status": 200
+            },
+            "id": "root",
+            "outcome": "satisfied"
+          },
+          {
+            "evidence": {
+              "digest": "sha256:8cb73cfaf666bcc045d70b9f9ab4dcd63e6a32605bea3d6ff8170dee1b1694c0",
+              "input": "workspace"
+            },
+            "id": "source-identity",
+            "outcome": "satisfied"
+          }
+        ],
+        "schema": "ato.contract-verification-receipt/1",
+        "target": {
+          "kind": "formation-runtime"
+        }
+      },
+      "retained_ref": "sha256:0fb8473b13e753144d3cb55963214cf089af8ee45357762b55e75e7c7096d098",
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": true,
+        "D_admitted": true,
+        "E_executed": true,
+        "F_verifier_ran": true,
+        "G_K_fully_satisfied": true,
+        "H_retained": true,
+        "I_functional_success": false
+      },
+      "primary_class": "success",
+      "terminal_code": "fully_satisfied",
+      "secondary_blockers_hypothesis": [
+        "Browser/UI"
+      ],
+      "candidate_producer_solving_plausible": null,
+      "candidate_producer_basis": null,
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "0b5285269b75a5bb657cfe1f535296923401d7610a6b048e5924bf5237db3250",
+      "execution_scope": "typed K only (GET / 200 + source identity); application functionality NOT established"
+    },
+    {
+      "index": 23,
+      "name": "CyberChef",
+      "group": "new_30",
+      "repo": "https://github.com/gchq/CyberChef",
+      "ref": "d0267c3cf7691e9c2ed51e2d5071b9fd6004fcc1",
+      "archive_sha256": "801900966adb4f72bc7551704d3290df98073f23e5c81314cddc2f70e5bb10a6",
+      "license": "Apache-2.0",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "attempt_id": "local-2147473-3",
+          "candidate": "node-static/v1",
+          "failure": {
+            "code": "intent_malformed",
+            "message": "node version is malformed: \"24\" is not an exact version: unexpected end of input while parsing major version number",
+            "stage": "projection"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "intent_malformed",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "intent_malformed",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "intent_malformed",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "failed"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "intent_malformed",
+          "message": "node version is malformed: \"24\" is not an exact version: unexpected end of input while parsing major version number",
+          "stage": "projection"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "intent_malformed",
+      "secondary_blockers_hypothesis": [
+        "runtime/toolchain",
+        "dependency/network"
+      ],
+      "candidate_producer_solving_plausible": "false",
+      "candidate_producer_basis": "missing execution capability or policy (runtime catalog, multi-service, network), not missing knowledge",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "08a0a68366532b61ac87ed4d710dc662947a4c99fa8aad422b3530e58f2ed491",
+      "execution_scope": null
+    },
+    {
+      "index": 24,
+      "name": "IT-Tools",
+      "group": "new_30",
+      "repo": "https://github.com/CorentinTh/it-tools",
+      "ref": "d505845f918e946ec300af7b36efc107e2f66e9e",
+      "archive_sha256": "02fc371df3d79b189cfa752f2bd5a411dddac6a6fb92ad94a3c0ad9f7e44a91a",
+      "license": "GPL-3.0",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_node_static_v2_static_unproven",
+            "message": "A standalone static artifact is not established; explicit service/build authoring is required.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_node_static_v2_static_unproven",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_node_static_v2_static_unproven",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_node_static_v2_static_unproven",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_node_static_v2_static_unproven",
+          "message": "A standalone static artifact is not established; explicit service/build authoring is required.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_node_static_v2_static_unproven",
+      "secondary_blockers_hypothesis": [
+        "dependency/network"
+      ],
+      "candidate_producer_solving_plausible": "unknown",
+      "candidate_producer_basis": "a proposal could name an entrypoint/workspace, but dependency resolution/service semantics still gate execution; not tested (no model calls)",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "bbfab75358f11490884412cb695428cbe09fe48177e0b3c8aa4a1920b6585596",
+      "execution_scope": null
+    },
+    {
+      "index": 25,
+      "name": "Squoosh",
+      "group": "new_30",
+      "repo": "https://github.com/GoogleChromeLabs/squoosh",
+      "ref": "e8d35e0fb66eb16eff6fe8fc773eabcbb7128de3",
+      "archive_sha256": "8a4caf8744066d08005ce32034ba654d8114aa6875ff3267b56a68a9021d1c08",
+      "license": "Apache-2.0",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [
+        "sha256:3a2edba7530f539b5314ed145523d9e9020ef325f2a9ade28bf44a00f525694b"
+      ],
+      "attempted_derivation_refs": [
+        "sha256:c0c7b531005a4396f7676a8c2cd729b05c9b4afe5e60540c2016872c64ae8423"
+      ],
+      "attempts": [
+        {
+          "attempt_id": "local-2147539-3",
+          "candidate": "node-static/v1",
+          "contract_ref": "sha256:3a2edba7530f539b5314ed145523d9e9020ef325f2a9ade28bf44a00f525694b",
+          "derivation_ref": "sha256:c0c7b531005a4396f7676a8c2cd729b05c9b4afe5e60540c2016872c64ae8423",
+          "failure": {
+            "code": "network_denied",
+            "message": "this candidate's build resolves dependencies from the network and the request denies it; it was not attempted",
+            "stage": "admission"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "network_denied",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "network_denied",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "network_denied",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "network_denied",
+          "message": "this candidate's build resolves dependencies from the network and the request denies it; it was not attempted",
+          "stage": "admission"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": true,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "effect/policy",
+      "terminal_code": "network_denied",
+      "secondary_blockers_hypothesis": [
+        "dependency/network"
+      ],
+      "candidate_producer_solving_plausible": "false",
+      "candidate_producer_basis": "missing execution capability or policy (runtime catalog, multi-service, network), not missing knowledge",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "f1c9b4851fde20dc9a286896db8c3e0c489129bfcca8e8c72dfd68a6be18c55c",
+      "execution_scope": null
+    },
+    {
+      "index": 26,
+      "name": "Hoppscotch",
+      "group": "new_30",
+      "repo": "https://github.com/hoppscotch/hoppscotch",
+      "ref": "a9ffa29ce5036ef5be0768db35a8b6bae32e1160",
+      "archive_sha256": "c1315ac8a04c64a200553ae0e02091f8bdd869595061e746e37036157b96620c",
+      "license": "MIT",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_node_static_v2_workspace",
+            "message": "Workspace target/build/output require explicit authoring.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_node_static_v2_workspace",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_node_static_v2_workspace",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_node_static_v2_workspace",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_node_static_v2_workspace",
+          "message": "Workspace target/build/output require explicit authoring.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_node_static_v2_workspace",
+      "secondary_blockers_hypothesis": [
+        "multi-service",
+        "dependency/network"
+      ],
+      "candidate_producer_solving_plausible": "false",
+      "candidate_producer_basis": "missing execution capability or policy (runtime catalog, multi-service, network), not missing knowledge",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "469a3030208360c79010ecbd08760874538c55d37c5fcbfcdba3fd7d51adf794",
+      "execution_scope": null
+    },
+    {
+      "index": 27,
+      "name": "Wiki.js",
+      "group": "new_30",
+      "repo": "https://github.com/requarks/wiki",
+      "ref": "712a3a5bb23b70d7f7325a04b80cc5f20a8f9d9a",
+      "archive_sha256": "06e8b84154b9c4a4075cb69633c9607935d7b8c8fbda24d568b90029015a4cc6",
+      "license": "AGPL-3.0",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_node_static_v2_manager_config",
+            "message": "Package-manager configuration requires explicit authoring.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_node_static_v2_manager_config",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_node_static_v2_manager_config",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_node_static_v2_manager_config",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_node_static_v2_manager_config",
+          "message": "Package-manager configuration requires explicit authoring.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_node_static_v2_manager_config",
+      "secondary_blockers_hypothesis": [
+        "dependency/network",
+        "multi-service"
+      ],
+      "candidate_producer_solving_plausible": "unknown",
+      "candidate_producer_basis": "a proposal could name an entrypoint/workspace, but dependency resolution/service semantics still gate execution; not tested (no model calls)",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "fcb4dadf604815b77783aea47ac481acc1b1af03256796019e9737025cc61d30",
+      "execution_scope": null
+    },
+    {
+      "index": 28,
+      "name": "Kutt",
+      "group": "new_30",
+      "repo": "https://github.com/thedevs-network/kutt",
+      "ref": "279b491b53bbd01fbae70f603222526962772061",
+      "archive_sha256": "6fd86408c5ec917506aa0b081e72532dfaf78542855c1b9e1d984c1b6d2f52ae",
+      "license": "MIT",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_node_static_needs_build_script",
+            "message": "A built web app needs a `build` script in package.json. Ato runs `npm run build` and publishes what it writes to `dist/`.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_node_static_needs_build_script",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_node_static_needs_build_script",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_node_static_needs_build_script",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_node_static_needs_build_script",
+          "message": "A built web app needs a `build` script in package.json. Ato runs `npm run build` and publishes what it writes to `dist/`.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_node_static_needs_build_script",
+      "secondary_blockers_hypothesis": [
+        "dependency/network"
+      ],
+      "candidate_producer_solving_plausible": "unknown",
+      "candidate_producer_basis": "a proposal could name an entrypoint/workspace, but dependency resolution/service semantics still gate execution; not tested (no model calls)",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "2d3fe76bdbc364174481d7fd5a1782ee1ecb480c084b821b2308e8d9476a83ed",
+      "execution_scope": null
+    },
+    {
+      "index": 29,
+      "name": "Umami",
+      "group": "new_30",
+      "repo": "https://github.com/umami-software/umami",
+      "ref": "ec0ff50388c264ed8ce46f00967e92f7e71476ae",
+      "archive_sha256": "dfdc154f23fe52ffd8fbf13c0544ea880e5ef01463f57d06954512b41c50a93a",
+      "license": "MIT",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_node_static_v2_workspace",
+            "message": "Workspace target/build/output require explicit authoring.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_node_static_v2_workspace",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_node_static_v2_workspace",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_node_static_v2_workspace",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_node_static_v2_workspace",
+          "message": "Workspace target/build/output require explicit authoring.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_node_static_v2_workspace",
+      "secondary_blockers_hypothesis": [
+        "multi-service",
+        "dependency/network"
+      ],
+      "candidate_producer_solving_plausible": "false",
+      "candidate_producer_basis": "missing execution capability or policy (runtime catalog, multi-service, network), not missing knowledge",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "469a3030208360c79010ecbd08760874538c55d37c5fcbfcdba3fd7d51adf794",
+      "execution_scope": null
+    },
+    {
+      "index": 30,
+      "name": "Ghost",
+      "group": "new_30",
+      "repo": "https://github.com/TryGhost/Ghost",
+      "ref": "edea774531f4159bc343cc2d81e2d694dc240c02",
+      "archive_sha256": "c85e45d82c424c4f68696ed1907ef3f61ba42e59130d4f8c4391cecd8107d038",
+      "license": "MIT",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_node_static_v2_workspace",
+            "message": "Workspace target/build/output require explicit authoring.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_node_static_v2_workspace",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_node_static_v2_workspace",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_node_static_v2_workspace",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_node_static_v2_workspace",
+          "message": "Workspace target/build/output require explicit authoring.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_node_static_v2_workspace",
+      "secondary_blockers_hypothesis": [
+        "dependency/network",
+        "multi-service"
+      ],
+      "candidate_producer_solving_plausible": "unknown",
+      "candidate_producer_basis": "a proposal could name an entrypoint/workspace, but dependency resolution/service semantics still gate execution; not tested (no model calls)",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "469a3030208360c79010ecbd08760874538c55d37c5fcbfcdba3fd7d51adf794",
+      "execution_scope": null
+    },
+    {
+      "index": 31,
+      "name": "Radicale",
+      "group": "new_30",
+      "repo": "https://github.com/Kozea/Radicale",
+      "ref": "1913df87c1d5b1383d212001ad05734f2cf8a35d",
+      "archive_sha256": "8a2438e0c5ffac4e43661c7da1439c3f9b78d6424284b3865aca1d247fb791c5",
+      "license": "GPL-3.0",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_no_match",
+            "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_no_match",
+          "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_no_match",
+      "secondary_blockers_hypothesis": [
+        "dependency/network"
+      ],
+      "candidate_producer_solving_plausible": "unknown",
+      "candidate_producer_basis": "a proposal could name an entrypoint/workspace, but dependency resolution/service semantics still gate execution; not tested (no model calls)",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "d2ac6f1d700235df5dad70ea810b7025724176878b7acee227294041352de172",
+      "execution_scope": null
+    },
+    {
+      "index": 32,
+      "name": "Calibre-Web",
+      "group": "new_30",
+      "repo": "https://github.com/janeczku/calibre-web",
+      "ref": "6e840acbda8d62fdd159bf3855c01872d629a914",
+      "archive_sha256": "bad145af40b5fbcf921e436b3381e462ddce84d93563473616f4f8ca3aa28a45",
+      "license": "GPL-3.0",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_no_match",
+            "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_no_match",
+          "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_no_match",
+      "secondary_blockers_hypothesis": [
+        "dependency/network"
+      ],
+      "candidate_producer_solving_plausible": "unknown",
+      "candidate_producer_basis": "a proposal could name an entrypoint/workspace, but dependency resolution/service semantics still gate execution; not tested (no model calls)",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "d2ac6f1d700235df5dad70ea810b7025724176878b7acee227294041352de172",
+      "execution_scope": null
+    },
+    {
+      "index": 33,
+      "name": "Shynet",
+      "group": "new_30",
+      "repo": "https://github.com/milesmcc/shynet",
+      "ref": "ca35caba3af2b888acc990b99152c500a1c44461",
+      "archive_sha256": "80c79ee8c1759109f910d797e7c10217268d7154251cfa7c9f4bca529e167ec3",
+      "license": "Apache-2.0",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_node_static_needs_build_script",
+            "message": "A built web app needs a `build` script in package.json. Ato runs `npm run build` and publishes what it writes to `dist/`.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_node_static_needs_build_script",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_node_static_needs_build_script",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_node_static_needs_build_script",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_node_static_needs_build_script",
+          "message": "A built web app needs a `build` script in package.json. Ato runs `npm run build` and publishes what it writes to `dist/`.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_node_static_needs_build_script",
+      "secondary_blockers_hypothesis": [
+        "multi-service",
+        "dependency/network"
+      ],
+      "candidate_producer_solving_plausible": "false",
+      "candidate_producer_basis": "missing execution capability or policy (runtime catalog, multi-service, network), not missing knowledge",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "2d3fe76bdbc364174481d7fd5a1782ee1ecb480c084b821b2308e8d9476a83ed",
+      "execution_scope": null
+    },
+    {
+      "index": 34,
+      "name": "text-generation-webui",
+      "group": "new_30",
+      "repo": "https://github.com/oobabooga/textgen",
+      "ref": "c93f8871239550de2ccfe1e95d469aa82616f07e",
+      "archive_sha256": "424ff940d49160b99d6bc0893c4b5a51cfa06fd71f1e94b9e56ad61b809c3aa6",
+      "license": "AGPL-3.0",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_no_match",
+            "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_no_match",
+          "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_no_match",
+      "secondary_blockers_hypothesis": [
+        "dependency/network",
+        "runtime/toolchain"
+      ],
+      "candidate_producer_solving_plausible": "unknown",
+      "candidate_producer_basis": "a proposal could name an entrypoint/workspace, but dependency resolution/service semantics still gate execution; not tested (no model calls)",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "d2ac6f1d700235df5dad70ea810b7025724176878b7acee227294041352de172",
+      "execution_scope": null
+    },
+    {
+      "index": 35,
+      "name": "PrivateGPT",
+      "group": "new_30",
+      "repo": "https://github.com/zylon-ai/private-gpt",
+      "ref": "01ac43d72bc4c0b7565994197fe23476539059a7",
+      "archive_sha256": "c2f13bff0c9cfb4738bb62c7242c8e7ec8d453ca23bf7b89928d6be849b133ed",
+      "license": "Apache-2.0",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_no_match",
+            "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_no_match",
+          "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_no_match",
+      "secondary_blockers_hypothesis": [
+        "dependency/network",
+        "multi-service"
+      ],
+      "candidate_producer_solving_plausible": "unknown",
+      "candidate_producer_basis": "a proposal could name an entrypoint/workspace, but dependency resolution/service semantics still gate execution; not tested (no model calls)",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "d2ac6f1d700235df5dad70ea810b7025724176878b7acee227294041352de172",
+      "execution_scope": null
+    },
+    {
+      "index": 36,
+      "name": "Gotify",
+      "group": "new_30",
+      "repo": "https://github.com/gotify/server",
+      "ref": "d02796bd084af7fb6d81168ec0f79d9d496d1dd8",
+      "archive_sha256": "3199fdca520f9501487458c4afc48191485c37e1295c18b80c70837af007bc15",
+      "license": "MIT",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_no_match",
+            "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_no_match",
+          "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_no_match",
+      "secondary_blockers_hypothesis": [
+        "runtime/toolchain"
+      ],
+      "candidate_producer_solving_plausible": "false",
+      "candidate_producer_basis": "missing execution capability or policy (runtime catalog, multi-service, network), not missing knowledge",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "d2ac6f1d700235df5dad70ea810b7025724176878b7acee227294041352de172",
+      "execution_scope": null
+    },
+    {
+      "index": 37,
+      "name": "Navidrome",
+      "group": "new_30",
+      "repo": "https://github.com/navidrome/navidrome",
+      "ref": "3a31f702b529fe3d9843894e024d3a0316c11650",
+      "archive_sha256": "522f487abd5146cf652dfaef14d179b8515fd96ea115f04eef6beea56cebc273",
+      "license": "GPL-3.0",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_no_match",
+            "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_no_match",
+          "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_no_match",
+      "secondary_blockers_hypothesis": [
+        "runtime/toolchain"
+      ],
+      "candidate_producer_solving_plausible": "false",
+      "candidate_producer_basis": "missing execution capability or policy (runtime catalog, multi-service, network), not missing knowledge",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "d2ac6f1d700235df5dad70ea810b7025724176878b7acee227294041352de172",
+      "execution_scope": null
+    },
+    {
+      "index": 38,
+      "name": "PocketBase",
+      "group": "new_30",
+      "repo": "https://github.com/pocketbase/pocketbase",
+      "ref": "5cec579da984436a258602a46a96302fbd31f77c",
+      "archive_sha256": "efce3da1124ee8adb3c43f286877b6e4d24e4ba6e5e32870d46451d4eca22f06",
+      "license": "MIT",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_no_match",
+            "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_no_match",
+          "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_no_match",
+      "secondary_blockers_hypothesis": [
+        "runtime/toolchain"
+      ],
+      "candidate_producer_solving_plausible": "false",
+      "candidate_producer_basis": "missing execution capability or policy (runtime catalog, multi-service, network), not missing knowledge",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "d2ac6f1d700235df5dad70ea810b7025724176878b7acee227294041352de172",
+      "execution_scope": null
+    },
+    {
+      "index": 39,
+      "name": "Glance",
+      "group": "new_30",
+      "repo": "https://github.com/glanceapp/glance",
+      "ref": "372466c6d75318670dc66e4e452179350fc50c97",
+      "archive_sha256": "c77ca7bade3091098eda74725b1c35dd778348e620b6c63bcc3d01078b93801e",
+      "license": "AGPL-3.0",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_no_match",
+            "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_no_match",
+          "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_no_match",
+      "secondary_blockers_hypothesis": [
+        "runtime/toolchain"
+      ],
+      "candidate_producer_solving_plausible": "false",
+      "candidate_producer_basis": "missing execution capability or policy (runtime catalog, multi-service, network), not missing knowledge",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "d2ac6f1d700235df5dad70ea810b7025724176878b7acee227294041352de172",
+      "execution_scope": null
+    },
+    {
+      "index": 40,
+      "name": "Shiori",
+      "group": "new_30",
+      "repo": "https://github.com/go-shiori/shiori",
+      "ref": "9a9a426acaca0e57e205bf20266a44954aaa8264",
+      "archive_sha256": "ded75f4adf732070efc12c52f9aecf005626a2b7f50b7ba9ce8495f0d2061172",
+      "license": "MIT",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_node_static_v2_bun_deferred",
+            "message": "Bun authoring is deferred.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_node_static_v2_bun_deferred",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_node_static_v2_bun_deferred",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_node_static_v2_bun_deferred",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_node_static_v2_bun_deferred",
+          "message": "Bun authoring is deferred.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_node_static_v2_bun_deferred",
+      "secondary_blockers_hypothesis": [
+        "runtime/toolchain"
+      ],
+      "candidate_producer_solving_plausible": "false",
+      "candidate_producer_basis": "missing execution capability or policy (runtime catalog, multi-service, network), not missing knowledge",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "c4b5ab40416af0b3feb62590df293aeb286284cdb0e5365f01c94a1d3525c86c",
+      "execution_scope": null
+    },
+    {
+      "index": 41,
+      "name": "Vaultwarden",
+      "group": "new_30",
+      "repo": "https://github.com/dani-garcia/vaultwarden",
+      "ref": "061694d0cb3bbf5d4c7e920c892824f0020cff83",
+      "archive_sha256": "ef8e81a80286282d9be084169415268dfdbf47072663209f228144fdaae9e49e",
+      "license": "AGPL-3.0",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_no_match",
+            "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_no_match",
+          "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_no_match",
+      "secondary_blockers_hypothesis": [
+        "runtime/toolchain"
+      ],
+      "candidate_producer_solving_plausible": "false",
+      "candidate_producer_basis": "missing execution capability or policy (runtime catalog, multi-service, network), not missing knowledge",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "d2ac6f1d700235df5dad70ea810b7025724176878b7acee227294041352de172",
+      "execution_scope": null
+    },
+    {
+      "index": 42,
+      "name": "Lemmy",
+      "group": "new_30",
+      "repo": "https://github.com/LemmyNet/lemmy",
+      "ref": "f1476db8785600db709e6e01df331e00cffbe340",
+      "archive_sha256": "cedd12baa456b0ad70ace976346db0d2b1b81a33232e0e6ad9643156cd9b9773",
+      "license": "AGPL-3.0",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_no_match",
+            "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_no_match",
+          "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_no_match",
+      "secondary_blockers_hypothesis": [
+        "runtime/toolchain",
+        "multi-service"
+      ],
+      "candidate_producer_solving_plausible": "false",
+      "candidate_producer_basis": "missing execution capability or policy (runtime catalog, multi-service, network), not missing knowledge",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "d2ac6f1d700235df5dad70ea810b7025724176878b7acee227294041352de172",
+      "execution_scope": null
+    },
+    {
+      "index": 43,
+      "name": "Paperless-ngx",
+      "group": "new_30",
+      "repo": "https://github.com/paperless-ngx/paperless-ngx",
+      "ref": "61f36eb253bdeb4362d96f2b9db864c91e2bb09e",
+      "archive_sha256": "d2d560f5f0c35e2cdc5823e384790cb7a59030f0d7a65e137d6623d84bc3dff6",
+      "license": "GPL-3.0",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_no_match",
+            "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_no_match",
+          "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_no_match",
+      "secondary_blockers_hypothesis": [
+        "multi-service",
+        "dependency/network"
+      ],
+      "candidate_producer_solving_plausible": "false",
+      "candidate_producer_basis": "missing execution capability or policy (runtime catalog, multi-service, network), not missing knowledge",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "d2ac6f1d700235df5dad70ea810b7025724176878b7acee227294041352de172",
+      "execution_scope": null
+    },
+    {
+      "index": 44,
+      "name": "Mastodon",
+      "group": "new_30",
+      "repo": "https://github.com/mastodon/mastodon",
+      "ref": "d95390addf6d8df0b8a67a5ef413bfc64fa8890a",
+      "archive_sha256": "e4a7a3a320de567061c7885a228e596d084a5c95e7aa46acc7e070a8af27cc24",
+      "license": "AGPL-3.0",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_node_static_v2_workspace",
+            "message": "Workspace target/build/output require explicit authoring.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_node_static_v2_workspace",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_node_static_v2_workspace",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_node_static_v2_workspace",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_node_static_v2_workspace",
+          "message": "Workspace target/build/output require explicit authoring.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_node_static_v2_workspace",
+      "secondary_blockers_hypothesis": [
+        "multi-service",
+        "runtime/toolchain"
+      ],
+      "candidate_producer_solving_plausible": "false",
+      "candidate_producer_basis": "missing execution capability or policy (runtime catalog, multi-service, network), not missing knowledge",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "469a3030208360c79010ecbd08760874538c55d37c5fcbfcdba3fd7d51adf794",
+      "execution_scope": null
+    },
+    {
+      "index": 45,
+      "name": "Linkwarden",
+      "group": "new_30",
+      "repo": "https://github.com/linkwarden/linkwarden",
+      "ref": "952ac4540657cae3a67c3ca59433899d2fda8374",
+      "archive_sha256": "fb1ce9889cc1b77e86cec1e2c4e2eaf18cdbfba61636388bc0f50a1c6239e369",
+      "license": "AGPL-3.0",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_node_static_v2_workspace",
+            "message": "Workspace target/build/output require explicit authoring.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_node_static_v2_workspace",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_node_static_v2_workspace",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_node_static_v2_workspace",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_node_static_v2_workspace",
+          "message": "Workspace target/build/output require explicit authoring.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_node_static_v2_workspace",
+      "secondary_blockers_hypothesis": [
+        "multi-service",
+        "dependency/network"
+      ],
+      "candidate_producer_solving_plausible": "false",
+      "candidate_producer_basis": "missing execution capability or policy (runtime catalog, multi-service, network), not missing knowledge",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "469a3030208360c79010ecbd08760874538c55d37c5fcbfcdba3fd7d51adf794",
+      "execution_scope": null
+    },
+    {
+      "index": 46,
+      "name": "NetBox",
+      "group": "new_30",
+      "repo": "https://github.com/netbox-community/netbox",
+      "ref": "9bcfd73994b7dbdaf22b88a0e68b7193cd313d4e",
+      "archive_sha256": "fe6f0d311d176ae8e2436572a8018983665c5d7fa43dd75bccc77949253edd0e",
+      "license": "Apache-2.0",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_no_match",
+            "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_no_match",
+          "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_no_match",
+      "secondary_blockers_hypothesis": [
+        "multi-service",
+        "dependency/network"
+      ],
+      "candidate_producer_solving_plausible": "false",
+      "candidate_producer_basis": "missing execution capability or policy (runtime catalog, multi-service, network), not missing knowledge",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "d2ac6f1d700235df5dad70ea810b7025724176878b7acee227294041352de172",
+      "execution_scope": null
+    },
+    {
+      "index": 47,
+      "name": "BookStack",
+      "group": "new_30",
+      "repo": "https://github.com/BookStackApp/BookStack",
+      "ref": "a09aa8aac65e5a0aee786143c0e184cfdb2f67ea",
+      "archive_sha256": "85ec64bd57f42b10ca0ad2677f5f29c06c5e3840056427e527d6dc42d7eb4fb2",
+      "license": "MIT",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [
+        "sha256:f491e3e4a6e390000c80591852e6c83545ca7ecf1a589c8ba07326d9e5aeac71"
+      ],
+      "attempted_derivation_refs": [
+        "sha256:4b2766fcec614731d9f97339a1760bd454325f97aae84a544a9ead21b473e4d3"
+      ],
+      "attempts": [
+        {
+          "attempt_id": "local-2148462-3",
+          "candidate": "node-static/v1",
+          "contract_ref": "sha256:f491e3e4a6e390000c80591852e6c83545ca7ecf1a589c8ba07326d9e5aeac71",
+          "derivation_ref": "sha256:4b2766fcec614731d9f97339a1760bd454325f97aae84a544a9ead21b473e4d3",
+          "failure": {
+            "code": "network_denied",
+            "message": "this candidate's build resolves dependencies from the network and the request denies it; it was not attempted",
+            "stage": "admission"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "network_denied",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "network_denied",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "network_denied",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "network_denied",
+          "message": "this candidate's build resolves dependencies from the network and the request denies it; it was not attempted",
+          "stage": "admission"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": true,
+        "C_D_available": true,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "effect/policy",
+      "terminal_code": "network_denied",
+      "secondary_blockers_hypothesis": [
+        "runtime/toolchain",
+        "multi-service"
+      ],
+      "candidate_producer_solving_plausible": "false",
+      "candidate_producer_basis": "missing execution capability or policy (runtime catalog, multi-service, network), not missing knowledge",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "2f261230d84e0d288b58b73e82cc8d9d50bb2456aaf2a1d9afd9caa3464165f5",
+      "execution_scope": null
+    },
+    {
+      "index": 48,
+      "name": "Firefly III",
+      "group": "new_30",
+      "repo": "https://github.com/firefly-iii/firefly-iii",
+      "ref": "7879e01a0f6aab52e9b5ae00d04b3f7e4c912079",
+      "archive_sha256": "36d3097442e50cdb3964ae53d82b4e501f2191834971307f0a57a06abe83112d",
+      "license": "AGPL-3.0",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_node_static_needs_build_script",
+            "message": "A built web app needs a `build` script in package.json. Ato runs `npm run build` and publishes what it writes to `dist/`.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_node_static_needs_build_script",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_node_static_needs_build_script",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_node_static_needs_build_script",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_node_static_needs_build_script",
+          "message": "A built web app needs a `build` script in package.json. Ato runs `npm run build` and publishes what it writes to `dist/`.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_node_static_needs_build_script",
+      "secondary_blockers_hypothesis": [
+        "runtime/toolchain",
+        "multi-service"
+      ],
+      "candidate_producer_solving_plausible": "false",
+      "candidate_producer_basis": "missing execution capability or policy (runtime catalog, multi-service, network), not missing knowledge",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "2d3fe76bdbc364174481d7fd5a1782ee1ecb480c084b821b2308e8d9476a83ed",
+      "execution_scope": null
+    },
+    {
+      "index": 49,
+      "name": "OpenRefine",
+      "group": "new_30",
+      "repo": "https://github.com/OpenRefine/OpenRefine",
+      "ref": "cb94b3864b8c3637270b83f057c6901444a4e426",
+      "archive_sha256": "fa15532cf868c6523db7e7ba74994290621fbfb1bd97af2c67caedd6e41b0d2e",
+      "license": "BSD-3-Clause",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_no_match",
+            "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_no_match",
+          "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_no_match",
+      "secondary_blockers_hypothesis": [
+        "runtime/toolchain"
+      ],
+      "candidate_producer_solving_plausible": "false",
+      "candidate_producer_basis": "missing execution capability or policy (runtime catalog, multi-service, network), not missing knowledge",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "d2ac6f1d700235df5dad70ea810b7025724176878b7acee227294041352de172",
+      "execution_scope": null
+    },
+    {
+      "index": 50,
+      "name": "Jellyfin",
+      "group": "new_30",
+      "repo": "https://github.com/jellyfin/jellyfin",
+      "ref": "96bca6f0bdde6e4cf282a4bdef6867c741ae3581",
+      "archive_sha256": "3ab226a042d1666a1a51875511c8232344e1f1bb65e0a05529a7342d49315f13",
+      "license": "GPL-2.0",
+      "source_closure": null,
+      "runtime_facts": {
+        "formation.containment": "bwrap+landlock",
+        "formation.toolchain_root": "/opt/ato/toolchains",
+        "platform.arch": "aarch64",
+        "platform.os": "linux"
+      },
+      "policy": {
+        "network": "denied",
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "max_attempts": 4
+      },
+      "attempted_contract_refs": [],
+      "attempted_derivation_refs": [],
+      "attempts": [
+        {
+          "candidate": "detect",
+          "failure": {
+            "code": "preset_no_match",
+            "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+            "stage": "preset"
+          },
+          "outcomes": {
+            "cleanup": {
+              "reason": "nothing ran",
+              "state": "not_applicable"
+            },
+            "publication": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "runtime_verification": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            },
+            "seal": {
+              "reason": "preset_no_match",
+              "state": "not_attempted"
+            }
+          },
+          "runtime_id": "local",
+          "status": "filtered"
+        }
+      ],
+      "typed_failures": [
+        {
+          "code": "preset_no_match",
+          "message": "Ato can turn an HTML file, a folder with an index.html, or a project that builds to `dist/` into an App. This source is none of those yet.",
+          "stage": "preset"
+        }
+      ],
+      "receipt": null,
+      "retained_ref": null,
+      "progress": {
+        "A_source_recognized": true,
+        "B_K_formed": false,
+        "C_D_available": false,
+        "D_admitted": false,
+        "E_executed": false,
+        "F_verifier_ran": false,
+        "G_K_fully_satisfied": false,
+        "H_retained": false,
+        "I_functional_success": false
+      },
+      "primary_class": "known-D/authoring",
+      "terminal_code": "preset_no_match",
+      "secondary_blockers_hypothesis": [
+        "runtime/toolchain"
+      ],
+      "candidate_producer_solving_plausible": "false",
+      "candidate_producer_basis": "missing execution capability or policy (runtime catalog, multi-service, network), not missing knowledge",
+      "confidence": "high for the observed typed terminal; secondary blockers are unmeasured hypotheses",
+      "manual_intervention": false,
+      "observation_sha256": "d2ac6f1d700235df5dad70ea810b7025724176878b7acee227294041352de172",
+      "execution_scope": null
+    }
+  ]
+}
