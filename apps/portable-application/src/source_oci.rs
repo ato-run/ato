@@ -555,6 +555,82 @@ pub fn image_facts(archive: &Path) -> Result<ImageFacts> {
     })
 }
 
+/// Repack a private-daemon `docker save` into the portable transport form:
+/// only `oci-layout`, `index.json`, `manifest.json` and the blobs the single
+/// OCI manifest references (manifest, config, layers). A classic image store
+/// also writes legacy v1 per-layer JSON blobs that nothing references; the
+/// portable validator refuses those. Blob bytes are content-addressed and
+/// copied unchanged, so the manifest digest does not change. Returns how many
+/// unreferenced members were dropped.
+pub fn repack_saved_archive(saved: &Path, output: &Path) -> Result<usize> {
+    let members = tar_members(saved, &|_| true)?;
+    let invalid = |d: &str| err("source_oci_artifact_invalid", d.to_owned());
+    let index: Value = serde_json::from_slice(
+        members
+            .get("index.json")
+            .ok_or_else(|| invalid("no index"))?,
+    )
+    .map_err(|e| invalid(&e.to_string()))?;
+    let manifest_digest = index["manifests"][0]["digest"]
+        .as_str()
+        .filter(|d| is_digest(d) && index["manifests"].as_array().is_some_and(|m| m.len() == 1))
+        .ok_or_else(|| invalid("index must name one manifest"))?;
+    let path = |d: &str| format!("blobs/sha256/{}", &d[7..]);
+    let manifest: Value = serde_json::from_slice(
+        members
+            .get(&path(manifest_digest))
+            .ok_or_else(|| invalid("manifest missing"))?,
+    )
+    .map_err(|e| invalid(&e.to_string()))?;
+    let mut keep: BTreeSet<String> = ["oci-layout", "index.json", "manifest.json"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    keep.insert(path(manifest_digest));
+    let config = manifest["config"]["digest"]
+        .as_str()
+        .filter(|d| is_digest(d))
+        .ok_or_else(|| invalid("config"))?;
+    keep.insert(path(config));
+    for layer in manifest["layers"]
+        .as_array()
+        .ok_or_else(|| invalid("layers"))?
+    {
+        let d = layer["digest"]
+            .as_str()
+            .filter(|d| is_digest(d))
+            .ok_or_else(|| invalid("layer"))?;
+        keep.insert(path(d));
+    }
+    if let Some(missing) = keep.iter().find(|k| !members.contains_key(*k)) {
+        return Err(invalid(&format!("referenced member {missing} missing")));
+    }
+    let file = std::fs::File::create(output).map_err(|e| invalid(&e.to_string()))?;
+    let mut tar = tar::Builder::new(file);
+    for dir in ["blobs/", "blobs/sha256/"] {
+        let mut header = tar::Header::new_ustar();
+        header.set_entry_type(tar::EntryType::Directory);
+        header.set_mode(0o755);
+        header.set_mtime(0);
+        header.set_size(0);
+        header.set_cksum();
+        tar.append_data(&mut header, dir, std::io::empty())
+            .map_err(|e| invalid(&e.to_string()))?;
+    }
+    for name in &keep {
+        let bytes = &members[name];
+        let mut header = tar::Header::new_ustar();
+        header.set_mode(0o644);
+        header.set_mtime(0);
+        header.set_size(bytes.len() as u64);
+        header.set_cksum();
+        tar.append_data(&mut header, name, bytes.as_slice())
+            .map_err(|e| invalid(&e.to_string()))?;
+    }
+    tar.into_inner().map_err(|e| invalid(&e.to_string()))?;
+    Ok(members.len() - keep.len())
+}
+
 /// Guest path the OCI route mounts the (capsule-only) workspace at, chosen so
 /// it cannot shadow the image's own filesystem.
 pub const SOURCE_OCI_WORKSPACE_MOUNT: &str = "/.ato-workspace";
@@ -681,8 +757,12 @@ pub fn materialize(
     let result = (|| -> Result<Materialized> {
         // 5. Export and verify with the existing portable OCI validator.
         let image_id = builder.image_id(tag)?;
+        let saved = out.join("image.saved.tar");
+        builder.save(&image_id, &saved)?;
         let archive = out.join("image.tar");
-        builder.save(&image_id, &archive)?;
+        let dropped = repack_saved_archive(&saved, &archive)?;
+        std::fs::remove_file(&saved)
+            .map_err(|e| err("source_oci_artifact_invalid", e.to_string()))?;
         let size = std::fs::metadata(&archive)
             .map_err(|e| err("source_oci_artifact_invalid", e.to_string()))?
             .len();
@@ -777,6 +857,8 @@ pub fn materialize(
                 "layer_digests": facts.layer_digests,
                 "archive_sha256": sha256_file(&archive)?,
                 "archive_bytes": size,
+                "repack": {"dropped_unreferenced_members": dropped,
+                    "rule": "keep oci-layout, index.json, manifest.json and blobs referenced by the one OCI manifest; blob bytes unchanged"},
                 "image_config": {"cmd":facts.cmd,"entrypoint":facts.entrypoint,
                     "exposed_ports":facts.exposed_ports,"working_dir":facts.working_dir,
                     "volumes":facts.volumes,"user":facts.user},
