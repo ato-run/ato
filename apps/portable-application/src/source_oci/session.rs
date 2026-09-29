@@ -930,12 +930,17 @@ impl Drop for PrivateDockerSession {
 pub struct DockerCliBuilder {
     session: PrivateDockerSession,
     scratch: PathBuf,
+    preflight: RefCell<Option<Value>>,
 }
 
 impl DockerCliBuilder {
     pub fn new(session: PrivateDockerSession) -> Self {
         let scratch = session.fs_root.join("job");
-        Self { session, scratch }
+        Self {
+            session,
+            scratch,
+            preflight: RefCell::new(None),
+        }
     }
 }
 
@@ -1202,6 +1207,7 @@ echo "LISTED $(p "$LISTED":443)"
             "listed_connect": allowed,
             "listed_host": listed,
         });
+        *self.preflight.borrow_mut() = Some(result.clone());
         if direct.len() != 3
             || direct.iter().any(|l| l.starts_with("OPEN "))
             || !unlisted.contains(" 403")
@@ -1220,7 +1226,9 @@ echo "LISTED $(p "$LISTED":443)"
             Some(gate) => gate.report(),
             None => e.report.borrow().clone()?,
         };
-        serde_json::to_value(report).ok()
+        let mut value = serde_json::to_value(report).ok()?;
+        value["preflight"] = self.preflight.borrow().clone().unwrap_or(Value::Null);
+        Some(value)
     }
     fn egress_exhausted(&self) -> bool {
         self.session

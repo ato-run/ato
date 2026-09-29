@@ -787,7 +787,13 @@ pub fn materialize(
     let created =
         std::fs::create_dir(out).map_err(|e| err("source_oci_output_invalid", e.to_string()));
     let owns_out = created.is_ok();
-    let result = created.and_then(|()| build_and_verify(prepared, builder, out));
+    let mut result = created.and_then(|()| build_and_verify(prepared, builder, out));
+    // With egress, what the gate allowed and refused is evidence for any
+    // failure (e.g. a CONNECT to an unlisted host, or an artifact that was
+    // built and then refused); nothing else is published on failure.
+    if let (Err(e), Some(report)) = (&mut result, builder.egress_report()) {
+        e.detail = format!("{}\negress: {report}", e.detail);
+    }
     let released = builder.release();
     let outcome = match (result, released) {
         (Ok(m), Ok(())) => Ok(m),
@@ -933,11 +939,7 @@ fn build_and_verify(
         BuildOutcome::Failed { log_tail } => {
             // With egress, what the gate allowed and refused explains many
             // failures (e.g. a CONNECT to an unlisted host).
-            let detail = match builder.egress_report() {
-                Some(report) => format!("{log_tail}\negress: {report}"),
-                None => log_tail,
-            };
-            return Err(err("source_oci_build_failed", detail));
+            return Err(err("source_oci_build_failed", log_tail));
         }
     }
     // 5. Export within bounds and verify with the existing portable validator.
