@@ -1251,5 +1251,12 @@
   },
   "remote_migration_applied": false,
   "new_migration_created": false,
-  "1421": "untouched"
+  "1421": "untouched",
+  "observed_binaries": {
+    "ato-formation-worker": "92becff7b06eb58731b85cafd7ffdbdcd621758b7e4bbef7e2856d47243c1d56",
+    "proposal_search": "2f6e1a0c75105b78cda5460539112ea0e60de843dc2fe1f7083dd0762191e043",
+    "proposal_runtime": "ccbab72899d9c136897b3e0e62d57891e5735823c2d0aaad272b133943992f8e"
+  },
+  "worker_build_stamp": "ato-formation-worker 0.1.0 commit=20d825bd5ff09e1e2238a4975299e896093c545c clean build_id=unknown rustc 1.96.0 (ac68faa20 2026-05-25)",
+  "build_recheck_note": "A post-run rebuild against the shared target encountered stale cross-checkout metadata; touching the owned source retriggered compilation. Rebuilt binary was not byte-identical, so no reproducible-build claim. Actual binaries were copied to adaptive-bin before execution and retain the recorded hashes and clean 20d825bd worker build stamp. Use separate target directories for future stage runs."
 }
