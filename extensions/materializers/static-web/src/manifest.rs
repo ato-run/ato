@@ -171,6 +171,7 @@ pub fn is_allowed_media_type(media_type: &str) -> bool {
         media_type,
         "application/javascript; charset=utf-8"
             | "application/json; charset=utf-8"
+            | "application/yaml; charset=utf-8"
             | "application/wasm"
             | "application/octet-stream"
             // Live-artifact compatibility; see `media_type_for`. Kept in

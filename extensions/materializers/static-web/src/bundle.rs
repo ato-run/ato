@@ -302,6 +302,10 @@ pub fn media_type_for(path: &str) -> Option<&'static str> {
         "eot" => Some("application/vnd.ms-fontobject"),
         "js" | "mjs" => Some("application/javascript; charset=utf-8"),
         "json" => Some("application/json; charset=utf-8"),
+        // Transfer-exported static applications retain this declarative
+        // operations document in their immutable source tree. It is served as
+        // an ordinary source asset; Formation must not strip or reinterpret it.
+        "yaml" => Some("application/yaml; charset=utf-8"),
         "wasm" => Some("application/wasm"),
         "bin" => Some("application/octet-stream"),
         "woff2" => Some("font/woff2"),
@@ -514,6 +518,26 @@ mod tests {
         ] {
             assert_eq!(media_type_for(path), None, "{path} must not be typed");
         }
+    }
+
+    #[test]
+    fn preserves_transfer_operations_yaml_as_a_static_asset() {
+        let image = fixture_root();
+        fs::write(
+            image.path().join("dist/ato.operations.yaml"),
+            b"schema: ato.operations/v1\n",
+        )
+        .unwrap();
+        let extracted = extract_static_web_output(image.path(), &plan()).unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let produced = produce_static_web_bundle(&plan(), &extracted, parent.path(), &[]).unwrap();
+        let manifest: serde_json::Value = serde_json::from_slice(&produced.manifest_bytes).unwrap();
+
+        assert_eq!(
+            manifest["files"]["ato.operations.yaml"]["media_type"],
+            "application/yaml; charset=utf-8"
+        );
+        assert_eq!(media_type_for("ato.operations.yml"), None);
     }
 
     #[test]
