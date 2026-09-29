@@ -23,6 +23,7 @@ ato-ipc = { path = "../../lib/ipc", version = "0.1.0" }
 ato-materializer-static-web = { path = "../../extensions/materializers/static-web", version = "0.1.0" }
 ato-objects = { path = "../../lib/objects", version = "0.1.0" }
 ato-runtime-attempt = { path = "../../lib/runtime-attempt", version = "0.1.0" }
+netd = { path = "../../services/netd" }
 base64 = "0.22"
 anyhow = "1"
 clap = { version = "4.5", features = ["derive", "env"] }
@@ -34,6 +35,7 @@ sha2 = "0.10"
 tar = "0.4"
 tempfile = "3"
 thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
 
 [dev-dependencies]
 flate2 = "1"
