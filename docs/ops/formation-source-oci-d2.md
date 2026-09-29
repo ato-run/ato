@@ -1,5 +1,10 @@
 # Formation 6b-D2 — source → OCI materialization (offline integration)
 
+> Later: the builder boundary below (caller-provided private daemon) was
+> replaced by a CLI-owned private session; see
+> [formation-source-oci-d2-hardening](formation-source-oci-d2-hardening.md).
+> This first ledger is kept as recorded.
+
 ## State
 
 **implemented · unit-tested · actual offline integration verified** on
