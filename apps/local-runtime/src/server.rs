@@ -22,7 +22,7 @@ use ato_local_execution::{core_materializer_registry, start_durable, stop_and_se
 use ato_objects::LocalCapsuleRepository;
 
 use crate::apps::AppSupport;
-use crate::protocol::{AppInstanceRequest, AppStartRequest};
+use crate::protocol::{AppInstanceRequest, AppSourceSnapshotRequest, AppStartRequest};
 use crate::protocol::{ErrorBody, ExecutionList, ExecutionView, ProjectRequest, StartRequest};
 
 /// How long a worker is given to exit on its own after the stop request has
@@ -194,6 +194,7 @@ impl Server {
                 }
                 ("POST", "/v1/executions/status") => self.status(&request).map(to_value),
                 ("POST", "/v1/apps/import") => self.app_import(&request),
+                ("POST", "/v1/apps/form-source") => self.app_form_source(&request),
                 ("POST", "/v1/apps/start") => self.app_start(&request),
                 ("POST", "/v1/apps/stop") => self.app_stop(&request),
                 ("POST", "/v1/apps/status") => self.app_status(&request),
@@ -358,6 +359,17 @@ impl Server {
             .and_then(|query| query_value(query, "derivation"));
         self.app_support()?
             .import(&self.work_root, &request.body, derivation.as_deref())
+    }
+
+    /// `POST /v1/apps/form-source` — compile a validated source tree and its
+    /// browser state to ordinary portable v4 bytes. This does not import or
+    /// start anything; the Coordinator sends the result through its existing
+    /// validator/quarantine path first.
+    fn app_form_source(&self, request: &Request) -> Result<serde_json::Value> {
+        let body: AppSourceSnapshotRequest = request
+            .body_json()
+            .context("invalid app source snapshot request")?;
+        self.app_support()?.form_source(&self.work_root, body)
     }
 
     /// `POST /v1/apps/start` — one supervised Run; the response carries the

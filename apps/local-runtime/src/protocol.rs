@@ -46,6 +46,26 @@ pub struct AppInstanceRequest {
     pub instance: String,
 }
 
+/// A verified source tree projected by the Coordinator from an
+/// environment-independent Transfer bundle. The Runtime writes these bytes to
+/// a throwaway tree; the bundled `ato` remains the authority that selects the
+/// Formation preset and compiles the portable Application.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppSourceSnapshotRequest {
+    pub title: String,
+    pub files: Vec<AppSourceFile>,
+    #[serde(default)]
+    pub local_storage: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppSourceFile {
+    pub path: String,
+    pub content_base64: String,
+}
+
 /// A listing of the Computations a runtime holds.
 ///
 /// A wrapper rather than a bare array so the response can grow a cursor or a

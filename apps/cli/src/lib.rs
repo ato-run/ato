@@ -45,15 +45,21 @@ use ato_objects::{
     ReferenceRegistry, decode_capsule_bundle_document, encode_bundle,
     export_bundle_with_materializations, export_object_graph, import_bundle, resolve_computation,
 };
+use ato_portable_application::instance_snapshot::{
+    BROWSER_INSTANCE_STATE_PROTOCOL, INSTANCE_SNAPSHOT_SCHEMA, InstanceSnapshotResourceV1,
+    InstanceSnapshotV1, attach_instance_snapshot, encode_browser_state,
+};
 use ato_portable_application::local_instance::{
     LocalApplicationStore, LocalInstanceRun, LocalInstanceRunStatus, LocalRunActivation,
 };
+use ato_portable_application::portability_export::repack_portable_dependencies;
 use ato_portable_application::portability_export::repack_portable_dependencies_with_archives;
 use ato_portable_application::portability_plan::{PortableExportProfile, plan_portable_export};
 use ato_portable_application::{
     PortableRealizationKind, StaticApplicationAsset, StaticApplicationState,
-    ValidatedPortableApplication, build_authored_bundle_v2, bundle_sha256,
-    resolve_application_bindings, validate_bundle_for_derivation,
+    ValidatedPortableApplication, build_authored_bundle_v2, build_static_bundle,
+    build_static_bundle_from_draft, bundle_sha256, resolve_application_bindings,
+    validate_bundle_for_derivation,
 };
 use ato_realization_planner::{
     MaterializationCandidate, Placement, PlannerPolicy, RealizationPlanner, TargetEnvironment,
@@ -158,6 +164,9 @@ enum Commands {
 enum AppCommands {
     /// Import an immutable portable bundle as a new independent Instance.
     Import(AppImportArgs),
+    /// Compile a source tree plus browser state into a portable v4 bundle.
+    #[command(name = "__pack-source-snapshot", hide = true)]
+    PackSourceSnapshot(AppPackSourceSnapshotArgs),
     /// Start a new durable Run for an imported Instance.
     Start(AppStartArgs),
     /// Stop the active Run without deleting the Instance.
@@ -231,6 +240,18 @@ struct AppImportArgs {
     /// Select one declared DerivationRef. Required when the bundle has more than one route.
     #[arg(long)]
     derivation: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct AppPackSourceSnapshotArgs {
+    source: PathBuf,
+    #[arg(long)]
+    title: String,
+    /// Canonical JSON object mapping localStorage keys to values.
+    #[arg(long)]
+    browser_state: PathBuf,
+    #[arg(long)]
+    output: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -553,6 +574,7 @@ pub fn run() -> Result<()> {
         Commands::Run(args) => run_capsule(args),
         Commands::App { command } => match command {
             AppCommands::Import(args) => import_local_application(args),
+            AppCommands::PackSourceSnapshot(args) => pack_source_snapshot(args),
             AppCommands::Start(args) => start_local_instance(args),
             AppCommands::Stop { instance } => stop_local_instance(&instance),
             AppCommands::Inspect { instance } => inspect_local_instance(&instance),
@@ -1319,6 +1341,84 @@ fn import_local_application(args: AppImportArgs) -> Result<()> {
             serde_json::to_value(restored_snapshot)?,
         );
     println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
+}
+
+/// Local product adapter used by the loopback Runtime for environment-
+/// independent Transfer imports.
+///
+/// The Transfer decoder remains in the Coordinator. This command receives an
+/// already-materialized source tree and ordinary browser state, projects the
+/// source through the SAME Formation preset front-end, and emits a normal
+/// portable v4 Application. From that point on validation, import, Run and
+/// save all use the existing portable Application path; no Transfer identity
+/// is smuggled into the local store.
+fn pack_source_snapshot(args: AppPackSourceSnapshotArgs) -> Result<()> {
+    anyhow::ensure!(args.source.is_dir(), "source is not a directory");
+    let (_, bundle) = if args.source.join("capsule.toml").is_file() {
+        build_static_bundle(&args.source, &args.title)?
+    } else {
+        let evidence = ato_formation::detect::detect(&args.source)
+            .with_context(|| format!("inspect source {}", args.source.display()))?;
+        let preset = ato_formation::preset::select_preset(&evidence)
+            .map_err(|mismatch| anyhow::anyhow!("{}: {}", mismatch.code, mismatch.message))?;
+        anyhow::ensure!(
+            matches!(
+                preset,
+                ato_formation::preset::AppPreset::SingleHtml
+                    | ato_formation::preset::AppPreset::StaticFiles
+            ),
+            "local source import currently accepts build-free static sources; detected {}",
+            preset.id()
+        );
+        let draft = ato_formation::preset::synthesize_authoring(preset);
+        build_static_bundle_from_draft(&args.source, &args.title, &draft)?
+    };
+
+    // v4 is the saved-state transport. Cached does not fetch or invent any
+    // dependency; for a static tree it simply upgrades the envelope while K
+    // and D remain byte-identical semantic references.
+    let (mut bytes, mut bundle) =
+        repack_portable_dependencies(&bundle, PortableDependencyProfile::Cached, &BTreeMap::new())?;
+
+    let browser_state: BTreeMap<String, String> = serde_json::from_slice(
+        &fs::read(&args.browser_state)
+            .with_context(|| format!("read browser state {}", args.browser_state.display()))?,
+    )
+    .context("browser state is not a string map")?;
+    if !browser_state.is_empty() {
+        let content = encode_browser_state(&browser_state)?;
+        let content_ref = bundle_sha256(&content);
+        let snapshot = InstanceSnapshotV1 {
+            schema: INSTANCE_SNAPSHOT_SCHEMA.to_owned(),
+            resources: vec![InstanceSnapshotResourceV1 {
+                slot: "browser".to_owned(),
+                protocol: BROWSER_INSTANCE_STATE_PROTOCOL.to_owned(),
+                content_ref: content_ref.clone(),
+            }],
+            assets: Vec::new(),
+            asset_bindings: Vec::new(),
+        };
+        let saved =
+            attach_instance_snapshot(&bundle, snapshot, &BTreeMap::from([(content_ref, content)]))?;
+        bytes = saved.0;
+        bundle = saved.1;
+    }
+
+    fs::write(&args.output, &bytes)
+        .with_context(|| format!("write portable Application {}", args.output.display()))?;
+    println!(
+        "{}",
+        serde_json::to_string(&serde_json::json!({
+            "bundle_sha256": bundle_sha256(&bytes),
+            "format_version": bundle.index.version,
+            "profile": bundle.index.profile,
+            "root_contract_ref": bundle.index.root_contract_ref,
+            "application_ref": bundle.index.application_ref,
+            "derivation_refs": bundle.index.derivations,
+            "instance_snapshot_ref": bundle.index.instance_snapshot_ref,
+        }))?
+    );
     Ok(())
 }
 

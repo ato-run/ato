@@ -858,13 +858,29 @@ pub fn build_static_bundle(
     source_root: &Path,
     title: &str,
 ) -> Result<(Vec<u8>, PortableApplicationBundle), PortableApplicationError> {
+    let draft = read_authoring_draft(source_root)?;
+    build_static_bundle_from_draft(source_root, title, &draft)
+}
+
+/// Deterministically form the same portable static Application from an
+/// already-selected authoring draft.
+///
+/// Formation presets and an authored `capsule.toml` both compile to
+/// [`AuthoringDraft`]. Keeping the bundle constructor below that boundary lets
+/// callers reuse the ordinary preset selector without writing a synthetic
+/// `capsule.toml` into the source tree (which would change that tree's
+/// identity).
+pub fn build_static_bundle_from_draft(
+    source_root: &Path,
+    title: &str,
+    draft: &AuthoringDraft,
+) -> Result<(Vec<u8>, PortableApplicationBundle), PortableApplicationError> {
     if title.trim().is_empty() {
         return Err(profile("application title must not be empty"));
     }
-    let draft = read_authoring_draft(source_root)?;
     let (mut objects, tree_ref) = build_portable_tree(source_root)?;
     let (contract, derivation) = bind(
-        &draft,
+        draft,
         &BindingContext {
             source_closure_ref: &tree_ref,
         },

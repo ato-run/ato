@@ -22,10 +22,13 @@
 #![forbid(unsafe_code)]
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
+use base64::Engine;
+
+use crate::protocol::AppSourceSnapshotRequest;
 
 /// Path to the `ato` binary the runtime may invoke for portable Apps.
 ///
@@ -43,6 +46,8 @@ pub const APP_HOME_ENV: &str = "ATO_LOCAL_RUNTIME_APP_HOME";
 /// refuse an obviously malformed request, not to police application size.
 /// The product-side cap (`MAX_BUNDLE_BYTES` in the PWA) is the real one.
 const MAX_BUNDLE_BYTES: usize = 512 * 1024 * 1024;
+const MAX_SOURCE_FILES: usize = 50_000;
+const MAX_SOURCE_BYTES: usize = 512 * 1024 * 1024;
 
 /// Stderr is the CLI's diagnostic channel; carry its tail into the error so a
 /// caller sees the actual refusal rather than "exit 1".
@@ -149,6 +154,92 @@ impl AppSupport {
         outcome
     }
 
+    /// Project a Transfer source tree into a regular portable v4 bundle.
+    ///
+    /// This transport owns only staging and containment. Preset selection,
+    /// Contract/Derivation construction and Instance snapshot sealing are all
+    /// delegated to the bundled `ato` command, so they cannot drift into a
+    /// second Desktop-specific implementation.
+    pub fn form_source(
+        &self,
+        work_root: &Path,
+        request: AppSourceSnapshotRequest,
+    ) -> Result<serde_json::Value> {
+        anyhow::ensure!(
+            !request.title.trim().is_empty() && request.title.len() <= 160,
+            "source title is invalid"
+        );
+        anyhow::ensure!(
+            !request.files.is_empty() && request.files.len() <= MAX_SOURCE_FILES,
+            "source file count is invalid"
+        );
+        let incoming = work_root.join("incoming");
+        std::fs::create_dir_all(&incoming)
+            .with_context(|| format!("creating {}", incoming.display()))?;
+        let staged = incoming.join(format!("source-{}", unique_name()));
+        let source = staged.join("source");
+        std::fs::create_dir_all(&source)
+            .with_context(|| format!("creating {}", source.display()))?;
+        let browser_state = staged.join("browser-state.json");
+        let output = staged.join("application.capsule");
+
+        let outcome = (|| -> Result<serde_json::Value> {
+            let mut total = 0usize;
+            let mut paths = std::collections::BTreeSet::new();
+            for entry in request.files {
+                let relative = safe_source_path(&entry.path)?;
+                anyhow::ensure!(paths.insert(relative.clone()), "duplicate source path");
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(entry.content_base64)
+                    .context("source file is not valid base64")?;
+                total = total
+                    .checked_add(bytes.len())
+                    .context("source size overflow")?;
+                anyhow::ensure!(total <= MAX_SOURCE_BYTES, "source exceeds byte limit");
+                let target = source.join(&relative);
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent)
+                        .with_context(|| format!("creating {}", parent.display()))?;
+                }
+                std::fs::write(&target, bytes)
+                    .with_context(|| format!("writing {}", relative.display()))?;
+            }
+            std::fs::write(&browser_state, serde_json::to_vec(&request.local_storage)?)
+                .with_context(|| format!("writing {}", browser_state.display()))?;
+            let stdout = self.run(&[
+                "app".into(),
+                "__pack-source-snapshot".into(),
+                source.display().to_string(),
+                "--title".into(),
+                request.title,
+                "--browser-state".into(),
+                browser_state.display().to_string(),
+                "--output".into(),
+                output.display().to_string(),
+            ])?;
+            let bytes =
+                std::fs::read(&output).with_context(|| format!("reading {}", output.display()))?;
+            anyhow::ensure!(
+                !bytes.is_empty() && bytes.len() <= MAX_BUNDLE_BYTES,
+                "formed portable bundle has an invalid size"
+            );
+            let mut metadata: serde_json::Value = serde_json::from_slice(&stdout)
+                .context("ato source pack returned malformed output")?;
+            metadata
+                .as_object_mut()
+                .context("ato source pack returned a non-object")?
+                .insert(
+                    "bundle_base64".to_owned(),
+                    serde_json::Value::String(
+                        base64::engine::general_purpose::STANDARD.encode(bytes),
+                    ),
+                );
+            Ok(metadata)
+        })();
+        let _ = std::fs::remove_dir_all(&staged);
+        outcome
+    }
+
     /// `ato app start` — one supervised Run for the Instance.
     ///
     /// `--json --no-open --supervised`: machine-readable result, no browser,
@@ -190,6 +281,33 @@ impl AppSupport {
     }
 }
 
+fn safe_source_path(value: &str) -> Result<PathBuf> {
+    anyhow::ensure!(
+        !value.is_empty() && value.len() <= 1024 && !value.contains('\0'),
+        "source path is invalid"
+    );
+    let path = Path::new(value);
+    let mut safe = PathBuf::new();
+    let mut depth = 0usize;
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => {
+                safe.push(part);
+                depth += 1;
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                bail!("source path escapes the staging root")
+            }
+        }
+    }
+    anyhow::ensure!(
+        !safe.as_os_str().is_empty() && depth <= 64,
+        "source path is invalid"
+    );
+    Ok(safe)
+}
+
 /// A filesystem-safe throwaway name for the staged bundle: timestamp plus a
 /// per-process counter, so concurrent imports never share a path.
 fn unique_name() -> String {
@@ -210,5 +328,16 @@ mod tests {
     #[test]
     fn staged_names_do_not_collide() {
         assert_ne!(unique_name(), unique_name());
+    }
+
+    #[test]
+    fn source_paths_are_confined() {
+        assert_eq!(
+            safe_source_path("assets/app.js").unwrap(),
+            PathBuf::from("assets/app.js")
+        );
+        assert!(safe_source_path("../secret").is_err());
+        assert!(safe_source_path("/etc/passwd").is_err());
+        assert!(safe_source_path("").is_err());
     }
 }

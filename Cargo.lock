@@ -528,6 +528,7 @@ dependencies = [
  "ato-computation",
  "ato-local-execution",
  "ato-objects",
+ "base64 0.22.1",
  "serde",
  "serde_json",
  "signal-hook",
