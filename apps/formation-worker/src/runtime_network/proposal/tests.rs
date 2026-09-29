@@ -15,6 +15,7 @@ fn authorization() -> ProposalAuthorization {
             http_port: "app.http".into(),
             guest_port: 8000,
         }),
+        node_static_workspace: None,
         policy: CandidateProducerPolicy {
             max_proposal_rounds: 1,
             max_proposals: 4,
