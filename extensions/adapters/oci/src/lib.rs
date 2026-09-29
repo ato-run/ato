@@ -325,6 +325,15 @@ impl DockerOciAdapter {
             )?;
         }
         let (_, image_for_run) = self.admit_image()?;
+        // Docker silently creates an anonymous, writable volume for every
+        // image VOLUME no mount covers. That would be state outside the
+        // read-only root that no Capsule declared, so it is refused.
+        let volumes = image_volumes(&self.docker, &image_for_run)?;
+        let uncovered = uncovered_volumes(&volumes, &self.spec);
+        ensure!(
+            uncovered.is_empty(),
+            "OCI image declares VOLUME {uncovered:?} that no declared state or workspace mount covers; anonymous volumes are not created"
+        );
 
         let suffix = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         // A service's alias is kept whole in its container name so an operator
@@ -1125,8 +1134,8 @@ fn validate_spec(spec: &OciSpec) -> Result<()> {
         "OCI entrypoint is invalid"
     );
     ensure!(
-        spec.working_dir == "/app",
-        "OCI working directory must be /app"
+        valid_guest_path(&spec.working_dir),
+        "OCI working directory must be an absolute traversal-free guest path"
     );
     ensure!(
         valid_guest_path(&spec.workspace_mount_path),
@@ -1179,6 +1188,44 @@ fn validate_spec(spec: &OciSpec) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn image_volumes(docker: &Path, image: &str) -> Result<Vec<String>> {
+    let output = Command::new(docker)
+        .args(["image", "inspect", "--format", "{{json .Config.Volumes}}", image])
+        .output()
+        .context("inspect OCI image volumes")?;
+    ensure!(
+        output.status.success(),
+        "OCI image volumes are not inspectable: {}",
+        bounded_stderr(&output)
+    );
+    let volumes: Option<BTreeMap<String, serde_json::Value>> =
+        serde_json::from_slice(&output.stdout).context("invalid Docker image volume output")?;
+    Ok(volumes.unwrap_or_default().into_keys().collect())
+}
+
+/// Image VOLUMEs that neither the workspace mount, a declared mount, nor the
+/// `/tmp` tmpfs covers (a VOLUME is covered at or below a mount target; a
+/// mount below a VOLUME does not stop Docker creating the volume).
+fn uncovered_volumes(volumes: &[String], spec: &OciSpec) -> Vec<String> {
+    let targets = std::iter::once(spec.workspace_mount_path.as_str())
+        .chain(spec.mounts.iter().map(|mount| mount.guest_path.as_str()))
+        .chain(std::iter::once("/tmp"))
+        .collect::<Vec<_>>();
+    volumes
+        .iter()
+        .filter(|volume| {
+            let volume = volume.trim_end_matches('/');
+            !targets.iter().any(|target| {
+                volume == *target
+                    || volume
+                        .strip_prefix(target)
+                        .is_some_and(|rest| rest.starts_with('/'))
+            })
+        })
+        .cloned()
+        .collect()
 }
 
 fn valid_guest_path(target: &str) -> bool {
@@ -1411,6 +1458,45 @@ mod tests {
             stop_timeout_seconds: 5,
             labels: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn working_dir_is_any_absolute_traversal_free_guest_path() {
+        let mut declared = spec();
+        declared.working_dir = "/opt/app".to_owned();
+        assert!(validate_spec(&declared).is_ok());
+        for invalid in ["opt/app", "/", "/opt/../etc", "/opt//app", "/a,b", "/a\\b"] {
+            declared.working_dir = invalid.to_owned();
+            assert!(validate_spec(&declared).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn image_volumes_must_be_covered_by_a_declared_mount() {
+        let state = tempfile::tempdir().unwrap();
+        let mut declared = spec();
+        declared.workspace_mount_path = "/.ato-workspace".to_owned();
+        let volumes = vec![
+            "/opt/app/server-data".to_owned(),
+            "/tmp/cache".to_owned(),
+            "/.ato-workspace/x".to_owned(),
+        ];
+        assert_eq!(
+            uncovered_volumes(&volumes, &declared),
+            vec!["/opt/app/server-data".to_owned()]
+        );
+        declared.mounts.push(OciMount {
+            host_path: state.path().to_path_buf(),
+            guest_path: "/opt/app/server-data".to_owned(),
+            writable: true,
+        });
+        assert!(uncovered_volumes(&volumes, &declared).is_empty());
+        // A mount below a VOLUME, or a sibling with a common prefix, does not
+        // cover it.
+        assert_eq!(
+            uncovered_volumes(&["/opt/app".to_owned(), "/opt/app/server".to_owned()], &declared),
+            vec!["/opt/app".to_owned(), "/opt/app/server".to_owned()]
+        );
     }
 
     #[test]

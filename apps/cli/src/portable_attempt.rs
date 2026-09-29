@@ -29,7 +29,8 @@ use ato_formation::verify::VerificationExecutionEvidence;
 use ato_objects::PortableDependencyProfile;
 use ato_portable_application::{
     OCI_CPU_MILLIS_RUNTIME, OCI_ENTRYPOINT_RUNTIME, OCI_IMAGE_RUNTIME, OCI_MEMORY_BYTES_RUNTIME,
-    OCI_PIDS_LIMIT_RUNTIME, OCI_PLATFORM_RUNTIME, OCI_WORKSPACE_MOUNT_RUNTIME, PYTHON_RUNTIME,
+    OCI_PIDS_LIMIT_RUNTIME, OCI_PLATFORM_RUNTIME, OCI_WORKING_DIR_RUNTIME, OCI_WORKSPACE_MOUNT_RUNTIME,
+    PYTHON_RUNTIME,
     PortableRealizationKind, StaticApplicationServer, StaticApplicationServerExt,
     StaticApplicationState, ValidatedPortableApplication,
 };
@@ -311,7 +312,10 @@ impl PortableBundleExecutor<'_> {
                 .clone(),
             entrypoint: runtime.get(OCI_ENTRYPOINT_RUNTIME).cloned(),
             argv: step.argv.clone(),
-            working_dir: "/app".to_owned(),
+            working_dir: runtime
+                .get(OCI_WORKING_DIR_RUNTIME)
+                .cloned()
+                .unwrap_or_else(|| "/app".to_owned()),
             workspace_mount_path: runtime
                 .get(OCI_WORKSPACE_MOUNT_RUNTIME)
                 .cloned()
