@@ -89,7 +89,19 @@ impl ExecutionPlan {
             .map(|action| match action {
                 BuildAction::Prerequisite(step) => Ok(Cow::Borrowed(step)),
                 BuildAction::Authored { step } => {
-                    project_exec(&derivation.steps[*step]).map(Cow::Owned)
+                    let mut projected = project_exec(&derivation.steps[*step])?;
+                    // Bind a declared logical manager to its exact provisioned binary.
+                    // An absent binary must fail, never fall through to a host PATH entry.
+                    if let Some(manager) = &self.package_manager
+                        && projected.argv.first() == Some(&manager.name)
+                    {
+                        projected.argv[0] = format!(
+                            "{}/bin/{}",
+                            intent::package_manager_home(&manager.name, &manager.version),
+                            manager.name
+                        );
+                    }
+                    Ok(Cow::Owned(projected))
                 }
             })
             .collect()
