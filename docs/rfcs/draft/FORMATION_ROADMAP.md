@@ -44,7 +44,7 @@ that actual acceptance.
 | 4 | Durable deterministic SearchState; D1 failure→evidence→authorized D2; restart preserves search/attempt identity | Merged: API #693 `18fe2c75` → ato #1408 `a46fd62d` (migration 0300 not applied remotely); actual Coordinator restart acceptance cases 1–7, restart points 1–9, review hardening H1–H4; not deployed |
 | 5a | Optional finite AllowedChoices DecisionProvider; deterministic fallback under the same permissions and budget; compare attempts, elapsed time, provider usage and cost | **Completed (implemented and locally/integration verified)**. 5a-a merged: ato #1409 / API #694 (ADR-035, migration 0301). 5a-b merged: API #695 `1853f280` → ato #1410 `c883087e` (ADR-036, migration 0302): Inspect / Stop and independent decision sequence; B0–B8 verified. Probe deferred (no safe existing primitive). Live Jev acceptance and same-fixture/same-budget comparison: passed (2026-09-26); both arms 2 attempts / PASS; deterministic 3.573 s, Jev 3.022 s, 1 call, 1612 input / 134 output tokens, estimated $0.000067704. Not deployed; migrations not applied remotely |
 | 5b | **Candidate Generation**: general LLM CandidateProducer → typed proposal → Ato ProposalValidator/compiler → candidate-pool expansion | **Fixed CandidateProducer path: implemented, actual integration verified, merged, not deployed.** C2 #1424 merged at `d4fa39a693eb253949c65486288908e9ae47cf57`. **Completed: bounded general-LLM Candidate Generation integration, implemented and actual integration verified.** D3 v2 G0–G5 PASS, six DeepSeek calls, zero retries; [live evidence](../../ops/formation-deepseek-d3-results.md). Implementation merged through #1431 `1d0a35d4`; not deployed. General efficacy and real-world coverage remain separate measurements. [Actual ledger](../../ops/formation-proposal-requester-2026-09-28.md): zero-known-D/no-Preset same-K PASS, P0–P11 and L1–L3. E1/E2 selection efficacy is not a prerequisite |
-| 5c | **Adaptive Formation Loop**: DecisionProvider ↔ CandidateProducer ↔ Runtime/Verifier evidence, bounded iterative adaptation | Pending; no unbounded generation/execution loop |
+| 5c | **Adaptive Formation Loop**: DecisionProvider ↔ CandidateProducer ↔ Runtime/Verifier evidence, bounded iterative adaptation | **COMPLETED — bounded Adaptive Formation integration**: actual A0–A9 + C2 fixed 15 groups PASS; one proposal round; requester merge tracked separately, not deployed |
 | 6a | **Real-world coverage measurement**: 20 real applications using current known-D Formation | **COMPLETED (measurement gate)**: [20 pinned upstream apps](../../ops/formation-coverage-20.md), actual local Linux Formation terminal outcomes; 16 authoring refusals, 3 policy refusals, 1 static typed-K receipt. Functional application success not established; unmerged evidence, not deployed |
 | 6b | **Capability expansion**: 20 → 50 → 100, measured Runtime/Adapter/build/service gaps | Pending; prioritize observed blockers, not repository registration count |
 | 6c | **Continuous adaptation**: revalidate on new authorized Runtime, verified D, Adapter or evidence | Pending; triggers never expand execution/data permissions |
@@ -192,3 +192,12 @@ separate authorization gates. Merging any of these PRs grants none of those.
 The final 3c-b [archive hardening evidence](../../ops/runtime-network-3c-b-hardening-2026-09-25.md)
 records restricted transports, preserved normal identities and re-review heads;
 it does not advance 3d or alter the historical integration results.
+
+### 5c bounded adaptive integration evidence
+
+See [5c actual ledger](../../ops/formation-adaptive-5c.md). Escalate is offered only
+when the existing deterministic core returns OpenProposalRound. DecisionProvider
+chooses an opaque finite choice, never operation/source/prompt/K/Runtime arguments.
+The receiver retains proposal durability and only Verifier decides K. 0307
+consumes escalation via round existence, without rewriting old Attempt semantics.
+No live model calls were used for 5c. This is not autonomous repair.

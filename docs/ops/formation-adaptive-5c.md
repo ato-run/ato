@@ -1,59 +1,62 @@
-# Formation 5c — implementation and actual merge blocker
+# Formation 5c — bounded adaptive integration
 
-**STOP / Draft / unmerged.** 5c is not completed. No new migration was created,
-0301/0302 were not edited, no SQL fence was bypassed. Additional model calls 0.
+**A0–A9 actual PASS; implemented and integration verified.** One proposal
+round, finite DecisionProvider choices, requester-owned FixedCandidateProducer,
+actual Runtime/Verifier only. No autonomous repair or repeated model generation.
+Merge/deploy status is separate; this record precedes requester merge.
 
-## Pins
+## Exact pins
 
-- ato base (#1434 merge): `857cb1ed4d71c99fde95a0302e0acf6952cdc7e8`.
-- Core implementation: `20d825bd5ff09e1e2238a4975299e896093c545c` (#1435).
-- Receiver tested: `0eb8eb5caaa24d3889cea5481e6005d3bb8b603d` (ato-api #707),
-  base `7d61b969a2a0dbf075539c066913eb686a95bb1e`.
-- WASM `eff1969064bd1a5a102c532fb5a757eb718913b9430dad4dc4982a46bfe6e342`.
+- Core/actual Rust binaries: `20d825bd5ff09e1e2238a4975299e896093c545c`.
+- Harness: `01c803a505ab74d77fbb3c657e8f34c33921c1c6`.
+- 0307 migration #708 merge: `22e8ce535aa2ba9603a564b4cafc8d0b66d8bff7`.
+- Receiver #707 merge: `21e7e0e0b4bf82949278340d4dad7daa8116cf86`.
+- WASM: `eff1969064bd1a5a102c532fb5a757eb718913b9430dad4dc4982a46bfe6e342`.
+- Main integration: `acafe049840ec9040db31ecfeae2edde2de56e9f`.
 
-## Local / actual evidence
+Actual Python-process binaries are the already verified core pin, not relabeled
+as a build of the integrated head. Integration adds the 6a measurement helper/docs
+and main's unrelated OCI egress correction; this Python path does not call OCI.
+Integrated selected regression is separately re-run. Historical blocked evidence
+and actual binary provenance are preserved in `formation-adaptive-5c-pre0307.*`.
 
-Rust selected regression **675/0/1**, Clippy all targets, fmt and diff PASS.
-Receiver **318/0** and typecheck PASS. Unit fallback tests do not exercise SQL.
+## Actual acceptance (fresh isolated Linux D1/Coordinator)
 
-Actual isolated Linux Coordinator/D1/Runtime/Verifier: A0, A1–A3, A4, A5,
-A6 budget/deadline and A7 passed. A5 deliberately injects history-unavailable in
-local D1 after a real FAIL; A7 pauses local proposal insertion across restart.
-These are fault-injection integration, not naturally occurring effect failures.
-Actual same-K receipts are embedded in JSON, with the frozen runtime constraint.
-A9 observations exist, but the **complete A0–A9 gate is not closed**.
+| Gate | Result |
+|---|---|
+| A0 | No DecisionProvider: old deterministic proposal behavior, actual PASS |
+| A1–A3 | Known bad FAIL → evidence → Escalate → one round → generated bad FAIL → generated good same-K PASS |
+| A4 | Actual unresolved UNKNOWN, escalation/producer 0 |
+| A5 | Actual FAIL then controlled history-unavailable D1 fault: EffectUnknown, escalation/producer 0 |
+| A6 | Attempt budget and deadline exhaustion: producer 0 |
+| A7 | Pause after durable chosen Escalate, restart before proposal open: same choice, round1, producer1, actual PASS |
+| A8 | Five cases: old invalid-label timeout, malformed JSON timeout, valid-format out_of_set, explicit invalid, provider_error. All advance to generated-candidate decision and actual PASS |
+| A9 | Original K/ContractRef, Runtime constraint, network denied/empty bindings preserved; Verifier receipt required |
 
-A8 failed to finish: the invalid injected choice label was refused by the HTTP
-boundary, the durable decision timed out, the fixed producer was called once,
-and its round completed/admitted D. No new decision or attempt followed.
-The current C2 15-group re-run was not started because this blocker stopped the
-suite. Historical C2 results are not relabeled as verification of this head.
+A8 records seq0's unchanged fallback outcome, round count1, producer call1,
+then seq1 with **attempt_seq=0**. No fake attempt consumes the release. Exactly
+one real generated attempt follows the next chosen decision; its receipt is
+embedded in JSON. Same ContractRef throughout:
+`sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee`.
 
-## Root cause: existing SQL disagrees with Rust
+Adaptive: **12 scenario groups PASS, fixed calls8, live calls0**.
+C2: **15 groups PASS, fixed calls12, live calls0**, including zero-D, P0–P11,
+unsupported, provider error/timeout, restart/concurrency, UNKNOWN and L1–L3.
+A5/A7 are explicit local fault injection, not invented natural incidents.
 
-0302 `trg_decision_open_guard` treats every fallback as pending while
-`d.attempt_seq == current attempt count`. A completed proposal round adds D but
-not an attempt. Rust correctly consumes the escalation once `proposal_round`
-exists and returns the next OpenDecision; the DB silently ignores that insert.
-Chosen escalation works because the chosen-action branch does not apply this
-fallback predicate. This explains why positive actual A3/A7 and Rust-only
-fallback tests pass while the actual fallback path stalls.
+## Regressions and durable boundary
 
-Fixing the durable fence needs an additive trigger migration with old-wire
-compatibility and restart/concurrency tests. Do not weaken the Rust behavior to
-skip the generated-candidate decision, fabricate an attempt, reinterpret old
-fallback rows, or mutate 0302. The user explicitly required STOP if DB schema
-changes became necessary; this PR and receiver #707 therefore remain held.
+- Selected Rust: **675 PASS / 0 FAIL / 1 existing ignored**; Clippy/fmt/diff PASS.
+- Receiver: **336 PASS / 0 FAIL**; typecheck PASS.
+- Real D1 MIG0–MIG12 (17 tests), one byte-preserving scope test.
+- schema generate/check/fresh-bootstrap and non-empty 0306→0307 upgrade PASS.
+- 0301/0302 unchanged; 0307 replaces only decision-open release guard.
+- Open/claimed proposal's independent fence remains intact. Legacy/fallback
+  Attempt counting, chosen Inspect/Stop/Attempt and issue fence unchanged.
 
-## CI classification
+Prior failure and CI observations remain in the pre0307 ledger, not erased or
+relabelled. Receiver CI run 36519799995 has billing failure before any steps;
+not green. Integrated-head ato CI classification is recorded separately.
 
-Rust CI head run 36511389959 compared with base 857cb1ed run 36510579404:
-Windows Unix-only browser API errors, Ubuntu hosted Python/Node failure, and
-macOS portable ownership/hosted validator failures also occur on that base.
-No new failure in the fetched head failure set. CodeQL languages PASS at core
-head. CI remains red, not green.
-
-API Activity CI 36511529096: billing/spending-limit annotation before steps in
-both jobs, full-serial skipped. No code execution; local results stand separately.
-
-No live Jev/DeepSeek, credential read, deploy, remote migration, or #1421 change.
+No live Jev/DeepSeek calls, credential read, remote migration, deployment,
+production flags, or #1421 changes. 0307 exists/applied only to local tests.
