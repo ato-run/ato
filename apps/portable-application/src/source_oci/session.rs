@@ -536,9 +536,8 @@ impl PrivateDockerSession {
             format!("/{}/daemon", self.cgroup_name),
             self.fs_root.join("data").display().to_string(),
         );
-        if self.egress.is_some() {
+        if let Some(e) = &self.egress {
             self.wire_egress()?;
-            let e = self.egress.as_ref().expect("egress");
             let mut interfaces = vec!["docker0".to_owned(), "lo".to_owned(), e.ns_if.clone()];
             interfaces.sort();
             expected.interfaces = interfaces;
