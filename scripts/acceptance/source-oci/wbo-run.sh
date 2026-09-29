@@ -43,18 +43,31 @@ start_run() { # $1 = n
   [[ $rc -eq 0 ]] || return 1
   echo "C receipt-$1 $(python3 -c 'import json,sys;r=json.load(open(sys.argv[1]));print(json.dumps({"fully_satisfied":r["fully_satisfied"],"outcomes":[o["outcome"] for o in r["observations"]],"contract_ref":r["contract_ref"],"derivation_ref":r["derivation_ref"]}))' "$R/receipt-$1.json")"
 }
+# `ato app stop` waits 5 s for the worker's acknowledgement; an OCI stop can
+# take longer. Record the command's result, then wait until the Instance has
+# no active Run (the worker's own confirmed cleanup) before going on.
+stop_run() { # $1 = n
+  "${U[@]}" "$ATO" app stop "$INSTANCE" > "$R/stop-$1.txt" 2>&1
+  local rc=$? waited=0
+  while (( waited < 120 )); do
+    "${U[@]}" "$ATO" app inspect "$INSTANCE" > "$R/inspect-$1.json" 2>/dev/null
+    python3 -c 'import json,sys;sys.exit(0 if json.load(open(sys.argv[1]))["active_run"] is None else 1)' "$R/inspect-$1.json" && break
+    sleep 1; waited=$((waited + 1))
+  done
+  echo "B stop-$1 exit=$rc ($(head -1 "$R/stop-$1.txt")) run_ended_after=${waited}s containers=$("${DK[@]}" ps -aq | wc -l)"
+}
 identity() {
   local c; c=$("${DK[@]}" ps -q | head -1)
-  echo "identity container=$c user=$("${DK[@]}" inspect --format '{{.Config.User}}' "$c") procs=$("${DK[@]}" top "$c" -eo uid,gid,comm | tail -n +2 | tr -s ' ' | tr '\n' ';') mounts=$("${DK[@]}" inspect --format '{{json .Mounts}}' "$c")"
+  echo "identity container=$c user=$("${DK[@]}" inspect --format '{{.Config.User}}' "$c") procs=$("${DK[@]}" top "$c" -eo pid,uid,gid,comm | tail -n +2 | tr -s ' ' | tr '\n' ';') mounts=$("${DK[@]}" inspect --format '{{json .Mounts}}' "$c")"
 }
 
 if start_run 1; then
   identity
   echo "D $("${CHECK[@]}" draw --chrome "$CHROME" --url "$URL" --board ato-wbo-check --id ato-wbo-probe-1 --scratch "$OUT/home" 2>&1 | tail -1)"
-  "${U[@]}" "$ATO" app stop "$INSTANCE" > "$R/stop-1.txt" 2>&1; echo "B stop-1 exit=$?"
+  stop_run 1
   if start_run 2; then
     echo "E $("${CHECK[@]}" verify --chrome "$CHROME" --url "$URL" --board ato-wbo-check --id ato-wbo-probe-1 --scratch "$OUT/home" 2>&1 | tail -1)"
-    "${U[@]}" "$ATO" app stop "$INSTANCE" > "$R/stop-2.txt" 2>&1; echo "B stop-2 exit=$?"
+    stop_run 2
   fi
 fi
 FILES=$(grep -rl "ato-wbo-probe-1" "$OUT/ato-home" 2>/dev/null | grep -v -e receipt -e '\.log$' | head -5)
