@@ -92,3 +92,33 @@ redirect would stop the phase again.
 - After a durable restart, the Run's receipt names a different ContractRef and
   one more observation: the continuation is re-sealed with its state. This is
   existing semantics, recorded as observed.
+
+## Run 2 (after the user-approved blob endpoint `production.cloudfront.docker.com`)
+
+- Code `4553d368`, `ato` sha256 `dfc737fe…`. The WBO archive matched the pin;
+  28.3 GB of disk was free.
+- **Base acquisition: done.**
+  - `docker.io/library/node:24-alpine` resolved to root `sha256:ebfe2f90…`;
+    linux/amd64 manifest `sha256:83f1c388…`; config `sha256:c1088495…`;
+    4 layers.
+  - Content 61,648,926 bytes; archive `sha256:c60f7d0d…` (61,652,992 bytes).
+  - The gate moved 61,798,832 bytes, with CONNECTs only to
+    `registry-1.docker.io`, `auth.docker.io` and
+    `production.cloudfront.docker.com`, and 0 refusals.
+  - Build egress budget: 524,288,000 − 61,798,832 = 462,489,168 bytes.
+- **A (image build): stopped at the artifact bound.**
+  - BuildKit completed the WBO Dockerfile inside the egress session (so apk
+    and npm went through the gate).
+  - The built image reports 372,919,274 bytes uncompressed. That is over the
+    128 MiB archive bound, so it was refused before `docker save` with
+    `source_oci_artifact_bounds`, and nothing was published.
+  - The bound was not raised.
+  - Session roots, cgroups, tagged host rules and veths left: 0.
+  - This run's gate record and preflight were not published (the failure path
+    dropped them). This was fixed afterwards (`350a92f3`): every failed online
+    build now carries the egress record and the preflight.
+- B–E were not reached.
+
+The transport archive is a classic-store `docker save` repack whose layers are
+uncompressed tars, so the bound applies to uncompressed layer bytes. Whether a
+compressed-layer archive would fit within 128 MiB was not measured.
