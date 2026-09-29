@@ -1,8 +1,13 @@
 //! CandidateProducer proposals are untrusted authoring input, never decisions or
 //! verification evidence. Ato alone resolves logical IDs and compiles canonical D.
 //! This core has no provider transport, durable storage or execution authority.
+mod node_static_workspace;
 mod python_http;
 mod source_context;
+pub use node_static_workspace::{
+    MAX_WORKSPACE_CANDIDATES, NodeStaticWorkspaceAuthorization, WORKSPACE_HTTP_PORT,
+    WorkspaceInstallScope, WorkspaceStaticBuild, relative_dir,
+};
 pub use python_http::PythonHttpProcess;
 pub use source_context::*;
 
@@ -60,6 +65,10 @@ pub struct ProposalAuthorization {
     pub source_domain: SourceDomain,
     /// Ato-owned constructor parameters, not LLM arguments.
     pub python_http_process: Option<PythonHttpProcess>,
+    /// Private workspace-ID resolution from the bounded inventory. Absent on
+    /// every earlier authorization, whose canonical bytes are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_static_workspace: Option<NodeStaticWorkspaceAuthorization>,
     pub policy: CandidateProducerPolicy,
 }
 
@@ -85,6 +94,8 @@ pub enum OperationDomain {
     PythonScript { entrypoint_ids: Vec<String> },
     #[serde(rename = "python_module@1")]
     PythonModule { module_ids: Vec<String> },
+    #[serde(rename = "node_static_workspace@1")]
+    NodeStaticWorkspace { workspace_ids: Vec<String> },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", deny_unknown_fields)]
@@ -95,6 +106,8 @@ pub enum OperationInvocation {
     PythonScript { entrypoint_id: String },
     #[serde(rename = "python_module@1")]
     PythonModule { module_id: String },
+    #[serde(rename = "node_static_workspace@1")]
+    NodeStaticWorkspace { workspace_id: String },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -140,7 +153,8 @@ impl ProposalAuthorization {
     pub fn validate(&self) -> Result<(), ProposalError> {
         self.policy.validate()?;
         let domain = &self.source_domain;
-        if domain.entrypoints.len() + domain.modules.len() == 0
+        if (domain.entrypoints.len() + domain.modules.len() == 0
+            && self.node_static_workspace.is_none())
             || domain.entrypoints.len() + domain.modules.len() > generation::MAX_ENTRYPOINTS
             || self.modifiable_derivation_refs.len() > 64
             || self
@@ -174,6 +188,9 @@ impl ProposalAuthorization {
         if let Some(template) = &self.python_http_process {
             template.validate()?;
         }
+        if let Some(workspace) = &self.node_static_workspace {
+            workspace.validate()?;
+        }
         Ok(())
     }
 
@@ -199,6 +216,11 @@ impl ProposalAuthorization {
                     module_ids: domain.modules.keys().cloned().collect(),
                 });
             }
+        }
+        if let Some(workspace) = &self.node_static_workspace {
+            operations.push(OperationDomain::NodeStaticWorkspace {
+                workspace_ids: workspace.workspaces.keys().cloned().collect(),
+            });
         }
         Ok(OperationCatalog {
             schema: CATALOG_SCHEMA.into(),
@@ -236,6 +258,9 @@ impl ProposalAuthorization {
         if let Some(template) = &self.python_http_process {
             // Validate complete K/port/input coupling before a provider call.
             template.validate_contract(&frozen.base_contract, source)?;
+        }
+        if let Some(workspace) = &self.node_static_workspace {
+            workspace.validate_contract(&frozen.base_contract, source)?;
         }
         Ok(())
     }
@@ -370,24 +395,36 @@ fn compile_proposal(
         .ok_or(ProposalError("proposal_initial_source_required"))?;
     let (compiled, mut candidate) = match proposal {
         Proposal::Unsupported {} => return Ok(None),
-        Proposal::ProposeDerivation { operations } => {
-            let [OperationInvocation::PythonHttpProcess { entrypoint_id }] = operations.as_slice()
-            else {
-                return Err(ProposalError("proposal_propose_operation"));
-            };
-            let template = authorization
-                .python_http_process
-                .as_ref()
-                .ok_or(ProposalError("proposal_operation_unauthorized"))?;
-            let path = authorization
-                .source_domain
-                .entrypoints
-                .get(entrypoint_id)
-                .ok_or(ProposalError("proposal_id_unauthorized"))?;
-            let compiled = template.compile(source, &frozen.base_contract, path)?;
-            let candidate = template.candidate(source, compiled.derivation_ref.clone());
-            (compiled, candidate)
-        }
+        Proposal::ProposeDerivation { operations } => match operations.as_slice() {
+            [OperationInvocation::PythonHttpProcess { entrypoint_id }] => {
+                let template = authorization
+                    .python_http_process
+                    .as_ref()
+                    .ok_or(ProposalError("proposal_operation_unauthorized"))?;
+                let path = authorization
+                    .source_domain
+                    .entrypoints
+                    .get(entrypoint_id)
+                    .ok_or(ProposalError("proposal_id_unauthorized"))?;
+                let compiled = template.compile(source, &frozen.base_contract, path)?;
+                let candidate = template.candidate(source, compiled.derivation_ref.clone());
+                (compiled, candidate)
+            }
+            [OperationInvocation::NodeStaticWorkspace { workspace_id }] => {
+                let domain = authorization
+                    .node_static_workspace
+                    .as_ref()
+                    .ok_or(ProposalError("proposal_operation_unauthorized"))?;
+                let workspace = domain
+                    .workspaces
+                    .get(workspace_id)
+                    .ok_or(ProposalError("proposal_id_unauthorized"))?;
+                let compiled = domain.compile(source, &frozen.base_contract, workspace)?;
+                let candidate = domain.candidate(source, compiled.derivation_ref.clone());
+                (compiled, candidate)
+            }
+            _ => return Err(ProposalError("proposal_propose_operation")),
+        },
         Proposal::ModifyDerivation {
             base_derivation_ref,
             operations,
@@ -436,7 +473,8 @@ fn compile_proposal(
                         PythonInvocation::Module(module),
                     )
                 }
-                OperationInvocation::PythonHttpProcess { .. } => {
+                OperationInvocation::PythonHttpProcess { .. }
+                | OperationInvocation::NodeStaticWorkspace { .. } => {
                     return Err(ProposalError("proposal_modify_operation"));
                 }
             };
@@ -492,7 +530,11 @@ pub fn validate_candidate_scope(
         let new_scope = authorization
             .python_http_process
             .as_ref()
-            .is_some_and(|t| t.candidate(source, candidate.derivation_ref.clone()) == *candidate);
+            .is_some_and(|t| t.candidate(source, candidate.derivation_ref.clone()) == *candidate)
+            || authorization
+                .node_static_workspace
+                .as_ref()
+                .is_some_and(|t| t.candidate(source, candidate.derivation_ref.clone()) == *candidate);
         let modified_scope = frozen.candidates.iter().any(|base| {
             authorization
                 .modifiable_derivation_refs
