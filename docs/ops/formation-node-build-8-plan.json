@@ -1,0 +1,82 @@
+{
+  "schema": "ato.formation-node-build-remeasurement/1",
+  "execution_sha": "28d7e2f9cbac687f04fecf130c2002b2cd730db1",
+  "qualification_head": "dbd1469adbc5cd9d58b6fbdf53c512f430a42dca",
+  "qualification_merge": "968836af358615844838fb7543a3832d52119808",
+  "qualification_sha256": "f2a569de9deac691a75cc583f775a2ec4d5f765a0cbfa930d5e9d4815367048e",
+  "cohort_plan_sha256": "09dd673a79b73e561dc872e75268008c4703615097a1019495ed652e51e7f556",
+  "network": "denied",
+  "candidate_producer": "off",
+  "decision_provider": "off",
+  "model_calls": 0,
+  "app_specific_D": false,
+  "retry": 0,
+  "K_scope": "unchanged GET / = 200 + source identity if authoring succeeds; no invented K on pre-authoring refusal",
+  "functional_success": "not inferred from typed-K receipt",
+  "applications": [
+    {
+      "index": 1,
+      "name": "Excalidraw",
+      "repo": "https://github.com/excalidraw/excalidraw",
+      "ref": "5a406e51875157bece389b9bc92d41ff241d5f3d",
+      "archive_sha256": "94603a7879307fd68bd993b4758a1ccdcf1ff068222bf98a9f5b6c5bdaca56a3",
+      "old_blocker": "preset_node_static_needs_lockfile"
+    },
+    {
+      "index": 6,
+      "name": "SearXNG",
+      "repo": "https://github.com/searxng/searxng",
+      "ref": "12f8b6515ca77c3c3bc1498584950ef5daca1433",
+      "archive_sha256": "13dbc1adeff80145c439686b2a7588aca89604bd1d86cd5623d029376e4a59bb",
+      "old_blocker": "preset_node_static_needs_lockfile"
+    },
+    {
+      "index": 8,
+      "name": "Etherpad",
+      "repo": "https://github.com/ether/etherpad",
+      "ref": "c080707dcd3e3dfa730bb699970ad1abf33aaf42",
+      "archive_sha256": "268168f1f5e6644f86e6c514d1f90068d01d56a1a290e5762f4ffcd1e0097ec0",
+      "old_blocker": "preset_node_static_needs_lockfile"
+    },
+    {
+      "index": 10,
+      "name": "Gitea",
+      "repo": "https://github.com/go-gitea/gitea",
+      "ref": "fba8d7eaceeed3f8bbc364386d2a35aa672285a2",
+      "archive_sha256": "8e2f5281daf1ec18427319ae7d61ccbc12038310bd44fb72ecc66d43b1c061f8",
+      "old_blocker": "preset_node_static_needs_lockfile"
+    },
+    {
+      "index": 13,
+      "name": "HedgeDoc",
+      "repo": "https://github.com/hedgedoc/hedgedoc",
+      "ref": "5dd94d5449e52835ab034d4da21773cad08ebf51",
+      "archive_sha256": "6b99ac59a4ce6990f9a9e20d4b44b405c255900943c5bfaa868fc8a526e7720d",
+      "old_blocker": "preset_node_static_needs_lockfile"
+    },
+    {
+      "index": 14,
+      "name": "Actual Budget",
+      "repo": "https://github.com/actualbudget/actual",
+      "ref": "eb28966d6ca549236dd08b163ffc8570c710e712",
+      "archive_sha256": "23659e0cc54128ac20e459ddb7a7524c96148f906dcb74dfe66342ce84ddb8a5",
+      "old_blocker": "preset_node_static_needs_lockfile"
+    },
+    {
+      "index": 15,
+      "name": "JupyterLab",
+      "repo": "https://github.com/jupyterlab/jupyterlab",
+      "ref": "bb166a775cba8911fa157c1ff4858b12766d6ede",
+      "archive_sha256": "af39846f2016b0d0a4220123ba13b69180ab11b64c8ec893572018157b2c56c5",
+      "old_blocker": "preset_node_static_needs_lockfile"
+    },
+    {
+      "index": 19,
+      "name": "Grist core",
+      "repo": "https://github.com/gristlabs/grist-core",
+      "ref": "b4ccc892202a3aefd6e565f0bc0c01081433a53c",
+      "archive_sha256": "0fb3e9be24032f710a401717a80f41dbb7e247d050a578f6214f7f0d0919083a",
+      "old_blocker": "preset_node_static_needs_lockfile"
+    }
+  ]
+}
