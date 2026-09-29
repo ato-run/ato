@@ -152,6 +152,25 @@ enum Commands {
     PortableSandboxExec(PortableSandboxExecArgs),
     #[command(name = "__portable-instance-worker", hide = true)]
     PortableInstanceWorker(PortableInstanceWorkerArgs),
+    /// 6b-D2 experimental: build a frozen source's root Dockerfile with a
+    /// private builder into a verified OCI archive and an authored OCI route.
+    #[command(name = "__source-oci-build", hide = true)]
+    SourceOciBuild(SourceOciBuildArgs),
+}
+
+#[derive(Debug, Args)]
+struct SourceOciBuildArgs {
+    /// `ato.source-oci-request/1` JSON.
+    #[arg(long)]
+    request: PathBuf,
+    /// Private builder daemon (`unix:///abs/path`); never inherited from env.
+    #[arg(long)]
+    docker_host: String,
+    #[arg(long, default_value = "docker")]
+    docker: PathBuf,
+    /// New output directory.
+    #[arg(long)]
+    out: PathBuf,
 }
 
 #[derive(Subcommand)]
@@ -567,7 +586,30 @@ pub fn run() -> Result<()> {
         },
         Commands::PortableSandboxExec(args) => portable_sandbox_exec(args),
         Commands::PortableInstanceWorker(args) => portable_instance_worker(args),
+        Commands::SourceOciBuild(args) => source_oci_build(args),
     }
+}
+
+fn source_oci_build(args: SourceOciBuildArgs) -> Result<()> {
+    use ato_portable_application::source_oci::{
+        DockerCliBuilder, PROVENANCE_FILE, SourceOciRequest, materialize,
+    };
+    let request: SourceOciRequest = serde_json::from_slice(
+        &fs::read(&args.request).with_context(|| format!("read {}", args.request.display()))?,
+    )
+    .context("source-oci request is malformed")?;
+    let builder = DockerCliBuilder::new(args.docker, &args.docker_host)?;
+    let materialized = materialize(&request, &builder, &args.out)?;
+    let provenance = serde_json::to_vec_pretty(&materialized.provenance)?;
+    fs::write(args.out.join(PROVENANCE_FILE), &provenance)?;
+    let authored = args.out.join("authored");
+    fs::create_dir(&authored)?;
+    fs::write(authored.join("capsule.toml"), &materialized.capsule_toml)?;
+    fs::write(authored.join(PROVENANCE_FILE), &provenance)?;
+    println!("image_reference={}", materialized.image_reference);
+    println!("archive={}", materialized.archive.display());
+    println!("authored={}", authored.display());
+    Ok(())
 }
 
 fn pack(args: PackArgs) -> Result<()> {
