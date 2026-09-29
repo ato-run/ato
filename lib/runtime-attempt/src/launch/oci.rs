@@ -540,6 +540,12 @@ pub fn service_oci_spec(
         );
     }
 
+    ensure!(
+        service.working_dir == "/app",
+        "service `{}` declares working directory {}; service groups run in /app",
+        service.name,
+        service.working_dir
+    );
     Ok(OciSpec {
         id: format!("{}-{}", spec.context.run_id, service.name),
         image: service.image_reference.clone(),
