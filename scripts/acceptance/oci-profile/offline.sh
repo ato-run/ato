@@ -60,7 +60,7 @@ TOML
 }
 STATE='
 [[state]]
-id = "server-data"
+id = "server_data"
 use = "ato.state.filesystem@1"
 mount = "/opt/app/server-data"
 access = "read-write"
