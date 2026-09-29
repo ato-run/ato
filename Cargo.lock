@@ -664,7 +664,6 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "flate2",
- "libc",
  "reqwest",
  "serde",
  "serde_jcs",
