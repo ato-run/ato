@@ -16,12 +16,22 @@
       "acquired_as": "docker.io/library/node:24-alpine",
       "platform": "linux/amd64",
       "resolution": "once, by ato __source-oci-acquire-base; the root digest is frozen before the build",
-      "endpoints": ["registry-1.docker.io", "auth.docker.io", "production.cloudflare.docker.com"],
-      "max_bytes": 209715200
+      "endpoints": [
+        "registry-1.docker.io",
+        "auth.docker.io",
+        "production.cloudfront.docker.com"
+      ],
+      "max_bytes": 209715200,
+      "endpoint_change": "2026-09-30: blob endpoint replaced by the exact host production.cloudfront.docker.com observed in run 1 (user-approved; no wildcard). Any other unlisted redirect stops the phase."
     },
     "build_egress": {
-      "hosts": ["dl-cdn.alpinelinux.org", "registry.npmjs.org"],
-      "ports": [443],
+      "hosts": [
+        "dl-cdn.alpinelinux.org",
+        "registry.npmjs.org"
+      ],
+      "ports": [
+        443
+      ],
       "max_transfer_bytes": "524288000 minus the bytes the base acquisition moved",
       "path": "RUN steps -> session bridge -> veth -> egress gate (CONNECT only); preflight must show direct dials blocked, unlisted CONNECT 403, listed CONNECT 200 before the build"
     },
@@ -37,7 +47,12 @@
       "runtime_pids_limit": 256
     },
     "declared_transport_port": 80,
-    "authorized_state": [{"id": "server_data", "mount": "/opt/app/server-data"}],
+    "authorized_state": [
+      {
+        "id": "server_data",
+        "mount": "/opt/app/server-data"
+      }
+    ],
     "cache": "none kept; the session disk is deleted with the session"
   },
   "contract": {
