@@ -36,8 +36,20 @@ runtime. OCI routes require a digest-pinned image and a supported Linux
 platform. Runtime availability remains admission state, not bundle validity.
 OCI authoring may set `oci.workspace_mount` to an absolute, traversal-free
 guest path when an image owns `/app`. Omitting it preserves the original
-read-only `/app` workspace mount. This is a realization instruction and is
-therefore part of D, not K.
+read-only `/app` workspace mount. A single-container OCI route may also set
+`oci.working_dir` (absolute, traversal-free) when the image's own working
+directory is not `/app`; omitting it keeps `/app` and existing DerivationRefs.
+The working directory and the workspace mount target are independent. Service
+groups do not model a working directory and still run in `/app`. Both keys are
+realization instructions and therefore part of D, not K.
+
+Every image VOLUME must have a declared mount at exactly its path (the
+workspace mount, a declared `[[state]]` slot, or the `/tmp` tmpfs); a mount
+above or below the VOLUME path does not count, because Docker creates the
+anonymous volume unless a mount has that exact destination. Otherwise the
+Adapter refuses the launch before creating a container
+(`oci_volume_unauthorized`) instead of letting Docker create an anonymous
+writable volume outside the read-only root.
 
 ## Identity
 
