@@ -664,8 +664,11 @@ pub fn materialize(
     builder: &dyn OciBuilder,
     out: &Path,
 ) -> Result<Materialized> {
+    // Ownership of `out` comes only from creating it here. An existing
+    // directory, file or symlink is refused and never cleaned up.
     let created =
         std::fs::create_dir(out).map_err(|e| err("source_oci_output_invalid", e.to_string()));
+    let owns_out = created.is_ok();
     let result = created.and_then(|()| build_and_verify(prepared, builder, out));
     let released = builder.release();
     let outcome = match (result, released) {
@@ -677,7 +680,7 @@ pub fn materialize(
             Err(e)
         }
     };
-    if outcome.is_err() && out.exists() {
+    if outcome.is_err() && owns_out {
         // Nothing is published from a failed or unconfirmed job.
         let _ = std::fs::remove_dir_all(out);
     }
