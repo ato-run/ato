@@ -69,8 +69,12 @@ pub struct SourceOciRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BaseImageInput {
-    /// The reference exactly as the Dockerfile names it, digest-pinned.
+    /// The reference exactly as the Dockerfile's FROM names it (a tag or a
+    /// digest reference). It is only a lookup key for the build.
     pub reference: String,
+    /// The frozen root digest Ato resolved that reference to, before the
+    /// build. A digest written in `reference` must equal it.
+    pub pinned_digest: String,
     pub archive: PathBuf,
     pub archive_sha256: String,
 }
@@ -96,13 +100,20 @@ fn is_digest(value: &str) -> bool {
     })
 }
 
-fn reference_digest(reference: &str) -> Option<&str> {
-    let (name, digest) = reference.rsplit_once('@')?;
-    (!name.is_empty()
-        && !name.contains(char::is_whitespace)
-        && !name.contains(['$', '=', '\0'])
-        && is_digest(digest))
-    .then_some(digest)
+/// A FROM-style image reference: no whitespace, no build-arg expansion, no
+/// `=` (the named-context separator). A digest part, when present, is returned.
+fn parse_reference(reference: &str) -> Option<Option<&str>> {
+    if reference.is_empty()
+        || reference.len() > 256
+        || reference.contains(char::is_whitespace)
+        || reference.contains(['$', '=', '\0'])
+    {
+        return None;
+    }
+    match reference.rsplit_once('@') {
+        Some((name, digest)) => (!name.is_empty() && is_digest(digest)).then_some(Some(digest)),
+        None => Some(None),
+    }
 }
 
 impl SourceOciRequest {
@@ -134,10 +145,15 @@ impl SourceOciRequest {
         }
         let mut seen = BTreeSet::new();
         for base in &self.base_images {
-            if reference_digest(&base.reference).is_none() || !seen.insert(&base.reference) {
+            let written = parse_reference(&base.reference);
+            if written.is_none()
+                || !is_digest(&base.pinned_digest)
+                || written.flatten().is_some_and(|d| d != base.pinned_digest)
+                || !seen.insert(&base.reference)
+            {
                 return Err(err(
                     "source_oci_base_reference_invalid",
-                    "base references must be unique and digest-pinned",
+                    "base references must be unique and resolved to a pinned root digest",
                 ));
             }
             if !is_digest(&base.archive_sha256) {
@@ -413,7 +429,7 @@ fn check_base_archive(base: &BaseImageInput) -> Result<String> {
             ),
         ));
     }
-    let digest = reference_digest(&base.reference).expect("validated");
+    let digest = base.pinned_digest.as_str();
     let blob = format!("blobs/sha256/{}", &digest[7..]);
     let members = tar_members(&base.archive, &|n| {
         n == "index.json" || n == "manifest.json" || n == blob
@@ -619,7 +635,7 @@ pub fn materialize(
         named.push((base.reference.clone(), format!("docker-image://{tag}")));
         bases.push(
             json!({"reference":base.reference,"archive_sha256":base.archive_sha256,
-            "root_digest":reference_digest(&base.reference),"config_digest":config}),
+            "pinned_digest":base.pinned_digest,"config_digest":config}),
         );
     }
     // 4. Build with the existing builder; semantics are BuildKit's.
