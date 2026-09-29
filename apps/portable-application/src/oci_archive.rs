@@ -358,6 +358,13 @@ fn select_platform(
     members: &BTreeMap<String, Member>,
     platform: &str,
 ) -> Result<String> {
+    checked_descriptor(platform_descriptor(index, platform)?, members)
+}
+
+/// The one descriptor of an image index for `platform` (`os/arch`; arm64
+/// may carry variant v8). Attestation manifests (`unknown/unknown`) never
+/// match; zero or several matches are refused.
+pub(crate) fn platform_descriptor<'a>(index: &'a Value, platform: &str) -> Result<&'a Value> {
     let (os, architecture) = platform.split_once('/').context("platform os/arch")?;
     let matches = index["manifests"]
         .as_array()
@@ -379,7 +386,7 @@ fn select_platform(
         "OCI index has {} manifests for {platform}; exactly one is required",
         matches.len()
     );
-    checked_descriptor(matches[0], members)
+    Ok(matches[0])
 }
 
 fn checked_descriptor(descriptor: &Value, members: &BTreeMap<String, Member>) -> Result<String> {

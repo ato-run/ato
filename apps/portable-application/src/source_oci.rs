@@ -31,6 +31,8 @@ use crate::oci_archive::{
     verify_base_archive, verify_oci_archive,
 };
 
+pub mod acquire;
+pub mod egress;
 pub mod isolation;
 #[cfg(target_os = "linux")]
 pub mod session;
