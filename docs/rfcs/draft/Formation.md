@@ -23,13 +23,15 @@ The earlier sign-in/full-text-unverified limitation is resolved by these files.
 | §7–8: exact Runtime and implementation ownership | Preserve Exact Runtime, common execution/admission, no Coordinator model calls |
 | §10 Phase 3: Jev Decision Layer | Roadmap **5a ≒ original Phase 3** |
 | §10 Phase 4: LLM Candidate Generation | Roadmap **5b ≒ original Phase 4**; must include a no-Preset/no-known-D small OSS acceptance |
-| §10 Phase 5: Continuous Adaptation | Roadmap **5c ≒ original Phase 5**; bounded evidence-driven adaptation, not a completed capability |
+| §10 Phase 5: Continuous Adaptation | Roadmap **6c ≒ original Phase 5**; authorized, known-D-first background revalidation on external Runtime / verified D / Adapter / evidence triggers |
 | §11: evidence and acceptance | Unit/mock/actual Runtime/hosted acceptance are reported separately |
 | §12: unresolved representation/API decisions | Do not invent CapsuleRef or reinterpret existing v2/v3/v4 identity |
 
-Roadmap **6a/6b/6c are an added product coverage implementation track**, not
-original Phase numbering. In particular, 6c is the product rollout/measurement
-of continuous adaptation, not a renaming of original Phase 5.
+Roadmap **5c** closes Phase 4 within one search using bounded
+DecisionProvider ↔ CandidateProducer ↔ Runtime/Verifier integration. It is not
+original Phase 5. **6a** is independent real-world coverage measurement; **6b**
+is measured capability expansion; **6c** implements original Phase 5 Continuous
+Adaptation. Implementation stage numbers remain distinct from original phases.
 The original is a design proposal: its undecided Capsule identity is not a
 request to change existing ContractRef/ComputationRef wire semantics here.
 
