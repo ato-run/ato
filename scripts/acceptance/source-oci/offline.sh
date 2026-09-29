@@ -36,7 +36,7 @@ case "$CASE" in
   build) ;;
   unauthorized_external_input) sed -i "s#^FROM .*#FROM alpine:3.20@sha256:$(printf '0%.0s' $(seq 64))#" "$CTX/Dockerfile" ;;
   context_escape) echo 'COPY ../outside.txt /srv/outside.txt' >> "$CTX/Dockerfile"; echo secret > "$W/src/outside.txt" ;;
-XX
+  base_digest_mismatch) cp "$BASE" "$W/base-tampered.tar"; printf 'x' >> "$W/base-tampered.tar"; chown "$RUN_USER" "$W/base-tampered.tar"; BASE_ARCHIVE="$W/base-tampered.tar" ;;
   build_timeout) sed -i 's#^COPY index.html#RUN sleep 120\nCOPY index.html#' "$CTX/Dockerfile"; TIMEOUT=5 ;;
   archive_bound) MAXB=1024 ;;
   build_network) sed -i 's#^COPY index.html#RUN wget -q -O /srv/remote.html http://example.com/\nCOPY index.html#' "$CTX/Dockerfile" ;;
