@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 
 use super::{AppPreset, PresetMismatch, synthesize_authoring};
 use crate::authoring::{AuthoringDraft, AuthoringProvenance, RuntimeDraft, StepDraft, StepNetwork};
-use crate::detect::{DetectorEvidence, ViteOutDir};
+use crate::detect::{DetectorEvidence, NodeEvidence, ViteOutDir};
 use crate::intent::{self, ResolvedPackageManager};
 
 pub const NODE_STATIC_V2: &str = "node-static/v2";
@@ -31,20 +31,7 @@ pub fn synthesize_node_static_v2(
             "Workspace target/build/output require explicit authoring.",
         ));
     }
-    // These files can redirect the selected manager or run source hooks during
-    // provisioning. This slice has no config interpreter; refuse rather than
-    // delegate exact-version authority back to project configuration.
-    if evidence.present_files.iter().any(|p| {
-        matches!(
-            p.as_str(),
-            ".yarnrc" | ".yarnrc.yml" | ".npmrc" | ".pnpmfile.cjs" | ".pnpmfile.js"
-        )
-    }) {
-        return Err(refuse(
-            "preset_node_static_v2_manager_config",
-            "Package-manager configuration requires explicit authoring.",
-        ));
-    }
+    refuse_manager_config(evidence)?;
     if !evidence.present_files.iter().any(|p| p == "index.html") {
         return Err(refuse(
             "preset_node_static_v2_static_unproven",
@@ -66,7 +53,104 @@ pub fn synthesize_node_static_v2(
     let profile = intent::detect_static_build(evidence)
         .map_err(|e| PresetMismatch::new(e.code(), e.to_string()))?
         .ok_or_else(|| refuse("preset_node_static_v2_static_unproven", "A standalone static artifact is not established; explicit service/build authoring is required."))?;
-    let declared = BTreeMap::from([("node".to_owned(), profile.node_version.clone())]);
+    let (manager, install_mode) = exact_manager(node, &profile.node_version)?;
+    Ok(static_build_draft(
+        profile.node_version,
+        manager,
+        install_mode,
+        ".",
+        profile.output_root,
+    ))
+}
+
+/// Canonical v2 D for one build scope. Install always runs at the source root
+/// (the one lockfile scope); the build runs in `build_cwd`, which is `.` for a
+/// non-workspace source and an inventory-resolved workspace otherwise.
+pub(crate) fn static_build_draft(
+    node_version: String,
+    manager: ResolvedPackageManager,
+    install_mode: &'static str,
+    build_cwd: &str,
+    output_root: String,
+) -> AuthoringDraft {
+    // Reuse the existing K template without changing its scope. Only D changes.
+    let mut draft = synthesize_authoring(AppPreset::NodeStatic);
+    draft.provenance = AuthoringProvenance::PresetSynthesized {
+        preset: NODE_STATIC_V2,
+    };
+    draft.derivation.workspace_build = None;
+    draft.derivation.runtimes = vec![
+        RuntimeDraft {
+            name: "node".into(),
+            version: node_version,
+        },
+        RuntimeDraft {
+            name: manager.name.clone(),
+            version: manager.version,
+        },
+    ];
+    let mut serve = draft.derivation.steps.remove(0);
+    serve.root = Some(output_root);
+    serve.cwd = ".".into();
+    let exec_in = |id: &str, args: &[&str], cwd: &str, network| StepDraft {
+        id: id.into(),
+        protocol: crate::authoring::PROCESS_PROTOCOL.into(),
+        op: "exec".into(),
+        argv: std::iter::once(manager.name.clone())
+            .chain(args.iter().map(|s| (*s).into()))
+            .collect(),
+        cwd: cwd.into(),
+        env: BTreeMap::new(),
+        source: None,
+        root: None,
+        entry: None,
+        spa_fallback: None,
+        network,
+    };
+    draft.derivation.steps = vec![
+        exec_in(
+            "install",
+            &["install", install_mode],
+            ".",
+            StepNetwork::DependencyResolution,
+        ),
+        exec_in("build", &["run", "build"], build_cwd, StepNetwork::Denied),
+        serve,
+    ];
+    draft
+}
+
+/// Package-manager files that can redirect the manager or run source hooks.
+/// No config interpreter exists; refuse rather than delegate version authority.
+pub(crate) const MANAGER_CONFIG_FILES: &[&str] = &[
+    ".yarnrc",
+    ".yarnrc.yml",
+    ".npmrc",
+    ".pnpmfile.cjs",
+    ".pnpmfile.js",
+];
+
+pub(crate) fn refuse_manager_config(evidence: &DetectorEvidence) -> Result<(), PresetMismatch> {
+    if evidence
+        .present_files
+        .iter()
+        .any(|p| MANAGER_CONFIG_FILES.contains(&p.as_str()))
+    {
+        return Err(PresetMismatch::new(
+            "preset_node_static_v2_manager_config",
+            "Package-manager configuration requires explicit authoring.",
+        ));
+    }
+    Ok(())
+}
+
+/// The one exact pnpm/Yarn and its immutable install mode for the root lock.
+pub(crate) fn exact_manager(
+    node: &NodeEvidence,
+    node_version: &str,
+) -> Result<(ResolvedPackageManager, &'static str), PresetMismatch> {
+    let refuse = |code, message: &str| PresetMismatch::new(code, message);
+    let declared = BTreeMap::from([("node".to_owned(), node_version.to_owned())]);
     let resolve = |declaration: Option<String>| -> Result<ResolvedPackageManager, PresetMismatch> {
         let mut facts = node.clone();
         facts.package_manager = declaration;
@@ -131,48 +215,5 @@ pub fn synthesize_node_static_v2(
     } else {
         "--frozen-lockfile"
     };
-    // Reuse the existing K template without changing its scope. Only D changes.
-    let mut draft = synthesize_authoring(AppPreset::NodeStatic);
-    draft.provenance = AuthoringProvenance::PresetSynthesized {
-        preset: NODE_STATIC_V2,
-    };
-    draft.derivation.workspace_build = None;
-    draft.derivation.runtimes = vec![
-        RuntimeDraft {
-            name: "node".into(),
-            version: profile.node_version,
-        },
-        RuntimeDraft {
-            name: manager.name.clone(),
-            version: manager.version,
-        },
-    ];
-    let mut serve = draft.derivation.steps.remove(0);
-    serve.root = Some(profile.output_root);
-    serve.cwd = ".".into();
-    let exec = |id: &str, args: &[&str], network| StepDraft {
-        id: id.into(),
-        protocol: crate::authoring::PROCESS_PROTOCOL.into(),
-        op: "exec".into(),
-        argv: std::iter::once(manager.name.clone())
-            .chain(args.iter().map(|s| (*s).into()))
-            .collect(),
-        cwd: ".".into(),
-        env: BTreeMap::new(),
-        source: None,
-        root: None,
-        entry: None,
-        spa_fallback: None,
-        network,
-    };
-    draft.derivation.steps = vec![
-        exec(
-            "install",
-            &["install", install_mode],
-            StepNetwork::DependencyResolution,
-        ),
-        exec("build", &["run", "build"], StepNetwork::Denied),
-        serve,
-    ];
-    Ok(draft)
+    Ok((manager, install_mode))
 }
