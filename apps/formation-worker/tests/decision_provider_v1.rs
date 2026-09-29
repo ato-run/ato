@@ -247,3 +247,32 @@ fn only_requirement_facts_reach_the_provider() {
     // A choice whose D requires nothing sends no Runtime facts at all.
     assert!(requirement_scoped_facts(&p.choices[1]).is_empty());
 }
+
+#[test]
+fn escalation_is_a_finite_label_without_producer_payload() {
+    let mut point = point();
+    point.choices[0].action = OfferedAction::EscalateToCandidateProducer {};
+    let request = decision_request("jev-test", &point);
+    assert_eq!(
+        request["state"]["options"][&point.default_choice_id],
+        serde_json::json!({"action":"escalate_to_candidate_producer"})
+    );
+    assert_eq!(point.choices[0].attempt(), None);
+    let wire = serde_json::json!({"decision_point": {
+        "seq": 0, "default_choice_id": "escalate", "expires_at": "2026-09-29T00:00:30Z",
+        "choices": [{"choice_id":"escalate", "action":{"kind":"escalate_to_candidate_producer"}}]
+    }});
+    let restored = DecisionPoint::from_status(&wire).unwrap();
+    assert_eq!(
+        restored.choices[0].action,
+        OfferedAction::EscalateToCandidateProducer {}
+    );
+    assert_eq!(
+        ProviderAnswer::Choice {
+            choice_id: "escalate".into(),
+            evidence: serde_json::json!({})
+        }
+        .submission(0),
+        serde_json::json!({"seq":0,"choice_id":"escalate","evidence":{}})
+    );
+}
