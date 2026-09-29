@@ -87,7 +87,7 @@ TOML
   if [[ -f "$C/run/result.txt" ]]; then VOLUMES=$(sed -n 's/^volume_count=//p' "$C/run/result.txt")
   else VOLUMES=$(grep -c . "$C/run/failure-volumes.txt" 2>/dev/null || true); fi
   CONTAINERS=$(cut -d'"' -f4 "$C/containers-seen.jsonl" | sort -u | grep -c . || true)
-  ANON=$(grep -o '"Type":"volume"' "$C/containers-seen.jsonl" | wc -l)
+  ANON=$(grep -c '"Type":"volume"' "$C/containers-seen.jsonl" || true)
   CODE=$(grep -o 'oci_volume_unauthorized' "$C/run.log" | head -1 || true)
   printf '{"case":"%s","expect":"%s","exit":%d,"code":"%s","containers_created":%d,"volume_mounts_seen":%d,"private_store_volumes":%s,"derivation_ref":"%s"}\n' \
     "$NAME" "$EXPECT" "$RC" "$CODE" "$CONTAINERS" "$ANON" "${VOLUMES:-null}" "$D" | tee "$C/result.json"
