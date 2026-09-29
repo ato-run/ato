@@ -110,6 +110,12 @@ pub struct RunJournalEntry {
     pub network_generations: BTreeMap<String, u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process: Option<ProcessIdentity>,
+    /// The control plane knew this was a process realization, but the local
+    /// journal that would identify its pid/start-time was lost. Absence cannot
+    /// prove such a process stopped, so the slot stays quarantined until an
+    /// operator supplies stronger evidence.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub process_identity_required: bool,
 }
 
 impl RunJournalEntry {
@@ -125,6 +131,7 @@ impl RunJournalEntry {
             writer_fences: BTreeMap::new(),
             network_generations: BTreeMap::new(),
             process: None,
+            process_identity_required: false,
         }
     }
 }
@@ -576,6 +583,11 @@ pub fn recover_slot(
     for lease_id in leases {
         let entry = entries.iter().find(|entry| entry.lease_id == lease_id);
         let mut outcomes = Vec::new();
+        if entry.is_some_and(|entry| entry.process_identity_required && entry.process.is_none()) {
+            outcomes.push(StopOutcome::Unconfirmed {
+                reason: "process recovery requires the missing pid/start-time journal".to_owned(),
+            });
+        }
         if let Some(identity) = entry.and_then(|entry| entry.process.as_ref()) {
             outcomes.push(settle_process(identity));
         }
@@ -769,6 +781,33 @@ mod tests {
         assert!(!result.clean);
         assert_eq!(result.reports[0].outcome, "unconfirmed");
         assert!(lease.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_process_without_identity_stays_quarantined_even_when_oci_scan_is_empty() {
+        let root = tempfile::tempdir().unwrap();
+        let docker = fake_docker(root.path(), "#!/bin/sh\nexit 0\n");
+        let scanner = OwnedResourceScanner::with_docker(docker, "runner1", "slot1");
+        let journal = RunJournal::new(root.path(), "runner1", "slot1").unwrap();
+        let mut entry = RunJournalEntry::new(&owner("L-process"));
+        entry.phase = RunPhase::StopUnconfirmed;
+        entry.process_identity_required = true;
+        journal.record(&entry).unwrap();
+        let reporter = Reporter::default();
+
+        let result = recover_slot(
+            &journal,
+            Some(&scanner),
+            &reporter,
+            StopBudget::DEFAULT,
+            &leases_dir(root.path()),
+        )
+        .unwrap();
+
+        assert!(!result.clean);
+        assert_eq!(result.reports[0].outcome, "unconfirmed");
+        assert_eq!(journal.load().unwrap(), vec![entry]);
     }
 
     #[test]
