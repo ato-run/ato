@@ -869,7 +869,7 @@ fn build_and_verify(
     }
     if !facts.volumes.is_empty() {
         profile_divergences.push(json!({"kind":"volume","image":facts.volumes,
-            "effect":"root filesystem is read-only and no state slot is bound; writes to these paths fail"}));
+            "effect":"no state slot is authorized for these paths; Docker would create anonymous writable volumes, which the route must not rely on"}));
     }
     let capsule_toml = authored_route(request, &image_reference, &facts);
     let archive = out.join(ARCHIVE_FILE);
