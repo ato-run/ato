@@ -2,8 +2,9 @@
 
 Status: implementation / acceptance in progress (not completed).
 
-This is the bounded decision/producer connection from Formation Phase 5, not an
-agent loop. DecisionProvider still cannot create D or decide K. CandidateProducer
+This closes Formation Phase 4 through bounded decision/producer integration
+within one search, not an agent loop or original Phase 5. Original Phase 5 is
+roadmap 6c: external-trigger, authorized known-D-first background revalidation. DecisionProvider still cannot create D or decide K. CandidateProducer
 cannot decide K. Only the existing Runtime/Verifier receipt establishes same-K PASS.
 
 ## Core contract
