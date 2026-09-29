@@ -256,3 +256,75 @@ fn policy_cannot_bypass_enablement_or_change_after_source_verification() {
 }
 
 mod general;
+
+fn monorepo(p: &Path) {
+    std::fs::write(
+        p.join("package.json"),
+        r#"{"private":true,"packageManager":"yarn@1.22.22","workspaces":["apps/*"]}"#,
+    )
+    .unwrap();
+    std::fs::write(p.join("yarn.lock"), "# yarn lockfile v1\n").unwrap();
+    std::fs::create_dir_all(p.join("apps/web")).unwrap();
+    std::fs::write(
+        p.join("apps/web/package.json"),
+        r#"{"name":"web","scripts":{"build":"vite build","preview":"vite preview"}}"#,
+    )
+    .unwrap();
+    std::fs::write(p.join("apps/web/index.html"), "<!doctype html>").unwrap();
+}
+
+/// Workspace IDs are authorized only as the inventory of the digest-verified
+/// frozen extraction; a mutated private mapping is refused before submission.
+#[test]
+fn workspace_domain_must_equal_the_frozen_source_inventory() {
+    let (root, mut sub) = prepared(monorepo);
+    let domain = ato_formation::workspace::inventory(&root.path().join("input"))
+        .unwrap()
+        .authorization()
+        .unwrap();
+    let mut auth = authorization();
+    auth.python_http_process = None;
+    auth.source_domain.entrypoints.clear();
+    auth.node_static_workspace = Some(domain.clone());
+    let mut tampered = auth.clone();
+    tampered
+        .node_static_workspace
+        .as_mut()
+        .unwrap()
+        .workspaces
+        .get_mut("w_0")
+        .unwrap()
+        .output_root = "apps/web/build".into();
+    assert!(
+        sub.enable_candidate_producer(tampered)
+            .unwrap_err()
+            .to_string()
+            .contains("workspace domain differs")
+    );
+    sub.enable_candidate_producer(auth).unwrap();
+    let catalog = serde_json::to_string(
+        &sub.request
+            .policy
+            .proposal
+            .as_ref()
+            .unwrap()
+            .catalog()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(catalog.contains("node_static_workspace@1") && !catalog.contains("apps/web"));
+}
+
+#[test]
+fn prompt_v1_bytes_stay_pinned_and_v2_names_the_workspace_operation() {
+    use super::deepseek::*;
+    assert_eq!(
+        prompt_sha256(),
+        "sha256:a3217b28b4242fdc03e11fe5dee7d91fbbc47b79358c4ae31601002b7a81ea50"
+    );
+    assert!(!PROMPT.contains("node_static_workspace@1"));
+    assert!(PROMPT_V2.contains("node_static_workspace@1"));
+    assert!(PROMPT_V2.contains("never a path or package name"));
+    assert_eq!(prompt_for(PROMPT_VERSION_V2), Some(PROMPT_V2));
+    assert_eq!(prompt_for("ato.formation-candidate-producer-prompt/3"), None);
+}
