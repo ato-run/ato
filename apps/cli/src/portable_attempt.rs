@@ -29,10 +29,9 @@ use ato_formation::verify::VerificationExecutionEvidence;
 use ato_objects::PortableDependencyProfile;
 use ato_portable_application::{
     OCI_CPU_MILLIS_RUNTIME, OCI_ENTRYPOINT_RUNTIME, OCI_IMAGE_RUNTIME, OCI_MEMORY_BYTES_RUNTIME,
-    OCI_PIDS_LIMIT_RUNTIME, OCI_PLATFORM_RUNTIME, OCI_WORKING_DIR_RUNTIME, OCI_WORKSPACE_MOUNT_RUNTIME,
-    PYTHON_RUNTIME,
-    PortableRealizationKind, StaticApplicationServer, StaticApplicationServerExt,
-    StaticApplicationState, ValidatedPortableApplication,
+    OCI_PIDS_LIMIT_RUNTIME, OCI_PLATFORM_RUNTIME, OCI_WORKING_DIR_RUNTIME,
+    OCI_WORKSPACE_MOUNT_RUNTIME, PYTHON_RUNTIME, PortableRealizationKind, StaticApplicationServer,
+    StaticApplicationServerExt, StaticApplicationState, ValidatedPortableApplication,
 };
 use ato_runtime_attempt::launch::oci::{
     LaunchedOci, OciCandidate, ServiceStart, start_service_group,
