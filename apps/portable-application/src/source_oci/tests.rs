@@ -50,6 +50,11 @@ fn image_archive(config: Value) -> (Vec<u8>, String, String) {
         (blob_path(&md), manifest),
         (blob_path(&cd), config),
         (blob_path(&ld), layer),
+        // A classic store also writes an unreferenced legacy v1 layer JSON.
+        (
+            blob_path(&digest(b"{\"id\":\"legacy\"}")),
+            b"{\"id\":\"legacy\"}".to_vec(),
+        ),
     ]);
     (bytes, md, cd)
 }
@@ -255,6 +260,11 @@ fn materializes_a_verified_archive_and_an_authored_route_the_existing_packer_acc
         bytes: base64::engine::general_purpose::STANDARD.encode(std::fs::read(&m.archive).unwrap()),
     });
     assert!(archive.is_ok());
+    assert_eq!(
+        m.provenance["outputs"]["repack"]["dropped_unreferenced_members"],
+        1
+    );
+    assert!(!dir.path().join("out/image.saved.tar").exists());
 }
 
 #[test]
