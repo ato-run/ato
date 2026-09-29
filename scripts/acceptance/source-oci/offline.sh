@@ -23,7 +23,7 @@ REF="python:3.12-alpine@$ROOT"
 BASE_ARCHIVE="$BASE"
 TIMEOUT=600; MAXB=134217728; DISK=4294967296; MEM=2147483648; PIDS=1024
 HOST_IP=$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p')
-SERVER_PID=""; WATCH_PID=""
+SERVER_PID=""; WATCH_PID=""; FROZEN_SHA=""
 insert_before_copy() { # $1 = Dockerfile lines inserted before COPY index.html
   python3 - "$CTX/Dockerfile" "$1" <<'PY'
 import sys
@@ -37,7 +37,11 @@ case "$CASE" in
   build) ;;
   unauthorized_external_input) sed -i "s#^FROM .*#FROM alpine:3.20@sha256:$(printf '0%.0s' $(seq 64))#" "$CTX/Dockerfile" ;;
   context_escape) insert_before_copy 'COPY ../outside.txt /srv/outside.txt'; echo secret > "$W/src/outside.txt" ;;
-  base_digest_mismatch) cp "$BASE" "$W/base-tampered.tar"; printf 'x' >> "$W/base-tampered.tar"; BASE_ARCHIVE="$W/base-tampered.tar" ;;
+  base_digest_mismatch)
+    # The request keeps the frozen digest of the original bytes; the archive
+    # it names has one byte appended (still a readable tar).
+    FROZEN_SHA="sha256:$(sha256sum "$BASE" | cut -d' ' -f1)"
+    cp "$BASE" "$W/base-tampered.tar"; printf 'x' >> "$W/base-tampered.tar"; BASE_ARCHIVE="$W/base-tampered.tar" ;;
   base_graph_mismatch)
     # Same member set, but Docker's load manifest names a config the pinned
     # root never reaches (the attestation manifest blob).
@@ -67,8 +71,11 @@ PY
   archive_bound) MAXB=1024 ;;
   disk_bound) DISK=536870912; insert_before_copy 'RUN dd if=/dev/zero of=/fill bs=1M count=1024' ;;
   log_bound)
-    L='yes aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa | head -c 2500000'
-    insert_before_copy "RUN $L"$'\n'"RUN $L && true"$'\n'"RUN $L && :" ;;
+    # BuildKit clips each step's output (size and rate), so the bound is
+    # reached through many steps, each printing ~100 KB.
+    L='yes aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa | head -c 100000'
+    STEPS=""; for i in $(seq 60); do STEPS+="RUN $L && echo step-$i"$'\n'; done
+    insert_before_copy "${STEPS%$'\n'}" ;;
   build_network) insert_before_copy 'RUN wget -q -O /srv/remote.html http://example.com/' ;;
   privileged_run) insert_before_copy 'RUN --security=insecure true' ;;
   host_network_run) insert_before_copy 'RUN --network=host true' ;;
@@ -89,7 +96,7 @@ PY
   socket_alias|non_root) ;;
   *) echo "unknown case $CASE" >&2; exit 64 ;;
 esac
-BASE_SHA="sha256:$(sha256sum "$BASE_ARCHIVE" | cut -d' ' -f1)"
+BASE_SHA="${FROZEN_SHA:-sha256:$(sha256sum "$BASE_ARCHIVE" | cut -d' ' -f1)}"
 ( cd "$W/src" && tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -czf "$W/source.tar.gz" app )
 SRC_SHA="sha256:$(sha256sum "$W/source.tar.gz" | cut -d' ' -f1)"
 cat > "$W/request.json" <<JSON
