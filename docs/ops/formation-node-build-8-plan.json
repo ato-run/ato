@@ -1,6 +1,6 @@
 {
   "schema": "ato.formation-node-build-remeasurement/1",
-  "execution_sha": "6a6ff92b7e416dd1030d2dd03b022920268ab70f",
+  "execution_sha": "177b61489e1fb28539868f9d9a76ca21fc6d61ca",
   "qualification_head": "dbd1469adbc5cd9d58b6fbdf53c512f430a42dca",
   "qualification_merge": "968836af358615844838fb7543a3832d52119808",
   "qualification_sha256": "f2a569de9deac691a75cc583f775a2ec4d5f765a0cbfa930d5e9d4815367048e",
@@ -78,5 +78,10 @@
       "archive_sha256": "0fb3e9be24032f710a401717a80f41dbb7e247d050a578f6214f7f0d0919083a",
       "old_blocker": "preset_node_static_needs_lockfile"
     }
-  ]
+  ],
+  "previous_measurement": {
+    "execution_sha": "6a6ff92b7e416dd1030d2dd03b022920268ab70f",
+    "ledger_commit": "b5b3dcaef1cf3c13d40ab6722299ebb149563b6b",
+    "reason": "Narrow physical binding to explicit D runtime requirements, preserving legacy source-only inference and authored PATH; identical eight source pins remeasured after this compatibility correction."
+  }
 }
