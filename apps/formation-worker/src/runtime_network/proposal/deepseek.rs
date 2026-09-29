@@ -15,8 +15,19 @@ use std::{io::Read, sync::Arc, time::Duration};
 
 pub const PROMPT_VERSION: &str = "ato.formation-candidate-producer-prompt/1";
 pub const PROMPT: &str = include_str!("prompt.txt");
+/// Adds `node_static_workspace@1`. Version 1 bytes stay pinned for its
+/// preregistered evidence; a configuration selects exactly one version.
+pub const PROMPT_VERSION_V2: &str = "ato.formation-candidate-producer-prompt/2";
+pub const PROMPT_V2: &str = include_str!("prompt-v2.txt");
 pub fn prompt_sha256() -> String {
     format!("sha256:{:x}", Sha256::digest(PROMPT.as_bytes()))
+}
+pub fn prompt_for(version: &str) -> Option<&'static str> {
+    match version {
+        PROMPT_VERSION => Some(PROMPT),
+        PROMPT_VERSION_V2 => Some(PROMPT_V2),
+        _ => None,
+    }
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -54,7 +65,7 @@ impl DeepSeekConfig {
         self.identity().validate()?;
         ensure!(
             self.provider == "deepseek"
-                && self.prompt_version == PROMPT_VERSION
+                && prompt_for(&self.prompt_version).is_some()
                 && (1..=2048).contains(&self.max_output_tokens)
                 && (1..=30_000).contains(&self.timeout_ms),
             "invalid DeepSeek configuration"
@@ -157,12 +168,14 @@ impl DeepSeekCandidateProducer {
         let canonical = serde_jcs::to_string(request).map_err(|_| ErrorClass::MalformedResponse)?;
         // Conservative byte upper bound (plus framing reserve) rather than a
         // guessed chars/token ratio. D3 must preregister this input bound.
-        let input_bound = (PROMPT.len() + canonical.len() + 1024) as u64;
+        let prompt =
+            prompt_for(&self.config.prompt_version).ok_or(ErrorClass::MalformedResponse)?;
+        let input_bound = (prompt.len() + canonical.len() + 1024) as u64;
         if input_bound > self.budget.plan().input_token_cap {
             return Err(ErrorClass::MalformedResponse);
         }
         let mut body = json!({"model":self.config.model,"stream":false,"max_tokens":self.config.max_output_tokens,
-            "response_format":{"type":"json_object"},"messages":[{"role":"system","content":PROMPT},{"role":"user","content":canonical}]});
+            "response_format":{"type":"json_object"},"messages":[{"role":"system","content":prompt},{"role":"user","content":canonical}]});
         match self.config.thinking {
             ThinkingMode::Disabled => body["thinking"] = json!({"type":"disabled"}),
             ThinkingMode::Enabled { ref effort } => {
