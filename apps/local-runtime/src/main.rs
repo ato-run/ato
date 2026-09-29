@@ -13,6 +13,7 @@
 
 #![forbid(unsafe_code)]
 
+mod apps;
 mod protocol;
 mod server;
 
@@ -74,7 +75,8 @@ fn run() -> Result<()> {
 
     let credential = read_credential()?;
 
-    let server = server::Server::bind(work_root, credential)?;
+    let apps = apps::AppSupport::from_env()?;
+    let server = server::Server::bind(work_root, credential, apps)?;
     let port = server.port();
 
     // READY only once the listener is bound AND the work root exists: a

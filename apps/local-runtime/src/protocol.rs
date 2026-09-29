@@ -30,6 +30,22 @@ pub struct ProjectRequest {
     pub project: String,
 }
 
+/// Start one Run of a durable portable Application Instance.
+///
+/// The Instance identifier is the local store's own (`linst_…`); this layer
+/// does not reinterpret it into a product id.
+#[derive(Debug, Deserialize)]
+pub struct AppStartRequest {
+    pub instance: String,
+    #[serde(default)]
+    pub bindings: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AppInstanceRequest {
+    pub instance: String,
+}
+
 /// A listing of the Computations a runtime holds.
 ///
 /// A wrapper rather than a bare array so the response can grow a cursor or a

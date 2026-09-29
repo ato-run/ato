@@ -242,6 +242,22 @@ struct AppStartArgs {
     /// Leave the durable Run active without opening its Surface.
     #[arg(long)]
     no_open: bool,
+    /// Emit the started Run as one JSON object instead of human-readable lines.
+    ///
+    /// Intended for the supervising Local Runtime, which parses this output;
+    /// humans get the lines.
+    #[arg(long)]
+    json: bool,
+    /// Keep the worker inside this process's group instead of detaching it.
+    ///
+    /// A caller that is itself a supervised host — the Local Runtime inside
+    /// Ato Desktop — owns teardown for its whole process group. Detaching the
+    /// worker would remove it from that group, leaving it running and
+    /// unsaved after the host's group teardown. Supervised mode lets the
+    /// worker observe the group signal and finish its own stop, the same
+    /// canonical path `ato app stop` drives.
+    #[arg(long)]
+    supervised: bool,
     /// Copy the Run-scoped canonical verification receipt to this path.
     #[arg(long)]
     verification_receipt: Option<PathBuf>,
@@ -1329,7 +1345,13 @@ fn start_local_instance(args: AppStartArgs) -> Result<()> {
         .stdin(Stdio::piped())
         .stdout(stdout.try_clone()?)
         .stderr(stdout);
-    configure_detached_process(&mut command);
+    // A supervised caller — the Local Runtime — owns teardown for its whole
+    // process group; the worker stays inside it so the group signal reaches
+    // the worker's own graceful stop. Direct CLI starts detach as before:
+    // the `ato` invocation exits and nothing else would ever stop the Run.
+    if !args.supervised {
+        configure_detached_process(&mut command);
+    }
     prevent_worker_from_inheriting_parent_stdio()?;
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -1376,6 +1398,16 @@ fn start_local_instance(args: AppStartArgs) -> Result<()> {
         .as_deref()
         .context("active local Instance Run omitted its receipt")?;
     let receipt_path = run_root.join(receipt_name);
+    let receipt_json = if args.json {
+        let bytes = fs::read(&receipt_path)
+            .with_context(|| format!("read local Instance receipt {}", receipt_path.display()))?;
+        Some(
+            serde_json::from_slice::<serde_json::Value>(&bytes)
+                .context("local Instance receipt is not valid JSON")?,
+        )
+    } else {
+        None
+    };
     if let Some(output) = args.verification_receipt {
         let receipt = fs::read(&receipt_path)
             .with_context(|| format!("read local Instance receipt {}", receipt_path.display()))?;
@@ -1386,6 +1418,26 @@ fn start_local_instance(args: AppStartArgs) -> Result<()> {
         .url
         .as_deref()
         .context("active local Instance Run omitted its Surface URL")?;
+    if args.json {
+        let realization = receipt_json
+            .as_ref()
+            .and_then(|receipt| receipt.get("execution"))
+            .and_then(|execution| execution.get("realization"))
+            .and_then(serde_json::Value::as_str)
+            .context("local Instance receipt omitted its realization")?;
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "instance": instance.instance_id,
+                "run": active.run_id,
+                "capsule": instance.contract_ref,
+                "route": realization,
+                "url": url,
+                "receipt": receipt_json,
+            }))?
+        );
+        return Ok(());
+    }
     println!("Instance: {}", instance.instance_id);
     println!("Run: {}", active.run_id);
     println!("Capsule: {}", instance.contract_ref);

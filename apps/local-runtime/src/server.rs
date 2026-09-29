@@ -21,6 +21,8 @@ use ato_local_execution::{core_materializer_registry, start_durable, stop_and_se
 
 use ato_objects::LocalCapsuleRepository;
 
+use crate::apps::AppSupport;
+use crate::protocol::{AppInstanceRequest, AppStartRequest};
 use crate::protocol::{ErrorBody, ExecutionList, ExecutionView, ProjectRequest, StartRequest};
 
 /// How long a worker is given to exit on its own after the stop request has
@@ -76,6 +78,15 @@ pub struct Server {
     /// Stop every client uses — there is no second teardown routine that could
     /// drift from the real one.
     shutdown: Arc<AtomicBool>,
+    /// Portable Application support, when the host configured it.
+    ///
+    /// Its workers deliberately stay inside this process's group (the CLI's
+    /// `--supervised` mode), so the host's group teardown IS their shutdown
+    /// path: the same signal that flags this loop reaches each worker, which
+    /// runs its own save-and-release. `stop_everything` therefore needs no
+    /// app case of its own — a second stop path here would only race the
+    /// worker's one.
+    apps: Option<AppSupport>,
 }
 
 impl Server {
@@ -84,7 +95,7 @@ impl Server {
     /// Loopback only, never 0.0.0.0: this runtime executes arbitrary local
     /// Computations on behalf of one machine's own user, and must not be
     /// reachable from the network under any configuration.
-    pub fn bind(work_root: PathBuf, credential: String) -> Result<Self> {
+    pub fn bind(work_root: PathBuf, credential: String, apps: Option<AppSupport>) -> Result<Self> {
         let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
             .context("binding a loopback port")?;
         Ok(Self {
@@ -93,6 +104,7 @@ impl Server {
             credential,
             workers: Mutex::new(Vec::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
+            apps,
         })
     }
 
@@ -173,23 +185,28 @@ impl Server {
             );
         }
 
-        let outcome = match (request.method.as_str(), request.path.as_str()) {
-            ("POST", "/v1/executions") => self.start(&request.body),
-            ("POST", "/v1/executions/stop") => self.stop(&request.body),
-            ("POST", "/v1/executions/list") => {
-                return self.respond_list(&mut stream);
-            }
-            ("POST", "/v1/executions/status") => self.status(&request.body),
-            _ => {
-                return respond(
-                    &mut stream,
-                    404,
-                    &ErrorBody {
-                        error: "not_found".into(),
-                    },
-                );
-            }
-        };
+        let outcome: Result<serde_json::Value> =
+            match (request.method.as_str(), request.path.as_str()) {
+                ("POST", "/v1/executions") => self.start(&request).map(to_value),
+                ("POST", "/v1/executions/stop") => self.stop(&request).map(to_value),
+                ("POST", "/v1/executions/list") => {
+                    return self.respond_list(&mut stream);
+                }
+                ("POST", "/v1/executions/status") => self.status(&request).map(to_value),
+                ("POST", "/v1/apps/import") => self.app_import(&request),
+                ("POST", "/v1/apps/start") => self.app_start(&request),
+                ("POST", "/v1/apps/stop") => self.app_stop(&request),
+                ("POST", "/v1/apps/status") => self.app_status(&request),
+                _ => {
+                    return respond(
+                        &mut stream,
+                        404,
+                        &ErrorBody {
+                            error: "not_found".into(),
+                        },
+                    );
+                }
+            };
 
         match outcome {
             Ok(view) => respond(&mut stream, 200, &view),
@@ -207,8 +224,8 @@ impl Server {
     ///
     /// The only Ato decision made here is "has this project been initialized
     /// yet"; everything after is the library's.
-    fn start(&self, body: &str) -> Result<ExecutionView> {
-        let request: StartRequest = serde_json::from_str(body).context("invalid start request")?;
+    fn start(&self, request: &Request) -> Result<ExecutionView> {
+        let request: StartRequest = request.body_json().context("invalid start request")?;
         let project = self.resolve(&request.project)?;
         let repository = LocalCapsuleRepository::open(&project)?;
 
@@ -293,8 +310,8 @@ impl Server {
         }
     }
 
-    fn stop(&self, body: &str) -> Result<ExecutionView> {
-        let request: ProjectRequest = serde_json::from_str(body).context("invalid stop request")?;
+    fn stop(&self, request: &Request) -> Result<ExecutionView> {
+        let request: ProjectRequest = request.body_json().context("invalid stop request")?;
         let project = self.resolve(&request.project)?;
         let repository = LocalCapsuleRepository::open(&project)?;
         // The full seal, not just the quiesce: stopping is five steps, and
@@ -314,12 +331,53 @@ impl Server {
         Ok(view)
     }
 
-    fn status(&self, body: &str) -> Result<ExecutionView> {
-        let request: ProjectRequest =
-            serde_json::from_str(body).context("invalid status request")?;
+    fn status(&self, request: &Request) -> Result<ExecutionView> {
+        let request: ProjectRequest = request.body_json().context("invalid status request")?;
         let project = self.resolve(&request.project)?;
         let repository = LocalCapsuleRepository::open(&project)?;
         view(&repository, &project)
+    }
+
+    /// Portable Application routes — thin transports over the bundled CLI.
+    ///
+    /// Each fails closed when the host did not configure app support: the
+    /// runtime then behaves exactly as it did before these routes existed.
+    fn app_support(&self) -> Result<&AppSupport> {
+        self.apps
+            .as_ref()
+            .context("local portable Applications are not configured on this runtime")
+    }
+
+    /// `POST /v1/apps/import` — the request BODY is the .capsule bytes.
+    /// A multi-Derivation bundle names its route on the query string, the
+    /// same `--derivation` the CLI exposes.
+    fn app_import(&self, request: &Request) -> Result<serde_json::Value> {
+        let derivation = request
+            .query
+            .as_deref()
+            .and_then(|query| query_value(query, "derivation"));
+        self.app_support()?
+            .import(&self.work_root, &request.body, derivation.as_deref())
+    }
+
+    /// `POST /v1/apps/start` — one supervised Run; the response carries the
+    /// Instance id, the Run, its Surface URL and the verification receipt.
+    fn app_start(&self, request: &Request) -> Result<serde_json::Value> {
+        let body: AppStartRequest = request.body_json().context("invalid app start request")?;
+        self.app_support()?.start(&body.instance, &body.bindings)
+    }
+
+    /// `POST /v1/apps/stop` — the worker's canonical save-and-release.
+    fn app_stop(&self, request: &Request) -> Result<serde_json::Value> {
+        let body: AppInstanceRequest = request.body_json().context("invalid app stop request")?;
+        self.app_support()?.stop(&body.instance)?;
+        Ok(serde_json::json!({"instance": body.instance, "status": "stopped"}))
+    }
+
+    /// `POST /v1/apps/status` — the store's own view, uninterpreted.
+    fn app_status(&self, request: &Request) -> Result<serde_json::Value> {
+        let body: AppInstanceRequest = request.body_json().context("invalid app status request")?;
+        self.app_support()?.status(&body.instance)
     }
 
     /// Resolve a caller-supplied project path inside the work root.
@@ -379,8 +437,19 @@ fn view(repository: &LocalCapsuleRepository, project: &Path) -> Result<Execution
 struct Request {
     method: String,
     path: String,
+    /// Query string with the leading `?` removed, when one was present.
+    query: Option<String>,
     authorization: Option<String>,
-    body: String,
+    /// Raw request bytes: JSON for most routes, a .capsule bundle for
+    /// `/v1/apps/import`.
+    body: Vec<u8>,
+}
+
+impl Request {
+    /// Decode a JSON body. Routes that take binary bodies never reach here.
+    fn body_json<T: serde::de::DeserializeOwned>(&self) -> Result<T> {
+        serde_json::from_slice(&self.body).map_err(Into::into)
+    }
 }
 
 fn read_request(stream: &mut TcpStream) -> Result<Request> {
@@ -389,7 +458,11 @@ fn read_request(stream: &mut TcpStream) -> Result<Request> {
     reader.read_line(&mut line)?;
     let mut parts = line.split_whitespace();
     let method = parts.next().unwrap_or_default().to_owned();
-    let path = parts.next().unwrap_or_default().to_owned();
+    let target = parts.next().unwrap_or_default().to_owned();
+    let (path, query) = match target.split_once('?') {
+        Some((path, query)) => (path.to_owned(), Some(query.to_owned())),
+        None => (target, None),
+    };
 
     let mut authorization = None;
     let mut length = 0usize;
@@ -417,9 +490,52 @@ fn read_request(stream: &mut TcpStream) -> Result<Request> {
     Ok(Request {
         method,
         path,
+        query,
         authorization,
-        body: String::from_utf8_lossy(&body).into_owned(),
+        body,
     })
+}
+
+/// One `key=value` pair out of the query string. The only query this server
+/// reads is `?derivation=` on app import, so a minimal decoder suffices:
+/// percent-escapes are decoded, everything else passes through.
+fn query_value(query: &str, key: &str) -> Option<String> {
+    for pair in query.split('&') {
+        let Some((name, value)) = pair.split_once('=') else {
+            continue;
+        };
+        if name == key {
+            return Some(percent_decode(value));
+        }
+    }
+    None
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let Ok(digit) = u8::from_str_radix(&value[index + 1..index + 3], 16)
+        {
+            out.push(digit);
+            index += 3;
+            continue;
+        }
+        out.push(if bytes[index] == b'+' {
+            b' '
+        } else {
+            bytes[index]
+        });
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn to_value(view: ExecutionView) -> serde_json::Value {
+    serde_json::to_value(view).expect("execution views serialize")
 }
 
 /// Constant-time credential check.
@@ -484,8 +600,9 @@ mod tests {
         Request {
             method: "POST".into(),
             path: "/v1/executions".into(),
+            query: None,
             authorization: authorization.map(str::to_owned),
-            body: String::new(),
+            body: Vec::new(),
         }
     }
 
@@ -514,6 +631,7 @@ mod tests {
             credential: "x".repeat(64),
             workers: Mutex::new(Vec::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
+            apps: None,
         };
         assert!(server.resolve("inside").is_ok());
         assert!(server.resolve("../../etc").is_err());
@@ -523,7 +641,7 @@ mod tests {
     #[test]
     fn the_listener_is_loopback_only() {
         let root = tempfile::tempdir().expect("work root");
-        let server = Server::bind(root.path().to_path_buf(), "y".repeat(64)).unwrap();
+        let server = Server::bind(root.path().to_path_buf(), "y".repeat(64), None).unwrap();
         let address = server.listener.local_addr().unwrap();
         assert!(address.ip().is_loopback(), "bound {address}");
         assert_ne!(server.port(), 0);
@@ -588,6 +706,7 @@ mod tests {
             credential: "x".repeat(64),
             workers: Mutex::new(Vec::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
+            apps: None,
         };
 
         assert!(server.list().unwrap().is_empty());
@@ -603,6 +722,7 @@ mod tests {
             credential: "x".repeat(64),
             workers: Mutex::new(Vec::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
+            apps: None,
         };
 
         assert!(server.list().unwrap().is_empty());
