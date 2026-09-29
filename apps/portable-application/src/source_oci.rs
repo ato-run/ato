@@ -931,7 +931,13 @@ fn build_and_verify(
             ));
         }
         BuildOutcome::Failed { log_tail } => {
-            return Err(err("source_oci_build_failed", log_tail));
+            // With egress, what the gate allowed and refused explains many
+            // failures (e.g. a CONNECT to an unlisted host).
+            let detail = match builder.egress_report() {
+                Some(report) => format!("{log_tail}\negress: {report}"),
+                None => log_tail,
+            };
+            return Err(err("source_oci_build_failed", detail));
         }
     }
     // 5. Export within bounds and verify with the existing portable validator.
