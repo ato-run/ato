@@ -11,8 +11,10 @@ deployed. Hosted projection: ato-api `feat/oci-working-dir-projection`.
   working directory is independent of `oci.workspace_mount`.
 - Service groups keep `/app`; the Hosted runner now checks that explicitly
   because the Adapter no longer does.
-- The Adapter refuses an image whose VOLUMEs are not covered (at or above) by
-  the workspace mount, a declared `[[state]]` mount or the `/tmp` tmpfs.
+- The Adapter refuses an image whose VOLUMEs have no mount at exactly their
+  path (workspace mount, a declared `[[state]]` mount or the `/tmp` tmpfs), with
+  `oci_volume_unauthorized`, before a container exists. A mount above or below
+  the VOLUME path does not count (Docker's own rule is an exact destination).
   Docker would otherwise create an anonymous writable volume outside the
   read-only root, and `rm --force` would leave it on the host.
 - No permission is added automatically: the container keeps `--read-only`,

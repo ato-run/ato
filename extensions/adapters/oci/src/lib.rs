@@ -56,6 +56,30 @@ impl std::fmt::Display for SpawnCleanupUnconfirmed {
 
 impl std::error::Error for SpawnCleanupUnconfirmed {}
 
+/// Stable code of [`OciVolumeUnauthorized`].
+pub const OCI_VOLUME_UNAUTHORIZED: &str = "oci_volume_unauthorized";
+
+/// The image declares VOLUMEs that no declared mount targets exactly. Docker
+/// would create an anonymous writable volume for each; the launch is refused
+/// before any container is created.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OciVolumeUnauthorized {
+    pub volumes: Vec<String>,
+}
+
+impl std::fmt::Display for OciVolumeUnauthorized {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{OCI_VOLUME_UNAUTHORIZED}: OCI image declares VOLUME {:?} with no declared state, \
+             workspace or tmpfs mount at exactly that path; anonymous volumes are not created",
+            self.volumes
+        )
+    }
+}
+
+impl std::error::Error for OciVolumeUnauthorized {}
+
 /// Remove a container a failed launch may have left, and confirm it is gone.
 fn discard_failed_launch(docker: &Path, container: &str) -> std::result::Result<(), String> {
     let removed = stop::docker_output(
@@ -330,10 +354,11 @@ impl DockerOciAdapter {
         // read-only root that no Capsule declared, so it is refused.
         let volumes = image_volumes(&self.docker, &image_for_run)?;
         let uncovered = uncovered_volumes(&volumes, &self.spec);
-        ensure!(
-            uncovered.is_empty(),
-            "OCI image declares VOLUME {uncovered:?} that no declared state or workspace mount covers; anonymous volumes are not created"
-        );
+        if !uncovered.is_empty() {
+            return Err(anyhow::Error::new(OciVolumeUnauthorized {
+                volumes: uncovered,
+            }));
+        }
 
         let suffix = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         // A service's alias is kept whole in its container name so an operator
@@ -1100,6 +1125,11 @@ impl Drop for OciHandle {
     }
 }
 
+/// The host-independent checks [`DockerOciAdapter::new`] applies to a spec.
+pub fn validate_oci_spec(spec: &OciSpec) -> Result<()> {
+    validate_spec(spec)
+}
+
 fn validate_spec(spec: &OciSpec) -> Result<()> {
     ensure!(!spec.id.trim().is_empty(), "OCI id is empty");
     let (repository, digest) = spec
@@ -1192,7 +1222,13 @@ fn validate_spec(spec: &OciSpec) -> Result<()> {
 
 fn image_volumes(docker: &Path, image: &str) -> Result<Vec<String>> {
     let output = Command::new(docker)
-        .args(["image", "inspect", "--format", "{{json .Config.Volumes}}", image])
+        .args([
+            "image",
+            "inspect",
+            "--format",
+            "{{json .Config.Volumes}}",
+            image,
+        ])
         .output()
         .context("inspect OCI image volumes")?;
     ensure!(
@@ -1205,9 +1241,10 @@ fn image_volumes(docker: &Path, image: &str) -> Result<Vec<String>> {
     Ok(volumes.unwrap_or_default().into_keys().collect())
 }
 
-/// Image VOLUMEs that neither the workspace mount, a declared mount, nor the
-/// `/tmp` tmpfs covers (a VOLUME is covered at or below a mount target; a
-/// mount below a VOLUME does not stop Docker creating the volume).
+/// Image VOLUMEs without a mount at exactly their path. Docker skips the
+/// anonymous volume only when a mount (or tmpfs) has that exact destination;
+/// a mount above or below the VOLUME path does not prevent it. A VOLUME path
+/// that is not an absolute traversal-free guest path is never covered.
 fn uncovered_volumes(volumes: &[String], spec: &OciSpec) -> Vec<String> {
     let targets = std::iter::once(spec.workspace_mount_path.as_str())
         .chain(spec.mounts.iter().map(|mount| mount.guest_path.as_str()))
@@ -1216,13 +1253,11 @@ fn uncovered_volumes(volumes: &[String], spec: &OciSpec) -> Vec<String> {
     volumes
         .iter()
         .filter(|volume| {
-            let volume = volume.trim_end_matches('/');
-            !targets.iter().any(|target| {
-                volume == *target
-                    || volume
-                        .strip_prefix(target)
-                        .is_some_and(|rest| rest.starts_with('/'))
-            })
+            let path = volume
+                .strip_suffix('/')
+                .filter(|path| !path.is_empty())
+                .unwrap_or(volume);
+            !(valid_guest_path(path) && targets.contains(&path))
         })
         .cloned()
         .collect()
@@ -1472,31 +1507,40 @@ mod tests {
     }
 
     #[test]
-    fn image_volumes_must_be_covered_by_a_declared_mount() {
+    fn image_volumes_need_a_declared_mount_at_exactly_their_path() {
         let state = tempfile::tempdir().unwrap();
         let mut declared = spec();
         declared.workspace_mount_path = "/.ato-workspace".to_owned();
-        let volumes = vec![
-            "/opt/app/server-data".to_owned(),
-            "/tmp/cache".to_owned(),
-            "/.ato-workspace/x".to_owned(),
-        ];
-        assert_eq!(
-            uncovered_volumes(&volumes, &declared),
-            vec!["/opt/app/server-data".to_owned()]
-        );
         declared.mounts.push(OciMount {
             host_path: state.path().to_path_buf(),
             guest_path: "/opt/app/server-data".to_owned(),
             writable: true,
         });
-        assert!(uncovered_volumes(&volumes, &declared).is_empty());
-        // A mount below a VOLUME, or a sibling with a common prefix, does not
-        // cover it.
-        assert_eq!(
-            uncovered_volumes(&["/opt/app".to_owned(), "/opt/app/server".to_owned()], &declared),
-            vec!["/opt/app".to_owned(), "/opt/app/server".to_owned()]
-        );
+        declared.mounts.push(OciMount {
+            host_path: state.path().to_path_buf(),
+            guest_path: "/data".to_owned(),
+            writable: true,
+        });
+        let covered = |volume: &str| uncovered_volumes(&[volume.to_owned()], &declared).is_empty();
+        // Exact destinations: state, workspace, the /tmp tmpfs.
+        assert!(covered("/opt/app/server-data"));
+        assert!(covered("/opt/app/server-data/"));
+        assert!(covered("/.ato-workspace"));
+        assert!(covered("/tmp"));
+        // A parent mount does not stop Docker creating the volume.
+        assert!(!covered("/data/sub"));
+        assert!(!covered("/tmp/cache"));
+        assert!(!covered("/.ato-workspace/x"));
+        // Nor does a child mount, a sibling prefix, or an unnormalized path.
+        assert!(!covered("/opt/app"));
+        assert!(!covered("/opt/app/server"));
+        assert!(!covered("/opt/app/server-data/../server-data"));
+        assert!(!covered("/data//"));
+        assert!(!covered("data"));
+        let error = OciVolumeUnauthorized {
+            volumes: vec!["/data/sub".to_owned()],
+        };
+        assert!(error.to_string().starts_with("oci_volume_unauthorized: "));
     }
 
     #[test]
