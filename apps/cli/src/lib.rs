@@ -1307,8 +1307,18 @@ fn import_local_application(args: AppImportArgs) -> Result<()> {
     }
     let bytes =
         fs::read(&args.capsule).with_context(|| format!("read {}", args.capsule.display()))?;
-    let instance = local_application_store()?.import(&bytes, args.derivation.as_deref())?;
-    println!("{}", serde_json::to_string_pretty(&instance)?);
+    let store = local_application_store()?;
+    let instance = store.import(&bytes, args.derivation.as_deref())?;
+    let restored_snapshot = store.restored_snapshot(&instance.instance_id)?;
+    let mut output = serde_json::to_value(&instance)?;
+    output
+        .as_object_mut()
+        .expect("LocalInstanceMetadata serializes as an object")
+        .insert(
+            "restored_snapshot".to_owned(),
+            serde_json::to_value(restored_snapshot)?,
+        );
+    println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
 }
 

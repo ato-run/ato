@@ -498,6 +498,17 @@ fn snapshot_bundle_imports_into_independent_asset_namespaces_and_reexports() {
     assert!(second.status.success());
     let second: Value = serde_json::from_slice(&second.stdout).unwrap();
 
+    assert_eq!(
+        first["restored_snapshot"]["snapshot_ref"],
+        first["data_snapshot_ref"]
+    );
+    assert_eq!(first["restored_snapshot"]["resources"][0]["slot"], "main");
+    assert_eq!(first["restored_snapshot"]["assets"][0]["alias"], "asset-1");
+    assert_ne!(
+        first["restored_snapshot"]["assets"][0]["asset_id"],
+        second["restored_snapshot"]["assets"][0]["asset_id"]
+    );
+
     let snapshot_digest = first["data_snapshot_ref"]
         .as_str()
         .unwrap()
