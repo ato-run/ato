@@ -104,6 +104,19 @@ struct Fetcher {
     max: u64,
 }
 
+/// The whole cause chain: a refused redirect names its target only in a
+/// nested source error.
+fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
+}
+
 fn failed(detail: impl Into<String>) -> super::SourceOciError {
     err("source_oci_base_acquisition_failed", detail)
 }
@@ -125,7 +138,9 @@ impl Fetcher {
             if let Some(token) = &self.token {
                 request = request.bearer_auth(token);
             }
-            let response = request.send().map_err(|e| failed(format!("{url}: {e}")))?;
+            let response = request
+                .send()
+                .map_err(|e| failed(format!("{url}: {}", error_chain(&e))))?;
             if response.status() == reqwest::StatusCode::UNAUTHORIZED && self.token.is_none() {
                 let challenge = response
                     .headers()
