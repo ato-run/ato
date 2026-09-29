@@ -13,9 +13,7 @@
 use std::cell::{Cell, RefCell};
 use std::fs::{self, File};
 use std::io::Read;
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt};
-use std::os::unix::net::UnixStream;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -41,6 +39,7 @@ pub struct SessionTools {
     pub mkfs_ext4: PathBuf,
     pub mount: PathBuf,
     pub umount: PathBuf,
+    pub kill: PathBuf,
 }
 
 impl Default for SessionTools {
@@ -53,6 +52,7 @@ impl Default for SessionTools {
             mkfs_ext4: "/usr/sbin/mkfs.ext4".into(),
             mount: "/usr/bin/mount".into(),
             umount: "/usr/bin/umount".into(),
+            kill: "/usr/bin/kill".into(),
         }
     }
 }
@@ -159,26 +159,41 @@ fn loop_devices_backed_by(image: &Path) -> Vec<String> {
         .collect()
 }
 
-fn peer_pid(socket: &Path) -> Option<u32> {
-    let stream = UnixStream::connect(socket).ok()?;
-    let mut cred = libc::ucred {
-        pid: 0,
-        uid: 0,
-        gid: 0,
+/// The listening unix socket bound at `socket` in `pid`'s network namespace
+/// is held open by `pid` itself: its inode appears among the process's file
+/// descriptors. A path that is an alias of another daemon's socket fails.
+fn socket_listener(pid: u32, socket: &Path) -> Option<u32> {
+    let table = fs::read_to_string(format!("/proc/{pid}/net/unix")).ok()?;
+    let wanted = socket.display().to_string();
+    let inodes: Vec<String> = table
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            // Num RefCount Protocol Flags Type St Inode Path; Flags 00010000 = listening.
+            (fields.len() >= 8 && fields[3] == "00010000" && fields[7] == wanted)
+                .then(|| fields[6].to_owned())
+        })
+        .collect();
+    let [inode] = inodes.as_slice() else {
+        return None;
     };
-    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-    // SAFETY: `cred` and `len` are valid for the duration of the call and
-    // sized for SO_PEERCRED.
-    let rc = unsafe {
-        libc::getsockopt(
-            stream.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            (&mut cred as *mut libc::ucred).cast(),
-            &mut len,
-        )
-    };
-    (rc == 0 && cred.pid > 0).then_some(cred.pid as u32)
+    let target = format!("socket:[{inode}]");
+    fs::read_dir(format!("/proc/{pid}/fd"))
+        .ok()?
+        .flatten()
+        .any(|fd| fs::read_link(fd.path()).is_ok_and(|l| l.display().to_string() == target))
+        .then_some(pid)
+}
+
+/// Effective UID from /proc (no libc call; this crate forbids unsafe code).
+fn effective_uid() -> Option<u32> {
+    fs::read_to_string("/proc/self/status")
+        .ok()?
+        .lines()
+        .find_map(|l| l.strip_prefix("Uid:"))
+        .and_then(|ids| ids.split_whitespace().nth(1))
+        .and_then(|id| id.parse().ok())
 }
 
 impl PrivateDockerSession {
@@ -186,8 +201,7 @@ impl PrivateDockerSession {
     /// exist. On any failure everything already created is released; a
     /// release failure is kept next to the original error.
     pub fn start(work_root: &Path, limits: &BuildLimits, tools: SessionTools) -> Result<Self> {
-        // SAFETY: geteuid has no preconditions.
-        if unsafe { libc::geteuid() } != 0 {
+        if effective_uid() != Some(0) {
             return Err(refused(
                 "a private builder session must own a network namespace, a cgroup and a filesystem (root required)",
             ));
@@ -223,6 +237,7 @@ impl PrivateDockerSession {
             &tools.mkfs_ext4,
             &tools.mount,
             &tools.umount,
+            &tools.kill,
         ] {
             if !tool.is_absolute() || !tool.is_file() {
                 return Err(refused(format!(
@@ -446,7 +461,7 @@ impl PrivateDockerSession {
             cpu_max: read_trim(&self.cgroup.join("cpu.max")),
             socket_is_socket: fs::symlink_metadata(&self.socket)
                 .is_ok_and(|m| m.file_type().is_socket()),
-            socket_peer_pid: peer_pid(&self.socket),
+            socket_listener_pid: socket_listener(pid, &self.socket),
             reported_root_dir: info.next().unwrap_or_default().trim().to_owned(),
             reported_cgroup_driver: info.next().unwrap_or_default().trim().to_owned(),
         }
@@ -492,8 +507,8 @@ impl PrivateDockerSession {
         }
         let mut problems = Vec::new();
         if let Some(mut child) = self.daemon.borrow_mut().take() {
-            // SAFETY: plain signal delivery to our own child.
-            unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+            // Graceful stop first so the daemon unmounts its own layers.
+            let _ = run_tool(&self.tools.kill, &["-TERM", &child.id().to_string()]);
             let deadline = Instant::now() + Duration::from_secs(20);
             while Instant::now() < deadline && matches!(child.try_wait(), Ok(None)) {
                 std::thread::sleep(Duration::from_millis(100));

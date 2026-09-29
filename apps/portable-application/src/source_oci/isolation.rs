@@ -22,10 +22,10 @@ pub struct IsolationFacts {
     pub memory_max: String,
     pub pids_max: String,
     pub cpu_max: String,
-    /// The socket path is a socket inside the session, and the process that
-    /// listens on it (SO_PEERCRED) is the daemon this session started.
+    /// The socket path is a socket inside the session, and the listening
+    /// socket bound there is held by the daemon this session started.
     pub socket_is_socket: bool,
-    pub socket_peer_pid: Option<u32>,
+    pub socket_listener_pid: Option<u32>,
     pub reported_root_dir: String,
     pub reported_cgroup_driver: String,
 }
@@ -82,10 +82,10 @@ pub fn check_isolation(
             facts.memory_max, facts.pids_max, facts.cpu_max
         ));
     }
-    if !facts.socket_is_socket || facts.socket_peer_pid != Some(facts.daemon_pid) {
+    if !facts.socket_is_socket || facts.socket_listener_pid != Some(facts.daemon_pid) {
         return refuse(format!(
-            "socket is not served by the session daemon (peer {:?}, daemon {})",
-            facts.socket_peer_pid, facts.daemon_pid
+            "socket is not served by the session daemon (listener {:?}, daemon {})",
+            facts.socket_listener_pid, facts.daemon_pid
         ));
     }
     if facts.reported_root_dir != expected.root_dir {
@@ -137,7 +137,7 @@ mod tests {
             pids_max: "512".into(),
             cpu_max: "200000 100000".into(),
             socket_is_socket: true,
-            socket_peer_pid: Some(42),
+            socket_listener_pid: Some(42),
             reported_root_dir: "/srv/ato/j1/fs/data".into(),
             reported_cgroup_driver: "cgroupfs".into(),
         }
@@ -175,10 +175,13 @@ mod tests {
             ("cpu", Box::new(|f| f.cpu_max = "max 100000".into())),
             // A socket path that is an alias of another daemon's socket: the
             // listener is not the process this session started.
-            ("socket alias", Box::new(|f| f.socket_peer_pid = Some(1))),
+            (
+                "socket alias",
+                Box::new(|f| f.socket_listener_pid = Some(1)),
+            ),
             (
                 "socket missing peer",
-                Box::new(|f| f.socket_peer_pid = None),
+                Box::new(|f| f.socket_listener_pid = None),
             ),
             ("not a socket", Box::new(|f| f.socket_is_socket = false)),
             (
