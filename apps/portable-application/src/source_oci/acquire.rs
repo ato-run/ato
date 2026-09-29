@@ -22,7 +22,7 @@ use crate::oci_archive::{platform_descriptor, verify_base_archive};
 pub const DOCKER_HUB_ENDPOINTS: &[&str] = &[
     "registry-1.docker.io",
     "auth.docker.io",
-    "production.cloudflare.docker.com",
+    "production.cloudfront.docker.com",
 ];
 pub const MAX_ACQUISITION_BYTES: u64 = 200 * 1024 * 1024;
 const MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
