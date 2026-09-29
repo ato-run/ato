@@ -55,7 +55,24 @@ impl EgressManager {
         policy: Arc<EgressPolicy>,
         receipt_tx: mpsc::Sender<NetworkEgressDecision>,
     ) -> anyhow::Result<Self> {
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        Self::start_on(
+            std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+            resolver,
+            policy,
+            receipt_tx,
+        )
+        .await
+    }
+
+    /// As [`Self::start`], on an explicit address (e.g. the host end of a
+    /// private veth that is the only route out of a build namespace).
+    pub async fn start_on(
+        address: std::net::SocketAddr,
+        resolver: Arc<dyn Resolver + Send + Sync>,
+        policy: Arc<EgressPolicy>,
+        receipt_tx: mpsc::Sender<NetworkEgressDecision>,
+    ) -> anyhow::Result<Self> {
+        let listener = TcpListener::bind(address).await?;
         let port = listener.local_addr()?.port();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
