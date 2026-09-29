@@ -29,12 +29,14 @@ The precise proposal/policy/persistence and P0–P11 contract is in
 [Formation](Formation.md).
 
 Reclassify 5a as completed Decision Layer, 5b as Candidate Generation next,
-5c as pending Adaptive Formation Loop. These correspond approximately to
-original Phase 3 (Jev Decision Layer), Phase 4 (LLM Candidate Generation),
-and Phase 5 (Continuous Adaptation), respectively. Split 6 into independent 6a coverage
-measurement, 6b capability expansion and 6c continuous adaptation. Known-D
-20-app measurement may start without 5b or E2 efficacy. 6a/6b/6c are an added
-product coverage track, not the original Phase numbering.
+5c as pending Adaptive Formation Loop (status at this ADR’s adoption).
+Correspondence correction (2026-09-29): 5a ≒ original Phase 3 (Jev Decision
+Layer); 5b ≒ Phase 4 (LLM Candidate Generation); 5c closes Phase 4 through
+bounded integration within one search, not Phase 5. Independent 6a coverage
+measurement and 6b capability expansion precede 6c, which implements original
+Phase 5 Continuous Adaptation: external triggers and authorized known-D-first
+background revalidation. Known-D 20-app measurement may start without 5b or E2
+efficacy. Implementation stage numbers are not original Phase numbering.
 
 ProposeDerivation must work from I + frozen K + catalog with zero known D;
 ModifyDerivation must explicitly identify an authorized known base. The
