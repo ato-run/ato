@@ -1,10 +1,10 @@
 {
   "schema": "ato.formation-node-build-remeasurement-results/1",
-  "execution_sha": "6a6ff92b7e416dd1030d2dd03b022920268ab70f",
-  "plan_sha256": "87d91d0d01a986eda0f6d4406eb667271ba26f909ca1bbd12d56fb3a123559b5",
+  "execution_sha": "177b61489e1fb28539868f9d9a76ca21fc6d61ca",
+  "plan_sha256": "c788cdb08ac4c64599e4a1cc019415176f4cc8d7ce162bfdb1bf5448ad22803d",
   "binary_hashes": {
-    "helper": "5e6e678abc7c573b33607b9cddee594d8bb353e036d92ff0d8e6175cf19e21a7",
-    "worker": "a1b7ba0a5e1cf4d369c79d1fa03ab6e98de78f20be54c62ab50930745b1bbcb5"
+    "helper": "8b9dd2c419b5f6a5b8afcf57aa4090d066987befc212bb1dcf889a267d25e422",
+    "worker": "9e1688776bfdafd78126390af35b47f2eb71c336c98e9d3e288feaaaaeb13819"
   },
   "applications": [
     {
@@ -572,9 +572,9 @@
   "network": "denied",
   "base_sha": "968836af358615844838fb7543a3832d52119808",
   "implementation_commit": "28d7e2f9cbac687f04fecf130c2002b2cd730db1",
-  "tested_execution_sha": "6a6ff92b7e416dd1030d2dd03b022920268ab70f",
-  "controller_head": "61c8d68f5ce01159a57007ea5fff3d1e870d6a56",
-  "raw_ledger_sha256": "b0fa963edb3d506b1fb46df0dc60eba035783cdccdd0b5dd2c58a3c6a228016c",
+  "tested_execution_sha": "177b61489e1fb28539868f9d9a76ca21fc6d61ca",
+  "controller_head": "9f9b8d7a5613e56f90a8ac2907b4ec6fa25200f5",
+  "raw_ledger_sha256": "643c6ce174e7092a4d3140d0812bdbff3e63773b435af91daa318a95beafb53b",
   "docs_correction": {
     "pr": 1439,
     "head": "d626202de2320779de9538cbf6c2044bf8654d0a",
@@ -587,14 +587,14 @@
   },
   "test_results": {
     "T0_T21": "PASS",
-    "additional_negative_tests": 2,
+    "additional_negative_tests": 4,
     "selected_rust": {
-      "passed": 700,
+      "passed": 702,
       "failed": 0,
       "ignored": 1
     },
     "linux_node_v2_and_local_formation": {
-      "passed": 43,
+      "passed": 45,
       "failed": 0,
       "ignored": 0
     },
@@ -670,7 +670,8 @@
         "passed": 3,
         "failed": 0
       }
-    }
+    },
+    "scope_note": "Completed CI classification is for pre-compatibility source at 61c8d68f. Final compatibility source is locally and Linux verified; latest head CI must not be assumed green from prior runs."
   },
   "verification_log_sha256": {
     "node-v2-regression-verified.log": "280d992fecaf6f58a2176b02cce2869abb3afd6356d3fb609afa4db2b0cc6cef",
@@ -682,6 +683,18 @@
     "linux-build.log": "810b479670b4566d2145bafc10ad7eba12e9f6f2889fe56f46da30feb5420310",
     "activity-mcp-2.log": "00113555db2d4233df86236bb09068dc7722f3b0502ce407a0e9bb1d9e9c6aa1",
     "activity-mcp-3.log": "3e3ad14d412c0cfc18d269d80aa59f699780e76377da06d0929cec9db26b47bf",
-    "activity-mcp-1.log": "6cae777f516052bd2952433158d271906900bf8f1238b9f54bf71c334e29ff95"
+    "activity-mcp-1.log": "6cae777f516052bd2952433158d271906900bf8f1238b9f54bf71c334e29ff95",
+    "node-v2-regression-final2.log": "c67b5beb81e3efcb9b8738342032077d095f320815406b099fdcf57df7f582f2",
+    "node-v2-clippy-final2.log": "63a256584f4dc13c3173c966dc5392687defac989bf8522a0048d7e3be6ea280",
+    "linux-tests-final.log": "d041a4a0fabf5c528e938b769ea9c988dc4f9e1d43b0f11492c1ec9f471ea85b",
+    "linux-build-final.log": "555c582083235a3327b244dbf44d58750851f0fe8ac5481c597e83cb65f6de25"
+  },
+  "previous_measurement": {
+    "execution_sha": "6a6ff92b7e416dd1030d2dd03b022920268ab70f",
+    "plan_sha256": "87d91d0d01a986eda0f6d4406eb667271ba26f909ca1bbd12d56fb3a123559b5",
+    "ledger_commit": "b5b3dcaef1cf3c13d40ab6722299ebb149563b6b",
+    "same_eight_pins": true,
+    "observations_byte_equal": true,
+    "reason": "preserve legacy source-only manager inference and explicitly authored PATH; default physical binding restricted to canonical exact D requirements"
   }
 }
