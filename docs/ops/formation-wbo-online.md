@@ -122,3 +122,72 @@ redirect would stop the phase again.
 The transport archive is a classic-store `docker save` repack whose layers are
 uncompressed tars, so the bound applies to uncompressed layer bytes. Whether a
 compressed-layer archive would fit within 128 MiB was not measured.
+
+## Archive bound change (user decision after run 2)
+
+The portable OCI transport bound and the source→OCI archive bound were raised
+from 128 MiB to **512 MiB**. A bundle may carry that archive as base64, so the
+bundle bound is now 768 MiB (`7d89439e`). Hosted import keeps its own limits;
+the Hosted validator was not rebuilt or deployed.
+
+## Run 3 (reusing the base frozen in run 2; no second acquisition)
+
+Code `7d89439e`, `ato` sha256 `a7b929ac…`. Host daemon was 68/5/67 before and
+after; host iptables had 140 rules and 9 links before and after.
+
+This is the second online build of the pin: run 2's build finished but its
+artifact was refused before save. Run 2's build egress was not recorded
+(fixed since), so the total moved across runs 2 and 3 is at most
+61.8 MB (acquisition) + run 2's unrecorded build egress + 12.3 MB.
+
+- **A — image build: PASS.**
+  - Preflight from the frozen base on the build network:
+    - direct dials blocked: `199.232.150.132:443`, `1.1.1.1:443`, gate
+      host `:22`
+    - unlisted CONNECT: `403 Forbidden`
+    - listed CONNECT (`dl-cdn.alpinelinux.org`): `200`
+  - Gate:
+    - allowed: `dl-cdn.alpinelinux.org:443` ×3 and `registry.npmjs.org:443`
+      ×15
+    - refused: `example.com` ×1 (the preflight)
+    - 12,340,498 bytes moved, budget not exhausted
+  - Build 23 s.
+  - Image `ato-source/eec4d71131ae@sha256:95a49001…`; archive
+    `sha256:5bc5faee…` (387,392,512 bytes, 11 layers, 11 unreferenced legacy
+    members dropped).
+  - Image config:
+    - Entrypoint `docker-entrypoint.sh`
+    - Cmd `/usr/local/bin/node server/server.mjs`
+    - WorkingDir `/opt/app`
+    - User `1000:1000`
+    - VOLUME `/opt/app/server-data`
+    - ExposedPorts `80/tcp`
+  - Authored route: `oci.working_dir = /opt/app` and `[[state]] server_data`.
+  - `apk info -v`: 23 packages recorded.
+  - Session residue: 0.
+- **Pack/export.** K `sha256:9bf1dde5…` (GET / = 200), D `sha256:c0c95774…`,
+  offline bundle 516,538,373 bytes.
+- **B — container start: FAILED (typed), stopped here.**
+  - On an empty private store with no route, the container exited at once with
+    **exit code 126**.
+  - A diagnosis under the same flags (read-only, cap-drop ALL,
+    no-new-privileges, uid 1000, `--workdir /opt/app`, state bind) shows
+    `/usr/local/bin/docker-entrypoint.sh: exec: line 11: /usr/local/bin/node:
+    Operation not permitted`.
+  - The image's `RUN setcap CAP_NET_BIND_SERVICE=+eip` gives `node` a file
+    capability (`cap_net_bind_service=eip`). The kernel refuses to execute such
+    a binary when that capability cannot be granted (bounding set emptied by
+    cap-drop ALL, no new privileges).
+  - No capability, root or network was added.
+  - The Adapter previously reported this as an address parse error; it now
+    reports `OCI container has no network address (status=exited exit=126 …)`
+    (`d647fcb3`, re-run on the same artifact).
+- **C, D, E: not reached.** No receipt was produced; the functional checks
+  were not run.
+- Private store after the attempt: 0 containers, 0 volumes. Host daemon
+  unchanged.
+
+WBO therefore needs, at runtime, either a capability the profile does not
+grant (`CAP_NET_BIND_SERVICE` for the file capability to apply) or a source
+without the `setcap` step. Neither is decided here: the Dockerfile is not
+rewritten and permissions are not relaxed automatically.
