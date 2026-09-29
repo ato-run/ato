@@ -13,9 +13,9 @@
   `968836af358615844838fb7543a3832d52119808`.
 - First implementation `28d7e2f9cbac687f04fecf130c2002b2cd730db1`;
   actual clean Linux build/test/measurement pin
-  **`6a6ff92b7e416dd1030d2dd03b022920268ab70f`**.
-- Controller/plan commit `61c8d68f5ce01159a57007ea5fff3d1e870d6a56`;
-  plan SHA256 `87d91d0d01a986eda0f6d4406eb667271ba26f909ca1bbd12d56fb3a123559b5`.
+  **`177b61489e1fb28539868f9d9a76ca21fc6d61ca`**.
+- Controller/plan commit `9f9b8d7a5613e56f90a8ac2907b4ec6fa25200f5`;
+  plan SHA256 `c788cdb08ac4c64599e4a1cc019415176f4cc8d7ce162bfdb1bf5448ad22803d`.
   Subsequent ledger/docs commits do not change execution/harness bytes.
 - Implemented, locally verified, **actual eight-app remeasurement verified**.
   At ledger creation PR unmerged; merge status remains a separate GitHub action.
@@ -46,12 +46,13 @@ Capsule canonical representation/identity is outside this change.
 
 ## Tests
 
-- T0–T21 **PASS**, plus two negative tests: manager config/output escapes and
-  npm lock + foreign manager conflict (24 tests).
-- Selected Rust regression: **700 PASS / 0 FAIL / 1 existing ignored**.
+- T0–T21 **PASS**, plus four compatibility/negative tests: manager config/output escapes,
+  npm lock + foreign manager conflict, legacy source-only manager inference and
+  explicitly authored PATH (26 tests).
+- Selected Rust regression: **702 PASS / 0 FAIL / 1 existing ignored**.
   formation, formation-worker, runtime-attempt, receipt-authority; includes 5a,
   fixed/general producer semantics, request compatibility and restart/fences.
-- Isolated Linux aarch64: 24 v2 tests + 19 local Formation tests = **43 PASS**.
+- Isolated Linux aarch64: 26 v2 tests + 19 local Formation tests = **45 PASS**.
   New local test executes the normal source/freeze/plan/admission path for pnpm,
   Yarn 1, Yarn >=2: network denied, no workload execution or receipt. macOS
   correctly refuses earlier at unavailable containment; no admission changed.
@@ -127,3 +128,18 @@ Two additional observations **are not baseline-reproduced failures**:
 
 These are recorded separately from the new route regression tests and must not
 be relabeled baseline or silently made green. No unrelated test/code was fixed.
+
+## Final compatibility review and remeasurement
+
+The physical binding initially also rewrote legacy source-only manager argv.
+Before final review it was narrowed to **explicit exact D runtime requirements
+and default (not authored PATH) binding**. New v2 defaults still use only the
+exact provisioned binary. Two regressions protect historical authored semantics.
+
+The initial eight-app ledger at `b5b3dcaef1cf3c13d40ab6722299ebb149563b6b`
+remains in history. A new clean build at `177b61489e1fb28539868f9d9a76ca21fc6d61ca`
+remeasured the same eight pins with a fresh scratch root; all eight raw
+observations are byte-identical to the first measurement. Source/ref/hash/K
+policy was not tuned to outcomes. The final plan was repinned before this run.
+The completed CI comparison above predates this narrow compatibility correction;
+final-source local/Linux tests are separate, not a claim of final-head green CI.

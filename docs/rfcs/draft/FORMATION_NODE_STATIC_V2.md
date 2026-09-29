@@ -46,7 +46,9 @@ The common bind/project_exec/lower_execution path validates and executes these
 steps. Existing exact Node / manager provisioning is reused (Yarn >=2 uses
 @yarnpkg/cli-dist, not an unversioned Corepack). A logical manager executable is
 bound to its exact provisioned absolute path only in the physical build step;
-it cannot fall back to a host PATH manager. D contains no toolchain homes,
+it cannot fall back to a host PATH manager. This default binding only applies
+when D explicitly requires that exact manager and does not author PATH. Legacy
+source-only inference and explicitly authored PATH retain their prior semantics. D contains no toolchain homes,
 host paths, Runtime IDs or credentials. No new executor/semantic primitive.
 
 ## Evidence and limits
