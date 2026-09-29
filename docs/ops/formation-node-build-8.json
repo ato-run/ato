@@ -1,0 +1,700 @@
+{
+  "schema": "ato.formation-node-build-remeasurement-results/1",
+  "execution_sha": "177b61489e1fb28539868f9d9a76ca21fc6d61ca",
+  "plan_sha256": "c788cdb08ac4c64599e4a1cc019415176f4cc8d7ce162bfdb1bf5448ad22803d",
+  "binary_hashes": {
+    "helper": "8b9dd2c419b5f6a5b8afcf57aa4090d066987befc212bb1dcf889a267d25e422",
+    "worker": "9e1688776bfdafd78126390af35b47f2eb71c336c98e9d3e288feaaaaeb13819"
+  },
+  "applications": [
+    {
+      "index": 1,
+      "name": "Excalidraw",
+      "repo": "https://github.com/excalidraw/excalidraw",
+      "ref": "5a406e51875157bece389b9bc92d41ff241d5f3d",
+      "archive_sha256": "94603a7879307fd68bd993b4758a1ccdcf1ff068222bf98a9f5b6c5bdaca56a3",
+      "old_blocker": "preset_node_static_needs_lockfile",
+      "observation_sha256": "469a3030208360c79010ecbd08760874538c55d37c5fcbfcdba3fd7d51adf794",
+      "observation": {
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "model_calls": 0,
+        "result": {
+          "result": {
+            "attempted_contract_refs": [],
+            "attempts": [
+              {
+                "candidate": "detect",
+                "failure": {
+                  "code": "preset_node_static_v2_workspace",
+                  "message": "Workspace target/build/output require explicit authoring.",
+                  "stage": "preset"
+                },
+                "outcomes": {
+                  "cleanup": {
+                    "reason": "nothing ran",
+                    "state": "not_applicable"
+                  },
+                  "publication": {
+                    "reason": "preset_node_static_v2_workspace",
+                    "state": "not_attempted"
+                  },
+                  "runtime_verification": {
+                    "reason": "preset_node_static_v2_workspace",
+                    "state": "not_attempted"
+                  },
+                  "seal": {
+                    "reason": "preset_node_static_v2_workspace",
+                    "state": "not_attempted"
+                  }
+                },
+                "runtime_id": "local",
+                "status": "filtered"
+              }
+            ],
+            "status": "no_verified_route"
+          },
+          "status": "formation_result"
+        },
+        "runtime_facts": {
+          "formation.containment": "bwrap+landlock",
+          "formation.toolchain_root": "/opt/ato/toolchains",
+          "platform.arch": "aarch64",
+          "platform.os": "linux"
+        },
+        "runtime_id": "local",
+        "schema": "ato.formation-coverage-observation/1"
+      },
+      "new_terminal": "preset_node_static_v2_workspace",
+      "primary_blocker": "known-D/authoring",
+      "authoring_reached": false,
+      "contract_ref": null,
+      "derivation_ref": null,
+      "receipt": null,
+      "retained_ref": null,
+      "actual_workload_executions": 0,
+      "functional_application_success": false,
+      "manual_intervention": false,
+      "secondary_factors_from_qualification": "static frontend candidate; root build delegates into a workspace; collaboration/services not verified"
+    },
+    {
+      "index": 6,
+      "name": "SearXNG",
+      "repo": "https://github.com/searxng/searxng",
+      "ref": "12f8b6515ca77c3c3bc1498584950ef5daca1433",
+      "archive_sha256": "13dbc1adeff80145c439686b2a7588aca89604bd1d86cd5623d029376e4a59bb",
+      "old_blocker": "preset_node_static_needs_lockfile",
+      "observation_sha256": "c80db3b85970d54254750782d29f9a00a12ce38590b51bba0e6d6efe7b3c3bba",
+      "observation": {
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "model_calls": 0,
+        "result": {
+          "result": {
+            "attempted_contract_refs": [],
+            "attempts": [
+              {
+                "candidate": "detect",
+                "failure": {
+                  "code": "preset_node_static_needs_lockfile",
+                  "message": "A built web app needs a package-lock.json so the build is reproducible. Run `npm install` once and include the lockfile.",
+                  "stage": "preset"
+                },
+                "outcomes": {
+                  "cleanup": {
+                    "reason": "nothing ran",
+                    "state": "not_applicable"
+                  },
+                  "publication": {
+                    "reason": "preset_node_static_needs_lockfile",
+                    "state": "not_attempted"
+                  },
+                  "runtime_verification": {
+                    "reason": "preset_node_static_needs_lockfile",
+                    "state": "not_attempted"
+                  },
+                  "seal": {
+                    "reason": "preset_node_static_needs_lockfile",
+                    "state": "not_attempted"
+                  }
+                },
+                "runtime_id": "local",
+                "status": "filtered"
+              }
+            ],
+            "status": "no_verified_route"
+          },
+          "status": "formation_result"
+        },
+        "runtime_facts": {
+          "formation.containment": "bwrap+landlock",
+          "formation.toolchain_root": "/opt/ato/toolchains",
+          "platform.arch": "aarch64",
+          "platform.os": "linux"
+        },
+        "runtime_id": "local",
+        "schema": "ato.formation-coverage-observation/1"
+      },
+      "new_terminal": "preset_node_static_needs_lockfile",
+      "primary_blocker": "known-D/authoring",
+      "authoring_reached": false,
+      "contract_ref": null,
+      "derivation_ref": null,
+      "receipt": null,
+      "retained_ref": null,
+      "actual_workload_executions": 0,
+      "functional_application_success": false,
+      "manual_intervention": false,
+      "secondary_factors_from_qualification": "not a standalone static app; Python service plus theme assets; root package has no lock or build script"
+    },
+    {
+      "index": 8,
+      "name": "Etherpad",
+      "repo": "https://github.com/ether/etherpad",
+      "ref": "c080707dcd3e3dfa730bb699970ad1abf33aaf42",
+      "archive_sha256": "268168f1f5e6644f86e6c514d1f90068d01d56a1a290e5762f4ffcd1e0097ec0",
+      "old_blocker": "preset_node_static_needs_lockfile",
+      "observation_sha256": "469a3030208360c79010ecbd08760874538c55d37c5fcbfcdba3fd7d51adf794",
+      "observation": {
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "model_calls": 0,
+        "result": {
+          "result": {
+            "attempted_contract_refs": [],
+            "attempts": [
+              {
+                "candidate": "detect",
+                "failure": {
+                  "code": "preset_node_static_v2_workspace",
+                  "message": "Workspace target/build/output require explicit authoring.",
+                  "stage": "preset"
+                },
+                "outcomes": {
+                  "cleanup": {
+                    "reason": "nothing ran",
+                    "state": "not_applicable"
+                  },
+                  "publication": {
+                    "reason": "preset_node_static_v2_workspace",
+                    "state": "not_attempted"
+                  },
+                  "runtime_verification": {
+                    "reason": "preset_node_static_v2_workspace",
+                    "state": "not_attempted"
+                  },
+                  "seal": {
+                    "reason": "preset_node_static_v2_workspace",
+                    "state": "not_attempted"
+                  }
+                },
+                "runtime_id": "local",
+                "status": "filtered"
+              }
+            ],
+            "status": "no_verified_route"
+          },
+          "status": "formation_result"
+        },
+        "runtime_facts": {
+          "formation.containment": "bwrap+landlock",
+          "formation.toolchain_root": "/opt/ato/toolchains",
+          "platform.arch": "aarch64",
+          "platform.os": "linux"
+        },
+        "runtime_id": "local",
+        "schema": "ato.formation-coverage-observation/1"
+      },
+      "new_terminal": "preset_node_static_v2_workspace",
+      "primary_blocker": "known-D/authoring",
+      "authoring_reached": false,
+      "contract_ref": null,
+      "derivation_ref": null,
+      "receipt": null,
+      "retained_ref": null,
+      "actual_workload_executions": 0,
+      "functional_application_success": false,
+      "manual_intervention": false,
+      "secondary_factors_from_qualification": "not a standalone static app; Node service plus frontend workspaces; no root build script"
+    },
+    {
+      "index": 10,
+      "name": "Gitea",
+      "repo": "https://github.com/go-gitea/gitea",
+      "ref": "fba8d7eaceeed3f8bbc364386d2a35aa672285a2",
+      "archive_sha256": "8e2f5281daf1ec18427319ae7d61ccbc12038310bd44fb72ecc66d43b1c061f8",
+      "old_blocker": "preset_node_static_needs_lockfile",
+      "observation_sha256": "469a3030208360c79010ecbd08760874538c55d37c5fcbfcdba3fd7d51adf794",
+      "observation": {
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "model_calls": 0,
+        "result": {
+          "result": {
+            "attempted_contract_refs": [],
+            "attempts": [
+              {
+                "candidate": "detect",
+                "failure": {
+                  "code": "preset_node_static_v2_workspace",
+                  "message": "Workspace target/build/output require explicit authoring.",
+                  "stage": "preset"
+                },
+                "outcomes": {
+                  "cleanup": {
+                    "reason": "nothing ran",
+                    "state": "not_applicable"
+                  },
+                  "publication": {
+                    "reason": "preset_node_static_v2_workspace",
+                    "state": "not_attempted"
+                  },
+                  "runtime_verification": {
+                    "reason": "preset_node_static_v2_workspace",
+                    "state": "not_attempted"
+                  },
+                  "seal": {
+                    "reason": "preset_node_static_v2_workspace",
+                    "state": "not_attempted"
+                  }
+                },
+                "runtime_id": "local",
+                "status": "filtered"
+              }
+            ],
+            "status": "no_verified_route"
+          },
+          "status": "formation_result"
+        },
+        "runtime_facts": {
+          "formation.containment": "bwrap+landlock",
+          "formation.toolchain_root": "/opt/ato/toolchains",
+          "platform.arch": "aarch64",
+          "platform.os": "linux"
+        },
+        "runtime_id": "local",
+        "schema": "ato.formation-coverage-observation/1"
+      },
+      "new_terminal": "preset_node_static_v2_workspace",
+      "primary_blocker": "known-D/authoring",
+      "authoring_reached": false,
+      "contract_ref": null,
+      "derivation_ref": null,
+      "receipt": null,
+      "retained_ref": null,
+      "actual_workload_executions": 0,
+      "functional_application_success": false,
+      "manual_intervention": false,
+      "secondary_factors_from_qualification": "not a standalone static app; Go server; Makefile frontend/backend build, no package build script"
+    },
+    {
+      "index": 13,
+      "name": "HedgeDoc",
+      "repo": "https://github.com/hedgedoc/hedgedoc",
+      "ref": "5dd94d5449e52835ab034d4da21773cad08ebf51",
+      "archive_sha256": "6b99ac59a4ce6990f9a9e20d4b44b405c255900943c5bfaa868fc8a526e7720d",
+      "old_blocker": "preset_node_static_needs_lockfile",
+      "observation_sha256": "469a3030208360c79010ecbd08760874538c55d37c5fcbfcdba3fd7d51adf794",
+      "observation": {
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "model_calls": 0,
+        "result": {
+          "result": {
+            "attempted_contract_refs": [],
+            "attempts": [
+              {
+                "candidate": "detect",
+                "failure": {
+                  "code": "preset_node_static_v2_workspace",
+                  "message": "Workspace target/build/output require explicit authoring.",
+                  "stage": "preset"
+                },
+                "outcomes": {
+                  "cleanup": {
+                    "reason": "nothing ran",
+                    "state": "not_applicable"
+                  },
+                  "publication": {
+                    "reason": "preset_node_static_v2_workspace",
+                    "state": "not_attempted"
+                  },
+                  "runtime_verification": {
+                    "reason": "preset_node_static_v2_workspace",
+                    "state": "not_attempted"
+                  },
+                  "seal": {
+                    "reason": "preset_node_static_v2_workspace",
+                    "state": "not_attempted"
+                  }
+                },
+                "runtime_id": "local",
+                "status": "filtered"
+              }
+            ],
+            "status": "no_verified_route"
+          },
+          "status": "formation_result"
+        },
+        "runtime_facts": {
+          "formation.containment": "bwrap+landlock",
+          "formation.toolchain_root": "/opt/ato/toolchains",
+          "platform.arch": "aarch64",
+          "platform.os": "linux"
+        },
+        "runtime_id": "local",
+        "schema": "ato.formation-coverage-observation/1"
+      },
+      "new_terminal": "preset_node_static_v2_workspace",
+      "primary_blocker": "known-D/authoring",
+      "authoring_reached": false,
+      "contract_ref": null,
+      "derivation_ref": null,
+      "receipt": null,
+      "retained_ref": null,
+      "actual_workload_executions": 0,
+      "functional_application_success": false,
+      "manual_intervention": false,
+      "secondary_factors_from_qualification": "not a standalone static app; frontend server + backend, turbo monorepo"
+    },
+    {
+      "index": 14,
+      "name": "Actual Budget",
+      "repo": "https://github.com/actualbudget/actual",
+      "ref": "eb28966d6ca549236dd08b163ffc8570c710e712",
+      "archive_sha256": "23659e0cc54128ac20e459ddb7a7524c96148f906dcb74dfe66342ce84ddb8a5",
+      "old_blocker": "preset_node_static_needs_lockfile",
+      "observation_sha256": "469a3030208360c79010ecbd08760874538c55d37c5fcbfcdba3fd7d51adf794",
+      "observation": {
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "model_calls": 0,
+        "result": {
+          "result": {
+            "attempted_contract_refs": [],
+            "attempts": [
+              {
+                "candidate": "detect",
+                "failure": {
+                  "code": "preset_node_static_v2_workspace",
+                  "message": "Workspace target/build/output require explicit authoring.",
+                  "stage": "preset"
+                },
+                "outcomes": {
+                  "cleanup": {
+                    "reason": "nothing ran",
+                    "state": "not_applicable"
+                  },
+                  "publication": {
+                    "reason": "preset_node_static_v2_workspace",
+                    "state": "not_attempted"
+                  },
+                  "runtime_verification": {
+                    "reason": "preset_node_static_v2_workspace",
+                    "state": "not_attempted"
+                  },
+                  "seal": {
+                    "reason": "preset_node_static_v2_workspace",
+                    "state": "not_attempted"
+                  }
+                },
+                "runtime_id": "local",
+                "status": "filtered"
+              }
+            ],
+            "status": "no_verified_route"
+          },
+          "status": "formation_result"
+        },
+        "runtime_facts": {
+          "formation.containment": "bwrap+landlock",
+          "formation.toolchain_root": "/opt/ato/toolchains",
+          "platform.arch": "aarch64",
+          "platform.os": "linux"
+        },
+        "runtime_id": "local",
+        "schema": "ato.formation-coverage-observation/1"
+      },
+      "new_terminal": "preset_node_static_v2_workspace",
+      "primary_blocker": "known-D/authoring",
+      "authoring_reached": false,
+      "contract_ref": null,
+      "derivation_ref": null,
+      "receipt": null,
+      "retained_ref": null,
+      "actual_workload_executions": 0,
+      "functional_application_success": false,
+      "manual_intervention": false,
+      "secondary_factors_from_qualification": "browser frontend candidate, but root lage build includes multiple products/services; output must be explicitly qualified"
+    },
+    {
+      "index": 15,
+      "name": "JupyterLab",
+      "repo": "https://github.com/jupyterlab/jupyterlab",
+      "ref": "bb166a775cba8911fa157c1ff4858b12766d6ede",
+      "archive_sha256": "af39846f2016b0d0a4220123ba13b69180ab11b64c8ec893572018157b2c56c5",
+      "old_blocker": "preset_node_static_needs_lockfile",
+      "observation_sha256": "469a3030208360c79010ecbd08760874538c55d37c5fcbfcdba3fd7d51adf794",
+      "observation": {
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "model_calls": 0,
+        "result": {
+          "result": {
+            "attempted_contract_refs": [],
+            "attempts": [
+              {
+                "candidate": "detect",
+                "failure": {
+                  "code": "preset_node_static_v2_workspace",
+                  "message": "Workspace target/build/output require explicit authoring.",
+                  "stage": "preset"
+                },
+                "outcomes": {
+                  "cleanup": {
+                    "reason": "nothing ran",
+                    "state": "not_applicable"
+                  },
+                  "publication": {
+                    "reason": "preset_node_static_v2_workspace",
+                    "state": "not_attempted"
+                  },
+                  "runtime_verification": {
+                    "reason": "preset_node_static_v2_workspace",
+                    "state": "not_attempted"
+                  },
+                  "seal": {
+                    "reason": "preset_node_static_v2_workspace",
+                    "state": "not_attempted"
+                  }
+                },
+                "runtime_id": "local",
+                "status": "filtered"
+              }
+            ],
+            "status": "no_verified_route"
+          },
+          "status": "formation_result"
+        },
+        "runtime_facts": {
+          "formation.containment": "bwrap+landlock",
+          "formation.toolchain_root": "/opt/ato/toolchains",
+          "platform.arch": "aarch64",
+          "platform.os": "linux"
+        },
+        "runtime_id": "local",
+        "schema": "ato.formation-coverage-observation/1"
+      },
+      "new_terminal": "preset_node_static_v2_workspace",
+      "primary_blocker": "known-D/authoring",
+      "authoring_reached": false,
+      "contract_ref": null,
+      "derivation_ref": null,
+      "receipt": null,
+      "retained_ref": null,
+      "actual_workload_executions": 0,
+      "functional_application_success": false,
+      "manual_intervention": false,
+      "secondary_factors_from_qualification": "not a standalone static app; browser assets require Python Jupyter server/kernel"
+    },
+    {
+      "index": 19,
+      "name": "Grist core",
+      "repo": "https://github.com/gristlabs/grist-core",
+      "ref": "b4ccc892202a3aefd6e565f0bc0c01081433a53c",
+      "archive_sha256": "0fb3e9be24032f710a401717a80f41dbb7e247d050a578f6214f7f0d0919083a",
+      "old_blocker": "preset_node_static_needs_lockfile",
+      "observation_sha256": "fcb4dadf604815b77783aea47ac481acc1b1af03256796019e9737025cc61d30",
+      "observation": {
+        "candidate_producer": "off",
+        "decision_provider": "off",
+        "model_calls": 0,
+        "result": {
+          "result": {
+            "attempted_contract_refs": [],
+            "attempts": [
+              {
+                "candidate": "detect",
+                "failure": {
+                  "code": "preset_node_static_v2_manager_config",
+                  "message": "Package-manager configuration requires explicit authoring.",
+                  "stage": "preset"
+                },
+                "outcomes": {
+                  "cleanup": {
+                    "reason": "nothing ran",
+                    "state": "not_applicable"
+                  },
+                  "publication": {
+                    "reason": "preset_node_static_v2_manager_config",
+                    "state": "not_attempted"
+                  },
+                  "runtime_verification": {
+                    "reason": "preset_node_static_v2_manager_config",
+                    "state": "not_attempted"
+                  },
+                  "seal": {
+                    "reason": "preset_node_static_v2_manager_config",
+                    "state": "not_attempted"
+                  }
+                },
+                "runtime_id": "local",
+                "status": "filtered"
+              }
+            ],
+            "status": "no_verified_route"
+          },
+          "status": "formation_result"
+        },
+        "runtime_facts": {
+          "formation.containment": "bwrap+landlock",
+          "formation.toolchain_root": "/opt/ato/toolchains",
+          "platform.arch": "aarch64",
+          "platform.os": "linux"
+        },
+        "runtime_id": "local",
+        "schema": "ato.formation-coverage-observation/1"
+      },
+      "new_terminal": "preset_node_static_v2_manager_config",
+      "primary_blocker": "known-D/authoring",
+      "authoring_reached": false,
+      "contract_ref": null,
+      "derivation_ref": null,
+      "receipt": null,
+      "retained_ref": null,
+      "actual_workload_executions": 0,
+      "functional_application_success": false,
+      "manual_intervention": false,
+      "secondary_factors_from_qualification": "not a standalone static app; Node/Python server and storage, frontend assets alone insufficient"
+    }
+  ],
+  "model_calls": 0,
+  "network": "denied",
+  "base_sha": "968836af358615844838fb7543a3832d52119808",
+  "implementation_commit": "28d7e2f9cbac687f04fecf130c2002b2cd730db1",
+  "tested_execution_sha": "177b61489e1fb28539868f9d9a76ca21fc6d61ca",
+  "controller_head": "9f9b8d7a5613e56f90a8ac2907b4ec6fa25200f5",
+  "raw_ledger_sha256": "643c6ce174e7092a4d3140d0812bdbff3e63773b435af91daa318a95beafb53b",
+  "docs_correction": {
+    "pr": 1439,
+    "head": "d626202de2320779de9538cbf6c2044bf8654d0a",
+    "merge": "a3b9a5d14696514bfbbb20b6e80d0308e4b20d42"
+  },
+  "qualification": {
+    "pr": 1438,
+    "head": "dbd1469adbc5cd9d58b6fbdf53c512f430a42dca",
+    "merge": "968836af358615844838fb7543a3832d52119808"
+  },
+  "test_results": {
+    "T0_T21": "PASS",
+    "additional_negative_tests": 4,
+    "selected_rust": {
+      "passed": 702,
+      "failed": 0,
+      "ignored": 1
+    },
+    "linux_node_v2_and_local_formation": {
+      "passed": 45,
+      "failed": 0,
+      "ignored": 0
+    },
+    "clippy": "PASS",
+    "fmt": "PASS",
+    "diff_check": "PASS",
+    "npm_K_D_bytes": "unchanged against v1 synthesis and existing identity goldens",
+    "npm_execution_plan": "unchanged",
+    "T17_T18_scope": "offline exact provisioning plan and absolute binary binding assertions; not a fresh manager installation claim",
+    "network_gate": "Linux actual local Formation fixture: each pnpm/Yarn route refused network_denied, no execution/receipt; macOS containment gate precedes network admission"
+  },
+  "aggregate": {
+    "measured": 8,
+    "old_terminal_distribution": {
+      "preset_node_static_needs_lockfile": 8
+    },
+    "new_terminal_distribution": {
+      "preset_node_static_v2_workspace": 6,
+      "preset_node_static_needs_lockfile": 1,
+      "preset_node_static_v2_manager_config": 1
+    },
+    "primary_blocker_distribution": {
+      "known-D/authoring": 8
+    },
+    "diagnostic_reclassified": 7,
+    "authoring_reach_before": 0,
+    "authoring_reach_after": 0,
+    "authoring_reach_delta": 0,
+    "same_K_verified_delta": 0,
+    "functional_success_delta": 0
+  },
+  "next_generic_fix": {
+    "target": "explicit workspace-scoped static build authoring",
+    "reason": "Workspace/config authoring is the largest observed terminal group (6). Qualification identifies Excalidraw and Actual Budget as two frontend candidates, not six admissible static apps. No arbitrary monorepo inference or repo-name branch.",
+    "implementation_started": false
+  },
+  "states": {
+    "implemented": true,
+    "locally_verified": true,
+    "actual_remeasurement_verified": true,
+    "merged_at_record_creation": false,
+    "deployed": false
+  },
+  "remote_migration": "none",
+  "live_model_calls": 0,
+  "forbidden_work": {
+    "1421": "unchanged",
+    "50_100_cohort": "not started",
+    "6c": "not started",
+    "Capsule_identity": "not changed"
+  },
+  "ci": {
+    "base_rust_run": 36523322247,
+    "head_rust_run": 36524301044,
+    "head_sha": "61c8d68f5ce01159a57007ea5fff3d1e870d6a56",
+    "overall": "red, not green",
+    "baseline_matched": [
+      "Windows Unix-only browser_sandbox compile APIs",
+      "Ubuntu hosted_python_and_node_use_the_common_process_runtime",
+      "macOS portable process ownership",
+      "macOS hosted validator candidate-never-listened"
+    ],
+    "not_baseline_reproduced": [
+      "macOS Activity MCP WouldBlock at activity_mcp.rs:191; unchanged source/path, isolated local 3/3 PASS",
+      "Ubuntu static server unauthorized state POST response read ConnectionReset at portable-application/src/lib.rs:3547; unchanged source, base PASS; tracked separately, not called a baseline failure; isolated Linux repetition 3/3 PASS"
+    ],
+    "isolated_repetitions": {
+      "macOS_activity_mcp": {
+        "passed": 3,
+        "failed": 0
+      },
+      "linux_static_server": {
+        "passed": 3,
+        "failed": 0
+      }
+    },
+    "scope_note": "Completed CI classification is for pre-compatibility source at 61c8d68f. Final compatibility source is locally and Linux verified; latest head CI must not be assumed green from prior runs."
+  },
+  "verification_log_sha256": {
+    "node-v2-regression-verified.log": "280d992fecaf6f58a2176b02cce2869abb3afd6356d3fb609afa4db2b0cc6cef",
+    "node-v2-clippy-verified.log": "cdbb0096891fdee9ef3fb6e76703451676dfb157d75ebc9ee5e53a2331b28539",
+    "static-server-2.log": "6f3822efa7977f11b884f7c9c5ee60be97cee20d36abf95bf39f23ab8c81eb5d",
+    "static-server-3.log": "265df21a112c9147158476699e02a2ea1388e4b236ba2d8921e0eceda914c7d2",
+    "static-server-1.log": "773c76533ef9fca310cc136fcccbf26514e51632b814863ca05b4ae0dd93edc8",
+    "linux-tests.log": "1fd47a559efa9acb9970fb2ec98df200b26260be0a4a33b602ac5a6320a00eb0",
+    "linux-build.log": "810b479670b4566d2145bafc10ad7eba12e9f6f2889fe56f46da30feb5420310",
+    "activity-mcp-2.log": "00113555db2d4233df86236bb09068dc7722f3b0502ce407a0e9bb1d9e9c6aa1",
+    "activity-mcp-3.log": "3e3ad14d412c0cfc18d269d80aa59f699780e76377da06d0929cec9db26b47bf",
+    "activity-mcp-1.log": "6cae777f516052bd2952433158d271906900bf8f1238b9f54bf71c334e29ff95",
+    "node-v2-regression-final2.log": "c67b5beb81e3efcb9b8738342032077d095f320815406b099fdcf57df7f582f2",
+    "node-v2-clippy-final2.log": "63a256584f4dc13c3173c966dc5392687defac989bf8522a0048d7e3be6ea280",
+    "linux-tests-final.log": "d041a4a0fabf5c528e938b769ea9c988dc4f9e1d43b0f11492c1ec9f471ea85b",
+    "linux-build-final.log": "555c582083235a3327b244dbf44d58750851f0fe8ac5481c597e83cb65f6de25"
+  },
+  "previous_measurement": {
+    "execution_sha": "6a6ff92b7e416dd1030d2dd03b022920268ab70f",
+    "plan_sha256": "87d91d0d01a986eda0f6d4406eb667271ba26f909ca1bbd12d56fb3a123559b5",
+    "ledger_commit": "b5b3dcaef1cf3c13d40ab6722299ebb149563b6b",
+    "same_eight_pins": true,
+    "observations_byte_equal": true,
+    "reason": "preserve legacy source-only manager inference and explicitly authored PATH; default physical binding restricted to canonical exact D requirements"
+  }
+}
