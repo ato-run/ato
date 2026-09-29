@@ -1073,6 +1073,13 @@ fn node_static_v2_network_denied_never_executes_or_returns_a_receipt() {
         assert!(attempts[0].derivation_ref.is_some());
         assert!(attempts[0].receipt.is_none());
         assert!(attempts[0].verification.is_none());
-        assert_eq!(attempts[0].failure.as_ref().unwrap().code, "network_denied");
+        assert_eq!(
+            attempts[0].failure.as_ref().unwrap().code,
+            if containment_available() {
+                "network_denied"
+            } else {
+                "runtime_cannot_contain_build"
+            }
+        );
     }
 }
