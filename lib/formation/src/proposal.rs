@@ -527,14 +527,15 @@ pub fn validate_candidate_scope(
         return Err(ProposalError("proposal_registry_full"));
     }
     for candidate in generated {
-        let new_scope = authorization
-            .python_http_process
-            .as_ref()
-            .is_some_and(|t| t.candidate(source, candidate.derivation_ref.clone()) == *candidate)
-            || authorization
+        let new_scope =
+            authorization.python_http_process.as_ref().is_some_and(|t| {
+                t.candidate(source, candidate.derivation_ref.clone()) == *candidate
+            }) || authorization
                 .node_static_workspace
                 .as_ref()
-                .is_some_and(|t| t.candidate(source, candidate.derivation_ref.clone()) == *candidate);
+                .is_some_and(|t| {
+                    t.candidate(source, candidate.derivation_ref.clone()) == *candidate
+                });
         let modified_scope = frozen.candidates.iter().any(|base| {
             authorization
                 .modifiable_derivation_refs
