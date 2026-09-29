@@ -757,8 +757,27 @@ fn a_tag_reference_is_resolved_only_through_an_explicit_pinned_digest() {
     );
 }
 
+/// `out` must be refused, untouched, before any load or build, with the
+/// builder still released.
+fn assert_refused_output(req: &SourceOciRequest, out: &Path) {
+    let b = fake(ok_config(), BuildOutcome::Built);
+    assert_eq!(
+        code(run(req, &b, out)),
+        "source_oci_output_invalid",
+        "{out:?}"
+    );
+    assert!(
+        !b.calls
+            .borrow()
+            .iter()
+            .any(|c| c.starts_with("build") || c.starts_with("load")),
+        "{out:?}"
+    );
+    assert_eq!(b.released.get(), 1, "{out:?}");
+}
+
 #[test]
-fn an_existing_output_path_is_refused_untouched_and_the_builder_is_still_released() {
+fn an_existing_output_directory_or_file_is_refused_untouched_and_the_builder_is_still_released() {
     let dir = tempfile::tempdir().unwrap();
     let req = request(dir.path());
     // An existing directory holding someone else's data.
@@ -768,6 +787,21 @@ fn an_existing_output_path_is_refused_untouched_and_the_builder_is_still_release
     // An existing file.
     let file = dir.path().join("file");
     std::fs::write(&file, b"keep this file").unwrap();
+    assert_refused_output(&req, &existing);
+    assert_refused_output(&req, &file);
+    assert_eq!(
+        std::fs::read(existing.join("sentinel")).unwrap(),
+        b"keep me"
+    );
+    assert_eq!(std::fs::read_dir(&existing).unwrap().count(), 1);
+    assert_eq!(std::fs::read(&file).unwrap(), b"keep this file");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_existing_output_symlink_is_refused_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let req = request(dir.path());
     // A symlink to a directory with data, and a dangling symlink.
     let target = dir.path().join("target");
     std::fs::create_dir(&target).unwrap();
@@ -776,28 +810,8 @@ fn an_existing_output_path_is_refused_untouched_and_the_builder_is_still_release
     std::os::unix::fs::symlink(&target, &link).unwrap();
     let dangling = dir.path().join("dangling");
     std::os::unix::fs::symlink(dir.path().join("absent"), &dangling).unwrap();
-    for out in [&existing, &file, &link, &dangling] {
-        let b = fake(ok_config(), BuildOutcome::Built);
-        assert_eq!(
-            code(run(&req, &b, out)),
-            "source_oci_output_invalid",
-            "{out:?}"
-        );
-        assert!(
-            !b.calls
-                .borrow()
-                .iter()
-                .any(|c| c.starts_with("build") || c.starts_with("load")),
-            "{out:?}"
-        );
-        assert_eq!(b.released.get(), 1, "{out:?}");
-    }
-    assert_eq!(
-        std::fs::read(existing.join("sentinel")).unwrap(),
-        b"keep me"
-    );
-    assert_eq!(std::fs::read_dir(&existing).unwrap().count(), 1);
-    assert_eq!(std::fs::read(&file).unwrap(), b"keep this file");
+    assert_refused_output(&req, &link);
+    assert_refused_output(&req, &dangling);
     assert_eq!(std::fs::read_link(&link).unwrap(), target);
     assert_eq!(
         std::fs::read(target.join("sentinel")).unwrap(),
