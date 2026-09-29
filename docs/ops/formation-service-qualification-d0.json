@@ -1,0 +1,2552 @@
+{
+  "schema": "ato.formation-service-qualification-d0/1",
+  "wave": "6b-D0",
+  "base": "461fa78cd871ccf376267b1115dcf46a54b13019",
+  "input": "the 41 non-success sources with a preregistered service/process shape in formation-coverage-50 (same pinned archives; nothing re-fetched)",
+  "method": "static reading of root manifests, lockfiles, version files, Dockerfiles and compose files (scripts/acceptance/coverage/service-qualification-facts.py) plus targeted file reads; no execution, no install, no model call",
+  "runtime_catalog": {
+    "node": [
+      "20.20.2",
+      "22.14.0"
+    ],
+    "python": [
+      "3.11.11",
+      "3.12.7",
+      "3.13.1"
+    ],
+    "other": "none"
+  },
+  "family_distribution": {
+    "Python service": 11,
+    "multi-service": 11,
+    "Go": 9,
+    "Node service": 4,
+    "PHP": 3,
+    "Rust": 1,
+    "JVM": 1,
+    ".NET": 1
+  },
+  "aggregate": {
+    "typed_native_launch": 15,
+    "runtime_in_current_catalog": 27,
+    "dependency_locked": 31,
+    "external_service_required": 13,
+    "port_provable_natively": 0,
+    "catalog_gap_families": {
+      "PHP": 3,
+      "Go": 9,
+      "Rust": 1,
+      "JVM": 1,
+      ".NET": 1
+    },
+    "catalog_gap_by_primary_language": {
+      "Go": 9,
+      "PHP": 3,
+      "Rust": 2,
+      "Ruby": 1,
+      "JVM": 1,
+      ".NET": 1,
+      "note": "Lemmy (Rust) and Mastodon (Ruby) are counted as multi-service families above"
+    }
+  },
+  "first_candidates": [
+    {
+      "name": "WBO",
+      "family": "Node service",
+      "launch": "package script start: node ./server/server.mjs (plain argv)",
+      "runtime": "engines node>=22 -> catalog 22.14.0 (range, resolvable)",
+      "lock": "package-lock.json",
+      "port": "PORT env, default 8080 (source config); not a declared port contract",
+      "state": "board data dir (Dockerfile VOLUME)"
+    },
+    {
+      "name": "JupyterLab",
+      "family": "Python service",
+      "launch": "pyproject console script (jupyter-lab)",
+      "runtime": "requires-python>=3.10 -> catalog; yarn 3.5.0 frontend build",
+      "lock": "yarn.lock (frontend only); Python deps unlocked",
+      "port": "EXPOSE 8888",
+      "state": "notebook dir"
+    },
+    {
+      "name": "Kutt",
+      "family": "Node service",
+      "launch": "package script start: node server/server.js --production (plain argv); separate migrate script",
+      "runtime": "no engines -> default 20.20.2",
+      "lock": "package-lock.json",
+      "port": "PORT env (.example.env 3000)",
+      "state": "SQLite file (DB_CLIENT=better-sqlite3 default)"
+    },
+    {
+      "name": "Radicale",
+      "family": "Python service",
+      "launch": "pyproject console script: radicale",
+      "runtime": "requires-python>=3.9 -> catalog",
+      "lock": "none (unpinned pyproject deps)",
+      "port": "EXPOSE 5232 (container metadata)",
+      "state": "collections dir"
+    },
+    {
+      "name": "Calibre-Web",
+      "family": "Python service",
+      "launch": "pyproject console script: cps",
+      "runtime": "requires-python>=3.6 -> catalog",
+      "lock": "requirements.txt ranges (not a lock)",
+      "port": "not declared",
+      "state": "calibre library + app DB"
+    }
+  ],
+  "guess_prohibitions": [
+    "no port inferred from framework/start script/README",
+    "no argv from main.py, cmd/, framework name or README shell",
+    "Dockerfile CMD/EXPOSE is container (OCI Adapter) metadata, not a native launch/port declaration"
+  ],
+  "model_calls": 0,
+  "deploy": "none",
+  "remote_migration": "none",
+  "applications": [
+    {
+      "index": 2,
+      "name": "WBO",
+      "family": "A",
+      "family_name": "Node service",
+      "terminal_code_50": "preset_node_static_needs_build_script",
+      "deterministic_launch_declaration": "package script start: node ./server/server.mjs (plain argv)",
+      "typed_native_launch": true,
+      "exact_runtime_version": "engines node>=22 -> catalog 22.14.0 (range, resolvable)",
+      "runtime_in_current_catalog": true,
+      "dependency_lock": "package-lock.json",
+      "dependency_locked": true,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "PORT env, default 8080 (source config); not a declared port contract",
+      "port_provable_natively": false,
+      "persistent_state": "board data dir (Dockerfile VOLUME)",
+      "external_services": "none",
+      "external_service_required": false,
+      "runtime_network": "none",
+      "source_facts": {
+        "markers": [
+          "package.json"
+        ],
+        "locks": [
+          "package-lock.json"
+        ],
+        "version_files": {},
+        "package_json": {
+          "packageManager": null,
+          "engines": {
+            "node": ">=22"
+          },
+          "start": "node ./server/server.mjs",
+          "workspaces": false,
+          "main": "./server/server.mjs",
+          "bin": false
+        },
+        "dockerfiles": [
+          ".devcontainer/Dockerfile",
+          "Dockerfile"
+        ],
+        "docker": {
+          "expose": [
+            "80"
+          ],
+          "volume": [
+            "/opt/app/server-data"
+          ],
+          "cmd": [
+            "[\"/usr/local/bin/node\", \"server/server.mjs\"]"
+          ]
+        },
+        "compose": {
+          "files": [
+            "docker-compose.yml"
+          ],
+          "external_services": []
+        }
+      }
+    },
+    {
+      "index": 4,
+      "name": "FreshRSS",
+      "family": "D",
+      "family_name": "PHP",
+      "terminal_code_50": "preset_node_static_needs_build_script",
+      "deterministic_launch_declaration": "container-only entrypoint.sh",
+      "typed_native_launch": false,
+      "exact_runtime_version": "php>=8.1 range; no PHP in catalog",
+      "runtime_in_current_catalog": true,
+      "dependency_lock": "composer.lock + package-lock (assets)",
+      "dependency_locked": true,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "EXPOSE 80/8080",
+      "port_provable_natively": false,
+      "persistent_state": "data dir",
+      "external_services": "optional postgres/mysql (SQLite default)",
+      "external_service_required": false,
+      "runtime_network": "feed fetching egress",
+      "source_facts": {
+        "markers": [
+          "Makefile",
+          "composer.json",
+          "package.json"
+        ],
+        "locks": [
+          "composer.lock",
+          "package-lock.json"
+        ],
+        "version_files": {},
+        "package_json": {
+          "packageManager": null,
+          "engines": {
+            "node": ">=20"
+          },
+          "start": null,
+          "workspaces": false,
+          "main": null,
+          "bin": false
+        },
+        "php": ">=8.1",
+        "dockerfiles": [
+          ".devcontainer/Dockerfile",
+          "Docker/Dockerfile",
+          "Docker/Dockerfile-Alpine",
+          "Docker/Dockerfile-Arch",
+          "Docker/Dockerfile-Newest",
+          "Docker/Dockerfile-Oldest"
+        ],
+        "docker": {
+          "expose": [
+            "80",
+            "8080"
+          ],
+          "volume": [],
+          "cmd": [
+            "[\"./Docker/entrypoint.sh\"]",
+            "([ -z \"$CRON_MIN\" ] || cron) && \\",
+            "[\"./Docker/entrypoint.sh\"]",
+            "([ -z \"$CRON_MIN\" ] || crond -d 6) && \\"
+          ]
+        },
+        "compose": {
+          "files": [
+            "Docker/freshrss/docker-compose-db.yml",
+            "Docker/freshrss/docker-compose-development.yml",
+            "Docker/freshrss/docker-compose-local.yml",
+            "Docker/freshrss/docker-compose-proxy.yml"
+          ],
+          "external_services": [
+            "postgres"
+          ]
+        }
+      }
+    },
+    {
+      "index": 5,
+      "name": "linkding",
+      "family": "B",
+      "family_name": "Python service",
+      "terminal_code_50": "network_denied",
+      "deterministic_launch_declaration": "none (Django manage.py; no console script)",
+      "typed_native_launch": false,
+      "exact_runtime_version": "requires-python>=3.13 -> 3.13.1 in catalog",
+      "runtime_in_current_catalog": true,
+      "dependency_lock": "uv.lock + package-lock (assets)",
+      "dependency_locked": true,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "not declared",
+      "port_provable_natively": false,
+      "persistent_state": "SQLite data dir",
+      "external_services": "none",
+      "external_service_required": false,
+      "runtime_network": "none",
+      "source_facts": {
+        "markers": [
+          "Makefile",
+          "manage.py",
+          "package.json",
+          "pyproject.toml"
+        ],
+        "locks": [
+          "package-lock.json",
+          "uv.lock"
+        ],
+        "version_files": {},
+        "package_json": {
+          "packageManager": null,
+          "engines": null,
+          "start": null,
+          "workspaces": false,
+          "main": null,
+          "bin": false
+        },
+        "pyproject": {
+          "requires_python": ">=3.13",
+          "console_scripts": false,
+          "build_backend": null
+        },
+        "dockerfiles": [],
+        "docker": {
+          "expose": [],
+          "volume": [],
+          "cmd": []
+        },
+        "compose": {
+          "files": [
+            "docker-compose.yml"
+          ],
+          "external_services": []
+        }
+      }
+    },
+    {
+      "index": 6,
+      "name": "SearXNG",
+      "family": "B",
+      "family_name": "Python service",
+      "terminal_code_50": "preset_node_static_needs_lockfile",
+      "deterministic_launch_declaration": "container-only scripts",
+      "typed_native_launch": false,
+      "exact_runtime_version": "python unpinned (requirements.txt); .nvmrc '25' for assets",
+      "runtime_in_current_catalog": false,
+      "dependency_lock": "requirements.txt (not a lock)",
+      "dependency_locked": false,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "not declared",
+      "port_provable_natively": false,
+      "persistent_state": "settings file",
+      "external_services": "valkey optional",
+      "external_service_required": false,
+      "runtime_network": "search egress",
+      "source_facts": {
+        "markers": [
+          "Makefile",
+          "go.mod",
+          "package.json",
+          "requirements.txt",
+          "setup.py"
+        ],
+        "locks": [
+          "go.sum"
+        ],
+        "version_files": {
+          ".nvmrc": "25"
+        },
+        "package_json": {
+          "packageManager": null,
+          "engines": null,
+          "start": null,
+          "workspaces": false,
+          "main": null,
+          "bin": false
+        },
+        "go": {
+          "go": "1.24.5",
+          "toolchain": null,
+          "main_root": false,
+          "cmd_mains": []
+        },
+        "dockerfiles": [
+          ".devcontainer/Dockerfile"
+        ],
+        "docker": {
+          "expose": [],
+          "volume": [],
+          "cmd": []
+        },
+        "compose": {
+          "files": [
+            "container/docker-compose.yml"
+          ],
+          "external_services": [
+            "valkey"
+          ]
+        }
+      }
+    },
+    {
+      "index": 7,
+      "name": "changedetection.io",
+      "family": "B",
+      "family_name": "Python service",
+      "terminal_code_50": "preset_no_match",
+      "deterministic_launch_declaration": "container-only CMD python changedetection.py -d /datastore",
+      "typed_native_launch": false,
+      "exact_runtime_version": "python unpinned",
+      "runtime_in_current_catalog": false,
+      "dependency_lock": "requirements.txt (not a lock)",
+      "dependency_locked": false,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "EXPOSE 5000",
+      "port_provable_natively": false,
+      "persistent_state": "datastore dir",
+      "external_services": "none (ollama optional)",
+      "external_service_required": false,
+      "runtime_network": "watched-site egress",
+      "source_facts": {
+        "markers": [
+          "requirements.txt",
+          "setup.py"
+        ],
+        "locks": [],
+        "version_files": {},
+        "dockerfiles": [
+          ".github/test/Dockerfile-alpine",
+          "Dockerfile"
+        ],
+        "docker": {
+          "expose": [
+            "5000"
+          ],
+          "volume": [],
+          "cmd": [
+            "[\"/docker-entrypoint.sh\"]",
+            "[\"python\", \"./changedetection.py\", \"-d\", \"/datastore\"]"
+          ]
+        },
+        "compose": {
+          "files": [
+            "docker-compose.yml"
+          ],
+          "external_services": [
+            "ollama"
+          ]
+        }
+      }
+    },
+    {
+      "index": 8,
+      "name": "Etherpad",
+      "family": "A",
+      "family_name": "Node service",
+      "terminal_code_50": "preset_node_static_v2_workspace",
+      "deterministic_launch_declaration": "container-only CMD (tsx node/server.ts)",
+      "typed_native_launch": false,
+      "exact_runtime_version": "engines node>=24 -> not in catalog",
+      "runtime_in_current_catalog": false,
+      "dependency_lock": "pnpm-lock (workspace config)",
+      "dependency_locked": true,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "EXPOSE 9001",
+      "port_provable_natively": false,
+      "persistent_state": "dirty-DB file default",
+      "external_services": "none required (mysql/postgres optional)",
+      "external_service_required": false,
+      "runtime_network": "none",
+      "source_facts": {
+        "markers": [
+          "package.json"
+        ],
+        "locks": [
+          "pnpm-lock.yaml"
+        ],
+        "version_files": {},
+        "package_json": {
+          "packageManager": "pnpm@12.4.2",
+          "engines": {
+            "node": ">=24.0.0",
+            "pnpm": ">=12.0.0"
+          },
+          "start": null,
+          "workspaces": false,
+          "main": null,
+          "bin": true
+        },
+        "dockerfiles": [
+          "Dockerfile"
+        ],
+        "docker": {
+          "expose": [
+            "9001"
+          ],
+          "volume": [],
+          "cmd": [
+            "wget -qO- http://127.0.0.1:9001/health | grep -E \"pass|ok|up\" > /dev/null || exit 1",
+            "[\"sh\", \"-c\", \"cd src && exec node --require tsx/cjs node/server.ts\"]"
+          ]
+        },
+        "compose": {
+          "files": [
+            "docker-compose.dev.yml",
+            "docker-compose.yml"
+          ],
+          "external_services": [
+            "mysql",
+            "postgres"
+          ]
+        }
+      }
+    },
+    {
+      "index": 9,
+      "name": "Miniflux",
+      "family": "C",
+      "family_name": "Go",
+      "terminal_code_50": "preset_no_match",
+      "deterministic_launch_declaration": "Procfile web: miniflux.app",
+      "typed_native_launch": true,
+      "exact_runtime_version": "go 1.26.0; no Go in catalog",
+      "runtime_in_current_catalog": true,
+      "dependency_lock": "go.sum",
+      "dependency_locked": true,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "not declared",
+      "port_provable_natively": false,
+      "persistent_state": "postgres",
+      "external_services": "postgres required",
+      "external_service_required": true,
+      "runtime_network": "feed fetching egress",
+      "source_facts": {
+        "markers": [
+          "Makefile",
+          "Procfile",
+          "go.mod"
+        ],
+        "locks": [
+          "go.sum"
+        ],
+        "version_files": {},
+        "go": {
+          "go": "1.26.0",
+          "toolchain": null,
+          "main_root": true,
+          "cmd_mains": []
+        },
+        "procfile": [
+          "web: miniflux.app"
+        ],
+        "dockerfiles": [
+          "packaging/debian/Dockerfile",
+          "packaging/rpm/Dockerfile"
+        ],
+        "docker": {
+          "expose": [],
+          "volume": [],
+          "cmd": [
+            "[\"/src/packaging/debian/build.sh\"]"
+          ]
+        },
+        "compose": {
+          "files": [
+            ".devcontainer/docker-compose.yml"
+          ],
+          "external_services": [
+            "postgres"
+          ]
+        }
+      }
+    },
+    {
+      "index": 10,
+      "name": "Gitea",
+      "family": "C",
+      "family_name": "Go",
+      "terminal_code_50": "preset_node_static_v2_workspace",
+      "deterministic_launch_declaration": "container-only (s6)",
+      "typed_native_launch": false,
+      "exact_runtime_version": "go 1.27/go1.27.1 + node>=22.18 assets; no Go in catalog",
+      "runtime_in_current_catalog": true,
+      "dependency_lock": "go.sum + pnpm-lock + uv.lock",
+      "dependency_locked": true,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "EXPOSE 22/3000",
+      "port_provable_natively": false,
+      "persistent_state": "repositories + DB dir",
+      "external_services": "none required (SQLite possible)",
+      "external_service_required": false,
+      "runtime_network": "none",
+      "source_facts": {
+        "markers": [
+          "Makefile",
+          "go.mod",
+          "package.json",
+          "pyproject.toml"
+        ],
+        "locks": [
+          "go.sum",
+          "pnpm-lock.yaml",
+          "uv.lock"
+        ],
+        "version_files": {},
+        "package_json": {
+          "packageManager": "pnpm@12.6.0",
+          "engines": {
+            "node": ">= 22.18.0",
+            "pnpm": ">= 11.0.0"
+          },
+          "start": null,
+          "workspaces": false,
+          "main": null,
+          "bin": false
+        },
+        "pyproject": {
+          "requires_python": ">=3.10",
+          "console_scripts": false,
+          "build_backend": null
+        },
+        "go": {
+          "go": "1.27",
+          "toolchain": "go1.27.1",
+          "main_root": true,
+          "cmd_mains": []
+        },
+        "dockerfiles": [
+          "Dockerfile",
+          "Dockerfile.rootless"
+        ],
+        "docker": {
+          "expose": [
+            "22 3000",
+            "2222 3000"
+          ],
+          "volume": [
+            "[\"/data\"]",
+            "[\"/var/lib/gitea\", \"/etc/gitea\"]"
+          ],
+          "cmd": [
+            "[\"/usr/bin/entrypoint\"]",
+            "[\"/usr/bin/s6-svscan\", \"/etc/s6\"]",
+            "[\"/usr/bin/dumb-init\", \"--\", \"/usr/local/bin/docker-entrypoint.sh\"]",
+            "[]"
+          ]
+        },
+        "compose": {
+          "files": [],
+          "external_services": []
+        }
+      }
+    },
+    {
+      "index": 11,
+      "name": "Vikunja",
+      "family": "C",
+      "family_name": "Go",
+      "terminal_code_50": "preset_no_match",
+      "deterministic_launch_declaration": "container-only binary",
+      "typed_native_launch": false,
+      "exact_runtime_version": "go 1.27.0; no Go in catalog",
+      "runtime_in_current_catalog": true,
+      "dependency_lock": "go.sum",
+      "dependency_locked": true,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "EXPOSE 3456",
+      "port_provable_natively": false,
+      "persistent_state": "files + DB",
+      "external_services": "none required (SQLite default)",
+      "external_service_required": false,
+      "runtime_network": "none",
+      "source_facts": {
+        "markers": [
+          "go.mod"
+        ],
+        "locks": [
+          "go.sum"
+        ],
+        "version_files": {},
+        "go": {
+          "go": "1.27.0",
+          "toolchain": null,
+          "main_root": true,
+          "cmd_mains": []
+        },
+        "dockerfiles": [
+          "Dockerfile"
+        ],
+        "docker": {
+          "expose": [
+            "3456"
+          ],
+          "volume": [],
+          "cmd": [
+            "[ \"/app/vikunja/vikunja\" ]"
+          ]
+        },
+        "compose": {
+          "files": [],
+          "external_services": []
+        }
+      }
+    },
+    {
+      "index": 12,
+      "name": "Mealie",
+      "family": "B",
+      "family_name": "Python service",
+      "terminal_code_50": "preset_no_match",
+      "deterministic_launch_declaration": "pyproject console script",
+      "typed_native_launch": true,
+      "exact_runtime_version": "requires-python>=3.14,<3.15 -> not in catalog",
+      "runtime_in_current_catalog": false,
+      "dependency_lock": "uv.lock",
+      "dependency_locked": true,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "not declared",
+      "port_provable_natively": false,
+      "persistent_state": "data dir",
+      "external_services": "none required (postgres optional)",
+      "external_service_required": false,
+      "runtime_network": "recipe scraping egress",
+      "source_facts": {
+        "markers": [
+          "pyproject.toml"
+        ],
+        "locks": [
+          "uv.lock"
+        ],
+        "version_files": {},
+        "pyproject": {
+          "requires_python": ">=3.14,<3.15",
+          "console_scripts": true,
+          "build_backend": "setuptools.build_meta"
+        },
+        "dockerfiles": [
+          ".devcontainer/Dockerfile",
+          "docker/Dockerfile"
+        ],
+        "docker": {
+          "expose": [],
+          "volume": [
+            "[ \"$MEALIE_HOME/data/\" ]"
+          ],
+          "cmd": [
+            "[\"/app/run.sh\"]"
+          ]
+        },
+        "compose": {
+          "files": [
+            "docker/docker-compose.dev.yml",
+            "docker/docker-compose.yml"
+          ],
+          "external_services": [
+            "postgres"
+          ]
+        }
+      }
+    },
+    {
+      "index": 13,
+      "name": "HedgeDoc",
+      "family": "I",
+      "family_name": "multi-service",
+      "terminal_code_50": "preset_node_static_v2_workspace",
+      "deterministic_launch_declaration": "package script start: dotenv + turbo (compound)",
+      "typed_native_launch": true,
+      "exact_runtime_version": "node 24.20.0 exact -> not in catalog",
+      "runtime_in_current_catalog": false,
+      "dependency_lock": "pnpm-lock",
+      "dependency_locked": true,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "EXPOSE 3000/3001",
+      "port_provable_natively": false,
+      "persistent_state": "uploads",
+      "external_services": "postgres/mariadb required",
+      "external_service_required": true,
+      "runtime_network": "none",
+      "source_facts": {
+        "markers": [
+          "package.json"
+        ],
+        "locks": [
+          "pnpm-lock.yaml"
+        ],
+        "version_files": {
+          ".nvmrc": "24.20.0"
+        },
+        "package_json": {
+          "packageManager": null,
+          "engines": null,
+          "start": "dotenv -c production -- turbo run start",
+          "workspaces": false,
+          "main": null,
+          "bin": false
+        },
+        "dockerfiles": [
+          "backend/docker/Dockerfile",
+          "frontend/docker/Dockerfile"
+        ],
+        "docker": {
+          "expose": [
+            "3000/tcp",
+            "3001/tcp"
+          ],
+          "volume": [],
+          "cmd": [
+            "[\"tini\", \"--\"]",
+            "[\"node\", \"dist/main.js\"]",
+            "[\"tini\", \"--\"]",
+            "[\"node\", \"server.js\"]"
+          ]
+        },
+        "compose": {
+          "files": [
+            "backend/docker-compose.auth.yml",
+            "backend/docker-compose.database.yml",
+            "docker/docker-compose.yml"
+          ],
+          "external_services": [
+            "mariadb",
+            "postgres"
+          ]
+        }
+      }
+    },
+    {
+      "index": 15,
+      "name": "JupyterLab",
+      "family": "B",
+      "family_name": "Python service",
+      "terminal_code_50": "preset_node_static_v2_workspace",
+      "deterministic_launch_declaration": "pyproject console script (jupyter-lab)",
+      "typed_native_launch": true,
+      "exact_runtime_version": "requires-python>=3.10 -> catalog; yarn 3.5.0 frontend build",
+      "runtime_in_current_catalog": true,
+      "dependency_lock": "yarn.lock (frontend only); Python deps unlocked",
+      "dependency_locked": false,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "EXPOSE 8888",
+      "port_provable_natively": false,
+      "persistent_state": "notebook dir",
+      "external_services": "kernel processes",
+      "external_service_required": false,
+      "runtime_network": "none",
+      "source_facts": {
+        "markers": [
+          "package.json",
+          "pyproject.toml"
+        ],
+        "locks": [
+          "yarn.lock"
+        ],
+        "version_files": {},
+        "package_json": {
+          "packageManager": "yarn@3.5.0",
+          "engines": null,
+          "start": null,
+          "workspaces": true,
+          "main": null,
+          "bin": false
+        },
+        "pyproject": {
+          "requires_python": ">=3.10",
+          "console_scripts": true,
+          "build_backend": "hatchling.build"
+        },
+        "dockerfiles": [
+          "docker/Dockerfile"
+        ],
+        "docker": {
+          "expose": [
+            "8888"
+          ],
+          "volume": [],
+          "cmd": []
+        },
+        "compose": {
+          "files": [],
+          "external_services": []
+        }
+      }
+    },
+    {
+      "index": 16,
+      "name": "LibreChat",
+      "family": "I",
+      "family_name": "multi-service",
+      "terminal_code_50": "preset_node_static_v2_bun_deferred",
+      "deterministic_launch_declaration": "container-only (npm run backend)",
+      "typed_native_launch": false,
+      "exact_runtime_version": "node 24.16.0 exact -> not in catalog",
+      "runtime_in_current_catalog": false,
+      "dependency_lock": "package-lock + bun.lock",
+      "dependency_locked": true,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "EXPOSE 3080",
+      "port_provable_natively": false,
+      "persistent_state": "uploads",
+      "external_services": "mongo required (+ meilisearch/rag optional)",
+      "external_service_required": true,
+      "runtime_network": "LLM provider egress",
+      "source_facts": {
+        "markers": [
+          "package.json"
+        ],
+        "locks": [
+          "bun.lock",
+          "package-lock.json"
+        ],
+        "version_files": {
+          ".nvmrc": "24.16.0"
+        },
+        "package_json": {
+          "packageManager": "npm@11.13.0",
+          "engines": null,
+          "start": null,
+          "workspaces": true,
+          "main": null,
+          "bin": false
+        },
+        "dockerfiles": [
+          ".devcontainer/Dockerfile",
+          "Dockerfile",
+          "Dockerfile.multi",
+          "otel/langfuse-fanout/Dockerfile"
+        ],
+        "docker": {
+          "expose": [
+            "3080",
+            "4318"
+          ],
+          "volume": [],
+          "cmd": [
+            "[\"npm\", \"run\", \"backend\"]",
+            "[\"node\", \"server/index.js\"]",
+            "[\"/usr/local/bin/langfuse-fanout\"]"
+          ]
+        },
+        "compose": {
+          "files": [
+            ".devcontainer/docker-compose.yml",
+            "docker-compose.langfuse-fanout.yml",
+            "docker-compose.yml",
+            "search/compose.yml"
+          ],
+          "external_services": [
+            "clickhouse",
+            "meilisearch",
+            "mongo",
+            "pgvector",
+            "postgres",
+            "redis"
+          ]
+        }
+      }
+    },
+    {
+      "index": 17,
+      "name": "ComfyUI",
+      "family": "B",
+      "family_name": "Python service",
+      "terminal_code_50": "preset_no_match",
+      "deterministic_launch_declaration": "none (main.py not declared)",
+      "typed_native_launch": false,
+      "exact_runtime_version": "requires-python>=3.10 -> catalog",
+      "runtime_in_current_catalog": true,
+      "dependency_lock": "requirements.txt (not a lock)",
+      "dependency_locked": false,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "not declared",
+      "port_provable_natively": false,
+      "persistent_state": "models/output dirs",
+      "external_services": "none",
+      "external_service_required": false,
+      "runtime_network": "model download egress; GPU optional",
+      "source_facts": {
+        "markers": [
+          "pyproject.toml",
+          "requirements.txt"
+        ],
+        "locks": [],
+        "version_files": {},
+        "pyproject": {
+          "requires_python": ">=3.10",
+          "console_scripts": false,
+          "build_backend": null
+        },
+        "dockerfiles": [],
+        "docker": {
+          "expose": [],
+          "volume": [],
+          "cmd": []
+        },
+        "compose": {
+          "files": [],
+          "external_services": []
+        }
+      }
+    },
+    {
+      "index": 18,
+      "name": "PdfDing",
+      "family": "B",
+      "family_name": "Python service",
+      "terminal_code_50": "network_denied",
+      "deterministic_launch_declaration": "container-only entrypoint.sh",
+      "typed_native_launch": false,
+      "exact_runtime_version": "python unpinned (poetry)",
+      "runtime_in_current_catalog": false,
+      "dependency_lock": "poetry.lock + package-lock (assets)",
+      "dependency_locked": true,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "not declared",
+      "port_provable_natively": false,
+      "persistent_state": "data dir",
+      "external_services": "none required (postgres optional)",
+      "external_service_required": false,
+      "runtime_network": "none",
+      "source_facts": {
+        "markers": [
+          "package.json",
+          "pyproject.toml"
+        ],
+        "locks": [
+          "package-lock.json",
+          "poetry.lock"
+        ],
+        "version_files": {},
+        "package_json": {
+          "packageManager": null,
+          "engines": null,
+          "start": null,
+          "workspaces": false,
+          "main": null,
+          "bin": false
+        },
+        "pyproject": {
+          "requires_python": null,
+          "console_scripts": false,
+          "build_backend": "poetry.core.masonry.api"
+        },
+        "dockerfiles": [
+          "Dockerfile"
+        ],
+        "docker": {
+          "expose": [],
+          "volume": [],
+          "cmd": [
+            "[\"./entrypoint.sh\"]"
+          ]
+        },
+        "compose": {
+          "files": [],
+          "external_services": []
+        }
+      }
+    },
+    {
+      "index": 19,
+      "name": "Grist core",
+      "family": "I",
+      "family_name": "multi-service",
+      "terminal_code_50": "preset_node_static_v2_manager_config",
+      "deterministic_launch_declaration": "package script start: sandbox/watch.sh (script)",
+      "typed_native_launch": true,
+      "exact_runtime_version": "node v22.12.0 exact -> not in catalog (22.14.0)",
+      "runtime_in_current_catalog": false,
+      "dependency_lock": "yarn.lock (Yarn 1 + sha512 pin)",
+      "dependency_locked": true,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "EXPOSE 8484",
+      "port_provable_natively": false,
+      "persistent_state": "docs dir",
+      "external_services": "python sandbox (gvisor) process",
+      "external_service_required": false,
+      "runtime_network": "none",
+      "source_facts": {
+        "markers": [
+          "package.json"
+        ],
+        "locks": [
+          "yarn.lock"
+        ],
+        "version_files": {
+          ".nvmrc": "v22.12.0"
+        },
+        "package_json": {
+          "packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e",
+          "engines": null,
+          "start": "sandbox/watch.sh",
+          "workspaces": false,
+          "main": null,
+          "bin": false
+        },
+        "dockerfiles": [
+          "Dockerfile",
+          "sandbox/docker/Dockerfile"
+        ],
+        "docker": {
+          "expose": [
+            "8484"
+          ],
+          "volume": [],
+          "cmd": [
+            "[\"./sandbox/docker_entrypoint.sh\"]",
+            "[\"./sandbox/run.sh\"]"
+          ]
+        },
+        "compose": {
+          "files": [
+            "docker-compose-examples/grist-local-testing/docker-compose.yml",
+            "docker-compose-examples/grist-traefik-auth-ssl/docker-compose.yml",
+            "docker-compose-examples/grist-traefik-basic-auth/docker-compose.yml",
+            "docker-compose-examples/grist-with-authelia-forwarded-headers/docker-compose.yml"
+          ],
+          "external_services": []
+        }
+      }
+    },
+    {
+      "index": 20,
+      "name": "File Browser",
+      "family": "C",
+      "family_name": "Go",
+      "terminal_code_50": "preset_no_match",
+      "deterministic_launch_declaration": "container-only init.sh",
+      "typed_native_launch": false,
+      "exact_runtime_version": "go 1.25.0; no Go in catalog",
+      "runtime_in_current_catalog": true,
+      "dependency_lock": "go.sum",
+      "dependency_locked": true,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "EXPOSE 80",
+      "port_provable_natively": false,
+      "persistent_state": "config + database dirs",
+      "external_services": "none (redis optional)",
+      "external_service_required": false,
+      "runtime_network": "none",
+      "source_facts": {
+        "markers": [
+          "go.mod"
+        ],
+        "locks": [
+          "go.sum"
+        ],
+        "version_files": {},
+        "go": {
+          "go": "1.25.0",
+          "toolchain": null,
+          "main_root": true,
+          "cmd_mains": []
+        },
+        "dockerfiles": [
+          "Dockerfile",
+          "Dockerfile.s6"
+        ],
+        "docker": {
+          "expose": [
+            "80"
+          ],
+          "volume": [
+            "/srv /config /database"
+          ],
+          "cmd": [
+            "[ \"tini\", \"--\", \"/init.sh\" ]"
+          ]
+        },
+        "compose": {
+          "files": [
+            "compose.yaml"
+          ],
+          "external_services": [
+            "redis"
+          ]
+        }
+      }
+    },
+    {
+      "index": 27,
+      "name": "Wiki.js",
+      "family": "A",
+      "family_name": "Node service",
+      "terminal_code_50": "preset_node_static_v2_manager_config",
+      "deterministic_launch_declaration": "package script start: node server (plain argv)",
+      "typed_native_launch": true,
+      "exact_runtime_version": "node v24.12.0 exact (.nvmrc) -> not in catalog",
+      "runtime_in_current_catalog": false,
+      "dependency_lock": "yarn.lock",
+      "dependency_locked": true,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "EXPOSE 3000; config.yml",
+      "port_provable_natively": false,
+      "persistent_state": "content dir",
+      "external_services": "postgres (config.yml; SQLite optional)",
+      "external_service_required": false,
+      "runtime_network": "none",
+      "source_facts": {
+        "markers": [
+          "package.json"
+        ],
+        "locks": [
+          "yarn.lock"
+        ],
+        "version_files": {
+          ".nvmrc": "v24.12.0"
+        },
+        "package_json": {
+          "packageManager": null,
+          "engines": {
+            "node": ">=20"
+          },
+          "start": "node server",
+          "workspaces": false,
+          "main": "wiki.js",
+          "bin": false
+        },
+        "dockerfiles": [
+          "dev/build-arm/Dockerfile",
+          "dev/build/Dockerfile",
+          "dev/containers/Dockerfile",
+          "dev/openshift/Dockerfile"
+        ],
+        "docker": {
+          "expose": [
+            "3000",
+            "3443"
+          ],
+          "volume": [
+            "[\"/wiki/data/content\"]"
+          ],
+          "cmd": [
+            "[\"node\", \"server\"]",
+            "[\"node\", \"--no-deprecation\", \"server\"]",
+            "[\"tail\", \"-f\", \"/dev/null\"]"
+          ]
+        },
+        "compose": {
+          "files": [
+            "dev/containers/docker-compose.yml",
+            "dev/examples/docker-compose.yml"
+          ],
+          "external_services": [
+            "postgres"
+          ]
+        }
+      }
+    },
+    {
+      "index": 28,
+      "name": "Kutt",
+      "family": "A",
+      "family_name": "Node service",
+      "terminal_code_50": "preset_node_static_needs_build_script",
+      "deterministic_launch_declaration": "package script start: node server/server.js --production (plain argv); separate migrate script",
+      "typed_native_launch": true,
+      "exact_runtime_version": "no engines -> default 20.20.2",
+      "runtime_in_current_catalog": true,
+      "dependency_lock": "package-lock.json",
+      "dependency_locked": true,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "PORT env (.example.env 3000)",
+      "port_provable_natively": false,
+      "persistent_state": "SQLite file (DB_CLIENT=better-sqlite3 default)",
+      "external_services": "none required (redis optional)",
+      "external_service_required": false,
+      "runtime_network": "none",
+      "source_facts": {
+        "markers": [
+          "package.json"
+        ],
+        "locks": [
+          "package-lock.json"
+        ],
+        "version_files": {},
+        "package_json": {
+          "packageManager": null,
+          "engines": null,
+          "start": "node server/server.js --production",
+          "workspaces": false,
+          "main": "./server/server.js",
+          "bin": false
+        },
+        "dockerfiles": [
+          "Dockerfile"
+        ],
+        "docker": {
+          "expose": [
+            "3000"
+          ],
+          "volume": [],
+          "cmd": [
+            "npm run migrate && npm start"
+          ]
+        },
+        "compose": {
+          "files": [
+            "docker-compose.mariadb.yml",
+            "docker-compose.postgres.yml",
+            "docker-compose.sqlite-redis.yml",
+            "docker-compose.yml"
+          ],
+          "external_services": [
+            "mariadb",
+            "mysql",
+            "postgres",
+            "redis"
+          ]
+        }
+      }
+    },
+    {
+      "index": 29,
+      "name": "Umami",
+      "family": "I",
+      "family_name": "multi-service",
+      "terminal_code_50": "preset_node_static_v2_workspace",
+      "deterministic_launch_declaration": "package script start: next start (needs build)",
+      "typed_native_launch": true,
+      "exact_runtime_version": "engines pnpm 12.3.4; node unpinned",
+      "runtime_in_current_catalog": false,
+      "dependency_lock": "pnpm-lock",
+      "dependency_locked": true,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "EXPOSE 3000",
+      "port_provable_natively": false,
+      "persistent_state": "DB",
+      "external_services": "postgres required (clickhouse optional)",
+      "external_service_required": true,
+      "runtime_network": "none",
+      "source_facts": {
+        "markers": [
+          "package.json"
+        ],
+        "locks": [
+          "pnpm-lock.yaml"
+        ],
+        "version_files": {},
+        "package_json": {
+          "packageManager": null,
+          "engines": {
+            "pnpm": "12.3.4"
+          },
+          "start": "next start",
+          "workspaces": false,
+          "main": null,
+          "bin": false
+        },
+        "dockerfiles": [
+          "Dockerfile"
+        ],
+        "docker": {
+          "expose": [
+            "3000"
+          ],
+          "volume": [],
+          "cmd": [
+            "[\"sh\", \"scripts/start-docker.sh\"]"
+          ]
+        },
+        "compose": {
+          "files": [
+            "docker-compose.test.yml",
+            "docker-compose.yml"
+          ],
+          "external_services": [
+            "clickhouse",
+            "postgres"
+          ]
+        }
+      }
+    },
+    {
+      "index": 30,
+      "name": "Ghost",
+      "family": "I",
+      "family_name": "multi-service",
+      "terminal_code_50": "preset_node_static_v2_workspace",
+      "deterministic_launch_declaration": "container-only (node index.js)",
+      "typed_native_launch": false,
+      "exact_runtime_version": "node 22.23.3 exact -> not in catalog",
+      "runtime_in_current_catalog": false,
+      "dependency_lock": "pnpm-lock (workspace)",
+      "dependency_locked": true,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "EXPOSE 2368",
+      "port_provable_natively": false,
+      "persistent_state": "content dir",
+      "external_services": "mysql required in production (SQLite dev)",
+      "external_service_required": true,
+      "runtime_network": "mail egress optional",
+      "source_facts": {
+        "markers": [
+          "package.json"
+        ],
+        "locks": [
+          "pnpm-lock.yaml"
+        ],
+        "version_files": {
+          ".nvmrc": "22.23.3",
+          ".node-version": "22.23.3"
+        },
+        "package_json": {
+          "packageManager": "pnpm@12.7.0+sha512.9c56477e360068d6e9dca6a92efb4e46b3dc5a52fcebf3d84d78b9736c0ded589a561621a52f68219a7a39facc63cdc079c3226ef9c9d5f02b79f74e69a807b6",
+          "engines": {
+            "node": "^22.23.1 || ^24.20.0"
+          },
+          "start": null,
+          "workspaces": false,
+          "main": null,
+          "bin": false
+        },
+        "dockerfiles": [
+          "Dockerfile.production",
+          "docker/dev-gateway/Dockerfile",
+          "docker/fake-mailgun/Dockerfile",
+          "docker/ghost-dev/Dockerfile",
+          "docker/tb-cli/Dockerfile",
+          "docker/tinybird-local-slim/Dockerfile"
+        ],
+        "docker": {
+          "expose": [
+            "2368",
+            "80 2368"
+          ],
+          "volume": [],
+          "cmd": [
+            "[\"node\", \"index.js\"]",
+            "[\"/usr/local/bin/fake-mailgun\"]",
+            "[\"/home/ghost/entrypoint.sh\"]",
+            "[\"pnpm\", \"dev\"]"
+          ]
+        },
+        "compose": {
+          "files": [
+            ".devcontainer/compose.devcontainer.yaml",
+            "compose.dev.analytics.yaml",
+            "compose.dev.fake-mailgun.yaml",
+            "compose.dev.mailgun.yaml"
+          ],
+          "external_services": [
+            "clickhouse",
+            "mysql",
+            "redis"
+          ]
+        }
+      }
+    },
+    {
+      "index": 31,
+      "name": "Radicale",
+      "family": "B",
+      "family_name": "Python service",
+      "terminal_code_50": "preset_no_match",
+      "deterministic_launch_declaration": "pyproject console script: radicale",
+      "typed_native_launch": true,
+      "exact_runtime_version": "requires-python>=3.9 -> catalog",
+      "runtime_in_current_catalog": true,
+      "dependency_lock": "none (unpinned pyproject deps)",
+      "dependency_locked": false,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "EXPOSE 5232 (container metadata)",
+      "port_provable_natively": false,
+      "persistent_state": "collections dir",
+      "external_services": "none",
+      "external_service_required": false,
+      "runtime_network": "none",
+      "source_facts": {
+        "markers": [
+          "pyproject.toml"
+        ],
+        "locks": [],
+        "version_files": {},
+        "pyproject": {
+          "requires_python": ">=3.9.0",
+          "console_scripts": true,
+          "build_backend": "setuptools.build_meta"
+        },
+        "dockerfiles": [
+          "Dockerfile",
+          "Dockerfile.dev"
+        ],
+        "docker": {
+          "expose": [
+            "5232"
+          ],
+          "volume": [
+            "/var/lib/radicale"
+          ],
+          "cmd": [
+            "[ \"/app/bin/python\", \"/app/bin/radicale\"]",
+            "[\"--hosts\", \"0.0.0.0:5232,[::]:5232\"]",
+            "[ \"/app/bin/python\", \"/app/bin/radicale\"]",
+            "[\"--hosts\", \"0.0.0.0:5232\"]"
+          ]
+        },
+        "compose": {
+          "files": [
+            "compose.yaml"
+          ],
+          "external_services": []
+        }
+      }
+    },
+    {
+      "index": 32,
+      "name": "Calibre-Web",
+      "family": "B",
+      "family_name": "Python service",
+      "terminal_code_50": "preset_no_match",
+      "deterministic_launch_declaration": "pyproject console script: cps",
+      "typed_native_launch": true,
+      "exact_runtime_version": "requires-python>=3.6 -> catalog",
+      "runtime_in_current_catalog": true,
+      "dependency_lock": "requirements.txt ranges (not a lock)",
+      "dependency_locked": false,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "not declared",
+      "port_provable_natively": false,
+      "persistent_state": "calibre library + app DB",
+      "external_services": "none",
+      "external_service_required": false,
+      "runtime_network": "none",
+      "source_facts": {
+        "markers": [
+          "pyproject.toml",
+          "requirements.txt"
+        ],
+        "locks": [],
+        "version_files": {},
+        "pyproject": {
+          "requires_python": ">=3.6",
+          "console_scripts": true,
+          "build_backend": "setuptools.build_meta"
+        },
+        "dockerfiles": [],
+        "docker": {
+          "expose": [],
+          "volume": [],
+          "cmd": []
+        },
+        "compose": {
+          "files": [],
+          "external_services": []
+        }
+      }
+    },
+    {
+      "index": 33,
+      "name": "Shynet",
+      "family": "B",
+      "family_name": "Python service",
+      "terminal_code_50": "preset_node_static_needs_build_script",
+      "deterministic_launch_declaration": "container-only entrypoint.sh",
+      "typed_native_launch": false,
+      "exact_runtime_version": "python unpinned (poetry)",
+      "runtime_in_current_catalog": false,
+      "dependency_lock": "poetry.lock + package-lock (assets)",
+      "dependency_locked": true,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "EXPOSE 8080",
+      "port_provable_natively": false,
+      "persistent_state": "DB",
+      "external_services": "postgres required",
+      "external_service_required": true,
+      "runtime_network": "none",
+      "source_facts": {
+        "markers": [
+          "package.json",
+          "pyproject.toml"
+        ],
+        "locks": [
+          "package-lock.json",
+          "poetry.lock"
+        ],
+        "version_files": {},
+        "package_json": {
+          "packageManager": null,
+          "engines": null,
+          "start": null,
+          "workspaces": false,
+          "main": null,
+          "bin": false
+        },
+        "pyproject": {
+          "requires_python": null,
+          "console_scripts": false,
+          "build_backend": "poetry.core.masonry.api"
+        },
+        "dockerfiles": [
+          ".devcontainer/Dockerfile",
+          "Dockerfile"
+        ],
+        "docker": {
+          "expose": [
+            "8080"
+          ],
+          "volume": [],
+          "cmd": [
+            "[ \"./entrypoint.sh\" ]"
+          ]
+        },
+        "compose": {
+          "files": [
+            ".devcontainer/docker-compose.yml",
+            "docker-compose.yml"
+          ],
+          "external_services": [
+            "postgres"
+          ]
+        }
+      }
+    },
+    {
+      "index": 34,
+      "name": "text-generation-webui",
+      "family": "B",
+      "family_name": "Python service",
+      "terminal_code_50": "preset_no_match",
+      "deterministic_launch_declaration": "container-only (server.py / start_linux.sh)",
+      "typed_native_launch": false,
+      "exact_runtime_version": "python unpinned",
+      "runtime_in_current_catalog": false,
+      "dependency_lock": "none",
+      "dependency_locked": false,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "EXPOSE 7860/5000",
+      "port_provable_natively": false,
+      "persistent_state": "models dir",
+      "external_services": "none",
+      "external_service_required": false,
+      "runtime_network": "model download egress; GPU",
+      "source_facts": {
+        "markers": [],
+        "locks": [],
+        "version_files": {},
+        "dockerfiles": [
+          "docker/TensorRT-LLM/Dockerfile",
+          "docker/amd/Dockerfile",
+          "docker/cpu/Dockerfile",
+          "docker/intel/Dockerfile",
+          "docker/nvidia/Dockerfile"
+        ],
+        "docker": {
+          "expose": [
+            "7860 5000"
+          ],
+          "volume": [],
+          "cmd": [
+            "[\"python3\", \"server.py\", \"--api\", \"--listen\"]",
+            "umask 0002 && export HOME=/home/app/textgen && ./start_linux.sh --listen",
+            "umask 0002 && export HOME=/home/app/textgen && ./start_linux.sh --listen",
+            "umask 0002 && export HOME=/home/app/textgen && ./start_linux.sh --listen"
+          ]
+        },
+        "compose": {
+          "files": [
+            "docker/amd/docker-compose.yml",
+            "docker/cpu/docker-compose.yml",
+            "docker/intel/docker-compose.yml",
+            "docker/nvidia/docker-compose.yml"
+          ],
+          "external_services": []
+        }
+      }
+    },
+    {
+      "index": 35,
+      "name": "PrivateGPT",
+      "family": "I",
+      "family_name": "multi-service",
+      "terminal_code_50": "preset_no_match",
+      "deterministic_launch_declaration": "pyproject console script: private-gpt",
+      "typed_native_launch": true,
+      "exact_runtime_version": "requires-python>=3.11,<3.12 -> 3.11.11 in catalog",
+      "runtime_in_current_catalog": true,
+      "dependency_lock": "uv.lock",
+      "dependency_locked": true,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "PORT env default 8080 (settings.yaml)",
+      "port_provable_natively": false,
+      "persistent_state": "local data",
+      "external_services": "rabbitmq task broker by default; LLM provider",
+      "external_service_required": false,
+      "runtime_network": "LLM/model egress",
+      "source_facts": {
+        "markers": [
+          "Makefile",
+          "pyproject.toml"
+        ],
+        "locks": [
+          "uv.lock"
+        ],
+        "version_files": {},
+        "pyproject": {
+          "requires_python": ">=3.11,<3.12",
+          "console_scripts": true,
+          "build_backend": "hatchling.build"
+        },
+        "dockerfiles": [
+          "Dockerfile"
+        ],
+        "docker": {
+          "expose": [
+            "8080"
+          ],
+          "volume": [],
+          "cmd": [
+            "[\"private-gpt\"]",
+            "[\"serve\"]"
+          ]
+        },
+        "compose": {
+          "files": [],
+          "external_services": []
+        }
+      }
+    },
+    {
+      "index": 36,
+      "name": "Gotify",
+      "family": "C",
+      "family_name": "Go",
+      "terminal_code_50": "preset_no_match",
+      "deterministic_launch_declaration": "container-only binary",
+      "typed_native_launch": false,
+      "exact_runtime_version": "go 1.26.0; no Go in catalog",
+      "runtime_in_current_catalog": true,
+      "dependency_lock": "go.sum",
+      "dependency_locked": true,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "not declared",
+      "port_provable_natively": false,
+      "persistent_state": "data dir",
+      "external_services": "none",
+      "external_service_required": false,
+      "runtime_network": "none",
+      "source_facts": {
+        "markers": [
+          "Makefile",
+          "go.mod"
+        ],
+        "locks": [
+          "go.sum"
+        ],
+        "version_files": {},
+        "go": {
+          "go": "1.26.0",
+          "toolchain": null,
+          "main_root": false,
+          "cmd_mains": []
+        },
+        "dockerfiles": [
+          "docker/Dockerfile"
+        ],
+        "docker": {
+          "expose": [],
+          "volume": [],
+          "cmd": [
+            "[\"./gotify-app\"]",
+            "[\"serve\"]"
+          ]
+        },
+        "compose": {
+          "files": [],
+          "external_services": []
+        }
+      }
+    },
+    {
+      "index": 37,
+      "name": "Navidrome",
+      "family": "C",
+      "family_name": "Go",
+      "terminal_code_50": "preset_no_match",
+      "deterministic_launch_declaration": "container-only binary",
+      "typed_native_launch": false,
+      "exact_runtime_version": "go 1.27 + node v24 assets; no Go in catalog",
+      "runtime_in_current_catalog": true,
+      "dependency_lock": "go.sum",
+      "dependency_locked": true,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "not declared",
+      "port_provable_natively": false,
+      "persistent_state": "data + music dirs",
+      "external_services": "none",
+      "external_service_required": false,
+      "runtime_network": "none",
+      "source_facts": {
+        "markers": [
+          "Makefile",
+          "go.mod"
+        ],
+        "locks": [
+          "go.sum"
+        ],
+        "version_files": {
+          ".nvmrc": "v24"
+        },
+        "go": {
+          "go": "1.27",
+          "toolchain": null,
+          "main_root": true,
+          "cmd_mains": []
+        },
+        "dockerfiles": [
+          ".devcontainer/Dockerfile",
+          "Dockerfile"
+        ],
+        "docker": {
+          "expose": [],
+          "volume": [
+            "[\"/data\", \"/music\"]"
+          ],
+          "cmd": [
+            "[\"/app/navidrome\"]"
+          ]
+        },
+        "compose": {
+          "files": [
+            "contrib/docker-compose/docker-compose-caddy.yml",
+            "contrib/docker-compose/docker-compose-traefik.yml",
+            "contrib/docker-compose/docker-compose.yml"
+          ],
+          "external_services": []
+        }
+      }
+    },
+    {
+      "index": 38,
+      "name": "PocketBase",
+      "family": "C",
+      "family_name": "Go",
+      "terminal_code_50": "preset_no_match",
+      "deterministic_launch_declaration": "none (library; example main)",
+      "typed_native_launch": false,
+      "exact_runtime_version": "go 1.27; no Go in catalog",
+      "runtime_in_current_catalog": true,
+      "dependency_lock": "go.sum",
+      "dependency_locked": true,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "not declared",
+      "port_provable_natively": false,
+      "persistent_state": "pb_data dir",
+      "external_services": "none",
+      "external_service_required": false,
+      "runtime_network": "none",
+      "source_facts": {
+        "markers": [
+          "Makefile",
+          "go.mod"
+        ],
+        "locks": [
+          "go.sum"
+        ],
+        "version_files": {},
+        "go": {
+          "go": "1.27",
+          "toolchain": null,
+          "main_root": false,
+          "cmd_mains": []
+        },
+        "dockerfiles": [],
+        "docker": {
+          "expose": [],
+          "volume": [],
+          "cmd": []
+        },
+        "compose": {
+          "files": [],
+          "external_services": []
+        }
+      }
+    },
+    {
+      "index": 39,
+      "name": "Glance",
+      "family": "C",
+      "family_name": "Go",
+      "terminal_code_50": "preset_no_match",
+      "deterministic_launch_declaration": "container-only binary --config",
+      "typed_native_launch": false,
+      "exact_runtime_version": "go 1.27.1; no Go in catalog",
+      "runtime_in_current_catalog": true,
+      "dependency_lock": "go.sum",
+      "dependency_locked": true,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "EXPOSE 8080",
+      "port_provable_natively": false,
+      "persistent_state": "config file",
+      "external_services": "none",
+      "external_service_required": false,
+      "runtime_network": "widget egress",
+      "source_facts": {
+        "markers": [
+          "go.mod"
+        ],
+        "locks": [
+          "go.sum"
+        ],
+        "version_files": {},
+        "go": {
+          "go": "1.27.1",
+          "toolchain": null,
+          "main_root": true,
+          "cmd_mains": []
+        },
+        "dockerfiles": [
+          "Dockerfile",
+          "Dockerfile.goreleaser"
+        ],
+        "docker": {
+          "expose": [
+            "8080/tcp"
+          ],
+          "volume": [],
+          "cmd": [
+            "[\"/app/glance\", \"--config\", \"/app/config/glance.yml\"]",
+            "[\"/app/glance\", \"--config\", \"/app/config/glance.yml\"]"
+          ]
+        },
+        "compose": {
+          "files": [],
+          "external_services": []
+        }
+      }
+    },
+    {
+      "index": 40,
+      "name": "Shiori",
+      "family": "C",
+      "family_name": "Go",
+      "terminal_code_50": "preset_node_static_v2_bun_deferred",
+      "deterministic_launch_declaration": "Procfile web: bin/shiori server -p $PORT",
+      "typed_native_launch": true,
+      "exact_runtime_version": "go 1.25.1; no Go in catalog; bun.lockb assets",
+      "runtime_in_current_catalog": true,
+      "dependency_lock": "go.sum + bun.lockb",
+      "dependency_locked": true,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "PORT via Procfile",
+      "port_provable_natively": false,
+      "persistent_state": "data dir",
+      "external_services": "none required (SQLite default)",
+      "external_service_required": false,
+      "runtime_network": "page archive egress",
+      "source_facts": {
+        "markers": [
+          "Makefile",
+          "Procfile",
+          "go.mod",
+          "package.json"
+        ],
+        "locks": [
+          "bun.lockb",
+          "go.sum"
+        ],
+        "version_files": {},
+        "package_json": {
+          "packageManager": null,
+          "engines": null,
+          "start": null,
+          "workspaces": false,
+          "main": null,
+          "bin": false
+        },
+        "go": {
+          "go": "1.25.1",
+          "toolchain": null,
+          "main_root": true,
+          "cmd_mains": []
+        },
+        "procfile": [
+          "web: bin/shiori server -p $PORT"
+        ],
+        "dockerfiles": [
+          "Dockerfile",
+          "Dockerfile.alpine",
+          "Dockerfile.compose",
+          "Dockerfile.e2e"
+        ],
+        "docker": {
+          "expose": [],
+          "volume": [],
+          "cmd": [
+            "[\"/usr/bin/shiori\"]",
+            "[\"server\"]",
+            "[\"/usr/bin/shiori\"]",
+            "[\"server\"]"
+          ]
+        },
+        "compose": {
+          "files": [
+            "docker-compose.yaml"
+          ],
+          "external_services": [
+            "mariadb",
+            "mysql",
+            "postgres"
+          ]
+        }
+      }
+    },
+    {
+      "index": 41,
+      "name": "Vaultwarden",
+      "family": "E",
+      "family_name": "Rust",
+      "terminal_code_50": "preset_no_match",
+      "deterministic_launch_declaration": "container-only start.sh",
+      "typed_native_launch": false,
+      "exact_runtime_version": "rust 1.98.1 toolchain pinned; no Rust in catalog",
+      "runtime_in_current_catalog": true,
+      "dependency_lock": "Cargo.lock",
+      "dependency_locked": true,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "EXPOSE 80",
+      "port_provable_natively": false,
+      "persistent_state": "/data",
+      "external_services": "none required (SQLite default)",
+      "external_service_required": false,
+      "runtime_network": "none",
+      "source_facts": {
+        "markers": [
+          "Cargo.toml"
+        ],
+        "locks": [
+          "Cargo.lock"
+        ],
+        "version_files": {
+          "rust-toolchain.toml": "[toolchain]\nchannel = \"1.98.1\"\ncomponents = [ \"rustfmt\", \"clippy\" ]\nprofile = \"minimal\""
+        },
+        "rust": {
+          "workspace": true,
+          "rust_version": "1.96.1",
+          "src_main": true
+        },
+        "dockerfiles": [
+          "docker/Dockerfile.alpine",
+          "docker/Dockerfile.debian",
+          "docker/Dockerfile.j2"
+        ],
+        "docker": {
+          "expose": [
+            "80"
+          ],
+          "volume": [
+            "/data"
+          ],
+          "cmd": [
+            "[\"/start.sh\"]",
+            "[\"/start.sh\"]",
+            "[\"/start.sh\"]"
+          ]
+        },
+        "compose": {
+          "files": [
+            "playwright/docker-compose.yml"
+          ],
+          "external_services": [
+            "mariadb",
+            "mysql",
+            "postgres"
+          ]
+        }
+      }
+    },
+    {
+      "index": 42,
+      "name": "Lemmy",
+      "family": "I",
+      "family_name": "multi-service",
+      "terminal_code_50": "preset_no_match",
+      "deterministic_launch_declaration": "container-only lemmy_server",
+      "typed_native_launch": false,
+      "exact_runtime_version": "rust 1.95 toolchain pinned; no Rust in catalog",
+      "runtime_in_current_catalog": true,
+      "dependency_lock": "Cargo.lock",
+      "dependency_locked": true,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "EXPOSE 8536",
+      "port_provable_natively": false,
+      "persistent_state": "DB",
+      "external_services": "postgres required",
+      "external_service_required": true,
+      "runtime_network": "federation egress",
+      "source_facts": {
+        "markers": [
+          "Cargo.toml"
+        ],
+        "locks": [
+          "Cargo.lock"
+        ],
+        "version_files": {
+          "rust-toolchain.toml": "[toolchain]\nchannel = \"1.95\""
+        },
+        "rust": {
+          "workspace": true,
+          "rust_version": "1.92",
+          "src_main": false
+        },
+        "dockerfiles": [
+          "docker/Dockerfile"
+        ],
+        "docker": {
+          "expose": [
+            "8536"
+          ],
+          "volume": [],
+          "cmd": [
+            "[\"lemmy_server\"]"
+          ]
+        },
+        "compose": {
+          "files": [
+            "docker/docker-compose.yml",
+            "docker/federation/docker-compose.yml"
+          ],
+          "external_services": [
+            "postgres"
+          ]
+        }
+      }
+    },
+    {
+      "index": 43,
+      "name": "Paperless-ngx",
+      "family": "I",
+      "family_name": "multi-service",
+      "terminal_code_50": "preset_no_match",
+      "deterministic_launch_declaration": "container-only /init (s6)",
+      "typed_native_launch": false,
+      "exact_runtime_version": "requires-python>=3.11 -> catalog",
+      "runtime_in_current_catalog": true,
+      "dependency_lock": "uv.lock",
+      "dependency_locked": true,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "EXPOSE 8000",
+      "port_provable_natively": false,
+      "persistent_state": "data + media dirs",
+      "external_services": "redis required (+ DB, tika/gotenberg optional)",
+      "external_service_required": true,
+      "runtime_network": "none",
+      "source_facts": {
+        "markers": [
+          "pyproject.toml"
+        ],
+        "locks": [
+          "uv.lock"
+        ],
+        "version_files": {},
+        "pyproject": {
+          "requires_python": ">=3.11",
+          "console_scripts": false,
+          "build_backend": null
+        },
+        "dockerfiles": [
+          ".devcontainer/Dockerfile",
+          "Dockerfile"
+        ],
+        "docker": {
+          "expose": [
+            "8000"
+          ],
+          "volume": [
+            "[\"/usr/src/paperless/data\", \\",
+            "[\"/usr/src/paperless/paperless-ngx/data\", \\"
+          ],
+          "cmd": [
+            "[\"/init\"]"
+          ]
+        },
+        "compose": {
+          "files": [
+            ".devcontainer/docker-compose.devcontainer.sqlite-tika.yml",
+            "docker/compose/docker-compose.ci-test.yml",
+            "docker/compose/docker-compose.mariadb-tika.yml",
+            "docker/compose/docker-compose.mariadb.yml"
+          ],
+          "external_services": [
+            "mariadb",
+            "mysql",
+            "redis",
+            "valkey"
+          ]
+        }
+      }
+    },
+    {
+      "index": 44,
+      "name": "Mastodon",
+      "family": "I",
+      "family_name": "multi-service",
+      "terminal_code_50": "preset_node_static_v2_workspace",
+      "deterministic_launch_declaration": "Procfile web/worker + streaming start",
+      "typed_native_launch": true,
+      "exact_runtime_version": "ruby 4.0.7 + node 24.21; no Ruby in catalog",
+      "runtime_in_current_catalog": true,
+      "dependency_lock": "Gemfile.lock + yarn.lock",
+      "dependency_locked": true,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "EXPOSE 3000/4000",
+      "port_provable_natively": false,
+      "persistent_state": "media",
+      "external_services": "postgres + redis required (+ elasticsearch optional)",
+      "external_service_required": true,
+      "runtime_network": "federation egress",
+      "source_facts": {
+        "markers": [
+          "Gemfile",
+          "Procfile",
+          "package.json"
+        ],
+        "locks": [
+          "Gemfile.lock",
+          "yarn.lock"
+        ],
+        "version_files": {
+          ".nvmrc": "24.21",
+          ".ruby-version": "4.0.7"
+        },
+        "package_json": {
+          "packageManager": "yarn@4.18.1",
+          "engines": {
+            "node": ">=22"
+          },
+          "start": "node ./streaming/index.js",
+          "workspaces": true,
+          "main": null,
+          "bin": false
+        },
+        "ruby_version_in_gemfile": ">= 3.3.0",
+        "procfile": [
+          "web: bin/heroku-web",
+          "worker: bundle exec sidekiq",
+          "",
+          "# For the streaming API, you need a separate app that shares Postgres and Redis:",
+          "#",
+          "# heroku create"
+        ],
+        "dockerfiles": [
+          ".devcontainer/Dockerfile",
+          "Dockerfile",
+          "streaming/Dockerfile"
+        ],
+        "docker": {
+          "expose": [
+            "3000",
+            "4000"
+          ],
+          "volume": [],
+          "cmd": [
+            "[\"/usr/bin/tini\", \"--\"]",
+            "[ \"node\", \"./streaming/index.js\" ]"
+          ]
+        },
+        "compose": {
+          "files": [
+            ".devcontainer/compose.yaml",
+            "docker-compose.yml"
+          ],
+          "external_services": [
+            "elasticsearch",
+            "postgres",
+            "redis"
+          ]
+        }
+      }
+    },
+    {
+      "index": 45,
+      "name": "Linkwarden",
+      "family": "I",
+      "family_name": "multi-service",
+      "terminal_code_50": "preset_node_static_v2_workspace",
+      "deterministic_launch_declaration": "container-only (prisma migrate + start)",
+      "typed_native_launch": false,
+      "exact_runtime_version": "node unpinned; Yarn 4.12.0",
+      "runtime_in_current_catalog": false,
+      "dependency_lock": "yarn.lock (workspace)",
+      "dependency_locked": true,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "EXPOSE 3000",
+      "port_provable_natively": false,
+      "persistent_state": "archives",
+      "external_services": "postgres required (+ meilisearch optional)",
+      "external_service_required": true,
+      "runtime_network": "page archive egress",
+      "source_facts": {
+        "markers": [
+          "package.json"
+        ],
+        "locks": [
+          "yarn.lock"
+        ],
+        "version_files": {},
+        "package_json": {
+          "packageManager": "yarn@4.12.0+sha512.f45ab632439a67f8bc759bf32ead036a1f413287b9042726b7cc4818b7b49e14e9423ba49b18f9e06ea4941c1ad062385b1d8760a8d5091a1a31e5f6219afca8",
+          "engines": null,
+          "start": null,
+          "workspaces": true,
+          "main": null,
+          "bin": false
+        },
+        "dockerfiles": [
+          "Dockerfile"
+        ],
+        "docker": {
+          "expose": [
+            "3000"
+          ],
+          "volume": [],
+          "cmd": [
+            "[ \"/usr/bin/curl\", \"--silent\", \"--fail\", \"http://127.0.0.1:3000/\" ]",
+            "[\"sh\", \"-c\", \"export PATH=/data/node_modules/.bin:$PATH && prisma migrate deploy --schema=/data/packages/prisma/schema.p"
+          ]
+        },
+        "compose": {
+          "files": [
+            "docker-compose.dev.yml",
+            "docker-compose.yml"
+          ],
+          "external_services": [
+            "meilisearch",
+            "postgres"
+          ]
+        }
+      }
+    },
+    {
+      "index": 46,
+      "name": "NetBox",
+      "family": "I",
+      "family_name": "multi-service",
+      "terminal_code_50": "preset_no_match",
+      "deterministic_launch_declaration": "pyproject console script (management)",
+      "typed_native_launch": true,
+      "exact_runtime_version": "requires-python>=3.12 -> catalog",
+      "runtime_in_current_catalog": true,
+      "dependency_lock": "requirements.txt (pins, not a lock file)",
+      "dependency_locked": false,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "not declared",
+      "port_provable_natively": false,
+      "persistent_state": "media",
+      "external_services": "postgres + redis required",
+      "external_service_required": true,
+      "runtime_network": "none",
+      "source_facts": {
+        "markers": [
+          "pyproject.toml",
+          "requirements.txt"
+        ],
+        "locks": [],
+        "version_files": {},
+        "pyproject": {
+          "requires_python": ">=3.12",
+          "console_scripts": true,
+          "build_backend": "hatchling.build"
+        },
+        "dockerfiles": [],
+        "docker": {
+          "expose": [],
+          "volume": [],
+          "cmd": []
+        },
+        "compose": {
+          "files": [],
+          "external_services": []
+        }
+      }
+    },
+    {
+      "index": 47,
+      "name": "BookStack",
+      "family": "D",
+      "family_name": "PHP",
+      "terminal_code_50": "network_denied",
+      "deterministic_launch_declaration": "none (artisan; no declared web server)",
+      "typed_native_launch": false,
+      "exact_runtime_version": "php ^8.2; no PHP in catalog",
+      "runtime_in_current_catalog": true,
+      "dependency_lock": "composer.lock + package-lock (assets)",
+      "dependency_locked": true,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "not declared",
+      "port_provable_natively": false,
+      "persistent_state": "uploads",
+      "external_services": "mysql required",
+      "external_service_required": true,
+      "runtime_network": "none",
+      "source_facts": {
+        "markers": [
+          "artisan",
+          "composer.json",
+          "package.json"
+        ],
+        "locks": [
+          "composer.lock",
+          "package-lock.json"
+        ],
+        "version_files": {},
+        "package_json": {
+          "packageManager": null,
+          "engines": null,
+          "start": null,
+          "workspaces": false,
+          "main": null,
+          "bin": false
+        },
+        "php": "^8.2.0",
+        "dockerfiles": [
+          "dev/docker/Dockerfile"
+        ],
+        "docker": {
+          "expose": [],
+          "volume": [],
+          "cmd": []
+        },
+        "compose": {
+          "files": [
+            "docker-compose.yml"
+          ],
+          "external_services": [
+            "mysql"
+          ]
+        }
+      }
+    },
+    {
+      "index": 48,
+      "name": "Firefly III",
+      "family": "D",
+      "family_name": "PHP",
+      "terminal_code_50": "preset_node_static_needs_build_script",
+      "deterministic_launch_declaration": "none (artisan)",
+      "typed_native_launch": false,
+      "exact_runtime_version": "php >=8.5; no PHP in catalog",
+      "runtime_in_current_catalog": true,
+      "dependency_lock": "composer.lock + package-lock (assets)",
+      "dependency_locked": true,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "not declared",
+      "port_provable_natively": false,
+      "persistent_state": "uploads",
+      "external_services": "DB required (SQLite possible)",
+      "external_service_required": true,
+      "runtime_network": "none",
+      "source_facts": {
+        "markers": [
+          "artisan",
+          "composer.json",
+          "package.json"
+        ],
+        "locks": [
+          "composer.lock",
+          "package-lock.json"
+        ],
+        "version_files": {},
+        "package_json": {
+          "packageManager": null,
+          "engines": null,
+          "start": null,
+          "workspaces": true,
+          "main": null,
+          "bin": false
+        },
+        "php": ">=8.5",
+        "dockerfiles": [],
+        "docker": {
+          "expose": [],
+          "volume": [],
+          "cmd": []
+        },
+        "compose": {
+          "files": [],
+          "external_services": []
+        }
+      }
+    },
+    {
+      "index": 49,
+      "name": "OpenRefine",
+      "family": "G",
+      "family_name": "JVM",
+      "terminal_code_50": "preset_no_match",
+      "deterministic_launch_declaration": "none (Maven; refine script)",
+      "typed_native_launch": false,
+      "exact_runtime_version": "java unpinned; no JVM in catalog",
+      "runtime_in_current_catalog": true,
+      "dependency_lock": "none (Maven pom)",
+      "dependency_locked": false,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "not declared",
+      "port_provable_natively": false,
+      "persistent_state": "workspace dir",
+      "external_services": "none",
+      "external_service_required": false,
+      "runtime_network": "none",
+      "source_facts": {
+        "markers": [
+          "pom.xml"
+        ],
+        "locks": [],
+        "version_files": {},
+        "dockerfiles": [],
+        "docker": {
+          "expose": [],
+          "volume": [],
+          "cmd": []
+        },
+        "compose": {
+          "files": [],
+          "external_services": []
+        }
+      }
+    },
+    {
+      "index": 50,
+      "name": "Jellyfin",
+      "family": "H",
+      "family_name": ".NET",
+      "terminal_code_50": "preset_no_match",
+      "deterministic_launch_declaration": "none (.NET solution)",
+      "typed_native_launch": false,
+      "exact_runtime_version": "dotnet SDK 10.0.0 rollForward; no .NET in catalog",
+      "runtime_in_current_catalog": true,
+      "dependency_lock": "none (NuGet)",
+      "dependency_locked": false,
+      "install_requirement": "dependency resolution (network) for every family; no offline cache preregistered",
+      "port_declaration": "not declared",
+      "port_provable_natively": false,
+      "persistent_state": "config + data + cache",
+      "external_services": "none (ffmpeg process)",
+      "external_service_required": false,
+      "runtime_network": "metadata egress",
+      "source_facts": {
+        "markers": [
+          "Jellyfin.sln",
+          "global.json"
+        ],
+        "locks": [],
+        "version_files": {
+          "global.json": "{\n    \"sdk\": {\n        \"version\": \"10.0.0\",\n        \"rollForward\": \"latestMinor\"\n    }\n}"
+        },
+        "dockerfiles": [],
+        "docker": {
+          "expose": [],
+          "volume": [],
+          "cmd": []
+        },
+        "compose": {
+          "files": [],
+          "external_services": []
+        }
+      }
+    }
+  ],
+  "candidate_remaining_blockers": {
+    "WBO": [
+      "port only via PORT env default (no declared port contract)",
+      "npm install needs dependency resolution (network)",
+      "persistent board data dir"
+    ],
+    "Kutt": [
+      "two-step typed launch (migrate then start)",
+      "better-sqlite3 native module needs a compiler in the build sandbox (unverified)",
+      "npm install needs dependency resolution",
+      "PORT via env"
+    ],
+    "JupyterLab": [
+      "source install requires a Yarn 3 workspace frontend build (manager config gap)",
+      "Python deps unlocked",
+      "kernel processes"
+    ],
+    "Radicale": [
+      "no dependency lock (unpinned pyproject deps)",
+      "pip install needs dependency resolution",
+      "port only as container EXPOSE / CLI flag"
+    ],
+    "Calibre-Web": [
+      "requirements are ranges, not a lock",
+      "requires a Calibre library state",
+      "port not declared"
+    ]
+  }
+}
