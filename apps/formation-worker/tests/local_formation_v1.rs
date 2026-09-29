@@ -1044,3 +1044,35 @@ fn a_static_candidate_is_verified_by_requesting_it_not_by_its_file_list() {
         "http_status_mismatch"
     );
 }
+
+#[test]
+fn node_static_v2_network_denied_never_executes_or_returns_a_receipt() {
+    for (manager, lock) in [
+        ("pnpm@9.1.0", "pnpm-lock.yaml"),
+        ("yarn@1.22.22", "yarn.lock"),
+        ("yarn@4.17.1", "yarn.lock"),
+    ] {
+        let package = format!(
+            r#"{{"packageManager":"{manager}","scripts":{{"build":"vite build","preview":"vite preview"}}}}"#
+        );
+        let dir = site(&[
+            ("package.json", &package),
+            (lock, ""),
+            ("index.html", "<html></html>"),
+        ]);
+        let scratch = tempfile::tempdir().unwrap();
+        let FormationResult::NoVerifiedRoute { attempts, .. } = local::run(
+            &request(dir.path(), FormationNetworkPolicy::Denied),
+            &formation(&scratch),
+        )
+        .unwrap() else {
+            panic!("network-denied route cannot form");
+        };
+        assert_eq!(attempts.len(), 1, "no raw source static fallback");
+        assert_eq!(attempts[0].candidate, "node-static/v2");
+        assert!(attempts[0].derivation_ref.is_some());
+        assert!(attempts[0].receipt.is_none());
+        assert!(attempts[0].verification.is_none());
+        assert_eq!(attempts[0].failure.as_ref().unwrap().code, "network_denied");
+    }
+}
