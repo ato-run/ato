@@ -40,7 +40,7 @@ pub mod session;
 pub const SOURCE_OCI_REQUEST_SCHEMA: &str = "ato.source-oci-request/1";
 pub const SOURCE_OCI_PROVENANCE_SCHEMA: &str = "ato.source-oci-materialization/1";
 /// Same bound as portable OCI transport.
-pub const MAX_ARCHIVE_BYTES: u64 = 128 * 1024 * 1024;
+pub const MAX_ARCHIVE_BYTES: u64 = crate::oci_archive::MAX_ARCHIVE_BYTES as u64;
 pub const MAX_BUILD_TIMEOUT_SECONDS: u64 = 3600;
 pub const MAX_BASE_IMAGES: usize = 8;
 /// Build progress output kept by the client before the build is aborted.
