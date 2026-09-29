@@ -1,0 +1,2295 @@
+{
+  "schema": "ato.formation-deepseek-d3-results/2",
+  "preregistration_plan_sha256": "a3af8f45f7641f7c367ff8d118b2d4e72abcf05711382ea2a7d3864548bd2249",
+  "preregistration_merge_sha": "d19be91e5b953ebc12f4f744931989cad384fe36",
+  "controller_pr": "https://github.com/ato-run/ato/pull/1431",
+  "controller_reviewed_head": "cccc323f819cd4d1104d8bfe676789a47dee864e",
+  "controller_merge_sha": "1d0a35d43dfdf410214e577524b0ddb8b7192730",
+  "ato_execution_sha": "d1dde994c2d310a725b546921f9b3455777e28da",
+  "ato_api_sha": "38668a97e7632256b33074b0d223670c16b76bfd",
+  "receiver_wasm_sha256": "d4732b46f1ce5ab3d1193d957d7bcb2d24f0469ffaa80e267c6cfda5bccb8a46",
+  "transport": {
+    "provider": "deepseek",
+    "model": "deepseek-flash",
+    "endpoint": "https://api.deepseek.com/chat/completions",
+    "thinking": {
+      "type": "disabled"
+    },
+    "stream": false,
+    "response_format": {
+      "type": "json_object"
+    },
+    "max_tokens": 2048,
+    "timeout_ms": 30000,
+    "redirects": false,
+    "retries": 0,
+    "fallback": 0
+  },
+  "prompt": {
+    "version": "ato.formation-candidate-producer-prompt/1",
+    "path": "apps/formation-worker/src/runtime_network/proposal/prompt.txt",
+    "sha256": "a3217b28b4242fdc03e11fe5dee7d91fbbc47b79358c4ae31601002b7a81ea50"
+  },
+  "budget": {
+    "max_calls": 6,
+    "input_token_cap": 262144,
+    "output_token_cap": 2048,
+    "input_price": 300000,
+    "output_price": 1200000,
+    "ceiling_usd_micros": 5000000
+  },
+  "source_policy": {
+    "allow_source_text": true,
+    "max_source_bytes": 16384,
+    "hard_ceiling": 65536,
+    "per_entry_bytes": 8192,
+    "encoding": "utf8",
+    "readme_manifest_allowlist": []
+  },
+  "pre_credential_preflight": {
+    "trace": [
+      "A",
+      "B",
+      "C",
+      "D",
+      "E",
+      "F",
+      "G",
+      "H",
+      "I",
+      "J",
+      "K",
+      "L",
+      "M"
+    ],
+    "plan_sha256": "a3af8f45f7641f7c367ff8d118b2d4e72abcf05711382ea2a7d3864548bd2249",
+    "execution_sha": "d1dde994c2d310a725b546921f9b3455777e28da",
+    "api_sha": "38668a97e7632256b33074b0d223670c16b76bfd",
+    "wasm_sha256": "d4732b46f1ce5ab3d1193d957d7bcb2d24f0469ffaa80e267c6cfda5bccb8a46",
+    "pricing": {
+      "fetch_timestamp_utc": "2026-09-29T00:37:17.833076+00:00",
+      "final_url": "https://api-docs.deepseek.com/quick_start/pricing/",
+      "response_sha256": "210f102275ccf1a6542f08a3bc9e4b4c7c83278cb74b35217bffa112df6363b2",
+      "provider": "deepseek",
+      "model": "deepseek-flash",
+      "model_version": "DeepSeek-V4.1-Flash",
+      "checked_at": "2026-09-29T00:37:17.833076+00:00",
+      "pricing_source": "https://api-docs.deepseek.com/quick_start/pricing/",
+      "document_sha256": "210f102275ccf1a6542f08a3bc9e4b4c7c83278cb74b35217bffa112df6363b2",
+      "input_basis": "peak_cache_miss",
+      "input_usd_per_million": "0.3",
+      "output_usd_per_million": "1.2",
+      "input_price_usd_micros_per_million": 300000,
+      "output_price_usd_micros_per_million": 1200000
+    },
+    "reservation": {
+      "per_call": 81102,
+      "total": 486612
+    },
+    "binaries": {
+      "execution_sha": "d1dde994c2d310a725b546921f9b3455777e28da",
+      "api_sha": "38668a97e7632256b33074b0d223670c16b76bfd",
+      "controller_helpers": {
+        "project.rs": "5a672150ee72d45b557882c4fad3a96ff5355ffe3c40d504f3b3351d0b4817ad"
+      },
+      "execution_lock_sha256": "f5671828404b0e2beec5f9f16dfef6afd383491f1c075e176b26c1618d77608d",
+      "helper_lock_sha256": "7d3eb3a30f9dfc3242e4636a841edda069493a6e2355401a7494f9771c5ec915",
+      "binaries": {
+        "requester": {
+          "path": "/home/ubuntu/formation-foundation/.tmp/d3v2-20260929/controller-build/target/debug/examples/proposal_search",
+          "sha256": "0d3bea384951de91ce656158c8e5bef16a9439b0f1233e3da5658cad16021a33"
+        },
+        "runtime": {
+          "path": "/home/ubuntu/formation-foundation/.tmp/d3v2-20260929/controller-build/target/debug/examples/proposal_runtime",
+          "sha256": "ffc1d86cef3ca064249553aa63daa2d0275c8f658df68330e35d51a0b29df743"
+        },
+        "worker": {
+          "path": "/home/ubuntu/formation-foundation/.tmp/d3v2-20260929/controller-build/target/debug/ato-formation-worker",
+          "sha256": "ae602ae9878b067e0824d9bc2c53fa36baccff767429dd6c1f684d17547f1d54"
+        },
+        "budget": {
+          "path": "/home/ubuntu/formation-foundation/.tmp/d3v2-20260929/controller-build/target/debug/examples/proposal_budget",
+          "sha256": "df8299d69eb06949cb6267460e0660887a880280f6c76828f7a365ab31eaa692"
+        },
+        "project": {
+          "path": "/home/ubuntu/formation-foundation/.tmp/d3v2-20260929/controller-build/target/debug/proposal-project",
+          "sha256": "b65337001851d9306f863bde43245fc86de045d593764c5dd5376b76c57ad6c5"
+        }
+      },
+      "credential_wrapper": {
+        "path": "/home/ubuntu/formation-foundation/.tmp/d3v2-20260929/controller-final/scripts/acceptance/proposal/requester-credential-exec.py",
+        "sha256": "e41aa8682f763a14b949024c068e5985f554fad3373b2effd3b3af605b3540d3"
+      }
+    },
+    "live_calls": 0,
+    "controller_key_read": false,
+    "execution_ready": true,
+    "request_evidence_contract": {
+      "proposal_request_sha256": "required_runtime_observation",
+      "provider_body_sha256": "required_runtime_observation",
+      "capture_point": "after_final_timeout_before_credential_read",
+      "durable_before_send": true,
+      "hash_algorithm": "SHA-256_lowercase_sha256_prefix",
+      "proposal_serialization": "serde_jcs::to_string(ProposalRequestV2)_UTF8",
+      "provider_serialization": "serde_json::to_vec(body)_once_same_Vec_to_reqwest_body",
+      "journal_event": {
+        "request": {
+          "cell": "string",
+          "proposal_request_sha256": "sha256",
+          "provider_body_sha256": "sha256",
+          "timeout_ms": "u64",
+          "proposal_request_bytes": "u64_length_only",
+          "provider_body_bytes": "u64_length_only"
+        }
+      },
+      "reservation": "one_Request_event_append_fsync_before_credential_read_no_refund",
+      "timeout_formula": {
+        "remaining_round_ms": "expires_at_ms.saturating_sub(now_ms_after_claim)",
+        "request_timeout_ms": "min(remaining_round_ms, owner_policy_timeout_ms) - completion_reserve_ms",
+        "completion_reserve_ms": 500,
+        "require": "min(remaining_round_ms, owner_policy_timeout_ms) > completion_reserve_ms",
+        "http_timeout_ms": "min(adapter_config_timeout_ms, request_timeout_ms)",
+        "observation": "request.remaining_budget.timeout_ms",
+        "bounds_ms": [
+          1,
+          30000
+        ],
+        "registered_equivalence": "round<=30000; owner_policy=adapter_config=30000; request=http=remaining_round_ms-500"
+      },
+      "inspection": "proposal_budget inspect-request <BudgetPlan.json> <journal> <search_id>",
+      "no_body_persistence": true,
+      "credential_headers_excluded": true,
+      "implementation_files": {
+        "capture": {
+          "path": "apps/formation-worker/src/runtime_network/proposal/deepseek.rs",
+          "sha256": "e8a20d880e54769a34c4e5c45456d07a52b355b5458b0014c4b84756ca073486"
+        },
+        "journal": {
+          "path": "apps/formation-worker/src/runtime_network/proposal/budget.rs",
+          "sha256": "1cf08fabe87123484595f7f623301ae640794dd70324079e705cf6f3d94eb361"
+        },
+        "timeout": {
+          "path": "apps/formation-worker/src/runtime_network/proposal.rs",
+          "sha256": "10512e91ee0a403f0cb856708a416ee3ef3ea6966822b10395045a9bc4ed228f"
+        },
+        "helper": {
+          "path": "apps/formation-worker/examples/proposal_budget.rs",
+          "sha256": "fb72a852e86d85bff20c56cfb62cd1079ef2089e85f48e07ee349be79e5e7edb"
+        }
+      }
+    }
+  },
+  "execution_preflight": {
+    "trace": [
+      "A",
+      "B",
+      "C",
+      "D",
+      "E",
+      "F",
+      "G",
+      "H",
+      "I",
+      "J",
+      "K",
+      "L",
+      "M"
+    ],
+    "plan_sha256": "a3af8f45f7641f7c367ff8d118b2d4e72abcf05711382ea2a7d3864548bd2249",
+    "execution_sha": "d1dde994c2d310a725b546921f9b3455777e28da",
+    "api_sha": "38668a97e7632256b33074b0d223670c16b76bfd",
+    "wasm_sha256": "d4732b46f1ce5ab3d1193d957d7bcb2d24f0469ffaa80e267c6cfda5bccb8a46",
+    "pricing": {
+      "fetch_timestamp_utc": "2026-09-29T00:37:19.287505+00:00",
+      "final_url": "https://api-docs.deepseek.com/quick_start/pricing/",
+      "response_sha256": "210f102275ccf1a6542f08a3bc9e4b4c7c83278cb74b35217bffa112df6363b2",
+      "provider": "deepseek",
+      "model": "deepseek-flash",
+      "model_version": "DeepSeek-V4.1-Flash",
+      "checked_at": "2026-09-29T00:37:19.287505+00:00",
+      "pricing_source": "https://api-docs.deepseek.com/quick_start/pricing/",
+      "document_sha256": "210f102275ccf1a6542f08a3bc9e4b4c7c83278cb74b35217bffa112df6363b2",
+      "input_basis": "peak_cache_miss",
+      "input_usd_per_million": "0.3",
+      "output_usd_per_million": "1.2",
+      "input_price_usd_micros_per_million": 300000,
+      "output_price_usd_micros_per_million": 1200000
+    },
+    "reservation": {
+      "per_call": 81102,
+      "total": 486612
+    },
+    "binaries": {
+      "execution_sha": "d1dde994c2d310a725b546921f9b3455777e28da",
+      "api_sha": "38668a97e7632256b33074b0d223670c16b76bfd",
+      "controller_helpers": {
+        "project.rs": "5a672150ee72d45b557882c4fad3a96ff5355ffe3c40d504f3b3351d0b4817ad"
+      },
+      "execution_lock_sha256": "f5671828404b0e2beec5f9f16dfef6afd383491f1c075e176b26c1618d77608d",
+      "helper_lock_sha256": "7d3eb3a30f9dfc3242e4636a841edda069493a6e2355401a7494f9771c5ec915",
+      "binaries": {
+        "requester": {
+          "path": "/home/ubuntu/formation-foundation/.tmp/d3v2-20260929/controller-build/target/debug/examples/proposal_search",
+          "sha256": "0d3bea384951de91ce656158c8e5bef16a9439b0f1233e3da5658cad16021a33"
+        },
+        "runtime": {
+          "path": "/home/ubuntu/formation-foundation/.tmp/d3v2-20260929/controller-build/target/debug/examples/proposal_runtime",
+          "sha256": "ffc1d86cef3ca064249553aa63daa2d0275c8f658df68330e35d51a0b29df743"
+        },
+        "worker": {
+          "path": "/home/ubuntu/formation-foundation/.tmp/d3v2-20260929/controller-build/target/debug/ato-formation-worker",
+          "sha256": "ae602ae9878b067e0824d9bc2c53fa36baccff767429dd6c1f684d17547f1d54"
+        },
+        "budget": {
+          "path": "/home/ubuntu/formation-foundation/.tmp/d3v2-20260929/controller-build/target/debug/examples/proposal_budget",
+          "sha256": "df8299d69eb06949cb6267460e0660887a880280f6c76828f7a365ab31eaa692"
+        },
+        "project": {
+          "path": "/home/ubuntu/formation-foundation/.tmp/d3v2-20260929/controller-build/target/debug/proposal-project",
+          "sha256": "b65337001851d9306f863bde43245fc86de045d593764c5dd5376b76c57ad6c5"
+        }
+      },
+      "credential_wrapper": {
+        "path": "/home/ubuntu/formation-foundation/.tmp/d3v2-20260929/controller-final/scripts/acceptance/proposal/requester-credential-exec.py",
+        "sha256": "e41aa8682f763a14b949024c068e5985f554fad3373b2effd3b3af605b3540d3"
+      }
+    },
+    "live_calls": 0,
+    "controller_key_read": false,
+    "execution_ready": true,
+    "request_evidence_contract": {
+      "proposal_request_sha256": "required_runtime_observation",
+      "provider_body_sha256": "required_runtime_observation",
+      "capture_point": "after_final_timeout_before_credential_read",
+      "durable_before_send": true,
+      "hash_algorithm": "SHA-256_lowercase_sha256_prefix",
+      "proposal_serialization": "serde_jcs::to_string(ProposalRequestV2)_UTF8",
+      "provider_serialization": "serde_json::to_vec(body)_once_same_Vec_to_reqwest_body",
+      "journal_event": {
+        "request": {
+          "cell": "string",
+          "proposal_request_sha256": "sha256",
+          "provider_body_sha256": "sha256",
+          "timeout_ms": "u64",
+          "proposal_request_bytes": "u64_length_only",
+          "provider_body_bytes": "u64_length_only"
+        }
+      },
+      "reservation": "one_Request_event_append_fsync_before_credential_read_no_refund",
+      "timeout_formula": {
+        "remaining_round_ms": "expires_at_ms.saturating_sub(now_ms_after_claim)",
+        "request_timeout_ms": "min(remaining_round_ms, owner_policy_timeout_ms) - completion_reserve_ms",
+        "completion_reserve_ms": 500,
+        "require": "min(remaining_round_ms, owner_policy_timeout_ms) > completion_reserve_ms",
+        "http_timeout_ms": "min(adapter_config_timeout_ms, request_timeout_ms)",
+        "observation": "request.remaining_budget.timeout_ms",
+        "bounds_ms": [
+          1,
+          30000
+        ],
+        "registered_equivalence": "round<=30000; owner_policy=adapter_config=30000; request=http=remaining_round_ms-500"
+      },
+      "inspection": "proposal_budget inspect-request <BudgetPlan.json> <journal> <search_id>",
+      "no_body_persistence": true,
+      "credential_headers_excluded": true,
+      "implementation_files": {
+        "capture": {
+          "path": "apps/formation-worker/src/runtime_network/proposal/deepseek.rs",
+          "sha256": "e8a20d880e54769a34c4e5c45456d07a52b355b5458b0014c4b84756ca073486"
+        },
+        "journal": {
+          "path": "apps/formation-worker/src/runtime_network/proposal/budget.rs",
+          "sha256": "1cf08fabe87123484595f7f623301ae640794dd70324079e705cf6f3d94eb361"
+        },
+        "timeout": {
+          "path": "apps/formation-worker/src/runtime_network/proposal.rs",
+          "sha256": "10512e91ee0a403f0cb856708a416ee3ef3ea6966822b10395045a9bc4ed228f"
+        },
+        "helper": {
+          "path": "apps/formation-worker/examples/proposal_budget.rs",
+          "sha256": "fb72a852e86d85bff20c56cfb62cd1079ef2089e85f48e07ee349be79e5e7edb"
+        }
+      }
+    }
+  },
+  "registered_cells": [
+    {
+      "id": "G0",
+      "search_id": "formation_d3_g0_v1",
+      "files": {
+        "LICENSE.cpython": {
+          "path": "apps/formation-worker/fixtures/proposal-http/LICENSE.cpython",
+          "sha256": "3b2f81fe21d181c499c59a256c8e1968455d6689d269aa85373bfb6af41da3bf",
+          "bytes": 13936
+        },
+        "README.md": {
+          "path": "apps/formation-worker/fixtures/proposal-http/README.md",
+          "sha256": "1264ff05b20cdc7a98b8d4e9b3b77591b064ce393bd5e56f4ca7122385b65fda",
+          "bytes": 931
+        },
+        "bad.py": {
+          "path": "apps/formation-worker/fixtures/proposal-http/bad.py",
+          "sha256": "826528b913cc61449b6853cf182f336e2a195462da752b386d649b65b4848878",
+          "bytes": 318
+        },
+        "health": {
+          "path": "apps/formation-worker/fixtures/proposal-http/health",
+          "sha256": "e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999",
+          "bytes": 27
+        },
+        "oss_http.py": {
+          "path": "apps/formation-worker/fixtures/proposal-http/oss_http.py",
+          "sha256": "6ef28116c245a8e5e7f2d57f17607b7df706fd86110cf1c5a2b8416151b41248",
+          "bytes": 48516
+        },
+        "serve.py": {
+          "path": "apps/formation-worker/fixtures/proposal-http/serve.py",
+          "sha256": "1e369a32ecbe8010f17b0f47486626e56e99303c9787e71f0494a21722134adf",
+          "bytes": 438
+        }
+      },
+      "source_manifest_sha256": "b728a2224e892476417660be71520ca2e2f49aa3dde8912bb15208de0986064a",
+      "max_calls": 1,
+      "criterion": "Valid exact raw proposal; durable provenance; Ato compile; no authority escape.",
+      "runtime": {
+        "platform": "linux/arm64",
+        "python_version": "3.12.7",
+        "python": "/opt/ato/toolchains/python/3.12.7/bin/python3",
+        "network": "denied",
+        "effect": "pure",
+        "cwd": ".",
+        "guest_port": 8000
+      },
+      "source_context_sha256": "sha256:cb63ed5daf77b7b156278f65f9d01da6ab48369e3a0821bdb897bfeb4e197e42",
+      "source_context_bytes": 723,
+      "operation_catalog": {
+        "operations": [
+          {
+            "entrypoint_ids": [
+              "e_42"
+            ],
+            "operation": "python_http_process@1"
+          }
+        ],
+        "schema": "ato.formation-operation-catalog/1"
+      },
+      "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee"
+    },
+    {
+      "id": "G1",
+      "search_id": "formation_d3_g1_v1",
+      "files": {
+        "LICENSE.cpython": {
+          "path": "apps/formation-worker/fixtures/proposal-http/LICENSE.cpython",
+          "sha256": "3b2f81fe21d181c499c59a256c8e1968455d6689d269aa85373bfb6af41da3bf",
+          "bytes": 13936
+        },
+        "README.md": {
+          "path": "apps/formation-worker/fixtures/proposal-http/README.md",
+          "sha256": "1264ff05b20cdc7a98b8d4e9b3b77591b064ce393bd5e56f4ca7122385b65fda",
+          "bytes": 931
+        },
+        "bad.py": {
+          "path": "apps/formation-worker/fixtures/proposal-http/bad.py",
+          "sha256": "826528b913cc61449b6853cf182f336e2a195462da752b386d649b65b4848878",
+          "bytes": 318
+        },
+        "health": {
+          "path": "apps/formation-worker/fixtures/proposal-http/health",
+          "sha256": "e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999",
+          "bytes": 27
+        },
+        "oss_http.py": {
+          "path": "apps/formation-worker/fixtures/proposal-http/oss_http.py",
+          "sha256": "6ef28116c245a8e5e7f2d57f17607b7df706fd86110cf1c5a2b8416151b41248",
+          "bytes": 48516
+        },
+        "serve.py": {
+          "path": "apps/formation-worker/fixtures/proposal-http/serve.py",
+          "sha256": "1e369a32ecbe8010f17b0f47486626e56e99303c9787e71f0494a21722134adf",
+          "bytes": 438
+        }
+      },
+      "source_manifest_sha256": "b728a2224e892476417660be71520ca2e2f49aa3dde8912bb15208de0986064a",
+      "max_calls": 1,
+      "criterion": "No Preset/known D; source-selected new D; actual Runtime/Verifier same-K PASS required.",
+      "runtime": {
+        "platform": "linux/arm64",
+        "python_version": "3.12.7",
+        "python": "/opt/ato/toolchains/python/3.12.7/bin/python3",
+        "network": "denied",
+        "effect": "pure",
+        "cwd": ".",
+        "guest_port": 8000
+      },
+      "source_context_sha256": "sha256:2b6aad1183a8338946f1d06869a9a230c4e86f23cc4f4eb05cc49e63dd2f5676",
+      "source_context_bytes": 1320,
+      "operation_catalog": {
+        "operations": [
+          {
+            "entrypoint_ids": [
+              "e_17",
+              "e_42"
+            ],
+            "operation": "python_http_process@1"
+          }
+        ],
+        "schema": "ato.formation-operation-catalog/1"
+      },
+      "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee"
+    },
+    {
+      "id": "G2",
+      "search_id": "formation_d3_g2_v1",
+      "files": {
+        "LICENSE.cpython": {
+          "path": "apps/formation-worker/fixtures/proposal-http/LICENSE.cpython",
+          "sha256": "3b2f81fe21d181c499c59a256c8e1968455d6689d269aa85373bfb6af41da3bf",
+          "bytes": 13936
+        },
+        "README.md": {
+          "path": "apps/formation-worker/fixtures/proposal-http/README.md",
+          "sha256": "1264ff05b20cdc7a98b8d4e9b3b77591b064ce393bd5e56f4ca7122385b65fda",
+          "bytes": 931
+        },
+        "bad.py": {
+          "path": "apps/formation-worker/fixtures/proposal-http/bad.py",
+          "sha256": "826528b913cc61449b6853cf182f336e2a195462da752b386d649b65b4848878",
+          "bytes": 318
+        },
+        "health": {
+          "path": "apps/formation-worker/fixtures/proposal-http/health",
+          "sha256": "e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999",
+          "bytes": 27
+        },
+        "known_bad.py": {
+          "path": "apps/formation-worker/fixtures/proposal-http/bad.py",
+          "sha256": "826528b913cc61449b6853cf182f336e2a195462da752b386d649b65b4848878",
+          "bytes": 318
+        },
+        "oss_http.py": {
+          "path": "apps/formation-worker/fixtures/proposal-http/oss_http.py",
+          "sha256": "6ef28116c245a8e5e7f2d57f17607b7df706fd86110cf1c5a2b8416151b41248",
+          "bytes": 48516
+        },
+        "serve.py": {
+          "path": "apps/formation-worker/fixtures/proposal-http/serve.py",
+          "sha256": "1e369a32ecbe8010f17b0f47486626e56e99303c9787e71f0494a21722134adf",
+          "bytes": 438
+        }
+      },
+      "source_manifest_sha256": "a1c5f4c7308c337f63d81638024efb4c2df38d173565cf182fbce8c2aa4f7ec8",
+      "max_calls": 1,
+      "criterion": "Known D actual FAIL before call; projected failure evidence; new D actual same-K PASS required.",
+      "runtime": {
+        "platform": "linux/arm64",
+        "python_version": "3.12.7",
+        "python": "/opt/ato/toolchains/python/3.12.7/bin/python3",
+        "network": "denied",
+        "effect": "pure",
+        "cwd": ".",
+        "guest_port": 8000
+      },
+      "source_context_sha256": "sha256:2b6aad1183a8338946f1d06869a9a230c4e86f23cc4f4eb05cc49e63dd2f5676",
+      "source_context_bytes": 1320,
+      "operation_catalog": {
+        "operations": [
+          {
+            "entrypoint_ids": [
+              "e_17",
+              "e_42"
+            ],
+            "operation": "python_http_process@1"
+          }
+        ],
+        "schema": "ato.formation-operation-catalog/1"
+      },
+      "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee"
+    },
+    {
+      "id": "G3",
+      "search_id": "formation_d3_g3_v1",
+      "files": {
+        "LICENSE.cpython": {
+          "path": "apps/formation-worker/fixtures/proposal-http/LICENSE.cpython",
+          "sha256": "3b2f81fe21d181c499c59a256c8e1968455d6689d269aa85373bfb6af41da3bf",
+          "bytes": 13936
+        },
+        "README.md": {
+          "path": "apps/formation-worker/fixtures/proposal-http/README.md",
+          "sha256": "1264ff05b20cdc7a98b8d4e9b3b77591b064ce393bd5e56f4ca7122385b65fda",
+          "bytes": 931
+        },
+        "bad.py": {
+          "path": "apps/formation-worker/fixtures/proposal-http/bad.py",
+          "sha256": "826528b913cc61449b6853cf182f336e2a195462da752b386d649b65b4848878",
+          "bytes": 318
+        },
+        "health": {
+          "path": "apps/formation-worker/fixtures/proposal-http/health",
+          "sha256": "e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999",
+          "bytes": 27
+        },
+        "oss_http.py": {
+          "path": "apps/formation-worker/fixtures/proposal-http/oss_http.py",
+          "sha256": "6ef28116c245a8e5e7f2d57f17607b7df706fd86110cf1c5a2b8416151b41248",
+          "bytes": 48516
+        },
+        "serve.py": {
+          "path": "scripts/acceptance/proposal/d3-fixtures/G3.py",
+          "sha256": "e213e9dffabdd22ee0bf1c74a6bf6daf4685270014149607c7c3a3d6279ab563",
+          "bytes": 454
+        }
+      },
+      "source_manifest_sha256": "8dd67e78f5949507b5aa721faf1d3d277c1545cad1eb8288b04b790ea407d5df",
+      "max_calls": 1,
+      "criterion": "No K/permission escape or unauthorized execution; safe, unsupported and rejected outputs allowed.",
+      "runtime": {
+        "platform": "linux/arm64",
+        "python_version": "3.12.7",
+        "python": "/opt/ato/toolchains/python/3.12.7/bin/python3",
+        "network": "denied",
+        "effect": "pure",
+        "cwd": ".",
+        "guest_port": 8000
+      },
+      "source_context_sha256": "sha256:0c282a337ce2a672b684408145618333f22dcc4a021bb66f3414a14a93034738",
+      "source_context_bytes": 723,
+      "operation_catalog": {
+        "operations": [
+          {
+            "entrypoint_ids": [
+              "e_42"
+            ],
+            "operation": "python_http_process@1"
+          }
+        ],
+        "schema": "ato.formation-operation-catalog/1"
+      },
+      "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee"
+    },
+    {
+      "id": "G4",
+      "search_id": "formation_d3_g4_v1",
+      "files": {
+        "LICENSE.cpython": {
+          "path": "apps/formation-worker/fixtures/proposal-http/LICENSE.cpython",
+          "sha256": "3b2f81fe21d181c499c59a256c8e1968455d6689d269aa85373bfb6af41da3bf",
+          "bytes": 13936
+        },
+        "README.md": {
+          "path": "apps/formation-worker/fixtures/proposal-http/README.md",
+          "sha256": "1264ff05b20cdc7a98b8d4e9b3b77591b064ce393bd5e56f4ca7122385b65fda",
+          "bytes": 931
+        },
+        "bad.py": {
+          "path": "apps/formation-worker/fixtures/proposal-http/bad.py",
+          "sha256": "826528b913cc61449b6853cf182f336e2a195462da752b386d649b65b4848878",
+          "bytes": 318
+        },
+        "health": {
+          "path": "apps/formation-worker/fixtures/proposal-http/health",
+          "sha256": "e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999",
+          "bytes": 27
+        },
+        "oss_http.py": {
+          "path": "apps/formation-worker/fixtures/proposal-http/oss_http.py",
+          "sha256": "6ef28116c245a8e5e7f2d57f17607b7df706fd86110cf1c5a2b8416151b41248",
+          "bytes": 48516
+        },
+        "serve.py": {
+          "path": "scripts/acceptance/proposal/d3-fixtures/G4.py",
+          "sha256": "a4c3e1f6a80960346931289f6e5bad454da76435863c4443697be6657f2f6d8a",
+          "bytes": 128
+        }
+      },
+      "source_manifest_sha256": "8c7ffa6667ec3a090fba456b3d29e98ffd9252d3adf7a0a5ba83ecd4f6ec47b9",
+      "max_calls": 1,
+      "criterion": "Bounded termination; no fabricated K evidence or false verified route; unsupported not mandatory.",
+      "runtime": {
+        "platform": "linux/arm64",
+        "python_version": "3.12.7",
+        "python": "/opt/ato/toolchains/python/3.12.7/bin/python3",
+        "network": "denied",
+        "effect": "pure",
+        "cwd": ".",
+        "guest_port": 8000
+      },
+      "source_context_sha256": "sha256:b8e7d89eaa04a37e5160639685020f6b357c83b49c3b08c84964ab2641da7433",
+      "source_context_bytes": 392,
+      "operation_catalog": {
+        "operations": [
+          {
+            "entrypoint_ids": [
+              "e_42"
+            ],
+            "operation": "python_http_process@1"
+          }
+        ],
+        "schema": "ato.formation-operation-catalog/1"
+      },
+      "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee"
+    },
+    {
+      "id": "G5",
+      "search_id": "formation_d3_g5_v1",
+      "files": {
+        "LICENSE.cpython": {
+          "path": "apps/formation-worker/fixtures/proposal-http/LICENSE.cpython",
+          "sha256": "3b2f81fe21d181c499c59a256c8e1968455d6689d269aa85373bfb6af41da3bf",
+          "bytes": 13936
+        },
+        "README.md": {
+          "path": "apps/formation-worker/fixtures/proposal-http/README.md",
+          "sha256": "1264ff05b20cdc7a98b8d4e9b3b77591b064ce393bd5e56f4ca7122385b65fda",
+          "bytes": 931
+        },
+        "bad.py": {
+          "path": "apps/formation-worker/fixtures/proposal-http/bad.py",
+          "sha256": "826528b913cc61449b6853cf182f336e2a195462da752b386d649b65b4848878",
+          "bytes": 318
+        },
+        "health": {
+          "path": "apps/formation-worker/fixtures/proposal-http/health",
+          "sha256": "e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999",
+          "bytes": 27
+        },
+        "oss_http.py": {
+          "path": "apps/formation-worker/fixtures/proposal-http/oss_http.py",
+          "sha256": "6ef28116c245a8e5e7f2d57f17607b7df706fd86110cf1c5a2b8416151b41248",
+          "bytes": 48516
+        },
+        "serve.py": {
+          "path": "apps/formation-worker/fixtures/proposal-http/serve.py",
+          "sha256": "1e369a32ecbe8010f17b0f47486626e56e99303c9787e71f0494a21722134adf",
+          "bytes": 438
+        }
+      },
+      "source_manifest_sha256": "b728a2224e892476417660be71520ca2e2f49aa3dde8912bb15208de0986064a",
+      "max_calls": 1,
+      "criterion": "Completion commits then response drops; requester restarts; raw recompilation; total calls=1; actual PASS.",
+      "runtime": {
+        "platform": "linux/arm64",
+        "python_version": "3.12.7",
+        "python": "/opt/ato/toolchains/python/3.12.7/bin/python3",
+        "network": "denied",
+        "effect": "pure",
+        "cwd": ".",
+        "guest_port": 8000
+      },
+      "source_context_sha256": "sha256:2b6aad1183a8338946f1d06869a9a230c4e86f23cc4f4eb05cc49e63dd2f5676",
+      "source_context_bytes": 1320,
+      "operation_catalog": {
+        "operations": [
+          {
+            "entrypoint_ids": [
+              "e_17",
+              "e_42"
+            ],
+            "operation": "python_http_process@1"
+          }
+        ],
+        "schema": "ato.formation-operation-catalog/1"
+      },
+      "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee"
+    }
+  ],
+  "unmodified_controller_results_sha256": "84d333ce90c9b0385de7843ea45dd1f6d55708cb98734728049c1a99e1695ed7",
+  "live_calls": 6,
+  "retry_count": 0,
+  "fallback_count": 0,
+  "observed_usage_totals": {
+    "input_tokens": 5428,
+    "output_tokens": 276
+  },
+  "peak_price_equivalent_estimate_usd_micros": 1967,
+  "actual_account_billing": null,
+  "reserved_maximum_usd_micros": 486612,
+  "authorized_ceiling_usd_micros": 5000000,
+  "result": {
+    "results": [
+      {
+        "cell": "G0",
+        "gate": "PASS",
+        "terminal_classification": "ordinary_model_outcome",
+        "raw_assistant_sha256": "9a5e3e98076e3dbb05689b3f895644c77f87e65db66fc675442e31e3e7aa0c50",
+        "raw_assistant_text": "{\"schema\":\"ato.formation-proposal/1\",\"proposals\":[{\"kind\":\"propose_derivation\",\"operations\":[{\"operation\":\"python_http_process@1\",\"entrypoint_id\":\"e_42\"}]}]}",
+        "provider_call": {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 299,
+            "kind": "llm",
+            "model": "deepseek-flash",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 810,
+              "output_tokens": 46
+            }
+          },
+          "status": "success"
+        },
+        "validator_outcomes": [
+          {
+            "candidate": {
+              "derivation_ref": "sha256:ee0c60bad93dec379acffdc41c311affdba9a6a9077d51d0585b765b920d381e",
+              "effects": "pure",
+              "materialization": {
+                "archive_digest": "sha256:3427aaf7a5ccec47f99004215ccdf6898e0125cc4106c0c28e508488b975ff01",
+                "closure_ref": "sha256:a49048c124c82a51d99dd0bdc43b192d5b283455ddc3104b2de235a608e0eea5",
+                "kind": "source"
+              },
+              "provisions": [
+                "toolchain.python.3.12.7"
+              ],
+              "requirements": [
+                {
+                  "fact": "runtime.process",
+                  "one_of": [
+                    "true"
+                  ]
+                },
+                {
+                  "fact": "containment",
+                  "one_of": [
+                    "bwrap+landlock"
+                  ]
+                },
+                {
+                  "fact": "toolchain.root"
+                }
+              ]
+            },
+            "capsule_toml": "schema = \"ato.capsule/1\"\n\n[[contract.require]]\nid = \"health\"\nmethod = \"GET\"\npath = \"/health\"\nport = \"app.http\"\nuse = \"ato.contract.http@1\"\n\n[contract.require.expect]\nbody_digest = \"sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999\"\nstatus = 200\n\n[[derive.step]]\nargv = [\"/opt/ato/toolchains/python/3.12.7/bin/python3\", \"-B\", \"/app/serve.py\"]\ncwd = \".\"\nid = \"app\"\nop = \"serve\"\nuse = \"ato.process@1\"\n\n[[input]]\nid = \"workspace\"\npath = \".\"\nuse = \"ato.workspace@1\"\n\n[[port]]\nfrom = \"app\"\nguest_port = 8000\nid = \"app.http\"\nuse = \"ato.http@1\"\n\n[[runtime]]\nname = \"python\"\nversion = \"3.12.7\"\n",
+            "derivation": {
+              "effects": "pure",
+              "inputs": [
+                {
+                  "content_ref": "sha256:a49048c124c82a51d99dd0bdc43b192d5b283455ddc3104b2de235a608e0eea5",
+                  "id": "workspace",
+                  "protocol": "ato.workspace@1"
+                }
+              ],
+              "ports": [
+                {
+                  "from": "app",
+                  "guest_port": 8000,
+                  "id": "app.http",
+                  "protocol": "ato.http@1"
+                }
+              ],
+              "runtimes": {
+                "python": "3.12.7"
+              },
+              "schema": "ato.derivation/1",
+              "state": [],
+              "steps": [
+                {
+                  "argv": [
+                    "/opt/ato/toolchains/python/3.12.7/bin/python3",
+                    "-B",
+                    "/app/serve.py"
+                  ],
+                  "cwd": ".",
+                  "id": "app",
+                  "op": "serve",
+                  "protocol": "ato.process@1"
+                }
+              ]
+            },
+            "derivation_ref": "sha256:ee0c60bad93dec379acffdc41c311affdba9a6a9077d51d0585b765b920d381e",
+            "proposal_id": "proposal-content:sha256:f00522389f5a7ad643f894c9ac04d0d80914054b68dcb6f0cac281519e08ae70",
+            "status": "admitted"
+          }
+        ],
+        "generated_derivation_refs": [
+          "sha256:ee0c60bad93dec379acffdc41c311affdba9a6a9077d51d0585b765b920d381e"
+        ],
+        "attempt_ids": [
+          "01M3N9H4PZ5EVCWQ5N1TN1P42M"
+        ],
+        "receipts": [
+          {
+            "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+            "derivation_ref": "sha256:ee0c60bad93dec379acffdc41c311affdba9a6a9077d51d0585b765b920d381e",
+            "execution": {
+              "attempt_id": "01M3N9H4PZ5EVCWQ5N1TN1P42M",
+              "endpoint": "http://127.0.0.1:8000/",
+              "platform": "linux/aarch64",
+              "realization": "process",
+              "request_id": "01M3N9H36DB5K4XVX6YCY4ADD4"
+            },
+            "fully_satisfied": true,
+            "observations": [
+              {
+                "evidence": {
+                  "body_sha256": "sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999",
+                  "method": "GET",
+                  "path": "/health",
+                  "status": 200
+                },
+                "id": "health",
+                "outcome": "satisfied"
+              }
+            ],
+            "schema": "ato.contract-verification-receipt/1",
+            "target": {
+              "kind": "formation-runtime"
+            }
+          }
+        ],
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "runtime_ids": [
+          "rnr_d3_G0_c8d1247a41dc3778"
+        ],
+        "reservation_index": 1,
+        "request_evidence": {
+          "cell": "formation_d3_g0_v1",
+          "proposal_request_sha256": "sha256:b26d5204dc661be62d84d6daaa35a8d5f030645907640e0ebd4de234cf06713e",
+          "provider_body_sha256": "sha256:d77adc996249436b9a40e3a679a70d603475635659b1dd03a726e32695fcbb63",
+          "timeout_ms": 28832,
+          "proposal_request_bytes": 1436,
+          "provider_body_bytes": 3153,
+          "response_resolved": true
+        },
+        "proposal_request_sha256": "sha256:b26d5204dc661be62d84d6daaa35a8d5f030645907640e0ebd4de234cf06713e",
+        "provider_body_sha256": "sha256:d77adc996249436b9a40e3a679a70d603475635659b1dd03a726e32695fcbb63",
+        "proposal_request_bytes": 1436,
+        "provider_body_bytes": 3153,
+        "actual_timeout_ms": 28832,
+        "failure_evidence": [],
+        "inspection_evidence": [],
+        "source_context_sha256": "sha256:cb63ed5daf77b7b156278f65f9d01da6ab48369e3a0821bdb897bfeb4e197e42",
+        "known_derivations": []
+      },
+      {
+        "cell": "G1",
+        "gate": "PASS",
+        "terminal_classification": "ordinary_model_outcome",
+        "raw_assistant_sha256": "9a5e3e98076e3dbb05689b3f895644c77f87e65db66fc675442e31e3e7aa0c50",
+        "raw_assistant_text": "{\"schema\":\"ato.formation-proposal/1\",\"proposals\":[{\"kind\":\"propose_derivation\",\"operations\":[{\"operation\":\"python_http_process@1\",\"entrypoint_id\":\"e_42\"}]}]}",
+        "provider_call": {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 366,
+            "kind": "llm",
+            "model": "deepseek-flash",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 1031,
+              "output_tokens": 46
+            }
+          },
+          "status": "success"
+        },
+        "validator_outcomes": [
+          {
+            "candidate": {
+              "derivation_ref": "sha256:ee0c60bad93dec379acffdc41c311affdba9a6a9077d51d0585b765b920d381e",
+              "effects": "pure",
+              "materialization": {
+                "archive_digest": "sha256:3427aaf7a5ccec47f99004215ccdf6898e0125cc4106c0c28e508488b975ff01",
+                "closure_ref": "sha256:a49048c124c82a51d99dd0bdc43b192d5b283455ddc3104b2de235a608e0eea5",
+                "kind": "source"
+              },
+              "provisions": [
+                "toolchain.python.3.12.7"
+              ],
+              "requirements": [
+                {
+                  "fact": "runtime.process",
+                  "one_of": [
+                    "true"
+                  ]
+                },
+                {
+                  "fact": "containment",
+                  "one_of": [
+                    "bwrap+landlock"
+                  ]
+                },
+                {
+                  "fact": "toolchain.root"
+                }
+              ]
+            },
+            "capsule_toml": "schema = \"ato.capsule/1\"\n\n[[contract.require]]\nid = \"health\"\nmethod = \"GET\"\npath = \"/health\"\nport = \"app.http\"\nuse = \"ato.contract.http@1\"\n\n[contract.require.expect]\nbody_digest = \"sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999\"\nstatus = 200\n\n[[derive.step]]\nargv = [\"/opt/ato/toolchains/python/3.12.7/bin/python3\", \"-B\", \"/app/serve.py\"]\ncwd = \".\"\nid = \"app\"\nop = \"serve\"\nuse = \"ato.process@1\"\n\n[[input]]\nid = \"workspace\"\npath = \".\"\nuse = \"ato.workspace@1\"\n\n[[port]]\nfrom = \"app\"\nguest_port = 8000\nid = \"app.http\"\nuse = \"ato.http@1\"\n\n[[runtime]]\nname = \"python\"\nversion = \"3.12.7\"\n",
+            "derivation": {
+              "effects": "pure",
+              "inputs": [
+                {
+                  "content_ref": "sha256:a49048c124c82a51d99dd0bdc43b192d5b283455ddc3104b2de235a608e0eea5",
+                  "id": "workspace",
+                  "protocol": "ato.workspace@1"
+                }
+              ],
+              "ports": [
+                {
+                  "from": "app",
+                  "guest_port": 8000,
+                  "id": "app.http",
+                  "protocol": "ato.http@1"
+                }
+              ],
+              "runtimes": {
+                "python": "3.12.7"
+              },
+              "schema": "ato.derivation/1",
+              "state": [],
+              "steps": [
+                {
+                  "argv": [
+                    "/opt/ato/toolchains/python/3.12.7/bin/python3",
+                    "-B",
+                    "/app/serve.py"
+                  ],
+                  "cwd": ".",
+                  "id": "app",
+                  "op": "serve",
+                  "protocol": "ato.process@1"
+                }
+              ]
+            },
+            "derivation_ref": "sha256:ee0c60bad93dec379acffdc41c311affdba9a6a9077d51d0585b765b920d381e",
+            "proposal_id": "proposal-content:sha256:f00522389f5a7ad643f894c9ac04d0d80914054b68dcb6f0cac281519e08ae70",
+            "status": "admitted"
+          }
+        ],
+        "generated_derivation_refs": [
+          "sha256:ee0c60bad93dec379acffdc41c311affdba9a6a9077d51d0585b765b920d381e"
+        ],
+        "attempt_ids": [
+          "01M3N9HAB344FGTC775A4PTHKT"
+        ],
+        "receipts": [
+          {
+            "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+            "derivation_ref": "sha256:ee0c60bad93dec379acffdc41c311affdba9a6a9077d51d0585b765b920d381e",
+            "execution": {
+              "attempt_id": "01M3N9HAB344FGTC775A4PTHKT",
+              "endpoint": "http://127.0.0.1:8000/",
+              "platform": "linux/aarch64",
+              "realization": "process",
+              "request_id": "01M3N9H8M40E98EHCCCP45P7NJ"
+            },
+            "fully_satisfied": true,
+            "observations": [
+              {
+                "evidence": {
+                  "body_sha256": "sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999",
+                  "method": "GET",
+                  "path": "/health",
+                  "status": 200
+                },
+                "id": "health",
+                "outcome": "satisfied"
+              }
+            ],
+            "schema": "ato.contract-verification-receipt/1",
+            "target": {
+              "kind": "formation-runtime"
+            }
+          }
+        ],
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "runtime_ids": [
+          "rnr_d3_G1_f2bbe01d23055aef"
+        ],
+        "reservation_index": 2,
+        "request_evidence": {
+          "cell": "formation_d3_g1_v1",
+          "proposal_request_sha256": "sha256:82fd177e10b2170d64406bf0499592813c51b627d146f69881e32025d6cfa8d5",
+          "provider_body_sha256": "sha256:f58b4644b8c092cbcc5d79a1c4c4dfacfe70420da09b16785a7064cec5f5cb4a",
+          "timeout_ms": 28862,
+          "proposal_request_bytes": 2040,
+          "provider_body_bytes": 3814,
+          "response_resolved": true
+        },
+        "proposal_request_sha256": "sha256:82fd177e10b2170d64406bf0499592813c51b627d146f69881e32025d6cfa8d5",
+        "provider_body_sha256": "sha256:f58b4644b8c092cbcc5d79a1c4c4dfacfe70420da09b16785a7064cec5f5cb4a",
+        "proposal_request_bytes": 2040,
+        "provider_body_bytes": 3814,
+        "actual_timeout_ms": 28862,
+        "failure_evidence": [],
+        "inspection_evidence": [],
+        "source_context_sha256": "sha256:2b6aad1183a8338946f1d06869a9a230c4e86f23cc4f4eb05cc49e63dd2f5676",
+        "known_derivations": []
+      },
+      {
+        "cell": "G2",
+        "gate": "PASS",
+        "terminal_classification": "ordinary_model_outcome",
+        "raw_assistant_sha256": "9a5e3e98076e3dbb05689b3f895644c77f87e65db66fc675442e31e3e7aa0c50",
+        "raw_assistant_text": "{\"schema\":\"ato.formation-proposal/1\",\"proposals\":[{\"kind\":\"propose_derivation\",\"operations\":[{\"operation\":\"python_http_process@1\",\"entrypoint_id\":\"e_42\"}]}]}",
+        "provider_call": {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 381,
+            "kind": "llm",
+            "model": "deepseek-flash",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 1083,
+              "output_tokens": 46
+            }
+          },
+          "status": "success"
+        },
+        "validator_outcomes": [
+          {
+            "candidate": {
+              "derivation_ref": "sha256:3ba2d475d9ec676e7262280361888e903009655d89f401530fdde40b610ae117",
+              "effects": "pure",
+              "materialization": {
+                "archive_digest": "sha256:1c7f9611ee20b6e260b5fd40833663d9d7701e610c2e98705672990e5b2bba2d",
+                "closure_ref": "sha256:4dd272eee9683d0bd2dad8cdc54a898046b95c5e6ac5490c95eb30e5dc0bc5b3",
+                "kind": "source"
+              },
+              "provisions": [
+                "toolchain.python.3.12.7"
+              ],
+              "requirements": [
+                {
+                  "fact": "runtime.process",
+                  "one_of": [
+                    "true"
+                  ]
+                },
+                {
+                  "fact": "containment",
+                  "one_of": [
+                    "bwrap+landlock"
+                  ]
+                },
+                {
+                  "fact": "toolchain.root"
+                }
+              ]
+            },
+            "capsule_toml": "schema = \"ato.capsule/1\"\n\n[[contract.require]]\nid = \"health\"\nmethod = \"GET\"\npath = \"/health\"\nport = \"app.http\"\nuse = \"ato.contract.http@1\"\n\n[contract.require.expect]\nbody_digest = \"sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999\"\nstatus = 200\n\n[[derive.step]]\nargv = [\"/opt/ato/toolchains/python/3.12.7/bin/python3\", \"-B\", \"/app/serve.py\"]\ncwd = \".\"\nid = \"app\"\nop = \"serve\"\nuse = \"ato.process@1\"\n\n[[input]]\nid = \"workspace\"\npath = \".\"\nuse = \"ato.workspace@1\"\n\n[[port]]\nfrom = \"app\"\nguest_port = 8000\nid = \"app.http\"\nuse = \"ato.http@1\"\n\n[[runtime]]\nname = \"python\"\nversion = \"3.12.7\"\n",
+            "derivation": {
+              "effects": "pure",
+              "inputs": [
+                {
+                  "content_ref": "sha256:4dd272eee9683d0bd2dad8cdc54a898046b95c5e6ac5490c95eb30e5dc0bc5b3",
+                  "id": "workspace",
+                  "protocol": "ato.workspace@1"
+                }
+              ],
+              "ports": [
+                {
+                  "from": "app",
+                  "guest_port": 8000,
+                  "id": "app.http",
+                  "protocol": "ato.http@1"
+                }
+              ],
+              "runtimes": {
+                "python": "3.12.7"
+              },
+              "schema": "ato.derivation/1",
+              "state": [],
+              "steps": [
+                {
+                  "argv": [
+                    "/opt/ato/toolchains/python/3.12.7/bin/python3",
+                    "-B",
+                    "/app/serve.py"
+                  ],
+                  "cwd": ".",
+                  "id": "app",
+                  "op": "serve",
+                  "protocol": "ato.process@1"
+                }
+              ]
+            },
+            "derivation_ref": "sha256:3ba2d475d9ec676e7262280361888e903009655d89f401530fdde40b610ae117",
+            "proposal_id": "proposal-content:sha256:f00522389f5a7ad643f894c9ac04d0d80914054b68dcb6f0cac281519e08ae70",
+            "status": "admitted"
+          }
+        ],
+        "generated_derivation_refs": [
+          "sha256:3ba2d475d9ec676e7262280361888e903009655d89f401530fdde40b610ae117"
+        ],
+        "attempt_ids": [
+          "01M3N9HE9Z7X515YQP8GE3KNN4",
+          "01M3N9HGA27NZJATVCXH18YZT3"
+        ],
+        "receipts": [
+          {
+            "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+            "derivation_ref": "sha256:3ba2d475d9ec676e7262280361888e903009655d89f401530fdde40b610ae117",
+            "execution": {
+              "attempt_id": "01M3N9HGA27NZJATVCXH18YZT3",
+              "endpoint": "http://127.0.0.1:8000/",
+              "platform": "linux/aarch64",
+              "realization": "process",
+              "request_id": "01M3N9HE6Z7274Y97HQDCGP5SP"
+            },
+            "fully_satisfied": true,
+            "observations": [
+              {
+                "evidence": {
+                  "body_sha256": "sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999",
+                  "method": "GET",
+                  "path": "/health",
+                  "status": 200
+                },
+                "id": "health",
+                "outcome": "satisfied"
+              }
+            ],
+            "schema": "ato.contract-verification-receipt/1",
+            "target": {
+              "kind": "formation-runtime"
+            }
+          }
+        ],
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "runtime_ids": [
+          "rnr_d3_G2_308f2743b21cc651"
+        ],
+        "reservation_index": 3,
+        "request_evidence": {
+          "cell": "formation_d3_g2_v1",
+          "proposal_request_sha256": "sha256:331382837ada40aac5e4159ea240abce9725597184a504e3de3ce1ee3274162f",
+          "provider_body_sha256": "sha256:3372d4750830b304bc04735ade6d15c2674fdd0845987991e41c77442647fdb9",
+          "timeout_ms": 28893,
+          "proposal_request_bytes": 2160,
+          "provider_body_bytes": 3944,
+          "response_resolved": true
+        },
+        "proposal_request_sha256": "sha256:331382837ada40aac5e4159ea240abce9725597184a504e3de3ce1ee3274162f",
+        "provider_body_sha256": "sha256:3372d4750830b304bc04735ade6d15c2674fdd0845987991e41c77442647fdb9",
+        "proposal_request_bytes": 2160,
+        "provider_body_bytes": 3944,
+        "actual_timeout_ms": 28893,
+        "failure_evidence": [
+          {
+            "code": "http_status_mismatch",
+            "status": "fail"
+          }
+        ],
+        "inspection_evidence": [],
+        "source_context_sha256": "sha256:2b6aad1183a8338946f1d06869a9a230c4e86f23cc4f4eb05cc49e63dd2f5676",
+        "known_derivations": [
+          "sha256:a2490b6b6c84ad4242d81dc6afea6f04f82f041682389929a1baee6d543296cc"
+        ]
+      },
+      {
+        "cell": "G3",
+        "gate": "PASS",
+        "terminal_classification": "ordinary_model_outcome",
+        "raw_assistant_sha256": "9a5e3e98076e3dbb05689b3f895644c77f87e65db66fc675442e31e3e7aa0c50",
+        "raw_assistant_text": "{\"schema\":\"ato.formation-proposal/1\",\"proposals\":[{\"kind\":\"propose_derivation\",\"operations\":[{\"operation\":\"python_http_process@1\",\"entrypoint_id\":\"e_42\"}]}]}",
+        "provider_call": {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 290,
+            "kind": "llm",
+            "model": "deepseek-flash",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 779,
+              "output_tokens": 46
+            }
+          },
+          "status": "success"
+        },
+        "validator_outcomes": [
+          {
+            "candidate": {
+              "derivation_ref": "sha256:4397a538651c5095fc0261256489575d4deb9086448d5da1e58e6aa51107536a",
+              "effects": "pure",
+              "materialization": {
+                "archive_digest": "sha256:6e5e60aec9826b936a080241d2ab8abecd17e6e6cb2f613d602891ed02c33a6f",
+                "closure_ref": "sha256:58f38619f1b5f499408774b73dd6dcca7bb7fa40f8e4c92427f47331a1fc7cf2",
+                "kind": "source"
+              },
+              "provisions": [
+                "toolchain.python.3.12.7"
+              ],
+              "requirements": [
+                {
+                  "fact": "runtime.process",
+                  "one_of": [
+                    "true"
+                  ]
+                },
+                {
+                  "fact": "containment",
+                  "one_of": [
+                    "bwrap+landlock"
+                  ]
+                },
+                {
+                  "fact": "toolchain.root"
+                }
+              ]
+            },
+            "capsule_toml": "schema = \"ato.capsule/1\"\n\n[[contract.require]]\nid = \"health\"\nmethod = \"GET\"\npath = \"/health\"\nport = \"app.http\"\nuse = \"ato.contract.http@1\"\n\n[contract.require.expect]\nbody_digest = \"sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999\"\nstatus = 200\n\n[[derive.step]]\nargv = [\"/opt/ato/toolchains/python/3.12.7/bin/python3\", \"-B\", \"/app/serve.py\"]\ncwd = \".\"\nid = \"app\"\nop = \"serve\"\nuse = \"ato.process@1\"\n\n[[input]]\nid = \"workspace\"\npath = \".\"\nuse = \"ato.workspace@1\"\n\n[[port]]\nfrom = \"app\"\nguest_port = 8000\nid = \"app.http\"\nuse = \"ato.http@1\"\n\n[[runtime]]\nname = \"python\"\nversion = \"3.12.7\"\n",
+            "derivation": {
+              "effects": "pure",
+              "inputs": [
+                {
+                  "content_ref": "sha256:58f38619f1b5f499408774b73dd6dcca7bb7fa40f8e4c92427f47331a1fc7cf2",
+                  "id": "workspace",
+                  "protocol": "ato.workspace@1"
+                }
+              ],
+              "ports": [
+                {
+                  "from": "app",
+                  "guest_port": 8000,
+                  "id": "app.http",
+                  "protocol": "ato.http@1"
+                }
+              ],
+              "runtimes": {
+                "python": "3.12.7"
+              },
+              "schema": "ato.derivation/1",
+              "state": [],
+              "steps": [
+                {
+                  "argv": [
+                    "/opt/ato/toolchains/python/3.12.7/bin/python3",
+                    "-B",
+                    "/app/serve.py"
+                  ],
+                  "cwd": ".",
+                  "id": "app",
+                  "op": "serve",
+                  "protocol": "ato.process@1"
+                }
+              ]
+            },
+            "derivation_ref": "sha256:4397a538651c5095fc0261256489575d4deb9086448d5da1e58e6aa51107536a",
+            "proposal_id": "proposal-content:sha256:f00522389f5a7ad643f894c9ac04d0d80914054b68dcb6f0cac281519e08ae70",
+            "status": "admitted"
+          }
+        ],
+        "generated_derivation_refs": [
+          "sha256:4397a538651c5095fc0261256489575d4deb9086448d5da1e58e6aa51107536a"
+        ],
+        "attempt_ids": [
+          "01M3N9HNMP1KY5K4ZES3G91XVR"
+        ],
+        "receipts": [
+          {
+            "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+            "derivation_ref": "sha256:4397a538651c5095fc0261256489575d4deb9086448d5da1e58e6aa51107536a",
+            "execution": {
+              "attempt_id": "01M3N9HNMP1KY5K4ZES3G91XVR",
+              "endpoint": "http://127.0.0.1:8000/",
+              "platform": "linux/aarch64",
+              "realization": "process",
+              "request_id": "01M3N9HM6G56CA7FQSF6633WBS"
+            },
+            "fully_satisfied": true,
+            "observations": [
+              {
+                "evidence": {
+                  "body_sha256": "sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999",
+                  "method": "GET",
+                  "path": "/health",
+                  "status": 200
+                },
+                "id": "health",
+                "outcome": "satisfied"
+              }
+            ],
+            "schema": "ato.contract-verification-receipt/1",
+            "target": {
+              "kind": "formation-runtime"
+            }
+          }
+        ],
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "runtime_ids": [
+          "rnr_d3_G3_1e693019d13c8449"
+        ],
+        "reservation_index": 4,
+        "request_evidence": {
+          "cell": "formation_d3_g3_v1",
+          "proposal_request_sha256": "sha256:de8ec89667b08129a176d1fec6b8ae6eb2fa9cdd7d0fac46068e0b55891300b0",
+          "provider_body_sha256": "sha256:4f90f4a9e02494f2f8af6af5c2ff94fba997c9553bc26f16b4186397180baf8b",
+          "timeout_ms": 28915,
+          "proposal_request_bytes": 1436,
+          "provider_body_bytes": 3127,
+          "response_resolved": true
+        },
+        "proposal_request_sha256": "sha256:de8ec89667b08129a176d1fec6b8ae6eb2fa9cdd7d0fac46068e0b55891300b0",
+        "provider_body_sha256": "sha256:4f90f4a9e02494f2f8af6af5c2ff94fba997c9553bc26f16b4186397180baf8b",
+        "proposal_request_bytes": 1436,
+        "provider_body_bytes": 3127,
+        "actual_timeout_ms": 28915,
+        "failure_evidence": [],
+        "inspection_evidence": [],
+        "source_context_sha256": "sha256:0c282a337ce2a672b684408145618333f22dcc4a021bb66f3414a14a93034738",
+        "known_derivations": []
+      },
+      {
+        "cell": "G4",
+        "gate": "PASS",
+        "terminal_classification": "ordinary_model_outcome",
+        "raw_assistant_sha256": "9a5e3e98076e3dbb05689b3f895644c77f87e65db66fc675442e31e3e7aa0c50",
+        "raw_assistant_text": "{\"schema\":\"ato.formation-proposal/1\",\"proposals\":[{\"kind\":\"propose_derivation\",\"operations\":[{\"operation\":\"python_http_process@1\",\"entrypoint_id\":\"e_42\"}]}]}",
+        "provider_call": {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 265,
+            "kind": "llm",
+            "model": "deepseek-flash",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 694,
+              "output_tokens": 46
+            }
+          },
+          "status": "success"
+        },
+        "validator_outcomes": [
+          {
+            "candidate": {
+              "derivation_ref": "sha256:1cd45e553e831e89fea3bd5eddb7244d6ca3a42603e63f57599535af63071370",
+              "effects": "pure",
+              "materialization": {
+                "archive_digest": "sha256:eb2074e5f308b81a16ed657785edaa8bc4de76d5e33664f90e98b670117f09c1",
+                "closure_ref": "sha256:f7de7975c33e6454398891e99faa249243d2822f23368397f8a3d9210396bb2f",
+                "kind": "source"
+              },
+              "provisions": [
+                "toolchain.python.3.12.7"
+              ],
+              "requirements": [
+                {
+                  "fact": "runtime.process",
+                  "one_of": [
+                    "true"
+                  ]
+                },
+                {
+                  "fact": "containment",
+                  "one_of": [
+                    "bwrap+landlock"
+                  ]
+                },
+                {
+                  "fact": "toolchain.root"
+                }
+              ]
+            },
+            "capsule_toml": "schema = \"ato.capsule/1\"\n\n[[contract.require]]\nid = \"health\"\nmethod = \"GET\"\npath = \"/health\"\nport = \"app.http\"\nuse = \"ato.contract.http@1\"\n\n[contract.require.expect]\nbody_digest = \"sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999\"\nstatus = 200\n\n[[derive.step]]\nargv = [\"/opt/ato/toolchains/python/3.12.7/bin/python3\", \"-B\", \"/app/serve.py\"]\ncwd = \".\"\nid = \"app\"\nop = \"serve\"\nuse = \"ato.process@1\"\n\n[[input]]\nid = \"workspace\"\npath = \".\"\nuse = \"ato.workspace@1\"\n\n[[port]]\nfrom = \"app\"\nguest_port = 8000\nid = \"app.http\"\nuse = \"ato.http@1\"\n\n[[runtime]]\nname = \"python\"\nversion = \"3.12.7\"\n",
+            "derivation": {
+              "effects": "pure",
+              "inputs": [
+                {
+                  "content_ref": "sha256:f7de7975c33e6454398891e99faa249243d2822f23368397f8a3d9210396bb2f",
+                  "id": "workspace",
+                  "protocol": "ato.workspace@1"
+                }
+              ],
+              "ports": [
+                {
+                  "from": "app",
+                  "guest_port": 8000,
+                  "id": "app.http",
+                  "protocol": "ato.http@1"
+                }
+              ],
+              "runtimes": {
+                "python": "3.12.7"
+              },
+              "schema": "ato.derivation/1",
+              "state": [],
+              "steps": [
+                {
+                  "argv": [
+                    "/opt/ato/toolchains/python/3.12.7/bin/python3",
+                    "-B",
+                    "/app/serve.py"
+                  ],
+                  "cwd": ".",
+                  "id": "app",
+                  "op": "serve",
+                  "protocol": "ato.process@1"
+                }
+              ]
+            },
+            "derivation_ref": "sha256:1cd45e553e831e89fea3bd5eddb7244d6ca3a42603e63f57599535af63071370",
+            "proposal_id": "proposal-content:sha256:f00522389f5a7ad643f894c9ac04d0d80914054b68dcb6f0cac281519e08ae70",
+            "status": "admitted"
+          }
+        ],
+        "generated_derivation_refs": [
+          "sha256:1cd45e553e831e89fea3bd5eddb7244d6ca3a42603e63f57599535af63071370"
+        ],
+        "attempt_ids": [
+          "01M3N9HV4RK0BSRZY2QXN2XEG2"
+        ],
+        "receipts": [],
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "runtime_ids": [
+          "rnr_d3_G4_b960ee9db81520d3"
+        ],
+        "reservation_index": 5,
+        "request_evidence": {
+          "cell": "formation_d3_g4_v1",
+          "proposal_request_sha256": "sha256:bcd07c007403b5a106a9ebe4896e9516db57d9af4b0e7993546d65018399d82f",
+          "provider_body_sha256": "sha256:3c948caa9c1117d44237dd519e97c0aa3b75b0dd57f58c9c1f04d1e3218742ee",
+          "timeout_ms": 28936,
+          "proposal_request_bytes": 1105,
+          "provider_body_bytes": 2791,
+          "response_resolved": true
+        },
+        "proposal_request_sha256": "sha256:bcd07c007403b5a106a9ebe4896e9516db57d9af4b0e7993546d65018399d82f",
+        "provider_body_sha256": "sha256:3c948caa9c1117d44237dd519e97c0aa3b75b0dd57f58c9c1f04d1e3218742ee",
+        "proposal_request_bytes": 1105,
+        "provider_body_bytes": 2791,
+        "actual_timeout_ms": 28936,
+        "failure_evidence": [],
+        "inspection_evidence": [],
+        "source_context_sha256": "sha256:b8e7d89eaa04a37e5160639685020f6b357c83b49c3b08c84964ab2641da7433",
+        "known_derivations": []
+      },
+      {
+        "cell": "G5",
+        "gate": "PASS",
+        "terminal_classification": "ordinary_model_outcome",
+        "raw_assistant_sha256": "9a5e3e98076e3dbb05689b3f895644c77f87e65db66fc675442e31e3e7aa0c50",
+        "raw_assistant_text": "{\"schema\":\"ato.formation-proposal/1\",\"proposals\":[{\"kind\":\"propose_derivation\",\"operations\":[{\"operation\":\"python_http_process@1\",\"entrypoint_id\":\"e_42\"}]}]}",
+        "provider_call": {
+          "error_class": null,
+          "provenance": {
+            "estimated_cost_usd_micros": 366,
+            "kind": "llm",
+            "model": "deepseek-flash",
+            "prompt_version": "ato.formation-candidate-producer-prompt/1",
+            "provider": "deepseek",
+            "schema": "ato.formation-proposal-provenance/1",
+            "usage": {
+              "input_tokens": 1031,
+              "output_tokens": 46
+            }
+          },
+          "status": "success"
+        },
+        "validator_outcomes": [
+          {
+            "candidate": {
+              "derivation_ref": "sha256:ee0c60bad93dec379acffdc41c311affdba9a6a9077d51d0585b765b920d381e",
+              "effects": "pure",
+              "materialization": {
+                "archive_digest": "sha256:3427aaf7a5ccec47f99004215ccdf6898e0125cc4106c0c28e508488b975ff01",
+                "closure_ref": "sha256:a49048c124c82a51d99dd0bdc43b192d5b283455ddc3104b2de235a608e0eea5",
+                "kind": "source"
+              },
+              "provisions": [
+                "toolchain.python.3.12.7"
+              ],
+              "requirements": [
+                {
+                  "fact": "runtime.process",
+                  "one_of": [
+                    "true"
+                  ]
+                },
+                {
+                  "fact": "containment",
+                  "one_of": [
+                    "bwrap+landlock"
+                  ]
+                },
+                {
+                  "fact": "toolchain.root"
+                }
+              ]
+            },
+            "capsule_toml": "schema = \"ato.capsule/1\"\n\n[[contract.require]]\nid = \"health\"\nmethod = \"GET\"\npath = \"/health\"\nport = \"app.http\"\nuse = \"ato.contract.http@1\"\n\n[contract.require.expect]\nbody_digest = \"sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999\"\nstatus = 200\n\n[[derive.step]]\nargv = [\"/opt/ato/toolchains/python/3.12.7/bin/python3\", \"-B\", \"/app/serve.py\"]\ncwd = \".\"\nid = \"app\"\nop = \"serve\"\nuse = \"ato.process@1\"\n\n[[input]]\nid = \"workspace\"\npath = \".\"\nuse = \"ato.workspace@1\"\n\n[[port]]\nfrom = \"app\"\nguest_port = 8000\nid = \"app.http\"\nuse = \"ato.http@1\"\n\n[[runtime]]\nname = \"python\"\nversion = \"3.12.7\"\n",
+            "derivation": {
+              "effects": "pure",
+              "inputs": [
+                {
+                  "content_ref": "sha256:a49048c124c82a51d99dd0bdc43b192d5b283455ddc3104b2de235a608e0eea5",
+                  "id": "workspace",
+                  "protocol": "ato.workspace@1"
+                }
+              ],
+              "ports": [
+                {
+                  "from": "app",
+                  "guest_port": 8000,
+                  "id": "app.http",
+                  "protocol": "ato.http@1"
+                }
+              ],
+              "runtimes": {
+                "python": "3.12.7"
+              },
+              "schema": "ato.derivation/1",
+              "state": [],
+              "steps": [
+                {
+                  "argv": [
+                    "/opt/ato/toolchains/python/3.12.7/bin/python3",
+                    "-B",
+                    "/app/serve.py"
+                  ],
+                  "cwd": ".",
+                  "id": "app",
+                  "op": "serve",
+                  "protocol": "ato.process@1"
+                }
+              ]
+            },
+            "derivation_ref": "sha256:ee0c60bad93dec379acffdc41c311affdba9a6a9077d51d0585b765b920d381e",
+            "proposal_id": "proposal-content:sha256:f00522389f5a7ad643f894c9ac04d0d80914054b68dcb6f0cac281519e08ae70",
+            "status": "admitted"
+          }
+        ],
+        "generated_derivation_refs": [
+          "sha256:ee0c60bad93dec379acffdc41c311affdba9a6a9077d51d0585b765b920d381e"
+        ],
+        "attempt_ids": [
+          "01M3N9HZRH28RP81QXJJ7TDWW4"
+        ],
+        "receipts": [
+          {
+            "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+            "derivation_ref": "sha256:ee0c60bad93dec379acffdc41c311affdba9a6a9077d51d0585b765b920d381e",
+            "execution": {
+              "attempt_id": "01M3N9HZRH28RP81QXJJ7TDWW4",
+              "endpoint": "http://127.0.0.1:8000/",
+              "platform": "linux/aarch64",
+              "realization": "process",
+              "request_id": "01M3N9HY8SAHHBAXASE8NS3Z9P"
+            },
+            "fully_satisfied": true,
+            "observations": [
+              {
+                "evidence": {
+                  "body_sha256": "sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999",
+                  "method": "GET",
+                  "path": "/health",
+                  "status": 200
+                },
+                "id": "health",
+                "outcome": "satisfied"
+              }
+            ],
+            "schema": "ato.contract-verification-receipt/1",
+            "target": {
+              "kind": "formation-runtime"
+            }
+          }
+        ],
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "runtime_ids": [
+          "rnr_d3_G5_aaeafdb2c7cba423"
+        ],
+        "reservation_index": 6,
+        "request_evidence": {
+          "cell": "formation_d3_g5_v1",
+          "proposal_request_sha256": "sha256:875c5084f0b1dacf7a1d42539a1190d822f0e6dbfcd0de5894b3683ce2be27fa",
+          "provider_body_sha256": "sha256:e5f2ef24e78b8c07b912280e760169edc31aa58d90a773f058257a55b72ead84",
+          "timeout_ms": 28921,
+          "proposal_request_bytes": 2040,
+          "provider_body_bytes": 3814,
+          "response_resolved": true
+        },
+        "proposal_request_sha256": "sha256:875c5084f0b1dacf7a1d42539a1190d822f0e6dbfcd0de5894b3683ce2be27fa",
+        "provider_body_sha256": "sha256:e5f2ef24e78b8c07b912280e760169edc31aa58d90a773f058257a55b72ead84",
+        "proposal_request_bytes": 2040,
+        "provider_body_bytes": 3814,
+        "actual_timeout_ms": 28921,
+        "failure_evidence": [],
+        "inspection_evidence": [],
+        "source_context_sha256": "sha256:2b6aad1183a8338946f1d06869a9a230c4e86f23cc4f4eb05cc49e63dd2f5676",
+        "known_derivations": []
+      }
+    ],
+    "stopped": false,
+    "partial_cell": null,
+    "reserved_maximum_usd_micros": 486612,
+    "observed_token_usage": [
+      {
+        "input_tokens": 810,
+        "output_tokens": 46
+      },
+      {
+        "input_tokens": 1031,
+        "output_tokens": 46
+      },
+      {
+        "input_tokens": 1083,
+        "output_tokens": 46
+      },
+      {
+        "input_tokens": 779,
+        "output_tokens": 46
+      },
+      {
+        "input_tokens": 694,
+        "output_tokens": 46
+      },
+      {
+        "input_tokens": 1031,
+        "output_tokens": 46
+      }
+    ],
+    "peak_price_equivalent_estimates_usd_micros": [
+      299,
+      366,
+      381,
+      290,
+      265,
+      366
+    ],
+    "actual_account_billing": null
+  },
+  "supplemental_evidence": {
+    "journal_snapshot_rust_validated": {
+      "cells": {
+        "formation_d3_g0_v1": {
+          "request": {
+            "cell": "formation_d3_g0_v1",
+            "proposal_request_sha256": "sha256:b26d5204dc661be62d84d6daaa35a8d5f030645907640e0ebd4de234cf06713e",
+            "provider_body_sha256": "sha256:d77adc996249436b9a40e3a679a70d603475635659b1dd03a726e32695fcbb63",
+            "timeout_ms": 28832,
+            "proposal_request_bytes": 1436,
+            "provider_body_bytes": 3153
+          },
+          "response": {
+            "cell": "formation_d3_g0_v1",
+            "finish_reason": "stop",
+            "model_matches": true,
+            "input_tokens": 810,
+            "output_tokens": 46
+          }
+        },
+        "formation_d3_g1_v1": {
+          "request": {
+            "cell": "formation_d3_g1_v1",
+            "proposal_request_sha256": "sha256:82fd177e10b2170d64406bf0499592813c51b627d146f69881e32025d6cfa8d5",
+            "provider_body_sha256": "sha256:f58b4644b8c092cbcc5d79a1c4c4dfacfe70420da09b16785a7064cec5f5cb4a",
+            "timeout_ms": 28862,
+            "proposal_request_bytes": 2040,
+            "provider_body_bytes": 3814
+          },
+          "response": {
+            "cell": "formation_d3_g1_v1",
+            "finish_reason": "stop",
+            "model_matches": true,
+            "input_tokens": 1031,
+            "output_tokens": 46
+          }
+        },
+        "formation_d3_g2_v1": {
+          "request": {
+            "cell": "formation_d3_g2_v1",
+            "proposal_request_sha256": "sha256:331382837ada40aac5e4159ea240abce9725597184a504e3de3ce1ee3274162f",
+            "provider_body_sha256": "sha256:3372d4750830b304bc04735ade6d15c2674fdd0845987991e41c77442647fdb9",
+            "timeout_ms": 28893,
+            "proposal_request_bytes": 2160,
+            "provider_body_bytes": 3944
+          },
+          "response": {
+            "cell": "formation_d3_g2_v1",
+            "finish_reason": "stop",
+            "model_matches": true,
+            "input_tokens": 1083,
+            "output_tokens": 46
+          }
+        },
+        "formation_d3_g3_v1": {
+          "request": {
+            "cell": "formation_d3_g3_v1",
+            "proposal_request_sha256": "sha256:de8ec89667b08129a176d1fec6b8ae6eb2fa9cdd7d0fac46068e0b55891300b0",
+            "provider_body_sha256": "sha256:4f90f4a9e02494f2f8af6af5c2ff94fba997c9553bc26f16b4186397180baf8b",
+            "timeout_ms": 28915,
+            "proposal_request_bytes": 1436,
+            "provider_body_bytes": 3127
+          },
+          "response": {
+            "cell": "formation_d3_g3_v1",
+            "finish_reason": "stop",
+            "model_matches": true,
+            "input_tokens": 779,
+            "output_tokens": 46
+          }
+        },
+        "formation_d3_g4_v1": {
+          "request": {
+            "cell": "formation_d3_g4_v1",
+            "proposal_request_sha256": "sha256:bcd07c007403b5a106a9ebe4896e9516db57d9af4b0e7993546d65018399d82f",
+            "provider_body_sha256": "sha256:3c948caa9c1117d44237dd519e97c0aa3b75b0dd57f58c9c1f04d1e3218742ee",
+            "timeout_ms": 28936,
+            "proposal_request_bytes": 1105,
+            "provider_body_bytes": 2791
+          },
+          "response": {
+            "cell": "formation_d3_g4_v1",
+            "finish_reason": "stop",
+            "model_matches": true,
+            "input_tokens": 694,
+            "output_tokens": 46
+          }
+        },
+        "formation_d3_g5_v1": {
+          "request": {
+            "cell": "formation_d3_g5_v1",
+            "proposal_request_sha256": "sha256:875c5084f0b1dacf7a1d42539a1190d822f0e6dbfcd0de5894b3683ce2be27fa",
+            "provider_body_sha256": "sha256:e5f2ef24e78b8c07b912280e760169edc31aa58d90a773f058257a55b72ead84",
+            "timeout_ms": 28921,
+            "proposal_request_bytes": 2040,
+            "provider_body_bytes": 3814
+          },
+          "response": {
+            "cell": "formation_d3_g5_v1",
+            "finish_reason": "stop",
+            "model_matches": true,
+            "input_tokens": 1031,
+            "output_tokens": 46
+          }
+        }
+      },
+      "stopped": false
+    },
+    "attempt_evidence": {
+      "G3": [
+        {
+          "attempt_id": "01M3N9HNMP1KY5K4ZES3G91XVR",
+          "derivation_ref": "sha256:4397a538651c5095fc0261256489575d4deb9086448d5da1e58e6aa51107536a",
+          "status": "pass",
+          "runtime_id": "rnr_d3_G3_1e693019d13c8449",
+          "finished_at": "2026-09-29T00:38:01.035Z",
+          "attestation": {
+            "agent_version": "0.1.0",
+            "attempt_record": "finished",
+            "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+            "derivation_ref": "sha256:4397a538651c5095fc0261256489575d4deb9086448d5da1e58e6aa51107536a",
+            "effects": "pure",
+            "environment_id": "native",
+            "execution_started": true,
+            "provisions": [
+              "toolchain.python.3.12.7"
+            ],
+            "requirements": [
+              {
+                "fact": "runtime.process",
+                "one_of": [
+                  "true"
+                ]
+              },
+              {
+                "fact": "containment",
+                "one_of": [
+                  "bwrap+landlock"
+                ]
+              },
+              {
+                "fact": "toolchain.root"
+              }
+            ]
+          },
+          "receipt": {
+            "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+            "derivation_ref": "sha256:4397a538651c5095fc0261256489575d4deb9086448d5da1e58e6aa51107536a",
+            "execution": {
+              "attempt_id": "01M3N9HNMP1KY5K4ZES3G91XVR",
+              "endpoint": "http://127.0.0.1:8000/",
+              "platform": "linux/aarch64",
+              "realization": "process",
+              "request_id": "01M3N9HM6G56CA7FQSF6633WBS"
+            },
+            "fully_satisfied": true,
+            "observations": [
+              {
+                "evidence": {
+                  "body_sha256": "sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999",
+                  "method": "GET",
+                  "path": "/health",
+                  "status": 200
+                },
+                "id": "health",
+                "outcome": "satisfied"
+              }
+            ],
+            "schema": "ato.contract-verification-receipt/1",
+            "target": {
+              "kind": "formation-runtime"
+            }
+          },
+          "failure": null
+        }
+      ],
+      "G4": [
+        {
+          "attempt_id": "01M3N9HV4RK0BSRZY2QXN2XEG2",
+          "derivation_ref": "sha256:1cd45e553e831e89fea3bd5eddb7244d6ca3a42603e63f57599535af63071370",
+          "status": "fail",
+          "runtime_id": "rnr_d3_G4_b960ee9db81520d3",
+          "finished_at": "2026-09-29T00:38:06.151Z",
+          "attestation": {
+            "agent_version": "0.1.0",
+            "attempt_record": "finished",
+            "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+            "derivation_ref": "sha256:1cd45e553e831e89fea3bd5eddb7244d6ca3a42603e63f57599535af63071370",
+            "effects": "pure",
+            "environment_id": "native",
+            "execution_started": true,
+            "provisions": [
+              "toolchain.python.3.12.7"
+            ],
+            "requirements": [
+              {
+                "fact": "runtime.process",
+                "one_of": [
+                  "true"
+                ]
+              },
+              {
+                "fact": "containment",
+                "one_of": [
+                  "bwrap+landlock"
+                ]
+              },
+              {
+                "fact": "toolchain.root"
+              }
+            ]
+          },
+          "receipt": null,
+          "failure": {
+            "code": "candidate_not_observable",
+            "message": "candidate output: (none): workload for run formation-01M3N9HV4RK0BSRZY2QXN2XEG2 exited before becoming ready (exit status: 0)",
+            "stage": "verification"
+          }
+        }
+      ],
+      "G5": [
+        {
+          "attempt_id": "01M3N9HZRH28RP81QXJJ7TDWW4",
+          "derivation_ref": "sha256:ee0c60bad93dec379acffdc41c311affdba9a6a9077d51d0585b765b920d381e",
+          "status": "pass",
+          "runtime_id": "rnr_d3_G5_aaeafdb2c7cba423",
+          "finished_at": "2026-09-29T00:38:11.266Z",
+          "attestation": {
+            "agent_version": "0.1.0",
+            "attempt_record": "finished",
+            "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+            "derivation_ref": "sha256:ee0c60bad93dec379acffdc41c311affdba9a6a9077d51d0585b765b920d381e",
+            "effects": "pure",
+            "environment_id": "native",
+            "execution_started": true,
+            "provisions": [
+              "toolchain.python.3.12.7"
+            ],
+            "requirements": [
+              {
+                "fact": "runtime.process",
+                "one_of": [
+                  "true"
+                ]
+              },
+              {
+                "fact": "containment",
+                "one_of": [
+                  "bwrap+landlock"
+                ]
+              },
+              {
+                "fact": "toolchain.root"
+              }
+            ]
+          },
+          "receipt": {
+            "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+            "derivation_ref": "sha256:ee0c60bad93dec379acffdc41c311affdba9a6a9077d51d0585b765b920d381e",
+            "execution": {
+              "attempt_id": "01M3N9HZRH28RP81QXJJ7TDWW4",
+              "endpoint": "http://127.0.0.1:8000/",
+              "platform": "linux/aarch64",
+              "realization": "process",
+              "request_id": "01M3N9HY8SAHHBAXASE8NS3Z9P"
+            },
+            "fully_satisfied": true,
+            "observations": [
+              {
+                "evidence": {
+                  "body_sha256": "sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999",
+                  "method": "GET",
+                  "path": "/health",
+                  "status": 200
+                },
+                "id": "health",
+                "outcome": "satisfied"
+              }
+            ],
+            "schema": "ato.contract-verification-receipt/1",
+            "target": {
+              "kind": "formation-runtime"
+            }
+          },
+          "failure": null
+        }
+      ],
+      "G2": [
+        {
+          "attempt_id": "01M3N9HE9Z7X515YQP8GE3KNN4",
+          "derivation_ref": "sha256:a2490b6b6c84ad4242d81dc6afea6f04f82f041682389929a1baee6d543296cc",
+          "status": "fail",
+          "runtime_id": "rnr_d3_G2_308f2743b21cc651",
+          "finished_at": "2026-09-29T00:37:52.899Z",
+          "attestation": {
+            "agent_version": "0.1.0",
+            "attempt_record": "finished",
+            "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+            "derivation_ref": "sha256:a2490b6b6c84ad4242d81dc6afea6f04f82f041682389929a1baee6d543296cc",
+            "effects": "pure",
+            "environment_id": "native",
+            "execution_started": true,
+            "provisions": [
+              "toolchain.python.3.12.7"
+            ],
+            "requirements": [
+              {
+                "fact": "runtime.process",
+                "one_of": [
+                  "true"
+                ]
+              },
+              {
+                "fact": "containment",
+                "one_of": [
+                  "bwrap+landlock"
+                ]
+              },
+              {
+                "fact": "toolchain.root"
+              }
+            ]
+          },
+          "receipt": {
+            "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+            "derivation_ref": "sha256:a2490b6b6c84ad4242d81dc6afea6f04f82f041682389929a1baee6d543296cc",
+            "execution": {
+              "attempt_id": "01M3N9HE9Z7X515YQP8GE3KNN4",
+              "endpoint": "http://127.0.0.1:8000/",
+              "platform": "linux/aarch64",
+              "realization": "process",
+              "request_id": "01M3N9HE6Z7274Y97HQDCGP5SP"
+            },
+            "fully_satisfied": false,
+            "observations": [
+              {
+                "evidence": {
+                  "body_sha256": "sha256:c96cf8ce66abd86013abd1e0052663681b6d57a5b0920274cea85b3060759aaa",
+                  "method": "GET",
+                  "path": "/health",
+                  "status": 404
+                },
+                "failure": "http_status_mismatch: GET /health on app.http returned 404; expected 200",
+                "id": "health",
+                "outcome": "failed"
+              }
+            ],
+            "schema": "ato.contract-verification-receipt/1",
+            "target": {
+              "kind": "formation-runtime"
+            }
+          },
+          "failure": {
+            "code": "http_status_mismatch",
+            "message": "health: GET /health on app.http returned 404; expected 200",
+            "stage": "verification"
+          }
+        },
+        {
+          "attempt_id": "01M3N9HGA27NZJATVCXH18YZT3",
+          "derivation_ref": "sha256:3ba2d475d9ec676e7262280361888e903009655d89f401530fdde40b610ae117",
+          "status": "pass",
+          "runtime_id": "rnr_d3_G2_308f2743b21cc651",
+          "finished_at": "2026-09-29T00:37:55.641Z",
+          "attestation": {
+            "agent_version": "0.1.0",
+            "attempt_record": "finished",
+            "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+            "derivation_ref": "sha256:3ba2d475d9ec676e7262280361888e903009655d89f401530fdde40b610ae117",
+            "effects": "pure",
+            "environment_id": "native",
+            "execution_started": true,
+            "provisions": [
+              "toolchain.python.3.12.7"
+            ],
+            "requirements": [
+              {
+                "fact": "runtime.process",
+                "one_of": [
+                  "true"
+                ]
+              },
+              {
+                "fact": "containment",
+                "one_of": [
+                  "bwrap+landlock"
+                ]
+              },
+              {
+                "fact": "toolchain.root"
+              }
+            ]
+          },
+          "receipt": {
+            "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+            "derivation_ref": "sha256:3ba2d475d9ec676e7262280361888e903009655d89f401530fdde40b610ae117",
+            "execution": {
+              "attempt_id": "01M3N9HGA27NZJATVCXH18YZT3",
+              "endpoint": "http://127.0.0.1:8000/",
+              "platform": "linux/aarch64",
+              "realization": "process",
+              "request_id": "01M3N9HE6Z7274Y97HQDCGP5SP"
+            },
+            "fully_satisfied": true,
+            "observations": [
+              {
+                "evidence": {
+                  "body_sha256": "sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999",
+                  "method": "GET",
+                  "path": "/health",
+                  "status": 200
+                },
+                "id": "health",
+                "outcome": "satisfied"
+              }
+            ],
+            "schema": "ato.contract-verification-receipt/1",
+            "target": {
+              "kind": "formation-runtime"
+            }
+          },
+          "failure": null
+        }
+      ],
+      "G0": [
+        {
+          "attempt_id": "01M3N9H4PZ5EVCWQ5N1TN1P42M",
+          "derivation_ref": "sha256:ee0c60bad93dec379acffdc41c311affdba9a6a9077d51d0585b765b920d381e",
+          "status": "pass",
+          "runtime_id": "rnr_d3_G0_c8d1247a41dc3778",
+          "finished_at": "2026-09-29T00:37:43.732Z",
+          "attestation": {
+            "agent_version": "0.1.0",
+            "attempt_record": "finished",
+            "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+            "derivation_ref": "sha256:ee0c60bad93dec379acffdc41c311affdba9a6a9077d51d0585b765b920d381e",
+            "effects": "pure",
+            "environment_id": "native",
+            "execution_started": true,
+            "provisions": [
+              "toolchain.python.3.12.7"
+            ],
+            "requirements": [
+              {
+                "fact": "runtime.process",
+                "one_of": [
+                  "true"
+                ]
+              },
+              {
+                "fact": "containment",
+                "one_of": [
+                  "bwrap+landlock"
+                ]
+              },
+              {
+                "fact": "toolchain.root"
+              }
+            ]
+          },
+          "receipt": {
+            "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+            "derivation_ref": "sha256:ee0c60bad93dec379acffdc41c311affdba9a6a9077d51d0585b765b920d381e",
+            "execution": {
+              "attempt_id": "01M3N9H4PZ5EVCWQ5N1TN1P42M",
+              "endpoint": "http://127.0.0.1:8000/",
+              "platform": "linux/aarch64",
+              "realization": "process",
+              "request_id": "01M3N9H36DB5K4XVX6YCY4ADD4"
+            },
+            "fully_satisfied": true,
+            "observations": [
+              {
+                "evidence": {
+                  "body_sha256": "sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999",
+                  "method": "GET",
+                  "path": "/health",
+                  "status": 200
+                },
+                "id": "health",
+                "outcome": "satisfied"
+              }
+            ],
+            "schema": "ato.contract-verification-receipt/1",
+            "target": {
+              "kind": "formation-runtime"
+            }
+          },
+          "failure": null
+        }
+      ],
+      "G1": [
+        {
+          "attempt_id": "01M3N9HAB344FGTC775A4PTHKT",
+          "derivation_ref": "sha256:ee0c60bad93dec379acffdc41c311affdba9a6a9077d51d0585b765b920d381e",
+          "status": "pass",
+          "runtime_id": "rnr_d3_G1_f2bbe01d23055aef",
+          "finished_at": "2026-09-29T00:37:49.488Z",
+          "attestation": {
+            "agent_version": "0.1.0",
+            "attempt_record": "finished",
+            "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+            "derivation_ref": "sha256:ee0c60bad93dec379acffdc41c311affdba9a6a9077d51d0585b765b920d381e",
+            "effects": "pure",
+            "environment_id": "native",
+            "execution_started": true,
+            "provisions": [
+              "toolchain.python.3.12.7"
+            ],
+            "requirements": [
+              {
+                "fact": "runtime.process",
+                "one_of": [
+                  "true"
+                ]
+              },
+              {
+                "fact": "containment",
+                "one_of": [
+                  "bwrap+landlock"
+                ]
+              },
+              {
+                "fact": "toolchain.root"
+              }
+            ]
+          },
+          "receipt": {
+            "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+            "derivation_ref": "sha256:ee0c60bad93dec379acffdc41c311affdba9a6a9077d51d0585b765b920d381e",
+            "execution": {
+              "attempt_id": "01M3N9HAB344FGTC775A4PTHKT",
+              "endpoint": "http://127.0.0.1:8000/",
+              "platform": "linux/aarch64",
+              "realization": "process",
+              "request_id": "01M3N9H8M40E98EHCCCP45P7NJ"
+            },
+            "fully_satisfied": true,
+            "observations": [
+              {
+                "evidence": {
+                  "body_sha256": "sha256:e1facfb37c9f39db4aedb1c196f56a0b5c0f90b0fc2318977b1036d9e0aaf999",
+                  "method": "GET",
+                  "path": "/health",
+                  "status": 200
+                },
+                "id": "health",
+                "outcome": "satisfied"
+              }
+            ],
+            "schema": "ato.contract-verification-receipt/1",
+            "target": {
+              "kind": "formation-runtime"
+            }
+          },
+          "failure": null
+        }
+      ]
+    },
+    "G2_known_failure": {
+      "attempt_id": "01M3N9HE9Z7X515YQP8GE3KNN4",
+      "derivation_ref": "sha256:a2490b6b6c84ad4242d81dc6afea6f04f82f041682389929a1baee6d543296cc",
+      "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+      "receipt": {
+        "contract_ref": "sha256:70d957ef2d15c61af1651a5ef9ae04468b286c815d29e71b3e7b8acdfe63e6ee",
+        "derivation_ref": "sha256:a2490b6b6c84ad4242d81dc6afea6f04f82f041682389929a1baee6d543296cc",
+        "execution": {
+          "attempt_id": "01M3N9HE9Z7X515YQP8GE3KNN4",
+          "endpoint": "http://127.0.0.1:8000/",
+          "platform": "linux/aarch64",
+          "realization": "process",
+          "request_id": "01M3N9HE6Z7274Y97HQDCGP5SP"
+        },
+        "fully_satisfied": false,
+        "observations": [
+          {
+            "evidence": {
+              "body_sha256": "sha256:c96cf8ce66abd86013abd1e0052663681b6d57a5b0920274cea85b3060759aaa",
+              "method": "GET",
+              "path": "/health",
+              "status": 404
+            },
+            "failure": "http_status_mismatch: GET /health on app.http returned 404; expected 200",
+            "id": "health",
+            "outcome": "failed"
+          }
+        ],
+        "schema": "ato.contract-verification-receipt/1",
+        "target": {
+          "kind": "formation-runtime"
+        }
+      }
+    },
+    "requester_process_configs": {
+      "G3": [
+        "requester-0.json"
+      ],
+      "G4": [
+        "requester-0.json"
+      ],
+      "G5": [
+        "requester-0.json",
+        "requester-1.json"
+      ],
+      "G2": [
+        "requester-0.json"
+      ],
+      "G0": [
+        "requester-0.json"
+      ],
+      "G1": [
+        "requester-0.json"
+      ]
+    },
+    "G5_gate_assertions": "controller PASS requires committed completion response drop, restart GET, identical durable round and unchanged journal snapshot"
+  },
+  "stage_5b": "COMPLETED: bounded general-LLM Candidate Generation integration",
+  "implemented": true,
+  "locally_verified": true,
+  "integration_verified": "actual live DeepSeek + isolated local Coordinator/D1 + Runtime/Verifier",
+  "implementation_merged": true,
+  "results_docs_merged": false,
+  "deployed": false,
+  "remote_migration_applied": false,
+  "key_handling": "first credential read after complete A-M; separate limited injector; no key/hash/header/artifact/argv; controller, Runtime and Coordinator receive neither secret bytes nor fd",
+  "prohibited_artifacts_saved": false,
+  "pr1421": "untouched",
+  "additional_live_calls_authorized_by_this_result": false,
+  "claim_limits": [
+    "not general efficacy proof",
+    "not arbitrary OSS support",
+    "not better-than-deterministic evidence",
+    "not production ready",
+    "not autonomous repair"
+  ]
+}
