@@ -186,6 +186,9 @@ struct Fake {
     fail_release: bool,
     released: Cell<u32>,
     calls: RefCell<Vec<String>>,
+    /// None: no gate (the trait default). Some(ok): preflight outcome.
+    egress: Option<bool>,
+    exhausted: bool,
 }
 impl OciBuilder for Fake {
     fn scratch(&self) -> &Path {
@@ -269,6 +272,23 @@ impl OciBuilder for Fake {
         self.store.borrow_mut().clear();
         Ok(())
     }
+    fn preflight_egress(&self, image: &str) -> Result<Value> {
+        self.calls.borrow_mut().push(format!("preflight {image}"));
+        match self.egress {
+            None => Err(err("source_oci_network_unauthorized", "no gate")),
+            Some(true) => Ok(json!({"direct": "blocked", "unlisted_host": 403})),
+            Some(false) => Err(err(
+                "source_oci_egress_preflight_failed",
+                "a direct connection was not blocked",
+            )),
+        }
+    }
+    fn egress_report(&self) -> Option<Value> {
+        self.egress.map(|_| json!({"transferred_bytes": 10}))
+    }
+    fn egress_exhausted(&self) -> bool {
+        self.exhausted
+    }
 }
 fn fake(config: Value, outcome: BuildOutcome) -> Fake {
     let (built, _, cd) = image_archive(config);
@@ -283,6 +303,8 @@ fn fake(config: Value, outcome: BuildOutcome) -> Fake {
         fail_release: false,
         released: Cell::new(0),
         calls: RefCell::new(vec![]),
+        egress: None,
+        exhausted: false,
     }
 }
 
@@ -309,8 +331,10 @@ fn request(dir: &Path) -> SourceOciRequest {
         platform: "linux/amd64".into(),
         base_images: vec![base_input(dir, "base.tar", "base:1", BaseShape::default())],
         declared_transport_port: 8080,
+        authorized_state: vec![],
         policy: SourceOciPolicy {
             network: "none".into(),
+            egress: None,
             build_timeout_seconds: 60,
             max_archive_bytes: MAX_ARCHIVE_BYTES,
             build: BuildLimits {
@@ -362,10 +386,9 @@ fn materializes_a_verified_archive_and_an_authored_route_the_existing_packer_acc
     )));
     assert!(calls.ends_with("release") && b.released.get() == 1 && b.store.borrow().is_empty());
     assert_eq!(m.provenance["outputs"]["image_config"]["cmd"][0], "python3");
-    assert_eq!(
-        m.provenance["profile_divergences"][0]["kind"],
-        "working_dir"
-    );
+    // The image's own WorkingDir is projected into D, not overridden.
+    assert_eq!(m.provenance["working_dir"], "/srv");
+    assert!(m.capsule_toml.contains(r#""oci.working_dir" = "/srv""#));
     // The pinned root, the selected platform manifest and the loaded config
     // are recorded separately.
     let base = &m.provenance["inputs"]["base_images"][0];
@@ -824,4 +847,149 @@ fn an_existing_output_symlink_is_refused_untouched() {
             .is_symlink()
     );
     assert!(!dir.path().join("absent").exists());
+}
+
+fn with_volume(volumes: Value) -> Value {
+    let mut config = ok_config();
+    config["config"]["Volumes"] = volumes;
+    config
+}
+
+#[test]
+fn image_volumes_need_exactly_the_authorized_state_slots() {
+    let dir = tempfile::tempdir().unwrap();
+    // A VOLUME without an authorized slot is refused.
+    let b = fake(with_volume(json!({"/data":{}})), BuildOutcome::Built);
+    assert_eq!(
+        code(run(&request(dir.path()), &b, &dir.path().join("o1"))),
+        "source_oci_volume_unauthorized"
+    );
+    // An authorized slot that is not a VOLUME is refused too.
+    let mut r = request(dir.path());
+    r.authorized_state = vec![AuthorizedState {
+        id: "data".into(),
+        mount: "/data".into(),
+    }];
+    let b = fake(ok_config(), BuildOutcome::Built);
+    assert_eq!(
+        code(run(&r, &b, &dir.path().join("o2"))),
+        "source_oci_volume_unauthorized"
+    );
+    // A parent path does not authorize a child VOLUME.
+    let b = fake(with_volume(json!({"/data/sub":{}})), BuildOutcome::Built);
+    assert_eq!(
+        code(run(&r, &b, &dir.path().join("o3"))),
+        "source_oci_volume_unauthorized"
+    );
+    // Exactly equal: the route declares the slot at that path.
+    let b = fake(with_volume(json!({"/data":{}})), BuildOutcome::Built);
+    let m = run(&r, &b, &dir.path().join("o4")).unwrap();
+    assert!(m.capsule_toml.contains("[[state]]\nid = \"data\""));
+    assert!(m.capsule_toml.contains("mount = \"/data\""));
+    let src = dir.path().join("authored");
+    std::fs::create_dir(&src).unwrap();
+    std::fs::write(src.join("capsule.toml"), &m.capsule_toml).unwrap();
+    std::fs::write(src.join(PROVENANCE_FILE), b"{}").unwrap();
+    let (_, bundle) = crate::build_authored_bundle_v2(&src).unwrap();
+    crate::validate_all_derivations(&bundle).unwrap();
+}
+
+fn online(dir: &Path) -> SourceOciRequest {
+    let mut r = request(dir);
+    r.policy.network = "egress_allowlist".into();
+    r.policy.egress = Some(BuildEgress {
+        hosts: vec!["dl-cdn.alpinelinux.org".into(), "registry.npmjs.org".into()],
+        ports: vec![443],
+        max_transfer_bytes: 300 * 1024 * 1024,
+    });
+    r
+}
+
+#[test]
+fn an_online_build_starts_only_after_the_gate_preflight_and_stops_at_its_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    // A builder without a gate refuses; nothing is built.
+    let b = fake(ok_config(), BuildOutcome::Built);
+    assert_eq!(
+        code(run(&online(dir.path()), &b, &dir.path().join("o1"))),
+        "source_oci_network_unauthorized"
+    );
+    assert!(!b.calls.borrow().iter().any(|c| c.starts_with("build")));
+    // A failed preflight refuses before the build.
+    let mut b = fake(ok_config(), BuildOutcome::Built);
+    b.egress = Some(false);
+    assert_eq!(
+        code(run(&online(dir.path()), &b, &dir.path().join("o2"))),
+        "source_oci_egress_preflight_failed"
+    );
+    assert!(!b.calls.borrow().iter().any(|c| c.starts_with("build")));
+    assert_eq!(b.released.get(), 1);
+    // A proven gate: preflight, then build; the evidence is recorded.
+    let mut b = fake(ok_config(), BuildOutcome::Built);
+    b.egress = Some(true);
+    let m = run(&online(dir.path()), &b, &dir.path().join("o3")).unwrap();
+    let calls = b.calls.borrow();
+    let preflight = calls
+        .iter()
+        .position(|c| c.starts_with("preflight"))
+        .unwrap();
+    let build = calls.iter().position(|c| c.starts_with("build")).unwrap();
+    assert!(preflight < build);
+    assert_eq!(m.provenance["egress"]["preflight"]["unlisted_host"], 403);
+    assert_eq!(m.provenance["egress"]["report"]["transferred_bytes"], 10);
+    assert_eq!(
+        m.provenance["egress"]["policy"]["hosts"][1],
+        "registry.npmjs.org"
+    );
+    drop(calls);
+    // Crossing the budget is its own typed failure; nothing is published.
+    let mut b = fake(
+        ok_config(),
+        BuildOutcome::Failed {
+            log_tail: "npm ERR".into(),
+        },
+    );
+    b.egress = Some(true);
+    b.exhausted = true;
+    let out = dir.path().join("o4");
+    assert_eq!(
+        code(run(&online(dir.path()), &b, &out)),
+        "source_oci_egress_bound"
+    );
+    assert!(!out.exists());
+}
+
+#[test]
+fn egress_allowlists_are_exact_and_bounded() {
+    let dir = tempfile::tempdir().unwrap();
+    let b = fake(ok_config(), BuildOutcome::Built);
+    let cases: [fn(&mut SourceOciRequest); 9] = [
+        |r| r.policy.egress = None,
+        |r| r.policy.network = "none".into(),
+        |r| r.policy.egress.as_mut().unwrap().hosts = vec![],
+        |r| r.policy.egress.as_mut().unwrap().hosts = vec!["*.npmjs.org".into()],
+        |r| r.policy.egress.as_mut().unwrap().hosts = vec!["104.16.0.1".into()],
+        |r| r.policy.egress.as_mut().unwrap().hosts = vec!["Registry.npmjs.org".into()],
+        |r| r.policy.egress.as_mut().unwrap().ports = vec![22],
+        |r| r.policy.egress.as_mut().unwrap().max_transfer_bytes = MAX_BUILD_EGRESS_BYTES + 1,
+        |r| r.policy.egress.as_mut().unwrap().hosts = vec!["localhost".into()],
+    ];
+    for (n, mutate) in cases.into_iter().enumerate() {
+        let mut r = online(dir.path());
+        mutate(&mut r);
+        assert_eq!(
+            code(run(&r, &b, &dir.path().join(format!("o{n}")))),
+            "source_oci_network_unauthorized",
+            "case {n}"
+        );
+    }
+    let mut r = request(dir.path());
+    r.authorized_state = vec![AuthorizedState {
+        id: "Bad-Key".into(),
+        mount: "/data".into(),
+    }];
+    assert_eq!(
+        code(run(&r, &b, &dir.path().join("s"))),
+        "source_oci_request_invalid"
+    );
 }
