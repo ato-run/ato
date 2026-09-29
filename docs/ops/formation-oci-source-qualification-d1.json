@@ -2,8 +2,9 @@
   "schema": "ato.formation-oci-source-qualification-d1/1",
   "wave": "6b-D1",
   "base": "233bda52e7e1f3c9acd4a67d41974f2152f87f9d",
+  "d0_merge": "2ce9a0eb2537c15b9a2ad1d40ecd2a2bcdf77478",
   "inputs": {
-    "d0": "docs/ops/formation-service-qualification-d0.json (revision 2b8e3fcf)",
+    "d0": "docs/ops/formation-service-qualification-d0.json (#1444 head 2b8e3fcf, merged 2ce9a0eb)",
     "dockerfile_facts": "docs/ops/formation-oci-source-qualification-d1-facts.json"
   },
   "method": "static parse of every Dockerfile/Containerfile (depth<=4, no node_modules) in the same 41 pinned archives; no build, pull, run or network",
@@ -15,7 +16,7 @@
     "final stage CMD or ENTRYPOINT (left to OCI semantics, never converted to native argv)",
     "exactly one literal TCP EXPOSE",
     "no mandatory external service",
-    "no Binding needed for startup (e.g. config absent from the image)"
+    "structural checks only: unresolved requirements (startup Binding, privilege, external dependency) are listed per app and must be resolved before execution"
   ],
   "primary_precedence": "external service > OCI v0 eligible > native blocked only by port binding > runtime catalog > ambiguous",
   "distribution": {
@@ -35,84 +36,129 @@
   },
   "oci_route_distribution": {
     "blocked_external_service": 13,
+    "structural_candidate": 9,
     "ambiguous_selection": 9,
-    "v0_eligible": 7,
     "no_dockerfile": 5,
     "ambiguous_port": 3,
-    "no_port": 2,
-    "requires_binding": 2
+    "no_port": 2
   },
-  "oci_v0_eligible": [
+  "candidate_counts": {
+    "structural_candidate": 9,
+    "structural_without_binding_or_external_dependency": 7,
+    "no_unresolved_requirements": 6,
+    "meaning": "static candidates only; no build, start, HTTP response or safety has been verified for any of them"
+  },
+  "structural_candidates": [
     {
       "name": "WBO",
       "runtime": "node",
       "runtime_in_catalog": true,
-      "port": "80",
+      "declared_transport_port": "80",
       "stages": 1,
       "digest_pinned": false,
-      "flags": []
+      "unresolved_requirements": [],
+      "notes": []
     },
     {
       "name": "changedetection.io",
       "runtime": "python",
       "runtime_in_catalog": true,
-      "port": "5000",
+      "declared_transport_port": "5000",
       "stages": 2,
       "digest_pinned": false,
-      "flags": [
-        "FROM uses ARG PYTHON_VERSION with default 3.11"
+      "unresolved_requirements": [],
+      "notes": [
+        "FROM uses ARG PYTHON_VERSION with in-file default 3.11"
       ]
     },
     {
       "name": "Etherpad",
       "runtime": "node",
       "runtime_in_catalog": false,
-      "port": "9001",
+      "declared_transport_port": "9001",
       "stages": 6,
       "digest_pinned": false,
-      "flags": [
-        "final stage chosen by ARG BUILD_ENV=git default (build_${BUILD_ENV})"
+      "unresolved_requirements": [],
+      "notes": [
+        "final stage chosen by ARG BUILD_ENV=git in-file default (build_${BUILD_ENV})"
       ]
     },
     {
       "name": "Vikunja",
       "runtime": "go",
       "runtime_in_catalog": false,
-      "port": "3456",
+      "declared_transport_port": "3456",
       "stages": 3,
       "digest_pinned": true,
-      "flags": []
+      "unresolved_requirements": [],
+      "notes": []
     },
     {
       "name": "Grist core",
       "runtime": "node",
       "runtime_in_catalog": false,
-      "port": "8484",
+      "declared_transport_port": "8484",
       "stages": 6,
       "digest_pinned": false,
-      "flags": [
-        "runtime sandbox (gVisor via sandbox/run.sh) may assume extra container privileges; unverified"
-      ]
+      "unresolved_requirements": [
+        {
+          "kind": "privilege",
+          "evidence": "runtime sandbox (gVisor via sandbox/run.sh) may require container privileges beyond the OCI Adapter default; unverified"
+        }
+      ],
+      "notes": []
     },
     {
       "name": "File Browser",
       "runtime": "go",
       "runtime_in_catalog": false,
-      "port": "80",
+      "declared_transport_port": "80",
       "stages": 2,
       "digest_pinned": false,
-      "flags": []
+      "unresolved_requirements": [],
+      "notes": []
     },
     {
       "name": "Kutt",
       "runtime": "node",
       "runtime_in_catalog": true,
-      "port": "3000",
+      "declared_transport_port": "3000",
       "stages": 1,
       "digest_pinned": false,
-      "flags": [
-        "shell-form CMD runs `npm run migrate && npm start` inside the container"
+      "unresolved_requirements": [],
+      "notes": [
+        "shell-form CMD runs `npm run migrate && npm start` inside the container (OCI semantics, not native argv)"
       ]
+    },
+    {
+      "name": "PrivateGPT",
+      "runtime": "python",
+      "runtime_in_catalog": true,
+      "declared_transport_port": "8080",
+      "stages": 6,
+      "digest_pinned": false,
+      "unresolved_requirements": [
+        {
+          "kind": "external_dependency",
+          "evidence": "settings.yaml defaults select a RabbitMQ task broker (PGPT_TASKS_RESULTS_BROKER_MODE:rabbitmq) and an external LLM; startup without them is unverified"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "name": "Glance",
+      "runtime": "go",
+      "runtime_in_catalog": false,
+      "declared_transport_port": "8080/tcp",
+      "stages": 2,
+      "digest_pinned": false,
+      "unresolved_requirements": [
+        {
+          "kind": "startup_binding",
+          "evidence": "ENTRYPOINT reads /app/config/glance.yml, which the final stage does not copy (only the binary)"
+        }
+      ],
+      "notes": []
     }
   ],
   "universal_gates": {
@@ -131,8 +177,11 @@
       "primary_runtime_kind": "node",
       "runtime_in_current_catalog": true,
       "native_route": "blocked_port_binding",
-      "oci_route": "v0_eligible",
+      "oci_route": "structural_candidate",
       "primary_bucket": "dockerfile_oci_possible_if_build_added",
+      "structural_candidate": true,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": true,
       "dependency_network_gate": true,
       "dockerfiles": [
         ".devcontainer/Dockerfile",
@@ -170,10 +219,12 @@
             "/opt/app/server-data"
           ],
           "workdir": "/opt/app"
-        }
+        },
+        "declared_transport_port": "80",
+        "http_suitability": "unverified (EXPOSE is port metadata; Runtime/Verifier decide)"
       },
       "external_services": "none",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": "base image pull by tag (no digest pin); 2 RUN steps install/fetch dependencies"
     },
     {
@@ -185,6 +236,9 @@
       "native_route": "blocked_runtime_catalog",
       "oci_route": "ambiguous_selection",
       "primary_bucket": "blocked_runtime_catalog",
+      "structural_candidate": false,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [
         ".devcontainer/Dockerfile",
@@ -197,7 +251,7 @@
       "selected_dockerfile": null,
       "root_dockerfile": null,
       "external_services": "optional postgres/mysql (SQLite default)",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": null
     },
     {
@@ -209,6 +263,9 @@
       "native_route": "blocked_launch_undeclared",
       "oci_route": "ambiguous_selection",
       "primary_bucket": "ambiguous",
+      "structural_candidate": false,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [
         "docker/alpine.Dockerfile",
@@ -217,7 +274,7 @@
       "selected_dockerfile": null,
       "root_dockerfile": null,
       "external_services": "none",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": null
     },
     {
@@ -229,6 +286,9 @@
       "native_route": "blocked_launch_undeclared",
       "oci_route": "ambiguous_selection",
       "primary_bucket": "ambiguous",
+      "structural_candidate": false,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [
         ".devcontainer/Dockerfile",
@@ -238,7 +298,7 @@
       "selected_dockerfile": null,
       "root_dockerfile": null,
       "external_services": "valkey optional",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": null
     },
     {
@@ -248,8 +308,11 @@
       "primary_runtime_kind": "python",
       "runtime_in_current_catalog": true,
       "native_route": "blocked_launch_undeclared",
-      "oci_route": "v0_eligible",
+      "oci_route": "structural_candidate",
       "primary_bucket": "dockerfile_oci_possible_if_build_added",
+      "structural_candidate": true,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": true,
       "dependency_network_gate": true,
       "dockerfiles": [
         ".github/test/Dockerfile-alpine",
@@ -292,11 +355,13 @@
           "user": null,
           "volume": [],
           "workdir": "/app"
-        }
+        },
+        "declared_transport_port": "5000",
+        "http_suitability": "unverified (EXPOSE is port metadata; Runtime/Verifier decide)"
       },
       "external_services": "none (ollama optional)",
-      "flags": [
-        "FROM uses ARG PYTHON_VERSION with default 3.11"
+      "notes": [
+        "FROM uses ARG PYTHON_VERSION with in-file default 3.11"
       ],
       "build_network_requirement": "base image pull by tag (no digest pin); 5 RUN steps install/fetch dependencies"
     },
@@ -307,8 +372,11 @@
       "primary_runtime_kind": "node",
       "runtime_in_current_catalog": false,
       "native_route": "blocked_runtime_catalog",
-      "oci_route": "v0_eligible",
+      "oci_route": "structural_candidate",
       "primary_bucket": "dockerfile_oci_possible_if_build_added",
+      "structural_candidate": true,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": true,
       "dependency_network_gate": true,
       "dockerfiles": [
         "Dockerfile",
@@ -356,11 +424,13 @@
           "user": "etherpad",
           "volume": [],
           "workdir": null
-        }
+        },
+        "declared_transport_port": "9001",
+        "http_suitability": "unverified (EXPOSE is port metadata; Runtime/Verifier decide)"
       },
       "external_services": "none required (mysql/postgres optional)",
-      "flags": [
-        "final stage chosen by ARG BUILD_ENV=git default (build_${BUILD_ENV})"
+      "notes": [
+        "final stage chosen by ARG BUILD_ENV=git in-file default (build_${BUILD_ENV})"
       ],
       "build_network_requirement": "base image pull by tag (no digest pin); 9 RUN steps install/fetch dependencies"
     },
@@ -373,6 +443,9 @@
       "native_route": "blocked_external_service",
       "oci_route": "blocked_external_service",
       "primary_bucket": "blocked_external_service",
+      "structural_candidate": false,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [
         "packaging/debian/Dockerfile",
@@ -383,7 +456,7 @@
       "selected_dockerfile": null,
       "root_dockerfile": null,
       "external_services": "postgres required",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": null
     },
     {
@@ -395,6 +468,9 @@
       "native_route": "blocked_runtime_catalog",
       "oci_route": "ambiguous_port",
       "primary_bucket": "blocked_runtime_catalog",
+      "structural_candidate": false,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [
         "Dockerfile",
@@ -445,10 +521,12 @@
             "[\"/data\"]"
           ],
           "workdir": null
-        }
+        },
+        "declared_transport_port": null,
+        "http_suitability": "unverified (EXPOSE is port metadata; Runtime/Verifier decide)"
       },
       "external_services": "none required (SQLite possible)",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": "base image pull by tag (no digest pin); 5 RUN steps install/fetch dependencies"
     },
     {
@@ -458,8 +536,11 @@
       "primary_runtime_kind": "go",
       "runtime_in_current_catalog": false,
       "native_route": "blocked_runtime_catalog",
-      "oci_route": "v0_eligible",
+      "oci_route": "structural_candidate",
       "primary_bucket": "dockerfile_oci_possible_if_build_added",
+      "structural_candidate": true,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": true,
       "dependency_network_gate": true,
       "dockerfiles": [
         "Dockerfile"
@@ -502,10 +583,12 @@
           "user": "1000",
           "volume": [],
           "workdir": "/app/vikunja"
-        }
+        },
+        "declared_transport_port": "3456",
+        "http_suitability": "unverified (EXPOSE is port metadata; Runtime/Verifier decide)"
       },
       "external_services": "none required (SQLite default)",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": "digest-pinned bases; 3 RUN steps install/fetch dependencies"
     },
     {
@@ -517,6 +600,9 @@
       "native_route": "blocked_runtime_catalog",
       "oci_route": "ambiguous_selection",
       "primary_bucket": "blocked_runtime_catalog",
+      "structural_candidate": false,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [
         ".devcontainer/Dockerfile",
@@ -525,7 +611,7 @@
       "selected_dockerfile": null,
       "root_dockerfile": null,
       "external_services": "none required (postgres optional)",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": null
     },
     {
@@ -537,6 +623,9 @@
       "native_route": "blocked_external_service",
       "oci_route": "blocked_external_service",
       "primary_bucket": "blocked_external_service",
+      "structural_candidate": false,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [
         "backend/docker/Dockerfile",
@@ -545,7 +634,7 @@
       "selected_dockerfile": null,
       "root_dockerfile": null,
       "external_services": "postgres/mariadb required",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": null
     },
     {
@@ -557,6 +646,9 @@
       "native_route": "blocked_port_binding",
       "oci_route": "ambiguous_selection",
       "primary_bucket": "blocked_port_binding",
+      "structural_candidate": false,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [
         "docker/Dockerfile"
@@ -564,7 +656,7 @@
       "selected_dockerfile": null,
       "root_dockerfile": null,
       "external_services": "kernel processes",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": null
     },
     {
@@ -576,6 +668,9 @@
       "native_route": "blocked_external_service",
       "oci_route": "blocked_external_service",
       "primary_bucket": "blocked_external_service",
+      "structural_candidate": false,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [
         ".devcontainer/Dockerfile",
@@ -620,10 +715,12 @@
           "user": "node",
           "volume": [],
           "workdir": "/app"
-        }
+        },
+        "declared_transport_port": "3080",
+        "http_suitability": "unverified (EXPOSE is port metadata; Runtime/Verifier decide)"
       },
       "external_services": "mongo required (+ meilisearch/rag optional)",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": "base image pull by tag (no digest pin); 4 RUN steps install/fetch dependencies"
     },
     {
@@ -635,12 +732,15 @@
       "native_route": "blocked_launch_undeclared",
       "oci_route": "no_dockerfile",
       "primary_bucket": "ambiguous",
+      "structural_candidate": false,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [],
       "selected_dockerfile": null,
       "root_dockerfile": null,
       "external_services": "none",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": null
     },
     {
@@ -652,6 +752,9 @@
       "native_route": "blocked_launch_undeclared",
       "oci_route": "no_port",
       "primary_bucket": "ambiguous",
+      "structural_candidate": false,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [
         "Dockerfile"
@@ -690,10 +793,12 @@
           "user": "$USERNAME",
           "volume": [],
           "workdir": "/home/$USERNAME"
-        }
+        },
+        "declared_transport_port": null,
+        "http_suitability": "unverified (EXPOSE is port metadata; Runtime/Verifier decide)"
       },
       "external_services": "none required (postgres optional)",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": "base image pull by tag (no digest pin); 9 RUN steps install/fetch dependencies"
     },
     {
@@ -703,8 +808,16 @@
       "primary_runtime_kind": "node",
       "runtime_in_current_catalog": false,
       "native_route": "blocked_runtime_catalog",
-      "oci_route": "v0_eligible",
+      "oci_route": "structural_candidate",
       "primary_bucket": "dockerfile_oci_possible_if_build_added",
+      "structural_candidate": true,
+      "unresolved_requirements": [
+        {
+          "kind": "privilege",
+          "evidence": "runtime sandbox (gVisor via sandbox/run.sh) may require container privileges beyond the OCI Adapter default; unverified"
+        }
+      ],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [
         "Dockerfile",
@@ -749,12 +862,12 @@
           "user": null,
           "volume": [],
           "workdir": "/grist"
-        }
+        },
+        "declared_transport_port": "8484",
+        "http_suitability": "unverified (EXPOSE is port metadata; Runtime/Verifier decide)"
       },
       "external_services": "python sandbox (gvisor) process",
-      "flags": [
-        "runtime sandbox (gVisor via sandbox/run.sh) may assume extra container privileges; unverified"
-      ],
+      "notes": [],
       "build_network_requirement": "base image pull by tag (no digest pin); 6 RUN steps install/fetch dependencies"
     },
     {
@@ -764,8 +877,11 @@
       "primary_runtime_kind": "go",
       "runtime_in_current_catalog": false,
       "native_route": "blocked_runtime_catalog",
-      "oci_route": "v0_eligible",
+      "oci_route": "structural_candidate",
       "primary_bucket": "dockerfile_oci_possible_if_build_added",
+      "structural_candidate": true,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": true,
       "dependency_network_gate": true,
       "dockerfiles": [
         "Dockerfile",
@@ -809,10 +925,12 @@
             "/srv /config /database"
           ],
           "workdir": null
-        }
+        },
+        "declared_transport_port": "80",
+        "http_suitability": "unverified (EXPOSE is port metadata; Runtime/Verifier decide)"
       },
       "external_services": "none (redis optional)",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": "base image pull by tag (no digest pin); 1 RUN steps install/fetch dependencies"
     },
     {
@@ -824,6 +942,9 @@
       "native_route": "blocked_runtime_catalog",
       "oci_route": "ambiguous_selection",
       "primary_bucket": "blocked_runtime_catalog",
+      "structural_candidate": false,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [
         "dev/build-arm/Dockerfile",
@@ -834,7 +955,7 @@
       "selected_dockerfile": null,
       "root_dockerfile": null,
       "external_services": "postgres (config.yml; SQLite optional)",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": null
     },
     {
@@ -844,8 +965,11 @@
       "primary_runtime_kind": "node",
       "runtime_in_current_catalog": true,
       "native_route": "blocked_port_binding",
-      "oci_route": "v0_eligible",
+      "oci_route": "structural_candidate",
       "primary_bucket": "dockerfile_oci_possible_if_build_added",
+      "structural_candidate": true,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": true,
       "dependency_network_gate": true,
       "dockerfiles": [
         "Dockerfile"
@@ -881,11 +1005,13 @@
           "user": null,
           "volume": [],
           "workdir": "/kutt"
-        }
+        },
+        "declared_transport_port": "3000",
+        "http_suitability": "unverified (EXPOSE is port metadata; Runtime/Verifier decide)"
       },
       "external_services": "none required (redis optional)",
-      "flags": [
-        "shell-form CMD runs `npm run migrate && npm start` inside the container"
+      "notes": [
+        "shell-form CMD runs `npm run migrate && npm start` inside the container (OCI semantics, not native argv)"
       ],
       "build_network_requirement": "base image pull by tag (no digest pin); 1 RUN steps install/fetch dependencies"
     },
@@ -898,6 +1024,9 @@
       "native_route": "blocked_external_service",
       "oci_route": "blocked_external_service",
       "primary_bucket": "blocked_external_service",
+      "structural_candidate": false,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [
         "Dockerfile"
@@ -945,10 +1074,12 @@
           "user": "nextjs",
           "volume": [],
           "workdir": "/app"
-        }
+        },
+        "declared_transport_port": "3000",
+        "http_suitability": "unverified (EXPOSE is port metadata; Runtime/Verifier decide)"
       },
       "external_services": "postgres required (clickhouse optional)",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": "base image pull by tag (no digest pin); 10 RUN steps install/fetch dependencies"
     },
     {
@@ -960,6 +1091,9 @@
       "native_route": "blocked_external_service",
       "oci_route": "blocked_external_service",
       "primary_bucket": "blocked_external_service",
+      "structural_candidate": false,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [
         "Dockerfile.production",
@@ -974,7 +1108,7 @@
       "selected_dockerfile": null,
       "root_dockerfile": null,
       "external_services": "mysql required in production (SQLite dev)",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": null
     },
     {
@@ -986,6 +1120,9 @@
       "native_route": "blocked_port_binding",
       "oci_route": "no_port",
       "primary_bucket": "blocked_port_binding",
+      "structural_candidate": false,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [
         "Dockerfile",
@@ -1019,10 +1156,12 @@
             "/var/lib/radicale"
           ],
           "workdir": "/app"
-        }
+        },
+        "declared_transport_port": null,
+        "http_suitability": "unverified (EXPOSE is port metadata; Runtime/Verifier decide)"
       },
       "external_services": "none",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": "base image pull by tag (no digest pin); 2 RUN steps install/fetch dependencies"
     },
     {
@@ -1034,12 +1173,15 @@
       "native_route": "blocked_port_binding",
       "oci_route": "no_dockerfile",
       "primary_bucket": "blocked_port_binding",
+      "structural_candidate": false,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [],
       "selected_dockerfile": null,
       "root_dockerfile": null,
       "external_services": "none",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": null
     },
     {
@@ -1051,6 +1193,9 @@
       "native_route": "blocked_external_service",
       "oci_route": "blocked_external_service",
       "primary_bucket": "blocked_external_service",
+      "structural_candidate": false,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [
         ".devcontainer/Dockerfile",
@@ -1090,10 +1235,12 @@
           "user": "appuser",
           "volume": [],
           "workdir": "/usr/src/shynet"
-        }
+        },
+        "declared_transport_port": "8080",
+        "http_suitability": "unverified (EXPOSE is port metadata; Runtime/Verifier decide)"
       },
       "external_services": "postgres required",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": "base image pull by tag (no digest pin); 3 RUN steps install/fetch dependencies"
     },
     {
@@ -1105,6 +1252,9 @@
       "native_route": "blocked_launch_undeclared",
       "oci_route": "ambiguous_selection",
       "primary_bucket": "ambiguous",
+      "structural_candidate": false,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [
         "docker/TensorRT-LLM/Dockerfile",
@@ -1116,7 +1266,7 @@
       "selected_dockerfile": null,
       "root_dockerfile": null,
       "external_services": "none",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": null
     },
     {
@@ -1126,8 +1276,16 @@
       "primary_runtime_kind": "python",
       "runtime_in_current_catalog": true,
       "native_route": "blocked_port_binding",
-      "oci_route": "requires_binding",
+      "oci_route": "structural_candidate",
       "primary_bucket": "blocked_port_binding",
+      "structural_candidate": true,
+      "unresolved_requirements": [
+        {
+          "kind": "external_dependency",
+          "evidence": "settings.yaml defaults select a RabbitMQ task broker (PGPT_TASKS_RESULTS_BROKER_MODE:rabbitmq) and an external LLM; startup without them is unverified"
+        }
+      ],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [
         "Dockerfile"
@@ -1176,12 +1334,12 @@
           "user": null,
           "volume": [],
           "workdir": "/home/worker/app"
-        }
+        },
+        "declared_transport_port": "8080",
+        "http_suitability": "unverified (EXPOSE is port metadata; Runtime/Verifier decide)"
       },
       "external_services": "rabbitmq task broker by default; LLM provider",
-      "flags": [
-        "settings.yaml defaults select a RabbitMQ task broker (PGPT_TASKS_RESULTS_BROKER_MODE:rabbitmq) and an external LLM; startup without them is unverified"
-      ],
+      "notes": [],
       "build_network_requirement": "base image pull by tag (no digest pin); 7 RUN steps install/fetch dependencies"
     },
     {
@@ -1193,6 +1351,9 @@
       "native_route": "blocked_runtime_catalog",
       "oci_route": "ambiguous_selection",
       "primary_bucket": "blocked_runtime_catalog",
+      "structural_candidate": false,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [
         "docker/Dockerfile"
@@ -1200,7 +1361,7 @@
       "selected_dockerfile": null,
       "root_dockerfile": null,
       "external_services": "none",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": null
     },
     {
@@ -1212,6 +1373,9 @@
       "native_route": "blocked_runtime_catalog",
       "oci_route": "ambiguous_port",
       "primary_bucket": "blocked_runtime_catalog",
+      "structural_candidate": false,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [
         ".devcontainer/Dockerfile",
@@ -1261,10 +1425,12 @@
             "[\"/data\", \"/music\"]"
           ],
           "workdir": "/app"
-        }
+        },
+        "declared_transport_port": "${ND_PORT}",
+        "http_suitability": "unverified (EXPOSE is port metadata; Runtime/Verifier decide)"
       },
       "external_services": "none",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": "base image pull by tag (no digest pin); 14 RUN steps install/fetch dependencies"
     },
     {
@@ -1276,12 +1442,15 @@
       "native_route": "blocked_runtime_catalog",
       "oci_route": "no_dockerfile",
       "primary_bucket": "blocked_runtime_catalog",
+      "structural_candidate": false,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [],
       "selected_dockerfile": null,
       "root_dockerfile": null,
       "external_services": "none",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": null
     },
     {
@@ -1291,8 +1460,16 @@
       "primary_runtime_kind": "go",
       "runtime_in_current_catalog": false,
       "native_route": "blocked_runtime_catalog",
-      "oci_route": "requires_binding",
+      "oci_route": "structural_candidate",
       "primary_bucket": "blocked_runtime_catalog",
+      "structural_candidate": true,
+      "unresolved_requirements": [
+        {
+          "kind": "startup_binding",
+          "evidence": "ENTRYPOINT reads /app/config/glance.yml, which the final stage does not copy (only the binary)"
+        }
+      ],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [
         "Dockerfile",
@@ -1327,12 +1504,12 @@
           "user": null,
           "volume": [],
           "workdir": "/app"
-        }
+        },
+        "declared_transport_port": "8080/tcp",
+        "http_suitability": "unverified (EXPOSE is port metadata; Runtime/Verifier decide)"
       },
       "external_services": "none",
-      "flags": [
-        "ENTRYPOINT reads /app/config/glance.yml, which the final stage does not copy (only the binary): a config Binding is required"
-      ],
+      "notes": [],
       "build_network_requirement": "base image pull by tag (no digest pin); 1 RUN steps install/fetch dependencies"
     },
     {
@@ -1344,6 +1521,9 @@
       "native_route": "blocked_runtime_catalog",
       "oci_route": "ambiguous_port",
       "primary_bucket": "blocked_runtime_catalog",
+      "structural_candidate": false,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [
         "Dockerfile",
@@ -1385,10 +1565,12 @@
           "user": null,
           "volume": [],
           "workdir": "${SHIORI_DIR}"
-        }
+        },
+        "declared_transport_port": "${PORT}",
+        "http_suitability": "unverified (EXPOSE is port metadata; Runtime/Verifier decide)"
       },
       "external_services": "none required (SQLite default)",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": "base image pull by tag (no digest pin); 1 RUN steps install/fetch dependencies"
     },
     {
@@ -1400,6 +1582,9 @@
       "native_route": "blocked_runtime_catalog",
       "oci_route": "ambiguous_selection",
       "primary_bucket": "blocked_runtime_catalog",
+      "structural_candidate": false,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [
         "docker/Dockerfile.alpine",
@@ -1412,7 +1597,7 @@
       "selected_dockerfile": null,
       "root_dockerfile": null,
       "external_services": "none required (SQLite default)",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": null
     },
     {
@@ -1424,6 +1609,9 @@
       "native_route": "blocked_external_service",
       "oci_route": "blocked_external_service",
       "primary_bucket": "blocked_external_service",
+      "structural_candidate": false,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [
         "docker/Dockerfile"
@@ -1431,7 +1619,7 @@
       "selected_dockerfile": null,
       "root_dockerfile": null,
       "external_services": "postgres required",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": null
     },
     {
@@ -1443,6 +1631,9 @@
       "native_route": "blocked_external_service",
       "oci_route": "blocked_external_service",
       "primary_bucket": "blocked_external_service",
+      "structural_candidate": false,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [
         ".devcontainer/Dockerfile",
@@ -1485,10 +1676,12 @@
             "[\"/usr/src/paperless/data\",  \"/usr/src/paperless/media\",  \"/usr/src/paperless/consume\",  \"/usr/src/paperless/export\"]"
           ],
           "workdir": "/usr/src/paperless/src/"
-        }
+        },
+        "declared_transport_port": "8000",
+        "http_suitability": "unverified (EXPOSE is port metadata; Runtime/Verifier decide)"
       },
       "external_services": "redis required (+ DB, tika/gotenberg optional)",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": "base image pull by tag (no digest pin); 4 RUN steps install/fetch dependencies"
     },
     {
@@ -1500,6 +1693,9 @@
       "native_route": "blocked_external_service",
       "oci_route": "blocked_external_service",
       "primary_bucket": "blocked_external_service",
+      "structural_candidate": false,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [
         ".devcontainer/Dockerfile",
@@ -1554,10 +1750,12 @@
           "user": "mastodon",
           "volume": [],
           "workdir": null
-        }
+        },
+        "declared_transport_port": "3000",
+        "http_suitability": "unverified (EXPOSE is port metadata; Runtime/Verifier decide)"
       },
       "external_services": "postgres + redis required (+ elasticsearch optional)",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": "base image pull by tag (no digest pin); 3 RUN steps install/fetch dependencies"
     },
     {
@@ -1569,6 +1767,9 @@
       "native_route": "blocked_external_service",
       "oci_route": "blocked_external_service",
       "primary_bucket": "blocked_external_service",
+      "structural_candidate": false,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [
         "Dockerfile"
@@ -1614,10 +1815,12 @@
           "user": null,
           "volume": [],
           "workdir": "/data"
-        }
+        },
+        "declared_transport_port": "3000",
+        "http_suitability": "unverified (EXPOSE is port metadata; Runtime/Verifier decide)"
       },
       "external_services": "postgres required (+ meilisearch optional)",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": "base image pull by tag (no digest pin); 8 RUN steps install/fetch dependencies"
     },
     {
@@ -1629,12 +1832,15 @@
       "native_route": "blocked_external_service",
       "oci_route": "blocked_external_service",
       "primary_bucket": "blocked_external_service",
+      "structural_candidate": false,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [],
       "selected_dockerfile": null,
       "root_dockerfile": null,
       "external_services": "postgres + redis required",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": null
     },
     {
@@ -1646,6 +1852,9 @@
       "native_route": "blocked_external_service",
       "oci_route": "blocked_external_service",
       "primary_bucket": "blocked_external_service",
+      "structural_candidate": false,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [
         "dev/docker/Dockerfile",
@@ -1654,7 +1863,7 @@
       "selected_dockerfile": null,
       "root_dockerfile": null,
       "external_services": "mysql required",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": null
     },
     {
@@ -1666,12 +1875,15 @@
       "native_route": "blocked_external_service",
       "oci_route": "blocked_external_service",
       "primary_bucket": "blocked_external_service",
+      "structural_candidate": false,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [],
       "selected_dockerfile": null,
       "root_dockerfile": null,
       "external_services": "DB required (SQLite possible)",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": null
     },
     {
@@ -1683,12 +1895,15 @@
       "native_route": "blocked_runtime_catalog",
       "oci_route": "no_dockerfile",
       "primary_bucket": "blocked_runtime_catalog",
+      "structural_candidate": false,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [],
       "selected_dockerfile": null,
       "root_dockerfile": null,
       "external_services": "none",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": null
     },
     {
@@ -1700,12 +1915,15 @@
       "native_route": "blocked_runtime_catalog",
       "oci_route": "no_dockerfile",
       "primary_bucket": "blocked_runtime_catalog",
+      "structural_candidate": false,
+      "unresolved_requirements": [],
+      "no_unresolved_requirements": false,
       "dependency_network_gate": true,
       "dockerfiles": [],
       "selected_dockerfile": null,
       "root_dockerfile": null,
       "external_services": "none (ffmpeg process)",
-      "flags": [],
+      "notes": [],
       "build_network_requirement": null
     }
   ]
