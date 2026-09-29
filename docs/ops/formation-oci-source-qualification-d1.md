@@ -56,7 +56,7 @@ Precedence fixed before counting: external service > OCI v0 eligible > native bl
   = base pull + RUN installs). It gates every route and is recorded per app.
 
 Route-level views: native blocked_runtime_catalog 16, blocked_external_service 13, blocked_port_binding 6, blocked_launch_undeclared 6;
-OCI blocked_external_service 13, ambiguous_selection 9, v0_eligible 7, no_dockerfile 5, ambiguous_port 3, no_port 2, requires_binding 2.
+OCI blocked_external_service 13, structural_candidate 9, ambiguous_selection 9, no_dockerfile 5, ambiguous_port 3, no_port 2.
 
 ## Structural OCI candidates (static only)
 
