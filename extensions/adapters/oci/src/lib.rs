@@ -110,6 +110,19 @@ fn failed_launch(docker: &Path, container: &str, error: anyhow::Error) -> anyhow
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Staging-only escape hatch for a dedicated Runner that hosts trusted Apps.
+/// When set to `1`, the Run bridge has ordinary Docker egress instead of being
+/// `--internal`. The broker bridge remains internal, and all container sandbox
+/// controls remain unchanged.
+///
+/// Never set this on a Runner serving public Try, Guest or Discover Runs. This
+/// exists only until declared, policy-bound HTTP egress replaces it.
+pub const DIRECT_EGRESS_ENV: &str = "ATO_OCI_DIRECT_EGRESS";
+
+fn direct_egress_enabled() -> bool {
+    std::env::var(DIRECT_EGRESS_ENV).is_ok_and(|value| value == "1")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OciEndpoint {
     pub host_port: u16,
@@ -250,8 +263,13 @@ impl DockerOciAdapter {
     /// Launch in a new `--internal` network owned by the returned handle. The
     /// single-container route: nothing else ever joins that network.
     pub fn spawn(&self, workspace: &Path, runtime_root: &Path) -> Result<OciHandle> {
-        let network =
-            OciNetwork::create_with(&self.docker, &self.spec.id, &self.spec.labels, "ator")?;
+        let network = OciNetwork::create_with(
+            &self.docker,
+            &self.spec.id,
+            &self.spec.labels,
+            "ator",
+            !direct_egress_enabled(),
+        )?;
         match self.spawn_in_network(workspace, runtime_root, &network, None) {
             Ok(mut handle) => {
                 handle.network = Some(network);
@@ -561,7 +579,25 @@ fn validate_loaded_image(
     Ok(())
 }
 
-/// One `--internal` bridge for one Run. Removed on [`OciNetwork::remove`] or,
+fn network_create_arguments(bridge_name: &str, internal: bool) -> Vec<String> {
+    let mut arguments = vec![
+        "network".to_owned(),
+        "create".to_owned(),
+        "--driver".to_owned(),
+        "bridge".to_owned(),
+    ];
+    if internal {
+        arguments.push("--internal".to_owned());
+    }
+    arguments.extend([
+        "--opt".to_owned(),
+        format!("com.docker.network.bridge.name={bridge_name}"),
+    ]);
+    arguments
+}
+
+/// One Run bridge. It is `--internal` unless the dedicated staging escape
+/// hatch is enabled. Removed on [`OciNetwork::remove`] or,
 /// best effort, on drop — so a failed launch never leaks a network.
 pub struct OciNetwork {
     docker: PathBuf,
@@ -576,7 +612,7 @@ impl OciNetwork {
         let docker = find_on_path("docker").context(
             "OCI runtime admission failed: Docker CLI is not installed or is not on PATH",
         )?;
-        Self::create_with(&docker, label, labels, "ator")
+        Self::create_with(&docker, label, labels, "ator", !direct_egress_enabled())
     }
 
     /// Create the dedicated bridge used only to reach the Runner-owned TCP
@@ -586,7 +622,7 @@ impl OciNetwork {
         let docker = find_on_path("docker").context(
             "OCI runtime admission failed: Docker CLI is not installed or is not on PATH",
         )?;
-        Self::create_with(&docker, label, labels, "atoe")
+        Self::create_with(&docker, label, labels, "atoe", true)
     }
 
     fn create_with(
@@ -594,6 +630,7 @@ impl OciNetwork {
         label: &str,
         labels: &BTreeMap<String, String>,
         bridge_prefix: &str,
+        internal: bool,
     ) -> Result<Self> {
         let suffix = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let name = format!(
@@ -602,15 +639,7 @@ impl OciNetwork {
             std::process::id()
         );
         let bridge_name = bridge_name(bridge_prefix, suffix);
-        let mut arguments = vec![
-            "network".to_owned(),
-            "create".to_owned(),
-            "--driver".to_owned(),
-            "bridge".to_owned(),
-            "--internal".to_owned(),
-            "--opt".to_owned(),
-            format!("com.docker.network.bridge.name={bridge_name}"),
-        ];
+        let mut arguments = network_create_arguments(&bridge_name, internal);
         for (key, value) in labels {
             ensure!(
                 key.starts_with("run.ato.dev/") && is_label_value(value),
@@ -1391,6 +1420,15 @@ mod tests {
         assert!(first.starts_with("atoe"));
         assert!(first.len() <= 15);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn run_networks_are_internal_unless_direct_egress_is_requested() {
+        let internal = network_create_arguments("ator7", true);
+        assert!(internal.iter().any(|argument| argument == "--internal"));
+        let direct = network_create_arguments("ator7", false);
+        assert!(!direct.iter().any(|argument| argument == "--internal"));
+        assert!(direct.contains(&"com.docker.network.bridge.name=ator7".to_owned()));
     }
 
     #[test]
