@@ -79,6 +79,20 @@ isolation mismatches (host/caller netns, extra interface, route, cgroup,
 limits, socket held by another process, other data root, systemd driver);
 original error + release failure kept together.
 
+## Output ownership (fix after review of `de1d2d35`)
+
+`materialize` now deletes `out` only when this call created it. Before the
+fix, an existing `--out` directory was removed after `create_dir` failed. A
+regression test covers an existing directory with a sentinel, a file, a
+symlink to a directory and a dangling symlink: the contents are unchanged,
+0 loads/builds happen, and the builder is released.
+
+Actual on sugamo at `9aa2fece` (`ato` `690fbe82…`, run as root):
+- existing directory, file and symlink `--out` all return
+  `source_oci_output_invalid`
+- the sentinels and the symlink target are intact
+- 0 session roots, cgroups and mounts are left
+
 ## Findings
 
 - `--pull=false` does not stop BuildKit from trying to resolve an unfrozen
