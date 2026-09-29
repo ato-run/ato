@@ -831,6 +831,9 @@ fn default_next(
                         .iter()
                         .any(|e| e.kind == *inspection && e.target_ref == *target_ref),
                     Some(ChoiceAction::Attempt { .. }) => s.attempts.len() as u64 == d.attempt_seq,
+                    // This decision releases the very proposal action whose
+                    // fences are checked below; it is not a pending attempt.
+                    Some(ChoiceAction::EscalateToCandidateProducer {}) => false,
                     None => false,
                 }
         });
