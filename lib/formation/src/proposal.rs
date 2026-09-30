@@ -139,7 +139,10 @@ pub enum Proposal {
         base_derivation_ref: String,
         operations: Vec<OperationInvocation>,
     },
-    Unsupported {},
+    Unsupported {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -481,7 +484,25 @@ fn compile_proposal(
         Proposal::InspectSource { .. } => {
             return Err(ProposalError("source_inspection_requires_registry"));
         }
-        Proposal::Unsupported {} => return Ok(None),
+        Proposal::Unsupported { reason } => {
+            if reason.as_deref().is_some_and(|reason| {
+                !matches!(
+                    reason,
+                    "unsupported_toolchain"
+                        | "unsupported_dependency_operation"
+                        | "unsupported_entrypoint"
+                        | "unsupported_build_operation"
+                        | "requires_external_service"
+                        | "requires_binding"
+                        | "source_oci_builder_unavailable"
+                        | "insufficient_source"
+                        | "unknown"
+                )
+            }) {
+                return Err(ProposalError("unsupported_reason_invalid"));
+            }
+            return Ok(None);
+        }
         Proposal::ProposeDerivation { operations } => match operations.as_slice() {
             [OperationInvocation::ExecutionPlan { plan }] => plan.compile(
                 frozen,

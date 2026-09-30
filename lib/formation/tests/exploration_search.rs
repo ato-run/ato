@@ -257,7 +257,7 @@ fn independent_provider_cap_stops_before_receiver_refuses_another_round() {
             decide_next(&s, &[], now + 1).unwrap(),
             SearchAction::WaitForProposalRound { .. }
         ));
-        s.proposal_round.as_mut().unwrap().outcome = Some(ProposalRoundOutcome::Completed);
+        s.proposal_round.as_mut().unwrap().outcome = Some(ProposalRoundOutcome::ProviderError);
         s = serde_json::from_slice(&s.canonical_bytes().unwrap()).unwrap();
     }
     assert_eq!(
@@ -501,4 +501,129 @@ fn reusable_static_preset_authoring_roundtrips_without_changing_d_or_k() {
         );
     }
     assert!(render_capsule_toml(&synthesize_authoring(AppPreset::NodeStatic)).is_err());
+}
+
+#[test]
+fn generated_static_build_lowers_to_existing_browser_adapter_with_same_k() {
+    let mut s = state();
+    let domain = s
+        .frozen
+        .policy
+        .proposal
+        .as_mut()
+        .unwrap()
+        .execution_plan
+        .as_mut()
+        .unwrap();
+    domain.toolchains = BTreeMap::from([
+        ("node".into(), "22.14.0".into()),
+        ("npm".into(), "10.9.2".into()),
+    ]);
+    domain.files.get_mut("server").unwrap().path = "package.json".into();
+    let mut p = plan();
+    p["runtime"] = json!({"name":"node","version":"22.14.0"});
+    p["static_output"] = json!("build");
+    let outcomes = compile(&s, p.clone());
+    let ProposalOutcome::Admitted(candidate) = &outcomes[0] else {
+        panic!("{outcomes:?}")
+    };
+    assert_eq!(
+        candidate.compiled().base_contract_ref,
+        s.frozen.contract_ref
+    );
+    let d = &candidate.compiled().derivation;
+    assert_eq!(d.steps.last().unwrap().protocol, "ato.browser@1");
+    assert_eq!(d.steps.last().unwrap().root.as_deref(), Some("build"));
+    assert!(d.steps.last().unwrap().argv.is_empty());
+    assert_eq!(d.ports[0].guest_port, None);
+    for invalid in ["/etc", "../outside", "/app/build"] {
+        p["static_output"] = json!(invalid);
+        assert!(matches!(
+            compile(&s, p.clone())[0],
+            ProposalOutcome::Rejected(ProposalError("unsupported_static_output"))
+        ));
+    }
+    p["static_output"] = json!("build");
+    p["argv"] = json!(["--arbitrary"]);
+    assert!(matches!(
+        compile(&s, p)[0],
+        ProposalOutcome::Rejected(ProposalError("unsupported_static_output"))
+    ));
+}
+
+#[test]
+fn unsupported_reason_is_bounded_and_legacy_declines_still_parse() {
+    let s = state();
+    for (reason, rejected) in [
+        (None, false),
+        (Some("unsupported_toolchain"), false),
+        (Some("free form secret"), true),
+    ] {
+        let mut proposal = json!({"kind":"unsupported"});
+        if let Some(reason) = reason {
+            proposal["reason"] = json!(reason);
+        }
+        let raw =
+            serde_json::to_vec(&json!({"schema":PROPOSAL_SCHEMA,"proposals":[proposal]})).unwrap();
+        let output = ProducerOutput::new(
+            raw,
+            ProducerProvenance {
+                provider: "fixed".into(),
+                model: None,
+            },
+        )
+        .unwrap();
+        let outcomes = CandidateRegistry::new(&s.frozen)
+            .unwrap()
+            .validate_batch(&BTreeMap::new(), &output)
+            .unwrap();
+        assert_eq!(
+            matches!(outcomes[0], ProposalOutcome::Rejected(_)),
+            rejected
+        );
+    }
+}
+
+#[test]
+fn repeated_empty_declines_stop_without_using_the_third_round() {
+    let mut s = state();
+    for round in 0..2 {
+        let SearchAction::OpenProposalRound {
+            opened_at_ms,
+            expires_at_ms,
+        } = decide_next(&s, &[], 100 + round * 6000).unwrap()
+        else {
+            panic!("unexpected action")
+        };
+        if let Some(old) = s.proposal_round.take() {
+            s.proposal_history.push(old);
+        }
+        s.proposal_round = Some(ProposalRoundRecord {
+            opened_at_ms,
+            expires_at_ms,
+            outcome: Some(ProposalRoundOutcome::Completed),
+            candidates: vec![],
+            derivations: vec![],
+            diagnostics: vec![],
+            inspection_requests: vec![],
+        });
+    }
+    let resumed: SearchStateV1 = serde_json::from_slice(&s.canonical_bytes().unwrap()).unwrap();
+    assert_eq!(
+        decide_next(&resumed, &[], 13000).unwrap(),
+        SearchAction::Finish {
+            reason: Termination::NoProgress
+        }
+    );
+    assert_eq!(
+        resumed
+            .frozen
+            .policy
+            .exploration
+            .unwrap()
+            .formation
+            .max_rounds
+            .get(),
+        3
+    );
 }

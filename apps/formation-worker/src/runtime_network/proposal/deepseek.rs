@@ -21,6 +21,8 @@ pub const PROMPT_VERSION_V2: &str = "ato.formation-candidate-producer-prompt/2";
 pub const PROMPT_V2: &str = include_str!("prompt-v2.txt");
 pub const PROMPT_VERSION_V3: &str = "ato.formation-candidate-producer-prompt/3";
 pub const PROMPT_V3: &str = include_str!("prompt-v3.txt");
+pub const PROMPT_VERSION_V4: &str = "ato.formation-candidate-producer-prompt/4";
+pub const PROMPT_V4: &str = include_str!("prompt-v4.txt");
 pub fn prompt_sha256() -> String {
     format!("sha256:{:x}", Sha256::digest(PROMPT.as_bytes()))
 }
@@ -29,6 +31,7 @@ pub fn prompt_for(version: &str) -> Option<&'static str> {
         PROMPT_VERSION => Some(PROMPT),
         PROMPT_VERSION_V2 => Some(PROMPT_V2),
         PROMPT_VERSION_V3 => Some(PROMPT_V3),
+        PROMPT_VERSION_V4 => Some(PROMPT_V4),
         _ => None,
     }
 }
@@ -183,7 +186,10 @@ impl DeepSeekCandidateProducer {
     /// never rewritten. Truncated text has a new transmitted-text digest.
     fn bounded_request(&self, request: &ProposalRequestV2) -> Result<ProposalRequestV2> {
         let mut projected = request.clone();
-        if self.config.prompt_version != PROMPT_VERSION_V3 {
+        if !matches!(
+            self.config.prompt_version.as_str(),
+            PROMPT_VERSION_V3 | PROMPT_VERSION_V4
+        ) {
             return Ok(projected);
         }
         let prompt = prompt_for(&self.config.prompt_version).context("prompt unavailable")?;
@@ -249,6 +255,9 @@ impl DeepSeekCandidateProducer {
             timeout_ms: request.remaining_budget.timeout_ms,
             proposal_request_bytes: canonical.len() as u64,
             provider_body_bytes: provider_body.len() as u64,
+            transmitted_context: Some(super::budget::TransmittedContextEvidence::from_request(
+                request,
+            )),
         };
         self.budget
             .reserve_request(evidence)

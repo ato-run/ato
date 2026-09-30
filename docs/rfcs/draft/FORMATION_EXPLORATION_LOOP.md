@@ -1,3 +1,38 @@
+# D-conversion repair pilot (unmerged)
+
+The first 100-app exploration arm added no generated-D PASS. Its preserved
+diagnostic append is `docs/ops/formation-exploration-diagnostics.{json,md}`.
+The following changes are bounded repairs for a separate small OSS pilot;
+they do not reinterpret the historical measurement.
+
+- Optional `static_output` in `execution_plan@1` connects a Node source-owned
+  build to the existing `ato.browser@1` serving adapter. Entrypoint is a verified
+  package.json ref; the output is workspace-relative. No process argv, module,
+  state or environment accompanies that serving route. Frozen K and explicit
+  port bind requirements remain authoritative. This makes a buildable frontend
+  expressible without running browser scripts as an HTTP server.
+- Initial four-file context chooses distinct source roles; configuration files
+  precede arbitrary source and test entries do not displace app startup files.
+  A later inspection keeps initial context in spare slots, within the same
+  16 KiB total and 8 KiB per-file prefix bounds. No new private paths or
+  authorization map enters provider requests.
+- Optional `unsupported.reason` uses bounded reason codes. Legacy declines
+  retain their canonical bytes; new raw evidence distinguishes capability,
+  binding and source-information reasons. A reason is a model claim, not proof
+  of runtime capability or impossibility.
+- Two adjacent completed empty declines, without inspection or validator
+  feedback, stop `no_progress`. Provider failures retain their separate round
+  accounting. The effective default limit remains three and no budget resets.
+- RequestEvidence optionally records actual transmitted source IDs, prefix
+  digest/length/truncation and bounded failure/previous-D/validator codes after
+  provider input trimming. It does not store text, log/environment values,
+  credentials, headers or reasoning. Exact request/body hashes still bind it.
+
+Prompt v4 is separately frozen for the pilot; prompt versions 1–3 remain
+unchanged. Model, source pins, K, Runtime ceiling and round limit are not tuned
+between applications. Direct PASS and failure→repair PASS are reported
+separately. No production execution/approval/deployment follows a submission.
+
 # Bounded Formation exploration with post-submission assessment
 
 Status: draft implementation contract for the explicitly requested exploration arm.

@@ -887,6 +887,22 @@ fn default_next(
     if s.frozen.policy.exploration.is_some()
         && let Some(round) = &s.proposal_round
     {
+        // Two completed declines without a D, inspection or validator feedback
+        // add no new execution/source evidence. Do not buy a third identical
+        // reasoning round. Provider errors remain separately budgeted outcomes.
+        let empty_decline = |r: &ProposalRoundRecord| {
+            r.outcome == Some(crate::proposal::ProposalRoundOutcome::Completed)
+                && r.candidates.is_empty()
+                && r.inspection_requests.is_empty()
+                && r.diagnostics.is_empty()
+        };
+        if empty_decline(round) && s.proposal_history.last().is_some_and(empty_decline) {
+            return Ok(finish(if passed {
+                Termination::Submitted
+            } else {
+                Termination::NoProgress
+            }));
+        }
         if round.outcome.is_some()
             && !round.candidates.is_empty()
             && round.candidates.iter().all(|c| {
