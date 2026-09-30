@@ -436,6 +436,7 @@ pub fn synthesize_authoring(preset: AppPreset) -> AuthoringDraft {
             ],
         },
         derivation: DerivationDraft {
+            requirements: Default::default(),
             inputs: vec![InputDraft {
                 id: PRESET_INPUT_ID.to_owned(),
                 protocol: WORKSPACE_PROTOCOL.to_owned(),

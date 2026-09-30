@@ -286,6 +286,7 @@ pub enum EffectClass {
 /// The proposed route.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DerivationDraft {
+    pub requirements: crate::requirements::ExecutionRequirements,
     pub inputs: Vec<InputDraft>,
     pub runtimes: Vec<RuntimeDraft>,
     pub steps: Vec<StepDraft>,
@@ -457,6 +458,11 @@ pub struct BoundState {
 #[serde(deny_unknown_fields)]
 pub struct BoundDerivation {
     pub schema: String,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::requirements::ExecutionRequirements::is_empty"
+    )]
+    pub requirements: crate::requirements::ExecutionRequirements,
     pub inputs: Vec<BoundInput>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub runtimes: BTreeMap<String, String>,
@@ -495,6 +501,14 @@ impl BoundContract {
 
 impl BoundDerivation {
     pub fn derivation_ref(&self) -> Result<String, AuthoringError> {
+        if self
+            .requirements
+            .canonicalized()
+            .map_err(|e| malformed("requirements", e.0))?
+            != self.requirements
+        {
+            return Err(malformed("requirements", "requirements must be canonical"));
+        }
         digest_of(self)
     }
 }
@@ -666,6 +680,10 @@ fn bind_derivation(
 
     Ok(BoundDerivation {
         schema: BOUND_DERIVATION_SCHEMA.to_owned(),
+        requirements: draft
+            .requirements
+            .canonicalized()
+            .map_err(|e| malformed("requirements", e.0))?,
         inputs,
         runtimes,
         steps,
@@ -818,6 +836,7 @@ mod tests {
                 }],
             },
             derivation: DerivationDraft {
+                requirements: Default::default(),
                 inputs: vec![InputDraft {
                     id: "workspace".to_owned(),
                     protocol: WORKSPACE_PROTOCOL.to_owned(),

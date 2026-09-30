@@ -38,6 +38,7 @@ fn state() -> SearchStateV1 {
         archive_digest: closure,
     });
     s.frozen.policy.proposal = Some(ProposalAuthorization {
+        execution_plan: None,
         modifiable_derivation_refs: vec![base.derivation_ref.clone()],
         python_http_process: Some(PythonHttpProcess {
             python_version: "3.12.7".into(),
@@ -694,6 +695,7 @@ fn empty_frontier() -> SearchStateV1 {
     });
     s.source_archive_bytes = Some(64);
     s.frozen.policy.proposal = Some(ProposalAuthorization {
+        execution_plan: None,
         modifiable_derivation_refs: vec![],
         source_domain: SourceDomain {
             entrypoints: BTreeMap::from([
