@@ -1,5 +1,8 @@
 //! Typed authoring of registered process operations. Never shell generation.
-use super::{ProposalError, PythonHttpProcess, python_http::contract_requirements};
+use super::{
+    ProposalError,
+    python_http::{contract_requirements, validate_http_contract},
+};
 use crate::{
     authoring::{BindingContext, bind},
     capsule_toml::parse_capsule_toml,
@@ -390,12 +393,7 @@ impl ExecutionPlanProposal {
             return Err(ProposalError("proposal_contract_unsupported"));
         };
         let port = port.to_string();
-        PythonHttpProcess {
-            python_version: "3.12.7".into(),
-            http_port: port.clone(),
-            guest_port: self.guest_port,
-        }
-        .validate_contract(&frozen.base_contract, source)?;
+        validate_http_contract(&frozen.base_contract, source, &port)?;
         let executable = format!(
             "/opt/ato/toolchains/{}/{}/bin/{}",
             self.runtime.name,
@@ -610,12 +608,7 @@ impl ExecutionPlanProposal {
         let [port] = ports.as_slice() else {
             return Err(ProposalError("proposal_contract_unsupported"));
         };
-        PythonHttpProcess {
-            python_version: "3.12.7".into(),
-            http_port: (*port).into(),
-            guest_port: self.guest_port,
-        }
-        .validate_contract(&frozen.base_contract, source)?;
+        validate_http_contract(&frozen.base_contract, source, port)?;
         let document = json!({"schema":"ato.capsule/1",
             "input":[{"id":"workspace","use":"ato.workspace@1","path":"."}],
             "derive":{"step":[{"id":"app","use":crate::source_oci_plan::OCI_PROTOCOL,"op":"serve","source":"workspace"}]},
