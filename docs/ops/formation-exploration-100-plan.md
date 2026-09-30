@@ -6,9 +6,9 @@ licenses and source-bound StaticFiles K templates are reused. The previously
 authorized explicit K for 81 sources is still a different entry condition from
 baseline inference. HTTP 200 alone is not functional acceptance.
 
-Implementation pin: `7552fcfe714f26ed44bf0b7abae74b61d3651c9d`.
-Receiver pin: `6a7fd9dd838ba306a260992dcf82de03233bbd20`.
-Rust receipt authority source: `64e03d0eb063eae5a08f516e629d53e26e824414`.
+Implementation pin: `10473525efa26416ef63025dbb5003c910a43c70`.
+Receiver pin: `b20bba7ab9daf282f8d5b1e22affe549ad3492a3`.
+Rust receipt authority source: `eb73dff36d15a829e8358d310dbb4106562b344d`.
 Exact binary/receiver hashes and frozen source identities are in the JSON plan.
 No implementation, prompt, ceiling or model change is allowed during the 100 arm.
 
@@ -60,3 +60,7 @@ The preflight helper remains the byte-identical revision-2 helper.
 The pilot reproduced a sender-only `proposal_claim_invalid` HTTP 400. Claimants
 now use the existing UUID schema. No model send/reservation preceded this repair;
 three expired pilot rounds remain in their original ledgers.
+
+Small acceptance completed: two actual HTTP dependency fixtures reached same-K via four live CandidateProducer calls; actual fixed Runtime cases verified authority repair, out-of-ceiling refusal, fresh reduction, failed-reduction best retention, default/configured rounds, provider cap, no progress and restart/UNKNOWN. WBO and copyparty upstream pilot failures remain failures; no fixture is counted among the 100 OSS. Total small calls are 10 CP and zero DP, all settled.
+
+The first 100 arm uses one frozen binary/receiver set, unchanged prompt/ceiling and all frozen sources. Typed source-limit/path/entry refusals are recorded as actual source-entry terminals with K unformed and no model call; digest/I/O/harness errors stop as infrastructure. Whole-wave journals are validated by the product Rust accounting parser before each new search; call caps and worst-case reservations include all owned pilot and gate runs.
