@@ -217,7 +217,9 @@ pub fn run_build_scoped(
                 limits.wall_clock_seconds
             );
         }
-        let output = run_step(step, &command.argv, remaining)?;
+        let facts = (network == NetworkPolicy::Scoped)
+            .then(|| policy_path.with_file_name("execution-facts.jsonl"));
+        let output = run_step_with_facts(step, &command.argv, remaining, facts.as_deref())?;
         diagnostics.push(bounded_diagnostic(&step.name, &output));
     }
 
@@ -430,7 +432,12 @@ impl<R: std::io::Read + std::os::fd::AsRawFd> Drain<R> {
 /// writer, which then never exits: the step would hang until its budget and
 /// fail as a timeout. Only each stream's tail is kept.
 #[cfg(unix)]
-fn run_step(step: &BuildStepV1, argv: &[String], budget: Duration) -> Result<Vec<u8>> {
+fn run_step_with_facts(
+    step: &BuildStepV1,
+    argv: &[String],
+    budget: Duration,
+    facts: Option<&Path>,
+) -> Result<Vec<u8>> {
     use std::os::unix::process::CommandExt as _;
 
     let (program, arguments) = argv.split_first().expect("argv is non-empty");
@@ -547,6 +554,15 @@ fn run_step(step: &BuildStepV1, argv: &[String], budget: Duration) -> Result<Vec
                 }
                 let mut combined = stdout.tail.finish();
                 combined.extend_from_slice(&stderr.tail.finish());
+                if let Some(path) = facts {
+                    crate::execution_facts::append(
+                        path,
+                        "build",
+                        &step.name,
+                        Some(status),
+                        &bounded_diagnostic(&step.name, &combined),
+                    )?;
+                }
                 if !status.success() {
                     // A step that KNOWS why it refused says so in a line
                     // written for the uploader. Without this the typed
@@ -612,7 +628,12 @@ fn group_alive(pid: u32) -> bool {
 }
 
 #[cfg(not(unix))]
-fn run_step(_step: &BuildStepV1, _argv: &[String], _budget: Duration) -> Result<Vec<u8>> {
+fn run_step_with_facts(
+    _step: &BuildStepV1,
+    _argv: &[String],
+    _budget: Duration,
+    _facts: Option<&Path>,
+) -> Result<Vec<u8>> {
     bail!("Formation build execution requires Unix process-group isolation")
 }
 
@@ -736,7 +757,7 @@ mod tests {
 
     fn run(script: &str, budget: Duration) -> Result<Vec<u8>> {
         let (step, argv) = step(script);
-        run_step(&step, &argv, budget)
+        run_step_with_facts(&step, &argv, budget, None)
     }
 
     /// Four MiB and more to one stream: far past any pipe buffer.

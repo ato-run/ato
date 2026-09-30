@@ -66,7 +66,7 @@ fn status(sub: &Submission) -> Value {
         schema:ato_formation::search::SEARCH_SCHEMA.into(),search_id:sub.request.search_id.clone(),owner_scope:"owner".into(),
         revision:1,frozen:frozen_request(&sub.request).unwrap(),deadline_ms:now+60_000,budget:BudgetCounters::default(),
         source_archive_bytes:sub.request.source.archive_bytes,attempts:vec![],owner_stopped:false,decisions:vec![],evidence:vec![],generation:None,
-        proposal_history:vec![],exploration_submission:None,proposal_round:Some(ProposalRoundRecord {opened_at_ms:now,expires_at_ms:now+30_000,outcome:None,candidates:vec![],derivations:vec![],diagnostics:vec![]}),
+        proposal_history:vec![],exploration_submission:None,proposal_round:Some(ProposalRoundRecord {opened_at_ms:now,expires_at_ms:now+30_000,outcome:None,candidates:vec![],derivations:vec![],diagnostics:vec![],inspection_requests:vec![]}),
     },"proposal_point":{"round_seq":1,"revision":1,"claimed":false},"proposal_round":{"round_seq":1,"status":"open"}})
 }
 fn output() -> ProducerOutput {

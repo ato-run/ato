@@ -4,11 +4,11 @@ use super::{
     budget::{CallBudget, FinishReason, RequestEvidence, ResponseEvidence},
     provenance::*,
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use ato_formation::proposal::{
     CandidateProducer, MAX_BATCH_BYTES, ProducerOutput, ProducerProvenance, ProposalRequestV2,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::{io::Read, sync::Arc, time::Duration};
@@ -32,20 +32,20 @@ pub fn prompt_for(version: &str) -> Option<&'static str> {
         _ => None,
     }
 }
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ThinkingMode {
     Disabled,
     Enabled { effort: ReasoningEffort },
 }
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningEffort {
     Low,
     High,
     Max,
 }
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeepSeekConfig {
     pub provider: String,
@@ -57,6 +57,17 @@ pub struct DeepSeekConfig {
     pub thinking: ThinkingMode,
 }
 impl DeepSeekConfig {
+    pub fn configuration_ref(&self, budget: &super::budget::BudgetPlan) -> Result<String> {
+        self.validate()?;
+        budget.validate()?;
+        let prompt = prompt_for(&self.prompt_version).context("unknown prompt version")?;
+        let canonical = serde_jcs::to_vec(&(
+            self,
+            budget,
+            format!("sha256:{:x}", Sha256::digest(prompt.as_bytes())),
+        ))?;
+        Ok(format!("sha256:{:x}", Sha256::digest(canonical)))
+    }
     pub fn identity(&self) -> ProviderIdentity {
         ProviderIdentity {
             provider: self.provider.clone(),
@@ -98,6 +109,9 @@ pub struct GeneralFailure {
     pub provenance: Provenance,
 }
 impl DeepSeekCandidateProducer {
+    pub fn configuration_ref(&self) -> Result<String> {
+        self.config.configuration_ref(self.budget.plan())
+    }
     pub fn new(
         config: DeepSeekConfig,
         key_environment: &str,
@@ -143,7 +157,8 @@ impl DeepSeekCandidateProducer {
         config.validate()?;
         budget.plan().validate()?;
         ensure!(
-            config.max_output_tokens <= budget.plan().output_token_cap,
+            budget.plan().output_price > 0
+                && config.max_output_tokens <= budget.plan().output_token_cap,
             "output exceeds spend reservation"
         );
         let http = reqwest::blocking::Client::builder()
@@ -162,6 +177,38 @@ impl DeepSeekCandidateProducer {
     }
     pub fn identity(&self) -> ProviderIdentity {
         self.config.identity()
+    }
+    /// Keep source text inside both its existing byte ceiling and the frozen
+    /// input reservation. K, source IDs, D, requirements and failure facts are
+    /// never rewritten. Truncated text has a new transmitted-text digest.
+    fn bounded_request(&self, request: &ProposalRequestV2) -> Result<ProposalRequestV2> {
+        let mut projected = request.clone();
+        if self.config.prompt_version != PROMPT_VERSION_V3 {
+            return Ok(projected);
+        }
+        let prompt = prompt_for(&self.config.prompt_version).context("prompt unavailable")?;
+        loop {
+            let bytes = serde_jcs::to_vec(&projected)?;
+            if (bytes.len() + prompt.len() + 1024) as u64 <= self.budget.plan().input_token_cap {
+                return Ok(projected);
+            }
+            let entry = projected
+                .source_context
+                .iter_mut()
+                .max_by_key(|e| e.text.len())
+                .context("non-text provider context exceeds input reservation")?;
+            if entry.text.is_empty() {
+                anyhow::bail!("non-text provider context exceeds input reservation");
+            }
+            let mut end = entry.text.len().saturating_sub(512);
+            while !entry.text.is_char_boundary(end) {
+                end -= 1;
+            }
+            entry.text.truncate(end);
+            entry.truncated = true;
+            entry.content_sha256 = format!("sha256:{:x}", Sha256::digest(entry.text.as_bytes()));
+            projected.source_context.retain(|e| !e.text.is_empty());
+        }
     }
     fn call(
         &self,
@@ -348,7 +395,10 @@ impl CandidateProducer<ProposalRequestV2, GeneralOutput, GeneralFailure>
     ) -> std::result::Result<GeneralOutput, GeneralFailure> {
         let mut provenance = self.identity().unknown_usage();
         let started = std::time::Instant::now();
-        let result = self.call(request, &mut provenance);
+        let result = self
+            .bounded_request(request)
+            .map_err(|_| ErrorClass::MalformedResponse)
+            .and_then(|projected| self.call(&projected, &mut provenance));
         if self.config.prompt_version == PROMPT_VERSION_V3 {
             provenance.latency_ms =
                 Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64);
@@ -356,6 +406,20 @@ impl CandidateProducer<ProposalRequestV2, GeneralOutput, GeneralFailure>
         match result {
             Ok(output) => Ok(GeneralOutput { output, provenance }),
             Err(class) => {
+                if self.config.prompt_version == PROMPT_VERSION_V3 {
+                    let cell = request.round_seq.map_or_else(
+                        || request.search_id.clone(),
+                        |seq| format!("{}_r{seq}", request.search_id),
+                    );
+                    if self
+                        .budget
+                        .snapshot()
+                        .ok()
+                        .is_some_and(|s| s.cells.get(&cell).is_some_and(|c| !c.is_settled()))
+                    {
+                        let _ = self.budget.charge_unknown(&cell);
+                    }
+                }
                 // Even across processes, a protocol/infrastructure error cannot
                 // silently advance the next live cell. No refund or retry.
                 let _ = self.budget.halt();

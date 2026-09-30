@@ -109,6 +109,7 @@ fn admit(s: &mut SearchStateV1) {
         candidates,
         derivations: vec![],
         diagnostics: vec![],
+        inspection_requests: vec![],
     });
 }
 fn placements(s: &SearchStateV1) -> Vec<Placement> {
@@ -453,6 +454,7 @@ fn open_round_waits_and_expires_without_fabricating_attempt_evidence() {
         candidates: vec![],
         derivations: vec![],
         diagnostics: vec![],
+        inspection_requests: vec![],
     });
     assert_eq!(
         decide_next(&s, &[], 11).unwrap(),
@@ -482,6 +484,7 @@ fn provider_error_and_timeout_exhaust_without_k_failure_or_retry() {
             candidates: vec![],
             derivations: vec![],
             diagnostics: vec![],
+            inspection_requests: vec![],
         });
         assert_eq!(
             decide_next(&s, &[], 11).unwrap(),
@@ -1015,6 +1018,7 @@ fn b10_zero_known_d_unsupported_terminates_once_without_k_evidence() {
         candidates: vec![],
         derivations: vec![],
         diagnostics: vec![],
+        inspection_requests: vec![],
     });
     assert_eq!(
         decide_next(&s, &[], 11).unwrap(),
@@ -1036,6 +1040,7 @@ fn b11_generated_first_d_uses_same_deterministic_and_decision_frontier() {
         candidates: candidates.iter().map(|c| c.candidate().clone()).collect(),
         derivations: vec![],
         diagnostics: vec![],
+        inspection_requests: vec![],
     });
     assert_eq!(s.candidates().count(), 2);
     assert!(
@@ -1197,6 +1202,7 @@ fn zero_known_d_respects_stop_deadline_budgets_and_single_round_error_outcomes()
             candidates: vec![],
             derivations: vec![],
             diagnostics: vec![],
+            inspection_requests: vec![],
         });
         assert_eq!(
             decide_next(&s, &[], 11).unwrap(),
@@ -1609,6 +1615,7 @@ fn adaptive_fallback_releases_proposal_then_next_generated_decision() {
             candidates: candidates.iter().map(|c| c.candidate().clone()).collect(),
             derivations: vec![],
             diagnostics: vec![],
+            inspection_requests: vec![],
         });
         let SearchAction::OpenDecision { seq, choices, .. } =
             decide_next(&s, &placements(&s), 13).unwrap()
