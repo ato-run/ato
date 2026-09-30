@@ -243,7 +243,7 @@ class Wave:
             locator = json.load(response)
         with urlopen(Request(self.plan['api']+'/v1/runtime-network/satisfy/'+locator['satisfy_id'],headers=auth)) as response:
             status = json.load(response)
-        write(cell/('status.'+self.suffix+'.json' if continuation else 'status.json'),status)
+        write(cell/('status.'+self.suffix+'.json' if (cell/'status.json').exists() else 'status.json'),status)
         cp_journal = result['candidate_producer_accounting']
         dp_journal = result['decision_provider_accounting'].get('journal',{})
         row = {'index':app['index'],'name':app['name'],'baseline_typed_K_pass':app['baseline_typed_K_pass'],
@@ -252,7 +252,7 @@ class Wave:
                'result':str(output.relative_to(self.root)),'result_sha256':sha(output),
                'exit_code':rc,'elapsed_seconds':round(time.monotonic()-start,3),
                'functional_acceptance':'not_measured'}
-        write(cell/('summary.'+self.suffix+'.json' if continuation else 'summary.json'),row)
+        write(cell/('summary.'+self.suffix+'.json' if (cell/'summary.json').exists() else 'summary.json'),row)
         print(json.dumps(row),flush=True)
         # Source copies are disposable; preserve raw evidence, journals, source
         # archives, worker state and receipts, including any unresolved UNKNOWN.
