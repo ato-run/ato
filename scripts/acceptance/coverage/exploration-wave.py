@@ -299,6 +299,10 @@ class Wave:
                     if self.processes:
                         self.a.resume = True
                     self.suffix = 'generation'+str(generation)
+                    log_generation = 0
+                    while (self.root/('coordinator.'+self.suffix+'.log')).exists():
+                        log_generation += 1
+                        self.suffix = 'generation'+str(generation)+'.resume'+str(log_generation)
                     self.setup()
                 if app['index'] == self.plan.get('uncreated_search_recovery_index'):
                     self.recover_uncreated(app)
