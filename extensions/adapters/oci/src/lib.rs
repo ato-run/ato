@@ -1113,10 +1113,27 @@ fn inspect_container_address(docker: &Path, container_id: &str) -> Result<IpAddr
         ],
         "inspect OCI container network address",
     )?;
-    value
-        .trim()
-        .parse()
-        .context("Docker returned an invalid container network address")
+    if let Ok(address) = value.trim().parse() {
+        return Ok(address);
+    }
+    // No address usually means the process already exited (e.g. exec was
+    // refused). Report the container's own state; its output is not copied
+    // into the error because it may hold runtime secrets.
+    let state = run_checked(
+        docker,
+        [
+            "inspect",
+            "--format",
+            "status={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{json .State.Error}}",
+            container_id,
+        ],
+        "inspect OCI container state",
+    )
+    .unwrap_or_default();
+    bail!(
+        "OCI container has no network address ({}); an exit code of 126 means the command could not be executed",
+        state.trim()
+    )
 }
 
 impl Drop for OciHandle {
