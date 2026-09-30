@@ -2384,6 +2384,14 @@
       "application_terminals_rerun": 0,
       "old_evidence_preserved": true,
       "source_only_preflight_retry": true
+    },
+    {
+      "previous_plan_sha256": "f4c4f28e823b5b37864d5851afd48dc723460b5fae342df61c03bea2c905c8e0",
+      "reason": "resume log filename collision before receiver startup/requester delivery; unique preserved controller log suffix only",
+      "completed": 59,
+      "model_calls_added": 0,
+      "requester_deliveries_added": 0,
+      "policy_or_runtime_changes": false
     }
   ],
   "credential_binding": {
@@ -2394,7 +2402,7 @@
     },
     "credential_values_saved": false
   },
-  "harness_pin": "b9b81c03bb9f531262bf95ede6f6b983068b23b4",
+  "harness_pin": "36c54d9635e666e17f33b50307fc9c008856b6a4",
   "accounting_roots": [
     "/home/ubuntu/formation-foundation/.tmp/exploration-no-call-gate",
     "/home/ubuntu/formation-foundation/.tmp/exploration-live-pilot2",
@@ -2437,7 +2445,7 @@
   ],
   "uncreated_search_recovery_index": 17,
   "harness_hashes": {
-    "exploration-wave.py": "b277a8919440c4b76f2dde44891426d296602e3edb13f6be19ba17c34e33d130",
+    "exploration-wave.py": "4d2523b4416115cd5705f52245fc8af6f312cdd0339d9dca697f544eae48b61c",
     "exploration-credential-exec.py": "120d9e6b9166181c3a97b252b09a1a64457e7dfceb2f6e4410922c21fda7129a",
     "exploration-credential-channel.py": "954550612a3bc41c3d6a726a9b8a2db4a8818f52b8ea073b09ae278267f1ebbc"
   },
