@@ -232,13 +232,15 @@ impl TransmittedContextEvidence {
 }
 impl RequestEvidence {
     fn validate(&self) -> Result<()> {
-        for hash in [&self.proposal_request_sha256, &self.provider_body_sha256] {
-            ensure!(
-                hash.strip_prefix("sha256:").is_some_and(|s| s.len() == 64
+        let valid_digest = |hash: &str| {
+            hash.strip_prefix("sha256:").is_some_and(|s| {
+                s.len() == 64
                     && s.bytes()
-                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))),
-                "invalid request digest"
-            );
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
+        };
+        for hash in [&self.proposal_request_sha256, &self.provider_body_sha256] {
+            ensure!(valid_digest(hash), "invalid request digest");
         }
         ensure!(
             (1..=30_000).contains(&self.timeout_ms)
@@ -258,7 +260,7 @@ impl RequestEvidence {
                         .source_entries
                         .iter()
                         .all(|e| identifier(&e.logical_id)
-                            && ato_formation::generation::is_sha256(&e.content_sha256)
+                            && valid_digest(&e.content_sha256)
                             && e.text_bytes
                                 <= ato_formation::proposal::MAX_SOURCE_ENTRY_BYTES as u64)
                     && context
@@ -273,7 +275,7 @@ impl RequestEvidence {
                     && context
                         .previous_derivation_refs
                         .iter()
-                        .all(|s| ato_formation::generation::is_sha256(s))
+                        .all(|s| valid_digest(s))
                     && context.proposal_diagnostics.len() <= 4
                     && context.proposal_diagnostics.iter().all(|s| identifier(s)),
                 "invalid transmitted context evidence"

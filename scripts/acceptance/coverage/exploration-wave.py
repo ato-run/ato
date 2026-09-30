@@ -243,7 +243,12 @@ class Wave:
         if continuation:
             cmd.extend(['--search-id',read(cell/'producer.search.json')['search_id']])
         for route in app.get('gate_routes', []):
-            require(app.get('infrastructure_fixture') is True, 'manual route in automatic cohort')
+            replay = app.get('prior_failure_replay')
+            if replay:
+                require(sha(route) == replay['capsule_toml_sha256'], 'prior live D replay changed')
+                require(replay['original_live_proposal'] and replay['previous_failure'], 'unproven repair replay')
+            else:
+                require(app.get('infrastructure_fixture') is True, 'manual route in automatic cohort')
             cmd.extend(['--route', route])
         if self.a.credential_socket:
             cmd = ['python3',self.plan['credential_wrapper'],self.a.credential_socket,*cmd]
