@@ -664,6 +664,7 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "flate2",
+ "netd",
  "reqwest",
  "serde",
  "serde_jcs",
@@ -672,6 +673,7 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

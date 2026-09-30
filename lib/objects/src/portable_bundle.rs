@@ -13,7 +13,10 @@ pub const PORTABLE_APPLICATION_BUNDLE_VERSION: u32 = 3;
 pub const PORTABLE_APPLICATION_PROFILE: &str = "ato.portable-application/1";
 pub const PORTABLE_APPLICATION_BUNDLE_VERSION_V4: u32 = 4;
 pub const PORTABLE_APPLICATION_PROFILE_V2: &str = "ato.portable-application/2";
-const MAX_BUNDLE_BYTES: u64 = 512 * 1024 * 1024;
+/// A bundle may carry one 512 MiB OCI archive (base64) plus its objects.
+const MAX_BUNDLE_BYTES: u64 = 768 * 1024 * 1024;
+/// Base64 length of the 512 MiB portable OCI transport bound.
+const MAX_OCI_ARCHIVE_BASE64_BYTES: usize = (512 * 1024 * 1024) / 3 * 4 + 4;
 const MAX_BUNDLE_OBJECTS: usize = 10_000;
 const MAX_BUNDLE_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_DECODED_BYTES: u64 = 256 * 1024 * 1024;
@@ -406,7 +409,7 @@ fn validate_shape_and_payloads(
                 || portability
                     .oci_archives
                     .iter()
-                    .any(|archive| archive.bytes.len() > 180 * 1024 * 1024)
+                    .any(|archive| archive.bytes.len() > MAX_OCI_ARCHIVE_BASE64_BYTES)
             {
                 return Err(PortableBundleError::DescriptorMismatch(
                     "OCI archive transport bounds/order".to_owned(),
