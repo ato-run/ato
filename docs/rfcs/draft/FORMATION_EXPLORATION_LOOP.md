@@ -2,7 +2,7 @@
 
 Status: draft implementation contract for the explicitly requested exploration arm.
 Existing baseline, legacy provider arms and historical ledgers remain separate.
-This document does not claim real-provider acceptance or deployment.
+Actual provider/Runtime evidence is recorded separately in docs/ops; this design document does not imply deployment.
 
 ## Frozen boundary and changing Derivations
 
@@ -96,9 +96,10 @@ send is retried. Responses record model, usage, latency and estimated cost.
 No-call reasons and full reservation charges are recorded separately from actual
 known token usage. Journals never contain credential values.
 
-Completion requires actual Coordinator, contained Runtime and live-provider
-acceptance on small upstream applications, including evidence-based repair,
-ceiling refusal, permission reduction, failure retention and restart. Infrastructure
-fixtures are additional regression evidence, not upstream acceptance. Only after
-that gate may the frozen 100-source cohort be measured as a new arm. Old results
-and their policy conditions must remain unchanged.
+The execution gate requires actual Coordinator, contained Runtime and live-provider
+acceptance on small HTTP application fixtures, including evidence-based repair,
+ceiling refusal, permission reduction, failure retention and restart. Frozen upstream
+pilots are measured separately. Fixture PASS never establishes upstream application
+or functional acceptance and is never counted in the 100 OSS arm. The frozen cohort
+is measured only after the actual execution gate; old results/policy conditions remain
+unchanged. WBO/copyparty pilot failures stay failures without prompt/source changes.
