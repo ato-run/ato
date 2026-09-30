@@ -1,10 +1,10 @@
 {
   "schema": "ato.formation-exploration-100-plan/1",
   "wave": "bounded autonomous exploration, new conditions; historical results preserved",
-  "frozen_at": "2026-09-30T11:51:38.964807+00:00",
-  "ato_pin": "64e03d0eb063eae5a08f516e629d53e26e824414",
-  "ato_api_pin": "775c52f3fc79539bfd701ec53612367d463a6ab0",
-  "authority_source_pin": "32903a85a6fe1711a68f933475354a5d63a17714",
+  "frozen_at": "2026-09-30T12:08:48.556831+00:00",
+  "ato_pin": "6d5242b9acba719d2e3fe0423525e902d86849de",
+  "ato_api_pin": "6a7fd9dd838ba306a260992dcf82de03233bbd20",
+  "authority_source_pin": "64e03d0eb063eae5a08f516e629d53e26e824414",
   "baseline": {
     "ledger": "docs/ops/formation-coverage-100.json",
     "sha256": "560302a51a04fc08d9868a8dfb84bc2ac58666e14a0ee3533f181e502c98d45c",
@@ -338,33 +338,34 @@
     "100_runs_only_after_gate_pass": true
   },
   "api": "http://127.0.0.1:19576",
-  "receiver_bundle": "/home/ubuntu/formation-foundation/.tmp/exploration-receiver/bundle",
+  "receiver_bundle": "/home/ubuntu/formation-foundation/.tmp/exploration-receiver-v3/bundle",
   "api_node_modules": "/home/ubuntu/formation-foundation/.tmp/6b-f-20260930-api/node_modules",
   "coordinator_script": "/home/ubuntu/formation-foundation/.tmp/6b-f-20260930-measurement/scripts/acceptance/proposal/coordinator.mjs",
   "credential_wrapper": "/home/ubuntu/formation-foundation/.tmp/exploration-code/scripts/acceptance/coverage/exploration-credential-exec.py",
   "binaries": {
     "ato": {
-      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-prereg/bin-v2/ato",
-      "sha256": "cba5c05a6b2204d30739120720a726991b1e0438a58e8c2cb96b3618ced55fc9"
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-prereg/bin-v3/ato",
+      "sha256": "050ef70cbad33464461a374d038316d37b7296fa42b946c695820f30b028223f"
     },
     "worker": {
-      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-prereg/bin-v2/worker",
-      "sha256": "a228baa15bf5d698a45e0d918c764b83b8406a94a3aba2389b45a91edea10cc1"
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-prereg/bin-v3/worker",
+      "sha256": "3229faaa0bb385fda239820c1e08126942336cbab0ab1efb1d4c0680bc9d32e0"
     },
     "preflight": {
-      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-prereg/bin-v2/preflight",
-      "sha256": "8178ca6b36ecb490e59b86ed3955dfe29c2a2ee1adf9b8afee2dad0a9f46c94e"
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-prereg/bin-v3/preflight",
+      "sha256": "8178ca6b36ecb490e59b86ed3955dfe29c2a2ee1adf9b8afee2dad0a9f46c94e",
+      "source_pin": "64e03d0eb063eae5a08f516e629d53e26e824414"
     }
   },
   "receiver_hashes": {
     "photon_rs_bg.wasm": "f477b87cbea0445c65fc7e580e89050190600379fcd44821cec67403483872b1",
     "schema.sql": "aba341217e9b5933bac894e20329f76823ed7dad4d9069fe96f2b5b641f338f0",
     "receipt_authority.wasm": "b02894222b64f5d6150f102f7e1920fc08e26094c65b7c92fa38ac46788862ec",
-    "worker.js": "a19a24571602c24ebdde9498eb70b9f1944610ffefbb76ccba55e9beda254e5e",
-    "receiver-pin.json": "fb948c2143da1f2d78f82eaac2acd8b919ef727d433fa17ccc6ac7e73dddefd9",
+    "worker.js": "4b2ef4998982260a9daacafd68fd5643a945d9ddd892d4c8a9f4901816bcca98",
+    "receiver-pin.json": "a188753f116079cdfd1614ef18fa064c7130414d16ec2d155ed13236b63e1cb0",
     "entry.ts": "0a7dc3ef0817d43d8be22341245dffe248d1b27d62a70e4a3d9f7526c16fc0b8",
     "schema-baseline.sql": "a941408a62e7fb6cdc03c83a14240952ff5e0753778f756313c16367185ef6e8",
-    "authority-provenance.json": "1109b1210fcbc32ba9c9b2bfcbccf2c84324924940262178bcb2dba6cc855a0a",
+    "authority-provenance.json": "90c05ff17e3a614184c0864e89ece99d06f156ce3dfc81dde13f8bf18c6edd76",
     "resvg.wasm": "22bf6e9f9a100d972da0411a69c5ba504367fc1fa87b3b64e3f35e53926d2d70",
     "schema-baseline.json": "c78d3109d741d6e3fce9babd86e026fec07d7c973adc24488a8a6e6518d7f1b8"
   },
@@ -372,7 +373,7 @@
     "OS": "Linux-6.17.0-1016-oracle-aarch64-with-glibc2.39",
     "arch": "aarch64",
     "rust": "rustc 1.96.0 (ac68faa20 2026-05-25)",
-    "disk_free_bytes": 115759747072,
+    "disk_free_bytes": 92409262080,
     "recorded_at": "2026-09-30T11:31:58.978882+00:00",
     "runtime_profile": "bwrap+Landlock; isolated loopback bridge; phase HTTPS broker; exact provisioned Python3.12.7/Node22.14.0",
     "toolchains_verified": {
@@ -2325,6 +2326,14 @@
       "model_calls": 0,
       "cost_usd_micros": 0,
       "previous_artifacts_preserved": true
+    },
+    {
+      "previous_plan_sha256": "271dd5ace5db7cfb206726b5e78187b3f9b93fb5c4ae8a65d3ce47896508f66f",
+      "reason": "owner restart locator replaces duplicate active-request submit; authenticated HTTP readiness prevents stale SQL runtime from hiding startup race; all model calls/reservations zero",
+      "model_calls": 0,
+      "cost_usd_micros": 0,
+      "previous_artifacts_preserved": true,
+      "original_search_deadline_and_consumed_round_unchanged": true
     }
   ],
   "credential_binding": {
