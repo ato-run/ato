@@ -28,7 +28,7 @@ pub fn oci_archive_from_file(
         .with_context(|| format!("inspect {}", path.display()))?
         .len();
     ensure!(
-        size <= 128 * 1024 * 1024,
+        size <= ato_portable_application::oci_archive::MAX_ARCHIVE_BYTES as u64,
         "OCI archive exceeds bounded transport size"
     );
     let archive = PortableOciArchive {
