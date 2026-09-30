@@ -1,8 +1,8 @@
 {
   "schema": "ato.formation-exploration-100-plan/1",
   "wave": "bounded autonomous exploration, new conditions; historical results preserved",
-  "frozen_at": "2026-09-30T12:08:48.556831+00:00",
-  "ato_pin": "6d5242b9acba719d2e3fe0423525e902d86849de",
+  "frozen_at": "2026-09-30T12:14:30.579544+00:00",
+  "ato_pin": "7552fcfe714f26ed44bf0b7abae74b61d3651c9d",
   "ato_api_pin": "6a7fd9dd838ba306a260992dcf82de03233bbd20",
   "authority_source_pin": "64e03d0eb063eae5a08f516e629d53e26e824414",
   "baseline": {
@@ -344,15 +344,15 @@
   "credential_wrapper": "/home/ubuntu/formation-foundation/.tmp/exploration-code/scripts/acceptance/coverage/exploration-credential-exec.py",
   "binaries": {
     "ato": {
-      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-prereg/bin-v3/ato",
-      "sha256": "050ef70cbad33464461a374d038316d37b7296fa42b946c695820f30b028223f"
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-prereg/bin-v4/ato",
+      "sha256": "2df1b52caf55062f0a3bc9f24994dde1cb957f21172eae2dc2e8d6e95a8cadfa"
     },
     "worker": {
-      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-prereg/bin-v3/worker",
-      "sha256": "3229faaa0bb385fda239820c1e08126942336cbab0ab1efb1d4c0680bc9d32e0"
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-prereg/bin-v4/worker",
+      "sha256": "224506ed8b974a02af3549171d0ac254d0d4b448cffde195cdecf19a10043059"
     },
     "preflight": {
-      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-prereg/bin-v3/preflight",
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-prereg/bin-v4/preflight",
       "sha256": "8178ca6b36ecb490e59b86ed3955dfe29c2a2ee1adf9b8afee2dad0a9f46c94e",
       "source_pin": "64e03d0eb063eae5a08f516e629d53e26e824414"
     }
@@ -2334,6 +2334,13 @@
       "cost_usd_micros": 0,
       "previous_artifacts_preserved": true,
       "original_search_deadline_and_consumed_round_unchanged": true
+    },
+    {
+      "previous_plan_sha256": "b156013e38d93faa4139221065535209ec2489b424ffbedc9280ac67d3675d47",
+      "reason": "pilot claimant used search text instead of UUID required by existing API; reproduced HTTP400 proposal_claim_invalid; no model sends/reservations; repair sender, preserve expired three rounds",
+      "model_calls": 0,
+      "cost_usd_micros": 0,
+      "previous_artifacts_preserved": true
     }
   ],
   "credential_binding": {
