@@ -2069,6 +2069,7 @@ fn execute_planned_ticket(
         shim: &config.shim,
         network,
     };
+    let network_refusal = |phase| scoped.as_ref().and_then(|gates| gates.first_refusal(phase));
     let exploring = ticket
         .exploration
         .as_ref()
@@ -2081,6 +2082,7 @@ fn execute_planned_ticket(
                 shim: &config.shim,
                 ceiling: &grant.ceiling,
                 gates: &gates.sockets,
+                network_refusal: Some(&network_refusal),
             },
         );
     let source_oci = ticket
