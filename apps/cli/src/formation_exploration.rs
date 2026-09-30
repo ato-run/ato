@@ -276,6 +276,21 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
         })
         .transpose()?;
     let mut answered = std::collections::BTreeSet::new();
+    // Coordinator wire requires a UUID claimant, separate from search identity.
+    let mut claimant = [0_u8; 16];
+    getrandom::fill(&mut claimant)
+        .map_err(|e| anyhow::anyhow!("claimant identity unavailable: {e}"))?;
+    claimant[6] = (claimant[6] & 0x0f) | 0x40;
+    claimant[8] = (claimant[8] & 0x3f) | 0x80;
+    let hex: String = claimant.iter().map(|b| format!("{b:02x}")).collect();
+    let claimant_id = format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..]
+    );
     let client = Client::new(&api, &token)?;
     let accepted = if continuation {
         client.resume_exploration(&submission)?
@@ -297,7 +312,7 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
             &id,
             &status,
             &mut submission,
-            &format!("requester_{search_id}"),
+            &claimant_id,
             producer.clone(),
         )?;
         if Settlement::of(&status)? != Settlement::Running {
