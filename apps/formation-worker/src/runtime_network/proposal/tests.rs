@@ -390,6 +390,39 @@ fn auto_source_priority_subset_is_valid_canonical_provider_context() {
     )
     .unwrap();
     let request = fresh.proposal_request_v2(&status(&fresh)).unwrap();
+    let mut view = status(&fresh);
+    let mut old = view["search_state"]["proposal_round"].clone();
+    old["outcome"] = json!("completed");
+    let inspected = request
+        .source_context
+        .iter()
+        .find(|e| e.text.contains("untrusted source documentation"))
+        .unwrap();
+    let auth = fresh
+        .request
+        .policy
+        .proposal
+        .as_ref()
+        .unwrap()
+        .execution_plan
+        .as_ref()
+        .unwrap();
+    old["inspection_requests"] =
+        json!([{"file_id":inspected.logical_id,"digest":auth.files[&inspected.logical_id].digest}]);
+    old["diagnostics"] = json!(["source_inspection_requested"]);
+    view["search_state"]["proposal_history"] = json!([old]);
+    let after = fresh.proposal_request_v2(&view).unwrap();
+    assert!(
+        after.source_context.iter().any(|e| e.text.contains("main")),
+        "manifest lost after a one-file inspection"
+    );
+    assert!(
+        after
+            .source_context
+            .iter()
+            .any(|e| e.logical_id == inspected.logical_id)
+    );
+    assert_eq!(after.source_context.len(), 4);
     assert_eq!(request.source_context.len(), 4);
     assert!(
         request
