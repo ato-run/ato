@@ -274,6 +274,8 @@ impl JevDecisionProvider {
             http: reqwest::blocking::Client::builder()
                 .timeout(timeout)
                 .redirect(reqwest::redirect::Policy::none())
+                .retry(reqwest::retry::never())
+                .no_proxy()
                 .build()?,
         })
     }

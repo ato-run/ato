@@ -30,10 +30,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::launch::process_executor::{
-    LaunchedProcess, LoopbackReadinessProbe, ProcessLaunchHost, launch_process_with,
-    wait_until_ready,
+    LaunchedProcess, LoopbackReadinessProbe, ProcessLaunchHost, ReadinessProbe,
+    launch_process_with, launch_process_with_scoped_network, wait_until_ready,
 };
-use crate::launch::resolved::{ResolvedEndpoint, ResolvedRuntimeLaunchContext};
+use crate::launch::resolved::{
+    ResolvedEndpoint, ResolvedRuntimeLaunchContext, ResolvedStateAttachment,
+};
 use crate::launch::sandbox::endpoint_port_env_name;
 use anyhow::{Context, Result, bail};
 use ato_formation::verify::RuntimeHttpObservation;
@@ -41,7 +43,7 @@ use ato_formation::{authoring::BoundDerivation, execution::ExecutionPlan};
 use ato_ipc::runtime_launch::{
     EndpointAllocationV1, EndpointV1, LaunchContextV1, LaunchRealizationV1, LaunchWorkspaceV1,
     LifecycleV1, ProcessRealizationV1, PublicEnvV1, RUNTIME_LAUNCH_SPEC_V1_PROTOCOL, ReadinessV1,
-    RuntimeLaunchSpecV1,
+    RuntimeLaunchSpecV1, StateAccessV1, StateAttachmentV1,
 };
 
 use crate::plan::copy_tree;
@@ -156,12 +158,32 @@ pub struct TemporaryRealization {
     endpoints: Vec<RealizedEndpoint>,
     scratch: PathBuf,
     output: PathBuf,
+    #[cfg(unix)]
+    ingress: Vec<crate::network_bridge::IngressBridge>,
 }
 
 impl TemporaryRealization {
     /// Launch the candidate through the Runtime's process executor and wait
     /// until every required port accepts connections.
     pub fn launch(request: &TemporaryRealizationRequest<'_>) -> Result<Self> {
+        Self::launch_inner(request, None)
+    }
+
+    pub fn launch_scoped(
+        request: &TemporaryRealizationRequest<'_>,
+        runtime_gate: &Path,
+    ) -> Result<Self> {
+        Self::launch_inner(request, Some(runtime_gate))
+    }
+
+    fn launch_inner(
+        request: &TemporaryRealizationRequest<'_>,
+        runtime_gate: Option<&Path>,
+    ) -> Result<Self> {
+        #[cfg(not(unix))]
+        if runtime_gate.is_some() {
+            bail!("scoped runtime requires Unix");
+        }
         let serve = request.plan.serving(request.derivation);
         if serve.argv.is_empty() {
             bail!("the intent declares no launch argv");
@@ -177,6 +199,8 @@ impl TemporaryRealization {
             endpoints: Vec::new(),
             scratch: scratch.to_path_buf(),
             output: scratch.join("candidate.log"),
+            #[cfg(unix)]
+            ingress: Vec::new(),
         };
         let workspace_root = scratch.join("workspace");
         std::fs::create_dir_all(&workspace_root)
@@ -253,6 +277,41 @@ impl TemporaryRealization {
             .map_err(anyhow::Error::msg)?;
         let argv = serve.argv.clone();
         let public_env = request.plan.process_environment(request.derivation);
+        let mut state_attachments = Vec::new();
+        let mut resolved_state = Vec::new();
+        if runtime_gate.is_some() {
+            for slot in &request.derivation.state {
+                if !ato_formation::proposal::isolated_state_id(&slot.id)
+                    || !ato_formation::proposal::isolated_state_mount(&slot.mount)
+                {
+                    bail!("unsupported_state_requirement");
+                }
+                let access = match slot.access {
+                    ato_formation::authoring::StateAccess::ReadOnly => StateAccessV1::ReadOnly,
+                    ato_formation::authoring::StateAccess::ReadWrite => StateAccessV1::ReadWrite,
+                };
+                // Empty, attempt-owned working copy. No normal instance state
+                // or production binding is ever resolved by exploration.
+                let path = scratch.join("isolated-state").join(&slot.id);
+                std::fs::create_dir_all(&path)?;
+                state_attachments.push(StateAttachmentV1 {
+                    state_key: slot.id.clone(),
+                    revision_ref: None,
+                    mount_target: slot.mount.clone(),
+                    access,
+                    writer_fence: None,
+                });
+                resolved_state.push(ResolvedStateAttachment::new(
+                    slot.id.clone(),
+                    None,
+                    path,
+                    slot.mount.clone(),
+                    access,
+                ));
+            }
+        } else if !request.derivation.state.is_empty() {
+            bail!("exploration_state_grant_required");
+        }
 
         let spec = RuntimeLaunchSpecV1 {
             protocol: RUNTIME_LAUNCH_SPEC_V1_PROTOCOL.to_owned(),
@@ -278,7 +337,7 @@ impl TemporaryRealization {
                 })
                 .collect(),
             secret_grants: Vec::new(),
-            state_attachments: Vec::new(),
+            state_attachments,
             endpoints: declared,
             readiness: ReadinessV1::Process {
                 timeout_ms: LAUNCH_TIMEOUT.as_millis() as u64,
@@ -290,20 +349,40 @@ impl TemporaryRealization {
             &cwd_relative,
             public_env,
             Vec::new(),
-            Vec::new(),
+            resolved_state,
             resolved,
         )
         .map_err(|error| anyhow::anyhow!("{error}"))?;
 
-        let launched = launch_process_with(
-            &spec,
-            &context,
-            &ProcessLaunchHost {
-                shim: request.shim.to_path_buf(),
-                runtime_root,
-                output: Some((realization.output.clone(), OUTPUT_LIMIT_BYTES)),
-            },
-        )?;
+        let host = ProcessLaunchHost {
+            shim: request.shim.to_path_buf(),
+            runtime_root,
+            output: Some((realization.output.clone(), OUTPUT_LIMIT_BYTES)),
+        };
+        let ingress_root = host.runtime_root.join("ingress");
+        let launched = match runtime_gate {
+            Some(socket) => {
+                std::fs::create_dir_all(&ingress_root)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(
+                        &ingress_root,
+                        std::fs::Permissions::from_mode(0o700),
+                    )?;
+                    for endpoint in &realization.endpoints {
+                        realization
+                            .ingress
+                            .push(crate::network_bridge::IngressBridge::start(
+                                ingress_root.join(format!("{}.sock", endpoint.host_port)),
+                                endpoint.host_port,
+                            )?);
+                    }
+                }
+                launch_process_with_scoped_network(&spec, &context, &host, socket, &ingress_root)?
+            }
+            None => launch_process_with(&spec, &context, &host)?,
+        };
         realization.launched = Some(launched);
 
         // Readiness: every observed port accepts a connection. The Runtime's
@@ -319,7 +398,21 @@ impl TemporaryRealization {
                 .launched
                 .as_mut()
                 .expect("launched until destroyed");
-            if let Err(error) = wait_until_ready(&per_endpoint, &context, launched, &probe) {
+            #[cfg(unix)]
+            let scoped_probe = ScopedReadiness {
+                bridges: &realization.ingress,
+                endpoints: &realization.endpoints,
+            };
+            #[cfg(unix)]
+            let selected_probe: &dyn ReadinessProbe = if runtime_gate.is_some() {
+                &scoped_probe
+            } else {
+                &probe
+            };
+            #[cfg(not(unix))]
+            let selected_probe: &dyn ReadinessProbe = &probe;
+            if let Err(error) = wait_until_ready(&per_endpoint, &context, launched, selected_probe)
+            {
                 // The port explanation first: the output tail is long, and
                 // a bounded report must not lose the actionable part.
                 let mut detail = String::new();
@@ -337,7 +430,26 @@ impl TemporaryRealization {
                         moved.guest_port
                     ));
                 }
-                detail.push_str(&format!("candidate output: {}", realization.output_tail()));
+                let exit = realization
+                    .launched
+                    .as_mut()
+                    .and_then(|p| p.exited().ok().flatten());
+                let tail = realization.output_tail();
+                if runtime_gate.is_some() {
+                    let control = scratch
+                        .parent()
+                        .context("attempt root missing")?
+                        .join("control");
+                    std::fs::create_dir_all(&control)?;
+                    crate::execution_facts::append(
+                        &control.join("execution-facts.jsonl"),
+                        "launch",
+                        "serve",
+                        exit,
+                        &tail,
+                    )?;
+                }
+                detail.push_str(&format!("candidate output: {tail}"));
                 return Err(error.context(detail));
             }
         }
@@ -398,6 +510,8 @@ impl TemporaryRealization {
             Some(launched) => launched.stop(&LIFECYCLE).map(|_| ()),
             None => Ok(()),
         };
+        #[cfg(unix)]
+        self.ingress.clear();
         let removed = if self.scratch.exists() {
             remove_scratch(&self.scratch)
         } else {
@@ -414,6 +528,27 @@ impl TemporaryRealization {
         } else {
             tail.to_owned()
         }
+    }
+}
+
+#[cfg(unix)]
+struct ScopedReadiness<'a> {
+    bridges: &'a [crate::network_bridge::IngressBridge],
+    endpoints: &'a [RealizedEndpoint],
+}
+#[cfg(unix)]
+impl ReadinessProbe for ScopedReadiness<'_> {
+    fn probe(&self, host_port: u16, path: &str) -> std::result::Result<(), String> {
+        if !path.is_empty() {
+            return Err("scoped readiness requires a declared TCP endpoint".into());
+        }
+        self.endpoints
+            .iter()
+            .position(|e| e.host_port == host_port)
+            .and_then(|index| self.bridges.get(index))
+            .ok_or_else(|| "scoped readiness endpoint missing".to_string())?
+            .ready()
+            .map_err(|e| e.to_string())
     }
 }
 

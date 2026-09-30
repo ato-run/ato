@@ -42,9 +42,13 @@ fn state() -> SearchStateV1 {
         max_provider_output_tokens: 6144,
         max_network_transfer_bytes: 1048576,
         max_network_transfer_bytes_per_attempt: 524288,
+        provider_configuration_ref: None,
+        decision_provider_configuration_ref: None,
+        provider_budget_binding_ref: None,
     });
     s.frozen.policy.proposal = Some(ProposalAuthorization {
         execution_plan: Some(PlanAuthorization {
+            source_oci: None,
             files: BTreeMap::from([(
                 "server".into(),
                 VerifiedSourceFile {
@@ -180,6 +184,7 @@ fn default_three_failed_provider_rounds_exhaust_without_reset_on_restart() {
             candidates: vec![],
             derivations: vec![],
             diagnostics: vec![],
+            inspection_requests: vec![],
         });
         s = serde_json::from_slice(&s.canonical_bytes().unwrap()).unwrap();
         assert_eq!(s.frozen.canonical_bytes().unwrap(), frozen);
@@ -210,6 +215,7 @@ fn configured_one_round_keeps_its_effective_limit_after_serialization() {
         candidates: vec![],
         derivations: vec![],
         diagnostics: vec![],
+        inspection_requests: vec![],
     });
     let restored: SearchStateV1 = serde_json::from_slice(&s.canonical_bytes().unwrap()).unwrap();
     assert_eq!(
@@ -239,4 +245,176 @@ fn ceiling_changes_are_separate_from_frozen_contract() {
         });
     assert_ne!(s.frozen.canonical_bytes().unwrap(), before);
     assert_eq!(s.frozen.contract_ref, k);
+}
+
+#[test]
+fn module_state_and_public_environment_are_canonical_and_source_bound() {
+    let mut s = state();
+    s.frozen
+        .policy
+        .proposal
+        .as_mut()
+        .unwrap()
+        .execution_plan
+        .as_mut()
+        .unwrap()
+        .files
+        .get_mut("server")
+        .unwrap()
+        .path = "demo/__main__.py".into();
+    let mut p = plan();
+    p["module"] = json!("demo");
+    p["environment"] = json!({"HOME":"/data"});
+    p["state"] = json!([{"id":"app.data","mount":"/data","access":"read-write"}]);
+    let out = compile(&s, p.clone());
+    let ProposalOutcome::Admitted(candidate) = &out[0] else {
+        panic!("{out:?}");
+    };
+    assert_eq!(candidate.compiled().derivation.state[0].mount, "/data");
+    assert_eq!(
+        candidate.compiled().derivation.steps.last().unwrap().argv[1..],
+        ["-m", "demo"]
+    );
+    p["module"] = json!("other");
+    assert!(matches!(
+        &compile(&s, p)[0],
+        ProposalOutcome::Rejected(ProposalError("proposal_module_source_mismatch"))
+    ));
+}
+
+#[test]
+fn state_cannot_mask_shim_system_or_policy_and_env_cannot_inject_into_owner() {
+    let s = state();
+    for path in [
+        "/",
+        "/app",
+        "/.ato/ingress",
+        "/etc",
+        "/opt/ato/toolchains",
+        "/data/../etc",
+    ] {
+        let mut p = plan();
+        p["state"] = json!([{"id":"app.data","mount":path,"access":"read-write"}]);
+        assert!(matches!(
+            &compile(&s, p)[0],
+            ProposalOutcome::Rejected(ProposalError("execution_plan_bounds"))
+        ));
+    }
+    for key in [
+        "LD_PRELOAD",
+        "DYLD_INSERT_LIBRARIES",
+        "ATO_RUN_TOKEN",
+        "HTTP_PROXY",
+        "API_SECRET",
+        "NODE_OPTIONS",
+    ] {
+        let mut p = plan();
+        p["environment"] = json!({key: "ignored"});
+        assert!(matches!(
+            &compile(&s, p)[0],
+            ProposalOutcome::Rejected(ProposalError("execution_plan_bounds"))
+        ));
+    }
+}
+
+#[test]
+fn bounded_inspection_is_validated_and_consumed_without_authorizing_a_d() {
+    let mut s = state();
+    let policy = &mut s.frozen.policy.proposal.as_mut().unwrap().policy;
+    policy.allow_source_text = true;
+    policy.max_source_bytes = 16384;
+    let source = json!({"file_id":"server","digest":format!("sha256:{}","b".repeat(64))});
+    let batch = serde_json::to_vec(&json!({"schema":PROPOSAL_SCHEMA,"proposals":[{"kind":"inspect_source","sources":[source]}]})).unwrap();
+    let output = ProducerOutput::new(
+        batch,
+        ProducerProvenance {
+            provider: "fixed".into(),
+            model: None,
+        },
+    )
+    .unwrap();
+    let mut registry = CandidateRegistry::new(&s.frozen)
+        .unwrap()
+        .with_inspection_budget(1)
+        .unwrap();
+    assert!(
+        matches!(&registry.validate_batch(&BTreeMap::new(), &output).unwrap()[0], ProposalOutcome::InspectionRequested(sources) if sources.len() == 1)
+    );
+    assert!(registry.generated().is_empty());
+    assert!(matches!(
+        &registry.validate_batch(&BTreeMap::new(), &output).unwrap()[0],
+        ProposalOutcome::Rejected(ProposalError("inspection_budget_exhausted"))
+    ));
+}
+
+#[test]
+fn public_catalog_is_bounded_and_does_not_export_the_path_map() {
+    let mut s = state();
+    let auth = s
+        .frozen
+        .policy
+        .proposal
+        .as_mut()
+        .unwrap()
+        .execution_plan
+        .as_mut()
+        .unwrap();
+    for n in 0..100 {
+        auth.files.insert(
+            format!("file{n}"),
+            VerifiedSourceFile {
+                path: format!("nested/path/{n}.py"),
+                digest: format!("sha256:{}", "b".repeat(64)),
+            },
+        );
+    }
+    let catalog = s
+        .frozen
+        .policy
+        .proposal
+        .as_ref()
+        .unwrap()
+        .catalog()
+        .unwrap();
+    let OperationDomain::ExecutionPlan { sources, .. } = &catalog.operations[0] else {
+        panic!()
+    };
+    assert_eq!(sources.len(), 32);
+    assert_eq!(sources[0].reference.file_id, "server");
+    let bytes = serde_json::to_string(&catalog).unwrap();
+    assert!(!bytes.contains("nested/path"));
+    assert!(!bytes.contains("server.py"));
+    let restored: OperationCatalog = serde_json::from_str(&bytes).unwrap();
+    assert_eq!(restored, catalog);
+}
+
+#[test]
+fn source_oci_proposal_is_canonical_source_bound_and_not_a_shell_plan() {
+    let mut s = state();
+    let auth = s
+        .frozen
+        .policy
+        .proposal
+        .as_mut()
+        .unwrap()
+        .execution_plan
+        .as_mut()
+        .unwrap();
+    auth.files.get_mut("server").unwrap().path = "Dockerfile".into();
+    auth.toolchains.insert("oci".into(), "1.0.0".into());
+    auth.source_oci=Some(serde_json::from_value(json!({"schema":"ato.source-oci-recipe/1","dockerfile":"Dockerfile","platform":"linux/arm64","base_images":[],
+        "build":{"memory_bytes":536870912,"cpu_limit_millis":1000,"pids_limit":128},"build_disk_bytes":536870912,
+        "runtime":{"memory_bytes":268435456,"cpu_limit_millis":1000,"pids_limit":128},"build_timeout_seconds":60,"max_archive_bytes":1048576})).unwrap());
+    let mut p = plan();
+    p["runtime"] = json!({"name":"oci","version":"1.0.0"});
+    let outcomes = compile(&s, p.clone());
+    let ProposalOutcome::Admitted(c) = &outcomes[0] else {
+        panic!("{outcomes:?}")
+    };
+    assert_eq!(c.compiled().derivation.steps.len(), 1);
+    assert!(c.compiled().derivation.steps[0].argv.is_empty());
+    assert!(c.compiled().derivation.source_oci.is_some());
+    assert_eq!(c.compiled().base_contract_ref, s.frozen.base_contract_ref);
+    p["argv"] = json!(["sh", "-c", "echo arbitrary"]);
+    assert!(matches!(compile(&s, p)[0], ProposalOutcome::Rejected(_)));
 }

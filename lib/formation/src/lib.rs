@@ -62,3 +62,5 @@ pub mod generation_context;
 pub mod search;
 
 pub mod proposal;
+
+pub mod source_oci_plan;

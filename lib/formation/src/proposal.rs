@@ -6,7 +6,9 @@ mod node_static_workspace;
 mod python_http;
 mod source_context;
 pub use execution_plan::{
-    ExecutionPlanProposal, PlanAuthorization, RuntimeSelection, SourceReference, VerifiedSourceFile,
+    CatalogSource, ExecutionPlanProposal, PlanAuthorization, PlanStateRequirement,
+    RuntimeSelection, SourceReference, VerifiedSourceFile, isolated_state_id, isolated_state_mount,
+    source_inspection_priority,
 };
 pub use node_static_workspace::{
     MAX_WORKSPACE_CANDIDATES, NodeStaticWorkspaceAuthorization, WORKSPACE_HTTP_PORT,
@@ -97,7 +99,9 @@ pub enum OperationDomain {
     #[serde(rename = "execution_plan@1")]
     ExecutionPlan {
         toolchains: BTreeMap<String, String>,
-        sources: Vec<SourceReference>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_oci: Option<crate::source_oci_plan::SourceOciRecipe>,
+        sources: Vec<CatalogSource>,
     },
     #[serde(rename = "python_http_process@1")]
     PythonHttpProcess { entrypoint_ids: Vec<String> },
@@ -125,6 +129,9 @@ pub enum OperationInvocation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Proposal {
+    InspectSource {
+        sources: Vec<SourceReference>,
+    },
     ProposeDerivation {
         operations: Vec<OperationInvocation>,
     },
@@ -219,14 +226,8 @@ impl ProposalAuthorization {
         if let Some(plan) = &self.execution_plan {
             operations.push(OperationDomain::ExecutionPlan {
                 toolchains: plan.toolchains.clone(),
-                sources: plan
-                    .files
-                    .iter()
-                    .map(|(id, file)| SourceReference {
-                        file_id: id.clone(),
-                        digest: file.digest.clone(),
-                    })
-                    .collect(),
+                source_oci: plan.source_oci.clone(),
+                sources: plan.catalog_sources(),
             });
         }
         let domain = &self.source_domain;
@@ -324,6 +325,7 @@ pub enum ProposalOutcome {
     Admitted(Box<ValidatedCandidate>),
     Unsupported,
     Rejected(ProposalError),
+    InspectionRequested(Vec<SourceReference>),
 }
 
 /// Ato-owned candidate set. Frozen candidates are borrowed, never rewritten.
@@ -332,6 +334,7 @@ pub enum ProposalOutcome {
 pub struct CandidateRegistry<'a> {
     frozen: &'a FrozenSearchV1,
     generated: Vec<ValidatedCandidate>,
+    inspection_remaining: u32,
 }
 impl<'a> CandidateRegistry<'a> {
     pub fn new(frozen: &'a FrozenSearchV1) -> Result<Self, ProposalError> {
@@ -341,7 +344,19 @@ impl<'a> CandidateRegistry<'a> {
         Ok(Self {
             frozen,
             generated: Vec::new(),
+            inspection_remaining: frozen
+                .policy
+                .exploration
+                .as_ref()
+                .map_or(0, |p| p.max_inspections),
         })
+    }
+    pub fn with_inspection_budget(mut self, remaining: u32) -> Result<Self, ProposalError> {
+        if remaining > self.inspection_remaining {
+            return Err(ProposalError("inspection_budget_invalid"));
+        }
+        self.inspection_remaining = remaining;
+        Ok(self)
     }
     pub fn candidates(&self) -> impl Iterator<Item = &SearchCandidate> {
         self.frozen
@@ -381,9 +396,45 @@ impl<'a> CandidateRegistry<'a> {
         }
         let mut outcomes = Vec::with_capacity(batch.proposals.len());
         for raw in batch.proposals {
-            let result = serde_json::from_str::<Proposal>(raw.get())
-                .map_err(|_| ProposalError("proposal_schema"))
-                .and_then(|proposal| compile_proposal(self.frozen, base_recipes, &proposal));
+            let parsed = serde_json::from_str::<Proposal>(raw.get())
+                .map_err(|_| ProposalError("proposal_schema"));
+            if let Ok(Proposal::InspectSource { sources }) = &parsed {
+                let validated = (|| {
+                    if sources.is_empty() || sources.len() > 4 {
+                        return Err(ProposalError("source_inspection_bounds"));
+                    }
+                    let domain = authorization
+                        .execution_plan
+                        .as_ref()
+                        .ok_or(ProposalError("source_inspection_unauthorized"))?;
+                    if !authorization.policy.allow_source_text {
+                        return Err(ProposalError("source_text_disabled"));
+                    }
+                    let mut ids = BTreeSet::new();
+                    for source in sources {
+                        if !ids.insert(&source.file_id)
+                            || domain
+                                .files
+                                .get(&source.file_id)
+                                .is_none_or(|f| f.digest != source.digest)
+                        {
+                            return Err(ProposalError("source_inspection_unauthorized"));
+                        }
+                    }
+                    if sources.len() > self.inspection_remaining as usize {
+                        return Err(ProposalError("inspection_budget_exhausted"));
+                    }
+                    self.inspection_remaining -= sources.len() as u32;
+                    Ok(sources.clone())
+                })();
+                outcomes.push(match validated {
+                    Ok(sources) => ProposalOutcome::InspectionRequested(sources),
+                    Err(error) => ProposalOutcome::Rejected(error),
+                });
+                continue;
+            }
+            let result =
+                parsed.and_then(|proposal| compile_proposal(self.frozen, base_recipes, &proposal));
             let outcome = match result {
                 Ok(None) => ProposalOutcome::Unsupported,
                 Err(error) => ProposalOutcome::Rejected(error),
@@ -427,6 +478,9 @@ fn compile_proposal(
         .as_ref()
         .ok_or(ProposalError("proposal_initial_source_required"))?;
     let (compiled, mut candidate) = match proposal {
+        Proposal::InspectSource { .. } => {
+            return Err(ProposalError("source_inspection_requires_registry"));
+        }
         Proposal::Unsupported {} => return Ok(None),
         Proposal::ProposeDerivation { operations } => match operations.as_slice() {
             [OperationInvocation::ExecutionPlan { plan }] => plan.compile(
@@ -574,7 +628,7 @@ pub fn validate_candidate_scope(
                 let mut compared = candidate.clone();
                 compared.provisions = ceiling.provisions.clone();
                 compared == ceiling
-                    && !candidate.provisions.is_empty()
+                    && (!candidate.provisions.is_empty() || t.source_oci.is_some())
                     && candidate
                         .provisions
                         .iter()
@@ -628,6 +682,8 @@ pub struct ProposalRoundRecord {
     pub derivations: Vec<crate::authoring::BoundDerivation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inspection_requests: Vec<SourceReference>,
 }
 
 pub const PROPOSAL_REQUEST_SCHEMA: &str = "ato.formation-proposal-request/1";
