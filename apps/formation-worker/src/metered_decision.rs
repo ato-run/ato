@@ -192,6 +192,7 @@ impl MeteredDecisionProvider {
             timeout_ms: self.config.timeout_ms,
             proposal_request_bytes: bytes.len() as u64,
             provider_body_bytes: bytes.len() as u64,
+            transmitted_context: None,
         })?;
         let started = Instant::now();
         let response = (|| {
@@ -351,6 +352,7 @@ mod tests {
                 timeout_ms: 1000,
                 proposal_request_bytes: bytes.len() as u64,
                 provider_body_bytes: bytes.len() as u64,
+                transmitted_context: None,
             })
             .unwrap();
         assert!(matches!(

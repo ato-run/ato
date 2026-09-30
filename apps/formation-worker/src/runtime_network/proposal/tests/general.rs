@@ -705,6 +705,7 @@ fn request_evidence(cell: &str) -> RequestEvidence {
         timeout_ms: 29481,
         proposal_request_bytes: 1837,
         provider_body_bytes: 4261,
+        transmitted_context: None,
     }
 }
 fn response_evidence(cell: &str) -> ResponseEvidence {
@@ -874,7 +875,8 @@ fn r9_source_bodies_are_not_stored_in_request_journal() {
     let event: Value = serde_json::from_str(journal.lines().nth(1).unwrap()).unwrap();
     assert!(event["request"]["proposal_request_bytes"].is_u64());
     assert!(event["request"]["provider_body_bytes"].is_u64());
-    assert_eq!(event["request"].as_object().unwrap().len(), 6);
+    assert_eq!(event["request"].as_object().unwrap().len(), 7);
+    assert!(event["request"]["transmitted_context"]["source_entries"].is_array());
 }
 #[test]
 fn historical_cell_response_journal_remains_readable() {
@@ -892,4 +894,27 @@ fn historical_cell_response_journal_remains_readable() {
     let saved = CallBudget::reopen(&path, plan()).unwrap();
     assert!(saved.snapshot().unwrap().cells["G0"].response.is_some());
     assert!(saved.inspect_request("G0").is_err());
+}
+
+#[test]
+fn transmitted_context_evidence_matches_actual_http_projection_without_text_or_secrets() {
+    let (_root, sub) = enabled();
+    let request = sub.proposal_request_v2(&status(&sub)).unwrap();
+    let (evidence, raw, journal) = capture_request(&request);
+    let body: Value = serde_json::from_slice(&raw).unwrap();
+    let sent: ato_formation::proposal::ProposalRequestV2 =
+        serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
+    let actual = super::super::budget::TransmittedContextEvidence::from_request(&sent);
+    assert_eq!(evidence.transmitted_context.as_ref(), Some(&actual));
+    assert_eq!(actual.source_entries.len(), sent.source_context.len());
+    for entry in &sent.source_context {
+        assert!(!journal.contains(&entry.text));
+    }
+    assert!(!journal.contains("synthetic-mock-key"));
+    let old = request_evidence("old");
+    assert!(
+        !serde_json::to_string(&old)
+            .unwrap()
+            .contains("transmitted_context")
+    );
 }

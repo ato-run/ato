@@ -419,10 +419,28 @@ impl Submission {
                         *id,
                     )
                 });
+                // Choose one representative per role before filling spare
+                // slots, so nested READMEs cannot crowd out the startup config.
+                let mut selected = Vec::new();
+                let mut roles = std::collections::BTreeSet::new();
+                for (id, file) in &ids {
+                    if selected.len() < 4
+                        && roles.insert(
+                            ato_formation::proposal::source_inspection_priority(&file.path).0,
+                        )
+                    {
+                        selected.push(*id);
+                    }
+                }
+                for (id, _) in &ids {
+                    if selected.len() < 4 && !selected.contains(id) {
+                        selected.push(*id);
+                    }
+                }
                 bounded_inspection_context(
-                    ids.into_iter()
-                        .take(4)
-                        .filter_map(|(id, _)| inspection_context.get(id))
+                    selected
+                        .into_iter()
+                        .filter_map(|id| inspection_context.get(id))
                         .cloned()
                         .collect(),
                     authorization.policy.max_source_bytes,
@@ -715,12 +733,33 @@ impl Submission {
                 .rev()
                 .find(|r| !r.inspection_requests.is_empty())
                 .map(|r| {
+                    // Most recent requested files first, then fill remaining
+                    // slots from the initial context. A single-file inspection
+                    // must not discard the manifest/entrypoint already seen.
+                    let mut entries: Vec<_> = r
+                        .inspection_requests
+                        .iter()
+                        .filter_map(|s| local.inspection_context.get(&s.file_id))
+                        .cloned()
+                        .collect();
+                    for initial in &local.source_context {
+                        if entries.len() >= 4 {
+                            break;
+                        }
+                        if !entries.iter().any(|e| e.logical_id == initial.logical_id) {
+                            // Use the full verified prefix before applying the
+                            // same total/per-entry bounds, not a twice-trimmed copy.
+                            entries.push(
+                                local
+                                    .inspection_context
+                                    .get(&initial.logical_id)
+                                    .unwrap_or(initial)
+                                    .clone(),
+                            );
+                        }
+                    }
                     bounded_inspection_context(
-                        r.inspection_requests
-                            .iter()
-                            .filter_map(|s| local.inspection_context.get(&s.file_id))
-                            .cloned()
-                            .collect(),
+                        entries,
                         local
                             .frozen
                             .policy

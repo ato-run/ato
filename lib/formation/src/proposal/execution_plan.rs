@@ -30,21 +30,30 @@ pub struct CatalogSource {
 pub fn source_inspection_priority(path: &str) -> (u8, usize) {
     let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
     let depth = path.bytes().filter(|b| *b == b'/').count();
-    let priority = match name.as_str() {
-        "package.json" | "pyproject.toml" | "setup.py" => 0,
-        "readme.md" | "readme.rst" | "readme" => 1,
-        "__main__.py" | "main.py" | "server.py" | "server.js" | "server.mjs" | "index.js"
-        | "app.py" | "main.js" => 2,
-        "package-lock.json" | "requirements.txt" => 3,
-        "dockerfile" => 4,
-        _ if name.ends_with(".py")
-            || name.ends_with(".mjs")
-            || name.ends_with(".cjs")
-            || name.ends_with(".js") =>
-        {
-            5
+    let test = path
+        .split('/')
+        .any(|p| matches!(p, "test" | "tests" | "__tests__" | "cypress" | "fixtures"));
+    let priority = if test {
+        6
+    } else {
+        match name.as_str() {
+            "package.json" | "pyproject.toml" | "setup.py" => 0,
+            "readme.md" | "readme.rst" | "readme" => 1,
+            "__main__.py" | "main.py" | "server.py" | "server.js" | "server.mjs" | "index.js"
+            | "app.py" | "main.js" => 2,
+            "configuration.mjs" | "config.mjs" | "configuration.js" | "config.js"
+            | "settings.py" => 3,
+            "package-lock.json" | "requirements.txt" => 4,
+            "dockerfile" => 5,
+            _ if name.ends_with(".py")
+                || name.ends_with(".mjs")
+                || name.ends_with(".cjs")
+                || name.ends_with(".js") =>
+            {
+                6
+            }
+            _ => 7,
         }
-        _ => 6,
     };
     (priority, depth)
 }
@@ -65,6 +74,7 @@ impl PlanAuthorization {
                     "manifest",
                     "readme",
                     "entrypoint",
+                    "configuration",
                     "lockfile",
                     "dockerfile",
                     "source",
@@ -213,6 +223,10 @@ pub struct RequirementBasis {
 pub struct ExecutionPlanProposal {
     pub runtime: RuntimeSelection,
     pub entrypoint: SourceReference,
+    /// Source-owned build output served by the existing browser adapter. The
+    /// entrypoint ref must be the manifest, never a browser script run as Node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_output: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
     pub argv: Vec<String>,
@@ -332,7 +346,23 @@ impl ExecutionPlanProposal {
         if self.runtime.name == "oci" {
             return self.compile_oci(frozen, authorization, entrypoint);
         }
-        if (self.runtime.name == "python" && !entrypoint.ends_with(".py"))
+        if let Some(output) = &self.static_output {
+            let manifest = if self.cwd == "." {
+                "package.json".to_owned()
+            } else {
+                format!("{}/package.json", self.cwd)
+            };
+            if self.runtime.name != "node"
+                || entrypoint != manifest
+                || !source_path(output)
+                || self.module.is_some()
+                || !self.argv.is_empty()
+                || !self.environment.is_empty()
+                || !self.state.is_empty()
+            {
+                return Err(ProposalError("unsupported_static_output"));
+            }
+        } else if (self.runtime.name == "python" && !entrypoint.ends_with(".py"))
             || (self.runtime.name == "node"
                 && ![".js", ".mjs", ".cjs"]
                     .iter()
@@ -461,40 +491,50 @@ impl ExecutionPlanProposal {
             steps.push(json!({"id":format!("build-{}",steps.len()),"use":"ato.process@1","op":"exec",
                 "argv":[format!("/opt/ato/toolchains/node/{}/bin/npm", self.runtime.version),"run",script],"cwd":self.cwd,"network":"scoped-build"}));
         }
-        let mut argv = match &self.module {
-            None => vec![executable, format!("/app/{entrypoint}")],
-            Some(module) => {
-                if self.runtime.name != "python"
-                    || module.is_empty()
-                    || module.len() > 128
-                    || !module.split('.').all(|s| {
-                        !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-                    })
-                {
-                    return Err(ProposalError("unsupported_module_entrypoint"));
+        let serving_port = if let Some(root) = &self.static_output {
+            steps.push(
+                json!({"id":"app","use":"ato.browser@1","op":"serve","cwd":".",
+                "source":"workspace","root":root,"entry":"index.html","spa_fallback":false}),
+            );
+            json!({"id":port,"use":"ato.http@1","from":"app"})
+        } else {
+            let mut argv = match &self.module {
+                None => vec![executable, format!("/app/{entrypoint}")],
+                Some(module) => {
+                    if self.runtime.name != "python"
+                        || module.is_empty()
+                        || module.len() > 128
+                        || !module.split('.').all(|s| {
+                            !s.is_empty()
+                                && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                        })
+                    {
+                        return Err(ProposalError("unsupported_module_entrypoint"));
+                    }
+                    let prefix = if self.cwd == "." {
+                        String::new()
+                    } else {
+                        format!("{}/", self.cwd)
+                    };
+                    let module_path = format!("{prefix}{}", module.replace('.', "/"));
+                    if entrypoint != format!("{module_path}.py")
+                        && entrypoint != format!("{module_path}/__main__.py")
+                    {
+                        return Err(ProposalError("proposal_module_source_mismatch"));
+                    }
+                    vec![executable, "-m".into(), module.clone()]
                 }
-                let prefix = if self.cwd == "." {
-                    String::new()
-                } else {
-                    format!("{}/", self.cwd)
-                };
-                let module_path = format!("{prefix}{}", module.replace('.', "/"));
-                if entrypoint != format!("{module_path}.py")
-                    && entrypoint != format!("{module_path}/__main__.py")
-                {
-                    return Err(ProposalError("proposal_module_source_mismatch"));
-                }
-                vec![executable, "-m".into(), module.clone()]
-            }
-        };
-        argv.extend(self.argv.iter().cloned());
-        steps.push(
+            };
+            argv.extend(self.argv.iter().cloned());
+            steps.push(
             json!({"id":"app","use":"ato.process@1","op":"serve","argv":argv,"cwd":self.cwd,"env":self.environment}),
         );
+            json!({"id":port,"use":"ato.http@1","from":"app","guest_port":self.guest_port})
+        };
         let document = json!({"schema":"ato.capsule/1",
             "input":[{"id":"workspace","use":"ato.workspace@1","path":"."}],
             "runtime":runtimes,"derive":{"step":steps},
-            "port":[{"id":port,"use":"ato.http@1","from":"app","guest_port":self.guest_port}],
+            "port":[serving_port],
             "contract":{"require":contract_requirements(&frozen.base_contract)},"requirements":self.requirements,
             "state":self.state.iter().map(|s| json!({"id":s.id,"use":crate::authoring::STATE_FILESYSTEM_PROTOCOL,"mount":s.mount,"access":s.access})).collect::<Vec<_>>()});
         let value = toml::Value::try_from(document)
