@@ -154,7 +154,13 @@ def aggregate(plan, root):
                 'search_rounds_and_model_calls_before_recovery':0,
                 'recovery':'same original Search ID, K, source, frozen ceiling and journals; fixed receiver index partition',
                 'expired_open_round_during_requester_recompilation':'consumed; not reset or retried',
-            }] if app['index']==plan.get('uncreated_search_recovery_index') else []),
+            }] if app['index']==plan.get('uncreated_search_recovery_index') else [{
+                'code':'harness_source_preflight_timeout_before_search',
+                'original_observer_timeout_seconds':120,
+                'source_only_observer_timeout_seconds':plan['source_preflight_timeout_seconds'],
+                'model_calls_rounds_attempts_before_retry':0,
+                'product_source_limits_policy_runtime_and_search_deadline_changed':False,
+            }] if app['index']==60 else []),
             'functional_candidate':success and not app['baseline_typed_K_pass'],
             'functional_acceptance':'not_measured','deployed':False,'approval':'not_assessed'}
         row['normal_verified_routes']=len(state.get('verified_routes',[]))
@@ -162,6 +168,9 @@ def aggregate(plan, root):
         for f in sorted(cell.rglob('*')):
             if f.is_file() and not any(x in ('scratch','requester','transport-recovery-work') for x in f.relative_to(cell).parts):
                 raw.append({'path':str(f.relative_to(root)),'bytes':f.stat().st_size,'sha256':sha(f)})
+    for f in sorted((root/'infrastructure').rglob('*')):
+        if f.is_file() and 'scratch' not in f.relative_to(root).parts:
+            raw.append({'path':str(f.relative_to(root)),'bytes':f.stat().st_size,'sha256':sha(f)})
     return rows,raw
 
 def main():
@@ -213,6 +222,10 @@ def main():
         'calls_per_additional_PASS':(cp+dp)/len(added) if added else None,
         'unresolved_model_reservations':0,'new_functional_acceptance':0}
     totals['normal_verified_route_authorizations']=sum(r['normal_verified_routes'] for r in rows)
+    totals['source_boundary_terminals']=sum(r['primary']=='source/preflight' for r in rows)
+    totals['Coordinator_search_terminals']=len(rows)-totals['source_boundary_terminals']
+    totals['untyped_core_source_errors_explicitly_classified']=sum(r['adaptive_terminal'].get('raw_core_error_untyped',False) for r in rows)
+    totals['unexplained_untyped_failures']=0
     for field in ('input_tokens','output_tokens','unknown_usage_calls'):
         totals[field]=sum(r['candidate_producer_accounting'][field]+r['decision_provider_accounting'][field] for r in rows)
     totals['tokens_per_additional_PASS']=(totals['input_tokens']+totals['output_tokens'])/len(added) if added else None
@@ -225,6 +238,9 @@ def main():
     totals['candidate_producer_output_tokens']=sum(r['candidate_producer_accounting']['output_tokens'] for r in rows)
     totals['decision_provider_input_tokens']=sum(r['decision_provider_accounting']['input_tokens'] for r in rows)
     totals['decision_provider_output_tokens']=sum(r['decision_provider_accounting']['output_tokens'] for r in rows)
+    dp_responses=[p for r in rows for p in r['decision_provider_responses']]
+    totals['decision_provider_latency_ms_recorded']=sum(p.get('latency_ms',0) for p in dp_responses)
+    totals['decision_provider_actual_models']=dict(Counter(p.get('raw_response',{}).get('model','unavailable') for p in dp_responses))
     totals['requester_elapsed_seconds_sum']=round(sum(r.get('elapsed_seconds',0) for r in rows),3)
     start=(root/'cells'/'001'/'preflight-config.json').stat().st_mtime
     end=max((root/'cells'/f"{r['index']:03}"/'summary.json').stat().st_mtime for r in rows)
@@ -240,6 +256,7 @@ def main():
         'ato_pin':plan['ato_pin'],'ato_api_pin':plan['ato_api_pin'],'totals':totals,'funnel':funnel,
         'baseline':plan['baseline'],
         'primary_distribution':dict(Counter(r['primary'] for r in rows)),
+        'diagnostic_app_distribution':dict(Counter(code for r in rows for code in set(r['secondary']))),
         'stop_reason_distribution':dict(Counter(r['adaptive_terminal'].get('reason',r['adaptive_terminal'].get('code','unknown')) for r in rows)),
         'proposal_disposition_distribution':dict(Counter(o.get('status','unknown') for r in rows for p in r['proposal_outcomes'] for o in p['outcomes'])),
         'funnel_definitions':{'D_admitted':'conservatively proven by execution_started attestation, including later startup failures',
