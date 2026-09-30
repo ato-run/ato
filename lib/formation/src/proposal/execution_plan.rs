@@ -105,6 +105,10 @@ pub fn source_path(path: &str) -> bool {
 }
 
 /// Source-owned secret/config files never enter model context or plan IDs.
+pub fn source_file_allowed(path: &str) -> bool {
+    source_path(path) && !credential_path(path)
+}
+
 fn credential_path(path: &str) -> bool {
     path.split('/').any(|part| {
         let part = part.to_ascii_lowercase();

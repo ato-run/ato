@@ -81,6 +81,35 @@ pub fn prepare_exploration_submission(
     search_id: &str,
     authorization: ProposalAuthorization,
 ) -> Result<Submission> {
+    prepare_exploration_submission_auto(
+        dir,
+        routes,
+        contract,
+        work_root,
+        constraint,
+        policy,
+        budget,
+        search_id,
+        Some(authorization),
+        BTreeMap::new(),
+    )
+}
+
+/// Build private source authorizations from the immutable verified extraction.
+/// Toolchain pins remain external; the model only receives bounded public IDs.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_exploration_submission_auto(
+    dir: &Path,
+    routes: &[PathBuf],
+    contract: BoundContract,
+    work_root: &Path,
+    constraint: RuntimeConstraintWire,
+    policy: SatisfyPolicy,
+    budget: SatisfyBudget,
+    search_id: &str,
+    authorization: Option<ProposalAuthorization>,
+    toolchains: BTreeMap<String, String>,
+) -> Result<Submission> {
     anyhow::ensure!(
         policy.exploration.is_some() && policy.proposal.is_none(),
         "explicit exploration policy required"
@@ -96,6 +125,55 @@ pub fn prepare_exploration_submission(
         search_id,
         Some(contract),
     )?;
+    let authorization = match authorization {
+        Some(a) => a,
+        None => {
+            let mut paths: Vec<_> = source_file_inventory(&submission.frozen_source.root)?
+                .into_iter()
+                .filter(|p| ato_formation::proposal::source_file_allowed(p))
+                .collect();
+            paths.sort_by_key(|p| {
+                (
+                    ato_formation::proposal::source_inspection_priority(p),
+                    p.clone(),
+                )
+            });
+            let files = paths
+                .into_iter()
+                .take(2048)
+                .map(|path| -> Result<_> {
+                    let id = format!("f_{:x}", Sha256::digest(path.as_bytes()))[..26].to_owned();
+                    let digest =
+                        file_digest(&mut File::open(submission.frozen_source.root.join(&path))?)?;
+                    Ok((
+                        id,
+                        ato_formation::proposal::VerifiedSourceFile { path, digest },
+                    ))
+                })
+                .collect::<Result<_>>()?;
+            ProposalAuthorization {
+                execution_plan: Some(ato_formation::proposal::PlanAuthorization {
+                    files,
+                    toolchains,
+                    source_oci: None,
+                }),
+                modifiable_derivation_refs: vec![],
+                source_domain: ato_formation::proposal::SourceDomain {
+                    entrypoints: BTreeMap::new(),
+                    modules: BTreeMap::new(),
+                },
+                python_http_process: None,
+                node_static_workspace: None,
+                policy: ato_formation::proposal::CandidateProducerPolicy {
+                    max_proposal_rounds: 1,
+                    max_proposals: 1,
+                    timeout_ms: 30_000,
+                    allow_source_text: true,
+                    max_source_bytes: 16 * 1024,
+                },
+            }
+        }
+    };
     submission.enable_candidate_producer(authorization)?;
     Ok(submission)
 }
@@ -568,15 +646,40 @@ impl Submission {
                     effective_max_rounds: p.formation.max_rounds.get(),
                     ceiling: p.ceiling.clone(),
                     previous_derivations,
+                    previous_plan: local.accepted_rounds.values().rev().find_map(|r| {
+                        if !r["outcomes"]
+                            .as_array()?
+                            .iter()
+                            .any(|o| o["status"] == "admitted")
+                        {
+                            return None;
+                        }
+                        let raw = BASE64.decode(r["raw_output_base64"].as_str()?).ok()?;
+                        let batch: Value = serde_json::from_slice(&raw).ok()?;
+                        let operation = &batch["proposals"][0]["operations"][0];
+                        if operation["operation"] != "execution_plan@1" {
+                            return None;
+                        }
+                        let plan = &operation["plan"];
+                        if serde_json::to_vec(plan).ok()?.len() > 8192 {
+                            return None;
+                        }
+                        serde_json::from_value(plan.clone()).ok()
+                    }),
                     failures,
                     successful_derivation_ref: state
                         .exploration_submission
                         .as_ref()
                         .map(|s| s.derivation_ref.clone()),
                     proposal_diagnostics: state
-                        .proposal_round
-                        .as_ref()
-                        .map_or_else(Vec::new, |r| r.diagnostics.clone()),
+                        .proposal_history
+                        .iter()
+                        .chain(state.proposal_round.iter())
+                        .rev()
+                        .find(|r| !r.diagnostics.is_empty())
+                        .map_or_else(Vec::new, |r| {
+                            r.diagnostics.iter().take(4).cloned().collect()
+                        }),
                 }
             }),
             source_context: state

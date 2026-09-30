@@ -1050,26 +1050,55 @@ fn prepare_submission_inner(
         .transpose()?;
     let mut authorized = Vec::new();
     let mut contracts = BTreeMap::new();
-    for file in &route_files {
-        let text = std::fs::read_to_string(file)
-            .with_context(|| format!("cannot read the route {}", file.display()))?;
-        let draft: AuthoringDraft =
-            parse_capsule_toml(&text).map_err(ato_formation::failure::FormationFailure::from)?;
-        let planned = plan_candidate(
+    let auto_known = policy.exploration.is_some() && routes.is_empty();
+    let mut recipes: Vec<(String, String)> = route_files
+        .iter()
+        .map(|file| {
+            std::fs::read_to_string(file)
+                .map(|text| (file.display().to_string(), text))
+                .with_context(|| format!("cannot read route {}", file.display()))
+        })
+        .collect::<Result<_>>()?;
+    if auto_known {
+        if let Some(text) = ato_formation::capsule_toml::read_capsule_toml(&frozen.root)? {
+            recipes.push(("source capsule.toml".into(), text));
+        } else if let Ok(drafts) = ato_formation::preset::candidate_authoring(&evidence) {
+            for draft in drafts {
+                if let Ok(text) = ato_formation::capsule_toml::render_capsule_toml(&draft) {
+                    recipes.push(("known preset".into(), text));
+                }
+            }
+        }
+    }
+    for (label, text) in recipes {
+        let draft: AuthoringDraft = match parse_capsule_toml(&text) {
+            Ok(d) => d,
+            Err(_) if auto_known => continue,
+            Err(e) => return Err(ato_formation::failure::FormationFailure::from(e).into()),
+        };
+        let planned = match plan_candidate(
             &draft,
             &frozen.closure_ref,
             &evidence,
             BTreeMap::new(),
             "/app",
             &host_triple(),
-        )?;
+        ) {
+            Ok(p) => p,
+            Err(_) if auto_known => continue,
+            Err(e) => return Err(e),
+        };
         match &base_contract_ref {
             None => base_contract_ref = Some(planned.contract_ref.clone()),
-            Some(existing) if existing != &planned.contract_ref => bail!(
-                "{} binds to Contract {}, not {existing}: one request satisfies one K",
-                file.display(),
-                planned.contract_ref
-            ),
+            Some(existing) if existing != &planned.contract_ref => {
+                if auto_known {
+                    continue;
+                }
+                bail!(
+                    "{label} binds to Contract {}, not {existing}: one request satisfies one K",
+                    planned.contract_ref
+                );
+            }
             Some(_) => {}
         }
         let (requirements, provisions) = derivation_requirements(&planned);
@@ -2288,6 +2317,29 @@ fn execute_retained_ticket(
     attested.effects = Some(effects_name(planned.derivation.effects));
     attested.requirements = requirements;
     attested.provisions = provisions;
+    let scoped = match ticket
+        .exploration
+        .as_ref()
+        .map(|grant| {
+            exploration::ScopedGates::start(
+                grant,
+                config.exploration.as_ref(),
+                &planned.derivation.requirements,
+                &attempt_root.join("control"),
+            )
+        })
+        .transpose()
+    {
+        Ok(gates) => gates,
+        Err(e) => {
+            return refused(
+                ticket,
+                attested.clone(),
+                "exploration_authority_exceeded",
+                &format!("{e:#}"),
+            );
+        }
+    };
     let browser = ticket
         .browser_contract
         .as_ref()
@@ -2309,7 +2361,14 @@ fn execute_retained_ticket(
             contract_ref: &ticket.contract_ref,
             runtime_id: &ticket.runtime_id,
             profile: &local::probe_local_runtime(),
-            authorization: EffectAuthorization::Unattended,
+            authorization: ticket
+                .exploration
+                .as_ref()
+                .map(|g| EffectAuthorization::Exploration {
+                    derivation_ref: &ticket.derivation_ref,
+                    grant: &g.ceiling,
+                })
+                .unwrap_or(EffectAuthorization::Unattended),
             network: NetworkPolicy::Denied,
             browser: browser.as_ref(),
             attempt_root,
@@ -2324,6 +2383,17 @@ fn execute_retained_ticket(
             expected_derivation_ref: &ticket.derivation_ref,
             expanded_limit: ticket.resource_budget.expanded_bytes,
             shim: &config.shim,
+            exploration: ticket
+                .exploration
+                .as_ref()
+                .zip(scoped.as_ref())
+                .map(
+                    |(g, s)| ato_runtime_attempt::retained::RetainedExploration {
+                        ceiling: &g.ceiling,
+                        runtime_gate: &s.sockets
+                            [&ato_formation::requirements::ExecutionPhase::Runtime],
+                    },
+                ),
         },
         Ok(permit),
     );
