@@ -227,6 +227,59 @@ fn configured_one_round_keeps_its_effective_limit_after_serialization() {
 }
 
 #[test]
+fn independent_provider_cap_stops_before_receiver_refuses_another_round() {
+    let mut s = state();
+    let policy = s.frozen.policy.exploration.as_mut().unwrap();
+    policy.formation.max_rounds = std::num::NonZeroU32::new(5).unwrap();
+    policy.max_provider_calls = 4;
+    for index in 0..4 {
+        let now = 100 + index * 6000;
+        let SearchAction::OpenProposalRound {
+            opened_at_ms,
+            expires_at_ms,
+        } = decide_next(&s, &[], now).unwrap()
+        else {
+            panic!("{index}")
+        };
+        if let Some(previous) = s.proposal_round.take() {
+            s.proposal_history.push(previous);
+        }
+        s.proposal_round = Some(ProposalRoundRecord {
+            opened_at_ms,
+            expires_at_ms,
+            outcome: None,
+            candidates: vec![],
+            derivations: vec![],
+            diagnostics: vec![],
+            inspection_requests: vec![],
+        });
+        assert!(matches!(
+            decide_next(&s, &[], now + 1).unwrap(),
+            SearchAction::WaitForProposalRound { .. }
+        ));
+        s.proposal_round.as_mut().unwrap().outcome = Some(ProposalRoundOutcome::Completed);
+        s = serde_json::from_slice(&s.canonical_bytes().unwrap()).unwrap();
+    }
+    assert_eq!(
+        decide_next(&s, &[], 25000).unwrap(),
+        SearchAction::Finish {
+            reason: Termination::BudgetExhausted
+        }
+    );
+    assert_eq!(s.proposal_history.len() + 1, 4);
+    assert_eq!(
+        s.frozen
+            .policy
+            .exploration
+            .unwrap()
+            .formation
+            .max_rounds
+            .get(),
+        5
+    );
+}
+
+#[test]
 fn ceiling_changes_are_separate_from_frozen_contract() {
     let mut s = state();
     let before = s.frozen.canonical_bytes().unwrap();
