@@ -1006,7 +1006,14 @@ fn default_next(
         }
         // A missing Runtime is not a failed Derivation, even after restart.
         if history.is_empty() {
-            if s.frozen.policy.exploration.is_some() {
+            if s.frozen.policy.exploration.is_some()
+                && placements
+                    .iter()
+                    .any(|p| p.derivation_ref == d.derivation_ref && !p.admissible)
+            {
+                // An actual hard-filtered placement is capability/policy
+                // evidence. Empty inventory during asynchronous registration
+                // is not a failure and must not consume another producer round.
                 continue;
             }
             return Ok(SearchAction::WaitForRuntime {
