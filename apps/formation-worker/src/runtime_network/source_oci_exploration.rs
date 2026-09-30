@@ -303,12 +303,12 @@ impl SourceOciRealizer<'_> {
         *self.artifact.borrow_mut() = Some(
             serde_json::json!({"kind":"exploration_source_oci_evidence","provenance":built.provenance, "stored_bytes":built.provenance["outputs"]["archive_bytes"].as_u64().unwrap_or(0)+serde_json::to_vec(&built.provenance).context("encode build provenance")?.len() as u64}),
         );
-        if !self
+        if self
             .artifact
             .borrow()
             .as_ref()
             .and_then(|v| v["stored_bytes"].as_u64())
-            .is_some_and(|n| n <= self.stored_limit)
+            .is_none_or(|n| n > self.stored_limit)
         {
             return Err(anyhow::anyhow!("search_stored_budget_exceeded").into());
         }

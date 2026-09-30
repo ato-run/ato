@@ -101,45 +101,51 @@ class Wave:
         return result.get('results', [])
 
     def setup(self):
-        self.root.mkdir(exist_ok=False)
-        (self.root/'.tmp').mkdir()
-        (self.root/'cells').mkdir()
+        self.root.mkdir(exist_ok=self.a.resume)
+        (self.root/'.tmp').mkdir(exist_ok=self.a.resume)
+        (self.root/'cells').mkdir(exist_ok=self.a.resume)
         receiver = self.root/'receiver'
-        receiver.mkdir()
-        shutil.copytree(self.plan['receiver_bundle'], receiver/'bundle')
+        receiver.mkdir(exist_ok=self.a.resume)
+        shutil.copytree(self.plan['receiver_bundle'], receiver/'bundle',dirs_exist_ok=self.a.resume)
         shutil.copy2(self.plan['coordinator_script'], receiver/'coordinator.mjs')
-        (receiver/'node_modules').symlink_to(self.plan['api_node_modules'])
-        coordinator = self.start(['node','coordinator.mjs'], receiver, self.root/'coordinator.log')
+        if not (receiver/'node_modules').exists():
+            (receiver/'node_modules').symlink_to(self.plan['api_node_modules'])
+        coordinator = self.start(['node','coordinator.mjs'], receiver, self.root/('coordinator.resume.log' if self.a.resume else 'coordinator.log'))
         self.wait(lambda: (receiver/'commands').exists() and coordinator.poll() is None,
                   'Coordinator initialization')
         self.token = self.root/'coordinator-token'
-        self.token.write_text('ato_rnr_'+secrets.token_hex(32))
-        self.token.chmod(0o600)
-        self.sql('INSERT INTO "user"(id,name,email) VALUES(?,?,?)',
-                 ['exploration','exploration','exploration@acceptance.invalid'])
-        self.sql('INSERT INTO runner_devices(id,user_id,display_name,token_hash) VALUES(?,?,?,?)',
-                 ['local','exploration','isolated exploration',sha(self.token)])
-        write(self.root/'sandbox.json', self.plan['sandbox'])
+        if not self.a.resume:
+            self.token.write_text('ato_rnr_'+secrets.token_hex(32))
+            self.token.chmod(0o600)
+            self.sql('INSERT INTO "user"(id,name,email) VALUES(?,?,?)',
+                     ['exploration','exploration','exploration@acceptance.invalid'])
+            self.sql('INSERT INTO runner_devices(id,user_id,display_name,token_hash) VALUES(?,?,?,?)',
+                     ['local','exploration','isolated exploration',sha(self.token)])
+            write(self.root/'sandbox.json', self.plan['sandbox'])
+        else:
+            require(read(self.root/'sandbox.json') == self.plan['sandbox'], 'sandbox changed on restart')
         runtime_root = Path(self.a.runtime_root)
-        runtime_root.mkdir(exist_ok=False, parents=True)
+        runtime_root.mkdir(exist_ok=self.a.resume, parents=True)
         self.runtime = self.start([self.plan['binaries']['ato']['path'],'runtime-network','serve',
             '--api',self.plan['api'],'--token-file',self.token,'--work-root',runtime_root/'w',
             '--out',runtime_root/'out','--exploration-sandbox',self.root/'sandbox.json'],
-            self.root,self.root/'runtime.log')
+            self.root,self.root/('runtime.resume.log' if self.a.resume else 'runtime.log'))
         self.wait(lambda: self.sql('SELECT environment_id FROM runtime_environments WHERE runtime_id=?', ['local']),
                   'Runtime advertisement')
 
     def app(self, app):
         n = f"{app['index']:03}"
         cell = self.root/'cells'/n
-        cell.mkdir()
+        continuation = self.a.resume and cell.exists()
+        cell.mkdir(exist_ok=continuation)
         config = self.plan['preflight_config']
-        write(cell/'preflight-config.json',config)
-        preflight = self.start([self.plan['binaries']['preflight']['path'],app['archive_path'],
-            'sha256:'+app['archive_sha256'],cell/'scratch','search_preregister_'+n,
-            cell/'preflight-config.json',cell/'preflight.json'], self.root,
-            cell/'preflight.stdout.log',cell/'preflight.stderr.log')
-        require(preflight.wait(timeout=120) == 0, 'verified-source preflight failure')
+        if not continuation:
+            write(cell/'preflight-config.json',config)
+            preflight = self.start([self.plan['binaries']['preflight']['path'],app['archive_path'],
+                'sha256:'+app['archive_sha256'],cell/'scratch','search_preregister_'+n,
+                cell/'preflight-config.json',cell/'preflight.json'], self.root,
+                cell/'preflight.stdout.log',cell/'preflight.stderr.log')
+            require(preflight.wait(timeout=120) == 0, 'verified-source preflight failure')
         projected = read(cell/'preflight.json')
         require(projected['contract_ref'] == app['contract_ref'], 'K changed')
         cp = self.plan['producer_config']
@@ -148,19 +154,25 @@ class Wave:
                 'provider':cp,'provider_budget':self.plan['producer_budget'],
                 'credential_environment':'DEEPSEEK_API_KEY','decision':self.plan['decision_config'],
                 'provider_journal':str(cell/'producer.jsonl')}
-        write(cell/'config.json',live)
+        if not continuation:
+            write(cell/'config.json',live)
+        else:
+            require(read(cell/'config.json') == live, 'requester config changed on restart')
         cmd = [self.plan['binaries']['ato']['path'],'form',projected['source'],'--runtime-network',
             '--exploration-config',cell/'config.json','--api',self.plan['api'],
             '--token-file',self.token,'--exact-runtime','local','--network','denied',
             '--work-root',cell/'requester','--max-attempts','4','--deadline-seconds','900',
             '--max-transfer-bytes',str(1024**3),'--max-expanded-bytes',str(2*1024**3),
             '--max-stored-bytes',str(1024**3)]
+        if continuation:
+            cmd.extend(['--search-id',read(cell/'producer.search.json')['search_id']])
         if self.a.credential_socket:
             cmd = ['python3',self.plan['credential_wrapper'],self.a.credential_socket,*cmd]
         start = time.monotonic()
-        requester = self.start(cmd,self.root,cell/'requester.stdout.log',cell/'requester.stderr.log')
+        output = cell/('requester.resume.stdout.log' if continuation else 'requester.stdout.log')
+        requester = self.start(cmd,self.root,output,cell/('requester.resume.stderr.log' if continuation else 'requester.stderr.log'))
         rc = requester.wait(timeout=950)
-        result = read(cell/'requester.stdout.log')
+        result = read(output)
         require(result['contract_ref'] == app['contract_ref'], 'result K mismatch')
         require(result['approval'] == 'not_assessed' and result['deployed'] is False, 'submission confused with approval')
         cp_journal = result['candidate_producer_accounting']
@@ -168,7 +180,7 @@ class Wave:
         row = {'index':app['index'],'name':app['name'],'baseline_typed_K_pass':app['baseline_typed_K_pass'],
                'typed_K_pass':result['submission'] is not None,'rounds_consumed':result['rounds_consumed'],
                'producer_calls':len(cp_journal['cells']),'decision_calls':len(dp_journal.get('cells',{})),
-               'result':'cells/'+n+'/requester.stdout.log','result_sha256':sha(cell/'requester.stdout.log'),
+               'result':str(output.relative_to(self.root)),'result_sha256':sha(output),
                'exit_code':rc,'elapsed_seconds':round(time.monotonic()-start,3),
                'functional_acceptance':'not_measured'}
         write(cell/'summary.json',row)
@@ -202,4 +214,5 @@ if __name__ == '__main__':
     parser.add_argument('--indices',required=True)
     parser.add_argument('--check-only',action='store_true')
     parser.add_argument('--credential-socket')
+    parser.add_argument('--resume',action='store_true')
     Wave(parser.parse_args()).run()

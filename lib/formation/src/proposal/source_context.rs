@@ -89,12 +89,18 @@ pub struct ExplorationContext {
     pub previous_plan: Option<super::ExecutionPlanProposal>,
     pub failures: Vec<ExplorationFailure>,
     pub successful_derivation_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub successful_derivation: Option<crate::authoring::BoundDerivation>,
     pub proposal_diagnostics: Vec<String>,
 }
 impl ExplorationContext {
     fn validate(&self) -> Result<(), ProposalError> {
         self.ceiling.validate().map_err(|e| ProposalError(e.0))?;
         if self.effective_max_rounds == 0
+            || self
+                .successful_derivation
+                .as_ref()
+                .is_some_and(|d| d.derivation_ref().ok() != self.successful_derivation_ref)
             || self
                 .previous_plan
                 .as_ref()

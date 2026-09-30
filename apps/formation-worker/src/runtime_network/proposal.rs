@@ -671,6 +671,10 @@ impl Submission {
                         .exploration_submission
                         .as_ref()
                         .map(|s| s.derivation_ref.clone()),
+                    successful_derivation: state
+                        .exploration_submission
+                        .as_ref()
+                        .map(|s| s.derivation.clone()),
                     proposal_diagnostics: state
                         .proposal_history
                         .iter()
@@ -966,6 +970,8 @@ fn bounded_inspection_context(
         entry.content_sha256 = format!("sha256:{:x}", Sha256::digest(entry.text.as_bytes()));
     }
     entries.retain(|e| !e.text.is_empty());
+    // Priority selects the subset; wire order is canonical source-ID order.
+    entries.sort_by(|a, b| (a.kind, &a.logical_id).cmp(&(b.kind, &b.logical_id)));
     entries
 }
 
