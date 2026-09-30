@@ -155,15 +155,17 @@
   "pricing_snapshots": [
     {
       "url": "https://api-docs.deepseek.com/quick_start/pricing/",
-      "path": "docs/ops/evidence/formation-adaptive-100-20260930/deepseek-pricing.html",
-      "sha256": "210f102275ccf1a6542f08a3bc9e4b4c7c83278cb74b35217bffa112df6363b2",
-      "retrieved_at": "2026-09-30T06:50:18.285891+00:00"
+      "path": "docs/ops/evidence/formation-adaptive-100-20260930/deepseek-pricing.json",
+      "sha256": "128813cfb8a9d2c19fe36a1175a42e8180112fea3613a20ceb189b8f593cb831",
+      "retrieved_at": "2026-09-30T06:50:18.285891+00:00",
+      "source_html_sha256": "210f102275ccf1a6542f08a3bc9e4b4c7c83278cb74b35217bffa112df6363b2"
     },
     {
       "url": "https://docs.typesafe.ai/models",
-      "path": "docs/ops/evidence/formation-adaptive-100-20260930/jev-pricing.html",
-      "sha256": "54732f7ba3fc25ff36a028229a01a1d86bf48ddaf2d3449ac8b39dda98fdea9e",
-      "retrieved_at": "2026-09-30T06:50:18.668359+00:00"
+      "path": "docs/ops/evidence/formation-adaptive-100-20260930/jev-pricing.json",
+      "sha256": "994436135085f001294f393897ae6983d84de21bd19fede05e6fee73b1371f73",
+      "retrieved_at": "2026-09-30T06:50:18.668359+00:00",
+      "source_html_sha256": "54732f7ba3fc25ff36a028229a01a1d86bf48ddaf2d3449ac8b39dda98fdea9e"
     }
   ],
   "pilot_indices": [
