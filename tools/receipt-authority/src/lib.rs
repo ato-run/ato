@@ -231,6 +231,8 @@ enum SearchRequest {
         frozen: Box<ato_formation::search::FrozenSearchV1>,
         base_recipes: std::collections::BTreeMap<String, String>,
         batch_json: String,
+        #[serde(default)]
+        inspection_remaining: Option<u32>,
     },
     CompileGeneration {
         policy: ato_formation::generation::GenerationPolicy,
@@ -341,6 +343,7 @@ pub fn evaluate_search(bytes: &[u8]) -> Value {
                 frozen,
                 base_recipes,
                 batch_json,
+                inspection_remaining,
             } => {
                 use ato_formation::proposal::{
                     CandidateRegistry, ProducerOutput, ProducerProvenance, ProposalOutcome,
@@ -354,6 +357,11 @@ pub fn evaluate_search(bytes: &[u8]) -> Value {
                 )
                 .map_err(|e| e.0.to_owned())?;
                 let mut registry = CandidateRegistry::new(&frozen).map_err(|e| e.0.to_owned())?;
+                if let Some(remaining) = inspection_remaining {
+                    registry = registry
+                        .with_inspection_budget(remaining)
+                        .map_err(|e| e.0.to_owned())?;
+                }
                 let outcomes = registry
                     .validate_batch(&base_recipes, &output)
                     .map_err(|e| e.0.to_owned())?;
@@ -373,6 +381,7 @@ pub fn evaluate_search(bytes: &[u8]) -> Value {
                         ProposalOutcome::Rejected(error) => {
                             serde_json::json!({"status": "rejected", "code": error.0})
                         }
+                        ProposalOutcome::InspectionRequested(sources) => serde_json::json!({"status":"rejected","code":"source_inspection_requested","inspection_refs":sources}),
                     })
                     .collect();
                 Ok(serde_json::json!({"status": "proposals_validated", "outcomes": outcomes}))
@@ -773,6 +782,9 @@ mod exploration_submission_tests {
             max_provider_output_tokens: 6144,
             max_network_transfer_bytes: 1048576,
             max_network_transfer_bytes_per_attempt: 524288,
+            provider_configuration_ref: None,
+            decision_provider_configuration_ref: None,
+            provider_budget_binding_ref: None,
         });
         state.source_archive_bytes = Some(64);
         let a = &mut state.attempts[0];

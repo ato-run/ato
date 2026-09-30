@@ -39,6 +39,14 @@ pub struct ExplorationPolicy {
     pub max_network_transfer_bytes: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub max_network_transfer_bytes_per_attempt: u64,
+    /// Canonical operational provider config + prompt + spend-plan digest.
+    /// Frozen once, distinct from K/D and never a credential value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_configuration_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_provider_configuration_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_budget_binding_ref: Option<String>,
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -57,6 +65,18 @@ impl ExplorationPolicy {
                 && self.max_network_transfer_bytes_per_attempt == 0)
         {
             return Err(SearchError("exploration_budget_invalid"));
+        }
+        if [
+            &self.provider_configuration_ref,
+            &self.decision_provider_configuration_ref,
+            &self.provider_budget_binding_ref,
+        ]
+        .iter()
+        .any(|ref_| {
+            ref_.as_ref()
+                .is_some_and(|r| !crate::generation::is_sha256(r))
+        }) {
+            return Err(SearchError("exploration_provider_configuration_invalid"));
         }
         Ok(())
     }

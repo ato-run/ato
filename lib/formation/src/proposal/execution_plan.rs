@@ -18,6 +18,64 @@ pub struct SourceReference {
     pub digest: String,
 }
 
+/// Bounded public discovery hints, never the private authorization path map.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogSource {
+    #[serde(flatten)]
+    pub reference: SourceReference,
+    pub purpose: String,
+}
+
+pub fn source_inspection_priority(path: &str) -> (u8, usize) {
+    let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+    let depth = path.bytes().filter(|b| *b == b'/').count();
+    let priority = match name.as_str() {
+        "package.json" | "pyproject.toml" | "setup.py" => 0,
+        "readme.md" | "readme.rst" | "readme" => 1,
+        "__main__.py" | "main.py" | "server.py" | "server.js" | "server.mjs" | "index.js"
+        | "app.py" | "main.js" => 2,
+        "package-lock.json" | "requirements.txt" => 3,
+        "dockerfile" => 4,
+        _ if name.ends_with(".py")
+            || name.ends_with(".mjs")
+            || name.ends_with(".cjs")
+            || name.ends_with(".js") =>
+        {
+            5
+        }
+        _ => 6,
+    };
+    (priority, depth)
+}
+
+impl PlanAuthorization {
+    pub fn catalog_sources(&self) -> Vec<CatalogSource> {
+        let mut sources: Vec<_> = self.files.iter().collect();
+        sources.sort_by_key(|(id, file)| (source_inspection_priority(&file.path), *id));
+        sources
+            .into_iter()
+            .take(32)
+            .map(|(id, file)| CatalogSource {
+                reference: SourceReference {
+                    file_id: id.clone(),
+                    digest: file.digest.clone(),
+                },
+                purpose: [
+                    "manifest",
+                    "readme",
+                    "entrypoint",
+                    "lockfile",
+                    "dockerfile",
+                    "source",
+                    "other",
+                ][source_inspection_priority(&file.path).0 as usize]
+                    .into(),
+            })
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VerifiedSourceFile {
@@ -30,6 +88,8 @@ pub struct VerifiedSourceFile {
 pub struct PlanAuthorization {
     pub files: BTreeMap<String, VerifiedSourceFile>,
     pub toolchains: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_oci: Option<crate::source_oci_plan::SourceOciRecipe>,
 }
 
 pub fn source_path(path: &str) -> bool {
@@ -69,6 +129,9 @@ fn credential_path(path: &str) -> bool {
 
 impl PlanAuthorization {
     pub fn validate(&self) -> Result<(), ProposalError> {
+        if let Some(recipe) = &self.source_oci {
+            recipe.validate().map_err(ProposalError)?;
+        }
         if self.files.len() > 2048
             || self.toolchains.len() > 16
             || self.files.iter().any(|(id, file)| {
@@ -129,6 +192,8 @@ pub enum DependencyOperation {
     NpmCi {
         manifest: SourceReference,
         lockfile: SourceReference,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        production_only: bool,
     },
 }
 
@@ -144,14 +209,46 @@ pub struct RequirementBasis {
 pub struct ExecutionPlanProposal {
     pub runtime: RuntimeSelection,
     pub entrypoint: SourceReference,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module: Option<String>,
     pub argv: Vec<String>,
     pub cwd: String,
     pub guest_port: u16,
     pub dependencies: Vec<DependencyOperation>,
     pub build_scripts: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub environment: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub state: Vec<PlanStateRequirement>,
     pub requirements: ExecutionRequirements,
     pub basis: Vec<RequirementBasis>,
     pub unknowns: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanStateRequirement {
+    pub id: String,
+    pub mount: String,
+    pub access: crate::authoring::StateAccess,
+}
+
+pub fn isolated_state_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id.as_bytes()[0].is_ascii_alphanumeric()
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+}
+
+/// Guest-owned paths only. A state mount can never mask the policy, shim,
+/// toolchain, kernel interfaces or system libraries.
+pub fn isolated_state_mount(path: &str) -> bool {
+    path.strip_prefix('/').is_some_and(source_path)
+        && ["/data", "/state", "/app"]
+            .iter()
+            .any(|root| path == *root && *root != "/app" || path.starts_with(&format!("{root}/")))
 }
 
 impl ExecutionPlanProposal {
@@ -169,7 +266,7 @@ impl ExecutionPlanProposal {
         self.requirements
             .within(&exploration.ceiling)
             .map_err(|e| ProposalError(e.0))?;
-        if !matches!(self.runtime.name.as_str(), "python" | "node") {
+        if !matches!(self.runtime.name.as_str(), "python" | "node" | "oci") {
             return Err(ProposalError("unsupported_toolchain"));
         }
         if authorization.toolchains.get(&self.runtime.name) != Some(&self.runtime.version) {
@@ -181,6 +278,39 @@ impl ExecutionPlanProposal {
             || self.argv.iter().any(|a| a.len() > 512 || a.contains('\0'))
             || self.dependencies.len() > 4
             || self.build_scripts.len() > 4
+            || self.state.len() > 8
+            || self
+                .state
+                .iter()
+                .any(|s| !isolated_state_id(&s.id) || !isolated_state_mount(&s.mount))
+            || self.environment.len() > 32
+            || self.environment.iter().any(|(key, value)| {
+                key.is_empty()
+                    || key.len() > 64
+                    || value.len() > 1024
+                    || value.contains('\0')
+                    || !key
+                        .bytes()
+                        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+                    || key.starts_with("LD_")
+                    || key.starts_with("DYLD_")
+                    || key.starts_with("ATO_")
+                    || matches!(
+                        key.as_str(),
+                        "PATH"
+                            | "PYTHONHOME"
+                            | "PYTHONPATH"
+                            | "NODE_OPTIONS"
+                            | "HTTP_PROXY"
+                            | "HTTPS_PROXY"
+                            | "ALL_PROXY"
+                            | "NO_PROXY"
+                    )
+                    || key.contains("SECRET")
+                    || key.contains("TOKEN")
+                    || key.contains("PASSWORD")
+                    || key.ends_with("_KEY")
+            })
             || self.basis.len() > 16
             || self.unknowns.len() > 16
             || self.unknowns.iter().any(|u| u.len() > 512)
@@ -195,6 +325,9 @@ impl ExecutionPlanProposal {
             }
         }
         let entrypoint = authorization.resolve(&self.entrypoint)?;
+        if self.runtime.name == "oci" {
+            return self.compile_oci(frozen, authorization, entrypoint);
+        }
         if (self.runtime.name == "python" && !entrypoint.ends_with(".py"))
             || (self.runtime.name == "node"
                 && ![".js", ".mjs", ".cjs"]
@@ -237,9 +370,9 @@ impl ExecutionPlanProposal {
         );
         let mut steps = vec![
             json!({"id":"check-toolchain","use":"ato.process@1","op":"exec",
-            "argv":[executable,"--version"],"cwd":self.cwd}),
+            "argv":[executable,"--version"],"cwd":self.cwd,"network":"scoped-dependencies"}),
         ];
-        let mut runtimes = vec![json!({"name":self.runtime.name,"version":self.runtime.version})];
+        let runtimes = vec![json!({"name":self.runtime.name,"version":self.runtime.version})];
         for dependency in &self.dependencies {
             let argv = match dependency {
                 DependencyOperation::PythonRequirements { requirements }
@@ -269,9 +402,11 @@ impl ExecutionPlanProposal {
                         format!("/app/{path}"),
                     ]
                 }
-                DependencyOperation::NpmCi { manifest, lockfile }
-                    if self.runtime.name == "node" =>
-                {
+                DependencyOperation::NpmCi {
+                    manifest,
+                    lockfile,
+                    production_only,
+                } if self.runtime.name == "node" => {
                     let manifest = authorization.resolve(manifest)?;
                     let lockfile = authorization.resolve(lockfile)?;
                     let prefix = if self.cwd == "." {
@@ -284,18 +419,21 @@ impl ExecutionPlanProposal {
                     {
                         return Err(ProposalError("unsupported_dependency_manifest"));
                     }
-                    let npm = authorization
+                    authorization
                         .toolchains
                         .get("npm")
                         .ok_or(ProposalError("runtime_toolchain_unavailable"))?;
-                    runtimes.push(json!({"name":"npm","version":npm}));
-                    vec![
-                        format!("/opt/ato/toolchains/npm/{npm}/bin/npm"),
+                    let mut argv = vec![
+                        format!("/opt/ato/toolchains/node/{}/bin/npm", self.runtime.version),
                         "ci".into(),
                         "--ignore-scripts".into(),
                         "--no-audit".into(),
                         "--no-fund".into(),
-                    ]
+                    ];
+                    if *production_only {
+                        argv.push("--omit=dev".into());
+                    }
+                    argv
                 }
                 _ => return Err(ProposalError("unsupported_dependency_operation")),
             };
@@ -312,26 +450,49 @@ impl ExecutionPlanProposal {
             {
                 return Err(ProposalError("unsupported_build_operation"));
             }
-            let npm = authorization
+            authorization
                 .toolchains
                 .get("npm")
                 .ok_or(ProposalError("runtime_toolchain_unavailable"))?;
-            if !runtimes.iter().any(|r| r["name"] == "npm") {
-                runtimes.push(json!({"name":"npm","version":npm}));
-            }
             steps.push(json!({"id":format!("build-{}",steps.len()),"use":"ato.process@1","op":"exec",
-                "argv":[format!("/opt/ato/toolchains/npm/{npm}/bin/npm"),"run",script],"cwd":self.cwd,"network":"scoped-build"}));
+                "argv":[format!("/opt/ato/toolchains/node/{}/bin/npm", self.runtime.version),"run",script],"cwd":self.cwd,"network":"scoped-build"}));
         }
-        let mut argv = vec![executable, format!("/app/{entrypoint}")];
+        let mut argv = match &self.module {
+            None => vec![executable, format!("/app/{entrypoint}")],
+            Some(module) => {
+                if self.runtime.name != "python"
+                    || module.is_empty()
+                    || module.len() > 128
+                    || !module.split('.').all(|s| {
+                        !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                    })
+                {
+                    return Err(ProposalError("unsupported_module_entrypoint"));
+                }
+                let prefix = if self.cwd == "." {
+                    String::new()
+                } else {
+                    format!("{}/", self.cwd)
+                };
+                let module_path = format!("{prefix}{}", module.replace('.', "/"));
+                if entrypoint != format!("{module_path}.py")
+                    && entrypoint != format!("{module_path}/__main__.py")
+                {
+                    return Err(ProposalError("proposal_module_source_mismatch"));
+                }
+                vec![executable, "-m".into(), module.clone()]
+            }
+        };
         argv.extend(self.argv.iter().cloned());
         steps.push(
-            json!({"id":"app","use":"ato.process@1","op":"serve","argv":argv,"cwd":self.cwd}),
+            json!({"id":"app","use":"ato.process@1","op":"serve","argv":argv,"cwd":self.cwd,"env":self.environment}),
         );
         let document = json!({"schema":"ato.capsule/1",
             "input":[{"id":"workspace","use":"ato.workspace@1","path":"."}],
             "runtime":runtimes,"derive":{"step":steps},
             "port":[{"id":port,"use":"ato.http@1","from":"app","guest_port":self.guest_port}],
-            "contract":{"require":contract_requirements(&frozen.base_contract)},"requirements":self.requirements});
+            "contract":{"require":contract_requirements(&frozen.base_contract)},"requirements":self.requirements,
+            "state":self.state.iter().map(|s| json!({"id":s.id,"use":crate::authoring::STATE_FILESYSTEM_PROTOCOL,"mount":s.mount,"access":s.access})).collect::<Vec<_>>()});
         let value = toml::Value::try_from(document)
             .map_err(|_| ProposalError("proposal_compilation_failed"))?;
         let capsule_toml =
@@ -357,6 +518,84 @@ impl ExecutionPlanProposal {
             .iter()
             .map(|(name, version)| format!("toolchain.{name}.{version}"))
             .collect();
+        Ok((
+            CompiledGeneration {
+                capsule_toml,
+                derivation,
+                derivation_ref,
+                base_contract_ref: frozen.base_contract_ref.clone(),
+            },
+            candidate,
+        ))
+    }
+    fn compile_oci(
+        &self,
+        frozen: &FrozenSearchV1,
+        authorization: &PlanAuthorization,
+        entrypoint: &str,
+    ) -> Result<(CompiledGeneration, SearchCandidate), ProposalError> {
+        if entrypoint != "Dockerfile"
+            || self.cwd != "."
+            || !self.argv.is_empty()
+            || self.module.is_some()
+            || !self.environment.is_empty()
+            || !self.dependencies.is_empty()
+            || !self.build_scripts.is_empty()
+        {
+            return Err(ProposalError("unsupported_source_oci_selection"));
+        }
+        let recipe = authorization
+            .source_oci
+            .as_ref()
+            .ok_or(ProposalError("source_oci_builder_unavailable"))?;
+        let source = frozen
+            .initial_source
+            .as_ref()
+            .ok_or(ProposalError("proposal_initial_source_required"))?;
+        let ports: std::collections::BTreeSet<_> = frozen
+            .base_contract
+            .requirements
+            .iter()
+            .filter_map(|r| r.port.as_deref())
+            .collect();
+        let ports = ports.into_iter().collect::<Vec<_>>();
+        let [port] = ports.as_slice() else {
+            return Err(ProposalError("proposal_contract_unsupported"));
+        };
+        PythonHttpProcess {
+            python_version: "3.12.7".into(),
+            http_port: (*port).into(),
+            guest_port: self.guest_port,
+        }
+        .validate_contract(&frozen.base_contract, source)?;
+        let document = json!({"schema":"ato.capsule/1",
+            "input":[{"id":"workspace","use":"ato.workspace@1","path":"."}],
+            "derive":{"step":[{"id":"app","use":crate::source_oci_plan::OCI_PROTOCOL,"op":"serve","source":"workspace"}]},
+            "port":[{"id":port,"use":"ato.http@1","from":"app","guest_port":self.guest_port}],
+            "source_oci":recipe,"requirements":self.requirements,
+            "state":self.state.iter().map(|s| json!({"id":s.id,"use":crate::authoring::STATE_FILESYSTEM_PROTOCOL,"mount":s.mount,"access":s.access})).collect::<Vec<_>>(),
+            "contract":{"require":contract_requirements(&frozen.base_contract)}});
+        let value = toml::Value::try_from(document)
+            .map_err(|_| ProposalError("proposal_compilation_failed"))?;
+        let capsule_toml =
+            toml::to_string(&value).map_err(|_| ProposalError("proposal_compilation_failed"))?;
+        let draft = parse_capsule_toml(&capsule_toml)
+            .map_err(|_| ProposalError("proposal_compilation_failed"))?;
+        let (contract, derivation) = bind(
+            &draft,
+            &BindingContext {
+                source_closure_ref: &source.closure_ref,
+            },
+        )
+        .map_err(|_| ProposalError("proposal_compilation_failed"))?;
+        if contract != frozen.base_contract {
+            return Err(ProposalError("proposal_contract_mismatch"));
+        }
+        let derivation_ref = derivation
+            .derivation_ref()
+            .map_err(|_| ProposalError("proposal_canonicalization"))?;
+        let mut candidate = authorization.candidate(source, derivation_ref.clone());
+        candidate.provisions.clear();
         Ok((
             CompiledGeneration {
                 capsule_toml,

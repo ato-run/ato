@@ -409,6 +409,9 @@ impl FrozenSearchV1 {
             }
         }
         if let Some(authorization) = &self.policy.proposal {
+            if self.policy.exploration.is_some() && authorization.policy.max_proposals != 1 {
+                return Err(SearchError("exploration_requires_single_candidate_round"));
+            }
             authorization
                 .validate_search(self)
                 .map_err(|e| SearchError(e.0))?;
@@ -619,12 +622,36 @@ impl SearchStateV1 {
             crate::proposal::validate_candidate_scope(&self.frozen, &round.candidates)
                 .map_err(|e| SearchError(e.0))?;
         }
-        if self.frozen.policy.exploration.is_some() {
+        if let Some(exploration) = &self.frozen.policy.exploration {
+            let mut inspected = 0_u32;
             for round in self
                 .proposal_history
                 .iter()
                 .chain(self.proposal_round.iter())
             {
+                let authorization = self
+                    .frozen
+                    .policy
+                    .proposal
+                    .as_ref()
+                    .ok_or(SearchError("proposal_without_policy"))?;
+                inspected = inspected
+                    .checked_add(round.inspection_requests.len() as u32)
+                    .ok_or(SearchError("inspection_budget_exhausted"))?;
+                if inspected > exploration.max_inspections
+                    || round.inspection_requests.len() > 16
+                    || (!round.inspection_requests.is_empty()
+                        && round.outcome != Some(ProposalRoundOutcome::Completed))
+                    || round.inspection_requests.iter().any(|r| {
+                        authorization
+                            .execution_plan
+                            .as_ref()
+                            .and_then(|p| p.files.get(&r.file_id))
+                            .is_none_or(|f| f.digest != r.digest)
+                    })
+                {
+                    return Err(SearchError("inspection_evidence_invalid"));
+                }
                 if round.derivations.len() != round.candidates.len()
                     || round
                         .derivations
@@ -752,7 +779,11 @@ fn default_next(
             )
         }) {
             return Ok(finish(if passed {
-                Termination::Verified
+                if s.frozen.policy.exploration.is_some() {
+                    Termination::Submitted
+                } else {
+                    Termination::Verified
+                }
             } else {
                 Termination::BudgetExhausted
             }));
@@ -780,7 +811,11 @@ fn default_next(
             && s.frozen.policy.proposal.is_none()
         {
             return Ok(finish(if passed {
-                Termination::Verified
+                if s.frozen.policy.exploration.is_some() {
+                    Termination::Submitted
+                } else {
+                    Termination::Verified
+                }
             } else {
                 Termination::CandidatesExhausted
             }));
@@ -1041,7 +1076,11 @@ fn default_next(
                 .is_none_or(|bytes| bytes == 0 || bytes > transfer_left)
                 || available(l.max_stored_bytes, b.stored_used, b.stored_reserved) == 0
             {
-                return Ok(finish(Termination::BudgetExhausted));
+                return Ok(finish(if passed && s.frozen.policy.exploration.is_some() {
+                    Termination::Submitted
+                } else {
+                    Termination::BudgetExhausted
+                }));
             }
             let expires_at_ms = now_ms.saturating_add(timeout_ms).min(s.deadline_ms);
             return Ok(if is_proposal {

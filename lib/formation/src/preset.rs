@@ -483,6 +483,7 @@ pub fn synthesize_authoring(preset: AppPreset) -> AuthoringDraft {
                 AppPreset::SingleJsx => Some(SINGLE_JSX_COMPILER.to_owned()),
                 _ => None,
             },
+            source_oci: None,
             // Serving files has no effect outside the continuation. A build
             // that installs from a registry still has none that outlives it.
             effects: EffectClass::Pure,

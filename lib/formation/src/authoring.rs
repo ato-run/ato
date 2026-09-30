@@ -314,6 +314,7 @@ pub struct DerivationDraft {
     /// compilers do different things, and a Capsule identity that could not
     /// tell them apart would let one be resumed as the other.
     pub workspace_compiler: Option<String>,
+    pub source_oci: Option<crate::source_oci_plan::SourceOciRecipe>,
     /// The platforms this route can run on, when the author restricts them.
     /// Empty: no restriction stated.
     pub platforms: Vec<PlatformDraft>,
@@ -480,6 +481,8 @@ pub struct BoundDerivation {
     // before this existed digests exactly as it did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_compiler: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_oci: Option<crate::source_oci_plan::SourceOciRecipe>,
     /// The platforms this route can run on. A route that states none digests
     /// exactly as before this field existed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -681,6 +684,9 @@ fn bind_derivation(
     }
     state.sort_by(|a, b| a.id.cmp(&b.id));
 
+    if let Some(recipe) = &draft.source_oci {
+        recipe.validate().map_err(|e| malformed("source_oci", e))?;
+    }
     Ok(BoundDerivation {
         schema: BOUND_DERIVATION_SCHEMA.to_owned(),
         requirements: draft
@@ -694,6 +700,7 @@ fn bind_derivation(
         state,
         workspace_build: draft.workspace_build.clone(),
         workspace_compiler: draft.workspace_compiler.clone(),
+        source_oci: draft.source_oci.clone(),
         platforms: {
             let mut platforms = draft.platforms.clone();
             platforms.sort();
@@ -870,6 +877,7 @@ mod tests {
                 state: vec![],
                 workspace_build: None,
                 workspace_compiler: None,
+                source_oci: None,
                 effects: EffectClass::Pure,
             },
             provenance,

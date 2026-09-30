@@ -187,6 +187,14 @@ pub fn parse_capsule_toml(text: &str) -> Result<AuthoringDraft, CapsuleTomlError
                     .try_into()
                     .map_err(|e| malformed("requirements", format!("{e}")))?;
             }
+            "source_oci" => {
+                let recipe: crate::source_oci_plan::SourceOciRecipe = value
+                    .clone()
+                    .try_into()
+                    .map_err(|e| malformed("source_oci", format!("{e}")))?;
+                recipe.validate().map_err(|e| malformed("source_oci", e))?;
+                derivation.source_oci = Some(recipe);
+            }
             "platform" => derivation.platforms = read_platforms(value)?,
             other => {
                 return Err(malformed(
@@ -452,6 +460,14 @@ fn read_derive(value: &Value) -> Result<Vec<StepDraft>, AuthoringError> {
                         return Err(malformed(
                             format!("{what}.argv"),
                             "a launch is declared, never inferred from a framework or a filename",
+                        ));
+                    }
+                }
+                crate::source_oci_plan::OCI_PROTOCOL => {
+                    if op != "serve" || !argv.is_empty() || step.get("source").is_none() {
+                        return Err(malformed(
+                            &what,
+                            "source OCI requires ImageDefault command and a workspace input",
                         ));
                     }
                 }

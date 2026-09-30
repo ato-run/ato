@@ -24,6 +24,7 @@ pub mod build_sandbox;
 pub mod build_sandbox_exec;
 mod cached_toolchain;
 pub mod ephemeral;
+pub mod execution_facts;
 pub mod executor;
 pub mod exploration_realizer;
 pub mod formation_realizer;

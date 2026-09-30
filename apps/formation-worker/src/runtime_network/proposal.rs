@@ -30,6 +30,7 @@ pub(super) struct RequesterProposal {
     accepted_rounds: BTreeMap<u64, Value>,
     recipes: BTreeMap<String, String>,
     source_context: Vec<SourceContextEntry>,
+    inspection_context: BTreeMap<String, SourceContextEntry>,
     provider_identity: Option<ProviderIdentity>,
     observed_calls: BTreeMap<u64, ProviderCall>,
 }
@@ -64,6 +65,81 @@ pub fn prepare_proposal_submission(
     )?;
     submission.enable_candidate_producer(authorization)?;
     Ok(submission)
+}
+
+/// Product entry for frozen K with optional reusable routes. Source and all
+/// routes are checked by the common preparation path; no fallback K is minted.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_exploration_submission(
+    dir: &Path,
+    routes: &[PathBuf],
+    contract: BoundContract,
+    work_root: &Path,
+    constraint: RuntimeConstraintWire,
+    policy: SatisfyPolicy,
+    budget: SatisfyBudget,
+    search_id: &str,
+    authorization: ProposalAuthorization,
+) -> Result<Submission> {
+    anyhow::ensure!(
+        policy.exploration.is_some() && policy.proposal.is_none(),
+        "explicit exploration policy required"
+    );
+    let mut submission = prepare_submission_inner(
+        dir,
+        routes,
+        None,
+        work_root,
+        constraint,
+        policy,
+        budget,
+        search_id,
+        Some(contract),
+    )?;
+    submission.enable_candidate_producer(authorization)?;
+    Ok(submission)
+}
+
+impl Submission {
+    /// Validate an unapproved submission against the locally frozen search.
+    /// It is never returned as a normal verified route or Run permission.
+    pub fn exploration_result(&mut self, status: &Value) -> Result<Value> {
+        self.accept_proposal_round(status)?;
+        let state = self.proposal_search(status)?;
+        let local = self
+            .proposal_state
+            .as_ref()
+            .context("exploration not enabled")?;
+        let submitted = state.exploration_submission.as_ref();
+        if let Some(submission) = submitted {
+            submission.validate(&state)?;
+        }
+        let rounds: Vec<_> = state
+            .proposal_history
+            .iter()
+            .chain(state.proposal_round.iter())
+            .collect();
+        let calls: Vec<_> = local
+            .accepted_rounds
+            .values()
+            .filter(|r| !r["provider_call"].is_null())
+            .map(|r| r["provider_call"].clone())
+            .collect();
+        Ok(json!({
+            "schema":"ato.formation-exploration-result/1", "search_id":state.search_id,
+            "frozen_contract":state.frozen.base_contract,"contract_ref":state.frozen.base_contract_ref,
+            "submission":submitted,"approval":"not_assessed","deployed":false,
+            "final_requirements":submitted.map(|s| &s.derivation.requirements),
+            "rounds":rounds,"rounds_consumed":rounds.len(),"effective_max_rounds":state.frozen.policy.exploration.as_ref().unwrap().formation.max_rounds,
+            "attempts":state.attempts,"budget":state.budget,"candidate_producer_calls":calls,
+            "known_attempts":state.attempts.iter().filter(|a|state.frozen.candidates.iter().any(|c|c.derivation_ref==a.derivation_ref)).count(),
+            "generated_attempts":state.attempts.iter().filter(|a|!state.frozen.candidates.iter().any(|c|c.derivation_ref==a.derivation_ref)).count(),
+            "permission_reduction":reduction_evidence(&state),
+            "proposal_evidence":local.accepted_rounds.values().map(|r| json!({"round_seq":r["round_seq"],"raw_output_digest":r["raw_output_digest"],"raw_output_base64":r["raw_output_base64"],"outcomes":r["outcomes"],"provenance":r["provenance"]})).collect::<Vec<_>>(),
+            "stop":status["exploration_stop"],"search_status":status["status"],
+            "permission_minimality":"only reductions established by fresh PASS receipts; mathematical minimality is not claimed"
+        }))
+    }
 }
 
 fn frozen_request(request: &SatisfyRequest) -> Result<FrozenSearchV1> {
@@ -183,6 +259,7 @@ impl Submission {
         }
         // Read only the independent digest-verified extraction, never the user's
         // mutable working tree. No read/crawl at all when source text is disabled.
+        let mut inspection_context = BTreeMap::new();
         let source_context = if authorization.policy.allow_source_text {
             let mut texts = Vec::new();
             for (id, path) in &authorization.source_domain.entrypoints {
@@ -214,17 +291,55 @@ impl Submission {
                     ));
                 }
             }
-            build_source_context(
-                &authorization,
-                &texts
-                    .iter()
-                    .map(|(kind, id, bytes)| AuthorizedSourceText {
-                        kind: *kind,
-                        logical_id: id,
-                        bytes,
-                    })
-                    .collect::<Vec<_>>(),
-            )?
+            if self.request.policy.exploration.is_some() {
+                for (kind, id, bytes) in &texts {
+                    let entries = build_source_context(
+                        &authorization,
+                        &[AuthorizedSourceText {
+                            kind: *kind,
+                            logical_id: id,
+                            bytes,
+                        }],
+                    )?;
+                    if let Some(entry) = entries.into_iter().next() {
+                        inspection_context.insert(id.to_string(), entry);
+                    }
+                }
+                // Deterministic initial inspection, independent of app outcome.
+                // The private path map stays inside the requester.
+                let mut ids: Vec<_> = authorization
+                    .execution_plan
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|p| p.files.iter())
+                    .collect();
+                ids.sort_by_key(|(id, f)| {
+                    (
+                        ato_formation::proposal::source_inspection_priority(&f.path),
+                        *id,
+                    )
+                });
+                bounded_inspection_context(
+                    ids.into_iter()
+                        .take(4)
+                        .filter_map(|(id, _)| inspection_context.get(id))
+                        .cloned()
+                        .collect(),
+                    authorization.policy.max_source_bytes,
+                )
+            } else {
+                build_source_context(
+                    &authorization,
+                    &texts
+                        .iter()
+                        .map(|(kind, id, bytes)| AuthorizedSourceText {
+                            kind: *kind,
+                            logical_id: id,
+                            bytes,
+                        })
+                        .collect::<Vec<_>>(),
+                )?
+            }
         } else {
             vec![]
         };
@@ -248,6 +363,7 @@ impl Submission {
             accepted_rounds: Default::default(),
             recipes: BTreeMap::new(),
             source_context,
+            inspection_context,
             provider_identity: None,
             observed_calls: Default::default(),
         });
@@ -433,9 +549,15 @@ impl Submission {
                             derivation_ref: d.into(),
                             stage: bounded_identifier(f["stage"].as_str().unwrap_or("unknown"), 32),
                             code: bounded_identifier(f["code"].as_str().unwrap_or("unknown"), 96),
-                            exit_code: None,
-                            log_tail: public_log_tail(f["message"].as_str().unwrap_or("")),
-                            artifacts: vec![],
+                            exit_code: execution_fact(a)["exit_code"]
+                                .as_i64()
+                                .and_then(|n| i32::try_from(n).ok()),
+                            log_tail: public_log_tail(
+                                execution_fact(a)["log_tail"]
+                                    .as_str()
+                                    .unwrap_or_else(|| f["message"].as_str().unwrap_or("")),
+                            ),
+                            artifacts: artifact_refs(a),
                             network_denials: denied_network(a),
                             authority_denials: denied_authority(a),
                         })
@@ -457,7 +579,30 @@ impl Submission {
                         .map_or_else(Vec::new, |r| r.diagnostics.clone()),
                 }
             }),
-            source_context: local.source_context.clone(),
+            source_context: state
+                .proposal_history
+                .iter()
+                .chain(state.proposal_round.iter())
+                .rev()
+                .find(|r| !r.inspection_requests.is_empty())
+                .map(|r| {
+                    bounded_inspection_context(
+                        r.inspection_requests
+                            .iter()
+                            .filter_map(|s| local.inspection_context.get(&s.file_id))
+                            .cloned()
+                            .collect(),
+                        local
+                            .frozen
+                            .policy
+                            .proposal
+                            .as_ref()
+                            .unwrap()
+                            .policy
+                            .max_source_bytes,
+                    )
+                })
+                .unwrap_or_else(|| local.source_context.clone()),
         };
         value.validate(
             local
@@ -575,6 +720,21 @@ impl Submission {
             );
         }
         let mut registry = CandidateRegistry::new(&local.frozen)?;
+        if let Some(policy) = &local.frozen.policy.exploration {
+            let used: u32 = state
+                .proposal_history
+                .iter()
+                .chain(state.proposal_round.iter())
+                .take(seq as usize - 1)
+                .map(|r| r.inspection_requests.len() as u32)
+                .sum();
+            registry = registry.with_inspection_budget(
+                policy
+                    .max_inspections
+                    .checked_sub(used)
+                    .context("inspection budget mismatch")?,
+            )?;
+        }
         let outcomes = if let Some(base64) = round["raw_output_base64"].as_str() {
             anyhow::ensure!(base64.len() <= 21848, "raw output too large");
             let raw = BASE64.decode(base64)?;
@@ -650,7 +810,14 @@ impl Submission {
             .context("round absent from search")?;
         anyhow::ensure!(
             serde_json::to_value(record.outcome)? == round["status"]
-                && record.candidates == generated,
+                && record.candidates == generated
+                && serde_json::to_value(&record.inspection_requests)?
+                    == json!(
+                        outcomes
+                            .iter()
+                            .flat_map(|o| o["inspection_refs"].as_array().into_iter().flatten())
+                            .collect::<Vec<_>>()
+                    ),
             "durable candidate scope mismatch"
         );
         let recipes: BTreeMap<_, _> = registry
@@ -681,6 +848,24 @@ impl Submission {
     }
 }
 
+fn bounded_inspection_context(
+    mut entries: Vec<SourceContextEntry>,
+    cap: usize,
+) -> Vec<SourceContextEntry> {
+    let share = (cap / entries.len().max(1)).min(ato_formation::proposal::MAX_SOURCE_ENTRY_BYTES);
+    for entry in &mut entries {
+        let mut end = entry.text.len().min(share);
+        while !entry.text.is_char_boundary(end) {
+            end -= 1;
+        }
+        entry.truncated |= end != entry.text.len();
+        entry.text.truncate(end);
+        entry.content_sha256 = format!("sha256:{:x}", Sha256::digest(entry.text.as_bytes()));
+    }
+    entries.retain(|e| !e.text.is_empty());
+    entries
+}
+
 fn outcome_wire(outcome: &ProposalOutcome) -> Value {
     match outcome {
         ProposalOutcome::Admitted(c) => json!({"status":"admitted","proposal_id":c.proposal_id(),
@@ -688,6 +873,9 @@ fn outcome_wire(outcome: &ProposalOutcome) -> Value {
             "derivation":c.compiled().derivation,"candidate":c.candidate()}),
         ProposalOutcome::Rejected(e) => json!({"status":"rejected","code":e.0}),
         ProposalOutcome::Unsupported => json!({"status":"unsupported"}),
+        ProposalOutcome::InspectionRequested(sources) => {
+            json!({"status":"rejected","code":"source_inspection_requested","inspection_refs":sources})
+        }
     }
 }
 
@@ -743,6 +931,13 @@ pub fn serve_general_proposal(
     claimant_id: &str,
     producer: Arc<DeepSeekCandidateProducer>,
 ) -> Result<bool> {
+    if let Some(exploration) = &submission.request.policy.exploration {
+        anyhow::ensure!(
+            exploration.provider_configuration_ref.as_deref()
+                == Some(producer.configuration_ref()?.as_str()),
+            "frozen provider configuration mismatch"
+        );
+    }
     submission.configure_general_producer(producer.identity())?;
     serve_proposal_inner(
         client,
@@ -1034,4 +1229,60 @@ fn denied_authority(attempt: &Value) -> Vec<ato_formation::requirements::Authori
         }
     }
     refused.into_iter().take(16).collect()
+}
+
+fn execution_fact(attempt: &Value) -> Value {
+    attempt["exploration_evidence"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|e| e["kind"] == "exploration_execution_facts")
+        .flat_map(|e| e["facts"].as_array().into_iter().flatten())
+        .last()
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+fn artifact_refs(attempt: &Value) -> Vec<String> {
+    attempt["exploration_evidence"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|e| e["kind"] == "exploration_source_oci_evidence")
+        .filter_map(|e| e["provenance"]["outputs"]["archive_sha256"].as_str())
+        .filter(|s| {
+            s.strip_prefix("sha256:").is_some_and(|h| {
+                h.len() == 64
+                    && h.bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            })
+        })
+        .take(4)
+        .map(str::to_owned)
+        .collect()
+}
+
+fn reduction_evidence(state: &SearchStateV1) -> Value {
+    let Some(best) = &state.exploration_submission else {
+        return json!({"verified":false,"reason":"K_not_reached"});
+    };
+    let first = state
+        .attempts
+        .iter()
+        .position(|a| a.route_accepted)
+        .unwrap_or(state.attempts.len());
+    let reduction_attempts: Vec<_> = state
+        .attempts
+        .iter()
+        .skip(first.saturating_add(1))
+        .map(|a| {
+            json!({
+                "attempt_id":a.attempt_id,"derivation_ref":a.derivation_ref,"status":a.status,
+                "fresh_PASS_accepted":a.route_accepted,"failure_code":a.failure_code
+            })
+        })
+        .collect();
+    json!({"attempts":reduction_attempts,"final_verified_derivation_ref":best.derivation_ref,
+        "final_receipt_attempt_id":best.attempt_id,
+        "successful_D_retained":true,"unverified_reduction_submitted":false,
+        "mathematical_minimality_claimed":false})
 }

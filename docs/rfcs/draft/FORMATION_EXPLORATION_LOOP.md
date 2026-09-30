@@ -1,85 +1,104 @@
-# Formation exploration within frozen ceilings
+# Bounded Formation exploration with post-submission assessment
 
-Status: implementation in progress; acceptance and new 100-app measurement pending.
+Status: draft implementation contract for the explicitly requested exploration arm.
+Existing baseline, legacy provider arms and historical ledgers remain separate.
+This document does not claim real-provider acceptance or deployment.
 
-This draft implements the owner's 2026-09-30 instruction. It supersedes the
-one-proposal-round restriction of FORMATION_ADAPTIVE_ESCALATION for explicitly
-configured exploration searches, not existing frozen searches.
+## Frozen boundary and changing Derivations
 
-## Identity and authority
+The requester freezes K, verified source closure, Runtime constraint, exploration
+ceiling, provider configuration, journals and all resource budgets before search.
+The external worker config supplies an independent operator ceiling. Every ticket
+must fit both ceilings. Proposal text cannot amend either frozen policy.
 
-K and the source closure are frozen once. A canonical D includes execution
-requirements: exact network endpoints and resource/operation requirements,
-scoped to dependency acquisition, build, or runtime. Changing a requirement
-changes D's digest. Evidence supporting a requirement is separately addressable.
-Exploration ceilings and approval are not part of D and cannot travel with it.
+Canonical D includes phase-scoped network requirements and logical authority
+requirements (protocol, resource, operation, phase). Changing requirements changes
+D's digest. Physical gate sockets, base archive paths, credentials, temporary state
+and owner management authorization are bindings; they are not reusable grants.
 
-The externally configured exploration ceiling is frozen with SearchPolicy.
-Normal-run policy is not edited. Each attempt receives only the intersection
-of the ceiling and that D's requirements. No production Binding/credential or
-resource is inherited. An unenforceable requirement is refused before start;
-host-unrestricted dependency-resolution is not scoped exploration networking.
-An out-of-ceiling proposal is saved as exploration_authority_exceeded.
+The search tries declared reusable D first, with the existing attempt budget.
+Then a typed CandidateProducer plan is validated and compiled by Rust into D,
+admitted by the registered adapter and executed by the common Runtime. HTTP
+observations are compared against frozen K by the existing Verifier. No model
+output is passed to a shell or allowed to claim a verification verdict.
 
-K reached, successful D submitted, risk assessed, approved, published, and
-deployed are distinct states. A receipt does not grant normal execution.
-Approval refers to the final D digest. Only a Runtime-authenticated fresh
-receipt for frozen K and that exact D can update the successful submission.
+## Round and continuation invariants
 
-## Rounds and durable transitions
+`formation.max_rounds` is a positive integer, default 3, captured in the frozen
+search. One opened round owns at most one candidate. Decline, invalid output,
+inspection request, timeout and provider failure consume that round. Known-D
+attempts and generated rounds are separately reported; actual execution still
+consumes the shared attempts, time, transfer, expansion and storage budgets.
+Dependency, build and runtime egress use separate phase gates and a shared
+non-resetting transfer reservation. Permission changes and reduction attempts
+consume subsequent rounds, never an implicit unbudgeted retry.
 
-External formation.max_rounds is a positive integer, default 3. Its effective
-value and all other ceilings are stored before the first round. Known D uses
-the existing attempt budget. Opening a generation round atomically consumes
-one round even if the provider declines, returns invalid bytes, fails, or times
-out. Dependency/network/authority repair and successful-D reduction executions
-each require a new round. A bounded inspection request settles its generation
-round; subsequent inference consumes a new round and a separate provider call.
+Earlier rounds, generated D and inspection counts remain durable. CAS/fences
+continue to govern single round claims, completion and attempt results. Pending
+attempts and unresolved external-effect UNKNOWN prevent another attempt. Model
+transport with unknown usage is conservatively charged its full reservation and
+halted; this accounting action does not resolve a workload UNKNOWN.
 
-All rounds are append-only records with existing owner scope, revision CAS,
-claim fences, deadlines, source cost checks, and usage reservations. Restart or
-linked continuation does not reset counters. Outstanding external effects in
-UNKNOWN block further execution until the existing cessation resolution.
-Duplicate D without a new verified retry basis terminates as no_progress.
+The same D is not executed again without a newly admitted retry basis. Repeated
+candidate digests with no progress end the search. This initial adapter does not
+implement automatic retry of identical D. Restart reopens the same journal and
+search instead of assigning a fresh budget or source context.
 
-Known D is attempted first. Absence/exhaustion or a repairable failure opens
-CandidateProducer regardless of the legacy OperationCatalog's emptiness.
-Typed proposals name source refs, runtime/toolchain, dependency/build/process
-or source-to-OCI operations, state, ports, and scoped requirements with evidence.
-The Rust authority validates and canonicalizes; registered adapters lower the
-result. No provider output is executed as shell. Unsupported adapter/toolchain
-and out-of-ceiling requirements are explicit diagnostics, not LLM failures.
+## Proposal and physical adapters
 
-After PASS, hold the verified D while spending remaining rounds on requirement
-reduction. A verified reduced D replaces it; a failed/unknown reduction never
-replaces the prior success. Report tested reductions, not mathematical minimality.
+`execution_plan@1` exposes bounded source IDs/digests and public purpose hints,
+listed toolchains and, when configured, a frozen source-OCI recipe. Private source
+paths and resource bindings remain in the requester. Source text is verified,
+credential-excluded and bounded by the existing 16 KiB projection ceiling.
+Inspections refer to already authorized immutable files and consume a separate
+count; they do not execute arbitrary commands or expand the domain.
 
-## Acceptance and measurement
+Registered operations initially include pinned Python/Node process startup,
+Python hashed binary-wheel requirements, npm locked install with scripts disabled,
+existing npm build script names, and the existing isolated source-OCI builder.
+Literal interpreter argv, relative cwd, port, isolated filesystem slots and public
+environment values are typed and validated. Unrepresented runtimes or unavailable
+physical adapters have concrete diagnostics; proposal capability is not an
+execution success.
 
-Use the actual Coordinator, Runtime, and providers for small preregistered apps:
-zero-known-D PASS, evidence-based dependency repair, in-ceiling network repair,
-out-of-ceiling authority refusal, reduction PASS/FAIL, round limits/restart,
-UNKNOWN and retained replay. Persist source/prompt/model/code/config pins,
-provider calls/usage/latency/cost, exact D/receipt, all requirement changes, and
-no-call reasons. Test doubles do not complete these gates.
+Process execution uses bwrap network namespaces plus Landlock, guest-local
+readiness and declared ingress, and owner-run phase-scoped HTTPS CONNECT gates.
+No guest gets host network, management socket or production state. Public DNS is
+rechecked by the broker; private/link-local/metadata endpoints are refused.
+The source-OCI route uses frozen base archives, existing Dockerfile validation,
+a private builder daemon, its existing resource limits and verified image
+materialization. It preserves the current Cmd/state/file-capability profile.
+The common OCI runtime uses an explicit operator socket and a fresh empty Docker
+config instead of ambient Docker contexts or registry credentials. K produced by
+the builder is not substituted for the exploration K.
 
-Then freeze a new 100-app arm using the unchanged cohort and historical ledgers.
-Report additional PASS, actual provider invocation rate, authority recovery,
-cost per additional PASS, and any budget/adapter limits. No deployment or remote
-migration is included. The pre-existing residual model budget is not reset.
+## Success, reduction and later authorization
 
-## Implementation checkpoint (not completion)
+A fresh fully-satisfied receipt assigned to exact K/D/attempt establishes
+`k_reached_awaiting_assessment`. The coordinator stores canonical K/D, receipt,
+requirements and round history as an unapproved submission, not a normal
+verified-route authorization. Normal Run, retained replay, publication and
+production deployment cannot inherit the exploration grant.
 
-Implemented locally: canonical phase/resource requirements, frozen positive round
-limits, durable round/provider history, cross-round decision fences, bounded
-execution evidence context, process/dependency typed compiler, D-bound unapproved
-submission validation/selection, and a netd bridge for isolated dependency/build
-steps. The Runtime refuses unenforceable requirements rather than using host
-networking. D1 network reservations are fully charged at claim and accumulate
-across rounds/continuations; gate phases share the attempt reservation. Actual
-transfer telemetry and conservative reservation charges are separate.
+Remaining rounds may propose a strict requirements subset with identical source,
+steps and other execution semantics. A fresh PASS replaces the best submission.
+A failed or unverified reduction retains the preceding successful D and receipt.
+The result reports attempted reductions and their verification; it makes no claim
+of mathematical minimality. Later risk assessment and owner authorization must
+bind the submitted D digest in their own workflow.
 
-Still pending: source-inspection requests, isolated state and runtime-egress
-lowering, source-to-OCI proposal integration, actual Linux/provider acceptance,
-and the new 100-app arm. Unit/codec/migration tests do not establish these gates.
-Legacy one-round searches and their canonical fixture bytes remain unchanged.
+## Provider accounting and acceptance
+
+Both transports reserve and fsync before credential access or sending. Model,
+prompt, limits, pricing and journal bindings are frozen. Singleton choices bypass
+the DecisionProvider. Restart uses assignment-checked cached answers; no unresolved
+send is retried. Responses record model, usage, latency and estimated cost.
+No-call reasons and full reservation charges are recorded separately from actual
+known token usage. Journals never contain credential values.
+
+Completion requires actual Coordinator, contained Runtime and live-provider
+acceptance on small upstream applications, including evidence-based repair,
+ceiling refusal, permission reduction, failure retention and restart. Infrastructure
+fixtures are additional regression evidence, not upstream acceptance. Only after
+that gate may the frozen 100-source cohort be measured as a new arm. Old results
+and their policy conditions must remain unchanged.

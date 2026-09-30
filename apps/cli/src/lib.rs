@@ -3,6 +3,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 mod desktop_control;
+mod formation_exploration;
 mod object_transport;
 mod portable_attempt;
 mod portable_dependency;
@@ -475,6 +476,10 @@ struct FormArgs {
     /// Repeat for up to 16 files. Model sees IDs, never the paths or source.
     #[arg(long = "generation-entrypoint", requires = "generation_provider")]
     generation_entrypoints: Vec<String>,
+    /// External exploration ceiling, frozen K, source authorization and
+    /// pinned provider/spend config (JSON or TOML). No normal Run approval.
+    #[arg(long, requires = "runtime_network", conflicts_with_all = ["generation_provider", "verify_browser"])]
+    exploration_config: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -807,6 +812,9 @@ fn browser_verifier_command(
 
 /// Submit a SatisfyRequest and wait for the coordinator to settle it.
 fn form_on_runtime_network(args: FormArgs) -> Result<()> {
+    if args.exploration_config.is_some() {
+        return formation_exploration::run(args);
+    }
     use ato_formation_worker::runtime_network::{
         Client, RuntimeConstraintWire, SatisfyBudget, SatisfyPolicy, Settlement, new_search_id,
         prepare_submission,

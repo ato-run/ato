@@ -967,6 +967,7 @@ pub fn build_multi_derivation_bundle(
             state: Vec::new(),
             workspace_build: None,
             workspace_compiler: None,
+            source_oci: None,
             effects: EffectClass::Pure,
         },
         provenance: AuthoringProvenance::Authored,
@@ -1266,6 +1267,7 @@ pub fn build_dynamic_routes_bundle(
             .collect(),
         workspace_build: None,
         workspace_compiler: None,
+        source_oci: None,
         effects: spec.effects,
     };
     let mut requirements = spec

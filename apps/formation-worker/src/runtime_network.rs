@@ -51,6 +51,7 @@ use std::fs::File;
 use std::io::{Read, Seek, Write};
 
 pub mod proposal;
+mod source_oci_exploration;
 
 pub const PROTOCOL: &str = "ato.runtime-network/0";
 /// The one execution environment a host advertises in Phase 1: itself.
@@ -370,6 +371,8 @@ pub struct ExplorationTicket {
 pub struct ExplorationSandbox {
     pub ceiling: ato_formation::requirements::ExecutionRequirements,
     pub max_network_transfer_bytes_per_attempt: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_oci: Option<source_oci_exploration::SourceOciSandbox>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1034,7 +1037,7 @@ fn prepare_submission_inner(
     )?;
     let evidence = detect(&frozen.root).context("detection failed")?;
 
-    let route_files: Vec<PathBuf> = if explicit_contract.is_some() {
+    let route_files: Vec<PathBuf> = if explicit_contract.is_some() && routes.is_empty() {
         Vec::new()
     } else if routes.is_empty() {
         vec![frozen.root.join("capsule.toml")]
@@ -1847,6 +1850,17 @@ fn execute_planned_ticket(
             .min(ticket.resource_budget.expanded_bytes),
         ..ceiling
     };
+    let source_oci_archive = match archive.try_clone() {
+        Ok(file) => file,
+        Err(error) => {
+            return refused(
+                ticket,
+                attested.clone(),
+                "source_unavailable",
+                &error.to_string(),
+            );
+        }
+    };
     let verified = match FileVerifiedArchive::verify(
         archive,
         archive_digest,
@@ -2015,9 +2029,32 @@ fn execute_planned_ticket(
                 gates: &gates.sockets,
             },
         );
-    let realizer: &dyn ato_runtime_attempt::realize::CandidateRealizer = exploring
+    let source_oci = ticket
+        .exploration
+        .as_ref()
+        .filter(|_| planned.derivation.source_oci.is_some())
+        .map(|grant| source_oci_exploration::SourceOciRealizer {
+            planned: &planned,
+            archive: &source_oci_archive,
+            archive_digest,
+            source_root: &frozen.root,
+            artifact_root: &config.out_dir,
+            stored_limit: ticket.resource_budget.stored_bytes,
+            ticket: grant,
+            configured: config
+                .exploration
+                .as_ref()
+                .and_then(|c| c.source_oci.as_ref()),
+            artifact: std::cell::RefCell::new(None),
+        });
+    let realizer: &dyn ato_runtime_attempt::realize::CandidateRealizer = source_oci
         .as_ref()
         .map(|r| r as &dyn ato_runtime_attempt::realize::CandidateRealizer)
+        .or_else(|| {
+            exploring
+                .as_ref()
+                .map(|r| r as &dyn ato_runtime_attempt::realize::CandidateRealizer)
+        })
         .unwrap_or(&legacy);
     let outcome = run_reserved_attempt(
         &AttemptRequest {
@@ -2105,8 +2142,22 @@ fn execute_planned_ticket(
     };
 
     let mut report = attempt_report(ticket, &attempt, attested, materialization_ref, None, usage);
+    if let Some(artifact) = source_oci.and_then(|r| r.artifact.into_inner()) {
+        report.resource_usage.stored_bytes = report
+            .resource_usage
+            .stored_bytes
+            .saturating_add(artifact["stored_bytes"].as_u64().unwrap_or(0));
+        report.verifier_receipts.push(artifact);
+    }
     if let Some(gates) = scoped.as_ref() {
         report.verifier_receipts.push(gates.evidence());
+        if let Ok(facts) = ato_runtime_attempt::execution_facts::read(
+            &attempt_root.join("control/execution-facts.jsonl"),
+        ) {
+            report
+                .verifier_receipts
+                .push(serde_json::json!({"kind":"exploration_execution_facts","facts":facts}));
+        }
     }
     if ticket.exploration.is_some()
         && report
@@ -2114,21 +2165,12 @@ fn execute_planned_ticket(
             .as_ref()
             .is_some_and(|f| f.code == "authority_denied")
     {
-        use ato_formation::requirements::{
-            AuthorityRequirement, ExecutionPhase, ResourceOperation,
-        };
-        let denied = planned
-            .derivation
-            .ports
-            .iter()
-            .map(|p| AuthorityRequirement {
-                phase: ExecutionPhase::Runtime,
-                protocol: p.protocol.clone(),
-                resource: p.id.clone(),
-                operation: ResourceOperation::Bind,
-            })
-            .filter(|a| !planned.derivation.requirements.authority.contains(a))
-            .collect::<Vec<_>>();
+        let denied = ato_runtime_attempt::exploration_realizer::required_isolated_authority(
+            &planned.derivation,
+        )
+        .into_iter()
+        .filter(|a| !planned.derivation.requirements.authority.contains(a))
+        .collect::<Vec<_>>();
         report
             .verifier_receipts
             .push(serde_json::json!({"kind":"exploration_authority_evidence","refused":denied}));
@@ -2136,6 +2178,7 @@ fn execute_planned_ticket(
 
     if let Some(publisher) = publisher
         && report.outcome == "pass"
+        && planned.derivation.source_oci.is_none()
     {
         let publication = (|| -> Result<String> {
             let executed = outcome

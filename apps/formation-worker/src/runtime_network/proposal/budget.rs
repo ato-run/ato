@@ -1,4 +1,4 @@
-//! Acceptance-side dollar reservation journal, separate from Formation budgets.
+//! Durable provider dollar reservation journal, separate from execution budgets.
 //! A reservation is consumed before credentials are read. Never refunded on
 //! timeout/unknown usage. Incomplete writes fail closed; no implicit reset.
 use anyhow::{Result, ensure};
@@ -37,9 +37,9 @@ impl BudgetPlan {
         ensure!(
             (1..=6).contains(&self.max_calls)
                 && self.input_token_cap > 0
-                && (1..=2048).contains(&self.output_token_cap)
+                && (1..=if self.output_price == 0 { 65536 } else { 2048 })
+                    .contains(&self.output_token_cap)
                 && self.input_price > 0
-                && self.output_price > 0
                 && self.ceiling_usd_micros <= AUTHORIZED_USD_MICROS,
             "invalid spend plan"
         );
@@ -101,6 +101,15 @@ impl CallBudget {
         self.transact(Some(JournalEvent::Response { response }))
             .map(|_| ())
     }
+    /// Final accounting of a provider call whose usage cannot be established.
+    /// Charge the full reservation, halt this search's provider channel and
+    /// never retry it. This does not resolve workload effect UNKNOWN.
+    pub fn charge_unknown(&self, cell: &str) -> Result<()> {
+        self.transact(Some(JournalEvent::ChargedUnknown {
+            charged_unknown: cell.into(),
+        }))
+        .map(|_| ())
+    }
     /// Controllers consume this validated view, never reinterpret journal JSON.
     pub fn snapshot(&self) -> Result<BudgetSnapshot> {
         self.transact(None)
@@ -116,7 +125,7 @@ impl CallBudget {
                 .request
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("historical reservation has no request evidence"))?,
-            response_resolved: saved.response.is_some(),
+            response_resolved: saved.is_settled(),
         })
     }
     fn transact(&self, event: Option<JournalEvent>) -> Result<BudgetSnapshot> {
@@ -203,6 +212,13 @@ pub struct CallEvidence {
     /// None only for a historical Cell reservation. Not acceptable for D3 v2.
     pub request: Option<RequestEvidence>,
     pub response: Option<ResponseEvidence>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub charged_unknown: bool,
+}
+impl CallEvidence {
+    pub fn is_settled(&self) -> bool {
+        self.response.is_some() || self.charged_unknown
+    }
 }
 impl BudgetSnapshot {
     fn reserve(
@@ -213,7 +229,7 @@ impl BudgetSnapshot {
     ) -> Result<()> {
         ensure!(!self.stopped, "provider protocol violation: run stopped");
         ensure!(
-            self.cells.values().all(|c| c.response.is_some()),
+            self.cells.values().all(CallEvidence::is_settled),
             "prior call response unresolved"
         );
         ensure!(
@@ -233,6 +249,7 @@ impl BudgetSnapshot {
             CallEvidence {
                 request,
                 response: None,
+                charged_unknown: false,
             },
         );
         Ok(())
@@ -253,6 +270,15 @@ impl BudgetSnapshot {
                 ensure!(halt, "invalid halt");
                 self.stopped = true;
             }
+            JournalEvent::ChargedUnknown { charged_unknown } => {
+                let call = self
+                    .cells
+                    .get_mut(&charged_unknown)
+                    .ok_or_else(|| anyhow::anyhow!("provider reservation missing"))?;
+                ensure!(!call.is_settled(), "provider accounting already settled");
+                call.charged_unknown = true;
+                self.stopped = true;
+            }
             JournalEvent::Response { response } => {
                 let call = self
                     .cells
@@ -264,7 +290,7 @@ impl BudgetSnapshot {
                     historical_read || call.request.is_some(),
                     "response without request evidence"
                 );
-                ensure!(call.response.is_none(), "duplicate provider response");
+                ensure!(!call.is_settled(), "duplicate provider response");
                 self.stopped |= !response.within(plan);
                 call.response = Some(response);
             }
@@ -305,5 +331,6 @@ enum JournalEvent {
     Cell(String),
     Request { request: RequestEvidence },
     Halt { halt: bool },
+    ChargedUnknown { charged_unknown: String },
     Response { response: ResponseEvidence },
 }

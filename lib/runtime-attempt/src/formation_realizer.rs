@@ -44,7 +44,8 @@ fn refused(code: &str, message: impl Into<String>) -> Option<AttemptFailure> {
 impl CandidateRealizer for FormationRealizer<'_> {
     fn admit(&self, profile: &RuntimeProfile) -> Option<AttemptFailure> {
         let planned = self.planned;
-        if !planned.derivation.requirements.is_empty()
+        if planned.derivation.source_oci.is_some()
+            || !planned.derivation.requirements.is_empty()
             || planned.derivation.steps.iter().any(|s| {
                 matches!(
                     s.network,
@@ -127,10 +128,30 @@ impl CandidateLauncher<'_> {
         attempt_id: &str,
         attempt_root: &Path,
     ) -> Result<Realized, RealizeFailure> {
+        self.realize_inner(executed, attempt_id, attempt_root, None)
+    }
+
+    pub(crate) fn realize_scoped(
+        &self,
+        executed: ExecutedCandidate,
+        attempt_id: &str,
+        attempt_root: &Path,
+        gate: &Path,
+    ) -> Result<Realized, RealizeFailure> {
+        self.realize_inner(executed, attempt_id, attempt_root, Some(gate))
+    }
+
+    fn realize_inner(
+        &self,
+        executed: ExecutedCandidate,
+        attempt_id: &str,
+        attempt_root: &Path,
+        gate: Option<&Path>,
+    ) -> Result<Realized, RealizeFailure> {
         let (candidate, evidence, realization) = match &executed {
             ExecutedCandidate::Process { workspace_root } => {
                 let (candidate, evidence) =
-                    self.realize_process(workspace_root, attempt_id, attempt_root)?;
+                    self.realize_process(workspace_root, attempt_id, attempt_root, gate)?;
                 (candidate, evidence, "process")
             }
             ExecutedCandidate::StaticWeb { output } => {
@@ -166,6 +187,7 @@ impl CandidateLauncher<'_> {
         workspace_root: &Path,
         attempt_id: &str,
         attempt_root: &Path,
+        runtime_gate: Option<&Path>,
     ) -> Result<(Box<dyn RunningCandidate>, RealizationEvidence), RealizeFailure> {
         let planned = self.planned;
         let mut ports: Vec<RequiredPort> = Vec::new();
@@ -195,11 +217,16 @@ impl CandidateLauncher<'_> {
             // no egress, TCP bind only on the allocated host ports. A
             // `dependency-resolution` request widens the BUILD, never the run.
             build_network: crate::attempt::network_name(self.network).to_owned(),
-            candidate_network: "no-egress; tcp bind limited to allocated host ports".to_owned(),
+            candidate_network: if runtime_gate.is_some() {
+                "isolated namespace; declared ingress; phase-scoped HTTPS egress broker"
+            } else {
+                "no-egress; tcp bind limited to allocated host ports"
+            }
+            .to_owned(),
             endpoints: BTreeMap::new(),
             destroyed: false,
         };
-        let realization = match TemporaryRealization::launch(&TemporaryRealizationRequest {
+        let request = TemporaryRealizationRequest {
             workspace: workspace_root,
             scratch: &scratch,
             derivation: &planned.derivation,
@@ -207,7 +234,12 @@ impl CandidateLauncher<'_> {
             ports: &ports,
             shim: self.shim,
             attempt_id,
-        }) {
+        };
+        let launched = match runtime_gate {
+            Some(gate) => TemporaryRealization::launch_scoped(&request, gate),
+            None => TemporaryRealization::launch(&request),
+        };
+        let realization = match launched {
             Ok(realization) => realization,
             Err(error) => {
                 // Dropped on the error path: gone unless the Runtime said

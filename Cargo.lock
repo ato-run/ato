@@ -439,10 +439,12 @@ name = "ato-formation-worker"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ato-adapter-oci",
  "ato-adapter-process",
  "ato-formation",
  "ato-ipc",
  "ato-materializer-static-web",
+ "ato-portable-application",
  "ato-runtime-attempt",
  "ato-sandbox",
  "base64 0.22.1",

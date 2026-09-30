@@ -5,6 +5,192 @@ use anyhow::{Context, Result, ensure};
 
 pub const GUEST_SOCKET: &str = "/.ato/egress.sock";
 pub const PROXY_PORT: u16 = 32189;
+pub const INGRESS_ROOT: &str = "/.ato/ingress";
+
+/// Ingress is a distinct owner endpoint. Its guest peer may dial only a
+/// declared port on its OWN loopback, never a host resource. The handshake
+/// proves the workload accepted a connection, not merely that our proxy did.
+#[cfg(unix)]
+pub struct IngressBridge {
+    stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    listener: Option<std::thread::JoinHandle<()>>,
+    socket: std::path::PathBuf,
+    streams: std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<u64, std::net::TcpStream>>>,
+}
+
+#[cfg(unix)]
+impl IngressBridge {
+    pub fn start(socket: std::path::PathBuf, host_port: u16) -> Result<Self> {
+        use std::sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+        };
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, host_port))?;
+        listener.set_nonblocking(true)?;
+        let stopped = Arc::new(AtomicBool::new(false));
+        let streams = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+        let stop = stopped.clone();
+        let active = streams.clone();
+        let target = socket.clone();
+        let task = std::thread::spawn(move || {
+            let mut children: Vec<std::thread::JoinHandle<()>> = Vec::new();
+            let mut seq = 0_u64;
+            while !stop.load(Ordering::Acquire) {
+                children.retain(|t| !t.is_finished());
+                match listener.accept() {
+                    Ok((tcp, _)) if children.len() < 16 => {
+                        if let Ok(mut handles) = active.lock()
+                            && let Ok(clone) = tcp.try_clone()
+                        {
+                            handles.insert(seq, clone);
+                        }
+                        let path = target.clone();
+                        let counter = seq;
+                        seq = seq.saturating_add(1);
+                        let handles = active.clone();
+                        children.push(std::thread::spawn(move || {
+                            if let Ok(unix) = ingress_connect(&path) {
+                                let _ = relay(unix, tcp);
+                            }
+                            if let Ok(mut handles) = handles.lock() {
+                                handles.remove(&counter);
+                            }
+                        }));
+                    }
+                    Ok(_) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(10))
+                    }
+                    Err(_) => break,
+                }
+            }
+            for task in children {
+                let _ = task.join();
+            }
+        });
+        Ok(Self {
+            stopped,
+            listener: Some(task),
+            socket,
+            streams,
+        })
+    }
+
+    pub fn ready(&self) -> Result<()> {
+        ingress_connect(&self.socket).map(|_| ())
+    }
+}
+
+#[cfg(unix)]
+impl Drop for IngressBridge {
+    fn drop(&mut self) {
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::Release);
+        if let Ok(handles) = self.streams.lock() {
+            for stream in handles.values() {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
+        }
+        if let Some(task) = self.listener.take() {
+            let _ = task.join();
+        }
+    }
+}
+
+#[cfg(unix)]
+fn ingress_connect(socket: &std::path::Path) -> Result<std::os::unix::net::UnixStream> {
+    use std::io::Read;
+    let mut unix = std::os::unix::net::UnixStream::connect(socket)?;
+    unix.set_read_timeout(Some(std::time::Duration::from_millis(250)))?;
+    let mut accepted = [0];
+    unix.read_exact(&mut accepted)?;
+    ensure!(accepted == [1], "guest endpoint did not accept");
+    Ok(unix)
+}
+
+#[cfg(unix)]
+pub fn namespace_ingress(args: &[String]) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+    ensure!(
+        !args.is_empty() && args.len() <= 16,
+        "invalid ingress endpoints"
+    );
+    let mut tasks = Vec::new();
+    for value in args {
+        let port: u16 = value.parse()?;
+        ensure!(port > 0, "invalid ingress port");
+        let socket = format!("{INGRESS_ROOT}/{port}.sock");
+        let listener = UnixListener::bind(&socket)?;
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
+        tasks.push(std::thread::spawn(move || {
+            let mut children: Vec<std::thread::JoinHandle<()>> = Vec::new();
+            for incoming in listener.incoming() {
+                children.retain(|t| !t.is_finished());
+                let Ok(mut unix) = incoming else {
+                    break;
+                };
+                if children.len() >= 16 {
+                    continue;
+                }
+                let Ok(tcp) = std::net::TcpStream::connect_timeout(
+                    &std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port)),
+                    std::time::Duration::from_millis(100),
+                ) else {
+                    continue;
+                };
+                if unix.write_all(&[1]).is_err() {
+                    continue;
+                }
+                children.push(std::thread::spawn(move || {
+                    let _ = relay(unix, tcp);
+                }));
+            }
+        }));
+    }
+    println!("ready");
+    for task in tasks {
+        let _ = task.join();
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn namespace_ingress(_: &[String]) -> Result<()> {
+    anyhow::bail!("scoped ingress requires Unix")
+}
+
+pub fn start_namespace_ingress(shim: &str, args: &[String]) -> Result<std::process::Child> {
+    use std::io::BufRead;
+    let ports: Vec<_> = args
+        .windows(2)
+        .filter(|v| v[0] == "--ingress-port")
+        .map(|v| &v[1])
+        .collect();
+    let mut child = std::process::Command::new(shim)
+        .args(["sandbox-exec", "--ingress-relay"])
+        .args(ports)
+        .env_clear()
+        .stdout(std::process::Stdio::piped())
+        .spawn()?;
+    let stdout = child.stdout.take().context("ingress readiness missing")?;
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let result = std::io::BufReader::new(stdout)
+            .read_line(&mut line)
+            .map(|_| line);
+        let _ = tx.send(result);
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(2)) {
+        Ok(Ok(line)) if line == "ready\n" => Ok(child),
+        _ => {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!("namespace ingress failed readiness")
+        }
+    }
+}
 
 #[cfg(unix)]
 pub struct HostBridge {
@@ -157,9 +343,9 @@ pub fn namespace_relay() -> Result<()> {
     anyhow::bail!("scoped network namespaces require Unix")
 }
 
-pub fn start_namespace_relay() -> Result<std::process::Child> {
+pub fn start_namespace_relay(shim: &str) -> Result<std::process::Child> {
     use std::io::BufRead;
-    let mut child = std::process::Command::new("/.ato/formation")
+    let mut child = std::process::Command::new(shim)
         .args(["sandbox-exec", "--network-relay"])
         .env_clear()
         .stdout(std::process::Stdio::piped())
