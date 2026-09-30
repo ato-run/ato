@@ -570,7 +570,16 @@ pub fn validate_candidate_scope(
     for candidate in generated {
         let new_scope =
             authorization.execution_plan.as_ref().is_some_and(|t| {
-                t.candidate(source, candidate.derivation_ref.clone()) == *candidate
+                let ceiling = t.candidate(source, candidate.derivation_ref.clone());
+                let mut compared = candidate.clone();
+                compared.provisions = ceiling.provisions.clone();
+                compared == ceiling
+                    && !candidate.provisions.is_empty()
+                    && candidate
+                        .provisions
+                        .iter()
+                        .all(|p| ceiling.provisions.contains(p))
+                    && candidate.provisions.windows(2).all(|p| p[0] < p[1])
             }) || authorization.python_http_process.as_ref().is_some_and(|t| {
                 t.candidate(source, candidate.derivation_ref.clone()) == *candidate
             }) || authorization
@@ -615,6 +624,10 @@ pub struct ProposalRoundRecord {
     pub expires_at_ms: u64,
     pub outcome: Option<ProposalRoundOutcome>,
     pub candidates: Vec<SearchCandidate>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub derivations: Vec<crate::authoring::BoundDerivation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<String>,
 }
 
 pub const PROPOSAL_REQUEST_SCHEMA: &str = "ato.formation-proposal-request/1";

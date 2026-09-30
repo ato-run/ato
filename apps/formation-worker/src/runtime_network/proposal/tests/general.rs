@@ -562,7 +562,11 @@ fn general_provenance_and_raw_mismatch_fail_before_admission() {
     let mut saved = general_completed(&sub, &identity);
     let observed: ProviderCall =
         serde_json::from_value(saved["proposal_round"]["provider_call"].clone()).unwrap();
-    sub.proposal_state.as_mut().unwrap().observed_call = Some(observed);
+    sub.proposal_state
+        .as_mut()
+        .unwrap()
+        .observed_calls
+        .insert(1, observed);
     saved["proposal_round"]["provider_call"]["provenance"]["usage"]["input_tokens"] = json!(456);
     saved["proposal_round"]["provenance"]["usage"]["input_tokens"] = json!(456);
     assert!(sub.accept_proposal_round(&saved).is_err());

@@ -9,10 +9,11 @@ use ato_formation::{
     authoring::BoundContract,
     generation_context::{project_failures, project_inspections},
     proposal::{
-        AuthorizedSourceText, CandidateProducer, CandidateRegistry, PROPOSAL_REQUEST_SCHEMA,
-        ProducerError, ProducerOutput, ProducerProvenance, ProposalAuthorization, ProposalBudget,
-        ProposalOutcome, ProposalRequest, ProposalRequestV2, ProposalRequestV2Schema,
-        SourceContextEntry, SourceContextKind, build_source_context,
+        AuthorizedSourceText, CandidateProducer, CandidateRegistry, ExplorationContext,
+        ExplorationFailure, PROPOSAL_REQUEST_SCHEMA, ProducerError, ProducerOutput,
+        ProducerProvenance, ProposalAuthorization, ProposalBudget, ProposalOutcome,
+        ProposalRequest, ProposalRequestV2, ProposalRequestV2Schema, SourceContextEntry,
+        SourceContextKind, build_source_context,
     },
     search::{FrozenSearchV1, InitialSource, SearchStateV1},
 };
@@ -25,12 +26,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub(super) struct RequesterProposal {
     frozen: FrozenSearchV1,
     bases: BTreeMap<String, String>,
-    attempted_claim: bool,
-    accepted_round: Option<Value>,
+    attempted_claims: std::collections::BTreeSet<u64>,
+    accepted_rounds: BTreeMap<u64, Value>,
     recipes: BTreeMap<String, String>,
     source_context: Vec<SourceContextEntry>,
     provider_identity: Option<ProviderIdentity>,
-    observed_call: Option<ProviderCall>,
+    observed_calls: BTreeMap<u64, ProviderCall>,
 }
 
 /// No preset, route or placeholder D is planned. K is supplied explicitly by
@@ -88,6 +89,9 @@ fn frozen_request(request: &SatisfyRequest) -> Result<FrozenSearchV1> {
         "allow_managed":request.policy.allow_managed,"bindings":request.bindings});
     if let Some(p) = &request.policy.proposal {
         policy["proposal"] = json!(p);
+    }
+    if let Some(p) = &request.policy.exploration {
+        policy["exploration"] = json!(p);
     }
     if let Some(p) = &request.policy.decision {
         policy["decision"] = json!(p);
@@ -154,6 +158,19 @@ impl Submission {
                 "module entrypoint is not in frozen source"
             );
         }
+        if let Some(domain) = &authorization.execution_plan {
+            for file in domain.files.values() {
+                anyhow::ensure!(
+                    files.contains(&file.path),
+                    "plan source is not a frozen regular file"
+                );
+                let bytes = std::fs::read(inventory.root.join(&file.path))?;
+                anyhow::ensure!(
+                    format!("sha256:{:x}", Sha256::digest(&bytes)) == file.digest,
+                    "plan source digest mismatch"
+                );
+            }
+        }
         // Workspace IDs resolve only to the inventory of this verified extraction.
         if let Some(domain) = &authorization.node_static_workspace {
             let recomputed = ato_formation::workspace::inventory(&inventory.root)
@@ -188,6 +205,15 @@ impl Submission {
                     std::fs::read(inventory.root.join(file))?,
                 ));
             }
+            if let Some(domain) = &authorization.execution_plan {
+                for (id, file) in &domain.files {
+                    texts.push((
+                        SourceContextKind::VerifiedFile,
+                        id.as_str(),
+                        std::fs::read(inventory.root.join(&file.path))?,
+                    ));
+                }
+            }
             build_source_context(
                 &authorization,
                 &texts
@@ -218,12 +244,12 @@ impl Submission {
                 .iter()
                 .map(|d| (d.derivation_ref.clone(), d.capsule_toml.clone()))
                 .collect(),
-            attempted_claim: false,
-            accepted_round: None,
+            attempted_claims: Default::default(),
+            accepted_rounds: Default::default(),
             recipes: BTreeMap::new(),
             source_context,
             provider_identity: None,
-            observed_call: None,
+            observed_calls: Default::default(),
         });
         self.request = request;
         Ok(())
@@ -352,7 +378,8 @@ impl Submission {
             "configured provider changed"
         );
         anyhow::ensure!(
-            !local.attempted_claim || local.provider_identity.as_ref() == Some(&identity),
+            local.attempted_claims.is_empty()
+                || local.provider_identity.as_ref() == Some(&identity),
             "provider configured after claim"
         );
         local.provider_identity = Some(identity);
@@ -364,9 +391,13 @@ impl Submission {
             .proposal_state
             .as_ref()
             .context("producer not enabled")?;
+        let state = self.proposal_search(status)?;
         let value = ProposalRequestV2 {
             schema: ProposalRequestV2Schema::V2,
             search_id: request.search_id,
+            round_seq: local.frozen.policy.exploration.as_ref().map(|_| {
+                (state.proposal_history.len() + usize::from(state.proposal_round.is_some())) as u32
+            }),
             frozen_contract: request.frozen_contract,
             runtime_constraint: request.runtime_constraint,
             known_derivations: request.known_derivations,
@@ -374,6 +405,58 @@ impl Submission {
             inspection_evidence: request.inspection_evidence,
             operation_catalog: request.operation_catalog,
             remaining_budget: request.remaining_budget,
+            exploration_context: local.frozen.policy.exploration.as_ref().map(|p| {
+                let previous_derivations = state
+                    .proposal_history
+                    .iter()
+                    .chain(state.proposal_round.iter())
+                    .flat_map(|r| r.derivations.iter())
+                    .rev()
+                    .take(3)
+                    .cloned()
+                    .collect();
+                let failures = status["attempts"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .rev()
+                    .filter_map(|a| {
+                        let d = a["derivation_ref"].as_str()?;
+                        if !state.attempts.iter().any(|saved| {
+                            saved.derivation_ref == d && saved.attempt_id == a["attempt_id"]
+                        }) || a["failure"].is_null()
+                        {
+                            return None;
+                        }
+                        let f = &a["failure"];
+                        Some(ExplorationFailure {
+                            derivation_ref: d.into(),
+                            stage: bounded_identifier(f["stage"].as_str().unwrap_or("unknown"), 32),
+                            code: bounded_identifier(f["code"].as_str().unwrap_or("unknown"), 96),
+                            exit_code: None,
+                            log_tail: public_log_tail(f["message"].as_str().unwrap_or("")),
+                            artifacts: vec![],
+                            network_denials: denied_network(a),
+                            authority_denials: denied_authority(a),
+                        })
+                    })
+                    .take(4)
+                    .collect();
+                ExplorationContext {
+                    effective_max_rounds: p.formation.max_rounds.get(),
+                    ceiling: p.ceiling.clone(),
+                    previous_derivations,
+                    failures,
+                    successful_derivation_ref: state
+                        .exploration_submission
+                        .as_ref()
+                        .map(|s| s.derivation_ref.clone()),
+                    proposal_diagnostics: state
+                        .proposal_round
+                        .as_ref()
+                        .map_or_else(Vec::new, |r| r.diagnostics.clone()),
+                }
+            }),
             source_context: local.source_context.clone(),
         };
         value.validate(
@@ -419,25 +502,52 @@ impl Submission {
             return Ok(());
         }
         let state = self.proposal_search(status)?;
-        let round = &status["proposal_round"];
-        if round.is_null() || matches!(round["status"].as_str(), Some("open" | "claimed")) {
-            anyhow::ensure!(
-                self.proposal_state
-                    .as_ref()
-                    .and_then(|p| p.accepted_round.as_ref())
-                    .is_none(),
-                "durable proposal disappeared"
-            );
-            return Ok(());
+        let mut wire_rounds: Vec<&Value> = status["proposal_history"]
+            .as_array()
+            .map(|a| a.iter().collect())
+            .unwrap_or_default();
+        if !status["proposal_round"].is_null() {
+            wire_rounds.push(&status["proposal_round"]);
         }
-        anyhow::ensure!(round["round_seq"] == 1, "invalid round");
         let local = self
             .proposal_state
             .as_ref()
             .context("producer not enabled")?;
-        if let Some(prior) = &local.accepted_round {
-            anyhow::ensure!(prior == round, "durable proposal changed");
+        anyhow::ensure!(
+            wire_rounds.len()
+                == state.proposal_history.len() + usize::from(state.proposal_round.is_some()),
+            "durable proposal disappeared"
+        );
+        for (index, round) in wire_rounds.iter().enumerate() {
+            anyhow::ensure!(round["round_seq"] == index as u64 + 1, "invalid round");
+            if let Some(prior) = local.accepted_rounds.get(&(index as u64 + 1)) {
+                anyhow::ensure!(prior == *round, "durable proposal changed");
+            }
         }
+        anyhow::ensure!(
+            local.accepted_rounds.len() <= wire_rounds.len(),
+            "durable proposal disappeared"
+        );
+        for round in wire_rounds {
+            let seq = round["round_seq"].as_u64().context("invalid round")?;
+            if matches!(round["status"].as_str(), Some("open" | "claimed")) {
+                continue;
+            }
+            self.accept_settled_round(&state, round, seq)?;
+        }
+        Ok(())
+    }
+
+    fn accept_settled_round(
+        &mut self,
+        state: &SearchStateV1,
+        round: &Value,
+        seq: u64,
+    ) -> Result<()> {
+        let local = self
+            .proposal_state
+            .as_ref()
+            .context("producer not enabled")?;
         let call: Option<ProviderCall> = round
             .get("provider_call")
             .map(|v| serde_json::from_value(v.clone()))
@@ -458,7 +568,7 @@ impl Submission {
                 "durable provider status mismatch"
             );
         }
-        if let Some(observed) = &local.observed_call {
+        if let Some(observed) = local.observed_calls.get(&seq) {
             anyhow::ensure!(
                 call.as_ref() == Some(observed),
                 "persisted provider evidence changed"
@@ -533,8 +643,10 @@ impl Submission {
             .map(|c| c.candidate().clone())
             .collect();
         let record = state
-            .proposal_round
-            .as_ref()
+            .proposal_history
+            .iter()
+            .chain(state.proposal_round.iter())
+            .nth(seq as usize - 1)
             .context("round absent from search")?;
         anyhow::ensure!(
             serde_json::to_value(record.outcome)? == round["status"]
@@ -559,8 +671,8 @@ impl Submission {
             self.contracts
                 .insert(derivation.clone(), local.frozen.base_contract.clone());
         }
-        local.recipes = recipes;
-        local.accepted_round = Some(round.clone());
+        local.recipes.extend(recipes);
+        local.accepted_rounds.insert(seq, round.clone());
         Ok(())
     }
 
@@ -680,14 +792,15 @@ fn serve_proposal_inner(
         .proposal_state
         .as_mut()
         .context("producer not enabled")?;
-    if local.attempted_claim {
+    let seq = point["round_seq"].as_u64().context("invalid round")?;
+    if local.attempted_claims.contains(&seq) {
         return Ok(false);
     }
     anyhow::ensure!(
-        point["revision"] == state.revision && point["round_seq"] == 1,
+        point["revision"] == state.revision && seq == (state.proposal_history.len() + 1) as u64,
         "proposal point revision mismatch"
     );
-    local.attempted_claim = true;
+    local.attempted_claims.insert(seq);
     let Ok(claim) = client.claim_proposal(id, state.revision, claimant_id) else {
         return Ok(false);
     };
@@ -699,7 +812,7 @@ fn serve_proposal_inner(
         .context("missing claim revision")?;
     anyhow::ensure!(
         state.revision.checked_add(1) == Some(revision)
-            && claim["round_seq"] == 1
+            && claim["round_seq"] == seq
             && fence.len() == 36
             && fence
                 .bytes()
@@ -791,7 +904,8 @@ fn serve_proposal_inner(
                 .proposal_state
                 .as_mut()
                 .context("producer missing")?
-                .observed_call = Some(call);
+                .observed_calls
+                .insert(seq, call);
         }
     }
     let bytes = serde_json::to_vec(&completion)?;
@@ -803,3 +917,121 @@ fn serve_proposal_inner(
 
 #[cfg(test)]
 mod tests;
+
+fn bounded_identifier(value: &str, max: usize) -> String {
+    if value.len() <= max && value.bytes().all(|b| b.is_ascii_lowercase() || b == b'_') {
+        value.into()
+    } else {
+        "unknown".into()
+    }
+}
+fn public_log_tail(text: &str) -> String {
+    let mut out = String::new();
+    for line in text
+        .lines()
+        .rev()
+        .take(16)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+    {
+        let lower = line.to_ascii_lowercase();
+        if [
+            "authorization",
+            "bearer ",
+            "password=",
+            "token=",
+            "secret=",
+            "credential",
+        ]
+        .iter()
+        .any(|s| lower.contains(s))
+        {
+            out.push_str("<redacted-sensitive-log>\n");
+            continue;
+        }
+        for word in line.split_whitespace() {
+            let bare = word.trim_matches(['\'', '"', '(', ')', ',']);
+            if bare.starts_with("https://") || bare.starts_with("http://") {
+                out.push_str(&ato_formation::source::redact_url(bare));
+            } else if bare.starts_with('/')
+                && !bare.starts_with("/app/")
+                && !bare.starts_with("/src/")
+                && !bare.starts_with("/opt/ato/toolchains/")
+            {
+                out.push_str("<host-path>");
+            } else {
+                out.push_str(word);
+            }
+            out.push(' ');
+        }
+        out.push('\n');
+    }
+    while out.len() > 2048 {
+        out.remove(0);
+    }
+    out
+}
+
+fn denied_network(attempt: &Value) -> Vec<ato_formation::requirements::NetworkRequirement> {
+    use ato_formation::requirements::{ExecutionPhase, ExecutionRequirements, NetworkRequirement};
+    let mut refused = std::collections::BTreeSet::new();
+    for report in attempt["exploration_evidence"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|e| e["kind"] == "exploration_network_evidence")
+        .flat_map(|e| e["reports"].as_array().into_iter().flatten())
+    {
+        let Ok(phase) = serde_json::from_value::<ExecutionPhase>(report["phase"].clone()) else {
+            continue;
+        };
+        for denied in report["report"]["refused"].as_array().into_iter().flatten() {
+            let (Some(host), Some(port)) = (denied["target"].as_str(), denied["port"].as_u64())
+            else {
+                continue;
+            };
+            let Ok(port) = u16::try_from(port) else {
+                continue;
+            };
+            let n = NetworkRequirement {
+                phase,
+                host: host.into(),
+                port,
+            };
+            if (ExecutionRequirements {
+                network: vec![n.clone()],
+                authority: vec![],
+            })
+            .validate()
+            .is_ok()
+            {
+                refused.insert(n);
+            }
+        }
+    }
+    refused.into_iter().take(16).collect()
+}
+fn denied_authority(attempt: &Value) -> Vec<ato_formation::requirements::AuthorityRequirement> {
+    use ato_formation::requirements::{AuthorityRequirement, ExecutionRequirements};
+    let mut refused = std::collections::BTreeSet::new();
+    for requirement in attempt["exploration_evidence"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|e| e["kind"] == "exploration_authority_evidence")
+        .flat_map(|e| e["refused"].as_array().into_iter().flatten())
+    {
+        if let Ok(a) = serde_json::from_value::<AuthorityRequirement>(requirement.clone())
+            && (ExecutionRequirements {
+                network: vec![],
+                authority: vec![a.clone()],
+            })
+            .validate()
+            .is_ok()
+        {
+            refused.insert(a);
+        }
+    }
+    refused.into_iter().take(16).collect()
+}

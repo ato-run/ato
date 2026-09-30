@@ -44,6 +44,29 @@ pub fn source_path(path: &str) -> bool {
         })
 }
 
+/// Source-owned secret/config files never enter model context or plan IDs.
+fn credential_path(path: &str) -> bool {
+    path.split('/').any(|part| {
+        let part = part.to_ascii_lowercase();
+        part == ".env"
+            || part.starts_with(".env.")
+            || part.starts_with(".dev.vars")
+            || matches!(
+                part.as_str(),
+                ".ssh"
+                    | ".aws"
+                    | ".azure"
+                    | ".kube"
+                    | ".npmrc"
+                    | ".pypirc"
+                    | "credentials"
+                    | "secrets"
+            )
+            || part.ends_with(".pem")
+            || part.ends_with(".key")
+    })
+}
+
 impl PlanAuthorization {
     pub fn validate(&self) -> Result<(), ProposalError> {
         if self.files.len() > 2048
@@ -51,6 +74,7 @@ impl PlanAuthorization {
             || self.files.iter().any(|(id, file)| {
                 !crate::generation::logical_id(id)
                     || !source_path(&file.path)
+                    || credential_path(&file.path)
                     || !is_sha256(&file.digest)
             })
             || self.toolchains.iter().any(|(name, version)| {
@@ -276,7 +300,7 @@ impl ExecutionPlanProposal {
                 _ => return Err(ProposalError("unsupported_dependency_operation")),
             };
             steps.push(json!({"id":format!("dependencies-{}",steps.len()),"use":"ato.process@1","op":"exec",
-                "argv":argv,"cwd":self.cwd,"network":"dependency-resolution"}));
+                "argv":argv,"cwd":self.cwd,"network":"scoped-dependencies"}));
         }
         for script in &self.build_scripts {
             if self.runtime.name != "node"
@@ -292,8 +316,11 @@ impl ExecutionPlanProposal {
                 .toolchains
                 .get("npm")
                 .ok_or(ProposalError("runtime_toolchain_unavailable"))?;
+            if !runtimes.iter().any(|r| r["name"] == "npm") {
+                runtimes.push(json!({"name":"npm","version":npm}));
+            }
             steps.push(json!({"id":format!("build-{}",steps.len()),"use":"ato.process@1","op":"exec",
-                "argv":[format!("/opt/ato/toolchains/npm/{npm}/bin/npm"),"run",script],"cwd":self.cwd}));
+                "argv":[format!("/opt/ato/toolchains/npm/{npm}/bin/npm"),"run",script],"cwd":self.cwd,"network":"scoped-build"}));
         }
         let mut argv = vec![executable, format!("/app/{entrypoint}")];
         argv.extend(self.argv.iter().cloned());
@@ -324,7 +351,12 @@ impl ExecutionPlanProposal {
         let derivation_ref = derivation
             .derivation_ref()
             .map_err(|_| ProposalError("proposal_canonicalization"))?;
-        let candidate = authorization.candidate(source, derivation_ref.clone());
+        let mut candidate = authorization.candidate(source, derivation_ref.clone());
+        candidate.provisions = derivation
+            .runtimes
+            .iter()
+            .map(|(name, version)| format!("toolchain.{name}.{version}"))
+            .collect();
         Ok((
             CompiledGeneration {
                 capsule_toml,

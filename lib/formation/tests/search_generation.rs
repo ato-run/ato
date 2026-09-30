@@ -212,6 +212,7 @@ fn admitted_d_joins_iteration_decisions_and_events_without_rewriting_frozen_cand
     s.decisions.push(DecisionRecord {
         seq,
         attempt_seq: 1,
+        proposal_seq: 0,
         opened_at_ms: 12,
         default_id: default_id.clone(),
         choices,
@@ -608,6 +609,7 @@ fn exhaustion_cannot_skip_an_open_decision_chosen_inspection_or_stop() {
     s.decisions.push(DecisionRecord {
         seq: 0,
         attempt_seq: 1,
+        proposal_seq: 0,
         opened_at_ms: 0,
         default_id: choices[0].choice_id.clone(),
         choices,

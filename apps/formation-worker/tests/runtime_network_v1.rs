@@ -81,6 +81,7 @@ fn submit(dir: &Path, scratch: &Path) -> Submission {
             decision: None,
             generation: None,
             proposal: None,
+            exploration: None,
         },
         SatisfyBudget::ceilings(4, "first_pass"),
         "search_test",
@@ -145,6 +146,7 @@ fn ticket(submission: &Submission) -> (AttemptTicket, Vec<u8>) {
     std::io::Read::read_to_end(&mut submission.source_file().unwrap(), &mut archive).unwrap();
     (
         AttemptTicket {
+            exploration: None,
             attempt_id: "att_test".to_owned(),
             fence: 1,
             satisfy_id: "sat_test".to_owned(),
@@ -173,6 +175,7 @@ fn ticket(submission: &Submission) -> (AttemptTicket, Vec<u8>) {
 
 fn serve_config(scratch: &Path) -> ServeConfig {
     ServeConfig {
+        exploration: None,
         api: "http://127.0.0.1:9".to_owned(),
         token: "unused".to_owned(),
         work_root: scratch.join("work"),
@@ -1353,6 +1356,7 @@ fn a_search_budget_above_a_ceiling_is_never_sent() {
             decision: None,
             generation: None,
             proposal: None,
+            exploration: None,
         },
         SatisfyBudget {
             max_stored_bytes: MAX_SEARCH_STORED_BYTES + 1,

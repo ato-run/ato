@@ -44,7 +44,16 @@ fn refused(code: &str, message: impl Into<String>) -> Option<AttemptFailure> {
 impl CandidateRealizer for FormationRealizer<'_> {
     fn admit(&self, profile: &RuntimeProfile) -> Option<AttemptFailure> {
         let planned = self.planned;
-        if !planned.derivation.requirements.is_empty() {
+        if !planned.derivation.requirements.is_empty()
+            || planned.derivation.steps.iter().any(|s| {
+                matches!(
+                    s.network,
+                    ato_formation::authoring::StepNetwork::ScopedDependencies
+                        | ato_formation::authoring::StepNetwork::ScopedBuild
+                        | ato_formation::authoring::StepNetwork::ScopedRuntime
+                )
+            })
+        {
             return refused(
                 "exploration_requirement_enforcement_unavailable",
                 "the legacy Formation realizer has no phase-scoped grant broker; host-unrestricted networking cannot satisfy scoped requirements",

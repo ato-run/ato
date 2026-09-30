@@ -510,6 +510,9 @@ struct RuntimeNetworkServeArgs {
     /// Stop after handling this many attempts.
     #[arg(long)]
     max_attempts: Option<u32>,
+    /// External exploration sandbox ceiling as JSON; no production bindings.
+    #[arg(long)]
+    exploration_sandbox: Option<PathBuf>,
 }
 
 /// The build's own identity: what this binary is, not merely which release
@@ -878,6 +881,7 @@ fn form_on_runtime_network(args: FormArgs) -> Result<()> {
             decision: decision_policy.clone(),
             generation: None,
             proposal: None,
+            exploration: None,
         },
         SatisfyBudget {
             max_attempts: u32::try_from(args.max_attempts)
@@ -981,6 +985,10 @@ fn runtime_network_serve(args: RuntimeNetworkServeArgs) -> Result<()> {
         .join("ato/runtime-network");
     ato_formation_worker::runtime_network::serve(
         &ato_formation_worker::runtime_network::ServeConfig {
+            exploration: args
+                .exploration_sandbox
+                .map(|p| -> Result<_> { Ok(serde_json::from_slice(&std::fs::read(p)?)?) })
+                .transpose()?,
             api: args.api,
             token: read_token(&args.token_file)?,
             work_root: args.work_root.unwrap_or_else(|| base.join("work")),

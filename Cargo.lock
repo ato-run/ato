@@ -449,6 +449,7 @@ dependencies = [
  "clap",
  "fs2",
  "libc",
+ "netd",
  "reqwest",
  "serde",
  "serde_jcs",
@@ -694,6 +695,7 @@ version = "0.1.0"
 dependencies = [
  "ato-formation",
  "serde",
+ "serde_jcs",
  "serde_json",
 ]
 

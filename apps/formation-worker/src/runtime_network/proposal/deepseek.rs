@@ -19,6 +19,8 @@ pub const PROMPT: &str = include_str!("prompt.txt");
 /// preregistered evidence; a configuration selects exactly one version.
 pub const PROMPT_VERSION_V2: &str = "ato.formation-candidate-producer-prompt/2";
 pub const PROMPT_V2: &str = include_str!("prompt-v2.txt");
+pub const PROMPT_VERSION_V3: &str = "ato.formation-candidate-producer-prompt/3";
+pub const PROMPT_V3: &str = include_str!("prompt-v3.txt");
 pub fn prompt_sha256() -> String {
     format!("sha256:{:x}", Sha256::digest(PROMPT.as_bytes()))
 }
@@ -26,6 +28,7 @@ pub fn prompt_for(version: &str) -> Option<&'static str> {
     match version {
         PROMPT_VERSION => Some(PROMPT),
         PROMPT_VERSION_V2 => Some(PROMPT_V2),
+        PROMPT_VERSION_V3 => Some(PROMPT_V3),
         _ => None,
     }
 }
@@ -190,7 +193,10 @@ impl DeepSeekCandidateProducer {
         // Serialize once. These exact bytes are both hashed and passed to reqwest.
         let provider_body = serde_json::to_vec(&body).map_err(|_| ErrorClass::MalformedResponse)?;
         let evidence = RequestEvidence {
-            cell: request.search_id.clone(),
+            cell: request.round_seq.map_or_else(
+                || request.search_id.clone(),
+                |seq| format!("{}_r{seq}", request.search_id),
+            ),
             proposal_request_sha256: format!("sha256:{:x}", Sha256::digest(canonical.as_bytes())),
             provider_body_sha256: format!("sha256:{:x}", Sha256::digest(&provider_body)),
             timeout_ms: request.remaining_budget.timeout_ms,
@@ -266,7 +272,10 @@ impl DeepSeekCandidateProducer {
             .next()
             .ok_or(ErrorClass::MalformedResponse)?;
         let evidence = ResponseEvidence {
-            cell: request.search_id.clone(),
+            cell: request.round_seq.map_or_else(
+                || request.search_id.clone(),
+                |seq| format!("{}_r{seq}", request.search_id),
+            ),
             finish_reason: match choice.finish_reason.as_str() {
                 "stop" => FinishReason::Stop,
                 "length" => FinishReason::Length,
@@ -338,7 +347,13 @@ impl CandidateProducer<ProposalRequestV2, GeneralOutput, GeneralFailure>
         request: &ProposalRequestV2,
     ) -> std::result::Result<GeneralOutput, GeneralFailure> {
         let mut provenance = self.identity().unknown_usage();
-        match self.call(request, &mut provenance) {
+        let started = std::time::Instant::now();
+        let result = self.call(request, &mut provenance);
+        if self.config.prompt_version == PROMPT_VERSION_V3 {
+            provenance.latency_ms =
+                Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64);
+        }
+        match result {
             Ok(output) => Ok(GeneralOutput { output, provenance }),
             Err(class) => {
                 // Even across processes, a protocol/infrastructure error cannot

@@ -422,6 +422,13 @@ fn read_derive(value: &Value) -> Result<Vec<StepDraft>, AuthoringError> {
                     ));
                 }
                 Some(Value::String(value)) if value == "denied" => StepNetwork::Denied,
+                Some(Value::String(value)) if value == "scoped-dependencies" => {
+                    StepNetwork::ScopedDependencies
+                }
+                Some(Value::String(value)) if value == "scoped-build" => StepNetwork::ScopedBuild,
+                Some(Value::String(value)) if value == "scoped-runtime" => {
+                    StepNetwork::ScopedRuntime
+                }
                 Some(Value::String(value)) if value == "dependency-resolution" => {
                     StepNetwork::DependencyResolution
                 }

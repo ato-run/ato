@@ -206,6 +206,9 @@ pub enum StepNetwork {
     Denied,
     /// Resolve dependencies from the network.
     DependencyResolution,
+    ScopedDependencies,
+    ScopedBuild,
+    ScopedRuntime,
 }
 
 impl StepNetwork {

@@ -216,6 +216,16 @@ pub fn evaluate(bytes: &[u8]) -> Decision {
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum SearchRequest {
+    AssembleExplorationSubmission {
+        state: Box<ato_formation::search::SearchStateV1>,
+        capsule_toml: String,
+        attempt_id: String,
+        receipt: Box<ato_formation::verify::ContractVerificationReceipt>,
+    },
+    SelectExplorationSubmission {
+        state: Box<ato_formation::search::SearchStateV1>,
+        submissions: Vec<ato_formation::exploration::ExplorationSubmission>,
+    },
     /// Strict batch bytes are validated by Rust, never canonicalized by TS.
     CompileProposals {
         frozen: Box<ato_formation::search::FrozenSearchV1>,
@@ -256,6 +266,77 @@ pub fn evaluate_search(bytes: &[u8]) -> Value {
         let request: SearchRequest =
             serde_json::from_slice(bytes).map_err(|_| "search_input_invalid".to_owned())?;
         match request {
+            SearchRequest::AssembleExplorationSubmission {
+                mut state,
+                capsule_toml,
+                attempt_id,
+                receipt,
+            } => {
+                use ato_formation::{
+                    authoring::{BindingContext, bind},
+                    capsule_toml::parse_capsule_toml,
+                    exploration::{ExplorationSubmission, SubmissionStatus},
+                };
+                state.validate().map_err(|e| e.to_string())?;
+                let source = state
+                    .frozen
+                    .initial_source
+                    .as_ref()
+                    .ok_or("exploration_source_required")?;
+                let (contract, derivation) = bind(
+                    &parse_capsule_toml(&capsule_toml).map_err(|e| e.to_string())?,
+                    &BindingContext {
+                        source_closure_ref: &source.closure_ref,
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+                let derivation_ref = derivation.derivation_ref().map_err(|e| e.to_string())?;
+                let matched = state
+                    .attempts
+                    .iter_mut()
+                    .find(|a| {
+                        a.attempt_id == attempt_id
+                            && a.derivation_ref == derivation_ref
+                            && a.status == DurableAttemptStatus::Pass
+                            && a.record == Some(ExecutionRecord::Finished)
+                    })
+                    .ok_or("submission_attempt_mismatch")?;
+                // Local validation only. Persisted acceptance comes ONLY from a
+                // saved, revalidated submission; this does not mutate a row.
+                matched.route_accepted = true;
+                let submission = ExplorationSubmission {
+                    status: SubmissionStatus::KReachedAwaitingAssessment,
+                    contract,
+                    contract_ref: state.frozen.contract_ref.clone(),
+                    derivation,
+                    derivation_ref,
+                    attempt_id,
+                    receipt: *receipt,
+                };
+                submission.validate(&state).map_err(|e| e.to_string())?;
+                Ok(
+                    serde_json::json!({"status":"exploration_submission_ready","submission_json":serde_jcs::to_string(&submission).map_err(|e| e.to_string())?}),
+                )
+            }
+            SearchRequest::SelectExplorationSubmission { state, submissions } => {
+                state.validate().map_err(|e| e.to_string())?;
+                if submissions.len() > 256 {
+                    return Err("exploration_submission_bounds".into());
+                }
+                let mut best: Option<ato_formation::exploration::ExplorationSubmission> = None;
+                for submission in submissions {
+                    submission.validate(&state).map_err(|e| e.to_string())?;
+                    if best
+                        .as_ref()
+                        .is_none_or(|old| old.admits_reduction(&submission.derivation).is_ok())
+                    {
+                        best = Some(submission);
+                    }
+                }
+                Ok(
+                    serde_json::json!({"status":"exploration_submission_selected","submission":best}),
+                )
+            }
             SearchRequest::CompileProposals {
                 frozen,
                 base_recipes,
@@ -634,6 +715,123 @@ mod proposal_tests {
             let result = evaluate_search(&serde_json::to_vec(&r).unwrap());
             assert_eq!(result["status"], "rejected");
             assert!(!result.to_string().contains("do-not-echo"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod exploration_submission_tests {
+    use super::*;
+    use ato_formation::{
+        authoring::{BindingContext, bind},
+        capsule_toml::parse_capsule_toml,
+        exploration::{ExplorationPolicy, FormationConfig},
+        requirements::ExecutionRequirements,
+        search::{DurableAttemptStatus, ExecutionRecord, SearchStateV1},
+        verify::{
+            ContractVerificationReceipt, RuntimeHttpObservation, RuntimeObservation, verify_runtime,
+        },
+    };
+    use serde_json::json;
+    const BASE: &str = include_str!("../../../lib/formation/tests/fixtures/proposal-python.toml");
+    fn request() -> Value {
+        // Synthetic evidence is only for ABI rejection/selection tests.
+        let mut state: SearchStateV1 = serde_json::from_str(include_str!(
+            "../../../lib/formation/tests/fixtures/search-state/d1-failed.json"
+        ))
+        .unwrap();
+        let closure = format!("sha256:{}", "a".repeat(64));
+        let (k, d) = bind(
+            &parse_capsule_toml(BASE).unwrap(),
+            &BindingContext {
+                source_closure_ref: &closure,
+            },
+        )
+        .unwrap();
+        state.frozen.base_contract_ref = k.contract_ref().unwrap();
+        state.frozen.contract_ref = state.frozen.base_contract_ref.clone();
+        state.frozen.base_contract = k.clone();
+        state.frozen.candidates.truncate(1);
+        state.frozen.candidates[0].derivation_ref = d.derivation_ref().unwrap();
+        state.frozen.candidates[0].materialization =
+            ato_formation::search::CandidateInput::Source {
+                closure_ref: closure.clone(),
+                archive_digest: closure.clone(),
+            };
+        state.frozen.initial_source = Some(ato_formation::search::InitialSource {
+            closure_ref: closure.clone(),
+            archive_digest: closure.clone(),
+        });
+        state.frozen.policy.proposal=Some(serde_json::from_value(json!({"modifiable_derivation_refs":[],"source_domain":{"entrypoints":{"entry":"broken.py"},"modules":{}},"policy":{"max_proposal_rounds":1,"max_proposals":1,"timeout_ms":5000,"allow_source_text":false,"max_source_bytes":0}})).unwrap());
+        state.frozen.policy.exploration = Some(ExplorationPolicy {
+            formation: FormationConfig::default(),
+            ceiling: ExecutionRequirements::default(),
+            max_provider_calls: 3,
+            max_inspections: 3,
+            max_provider_cost_usd_micros: 100000,
+            max_provider_input_tokens: 90000,
+            max_provider_output_tokens: 6144,
+            max_network_transfer_bytes: 1048576,
+            max_network_transfer_bytes_per_attempt: 524288,
+        });
+        state.source_archive_bytes = Some(64);
+        let a = &mut state.attempts[0];
+        a.derivation_ref = d.derivation_ref().unwrap();
+        a.status = DurableAttemptStatus::Pass;
+        a.record = Some(ExecutionRecord::Finished);
+        a.failure_code = None;
+        let observations = RuntimeObservation {
+            input_refs: [("workspace".into(), closure)].into(),
+            http: vec![RuntimeHttpObservation::from_response(
+                "app.http", "GET", "/", 200, b"ok",
+            )],
+            instance_snapshot_ref: None,
+        };
+        let mut receipt = ContractVerificationReceipt::from_attempt(
+            &state.frozen.contract_ref,
+            &a.derivation_ref,
+            &k,
+            &observations,
+            verify_runtime(&k, &observations),
+        );
+        receipt.execution = Some(
+            serde_json::from_value(json!({"realization":"process","attempt_id":a.attempt_id}))
+                .unwrap(),
+        );
+        json!({"operation":"assemble_exploration_submission","state":state,"capsule_toml":BASE,"attempt_id":"attempt-d1","receipt":receipt})
+    }
+    #[test]
+    fn same_k_fresh_receipt_submission_has_no_normal_authorization() {
+        let r = request();
+        let out = evaluate_search(&serde_json::to_vec(&r).unwrap());
+        assert_eq!(out["status"], "exploration_submission_ready", "{out}");
+        let submitted: Value =
+            serde_json::from_str(out["submission_json"].as_str().unwrap()).unwrap();
+        assert_eq!(submitted["status"], "k_reached_awaiting_assessment");
+        assert_eq!(submitted["contract"], r["state"]["frozen"]["base_contract"]);
+        assert_eq!(submitted["receipt"], r["receipt"]);
+        for key in ["approved", "grant", "ceiling", "published", "deployed"] {
+            assert!(submitted.get(key).is_none());
+        }
+        let mut state = r["state"].clone();
+        state["attempts"][0]["route_accepted"] = json!(true);
+        let selected=evaluate_search(&serde_json::to_vec(&json!({"operation":"select_exploration_submission","state":state,"submissions":[submitted.clone()]})).unwrap());
+        assert_eq!(selected["submission"], submitted);
+    }
+    #[test]
+    fn unverified_reduced_or_stale_receipt_is_never_submitted() {
+        for mode in 0..4 {
+            let mut r = request();
+            match mode {
+                0 => r["receipt"]["execution"]["attempt_id"] = json!("previous-attempt"),
+                1 => r["receipt"]["fully_satisfied"] = json!(false),
+                2 => r["state"]["attempts"][0]["status"] = json!("fail"),
+                _ => r["receipt"]["derivation_ref"] = json!(format!("sha256:{}", "c".repeat(64))),
+            }
+            assert_eq!(
+                evaluate_search(&serde_json::to_vec(&r).unwrap())["status"],
+                "rejected"
+            );
         }
     }
 }

@@ -59,6 +59,7 @@ fn opened(s: &mut SearchStateV1, at: u64) -> (Vec<Choice>, String) {
     s.decisions.push(DecisionRecord {
         seq,
         attempt_seq: s.attempts.len() as u64,
+        proposal_seq: 0,
         opened_at_ms: at,
         default_id: default_id.clone(),
         choices: choices.clone(),

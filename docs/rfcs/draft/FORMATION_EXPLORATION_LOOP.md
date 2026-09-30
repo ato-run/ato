@@ -67,3 +67,19 @@ Then freeze a new 100-app arm using the unchanged cohort and historical ledgers.
 Report additional PASS, actual provider invocation rate, authority recovery,
 cost per additional PASS, and any budget/adapter limits. No deployment or remote
 migration is included. The pre-existing residual model budget is not reset.
+
+## Implementation checkpoint (not completion)
+
+Implemented locally: canonical phase/resource requirements, frozen positive round
+limits, durable round/provider history, cross-round decision fences, bounded
+execution evidence context, process/dependency typed compiler, D-bound unapproved
+submission validation/selection, and a netd bridge for isolated dependency/build
+steps. The Runtime refuses unenforceable requirements rather than using host
+networking. D1 network reservations are fully charged at claim and accumulate
+across rounds/continuations; gate phases share the attempt reservation. Actual
+transfer telemetry and conservative reservation charges are separate.
+
+Still pending: source-inspection requests, isolated state and runtime-egress
+lowering, source-to-OCI proposal integration, actual Linux/provider acceptance,
+and the new 100-app arm. Unit/codec/migration tests do not establish these gates.
+Legacy one-round searches and their canonical fixture bytes remain unchanged.
