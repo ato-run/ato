@@ -825,6 +825,19 @@ fn default_next(
     let l = &s.frozen.policy.budget;
     if now_ms >= s.deadline_ms
         || s.frozen.policy.exploration.as_ref().is_some_and(|p| {
+            let settled = s.proposal_history.len()
+                + usize::from(
+                    s.proposal_round
+                        .as_ref()
+                        .is_some_and(|r| r.outcome.is_some()),
+                );
+            // The receiver also fences round opening by this independent
+            // provider cap. Stop before proposing an impossible CAS insert,
+            // without changing a frozen limit or interrupting an open round.
+            settled >= p.max_provider_calls as usize
+                && settled < p.formation.max_rounds.get() as usize
+        })
+        || s.frozen.policy.exploration.as_ref().is_some_and(|p| {
             p.max_network_transfer_bytes > 0
                 && available(
                     p.max_network_transfer_bytes,
