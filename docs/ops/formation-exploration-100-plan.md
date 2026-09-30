@@ -6,7 +6,7 @@ licenses and source-bound StaticFiles K templates are reused. The previously
 authorized explicit K for 81 sources is still a different entry condition from
 baseline inference. HTTP 200 alone is not functional acceptance.
 
-Implementation pin: `6d5242b9acba719d2e3fe0423525e902d86849de`.
+Implementation pin: `7552fcfe714f26ed44bf0b7abae74b61d3651c9d`.
 Receiver pin: `6a7fd9dd838ba306a260992dcf82de03233bbd20`.
 Rust receipt authority source: `64e03d0eb063eae5a08f516e629d53e26e824414`.
 Exact binary/receiver hashes and frozen source identities are in the JSON plan.
@@ -56,3 +56,7 @@ round and original deadline; it does not create a fresh search budget.
 Restart locator and authenticated HTTP readiness were repaired before any model
 reservation/send. Prior journals and original round/deadline remain unchanged.
 The preflight helper remains the byte-identical revision-2 helper.
+
+The pilot reproduced a sender-only `proposal_claim_invalid` HTTP 400. Claimants
+now use the existing UUID schema. No model send/reservation preceded this repair;
+three expired pilot rounds remain in their original ledgers.
