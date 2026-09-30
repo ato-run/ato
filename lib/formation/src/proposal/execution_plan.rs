@@ -42,7 +42,8 @@ pub fn source_inspection_priority(path: &str) -> (u8, usize) {
             "__main__.py" | "main.py" | "server.py" | "server.js" | "server.mjs" | "index.js"
             | "app.py" | "main.js" => 2,
             "configuration.mjs" | "config.mjs" | "configuration.js" | "config.js"
-            | "settings.py" => 3,
+            | "settings.py" | "gulpfile.js" | "gruntfile.js" | "vite.config.js"
+            | "vite.config.ts" | "webpack.config.js" | "rollup.config.js" => 3,
             "package-lock.json" | "requirements.txt" => 4,
             "dockerfile" => 5,
             _ if name.ends_with(".py")
