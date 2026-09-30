@@ -6,9 +6,9 @@ licenses and source-bound StaticFiles K templates are reused. The previously
 authorized explicit K for 81 sources is still a different entry condition from
 baseline inference. HTTP 200 alone is not functional acceptance.
 
-Implementation pin: `64e03d0eb063eae5a08f516e629d53e26e824414`.
-Receiver pin: `775c52f3fc79539bfd701ec53612367d463a6ab0`.
-Rust receipt authority source: `32903a85a6fe1711a68f933475354a5d63a17714`.
+Implementation pin: `6d5242b9acba719d2e3fe0423525e902d86849de`.
+Receiver pin: `6a7fd9dd838ba306a260992dcf82de03233bbd20`.
+Rust receipt authority source: `64e03d0eb063eae5a08f516e629d53e26e824414`.
 Exact binary/receiver hashes and frozen source identities are in the JSON plan.
 No implementation, prompt, ceiling or model change is allowed during the 100 arm.
 
@@ -52,3 +52,7 @@ Pilot preregistration revision: source-context canonical ordering was repaired b
 any model reservation or send. The prior plan and failed infrastructure evidence
 are preserved. Continuation reopens the same search/journals and keeps its consumed
 round and original deadline; it does not create a fresh search budget.
+
+Restart locator and authenticated HTTP readiness were repaired before any model
+reservation/send. Prior journals and original round/deadline remain unchanged.
+The preflight helper remains the byte-identical revision-2 helper.
