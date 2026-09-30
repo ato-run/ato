@@ -27,6 +27,7 @@ impl Default for FormationConfig {
 #[serde(deny_unknown_fields)]
 pub struct ExplorationPolicy {
     /// Effective config captured before execution, never re-read on restart.
+    #[serde(default)]
     pub formation: FormationConfig,
     pub ceiling: ExecutionRequirements,
     pub max_provider_calls: u32,
@@ -34,6 +35,14 @@ pub struct ExplorationPolicy {
     pub max_provider_cost_usd_micros: u64,
     pub max_provider_input_tokens: u64,
     pub max_provider_output_tokens: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub max_network_transfer_bytes: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub max_network_transfer_bytes_per_attempt: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 impl ExplorationPolicy {
@@ -43,6 +52,9 @@ impl ExplorationPolicy {
             || self.max_provider_cost_usd_micros == 0
             || self.max_provider_input_tokens == 0
             || self.max_provider_output_tokens == 0
+            || self.max_network_transfer_bytes_per_attempt > self.max_network_transfer_bytes
+            || (!self.ceiling.network.is_empty()
+                && self.max_network_transfer_bytes_per_attempt == 0)
         {
             return Err(SearchError("exploration_budget_invalid"));
         }
@@ -62,6 +74,8 @@ pub enum SubmissionStatus {
 #[serde(deny_unknown_fields)]
 pub struct ExplorationSubmission {
     pub status: SubmissionStatus,
+    pub contract: crate::authoring::BoundContract,
+    pub contract_ref: String,
     pub derivation: BoundDerivation,
     pub derivation_ref: String,
     pub attempt_id: String,
@@ -80,6 +94,11 @@ impl ExplorationSubmission {
             .requirements
             .within(&policy.ceiling)
             .map_err(|e| SearchError(e.0))?;
+        if self.contract != state.frozen.base_contract
+            || self.contract_ref != state.frozen.contract_ref
+        {
+            return Err(SearchError("submission_contract_mismatch"));
+        }
         if self
             .derivation
             .derivation_ref()

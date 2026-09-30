@@ -39,6 +39,7 @@ impl ProviderIdentity {
                 output_tokens: None,
             },
             estimated_cost_usd_micros: None,
+            latency_ms: None,
         }
     }
 }
@@ -59,6 +60,8 @@ pub struct Provenance {
     pub usage: Usage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimated_cost_usd_micros: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u64>,
 }
 impl Provenance {
     pub fn validate(&self, expected: &ProviderIdentity, success: bool) -> Result<()> {
@@ -79,7 +82,8 @@ impl Provenance {
             [
                 self.usage.input_tokens,
                 self.usage.output_tokens,
-                self.estimated_cost_usd_micros
+                self.estimated_cost_usd_micros,
+                self.latency_ms
             ]
             .into_iter()
             .flatten()

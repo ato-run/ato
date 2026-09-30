@@ -8,6 +8,7 @@ fn main() -> Result<()> {
         "usage: proposal_runtime API TOKEN_FILE WORK OUT SHIM"
     );
     serve(&ServeConfig {
+        exploration: None,
         api: a[1].clone(),
         token: std::fs::read_to_string(&a[2]).context("token file")?,
         work_root: (&a[3]).into(),

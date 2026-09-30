@@ -107,6 +107,8 @@ fn admit(s: &mut SearchStateV1) {
         expires_at_ms,
         outcome: Some(ProposalRoundOutcome::Completed),
         candidates,
+        derivations: vec![],
+        diagnostics: vec![],
     });
 }
 fn placements(s: &SearchStateV1) -> Vec<Placement> {
@@ -449,6 +451,8 @@ fn open_round_waits_and_expires_without_fabricating_attempt_evidence() {
         expires_at_ms: 5010,
         outcome: None,
         candidates: vec![],
+        derivations: vec![],
+        diagnostics: vec![],
     });
     assert_eq!(
         decide_next(&s, &[], 11).unwrap(),
@@ -476,6 +480,8 @@ fn provider_error_and_timeout_exhaust_without_k_failure_or_retry() {
             expires_at_ms: 5010,
             outcome: Some(outcome),
             candidates: vec![],
+            derivations: vec![],
+            diagnostics: vec![],
         });
         assert_eq!(
             decide_next(&s, &[], 11).unwrap(),
@@ -649,6 +655,7 @@ fn finite_decision_can_select_second_generated_d_but_only_issues_an_attempt() {
     s.decisions.push(DecisionRecord {
         seq,
         attempt_seq: s.attempts.len() as u64,
+        proposal_seq: 0,
         opened_at_ms: 11,
         default_id,
         choices,
@@ -1006,6 +1013,8 @@ fn b10_zero_known_d_unsupported_terminates_once_without_k_evidence() {
         expires_at_ms: 5010,
         outcome: Some(ProposalRoundOutcome::Completed),
         candidates: vec![],
+        derivations: vec![],
+        diagnostics: vec![],
     });
     assert_eq!(
         decide_next(&s, &[], 11).unwrap(),
@@ -1025,6 +1034,8 @@ fn b11_generated_first_d_uses_same_deterministic_and_decision_frontier() {
         expires_at_ms: 5010,
         outcome: Some(ProposalRoundOutcome::Completed),
         candidates: candidates.iter().map(|c| c.candidate().clone()).collect(),
+        derivations: vec![],
+        diagnostics: vec![],
     });
     assert_eq!(s.candidates().count(), 2);
     assert!(
@@ -1184,6 +1195,8 @@ fn zero_known_d_respects_stop_deadline_budgets_and_single_round_error_outcomes()
             expires_at_ms: 5010,
             outcome: Some(outcome),
             candidates: vec![],
+            derivations: vec![],
+            diagnostics: vec![],
         });
         assert_eq!(
             decide_next(&s, &[], 11).unwrap(),
@@ -1509,6 +1522,7 @@ fn open_adaptive_point(s: &mut SearchStateV1) {
     s.decisions.push(DecisionRecord {
         seq,
         attempt_seq: s.attempts.len() as u64,
+        proposal_seq: 0,
         opened_at_ms: 10,
         default_id,
         choices,
@@ -1593,6 +1607,8 @@ fn adaptive_fallback_releases_proposal_then_next_generated_decision() {
             expires_at_ms: 5012,
             outcome: Some(ProposalRoundOutcome::Completed),
             candidates: candidates.iter().map(|c| c.candidate().clone()).collect(),
+            derivations: vec![],
+            diagnostics: vec![],
         });
         let SearchAction::OpenDecision { seq, choices, .. } =
             decide_next(&s, &placements(&s), 13).unwrap()

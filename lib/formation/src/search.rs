@@ -134,6 +134,10 @@ pub struct BudgetCounters {
     /// provider decision budget (always equal to the recorded points).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub decisions_used: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub network_transfer_used: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub network_transfer_reserved: u64,
 }
 fn is_zero(n: &u64) -> bool {
     *n == 0
@@ -552,6 +556,20 @@ impl SearchStateV1 {
             return Err(SearchError("schema_or_bounds"));
         }
         self.frozen.canonical_bytes()?;
+        let network_cap = self
+            .frozen
+            .policy
+            .exploration
+            .as_ref()
+            .map_or(0, |p| p.max_network_transfer_bytes);
+        if self
+            .budget
+            .network_transfer_used
+            .checked_add(self.budget.network_transfer_reserved)
+            .is_none_or(|spent| spent > network_cap)
+        {
+            return Err(SearchError("exploration_network_accounting_invalid"));
+        }
         self.validate_generation()?;
         if !self.proposal_history.is_empty() && self.frozen.policy.exploration.is_none() {
             return Err(SearchError("proposal_history_without_exploration"));
@@ -600,6 +618,27 @@ impl SearchStateV1 {
             }
             crate::proposal::validate_candidate_scope(&self.frozen, &round.candidates)
                 .map_err(|e| SearchError(e.0))?;
+        }
+        if self.frozen.policy.exploration.is_some() {
+            for round in self
+                .proposal_history
+                .iter()
+                .chain(self.proposal_round.iter())
+            {
+                if round.derivations.len() != round.candidates.len()
+                    || round
+                        .derivations
+                        .iter()
+                        .zip(&round.candidates)
+                        .any(|(d, c)| d.derivation_ref().ok().as_ref() != Some(&c.derivation_ref))
+                    || round.diagnostics.len() > 4
+                    || round.diagnostics.iter().any(|d| {
+                        d.len() > 96 || !d.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+                    })
+                {
+                    return Err(SearchError("proposal_derivation_evidence_invalid"));
+                }
+            }
         }
         if self.proposal_history.iter().any(|r| r.outcome.is_none()) {
             return Err(SearchError("proposal_history_unsettled"));
@@ -750,13 +789,25 @@ fn default_next(
     let b = &s.budget;
     let l = &s.frozen.policy.budget;
     if now_ms >= s.deadline_ms
+        || s.frozen.policy.exploration.as_ref().is_some_and(|p| {
+            p.max_network_transfer_bytes > 0
+                && available(
+                    p.max_network_transfer_bytes,
+                    b.network_transfer_used,
+                    b.network_transfer_reserved,
+                ) == 0
+        })
         || available(l.max_attempts, b.attempts_used, b.attempts_reserved) == 0
         || available(l.max_expanded_bytes, b.expanded_used, b.expanded_reserved) == 0
         || (s.frozen.policy.proposal.is_some()
             && available(l.max_stored_bytes, b.stored_used, b.stored_reserved) == 0)
     {
         return Ok(finish(if passed {
-            Termination::Verified
+            if s.frozen.policy.exploration.is_some() {
+                Termination::Submitted
+            } else {
+                Termination::Verified
+            }
         } else {
             Termination::BudgetExhausted
         }));
@@ -785,6 +836,42 @@ fn default_next(
             }
         });
     }
+    if s.frozen.policy.exploration.is_some()
+        && let Some(round) = &s.proposal_round
+    {
+        if round.outcome.is_some()
+            && !round.candidates.is_empty()
+            && round.candidates.iter().all(|c| {
+                s.attempts
+                    .iter()
+                    .any(|a| a.derivation_ref == c.derivation_ref)
+            })
+            && round.candidates.iter().all(|c| {
+                s.proposal_history.iter().any(|r| {
+                    r.candidates
+                        .iter()
+                        .any(|old| old.derivation_ref == c.derivation_ref)
+                })
+            })
+        {
+            return Ok(finish(if passed {
+                Termination::Submitted
+            } else {
+                Termination::NoProgress
+            }));
+        }
+        if round
+            .diagnostics
+            .iter()
+            .any(|d| d == "exploration_authority_exceeded")
+        {
+            return Ok(finish(if passed {
+                Termination::Submitted
+            } else {
+                Termination::ExplorationAuthorityExceeded
+            }));
+        }
+    }
     for d in s.candidates() {
         // Once K is reached, additional attempts belong to reduction rounds,
         // not untried alternatives from the original known-D domain.
@@ -796,6 +883,16 @@ fn default_next(
                 .any(|known| known.derivation_ref == d.derivation_ref)
         {
             continue;
+        }
+        if passed && let Some(submitted) = &s.exploration_submission {
+            let proposed = s.proposal_round.as_ref().and_then(|r| {
+                r.derivations
+                    .iter()
+                    .find(|p| p.derivation_ref().ok().as_deref() == Some(&d.derivation_ref))
+            });
+            if proposed.is_none_or(|p| submitted.admits_reduction(p).is_err()) {
+                continue;
+            }
         }
         let history: Vec<_> = s
             .attempts
@@ -818,7 +915,11 @@ fn default_next(
                 > available(l.max_transfer_bytes, b.transfer_used, b.transfer_reserved)
             {
                 return Ok(finish(if passed {
-                    Termination::Verified
+                    if s.frozen.policy.exploration.is_some() {
+                        Termination::Submitted
+                    } else {
+                        Termination::Verified
+                    }
                 } else {
                     Termination::BudgetExhausted
                 }));
@@ -841,6 +942,9 @@ fn default_next(
         }
         // A missing Runtime is not a failed Derivation, even after restart.
         if history.is_empty() {
+            if s.frozen.policy.exploration.is_some() {
+                continue;
+            }
             return Ok(SearchAction::WaitForRuntime {
                 derivation_ref: d.derivation_ref.clone(),
             });

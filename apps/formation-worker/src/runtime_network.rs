@@ -19,6 +19,8 @@
 //! refs, environment, effects or platform do not hold, and attests what it
 //! established. The coordinator decides fallback from that attestation.
 
+mod exploration;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -203,6 +205,8 @@ pub struct SatisfyPolicy {
     pub generation: Option<ato_formation::generation::GenerationPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposal: Option<ato_formation::proposal::ProposalAuthorization>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exploration: Option<ato_formation::exploration::ExplorationPolicy>,
 }
 
 /// The budget of the whole search the request belongs to (ADR-031). The
@@ -344,9 +348,28 @@ pub struct AttemptTicket {
     pub browser_contract: Option<BrowserContractV0>,
     pub bindings: BTreeMap<String, String>,
     pub network: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exploration: Option<ExplorationTicket>,
     /// This attempt's caps. A ticket without them is not one this Runtime
     /// runs: it would have nothing to hold the attempt to.
     pub resource_budget: TicketResourceBudget,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExplorationTicket {
+    pub search_id: String,
+    pub ceiling: ato_formation::requirements::ExecutionRequirements,
+    pub network_transfer_bytes: u64,
+}
+
+/// Operator configuration, read once at worker start and never projected as
+/// normal user authority. Tickets can narrow this ceiling, never expand it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExplorationSandbox {
+    pub ceiling: ato_formation::requirements::ExecutionRequirements,
+    pub max_network_transfer_bytes_per_attempt: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1507,6 +1530,7 @@ pub struct ServeConfig {
     pub poll: Duration,
     /// Handle at most this many tickets, then return.
     pub max_tickets: Option<u32>,
+    pub exploration: Option<ExplorationSandbox>,
 }
 
 /// Join the Runtime Network: advertise, report availability, and execute the
@@ -1914,9 +1938,42 @@ fn execute_planned_ticket(
         );
     }
 
-    let network = match ticket.network.as_str() {
-        "dependency-resolution" => NetworkPolicy::DependencyResolution,
-        _ => NetworkPolicy::Denied,
+    let scoped = ticket
+        .exploration
+        .as_ref()
+        .map(|exploration| {
+            exploration::ScopedGates::start(
+                exploration,
+                config.exploration.as_ref(),
+                &planned.derivation.requirements,
+                &attempt_root.join("network"),
+            )
+        })
+        .transpose();
+    let scoped = match scoped {
+        Ok(scoped) => scoped,
+        Err(error) => {
+            let code = error.to_string();
+            return refused_after_expansion(
+                attested.clone(),
+                if code.starts_with("exploration_") {
+                    code.split(':')
+                        .next()
+                        .unwrap_or("exploration_admission_failed")
+                } else {
+                    "exploration_admission_failed"
+                },
+                &code,
+            );
+        }
+    };
+    let network = if scoped.is_some() {
+        NetworkPolicy::Scoped
+    } else {
+        match ticket.network.as_str() {
+            "dependency-resolution" => NetworkPolicy::DependencyResolution,
+            _ => NetworkPolicy::Denied,
+        }
     };
     // A Runtime Network attempt is never verified outside the verifier
     // sandbox, whatever the worker was started with.
@@ -1932,6 +1989,36 @@ fn execute_planned_ticket(
             budget: Default::default(),
         });
     let spec = planned.attempt_spec();
+    let builder = LocalAttemptExecutor {
+        shim: config.shim.clone(),
+        network,
+        limits: BuildLimits::default(),
+    };
+    let legacy = FormationRealizer {
+        planned: &planned,
+        source_root: &frozen.root,
+        builder: &builder,
+        shim: &config.shim,
+        network,
+    };
+    let exploring = ticket
+        .exploration
+        .as_ref()
+        .zip(scoped.as_ref())
+        .map(
+            |(grant, gates)| ato_runtime_attempt::exploration_realizer::ExplorationRealizer {
+                planned: &planned,
+                source_root: &frozen.root,
+                builder: &builder,
+                shim: &config.shim,
+                ceiling: &grant.ceiling,
+                gates: &gates.sockets,
+            },
+        );
+    let realizer: &dyn ato_runtime_attempt::realize::CandidateRealizer = exploring
+        .as_ref()
+        .map(|r| r as &dyn ato_runtime_attempt::realize::CandidateRealizer)
+        .unwrap_or(&legacy);
     let outcome = run_reserved_attempt(
         &AttemptRequest {
             // Every attempt of one satisfy request spends from it: a
@@ -1945,7 +2032,14 @@ fn execute_planned_ticket(
             runtime_id: &ticket.runtime_id,
             profile: &local::probe_local_runtime(),
             // A ticket runs unattended, and may be retried elsewhere.
-            authorization: EffectAuthorization::Unattended,
+            authorization: ticket
+                .exploration
+                .as_ref()
+                .map(|grant| EffectAuthorization::Exploration {
+                    derivation_ref: &ticket.derivation_ref,
+                    grant: &grant.ceiling,
+                })
+                .unwrap_or(EffectAuthorization::Unattended),
             network,
             browser: browser.as_ref(),
             attempt_root,
@@ -1955,17 +2049,7 @@ fn execute_planned_ticket(
             receipt: ReceiptContext::formation(),
             interrupt: None,
         },
-        &FormationRealizer {
-            planned: &planned,
-            source_root: &frozen.root,
-            builder: &LocalAttemptExecutor {
-                shim: config.shim.clone(),
-                network,
-                limits: BuildLimits::default(),
-            },
-            shim: &config.shim,
-            network,
-        },
+        realizer,
         Ok(permit),
     );
     attested.execution_started = outcome.execution_started();
@@ -2021,6 +2105,35 @@ fn execute_planned_ticket(
     };
 
     let mut report = attempt_report(ticket, &attempt, attested, materialization_ref, None, usage);
+    if let Some(gates) = scoped.as_ref() {
+        report.verifier_receipts.push(gates.evidence());
+    }
+    if ticket.exploration.is_some()
+        && report
+            .failure
+            .as_ref()
+            .is_some_and(|f| f.code == "authority_denied")
+    {
+        use ato_formation::requirements::{
+            AuthorityRequirement, ExecutionPhase, ResourceOperation,
+        };
+        let denied = planned
+            .derivation
+            .ports
+            .iter()
+            .map(|p| AuthorityRequirement {
+                phase: ExecutionPhase::Runtime,
+                protocol: p.protocol.clone(),
+                resource: p.id.clone(),
+                operation: ResourceOperation::Bind,
+            })
+            .filter(|a| !planned.derivation.requirements.authority.contains(a))
+            .collect::<Vec<_>>();
+        report
+            .verifier_receipts
+            .push(serde_json::json!({"kind":"exploration_authority_evidence","refused":denied}));
+    }
+
     if let Some(publisher) = publisher
         && report.outcome == "pass"
     {
@@ -2353,6 +2466,7 @@ impl Client {
                     decision: None,
                     generation: None,
                     proposal: None,
+                    exploration: None,
                 },
                 budget,
             },
