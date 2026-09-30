@@ -54,6 +54,11 @@
       "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/vikunja-prereg/.tmp/exploration/ci-a63-failed.log",
       "bytes": 169563,
       "sha256": "1a0173344ca25057252067d5bf77edfcf3fa8e4a350838584912e3e43e97f59a"
+    },
+    {
+      "path": "/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.tmp/vikunja-prereg/.tmp/exploration/ci-b710-failed.log",
+      "bytes": 169232,
+      "sha256": "674be926980d67dbe08dc8ca8d31cd51945d287a4cbd6e807b84a877a18b595c"
     }
   ],
   "head_ci_history": [
@@ -62,13 +67,20 @@
       "Ubuntu": "PASS",
       "Windows": "same Unix API failures present at exact-base CI",
       "macOS": "one process activation failure; local exact test head3/base1 all PASS; not base-reproduced FAIL"
+    },
+    {
+      "sha": "a63a949b346d81d9efb910b8b50a15b1ab22b910",
+      "ato_run": 36723025417,
+      "Ubuntu": "PASS",
+      "Windows": "same unchanged browser_sandbox.rs Unix API failure reproduced at exact-base CI",
+      "macOS": "same a_process_run_is_owned_by_its_run_until_stopped activation failure as earlier CI; relevant Rust code unchanged since local head3/base1 PASS checks; not a base-reproduced FAIL"
     }
   ],
   "head_ci": {
-    "sha": "a63a949b346d81d9efb910b8b50a15b1ab22b910",
-    "ato_run": 36723025417,
+    "sha": "b710e675ab1518de5f1314b263b500fdaf0262d9",
+    "ato_run": 36735261733,
     "Ubuntu": "PASS",
     "Windows": "same unchanged browser_sandbox.rs Unix API failure reproduced at exact-base CI",
-    "macOS": "same a_process_run_is_owned_by_its_run_until_stopped activation failure as earlier CI; relevant Rust code unchanged since local head3/base1 PASS checks; not a base-reproduced FAIL"
+    "macOS": "same process activation failure; local head3/base1 PASS; cause not established and not base-reproduced FAIL; CI remains red"
   }
 }
