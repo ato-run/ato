@@ -177,6 +177,9 @@ class Wave:
             '--max-stored-bytes',str(1024**3)]
         if continuation:
             cmd.extend(['--search-id',read(cell/'producer.search.json')['search_id']])
+        for route in app.get('gate_routes', []):
+            require(app.get('infrastructure_fixture') is True, 'manual route in automatic cohort')
+            cmd.extend(['--route', route])
         if self.a.credential_socket:
             cmd = ['python3',self.plan['credential_wrapper'],self.a.credential_socket,*cmd]
         start = time.monotonic()
@@ -186,6 +189,15 @@ class Wave:
         result = read(output)
         require(result['contract_ref'] == app['contract_ref'], 'result K mismatch')
         require(result['approval'] == 'not_assessed' and result['deployed'] is False, 'submission confused with approval')
+        # Preserve the raw Coordinator/Runtime evidence as well as the strict
+        # requester-verified result. Neither is a fabricated application PASS.
+        auth = {'Authorization':'Bearer '+self.token.read_text().strip()}
+        search = read(cell/'producer.search.json')['search_id']
+        with urlopen(Request(self.plan['api']+'/v1/runtime-network/exploration/'+search+'/resume',headers=auth)) as response:
+            locator = json.load(response)
+        with urlopen(Request(self.plan['api']+'/v1/runtime-network/satisfy/'+locator['satisfy_id'],headers=auth)) as response:
+            status = json.load(response)
+        write(cell/('status.'+self.suffix+'.json' if continuation else 'status.json'),status)
         cp_journal = result['candidate_producer_accounting']
         dp_journal = result['decision_provider_accounting'].get('journal',{})
         row = {'index':app['index'],'name':app['name'],'baseline_typed_K_pass':app['baseline_typed_K_pass'],
@@ -198,8 +210,9 @@ class Wave:
         print(json.dumps(row),flush=True)
         # Source copies are disposable; preserve raw evidence, journals, source
         # archives, worker state and receipts, including any unresolved UNKNOWN.
-        shutil.rmtree(cell/'scratch')
-        shutil.rmtree(cell/'requester')
+        if result['search_status'] != 'unknown':
+            shutil.rmtree(cell/'scratch')
+            shutil.rmtree(cell/'requester')
 
     def run(self):
         if self.a.check_only:
