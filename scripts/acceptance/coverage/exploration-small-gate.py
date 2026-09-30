@@ -30,6 +30,7 @@ def fixed(w, name, schedule, routes=(), rounds=3):
         policy['exploration'].pop('formation')  # exercise the product default
     else:
         policy['exploration']['formation']['max_rounds']=rounds
+    policy['exploration']['max_provider_calls']=max(rounds,policy['exploration']['max_provider_calls'])
     pre=wave.read(w.plan['fixture_preflight'])
     config={'source':pre['source'],'contract':pre['contract'],'work':str(cell/'work'),
         'routes':list(routes),'policy':policy,'budget':dict(cfg['budget'],deadline_seconds=180),
@@ -55,6 +56,26 @@ def main(a):
         return
     try:
         w.setup()
+        if a.remaining_gates_only:
+            for name in ('rounds_5',):
+                cell=w.root/'fixed'/name
+                cfg=wave.read(cell/'config.json')
+                cfg.update(resume=True,schedule=[],result=str(cell/'result.resume.json'))
+                wave.write(cell/'config.resume.json',cfg)
+                p=w.start([w.plan['binaries']['gate_requester']['path'],cell/'config.resume.json'],w.root,cell/'requester.resume.log')
+                wave.require(p.wait(timeout=220)==0,'original provider-capped search did not settle')
+                result=wave.read(cell/'result.resume.json')['result']
+                wave.require(result['rounds_consumed']==4 and result['stop']['reason']=='budget_exhausted','original frozen provider cap changed')
+            unsupported={'schema':'ato.formation-proposal/1','proposals':[{'kind':'unsupported'}]}
+            raw=fixed(w,'rounds_5_valid',[unsupported]*5,rounds=5)
+            wave.require(raw['result']['rounds_consumed']==5 and raw['result']['stop']['reason']=='rounds_exhausted','configured five rounds failed')
+            valid=wave.read(w.plan['fixture_valid_plan'])
+            deficient=copy.deepcopy(valid);deficient['requirements']['authority']=[]
+            raw=fixed(w,'no_progress',[batch(deficient),batch(deficient)])
+            wave.require(len(raw['result']['attempts'])==1 and raw['result']['stop']['reason']=='no_progress','duplicate D executed')
+            return restart_gates(w)
+        if a.restart_gates_only:
+            return restart_gates(w)
         for app in w.plan['applications']:
             w.app(app)
         valid=wave.read(w.plan['fixture_valid_plan'])
@@ -89,15 +110,55 @@ def main(a):
         for app in w.plan['applications']:
             s=wave.read(w.root/'cells'/f"{app['index']:03}"/'summary.json')
             wave.require(s['typed_K_pass'] and s['producer_calls']>0,'real provider same-K PASS missing')
-        wave.write(w.root/'gate-summary.json',{'status':'passed','fresh_actual_Runtime_receipts':True,
+        wave.write(w.root/'gate-summary.json',{'status':'core_gates_passed_restart_unknown_pending','fresh_actual_Runtime_receipts':True,
             'live_provider_same_K_pass':True,'infrastructure_fixtures':True,
             'upstream_OSS_functional_acceptance':False,'deployed':False})
     finally:
         for p in reversed(w.processes):w.stop(p)
+
+def restart_gates(w):
+    records=Path(w.a.runtime_root)/'out'/'attempt-records'
+    # Real worker journal refusal, not a fabricated result. An unavailable
+    # historical execution record must conservatively become UNKNOWN.
+    records.chmod(0o555)
+    try:
+        unknown=fixed(w,'unknown_history',[],[w.plan['fixture_valid_route']])
+    finally:
+        records.chmod(0o700)
+    wave.require(unknown['status']['status']=='unknown','Runtime record refusal did not preserve UNKNOWN')
+    wave.require(not unknown['fixed_proposal_calls'],'UNKNOWN reached a producer')
+    before={name:wave.read(w.root/'fixed'/name/'result.json') for name in ('failed_reduction','unknown_history')}
+    w.stop(w.runtime)
+    w.stop(w.processes[0])
+    w.suffix='resume'+str(1+len(list(w.root.glob('coordinator.resume*.log'))))
+    w.a.resume=True
+    w.setup()
+    observations=[]
+    for name,old in before.items():
+        cell=w.root/'fixed'/name
+        cfg=wave.read(cell/'config.json')
+        cfg.update(resume=True,schedule=[],result=str(cell/'result.resume.json'))
+        wave.write(cell/'config.resume.json',cfg)
+        p=w.start([w.plan['binaries']['gate_requester']['path'],cell/'config.resume.json'],w.root,cell/'requester.resume.log')
+        wave.require(p.wait(timeout=220)==0,'restart failed')
+        new=wave.read(cell/'result.resume.json')
+        wave.require(new['status']['search_state']['frozen']==old['status']['search_state']['frozen'],'frozen policy changed')
+        for field in ('budget','rounds_consumed','attempts','submission'):
+            wave.require(new['result'][field]==old['result'][field],'restart reset '+field)
+        wave.require(not new['fixed_proposal_calls'],'restart invoked another producer')
+        wave.require(new['status']['status']==old['status']['status'],'restart cleared UNKNOWN/submission state')
+        observations.append({'name':name,'status':new['status']['status'],
+            'rounds':new['result']['rounds_consumed'],'attempts':len(new['result']['attempts']),
+            'result_sha256':wave.sha(cell/'result.resume.json')})
+    wave.write(w.root/'restart-unknown-summary.json',{'status':'passed','observations':observations,
+        'actual_Coordinator_Runtime_restart':True,'live_provider_calls':0,'unknown_automatically_retried':False})
+    print(json.dumps({'gate':'restart_unknown','status':'passed','observations':observations}),flush=True)
 
 if __name__=='__main__':
     import argparse
     p=argparse.ArgumentParser()
     for flag in ('plan','plan-sha256','run','runtime-root','indices'):p.add_argument('--'+flag,required=True)
     p.add_argument('--check-only',action='store_true');p.add_argument('--credential-socket');p.add_argument('--resume',action='store_true')
+    p.add_argument('--restart-gates-only',action='store_true')
+    p.add_argument('--remaining-gates-only',action='store_true')
     main(p.parse_args())
