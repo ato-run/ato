@@ -181,6 +181,12 @@ pub fn parse_capsule_toml(text: &str) -> Result<AuthoringDraft, CapsuleTomlError
             "state" => derivation.state = read_state(value)?,
             "contract" => contract.requirements = read_contract(value)?,
             "effects" => derivation.effects = read_effects(value)?,
+            "requirements" => {
+                derivation.requirements = value
+                    .clone()
+                    .try_into()
+                    .map_err(|e| malformed("requirements", format!("{e}")))?;
+            }
             "platform" => derivation.platforms = read_platforms(value)?,
             other => {
                 return Err(malformed(

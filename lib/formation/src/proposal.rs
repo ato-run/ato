@@ -1,9 +1,13 @@
 //! CandidateProducer proposals are untrusted authoring input, never decisions or
 //! verification evidence. Ato alone resolves logical IDs and compiles canonical D.
 //! This core has no provider transport, durable storage or execution authority.
+mod execution_plan;
 mod node_static_workspace;
 mod python_http;
 mod source_context;
+pub use execution_plan::{
+    ExecutionPlanProposal, PlanAuthorization, RuntimeSelection, SourceReference, VerifiedSourceFile,
+};
 pub use node_static_workspace::{
     MAX_WORKSPACE_CANDIDATES, NodeStaticWorkspaceAuthorization, WORKSPACE_HTTP_PORT,
     WorkspaceInstallScope, WorkspaceStaticBuild, relative_dir,
@@ -69,6 +73,8 @@ pub struct ProposalAuthorization {
     /// every earlier authorization, whose canonical bytes are unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_static_workspace: Option<NodeStaticWorkspaceAuthorization>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_plan: Option<PlanAuthorization>,
     pub policy: CandidateProducerPolicy,
 }
 
@@ -88,6 +94,11 @@ pub struct OperationCatalog {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", deny_unknown_fields)]
 pub enum OperationDomain {
+    #[serde(rename = "execution_plan@1")]
+    ExecutionPlan {
+        toolchains: BTreeMap<String, String>,
+        sources: Vec<SourceReference>,
+    },
     #[serde(rename = "python_http_process@1")]
     PythonHttpProcess { entrypoint_ids: Vec<String> },
     #[serde(rename = "python_script@1")]
@@ -100,6 +111,8 @@ pub enum OperationDomain {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", deny_unknown_fields)]
 pub enum OperationInvocation {
+    #[serde(rename = "execution_plan@1")]
+    ExecutionPlan { plan: Box<ExecutionPlanProposal> },
     #[serde(rename = "python_http_process@1")]
     PythonHttpProcess { entrypoint_id: String },
     #[serde(rename = "python_script@1")]
@@ -154,7 +167,8 @@ impl ProposalAuthorization {
         self.policy.validate()?;
         let domain = &self.source_domain;
         if (domain.entrypoints.len() + domain.modules.len() == 0
-            && self.node_static_workspace.is_none())
+            && self.node_static_workspace.is_none()
+            && self.execution_plan.is_none())
             || domain.entrypoints.len() + domain.modules.len() > generation::MAX_ENTRYPOINTS
             || self.modifiable_derivation_refs.len() > 64
             || self
@@ -191,6 +205,9 @@ impl ProposalAuthorization {
         if let Some(workspace) = &self.node_static_workspace {
             workspace.validate()?;
         }
+        if let Some(plan) = &self.execution_plan {
+            plan.validate()?;
+        }
         Ok(())
     }
 
@@ -199,6 +216,19 @@ impl ProposalAuthorization {
     pub fn catalog(&self) -> Result<OperationCatalog, ProposalError> {
         self.validate()?;
         let mut operations = Vec::new();
+        if let Some(plan) = &self.execution_plan {
+            operations.push(OperationDomain::ExecutionPlan {
+                toolchains: plan.toolchains.clone(),
+                sources: plan
+                    .files
+                    .iter()
+                    .map(|(id, file)| SourceReference {
+                        file_id: id.clone(),
+                        digest: file.digest.clone(),
+                    })
+                    .collect(),
+            });
+        }
         let domain = &self.source_domain;
         if self.python_http_process.is_some() && !domain.entrypoints.is_empty() {
             operations.push(OperationDomain::PythonHttpProcess {
@@ -230,6 +260,9 @@ impl ProposalAuthorization {
 
     pub fn validate_search(&self, frozen: &FrozenSearchV1) -> Result<(), ProposalError> {
         self.validate()?;
+        if self.execution_plan.is_some() && frozen.policy.exploration.is_none() {
+            return Err(ProposalError("exploration_policy_required"));
+        }
         let source = frozen
             .initial_source
             .as_ref()
@@ -396,6 +429,13 @@ fn compile_proposal(
     let (compiled, mut candidate) = match proposal {
         Proposal::Unsupported {} => return Ok(None),
         Proposal::ProposeDerivation { operations } => match operations.as_slice() {
+            [OperationInvocation::ExecutionPlan { plan }] => plan.compile(
+                frozen,
+                authorization
+                    .execution_plan
+                    .as_ref()
+                    .ok_or(ProposalError("proposal_operation_unauthorized"))?,
+            )?,
             [OperationInvocation::PythonHttpProcess { entrypoint_id }] => {
                 let template = authorization
                     .python_http_process
@@ -474,6 +514,7 @@ fn compile_proposal(
                     )
                 }
                 OperationInvocation::PythonHttpProcess { .. }
+                | OperationInvocation::ExecutionPlan { .. }
                 | OperationInvocation::NodeStaticWorkspace { .. } => {
                     return Err(ProposalError("proposal_modify_operation"));
                 }
@@ -528,7 +569,9 @@ pub fn validate_candidate_scope(
     }
     for candidate in generated {
         let new_scope =
-            authorization.python_http_process.as_ref().is_some_and(|t| {
+            authorization.execution_plan.as_ref().is_some_and(|t| {
+                t.candidate(source, candidate.derivation_ref.clone()) == *candidate
+            }) || authorization.python_http_process.as_ref().is_some_and(|t| {
                 t.candidate(source, candidate.derivation_ref.clone()) == *candidate
             }) || authorization
                 .node_static_workspace
