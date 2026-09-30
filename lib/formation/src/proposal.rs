@@ -8,7 +8,7 @@ mod source_context;
 pub use execution_plan::{
     CatalogSource, ExecutionPlanProposal, PlanAuthorization, PlanStateRequirement,
     RuntimeSelection, SourceReference, VerifiedSourceFile, isolated_state_id, isolated_state_mount,
-    source_inspection_priority,
+    source_file_allowed, source_inspection_priority,
 };
 pub use node_static_workspace::{
     MAX_WORKSPACE_CANDIDATES, NodeStaticWorkspaceAuthorization, WORKSPACE_HTTP_PORT,

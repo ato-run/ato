@@ -418,3 +418,34 @@ fn source_oci_proposal_is_canonical_source_bound_and_not_a_shell_plan() {
     p["argv"] = json!(["sh", "-c", "echo arbitrary"]);
     assert!(matches!(compile(&s, p)[0], ProposalOutcome::Rejected(_)));
 }
+
+#[test]
+fn reusable_static_preset_authoring_roundtrips_without_changing_d_or_k() {
+    use ato_formation::{
+        capsule_toml::render_capsule_toml,
+        preset::{AppPreset, synthesize_authoring},
+    };
+    let closure = format!("sha256:{}", "a".repeat(64));
+    for preset in [AppPreset::StaticFiles, AppPreset::SingleHtml] {
+        let before = synthesize_authoring(preset);
+        let rendered = render_capsule_toml(&before).unwrap();
+        let restored = parse_capsule_toml(&rendered).unwrap();
+        assert_eq!(
+            bind(
+                &before,
+                &BindingContext {
+                    source_closure_ref: &closure
+                }
+            )
+            .unwrap(),
+            bind(
+                &restored,
+                &BindingContext {
+                    source_closure_ref: &closure
+                }
+            )
+            .unwrap()
+        );
+    }
+    assert!(render_capsule_toml(&synthesize_authoring(AppPreset::NodeStatic)).is_err());
+}

@@ -1542,6 +1542,34 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
 
+    #[test]
+    fn exploration_docker_command_has_only_explicit_owner_bindings() {
+        let client = DockerClient {
+            executable: PathBuf::from("/usr/bin/docker"),
+            owner: Some((
+                PathBuf::from("/isolated/docker.sock"),
+                PathBuf::from("/isolated/empty-config"),
+            )),
+        };
+        let command = client.command();
+        let args: Vec<_> = command.get_args().map(|a| a.to_str().unwrap()).collect();
+        assert_eq!(
+            args,
+            [
+                "--host",
+                "unix:///isolated/docker.sock",
+                "--config",
+                "/isolated/empty-config"
+            ]
+        );
+        let env: Vec<_> = command
+            .get_envs()
+            .map(|(k, v)| (k.to_str().unwrap(), v.unwrap().to_str().unwrap()))
+            .collect();
+        assert_eq!(env, [("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")]);
+        assert_eq!(command.get_program(), "/usr/bin/docker");
+    }
+
     fn spec() -> OciSpec {
         OciSpec {
             id: "run_1".to_owned(),

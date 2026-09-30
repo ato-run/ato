@@ -10,7 +10,7 @@ use ato_formation_worker::runtime_network::{
     proposal::{
         budget::{BudgetPlan, CallBudget},
         deepseek::{DeepSeekCandidateProducer, DeepSeekConfig},
-        prepare_exploration_submission, serve_general_proposal,
+        prepare_exploration_submission_auto, serve_general_proposal,
     },
 };
 use ato_formation_worker::{
@@ -31,7 +31,10 @@ struct Config {
     schema: String,
     contract: BoundContract,
     exploration: ExplorationPolicy,
-    authorization: ProposalAuthorization,
+    #[serde(default)]
+    authorization: Option<ProposalAuthorization>,
+    #[serde(default)]
+    toolchains: std::collections::BTreeMap<String, String>,
     provider: DeepSeekConfig,
     provider_budget: BudgetPlan,
     credential_environment: String,
@@ -191,7 +194,7 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
                 max_decisions: d.budget.max_calls,
                 decision_timeout_ms: d.timeout_ms.saturating_add(2000),
             });
-    let mut submission = prepare_exploration_submission(
+    let mut submission = prepare_exploration_submission_auto(
         &args.path,
         &args.routes,
         config.contract,
@@ -221,6 +224,7 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
         },
         &search_id,
         config.authorization,
+        config.toolchains,
     )?;
     let budget = Arc::new(if continuation {
         CallBudget::reopen(&config.provider_journal, config.provider_budget)?

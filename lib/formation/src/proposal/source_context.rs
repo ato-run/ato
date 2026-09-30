@@ -85,6 +85,8 @@ pub struct ExplorationContext {
     pub effective_max_rounds: u32,
     pub ceiling: crate::requirements::ExecutionRequirements,
     pub previous_derivations: Vec<crate::authoring::BoundDerivation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_plan: Option<super::ExecutionPlanProposal>,
     pub failures: Vec<ExplorationFailure>,
     pub successful_derivation_ref: Option<String>,
     pub proposal_diagnostics: Vec<String>,
@@ -93,6 +95,10 @@ impl ExplorationContext {
     fn validate(&self) -> Result<(), ProposalError> {
         self.ceiling.validate().map_err(|e| ProposalError(e.0))?;
         if self.effective_max_rounds == 0
+            || self
+                .previous_plan
+                .as_ref()
+                .is_some_and(|p| serde_json::to_vec(p).map_or(true, |b| b.len() > 8192))
             || self.previous_derivations.len() > 3
             || self.failures.len() > 4
             || self.proposal_diagnostics.len() > 4
