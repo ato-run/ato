@@ -1,10 +1,10 @@
 {
   "schema": "ato.formation-exploration-100-plan/1",
   "wave": "bounded autonomous exploration, new conditions; historical results preserved",
-  "frozen_at": "2026-09-30T12:14:30.579544+00:00",
-  "ato_pin": "7552fcfe714f26ed44bf0b7abae74b61d3651c9d",
-  "ato_api_pin": "6a7fd9dd838ba306a260992dcf82de03233bbd20",
-  "authority_source_pin": "64e03d0eb063eae5a08f516e629d53e26e824414",
+  "frozen_at": "2026-09-30T12:42:44.902980+00:00",
+  "ato_pin": "eb73dff36d15a829e8358d310dbb4106562b344d",
+  "ato_api_pin": "b20bba7ab9daf282f8d5b1e22affe549ad3492a3",
+  "authority_source_pin": "eb73dff36d15a829e8358d310dbb4106562b344d",
   "baseline": {
     "ledger": "docs/ops/formation-coverage-100.json",
     "sha256": "560302a51a04fc08d9868a8dfb84bc2ac58666e14a0ee3533f181e502c98d45c",
@@ -338,21 +338,21 @@
     "100_runs_only_after_gate_pass": true
   },
   "api": "http://127.0.0.1:19578",
-  "receiver_bundle": "/home/ubuntu/formation-foundation/.tmp/exploration-receiver-v3/bundle",
+  "receiver_bundle": "/home/ubuntu/formation-foundation/.tmp/exploration-receiver-v4/bundle",
   "api_node_modules": "/home/ubuntu/formation-foundation/.tmp/6b-f-20260930-api/node_modules",
   "coordinator_script": "/home/ubuntu/formation-foundation/.tmp/6b-f-20260930-measurement/scripts/acceptance/proposal/coordinator.mjs",
   "credential_wrapper": "/home/ubuntu/formation-foundation/.tmp/exploration-code/scripts/acceptance/coverage/exploration-credential-exec.py",
   "binaries": {
     "ato": {
-      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-prereg/bin-v4/ato",
-      "sha256": "2df1b52caf55062f0a3bc9f24994dde1cb957f21172eae2dc2e8d6e95a8cadfa"
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-prereg/bin-v5/ato",
+      "sha256": "6d4aa211b62784e57230ba8a989ace584e6dc13c93253a7039d811a0cc67c277"
     },
     "worker": {
-      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-prereg/bin-v4/worker",
-      "sha256": "224506ed8b974a02af3549171d0ac254d0d4b448cffde195cdecf19a10043059"
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-prereg/bin-v5/worker",
+      "sha256": "8afb23dd3c20438d416209475933209dd5b253913bc4389347448578cbddc3f0"
     },
     "preflight": {
-      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-prereg/bin-v4/preflight",
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-prereg/bin-v5/preflight",
       "sha256": "8178ca6b36ecb490e59b86ed3955dfe29c2a2ee1adf9b8afee2dad0a9f46c94e",
       "source_pin": "64e03d0eb063eae5a08f516e629d53e26e824414"
     },
@@ -366,16 +366,16 @@
     }
   },
   "receiver_hashes": {
-    "photon_rs_bg.wasm": "f477b87cbea0445c65fc7e580e89050190600379fcd44821cec67403483872b1",
-    "schema.sql": "aba341217e9b5933bac894e20329f76823ed7dad4d9069fe96f2b5b641f338f0",
-    "receipt_authority.wasm": "b02894222b64f5d6150f102f7e1920fc08e26094c65b7c92fa38ac46788862ec",
-    "worker.js": "4b2ef4998982260a9daacafd68fd5643a945d9ddd892d4c8a9f4901816bcca98",
-    "receiver-pin.json": "a188753f116079cdfd1614ef18fa064c7130414d16ec2d155ed13236b63e1cb0",
-    "entry.ts": "0a7dc3ef0817d43d8be22341245dffe248d1b27d62a70e4a3d9f7526c16fc0b8",
     "schema-baseline.sql": "a941408a62e7fb6cdc03c83a14240952ff5e0753778f756313c16367185ef6e8",
-    "authority-provenance.json": "90c05ff17e3a614184c0864e89ece99d06f156ce3dfc81dde13f8bf18c6edd76",
+    "receiver-pin.json": "80939bbe813c5446699544692df2a1969bccb564e646167bdadfeb97ae59ee1c",
+    "authority-provenance.json": "d16b0e3aa101ba1077d5f731529844d5118f49c7895f28ada52bacec2511adbc",
+    "schema.sql": "aba341217e9b5933bac894e20329f76823ed7dad4d9069fe96f2b5b641f338f0",
+    "entry.ts": "0a7dc3ef0817d43d8be22341245dffe248d1b27d62a70e4a3d9f7526c16fc0b8",
+    "worker.js": "555df791a82e09c33d6200702d9603b0a2cc658c6e93a79a049a56510aed36bd",
     "resvg.wasm": "22bf6e9f9a100d972da0411a69c5ba504367fc1fa87b3b64e3f35e53926d2d70",
-    "schema-baseline.json": "c78d3109d741d6e3fce9babd86e026fec07d7c973adc24488a8a6e6518d7f1b8"
+    "schema-baseline.json": "c78d3109d741d6e3fce9babd86e026fec07d7c973adc24488a8a6e6518d7f1b8",
+    "receipt_authority.wasm": "cb6d274e71771da2310dcd0e36a4f6c3733cf7bf2d3725fda6164bd0199beb4d",
+    "photon_rs_bg.wasm": "f477b87cbea0445c65fc7e580e89050190600379fcd44821cec67403483872b1"
   },
   "host": {
     "OS": "Linux-6.17.0-1016-oracle-aarch64-with-glibc2.39",
@@ -470,6 +470,13 @@
       "model_calls": 0,
       "cost_usd_micros": 0,
       "previous_artifacts_preserved": true
+    },
+    {
+      "previous_plan_sha256": "8afc5e16e9df73ce14add518d6e5f2da49f65c3de4b21e3e55690e88696e8ce2",
+      "reason": "fixed infrastructure configured-round gate found independent provider cap; unchanged old search resumed to typed budget stop; app results/prompt/ceilings preserved",
+      "live_CP_before_revision": 10,
+      "live_DP_before_revision": 0,
+      "previous_artifacts_preserved": true
     }
   ],
   "credential_binding": {
@@ -480,7 +487,7 @@
     },
     "credential_values_saved": false
   },
-  "harness_pin": "80850241",
+  "harness_pin": "eb73dff36d15a829e8358d310dbb4106562b344d",
   "fixture_preflight": "/home/ubuntu/formation-foundation/.tmp/exploration-small-prereg/preflight.json",
   "fixture_valid_plan": "/home/ubuntu/formation-foundation/.tmp/exploration-small-prereg/valid-plan.json",
   "fixture_valid_route": "/home/ubuntu/formation-foundation/.tmp/exploration-small-prereg/valid.toml",
@@ -488,5 +495,6 @@
   "previous_live_DP_calls": 0,
   "live_fixture_CP_max": 6,
   "small_total_CP_worst_case": 12,
-  "small_gate_variant": "infrastructure fixture + actual product live provider; upstream pilot results retained; no automatic-cohort injection"
+  "small_gate_variant": "infrastructure fixture + actual product live provider; upstream pilot results retained; no automatic-cohort injection",
+  "fixed_continuation_only": true
 }
