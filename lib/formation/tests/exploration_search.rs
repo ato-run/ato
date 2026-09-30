@@ -568,6 +568,26 @@ fn a_process_plan_without_an_explicit_guest_port_is_rejected() {
 }
 
 #[test]
+fn omitted_unknowns_diagnostic_does_not_change_canonical_execution_or_requirements() {
+    let s = state();
+    let mut p = plan();
+    let original = compile(&s, p.clone());
+    let ProposalOutcome::Admitted(before) = &original[0] else {
+        panic!()
+    };
+    p.as_object_mut().unwrap().remove("unknowns");
+    let normalized = compile(&s, p);
+    let ProposalOutcome::Admitted(after) = &normalized[0] else {
+        panic!("{normalized:?}")
+    };
+    assert_eq!(before.compiled().derivation, after.compiled().derivation);
+    assert_eq!(
+        before.compiled().base_contract_ref,
+        after.compiled().base_contract_ref
+    );
+}
+
+#[test]
 fn unsupported_reason_is_bounded_and_legacy_declines_still_parse() {
     let s = state();
     for (reason, rejected) in [
