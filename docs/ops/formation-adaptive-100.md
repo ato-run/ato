@@ -118,7 +118,7 @@ reservationは実usageと分離し、12×81102＋12×2753＝1006260 USD micros�
 
 ## 原本・hash・状態
 
-raw archive SHA256 `d031296251e528a0523b4373415e508bed51f2e7e8aa64187abc3391ec967752`、raw results `13e3ca1aab0934a01477e3c98ba1559060a4e556dd64f2a525ac09f0cfda8288`、manifest `8fdb536157513d70dd57b808265a7aea9a42cf58dcc68210d4c453b9511bd1ef`。raw583 filesを全件hash照合。その他output774 files、frozen archives、receipts／retained objects、D1/R2 stateはLinux hostで保全。開始disk free124713345024 bytes、終了123937714176 bytes。Rust1.96.0、Ubuntu24.04/Linux6.17 aarch64。host-wide Docker pruneなし。
+raw archive SHA256 `d031296251e528a0523b4373415e508bed51f2e7e8aa64187abc3391ec967752`、raw results `13e3ca1aab0934a01477e3c98ba1559060a4e556dd64f2a525ac09f0cfda8288`、manifest `8fdb536157513d70dd57b808265a7aea9a42cf58dcc68210d4c453b9511bd1ef`。raw583 filesを全件hash照合。その他output774 files、frozen archives、receipts／retained objects、D1/R2 stateはLinux hostで保全。preregistration時のresource確認でdisk free124713345024 bytes、実行前gateは20GiB以上、終了123937714176 bytes。Rust1.96.0、Ubuntu24.04/Linux6.17 aarch64。host-wide Docker pruneなし。
 
 preregistration [plan](formation-adaptive-100-plan.json)、[operation inventory / plan prose](formation-adaptive-100-plan.md)、[100結果](formation-adaptive-100.json)、[paired比較](formation-known-vs-adaptive-100.json)、[raw manifest](evidence/formation-adaptive-100-20260930/raw-manifest.json)、[raw archive](evidence/formation-adaptive-100-20260930/raw-evidence.tar.gz)。追加のsealed-channel正／負テストはdummyのみ、実credential read0／model call0。
 
@@ -130,4 +130,4 @@ WBOはhistorical source-to-OCI image/verified artifact PASS、runtime_policy_cap
 
 ## CI
 
-結果headのCIは別途記録する。Rust/Cargo/workflow差分は0。greenとは仮定せず、exact-headのcheck結果を確認する。
+PRは#1450の`docs/formation-coverage-100`をbaseとする。Rust CIのpull_request対象branchは`main`／`dev`／`nightly`であり、このstacked PRではRust CIは起動しない。Rust/Cargo/workflow差分は0。結果exact headのcheck結果はPR説明に記録し、Release planの成功をRustテストの成功やdeployと読み替えない。
