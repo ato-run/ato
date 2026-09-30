@@ -530,9 +530,13 @@ fn general_claim_loss_never_calls_or_reclaims() {
     });
     let client = Client::new(&coordinator.endpoint, "mock-requester-token").unwrap();
     let initial = status(&sub);
+    let error =
+        serve_general_proposal(&client, "id", &initial, &mut sub, "owner", producer.clone())
+            .unwrap_err();
     assert!(
-        !serve_general_proposal(&client, "id", &initial, &mut sub, "owner", producer.clone())
-            .unwrap()
+        error
+            .to_string()
+            .contains("claim failed before provider send; no retry")
     );
     assert!(!serve_general_proposal(&client, "id", &initial, &mut sub, "owner", producer).unwrap());
     assert_eq!(model.count(), 0);
