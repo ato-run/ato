@@ -1,9 +1,13 @@
 //! The egress gate of an online source build: netd's CONNECT proxy with an
 //! exact hostname allowlist, a port allowlist, denied private and special
 //! address ranges (DNS rebinding cannot reach the host or a LAN), and one
-//! transfer budget shared by every tunnel. Every decision is kept as
-//! evidence. The gate never forwards plain HTTP and never resolves names for
-//! a host outside the allowlist.
+//! transfer budget shared by every tunnel. The gate never forwards plain
+//! HTTP and never resolves names for a host outside the allowlist.
+//!
+//! Policy enforcement (allowlists, denied ranges, budget) is authoritative.
+//! Recorded decisions are observational evidence only: netd sends them on a
+//! bounded channel with `try_send`, so a record can be dropped under load.
+//! This record is not a complete audit log.
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
