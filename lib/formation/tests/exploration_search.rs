@@ -627,3 +627,55 @@ fn repeated_empty_declines_stop_without_using_the_third_round() {
         3
     );
 }
+
+#[test]
+fn a_generated_d_waits_for_placement_without_spending_another_round_after_restart() {
+    let mut s = state();
+    let outcomes = compile(&s, plan());
+    let ProposalOutcome::Admitted(candidate) = &outcomes[0] else {
+        panic!()
+    };
+    let d = candidate.candidate().derivation_ref.clone();
+    s.proposal_round = Some(ProposalRoundRecord {
+        opened_at_ms: 100,
+        expires_at_ms: 5100,
+        outcome: Some(ProposalRoundOutcome::Completed),
+        candidates: vec![candidate.candidate().clone()],
+        derivations: vec![candidate.compiled().derivation.clone()],
+        diagnostics: vec![],
+        inspection_requests: vec![],
+    });
+    let frozen = s.frozen.canonical_bytes().unwrap();
+    let resumed: SearchStateV1 = serde_json::from_slice(&s.canonical_bytes().unwrap()).unwrap();
+    assert_eq!(
+        decide_next(&resumed, &[], 6000).unwrap(),
+        SearchAction::WaitForRuntime {
+            derivation_ref: d.clone()
+        }
+    );
+    assert_eq!(resumed.frozen.canonical_bytes().unwrap(), frozen);
+    let placement = Placement {
+        candidate_id: "candidate".into(),
+        derivation_ref: d.clone(),
+        runtime_id: "runtime".into(),
+        environment_id: "native".into(),
+        admissible: true,
+        transfer_bytes: 64,
+    };
+    assert!(matches!(
+        decide_next(&resumed, std::slice::from_ref(&placement), 7000).unwrap(),
+        SearchAction::IssueAttempt { .. }
+    ));
+    let refused = Placement {
+        admissible: false,
+        ..placement
+    };
+    assert!(matches!(
+        decide_next(&resumed, &[refused], 7000).unwrap(),
+        SearchAction::OpenProposalRound { .. }
+    ));
+    assert_eq!(
+        resumed.proposal_history.len() + usize::from(resumed.proposal_round.is_some()),
+        1
+    );
+}
