@@ -44,6 +44,12 @@ fn refused(code: &str, message: impl Into<String>) -> Option<AttemptFailure> {
 impl CandidateRealizer for FormationRealizer<'_> {
     fn admit(&self, profile: &RuntimeProfile) -> Option<AttemptFailure> {
         let planned = self.planned;
+        if !planned.derivation.requirements.is_empty() {
+            return refused(
+                "exploration_requirement_enforcement_unavailable",
+                "the legacy Formation realizer has no phase-scoped grant broker; host-unrestricted networking cannot satisfy scoped requirements",
+            );
+        }
         if !planned.plan.actions.is_empty()
             && profile.get("formation.containment") != Some("bwrap+landlock")
         {

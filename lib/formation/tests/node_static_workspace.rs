@@ -79,6 +79,7 @@ fn frozen(auth: NodeStaticWorkspaceAuthorization) -> FrozenSearchV1 {
         archive_digest: format!("sha256:{}", "b".repeat(64)),
     });
     s.frozen.policy.proposal = Some(ProposalAuthorization {
+        execution_plan: None,
         modifiable_derivation_refs: vec![],
         source_domain: SourceDomain {
             entrypoints: BTreeMap::new(),

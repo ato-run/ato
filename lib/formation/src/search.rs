@@ -61,6 +61,9 @@ pub struct SearchPolicy {
     pub generation: Option<GenerationPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposal: Option<ProposalAuthorization>,
+    /// Opt-in external ceiling. Normal-run network and bindings stay frozen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exploration: Option<crate::exploration::ExplorationPolicy>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -163,6 +166,12 @@ pub struct SearchStateV1 {
     pub generation: Option<GenerationRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposal_round: Option<ProposalRoundRecord>,
+    /// Settled earlier rounds, in opening order. Never folded into frozen D[]
+    /// and never discarded when advancing the current round or restarting.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proposal_history: Vec<ProposalRoundRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exploration_submission: Option<crate::exploration::ExplorationSubmission>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -218,6 +227,10 @@ pub struct Placement {
 #[serde(rename_all = "snake_case")]
 pub enum Termination {
     Verified,
+    Submitted,
+    RoundsExhausted,
+    NoProgress,
+    ExplorationAuthorityExceeded,
     CandidatesExhausted,
     BudgetExhausted,
     /// An effect may have happened and its outcome is not known.
@@ -373,6 +386,12 @@ impl FrozenSearchV1 {
         if let Some(policy) = &self.policy.decision {
             policy.validate()?;
         }
+        if let Some(policy) = &self.policy.exploration {
+            policy.validate()?;
+            if self.policy.proposal.is_none() || !self.policy.bindings.is_empty() {
+                return Err(SearchError("exploration_scope_invalid"));
+            }
+        }
         if let Some(policy) = &self.policy.generation {
             policy.validate().map_err(|e| SearchError(e.code()))?;
             if !self.policy.bindings.is_empty()
@@ -420,6 +439,12 @@ impl SearchStateV1 {
                     .as_ref()
                     .filter(|g| g.outcome == Some(GenerationOutcome::Admitted))
                     .and_then(|g| g.candidate.as_ref()),
+            )
+            .chain(
+                self.proposal_history
+                    .iter()
+                    .filter(|r| r.outcome == Some(ProposalRoundOutcome::Completed))
+                    .flat_map(|r| &r.candidates),
             )
             .chain(
                 self.proposal_round
@@ -528,7 +553,33 @@ impl SearchStateV1 {
         }
         self.frozen.canonical_bytes()?;
         self.validate_generation()?;
-        if let Some(round) = &self.proposal_round {
+        if !self.proposal_history.is_empty() && self.frozen.policy.exploration.is_none() {
+            return Err(SearchError("proposal_history_without_exploration"));
+        }
+        let limit = self
+            .frozen
+            .policy
+            .exploration
+            .as_ref()
+            .map_or(1, |p| p.formation.max_rounds.get() as usize);
+        if self
+            .proposal_history
+            .len()
+            .saturating_add(usize::from(self.proposal_round.is_some()))
+            > limit
+        {
+            return Err(SearchError("exploration_round_limit"));
+        }
+        let mut previous_expiry = None;
+        for round in self
+            .proposal_history
+            .iter()
+            .chain(self.proposal_round.iter())
+        {
+            if previous_expiry.is_some_and(|opened| round.opened_at_ms < opened) {
+                return Err(SearchError("proposal_round_order"));
+            }
+            previous_expiry = Some(round.opened_at_ms);
             let authorization = self
                 .frozen
                 .policy
@@ -549,6 +600,12 @@ impl SearchStateV1 {
             }
             crate::proposal::validate_candidate_scope(&self.frozen, &round.candidates)
                 .map_err(|e| SearchError(e.0))?;
+        }
+        if self.proposal_history.iter().any(|r| r.outcome.is_none()) {
+            return Err(SearchError("proposal_history_unsettled"));
+        }
+        if let Some(submission) = &self.exploration_submission {
+            submission.validate(self)?;
         }
         let mut ids = BTreeSet::new();
         for a in &self.attempts {
@@ -631,7 +688,17 @@ fn default_next(
         });
     }
     let passed = s.attempts.iter().any(|a| a.route_accepted);
-    if passed && s.frozen.policy.mode == SearchMode::FirstPass {
+    if passed
+        && s.exploration_submission
+            .as_ref()
+            .is_some_and(|p| p.derivation.requirements.is_empty())
+    {
+        return Ok(finish(Termination::Submitted));
+    }
+    if passed
+        && s.frozen.policy.mode == SearchMode::FirstPass
+        && s.frozen.policy.exploration.is_none()
+    {
         return Ok(finish(Termination::Verified));
     }
     if let Some(last) = s.attempts.last()
@@ -719,6 +786,17 @@ fn default_next(
         });
     }
     for d in s.candidates() {
+        // Once K is reached, additional attempts belong to reduction rounds,
+        // not untried alternatives from the original known-D domain.
+        if passed
+            && s.frozen.policy.exploration.is_some()
+            && s.frozen
+                .candidates
+                .iter()
+                .any(|known| known.derivation_ref == d.derivation_ref)
+        {
+            continue;
+        }
         let history: Vec<_> = s
             .attempts
             .iter()
@@ -780,9 +858,20 @@ fn default_next(
         .policy
         .proposal
         .as_ref()
-        .filter(|_| s.proposal_round.is_none())
+        .filter(|_| {
+            s.proposal_round.is_none()
+                || s.frozen.policy.exploration.as_ref().is_some_and(|p| {
+                    s.proposal_history.len().saturating_add(1)
+                        < p.formation.max_rounds.get() as usize
+                        && s.proposal_round
+                            .as_ref()
+                            .is_some_and(|r| r.outcome.is_some())
+                })
+        })
         .map(|p| (true, p.policy.timeout_ms));
-    if !passed && let Some((is_proposal, timeout_ms)) = pending_proposal.or(pending_generation) {
+    if (!passed || s.frozen.policy.exploration.is_some())
+        && let Some((is_proposal, timeout_ms)) = pending_proposal.or(pending_generation)
+    {
         // Never skip an unanswered decision or an unconsumed inspection/stop.
         if let Some(d) = s.decisions.last() {
             if d.outcome.is_none()
@@ -864,7 +953,13 @@ fn default_next(
             });
         }
     }
-    Ok(finish(if passed {
+    Ok(finish(if s.frozen.policy.exploration.is_some() {
+        if passed {
+            Termination::Submitted
+        } else {
+            Termination::RoundsExhausted
+        }
+    } else if passed {
         Termination::Verified
     } else {
         Termination::CandidatesExhausted
