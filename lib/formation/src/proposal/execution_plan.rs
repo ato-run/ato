@@ -247,6 +247,7 @@ pub struct ExecutionPlanProposal {
     pub state: Vec<PlanStateRequirement>,
     pub requirements: ExecutionRequirements,
     pub basis: Vec<RequirementBasis>,
+    #[serde(default)]
     pub unknowns: Vec<String>,
 }
 
