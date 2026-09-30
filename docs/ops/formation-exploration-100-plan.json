@@ -2394,7 +2394,7 @@
     },
     "credential_values_saved": false
   },
-  "harness_pin": "4b3fe096523b8cea6c8389fcf8418ff50d21598d",
+  "harness_pin": "b9b81c03bb9f531262bf95ede6f6b983068b23b4",
   "accounting_roots": [
     "/home/ubuntu/formation-foundation/.tmp/exploration-no-call-gate",
     "/home/ubuntu/formation-foundation/.tmp/exploration-live-pilot2",
