@@ -144,19 +144,60 @@ class Wave:
         self.wait(lambda: self.sql('SELECT environment_id FROM runtime_environments WHERE runtime_id=?', ['local']),
                   'Runtime advertisement')
 
+    def budget_gate(self):
+        # Product Rust validates every journal and settlement; the controller
+        # aggregates only explicitly preregistered owned runs, never secrets.
+        roots = [Path(p) for p in self.plan.get('accounting_roots', [])]
+        if self.root not in roots:
+            roots.append(self.root)
+        calls = {'CP':0,'DP':0}; reservation = 0
+        for root in roots:
+            for journal in sorted(root.glob('cells/*/producer*.jsonl')):
+                raw = subprocess.check_output([self.plan['binaries']['preflight']['path'],
+                    '--journal-snapshot',str(journal)],env=self.env,cwd=self.root)
+                view = json.loads(raw)
+                count = len(view['snapshot']['cells'])
+                kind = 'DP' if journal.name == 'producer.decision.jsonl' else 'CP'
+                calls[kind] += count
+                reservation += count * view['per_call_reservation']
+        budget = self.plan['model_budget']
+        require(calls['CP'] + 3 <= budget['max_candidate_producer_calls'], 'global CP cap')
+        require(calls['DP'] + 1 <= budget['max_decision_provider_calls'], 'global DP cap')
+        require(reservation + budget['per_CP_reservation']*3 + budget['per_DP_reservation']
+                <= self.plan['maximum_reservation_usd_micros'], 'global reservation cap')
+        return {'calls':calls,'reserved_usd_micros':reservation,'unresolved':0}
+
     def app(self, app):
         n = f"{app['index']:03}"
         cell = self.root/'cells'/n
         continuation = self.a.resume and cell.exists()
         cell.mkdir(exist_ok=continuation)
         config = self.plan['preflight_config']
+        self.budget_gate()
         if not continuation:
             write(cell/'preflight-config.json',config)
             preflight = self.start([self.plan['binaries']['preflight']['path'],app['archive_path'],
                 'sha256:'+app['archive_sha256'],cell/'scratch','search_preregister_'+n,
                 cell/'preflight-config.json',cell/'preflight.json'], self.root,
                 cell/'preflight.stdout.log',cell/'preflight.stderr.log')
-            require(preflight.wait(timeout=120) == 0, 'verified-source preflight failure')
+            rc = preflight.wait(timeout=120)
+            require((cell/'preflight.json').is_file(), 'untyped preflight infrastructure failure')
+            projected = read(cell/'preflight.json')
+            if 'preflight_terminal' in projected:
+                require(rc != 0 and projected['K_formed'] is False, 'invalid source terminal')
+                row = {'index':app['index'],'name':app['name'],
+                    'baseline_typed_K_pass':app['baseline_typed_K_pass'],'typed_K_pass':False,
+                    'rounds_consumed':0,'producer_calls':0,'decision_calls':0,
+                    'terminal':projected['preflight_terminal'],'primary':'source/preflight',
+                    'call_reason':'source_verification_or_transport_failure',
+                    'expected_contract_ref':app['contract_ref'],'K_formed':False,
+                    'result':'cells/'+n+'/preflight.json','result_sha256':sha(cell/'preflight.json'),
+                    'exit_code':rc,'functional_acceptance':'not_measured'}
+                write(cell/'summary.json',row)
+                print(json.dumps(row),flush=True)
+                shutil.rmtree(cell/'scratch',ignore_errors=True)
+                return
+            require(rc == 0, 'verified-source preflight infrastructure failure')
         projected = read(cell/'preflight.json')
         require(projected['contract_ref'] == app['contract_ref'], 'K changed')
         cp = self.plan['producer_config']

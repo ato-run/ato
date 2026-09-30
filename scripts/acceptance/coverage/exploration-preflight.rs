@@ -4,7 +4,7 @@ use anyhow::{Result, ensure};
 use ato_formation::{
     authoring::{BindingContext, bind},
     preset::{AppPreset, synthesize_authoring},
-    source::{DownloadedArchive, SourceLimits},
+    source::{DownloadedArchive, SourceError, SourceLimits},
 };
 use ato_formation_worker::runtime_network::{
     RuntimeConstraintWire, SatisfyBudget, SatisfyPolicy,
@@ -20,8 +20,31 @@ struct Config {
     policy: SatisfyPolicy,
     budget: SatisfyBudget,
 }
-fn main() -> Result<()> {
+fn prepare() -> Result<()> {
     let a: Vec<_> = std::env::args().collect();
+    if a.len() == 3 && a[1] == "--journal-snapshot" {
+        use ato_formation_worker::runtime_network::proposal::budget::{BudgetPlan, CallBudget};
+        let bytes = std::fs::read_to_string(&a[2])?;
+        let plan: BudgetPlan = serde_json::from_str(
+            bytes
+                .lines()
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("journal plan missing"))?,
+        )?;
+        let reservation = plan.validate()?;
+        let snapshot = CallBudget::reopen(std::path::Path::new(&a[2]), plan.clone())?.snapshot()?;
+        ensure!(
+            snapshot.cells.values().all(|c| c.is_settled()),
+            "unresolved provider reservation"
+        );
+        println!(
+            "{}",
+            serde_json::to_string(
+                &json!({"plan":plan,"per_call_reservation":reservation,"snapshot":snapshot})
+            )?
+        );
+        return Ok(());
+    }
     ensure!(
         a.len() == 7,
         "archive digest scratch search-id policy.json result.json"
@@ -72,4 +95,39 @@ fn main() -> Result<()> {
     writeln!(file, "{}", serde_json::to_string_pretty(&projection)?)?;
     file.sync_all()?;
     Ok(())
+}
+
+fn main() -> Result<()> {
+    match prepare() {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            // Pinned source rejection is an application entry terminal. Digest
+            // mismatch, I/O and unrecognized failures remain infrastructure stops.
+            let typed = error.downcast_ref::<SourceError>().filter(|e| {
+                matches!(
+                    e,
+                    SourceError::LimitExceeded { .. }
+                        | SourceError::PathEscape { .. }
+                        | SourceError::UnsupportedEntry { .. }
+                        | SourceError::SymlinkEscape { .. }
+                        | SourceError::SubdirectoryEscape { .. }
+                        | SourceError::SubdirectoryMissing { .. }
+                )
+            });
+            if let Some(source) = typed {
+                let args: Vec<_> = std::env::args().collect();
+                let result = json!({"schema":"ato.formation-exploration-source-terminal/1",
+                    "preflight_terminal":{"code":source.code(),"message":source.to_string()},
+                    "model_calls":0,"source_programs_executed":0,"K_formed":false});
+                use std::io::Write;
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&args[6])?;
+                writeln!(file, "{}", serde_json::to_string_pretty(&result)?)?;
+                file.sync_all()?;
+            }
+            Err(error)
+        }
+    }
 }
