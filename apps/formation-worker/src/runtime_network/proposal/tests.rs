@@ -333,3 +333,30 @@ fn prompt_v1_bytes_stay_pinned_and_v2_names_the_workspace_operation() {
         Some(PROMPT_V3)
     );
 }
+
+#[test]
+fn auto_plan_inventory_comes_from_verified_source_and_excludes_credentials() {
+    let (_root, mut sub) = prepared(|source| {
+        std::fs::write(source.join("package.json"), "{\"main\":\"app.py\"}").unwrap();
+        std::fs::write(source.join(".dev.vars"), "PROVIDER_KEY=must_not_project").unwrap();
+    });
+    let source = sub.frozen_source.root.clone();
+    let files = source_file_inventory(&source).unwrap();
+    assert!(files.contains("app.py"));
+    assert!(!ato_formation::proposal::source_file_allowed(".dev.vars"));
+    // The compiler refuses a private credential path even if a requester
+    // tries to supply it in a hand-written authorization.
+    let mut auth = authorization();
+    auth.execution_plan = Some(ato_formation::proposal::PlanAuthorization {
+        source_oci: None,
+        toolchains: BTreeMap::from([("python".into(), "3.12.7".into())]),
+        files: BTreeMap::from([(
+            "private".into(),
+            ato_formation::proposal::VerifiedSourceFile {
+                path: ".dev.vars".into(),
+                digest: format!("sha256:{}", "a".repeat(64)),
+            },
+        )]),
+    });
+    assert!(sub.enable_candidate_producer(auth).is_err());
+}
