@@ -2332,10 +2332,17 @@ fn execute_retained_ticket(
     {
         Ok(gates) => gates,
         Err(e) => {
+            let code = e.to_string();
             return refused(
                 ticket,
                 attested.clone(),
-                "exploration_authority_exceeded",
+                if code.starts_with("exploration_") {
+                    code.split(':')
+                        .next()
+                        .unwrap_or("exploration_admission_failed")
+                } else {
+                    "exploration_admission_failed"
+                },
                 &format!("{e:#}"),
             );
         }
