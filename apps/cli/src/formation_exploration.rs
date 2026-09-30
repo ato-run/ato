@@ -231,6 +231,27 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
     } else {
         CallBudget::create(&config.provider_journal, config.provider_budget)?
     });
+    // Owner-side restart metadata, separate from reusable K/D. Never replace
+    // an existing checkpoint or allocate another search against its journal.
+    let checkpoint = journal.with_extension("search.json");
+    let identity = serde_json::json!({"schema":"ato.formation-exploration-checkpoint/1",
+        "search_id":search_id,"contract_ref":submission.request.contract_ref,
+        "source_closure_ref":submission.request.source.closure_ref,
+        "exploration":submission.request.policy.exploration});
+    if continuation {
+        ensure!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&checkpoint)?)? == identity,
+            "exploration restart checkpoint mismatch"
+        );
+    } else {
+        use std::io::Write;
+        let mut saved = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&checkpoint)?;
+        saved.write_all(&serde_jcs::to_vec(&identity)?)?;
+        saved.sync_all()?;
+    }
     let producer = Arc::new(DeepSeekCandidateProducer::new(
         config.provider,
         &config.credential_environment,
