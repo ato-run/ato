@@ -59,6 +59,8 @@ class Wave:
         self.a = a
         self.plan = read(a.plan)
         require(sha(a.plan) == a.plan_sha256, 'plan changed')
+        require(all(gate is True for gate in self.plan.get('pre_execution_gates', {}).values()),
+                'future measurement gates not satisfied')
         require(self.plan['maximum_reservation_usd_micros'] <= 3507128, 'reservation ceiling')
         for value in self.plan['binaries'].values():
             require(sha(value['path']) == value['sha256'], 'binary changed')
