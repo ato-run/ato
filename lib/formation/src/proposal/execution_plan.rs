@@ -232,6 +232,9 @@ pub struct ExecutionPlanProposal {
     pub module: Option<String>,
     pub argv: Vec<String>,
     pub cwd: String,
+    /// Static serving allocates its port through the browser adapter. Process
+    /// routes must still provide a nonzero source-derived guest port.
+    #[serde(default)]
     pub guest_port: u16,
     pub dependencies: Vec<DependencyOperation>,
     pub build_scripts: Vec<String>,
@@ -291,7 +294,7 @@ impl ExecutionPlanProposal {
         if authorization.toolchains.get(&self.runtime.name) != Some(&self.runtime.version) {
             return Err(ProposalError("runtime_toolchain_unavailable"));
         }
-        if self.guest_port == 0
+        if (self.guest_port == 0 && self.static_output.is_none())
             || !(self.cwd == "." || source_path(&self.cwd))
             || self.argv.len() > 64
             || self.argv.iter().any(|a| a.len() > 512 || a.contains('\0'))

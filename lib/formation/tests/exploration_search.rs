@@ -536,6 +536,13 @@ fn generated_static_build_lowers_to_existing_browser_adapter_with_same_k() {
     assert_eq!(d.steps.last().unwrap().root.as_deref(), Some("build"));
     assert!(d.steps.last().unwrap().argv.is_empty());
     assert_eq!(d.ports[0].guest_port, None);
+    let expected_d = candidate.compiled().derivation_ref.clone();
+    p.as_object_mut().unwrap().remove("guest_port");
+    let without_port = compile(&s, p.clone());
+    let ProposalOutcome::Admitted(no_port) = &without_port[0] else {
+        panic!("{without_port:?}")
+    };
+    assert_eq!(no_port.compiled().derivation_ref, expected_d);
     for invalid in ["/etc", "../outside", "/app/build"] {
         p["static_output"] = json!(invalid);
         assert!(matches!(
@@ -549,6 +556,15 @@ fn generated_static_build_lowers_to_existing_browser_adapter_with_same_k() {
         compile(&s, p)[0],
         ProposalOutcome::Rejected(ProposalError("unsupported_static_output"))
     ));
+}
+
+#[test]
+fn a_process_plan_without_an_explicit_guest_port_is_rejected() {
+    let mut p = plan();
+    p.as_object_mut().unwrap().remove("guest_port");
+    assert!(
+        matches!(&compile(&state(),p)[0],ProposalOutcome::Rejected(e) if e.0=="execution_plan_bounds")
+    );
 }
 
 #[test]
