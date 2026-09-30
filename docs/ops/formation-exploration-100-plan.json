@@ -2371,6 +2371,19 @@
       "live_CP_total_before_recovery": 54,
       "live_DP_total_before_recovery": 0,
       "old_evidence_preserved": true
+    },
+    {
+      "previous_plan_sha256": "f7f475ac5caf0ed5eebe72051134fe91918629ea26e82fe543a97ceb7125af4b",
+      "reason": "source-only preflight harness 120-second timeout before Search/model/Runtime at index60; extend static capture observer wait to600; product binary, source limits, frozen K, Runtime, sandbox, search deadline900, provider caps/prompt and budgets unchanged",
+      "completed_before_recovery": 59,
+      "failed_index": 60,
+      "search_created": false,
+      "failed_index_model_calls": 0,
+      "failed_index_rounds": 0,
+      "failed_index_attempts": 0,
+      "application_terminals_rerun": 0,
+      "old_evidence_preserved": true,
+      "source_only_preflight_retry": true
     }
   ],
   "credential_binding": {
@@ -2424,8 +2437,9 @@
   ],
   "uncreated_search_recovery_index": 17,
   "harness_hashes": {
-    "exploration-wave.py": "3609d08c9895a8a52fa992f183c3af1441f790cb60979fbd51facf57eb7a7933",
+    "exploration-wave.py": "b277a8919440c4b76f2dde44891426d296602e3edb13f6be19ba17c34e33d130",
     "exploration-credential-exec.py": "120d9e6b9166181c3a97b252b09a1a64457e7dfceb2f6e4410922c21fda7129a",
     "exploration-credential-channel.py": "954550612a3bc41c3d6a726a9b8a2db4a8818f52b8ea073b09ae278267f1ebbc"
-  }
+  },
+  "source_preflight_timeout_seconds": 600
 }

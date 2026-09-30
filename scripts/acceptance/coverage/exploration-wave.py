@@ -185,7 +185,7 @@ class Wave:
                 'sha256:'+app['archive_sha256'],cell/'scratch','search_preregister_'+n,
                 cell/'preflight-config.json',cell/'preflight.json'], self.root,
                 cell/'preflight.stdout.log',cell/'preflight.stderr.log')
-            rc = preflight.wait(timeout=120)
+            rc = preflight.wait(timeout=self.plan.get('source_preflight_timeout_seconds',120))
             require((cell/'preflight.json').is_file(), 'untyped preflight infrastructure failure')
             projected = read(cell/'preflight.json')
             if 'preflight_terminal' in projected:

@@ -62,6 +62,7 @@ def aggregate(plan, root):
         assert sha(root/summary['result'])==summary['result_sha256']
         source_terminal=result.get('preflight_terminal')
         state=read(cell/'status.json') if not source_terminal else {}
+        assert not state.get('verified_routes'), 'exploration unexpectedly created normal verified-route authorization'
         success=summary['typed_K_pass']
         submission=result.get('submission')
         if success:
@@ -156,6 +157,7 @@ def aggregate(plan, root):
             }] if app['index']==plan.get('uncreated_search_recovery_index') else []),
             'functional_candidate':success and not app['baseline_typed_K_pass'],
             'functional_acceptance':'not_measured','deployed':False,'approval':'not_assessed'}
+        row['normal_verified_routes']=len(state.get('verified_routes',[]))
         rows.append(row)
         for f in sorted(cell.rglob('*')):
             if f.is_file() and not any(x in ('scratch','requester','transport-recovery-work') for x in f.relative_to(cell).parts):
@@ -210,6 +212,7 @@ def main():
         'charged_cost_per_additional_PASS_usd_micros':charged/len(added) if added else None,
         'calls_per_additional_PASS':(cp+dp)/len(added) if added else None,
         'unresolved_model_reservations':0,'new_functional_acceptance':0}
+    totals['normal_verified_route_authorizations']=sum(r['normal_verified_routes'] for r in rows)
     for field in ('input_tokens','output_tokens','unknown_usage_calls'):
         totals[field]=sum(r['candidate_producer_accounting'][field]+r['decision_provider_accounting'][field] for r in rows)
     totals['tokens_per_additional_PASS']=(totals['input_tokens']+totals['output_tokens'])/len(added) if added else None
