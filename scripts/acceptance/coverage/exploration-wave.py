@@ -39,6 +39,21 @@ def require(ok, reason):
         raise RuntimeError(reason)
 
 
+def observed_source_terminal(cell):
+    """Classify an actual core error; never manufacture a Search/Runtime result."""
+    error = (cell/'preflight.stderr.log').read_text()
+    if 'source object exceeds archive cap' not in error:
+        return None
+    return {'schema':'ato.formation-preflight-observed-source-terminal/1',
+        'preflight_terminal':{'code':'source_archive_cap_exceeded',
+            'stage':'source_transport_preparation',
+            'classification_origin':'harness taxonomy of actual untyped core source error',
+            'raw_core_error_untyped':True,
+            'core_error':'source object exceeds archive cap'},
+        'K_formed':False,'model_calls':0,'source_programs_executed':0,
+        'stderr_sha256':sha(cell/'preflight.stderr.log')}
+
+
 class Wave:
     def __init__(self, a):
         self.a = a
@@ -186,6 +201,10 @@ class Wave:
                 cell/'preflight-config.json',cell/'preflight.json'], self.root,
                 cell/'preflight.stdout.log',cell/'preflight.stderr.log')
             rc = preflight.wait(timeout=self.plan.get('source_preflight_timeout_seconds',120))
+            if not (cell/'preflight.json').exists():
+                observed = observed_source_terminal(cell)
+                if observed is not None and rc != 0:
+                    write(cell/'preflight.json',observed)
             require((cell/'preflight.json').is_file(), 'untyped preflight infrastructure failure')
             projected = read(cell/'preflight.json')
             if 'preflight_terminal' in projected:
