@@ -35,6 +35,12 @@ impl ScopedGates {
         requirements
             .within(&ticket.ceiling)
             .map_err(|e| anyhow::anyhow!(e.0))?;
+        // The current physical adapter is HTTPS CONNECT only. A mixed-port
+        // host/port Cartesian product must never widen canonical D's scope.
+        ensure!(
+            requirements.network.iter().all(|r| r.port == 443),
+            "exploration_unsupported_network_protocol"
+        );
         ensure!(!ticket.search_id.is_empty(), "exploration_search_missing");
         ensure!(
             ticket.network_transfer_bytes <= configured.max_network_transfer_bytes_per_attempt,
