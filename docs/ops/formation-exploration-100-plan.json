@@ -1,10 +1,10 @@
 {
   "schema": "ato.formation-exploration-100-plan/1",
   "wave": "bounded autonomous exploration, new conditions; historical results preserved",
-  "frozen_at": "2026-09-30T12:14:30.579544+00:00",
-  "ato_pin": "7552fcfe714f26ed44bf0b7abae74b61d3651c9d",
-  "ato_api_pin": "6a7fd9dd838ba306a260992dcf82de03233bbd20",
-  "authority_source_pin": "64e03d0eb063eae5a08f516e629d53e26e824414",
+  "frozen_at": "2026-09-30T12:47:59.414847+00:00",
+  "ato_pin": "10473525efa26416ef63025dbb5003c910a43c70",
+  "ato_api_pin": "b20bba7ab9daf282f8d5b1e22affe549ad3492a3",
+  "authority_source_pin": "eb73dff36d15a829e8358d310dbb4106562b344d",
   "baseline": {
     "ledger": "docs/ops/formation-coverage-100.json",
     "sha256": "560302a51a04fc08d9868a8dfb84bc2ac58666e14a0ee3533f181e502c98d45c",
@@ -335,46 +335,48 @@
     "repair_and_reduction_gate": "actual Coordinator/Runtime; original frozen source; scripted underprivileged D may be a separately declared gate, never the 100-arm baseline",
     "default_max_rounds": 3,
     "configured_max_rounds_case": 5,
-    "100_runs_only_after_gate_pass": true
+    "100_runs_only_after_gate_pass": true,
+    "outcome": "actual fixture live-provider same-K PASS and fixed actual Runtime repair/reduction/refusal/default/config/restart/UNKNOWN gates PASS; two upstream pilots FAIL preserved",
+    "live_calls_CP": 10,
+    "live_calls_DP": 0
   },
-  "api": "http://127.0.0.1:19576",
-  "receiver_bundle": "/home/ubuntu/formation-foundation/.tmp/exploration-receiver-v3/bundle",
+  "api": "http://127.0.0.1:19579",
+  "receiver_bundle": "/home/ubuntu/formation-foundation/.tmp/exploration-receiver-v4/bundle",
   "api_node_modules": "/home/ubuntu/formation-foundation/.tmp/6b-f-20260930-api/node_modules",
   "coordinator_script": "/home/ubuntu/formation-foundation/.tmp/6b-f-20260930-measurement/scripts/acceptance/proposal/coordinator.mjs",
   "credential_wrapper": "/home/ubuntu/formation-foundation/.tmp/exploration-code/scripts/acceptance/coverage/exploration-credential-exec.py",
   "binaries": {
     "ato": {
-      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-prereg/bin-v4/ato",
-      "sha256": "2df1b52caf55062f0a3bc9f24994dde1cb957f21172eae2dc2e8d6e95a8cadfa"
-    },
-    "worker": {
-      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-prereg/bin-v4/worker",
-      "sha256": "224506ed8b974a02af3549171d0ac254d0d4b448cffde195cdecf19a10043059"
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-prereg/bin-v6/ato",
+      "sha256": "c509c7df460fe63aeca8c5dffe48b01f6d51cd9531f98da3e1df19c274d1a4cb"
     },
     "preflight": {
-      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-prereg/bin-v4/preflight",
-      "sha256": "8178ca6b36ecb490e59b86ed3955dfe29c2a2ee1adf9b8afee2dad0a9f46c94e",
-      "source_pin": "64e03d0eb063eae5a08f516e629d53e26e824414"
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-prereg/bin-v6/preflight",
+      "sha256": "d844c518433400b1788c4e63d238435c60b111f1275fc73341bb74ff722288c3"
+    },
+    "worker": {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-prereg/bin-v6/worker",
+      "sha256": "8293a260f4e29d575511405ab207dccd46cd17649512997ebe801b805294efda"
     }
   },
   "receiver_hashes": {
-    "photon_rs_bg.wasm": "f477b87cbea0445c65fc7e580e89050190600379fcd44821cec67403483872b1",
-    "schema.sql": "aba341217e9b5933bac894e20329f76823ed7dad4d9069fe96f2b5b641f338f0",
-    "receipt_authority.wasm": "b02894222b64f5d6150f102f7e1920fc08e26094c65b7c92fa38ac46788862ec",
-    "worker.js": "4b2ef4998982260a9daacafd68fd5643a945d9ddd892d4c8a9f4901816bcca98",
-    "receiver-pin.json": "a188753f116079cdfd1614ef18fa064c7130414d16ec2d155ed13236b63e1cb0",
-    "entry.ts": "0a7dc3ef0817d43d8be22341245dffe248d1b27d62a70e4a3d9f7526c16fc0b8",
     "schema-baseline.sql": "a941408a62e7fb6cdc03c83a14240952ff5e0753778f756313c16367185ef6e8",
-    "authority-provenance.json": "90c05ff17e3a614184c0864e89ece99d06f156ce3dfc81dde13f8bf18c6edd76",
+    "receiver-pin.json": "80939bbe813c5446699544692df2a1969bccb564e646167bdadfeb97ae59ee1c",
+    "authority-provenance.json": "d16b0e3aa101ba1077d5f731529844d5118f49c7895f28ada52bacec2511adbc",
+    "schema.sql": "aba341217e9b5933bac894e20329f76823ed7dad4d9069fe96f2b5b641f338f0",
+    "entry.ts": "0a7dc3ef0817d43d8be22341245dffe248d1b27d62a70e4a3d9f7526c16fc0b8",
+    "worker.js": "555df791a82e09c33d6200702d9603b0a2cc658c6e93a79a049a56510aed36bd",
     "resvg.wasm": "22bf6e9f9a100d972da0411a69c5ba504367fc1fa87b3b64e3f35e53926d2d70",
-    "schema-baseline.json": "c78d3109d741d6e3fce9babd86e026fec07d7c973adc24488a8a6e6518d7f1b8"
+    "schema-baseline.json": "c78d3109d741d6e3fce9babd86e026fec07d7c973adc24488a8a6e6518d7f1b8",
+    "receipt_authority.wasm": "cb6d274e71771da2310dcd0e36a4f6c3733cf7bf2d3725fda6164bd0199beb4d",
+    "photon_rs_bg.wasm": "f477b87cbea0445c65fc7e580e89050190600379fcd44821cec67403483872b1"
   },
   "host": {
     "OS": "Linux-6.17.0-1016-oracle-aarch64-with-glibc2.39",
     "arch": "aarch64",
     "rust": "rustc 1.96.0 (ac68faa20 2026-05-25)",
-    "disk_free_bytes": 92409262080,
-    "recorded_at": "2026-09-30T11:31:58.978882+00:00",
+    "disk_free_bytes": 88843427840,
+    "recorded_at": "2026-09-30T12:47:59.414847+00:00",
     "runtime_profile": "bwrap+Landlock; isolated loopback bridge; phase HTTPS broker; exact provisioned Python3.12.7/Node22.14.0",
     "toolchains_verified": {
       "npm": "10.9.2 from Node22.14.0 distribution"
@@ -2341,6 +2343,14 @@
       "model_calls": 0,
       "cost_usd_micros": 0,
       "previous_artifacts_preserved": true
+    },
+    {
+      "previous_plan_sha256": "f60440f8db0fce951e2b1c85f25addb7528a2d87ff412837f666ee7e89f05480",
+      "reason": "small actual Runtime gate complete; independent provider-cap infrastructure bug repaired, bounded owner evidence projection and whole-wave product-validated accounting fixed before 100; upstream failures/prompt/ceiling unchanged",
+      "live_CP_before_100": 10,
+      "live_DP_before_100": 0,
+      "unresolved_model_reservations": 0,
+      "old_artifacts_preserved": true
     }
   ],
   "credential_binding": {
@@ -2350,5 +2360,15 @@
       "JEV_API_KEY": "ATO_DECISION_JEV_API_KEY"
     },
     "credential_values_saved": false
-  }
+  },
+  "harness_pin": "10473525efa26416ef63025dbb5003c910a43c70",
+  "accounting_roots": [
+    "/home/ubuntu/formation-foundation/.tmp/exploration-no-call-gate",
+    "/home/ubuntu/formation-foundation/.tmp/exploration-live-pilot2",
+    "/home/ubuntu/formation-foundation/.tmp/exploration-live-pilot3",
+    "/home/ubuntu/formation-foundation/.tmp/exploration-live-pilot4",
+    "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1",
+    "/home/ubuntu/formation-foundation/.tmp/exploration-100-run"
+  ],
+  "live_wave": "100-new-arm-first-actual-run"
 }
