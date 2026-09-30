@@ -15,6 +15,7 @@ import signal
 import subprocess
 import time
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 
 def sha(p):
@@ -52,6 +53,7 @@ class Wave:
             require(sha(app['archive_path']) == app['archive_sha256'], 'source changed')
         require(shutil.disk_usage('/home/ubuntu').free >= 20 * 1024**3, 'insufficient disk')
         self.root = Path(a.run)
+        self.suffix = 'resume'+str(1+len(list(self.root.glob('coordinator.resume*.log')))) if a.resume else ''
         self.processes = []
         self.env = {'PATH':'/opt/ato/toolchains/node/22.14.0/bin:/usr/bin:/bin',
                     'HOME':'/home/ubuntu', 'TMPDIR':str(self.root / '.tmp')}
@@ -110,7 +112,7 @@ class Wave:
         shutil.copy2(self.plan['coordinator_script'], receiver/'coordinator.mjs')
         if not (receiver/'node_modules').exists():
             (receiver/'node_modules').symlink_to(self.plan['api_node_modules'])
-        coordinator = self.start(['node','coordinator.mjs'], receiver, self.root/('coordinator.resume.log' if self.a.resume else 'coordinator.log'))
+        coordinator = self.start(['node','coordinator.mjs'], receiver, self.root/('coordinator.'+self.suffix+'.log' if self.a.resume else 'coordinator.log'))
         self.wait(lambda: (receiver/'commands').exists() and coordinator.poll() is None,
                   'Coordinator initialization')
         self.token = self.root/'coordinator-token'
@@ -124,12 +126,21 @@ class Wave:
             write(self.root/'sandbox.json', self.plan['sandbox'])
         else:
             require(read(self.root/'sandbox.json') == self.plan['sandbox'], 'sandbox changed on restart')
+        def http_ready():
+            try:
+                req = Request(self.plan['api']+'/v1/runtime-network/runtimes', headers={
+                    'Authorization':'Bearer '+self.token.read_text().strip()})
+                with urlopen(req,timeout=1) as response:
+                    return response.status == 200
+            except Exception:
+                return False
+        self.wait(http_ready,'Coordinator authenticated HTTP readiness')
         runtime_root = Path(self.a.runtime_root)
         runtime_root.mkdir(exist_ok=self.a.resume, parents=True)
         self.runtime = self.start([self.plan['binaries']['ato']['path'],'runtime-network','serve',
             '--api',self.plan['api'],'--token-file',self.token,'--work-root',runtime_root/'w',
             '--out',runtime_root/'out','--exploration-sandbox',self.root/'sandbox.json'],
-            self.root,self.root/('runtime.resume.log' if self.a.resume else 'runtime.log'))
+            self.root,self.root/('runtime.'+self.suffix+'.log' if self.a.resume else 'runtime.log'))
         self.wait(lambda: self.sql('SELECT environment_id FROM runtime_environments WHERE runtime_id=?', ['local']),
                   'Runtime advertisement')
 
@@ -169,8 +180,8 @@ class Wave:
         if self.a.credential_socket:
             cmd = ['python3',self.plan['credential_wrapper'],self.a.credential_socket,*cmd]
         start = time.monotonic()
-        output = cell/('requester.resume.stdout.log' if continuation else 'requester.stdout.log')
-        requester = self.start(cmd,self.root,output,cell/('requester.resume.stderr.log' if continuation else 'requester.stderr.log'))
+        output = cell/('requester.'+self.suffix+'.stdout.log' if continuation else 'requester.stdout.log')
+        requester = self.start(cmd,self.root,output,cell/('requester.'+self.suffix+'.stderr.log' if continuation else 'requester.stderr.log'))
         rc = requester.wait(timeout=950)
         result = read(output)
         require(result['contract_ref'] == app['contract_ref'], 'result K mismatch')
@@ -183,7 +194,7 @@ class Wave:
                'result':str(output.relative_to(self.root)),'result_sha256':sha(output),
                'exit_code':rc,'elapsed_seconds':round(time.monotonic()-start,3),
                'functional_acceptance':'not_measured'}
-        write(cell/'summary.json',row)
+        write(cell/('summary.'+self.suffix+'.json' if continuation else 'summary.json'),row)
         print(json.dumps(row),flush=True)
         # Source copies are disposable; preserve raw evidence, journals, source
         # archives, worker state and receipts, including any unresolved UNKNOWN.
@@ -194,8 +205,8 @@ class Wave:
         if self.a.check_only:
             print('NON_SECRET_GATE_PASS',flush=True)
             return
-        self.setup()
         try:
+            self.setup()
             selected = set(map(int,self.a.indices.split(',')))
             for app in self.plan['applications']:
                 if app['index'] in selected:
