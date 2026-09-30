@@ -6,7 +6,7 @@ licenses and source-bound StaticFiles K templates are reused. The previously
 authorized explicit K for 81 sources is still a different entry condition from
 baseline inference. HTTP 200 alone is not functional acceptance.
 
-Implementation pin: `75be917f7b054ea531181a6f73b72c0a57aa72c9`.
+Implementation pin: `64e03d0eb063eae5a08f516e629d53e26e824414`.
 Receiver pin: `775c52f3fc79539bfd701ec53612367d463a6ab0`.
 Rust receipt authority source: `32903a85a6fe1711a68f933475354a5d63a17714`.
 Exact binary/receiver hashes and frozen source identities are in the JSON plan.
@@ -47,3 +47,8 @@ Results must report fresh receipt assignment, D/requirements history, reduction
 verification, rounds/attempts, provider usage/latency/cost and no-call reasons.
 The retained artifacts, frozen archives, journals and receipts are preserved.
 No host-wide Docker prune is permitted. `#1421` remains untouched.
+
+Pilot preregistration revision: source-context canonical ordering was repaired before
+any model reservation or send. The prior plan and failed infrastructure evidence
+are preserved. Continuation reopens the same search/journals and keeps its consumed
+round and original deadline; it does not create a fresh search budget.
