@@ -1,8 +1,8 @@
 {
   "schema": "ato.formation-exploration-100-plan/1",
   "wave": "bounded autonomous exploration, new conditions; historical results preserved",
-  "frozen_at": "2026-09-30T11:31:04.919187+00:00",
-  "ato_pin": "75be917f7b054ea531181a6f73b72c0a57aa72c9",
+  "frozen_at": "2026-09-30T11:51:38.964807+00:00",
+  "ato_pin": "64e03d0eb063eae5a08f516e629d53e26e824414",
   "ato_api_pin": "775c52f3fc79539bfd701ec53612367d463a6ab0",
   "authority_source_pin": "32903a85a6fe1711a68f933475354a5d63a17714",
   "baseline": {
@@ -344,16 +344,16 @@
   "credential_wrapper": "/home/ubuntu/formation-foundation/.tmp/exploration-code/scripts/acceptance/coverage/exploration-credential-exec.py",
   "binaries": {
     "ato": {
-      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-prereg/bin/ato",
-      "sha256": "a67ea588a9e9044ae0a19f685baad30df65fae152a23d4e41fa8afeb896610f1"
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-prereg/bin-v2/ato",
+      "sha256": "cba5c05a6b2204d30739120720a726991b1e0438a58e8c2cb96b3618ced55fc9"
     },
     "worker": {
-      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-prereg/bin/worker",
-      "sha256": "5aaf3cb7608ae27617552e913443add60f8409f3173e2207cfdbfe41cfeb6287"
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-prereg/bin-v2/worker",
+      "sha256": "a228baa15bf5d698a45e0d918c764b83b8406a94a3aba2389b45a91edea10cc1"
     },
     "preflight": {
-      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-prereg/bin/preflight",
-      "sha256": "2c9ba9925b2d397800a1169cbfe69d372a5a9568aa1be2499ec467ee1555fc11"
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-prereg/bin-v2/preflight",
+      "sha256": "8178ca6b36ecb490e59b86ed3955dfe29c2a2ee1adf9b8afee2dad0a9f46c94e"
     }
   },
   "receiver_hashes": {
@@ -2317,5 +2317,22 @@
       "baseline_typed_K_pass": false,
       "explicit_K_newly_supplied": true
     }
-  ]
+  ],
+  "preregistration_revisions": [
+    {
+      "previous_plan_sha256": "05ecfc7ba4f0654a6bec5bfa1e78bfb3af3cd5576edf1744d1592dc35a9abb3b",
+      "reason": "pilot requester source-context wire-order design bug before any model reservation or send",
+      "model_calls": 0,
+      "cost_usd_micros": 0,
+      "previous_artifacts_preserved": true
+    }
+  ],
+  "credential_binding": {
+    "source": "ato-api/.dev.vars; authorized provider keys only",
+    "requester_variables": {
+      "DEEPSEEK_API_KEY": "DEEPSEEK_API_KEY",
+      "JEV_API_KEY": "ATO_DECISION_JEV_API_KEY"
+    },
+    "credential_values_saved": false
+  }
 }
