@@ -1,5 +1,43 @@
 # Formation — WBO isolated online build (6b-D2 follow-up)
 
+## Verdict (2026-09-30, user decision)
+
+WBO is closed at **B as a typed terminal under the current security profile**:
+`runtime_policy_capability_required` (exit 126). The image's `node` carries the
+file capability `cap_net_bind_service=eip`, which the OCI profile's
+`cap-drop ALL` + `no-new-privileges` cannot grant. No capability is added, and
+the Dockerfile and source are not changed.
+
+| Layer | Result |
+|---|---|
+| source -> bounded online OCI build (A) | PASS (run 3) |
+| verified OCI artifact | PASS |
+| connection to the existing OCI execution | reached |
+| B container start | FAILED: runtime_policy_capability_required, exit 126 |
+| C fresh Verifier receipt | not reached |
+| D client reflection | not reached |
+| E persistence across restart | not reached |
+| functional success | 0 |
+
+This is a runtime-policy capability mismatch, not a source-to-OCI failure. A
+future `oci.capabilities`-style D fact would need several real applications
+with the same blocker, would default to empty, would need explicit
+owner/policy authorization, and would never be promoted from the image. It is
+not pursued here.
+
+### Deviations from the preregistration
+
+| Item | Status |
+|---|---|
+| online build mechanism | verified |
+| run 3 build egress | observed 12,340,498 bytes, within the run 3 budget |
+| original experiment-wide "one online build / 500 MiB" condition | **not established**: run 2 completed an online build and run 3 rebuilt; run 2's build egress was not recorded |
+| blob endpoint | changed to the exact observed host `production.cloudfront.docker.com` (user-approved) |
+| archive bound | 128 MiB -> 512 MiB (user-approved) |
+
+The 500 MiB condition must not be restated later as a PASS.
+
+
 Expectations were fixed before any execution in
 [formation-wbo-expectations.json](formation-wbo-expectations.json).
 There was no deploy, no remote migration and no model call; #1421 is untouched.
@@ -13,7 +51,11 @@ There was no deploy, no remote migration and no model call; #1421 is untouched.
   - exact host and port allowlists
   - denied private and special ranges, so DNS rebinding cannot reach the host
     or the LAN
-  - the budget, with every decision kept as evidence
+  - the budget
+  - Policy enforcement is authoritative. Recorded decisions are observational
+    evidence: netd emits them on a bounded channel with `try_send`, so a record
+    can be dropped under load. They are not a complete audit log; that would
+    need drop detection or fail-closed accounting (not implemented).
 - **Base acquisition** (`source_oci::acquire`, `ato __source-oci-acquire-base`):
   a phase separate from the build. One docker.io `name:tag` is resolved
   through a gate listing only the registry, auth and blob endpoints; redirects
