@@ -1548,6 +1548,31 @@ impl Client {
         self.send(self.http.get(self.url(&format!("/satisfy/{id}"))))?
             .context("empty status answer")
     }
+
+    /// Reattach to the same owner's durable exploration. Never resubmit an
+    /// active request, allocate a second search, or reset any frozen budget.
+    pub fn resume_exploration(&self, submission: &Submission) -> Result<serde_json::Value> {
+        let id = &submission.request.search_id;
+        anyhow::ensure!(
+            id.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-')),
+            "invalid search id"
+        );
+        let value: serde_json::Value = self
+            .send(
+                self.http
+                    .get(self.url(&format!("/exploration/{id}/resume"))),
+            )?
+            .context("missing exploration restart locator")?;
+        let frozen: ato_formation::search::FrozenSearchV1 =
+            serde_json::from_value(value["frozen"].clone())?;
+        anyhow::ensure!(
+            value["search_id"] == id.as_str()
+                && frozen == proposal::frozen_request(&submission.request)?,
+            "exploration restart identity mismatch"
+        );
+        Ok(value)
+    }
 }
 
 // ─────────────────────────────────────────────────────────────── serving
