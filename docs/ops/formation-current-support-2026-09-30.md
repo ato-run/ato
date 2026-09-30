@@ -65,8 +65,18 @@ head-run failures (volume-backed session and reserved-path verifier) are **not
 reproduced in that paired parent log**, so are not asserted to be base-reproduced.
 The initial PR changed only two JSON docs; Rust/lock/workflow trees are identical
 to the parent. Current main run [36654141449](https://github.com/ato-run/ato/actions/runs/36654141449)
-also fails with additional runtime/port-registry tests. None is reported green,
-and branch protections are not changed or bypassed.
+also fails with additional runtime/port-registry tests. None is reported green;
+branch protection settings remain unchanged.
+
+The [reviewed-head CI recheck](formation-ci-static-recheck-2026-09-30.md)
+records Rust CI run `36658258823` at `06330897500092555c64cf143b241fbf93770a8d`.
+Its additional Ubuntu static-state-token failure is **base-reproduced**:
+exact base `b43eaa0c` CI has the same source location and ConnectionReset, and
+an independently compiled isolated base run also fails there. The three
+isolated head runs were FAIL / PASS / PASS; the base runs were cached PASS,
+then independently compiled FAIL. This is intermittent observation, not an
+established timing cause or a test fix. The user authorized merging this
+lineage after the recheck, including admin merge after an exact-head check.
 
 No deploy, remote migration, extra model call or credential reread; #1421
 untouched. The 4,513,388 USD-micros future reservation is unchanged and is not
