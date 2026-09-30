@@ -2392,6 +2392,18 @@
       "model_calls_added": 0,
       "requester_deliveries_added": 0,
       "policy_or_runtime_changes": false
+    },
+    {
+      "previous_plan_sha256": "d7e0c2755b95a8d110de633745f86a640bb3b3dc04a306f45acf37464a58c0c7",
+      "reason": "Core source object archive cap refusal at73 was untyped in helper; harness classifies exact observed core error without rerun or cap change",
+      "failed_index": 73,
+      "completed_search_terminals": 72,
+      "source_boundary_error_actual": true,
+      "source_error_untyped_core_explicitly_classified": true,
+      "app_rerun": false,
+      "model_calls_at73": 0,
+      "search_created_at73": false,
+      "policy_runtime_source_limits_changed": false
     }
   ],
   "credential_binding": {
@@ -2402,7 +2414,7 @@
     },
     "credential_values_saved": false
   },
-  "harness_pin": "36c54d9635e666e17f33b50307fc9c008856b6a4",
+  "harness_pin": "416e33161b84eb9684a6ea41b55227dfecc0cbcb",
   "accounting_roots": [
     "/home/ubuntu/formation-foundation/.tmp/exploration-no-call-gate",
     "/home/ubuntu/formation-foundation/.tmp/exploration-live-pilot2",
@@ -2445,7 +2457,7 @@
   ],
   "uncreated_search_recovery_index": 17,
   "harness_hashes": {
-    "exploration-wave.py": "4d2523b4416115cd5705f52245fc8af6f312cdd0339d9dca697f544eae48b61c",
+    "exploration-wave.py": "6170e2342b8e96df9bd0a8d3d2d80c112e2c872425b9b15f8111365f259ad0f7",
     "exploration-credential-exec.py": "120d9e6b9166181c3a97b252b09a1a64457e7dfceb2f6e4410922c21fda7129a",
     "exploration-credential-channel.py": "954550612a3bc41c3d6a726a9b8a2db4a8818f52b8ea073b09ae278267f1ebbc"
   },
