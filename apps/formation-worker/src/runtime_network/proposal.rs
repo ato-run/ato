@@ -1105,8 +1105,14 @@ fn serve_proposal_inner(
         "proposal point revision mismatch"
     );
     local.attempted_claims.insert(seq);
-    let Ok(claim) = client.claim_proposal(id, state.revision, claimant_id) else {
-        return Ok(false);
+    let claim = match client.claim_proposal(id, state.revision, claimant_id) {
+        Ok(claim) => claim,
+        Err(error) if matches!(&producer, Invocation::General(_)) => {
+            // No send follows an uncertain/refused claim. Surface the receiver
+            // diagnostic instead of silently waiting out every generated round.
+            return Err(error.context("proposal claim failed before provider send; no retry"));
+        }
+        Err(_) => return Ok(false),
     };
     let fence = claim["fence"]
         .as_str()
