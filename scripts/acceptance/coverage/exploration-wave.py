@@ -256,9 +256,6 @@ class Wave:
         output = cell/('requester.'+self.suffix+'.stdout.log' if continuation else 'requester.stdout.log')
         requester = self.start(cmd,self.root,output,cell/('requester.'+self.suffix+'.stderr.log' if continuation else 'requester.stderr.log'))
         rc = requester.wait(timeout=950)
-        result = read(output)
-        require(result['contract_ref'] == app['contract_ref'], 'result K mismatch')
-        require(result['approval'] == 'not_assessed' and result['deployed'] is False, 'submission confused with approval')
         # Preserve the raw Coordinator/Runtime evidence as well as the strict
         # requester-verified result. Neither is a fabricated application PASS.
         auth = {'Authorization':'Bearer '+self.token.read_text().strip()}
@@ -268,6 +265,30 @@ class Wave:
         with urlopen(Request(self.plan['api']+'/v1/runtime-network/satisfy/'+locator['satisfy_id'],headers=auth)) as response:
             status = json.load(response)
         write(cell/('status.'+self.suffix+'.json' if (cell/'status.json').exists() else 'status.json'),status)
+        try:
+            result = read(output)
+        except json.JSONDecodeError:
+            # A requester transport/wait failure is not a fabricated product
+            # terminal. Collect the durable state, keep UNKNOWN and all scratch,
+            # and never resubmit this app or reset its budget.
+            require(rc != 0, 'non-JSON successful requester is an infrastructure error')
+            read_journal = subprocess.check_output([
+                self.plan['binaries']['preflight']['path'], '--journal-snapshot',
+                str(cell/'producer.jsonl')], env=self.env, cwd=self.root)
+            snapshot = json.loads(read_journal)['snapshot']
+            row = {'index':app['index'], 'name':app['name'],
+                'baseline_typed_K_pass':app['baseline_typed_K_pass'], 'typed_K_pass':False,
+                'terminal_origin':'untyped_requester_failure_and_observed_coordinator_state',
+                'coordinator_status':status['status'], 'untyped_requester_failure':True,
+                'automatic_retry':False, 'producer_calls':len(snapshot['cells']),
+                'result':str(output.relative_to(self.root)), 'result_sha256':sha(output),
+                'exit_code':rc, 'elapsed_seconds':round(time.monotonic()-start,3),
+                'functional_acceptance':'not_measured'}
+            write(cell/'summary.json', row)
+            print(json.dumps(row),flush=True)
+            return
+        require(result['contract_ref'] == app['contract_ref'], 'result K mismatch')
+        require(result['approval'] == 'not_assessed' and result['deployed'] is False, 'submission confused with approval')
         cp_journal = result['candidate_producer_accounting']
         dp_journal = result['decision_provider_accounting'].get('journal',{})
         row = {'index':app['index'],'name':app['name'],'baseline_typed_K_pass':app['baseline_typed_K_pass'],

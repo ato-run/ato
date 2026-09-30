@@ -24,6 +24,7 @@ pub struct ExplorationRealizer<'a> {
     pub shim: &'a Path,
     pub ceiling: &'a ExecutionRequirements,
     pub gates: &'a BTreeMap<ExecutionPhase, PathBuf>,
+    pub network_refusal: Option<&'a crate::build::NetworkRefusalObserver<'a>>,
 }
 
 fn refuse(code: &str, message: impl Into<String>) -> Option<AttemptFailure> {
@@ -98,20 +99,33 @@ impl CandidateRealizer for ExplorationRealizer<'_> {
         admit_isolated_authority(d, self.ceiling)
     }
     fn realize(&self, attempt_id: &str, root: &Path) -> Result<Realized, RealizeFailure> {
-        let executed = self.builder.execute_with_scoped_network(
-            &AttemptExecution {
-                attempt_id,
-                candidate: self.planned,
-                source_root: self.source_root,
-                attempt_root: root,
-            },
-            BuildAttempt {
-                job_id: "exploration".into(),
-                attempt_id: attempt_id.into(),
-                attempt_fence: 1,
-            },
-            self.gates,
-        )?;
+        let executed = self
+            .builder
+            .execute_with_observed_network(
+                &AttemptExecution {
+                    attempt_id,
+                    candidate: self.planned,
+                    source_root: self.source_root,
+                    attempt_root: root,
+                },
+                BuildAttempt {
+                    job_id: "exploration".into(),
+                    attempt_id: attempt_id.into(),
+                    attempt_fence: 1,
+                },
+                self.gates,
+                self.network_refusal,
+            )
+            .map_err(
+                |error| match error.downcast_ref::<crate::build::BuildStopUnconfirmed>() {
+                    Some(stopped) => RealizeFailure::Abandoned {
+                        cleanup: stopped.cleanup.clone(),
+                        resources: vec![format!("build-process-group:{}", stopped.pid)],
+                        error,
+                    },
+                    None => RealizeFailure::Execution(error),
+                },
+            )?;
         CandidateLauncher {
             planned: self.planned,
             shim: self.shim,

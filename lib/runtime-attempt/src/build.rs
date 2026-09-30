@@ -24,6 +24,20 @@ use crate::build_sandbox::{
     BuildSandbox, GUEST_WORKSPACE_ROOT, NetworkPolicy, sandboxed_build_step_command,
 };
 
+/// The owner observes positive refusals from the phase gate. Workload output
+/// never controls this callback; absence of a record does not imply permission.
+pub type NetworkRefusalObserver<'a> = dyn Fn(
+        ato_formation::requirements::ExecutionPhase,
+    ) -> Option<ato_formation::requirements::NetworkRequirement>
+    + 'a;
+
+#[derive(Debug, thiserror::Error)]
+#[error("interrupted build process group {pid} could not be confirmed stopped: {cleanup}")]
+pub struct BuildStopUnconfirmed {
+    pub pid: u32,
+    pub cleanup: String,
+}
+
 /// One execution of a job.
 #[derive(Debug, Clone)]
 pub struct BuildAttempt {
@@ -119,6 +133,17 @@ pub fn run_build_scoped(
     attempt: BuildAttempt,
     sandbox: &BuildSandbox<'_>,
     gates: &std::collections::BTreeMap<ato_formation::requirements::ExecutionPhase, PathBuf>,
+) -> Result<BuildOutcome> {
+    run_build_scoped_observed(plan, derivation, attempt, sandbox, gates, None)
+}
+
+pub fn run_build_scoped_observed(
+    plan: &ExecutionPlan,
+    derivation: &BoundDerivation,
+    attempt: BuildAttempt,
+    sandbox: &BuildSandbox<'_>,
+    gates: &std::collections::BTreeMap<ato_formation::requirements::ExecutionPhase, PathBuf>,
+    refusal: Option<&NetworkRefusalObserver<'_>>,
 ) -> Result<BuildOutcome> {
     let (source_root, workspace_root, cache_root, shim, network, limits) = (
         sandbox.source_root,
@@ -219,7 +244,8 @@ pub fn run_build_scoped(
         }
         let facts = (network == NetworkPolicy::Scoped)
             .then(|| policy_path.with_file_name("execution-facts.jsonl"));
-        let output = run_step_with_facts(step, &command.argv, remaining, facts.as_deref())?;
+        let output =
+            run_step_with_facts(step, &command.argv, remaining, facts.as_deref(), refusal)?;
         diagnostics.push(bounded_diagnostic(&step.name, &output));
     }
 
@@ -437,6 +463,7 @@ fn run_step_with_facts(
     argv: &[String],
     budget: Duration,
     facts: Option<&Path>,
+    refusal: Option<&NetworkRefusalObserver<'_>>,
 ) -> Result<Vec<u8>> {
     use std::os::unix::process::CommandExt as _;
 
@@ -506,6 +533,44 @@ fn run_step_with_facts(
         }
         stdout.read_available();
         stderr.read_available();
+
+        if let Some(denied) = step.network_phase.and_then(|phase| refusal?(phase)) {
+            terminate_group(pid);
+            let status = child.wait();
+            if let Err(error) = ensure_group_gone(pid) {
+                return Err(BuildStopUnconfirmed {
+                    pid,
+                    cleanup: error.to_string(),
+                }
+                .into());
+            }
+            let status = status.map_err(|error| BuildStopUnconfirmed {
+                pid,
+                cleanup: format!("cannot reap network-refused build step: {error}"),
+            })?;
+            stdout.read_available();
+            stderr.read_available();
+            let mut combined = stdout.tail.finish();
+            combined.extend_from_slice(&stderr.tail.finish());
+            if let Some(path) = facts {
+                crate::execution_facts::append(
+                    path,
+                    "build",
+                    &step.name,
+                    Some(status),
+                    &bounded_diagnostic(&step.name, &combined),
+                )?;
+            }
+            return Err(FormationFailure::new(
+                "network_denied",
+                FailureStage::Build,
+                format!(
+                    "phase {:?} gate refused {}:{}; build process group stopped",
+                    denied.phase, denied.host, denied.port
+                ),
+            )
+            .into());
+        }
 
         // Seen without reaping: the step's process stays a zombie, so its pid
         // — the process group's id — cannot be reused while the rest of the
@@ -633,6 +698,7 @@ fn run_step_with_facts(
     _argv: &[String],
     _budget: Duration,
     _facts: Option<&Path>,
+    _refusal: Option<&NetworkRefusalObserver<'_>>,
 ) -> Result<Vec<u8>> {
     bail!("Formation build execution requires Unix process-group isolation")
 }
@@ -757,7 +823,56 @@ mod tests {
 
     fn run(script: &str, budget: Duration) -> Result<Vec<u8>> {
         let (step, argv) = step(script);
-        run_step_with_facts(&step, &argv, budget, None)
+        run_step_with_facts(&step, &argv, budget, None, None)
+    }
+
+    #[test]
+    fn positive_phase_gate_refusal_stops_a_waiting_step_and_retains_execution_facts() {
+        use ato_formation::requirements::{ExecutionPhase, NetworkRequirement};
+        let marker = format!("ato-build-refused-{}", std::process::id());
+        let (mut step, argv) = step(&format!(
+            "echo waiting; sh -c 'sleep 600; :' {marker} & wait"
+        ));
+        step.network_phase = Some(ExecutionPhase::Dependencies);
+        let scratch = tempfile::tempdir().unwrap();
+        let facts = scratch.path().join("execution-facts.jsonl");
+        let start = Instant::now();
+        let refusal = |phase| {
+            assert_eq!(phase, ExecutionPhase::Dependencies);
+            (start.elapsed() > Duration::from_millis(100)).then(|| NetworkRequirement {
+                phase,
+                host: "registry.npmjs.org".into(),
+                port: 443,
+            })
+        };
+        let error = run_step_with_facts(
+            &step,
+            &argv,
+            Duration::from_secs(60),
+            Some(&facts),
+            Some(&refusal),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<FormationFailure>().unwrap().code,
+            "network_denied"
+        );
+        assert!(start.elapsed() < Duration::from_secs(5));
+        assert!(survivors(&marker).is_empty());
+        let recorded = crate::execution_facts::read(&facts).unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert!(std::fs::read_to_string(facts).unwrap().contains("waiting"));
+    }
+
+    #[test]
+    fn a_networkless_step_does_not_consult_another_phases_refusal() {
+        let (step, argv) = step("echo offline");
+        let refusal = |_| panic!("another phase cannot interrupt this step");
+        assert_eq!(
+            run_step_with_facts(&step, &argv, Duration::from_secs(10), None, Some(&refusal))
+                .unwrap(),
+            b"offline\n"
+        );
     }
 
     /// Four MiB and more to one stream: far past any pipe buffer.

@@ -119,4 +119,77 @@ impl ScopedGates {
     pub fn evidence(&self) -> serde_json::Value {
         serde_json::json!({"kind":"exploration_network_evidence","reports":self.gates.iter().map(|(phase,gate)|serde_json::json!({"phase":phase,"report":gate.report()})).collect::<Vec<_>>()})
     }
+
+    /// A positive gate observation can stop a refused build promptly. The
+    /// bounded observational channel cannot prove the absence of refusals.
+    pub fn first_refusal(
+        &self,
+        phase: ExecutionPhase,
+    ) -> Option<ato_formation::requirements::NetworkRequirement> {
+        self.gates
+            .get(&phase)?
+            .report()
+            .refused
+            .into_iter()
+            .map(|target| ato_formation::requirements::NetworkRequirement {
+                phase,
+                host: target.target,
+                port: target.port,
+            })
+            .find(|requirement| {
+                ExecutionRequirements {
+                    network: vec![requirement.clone()],
+                    authority: vec![],
+                }
+                .validate()
+                .is_ok()
+            })
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    #[test]
+    fn actual_gate_refusal_is_reported_only_for_its_phase_without_external_dns() {
+        let gate = EgressGate::start(
+            "127.0.0.1:0".parse().unwrap(),
+            EgressAllowance {
+                hosts: vec!["exploration-denied.invalid".into()],
+                ports: vec![443],
+                max_transfer_bytes: 1000,
+            },
+        )
+        .unwrap();
+        let mut stream = std::net::TcpStream::connect(gate.address()).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        write!(
+            stream,
+            "CONNECT registry.npmjs.org:443 HTTP/1.1\r\nHost: registry.npmjs.org:443\r\n\r\n"
+        )
+        .unwrap();
+        let mut response = [0; 512];
+        let n = stream.read(&mut response).unwrap();
+        assert!(String::from_utf8_lossy(&response[..n]).contains("403"));
+        let gates = ScopedGates {
+            bridges: vec![],
+            sockets: BTreeMap::new(),
+            gates: BTreeMap::from([(ExecutionPhase::Dependencies, gate)]),
+        };
+        let start = std::time::Instant::now();
+        let refused = loop {
+            if let Some(refused) = gates.first_refusal(ExecutionPhase::Dependencies) {
+                break refused;
+            }
+            assert!(start.elapsed() < std::time::Duration::from_secs(2));
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert_eq!(refused.host, "registry.npmjs.org");
+        assert_eq!(refused.port, 443);
+        assert!(gates.first_refusal(ExecutionPhase::Build).is_none());
+    }
 }
