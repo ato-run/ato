@@ -77,7 +77,7 @@
     "executed": false,
     "reason": "Vikunja's pinned inputs exceed the approved bounds and endpoints before any build. Running it would need a new explicit network and size approval; allowlists and bounds are not widened in response to what is observed.",
     "blockers": [
-      {"code": "base_acquisition_bound", "fact": "xgo linux/amd64 is 4,161,691,592 compressed bytes: over the 200 MiB acquisition bound, the 500 MiB transfer total and the 5 GiB job disk"},
+      {"code": "base_acquisition_bound", "fact": "xgo linux/amd64 is 4,161,691,592 compressed bytes: over the 200 MiB acquisition bound and 500 MiB transfer total. Expanded job disk usage is unmeasured; compressed size alone does not establish exceeding 5 GiB."},
       {"code": "base_registry_unapproved", "fact": "ghcr.io and pkg-containers.githubusercontent.com are not approved acquisition endpoints, and acquire_base supports docker.io only"},
       {"code": "external_frontend_image", "fact": "the # syntax= frontend image is an external input the session cannot supply to BuildKit"},
       {"code": "build_egress_unapproved", "fact": "Go module proxy hosts would be needed; mage@latest is unpinned"},
