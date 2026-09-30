@@ -314,7 +314,7 @@
     "remaining_before_wave_usd_micros": 3507128,
     "max_candidate_producer_calls": 320,
     "max_decision_provider_calls": 108,
-    "max_requester_invocations": 108,
+    "max_requester_invocations": 109,
     "small_gate_max_CP": 20,
     "small_gate_max_DP": 8,
     "100_max_CP": 300,
@@ -344,7 +344,7 @@
   "receiver_bundle": "/home/ubuntu/formation-foundation/.tmp/exploration-receiver-v4/bundle",
   "api_node_modules": "/home/ubuntu/formation-foundation/.tmp/6b-f-20260930-api/node_modules",
   "coordinator_script": "/home/ubuntu/formation-foundation/.tmp/6b-f-20260930-measurement/scripts/acceptance/proposal/coordinator.mjs",
-  "credential_wrapper": "/home/ubuntu/formation-foundation/.tmp/exploration-code/scripts/acceptance/coverage/exploration-credential-exec.py",
+  "credential_wrapper": "/home/ubuntu/formation-foundation/.tmp/exploration-harness-v2/exploration-credential-exec.py",
   "binaries": {
     "ato": {
       "path": "/home/ubuntu/formation-foundation/.tmp/exploration-prereg/bin-v6/ato",
@@ -357,6 +357,12 @@
     "worker": {
       "path": "/home/ubuntu/formation-foundation/.tmp/exploration-prereg/bin-v6/worker",
       "sha256": "8293a260f4e29d575511405ab207dccd46cd17649512997ebe801b805294efda"
+    },
+    "gate_requester": {
+      "path": "/home/ubuntu/formation-foundation/.tmp/exploration-harness-v2/gate_requester",
+      "sha256": "f9143dba615e1d908774d01ce9185801018d6d773de80a3a70ec20258e4182a9",
+      "source_pin": "4b3fe096523b8cea6c8389fcf8418ff50d21598d",
+      "SDK_pin": "10473525efa26416ef63025dbb5003c910a43c70"
     }
   },
   "receiver_hashes": {
@@ -2351,6 +2357,20 @@
       "live_DP_before_100": 0,
       "unresolved_model_reservations": 0,
       "old_artifacts_preserved": true
+    },
+    {
+      "previous_plan_sha256": "96b3bd4d993a9f2ef930abf5c3c4b7b39a23381b55c787c1216904ea806d693d",
+      "reason": "local measurement owner source transport quota16; all product code/Runtime binaries/prompt/ceilings unchanged; preserve original backend and partition by predeclared index ranges, no source/evidence deletion or quota expansion",
+      "completed_before_recovery": 16,
+      "failed_index": 17,
+      "failed_search_rows": 0,
+      "failed_index_model_calls": 0,
+      "failed_index_rounds": 0,
+      "failed_index_attempts": 0,
+      "same_search_identity_and_journals_retained": true,
+      "live_CP_total_before_recovery": 54,
+      "live_DP_total_before_recovery": 0,
+      "old_evidence_preserved": true
     }
   ],
   "credential_binding": {
@@ -2361,7 +2381,7 @@
     },
     "credential_values_saved": false
   },
-  "harness_pin": "10473525efa26416ef63025dbb5003c910a43c70",
+  "harness_pin": "4b3fe096523b8cea6c8389fcf8418ff50d21598d",
   "accounting_roots": [
     "/home/ubuntu/formation-foundation/.tmp/exploration-no-call-gate",
     "/home/ubuntu/formation-foundation/.tmp/exploration-live-pilot2",
@@ -2370,5 +2390,42 @@
     "/home/ubuntu/formation-foundation/.tmp/exploration-small-gate1",
     "/home/ubuntu/formation-foundation/.tmp/exploration-100-run"
   ],
-  "live_wave": "100-new-arm-first-actual-run"
+  "live_wave": "100-new-arm-first-actual-run",
+  "receiver_partition_by_index": true,
+  "receiver_partitions": [
+    [
+      1,
+      16
+    ],
+    [
+      17,
+      32
+    ],
+    [
+      33,
+      48
+    ],
+    [
+      49,
+      64
+    ],
+    [
+      65,
+      80
+    ],
+    [
+      81,
+      96
+    ],
+    [
+      97,
+      100
+    ]
+  ],
+  "uncreated_search_recovery_index": 17,
+  "harness_hashes": {
+    "exploration-wave.py": "3609d08c9895a8a52fa992f183c3af1441f790cb60979fbd51facf57eb7a7933",
+    "exploration-credential-exec.py": "120d9e6b9166181c3a97b252b09a1a64457e7dfceb2f6e4410922c21fda7129a",
+    "exploration-credential-channel.py": "954550612a3bc41c3d6a726a9b8a2db4a8818f52b8ea073b09ae278267f1ebbc"
+  }
 }
