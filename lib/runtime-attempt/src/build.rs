@@ -102,6 +102,24 @@ pub fn run_build(
     attempt: BuildAttempt,
     sandbox: &BuildSandbox<'_>,
 ) -> Result<BuildOutcome> {
+    run_build_scoped(
+        plan,
+        derivation,
+        attempt,
+        sandbox,
+        &std::collections::BTreeMap::new(),
+    )
+}
+
+/// Gates are created by the owner from D requirements and a frozen ceiling,
+/// never from a workload environment or an inferred step name.
+pub fn run_build_scoped(
+    plan: &ExecutionPlan,
+    derivation: &BoundDerivation,
+    attempt: BuildAttempt,
+    sandbox: &BuildSandbox<'_>,
+    gates: &std::collections::BTreeMap<ato_formation::requirements::ExecutionPhase, PathBuf>,
+) -> Result<BuildOutcome> {
     let (source_root, workspace_root, cache_root, shim, network, limits) = (
         sandbox.source_root,
         sandbox.workspace_root,
@@ -143,6 +161,10 @@ pub fn run_build(
     for step in &steps {
         // A step that declared no network must not get one, even when the job's
         // policy would have allowed it. The narrower of the two wins.
+        ensure!(
+            step.network_phase.is_none() || network == NetworkPolicy::Scoped,
+            "scoped D requires a phase-scoped gate; host networking cannot satisfy it"
+        );
         let step_network = if step.needs_network {
             network
         } else {
@@ -165,6 +187,18 @@ pub fn run_build(
                 shim,
                 policy_host_path: policy_path,
                 network: step_network,
+                broker_socket: if step_network == NetworkPolicy::Scoped {
+                    Some(
+                        gates
+                            .get(&step.network_phase.unwrap_or(
+                                ato_formation::requirements::ExecutionPhase::Dependencies,
+                            ))
+                            .context("phase gate unavailable")?
+                            .as_path(),
+                    )
+                } else {
+                    None
+                },
                 limits,
                 toolchain: step.toolchain_access,
             },
@@ -691,6 +725,7 @@ mod tests {
                 name: "test".to_owned(),
                 argv: argv.clone(),
                 needs_network: false,
+                network_phase: None,
                 cwd_relative: String::new(),
                 env: std::collections::BTreeMap::new(),
                 toolchain_access: ato_formation::intent::ToolchainAccess::ReadOnly,

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::build::{BuildAttempt, control_policy_path, output_root, run_build};
+use crate::build::{BuildAttempt, control_policy_path, output_root, run_build_scoped};
 use crate::build_sandbox::{BuildSandbox, NetworkPolicy};
 use crate::plan::{PlannedCandidate, stage_workspace};
 use crate::static_lane::StaticFormationOutput;
@@ -66,6 +66,19 @@ impl LocalAttemptExecutor {
         execution: &AttemptExecution<'_>,
         build_attempt: BuildAttempt,
     ) -> Result<ExecutedCandidate> {
+        self.execute_with_scoped_network(
+            execution,
+            build_attempt,
+            &std::collections::BTreeMap::new(),
+        )
+    }
+
+    pub fn execute_with_scoped_network(
+        &self,
+        execution: &AttemptExecution<'_>,
+        build_attempt: BuildAttempt,
+        gates: &std::collections::BTreeMap<ato_formation::requirements::ExecutionPhase, PathBuf>,
+    ) -> Result<ExecutedCandidate> {
         anyhow::ensure!(
             build_attempt.attempt_id == execution.attempt_id,
             "build attempt identity mismatch"
@@ -81,7 +94,7 @@ impl LocalAttemptExecutor {
         let cache_root = attempt_root.join("cache");
         std::fs::create_dir_all(&cache_root).context("cannot create the build cache")?;
 
-        let built = run_build(
+        let built = run_build_scoped(
             &candidate.plan,
             &candidate.derivation,
             build_attempt,
@@ -92,9 +105,11 @@ impl LocalAttemptExecutor {
                 shim: &self.shim,
                 policy_host_path: &control_policy_path(attempt_root)?,
                 network: self.network,
+                broker_socket: None,
                 limits: self.limits,
                 toolchain: crate::build_sandbox::ToolchainAccess::ReadOnly,
             },
+            gates,
         )?;
 
         match candidate.plan.lane {

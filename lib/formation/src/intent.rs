@@ -296,6 +296,8 @@ pub struct BuildStepV1 {
     /// say "fetch, then build offline" instead of opening the network for the
     /// whole build.
     pub needs_network: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_phase: Option<crate::requirements::ExecutionPhase>,
     /// Where the step runs, relative to the workspace root. `""` is the root.
     /// Absent from every generated step, so existing plans digest as before.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -1753,6 +1755,7 @@ Nothing was changed — try again shortly.\"}}' >&2; exit 65; fi; \
             // Nothing is resolved from anywhere. Everything this step reads is
             // either the uploaded file or a platform asset already on disk.
             needs_network: false,
+            network_phase: None,
             cwd_relative: String::new(),
             env: BTreeMap::new(),
             toolchain_access: ToolchainAccess::ReadOnly,
@@ -1797,6 +1800,7 @@ Nothing was changed — try again shortly.\"}}' >&2; exit 65; fi; \
                     name: "install-node-dependencies".to_owned(),
                     argv: with_toolchain(install),
                     needs_network: true,
+                    network_phase: None,
                     cwd_relative: String::new(),
                     env: BTreeMap::new(),
                     toolchain_access: ToolchainAccess::ReadOnly,
@@ -1817,6 +1821,7 @@ Nothing was changed — try again shortly.\"}}' >&2; exit 65; fi; \
                     // build that reached out here would be fetching something
                     // the install step did not pin.
                     needs_network: false,
+                    network_phase: None,
                     cwd_relative: String::new(),
                     env: BTreeMap::new(),
                     toolchain_access: ToolchainAccess::ReadOnly,
@@ -1839,6 +1844,7 @@ Nothing was changed — try again shortly.\"}}' >&2; exit 65; fi; \
                     interpreter.clone().unwrap_or_else(|| "python3".to_owned()),
                 ],
                 needs_network: true,
+                network_phase: None,
                 cwd_relative: String::new(),
                 env: BTreeMap::new(),
                 toolchain_access: ToolchainAccess::ReadOnly,
@@ -1871,6 +1877,7 @@ Nothing was changed — try again shortly.\"}}' >&2; exit 65; fi; \
                     ),
                 ],
                 needs_network: false,
+                network_phase: None,
                 cwd_relative: String::new(),
                 env: BTreeMap::new(),
                 toolchain_access: ToolchainAccess::ReadOnly,
@@ -1904,6 +1911,7 @@ Nothing was changed — try again shortly.\"}}' >&2; exit 65; fi; \
                     format!("{root}/requirements.txt"),
                 ],
                 needs_network: true,
+                network_phase: None,
                 cwd_relative: String::new(),
                 env: BTreeMap::new(),
                 toolchain_access: ToolchainAccess::ReadOnly,
@@ -1968,6 +1976,7 @@ fn provision_python_step(version: &str, target_triple: &str) -> BuildStepV1 {
             ),
         ],
         needs_network: true,
+        network_phase: None,
         cwd_relative: String::new(),
         env: BTreeMap::new(),
         toolchain_access: ToolchainAccess::Provision,
@@ -1990,6 +1999,7 @@ fn provision_node_step(version: &str, target_triple: &str) -> BuildStepV1 {
             ),
         ],
         needs_network: true,
+        network_phase: None,
         cwd_relative: String::new(),
         env: BTreeMap::new(),
         toolchain_access: ToolchainAccess::Provision,
@@ -2026,6 +2036,7 @@ fn provision_package_manager_step(
             ),
         ],
         needs_network: true,
+        network_phase: None,
         cwd_relative: String::new(),
         env: BTreeMap::new(),
         toolchain_access: ToolchainAccess::Provision,

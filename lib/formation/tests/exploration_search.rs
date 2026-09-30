@@ -40,6 +40,8 @@ fn state() -> SearchStateV1 {
         max_provider_cost_usd_micros: 100_000,
         max_provider_input_tokens: 90_000,
         max_provider_output_tokens: 6144,
+        max_network_transfer_bytes: 1048576,
+        max_network_transfer_bytes_per_attempt: 524288,
     });
     s.frozen.policy.proposal = Some(ProposalAuthorization {
         execution_plan: Some(PlanAuthorization {
@@ -176,6 +178,8 @@ fn default_three_failed_provider_rounds_exhaust_without_reset_on_restart() {
             expires_at_ms,
             outcome: Some(ProposalRoundOutcome::ProviderError),
             candidates: vec![],
+            derivations: vec![],
+            diagnostics: vec![],
         });
         s = serde_json::from_slice(&s.canonical_bytes().unwrap()).unwrap();
         assert_eq!(s.frozen.canonical_bytes().unwrap(), frozen);
@@ -204,6 +208,8 @@ fn configured_one_round_keeps_its_effective_limit_after_serialization() {
         expires_at_ms: 5100,
         outcome: Some(ProposalRoundOutcome::Timeout),
         candidates: vec![],
+        derivations: vec![],
+        diagnostics: vec![],
     });
     let restored: SearchStateV1 = serde_json::from_slice(&s.canonical_bytes().unwrap()).unwrap();
     assert_eq!(
