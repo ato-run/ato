@@ -360,3 +360,46 @@ fn auto_plan_inventory_comes_from_verified_source_and_excludes_credentials() {
     });
     assert!(sub.enable_candidate_producer(auth).is_err());
 }
+
+#[test]
+fn auto_source_priority_subset_is_valid_canonical_provider_context() {
+    let (root, sub) = prepared(|source| {
+        std::fs::write(source.join("package.json"), "{\"main\":\"app.py\"}").unwrap();
+        std::fs::write(source.join("README.md"), "untrusted source documentation").unwrap();
+        std::fs::write(source.join("package-lock.json"), "{\"lockfileVersion\":3}").unwrap();
+        std::fs::write(source.join(".dev.vars"), "PROVIDER_KEY=excluded").unwrap();
+    });
+    let mut policy = sub.request.policy.clone();
+    policy.exploration = Some(
+        serde_json::from_value(json!({"ceiling":{},
+        "max_provider_calls":3,"max_inspections":4,"max_provider_cost_usd_micros":100000,
+        "max_provider_input_tokens":90000,"max_provider_output_tokens":6144}))
+        .unwrap(),
+    );
+    let fresh = prepare_exploration_submission_auto(
+        &sub.frozen_source.root,
+        &[],
+        sub.request.base_contract.clone(),
+        &root.path().join("auto"),
+        RuntimeConstraintWire::Any,
+        policy,
+        SatisfyBudget::ceilings(4, "first_pass"),
+        "auto_context_test",
+        None,
+        BTreeMap::from([("python".into(), "3.12.7".into())]),
+    )
+    .unwrap();
+    let request = fresh.proposal_request_v2(&status(&fresh)).unwrap();
+    assert_eq!(request.source_context.len(), 4);
+    assert!(
+        request
+            .source_context
+            .windows(2)
+            .all(|w| (w[0].kind, &w[0].logical_id) < (w[1].kind, &w[1].logical_id))
+    );
+    assert!(
+        !serde_json::to_string(&request)
+            .unwrap()
+            .contains("PROVIDER_KEY=excluded")
+    );
+}

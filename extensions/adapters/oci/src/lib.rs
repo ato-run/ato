@@ -197,19 +197,20 @@ pub struct OciAdmission {
 
 #[derive(Clone)]
 pub(crate) struct DockerClient {
-    executable: PathBuf,
-    owner: Option<(PathBuf, PathBuf)>,
+    executable: std::sync::Arc<PathBuf>,
+    owner: Option<std::sync::Arc<(PathBuf, PathBuf)>>,
 }
 impl DockerClient {
     fn ambient(executable: PathBuf) -> Self {
         Self {
-            executable,
+            executable: std::sync::Arc::new(executable),
             owner: None,
         }
     }
     pub(crate) fn command(&self) -> Command {
-        let mut c = Command::new(&self.executable);
-        if let Some((socket, config)) = &self.owner {
+        let mut c = Command::new(self.executable.as_ref());
+        if let Some(owner) = &self.owner {
+            let (socket, config) = owner.as_ref();
             c.env_clear()
                 .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
                 .arg("--host")
@@ -284,7 +285,7 @@ impl DockerOciAdapter {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(config, std::fs::Permissions::from_mode(0o700))?;
         }
-        self.docker.owner = Some((socket.into(), config.into()));
+        self.docker.owner = Some(std::sync::Arc::new((socket.into(), config.into())));
         Ok(self)
     }
 
@@ -1545,11 +1546,11 @@ mod tests {
     #[test]
     fn exploration_docker_command_has_only_explicit_owner_bindings() {
         let client = DockerClient {
-            executable: PathBuf::from("/usr/bin/docker"),
-            owner: Some((
+            executable: std::sync::Arc::new(PathBuf::from("/usr/bin/docker")),
+            owner: Some(std::sync::Arc::new((
                 PathBuf::from("/isolated/docker.sock"),
                 PathBuf::from("/isolated/empty-config"),
-            )),
+            ))),
         };
         let command = client.command();
         let args: Vec<_> = command.get_args().map(|a| a.to_str().unwrap()).collect();
