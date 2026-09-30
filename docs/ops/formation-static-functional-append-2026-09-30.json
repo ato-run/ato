@@ -1,0 +1,245 @@
+{
+  "schema": "ato.formation-static-functional-append/1",
+  "date": "2026-09-30",
+  "appends_to": "formation-coverage-50.json (unchanged)",
+  "preregistration": {
+    "file": "formation-static-functional-plan-2026-09-30.json",
+    "sha256": "1fe46dcc666385c2cc8a5ab36ba89b7e6deadf28da943beb2b0385709c3d0de7",
+    "commit": "896c3cc0e441e770c697a6ac5421b067be7d7203"
+  },
+  "current_main_observed": {
+    "ato": "b43eaa0c55be0229d55b8d82054d355b616d04b1",
+    "ato_api": "dcc3049a69051ed6d1c7819580ed1e171815c34c"
+  },
+  "formation_measurement_pin": "c4c285f3e9a751975286ccd78ba49e76e483fa83",
+  "formation_binary_hashes": {
+    "coverage_baseline": "cabca856fe6f2c6a1bc8b28e2867c1482a6144155d467a6f38a813558e216428",
+    "ato-formation-worker": "ee2c1e402e6111fac9e7d8e002d29b76eb70769d46e41b5d36b4925ea3e89092"
+  },
+  "formation_host": "oci-linux-test, linux/aarch64, same frozen binaries as baseline",
+  "retained_check": "baseline run/scratch absent; coverage-50.py removed each app scratch, including out/bundles; no prior artifact reused",
+  "formation_invocations": 2,
+  "static_routes_executed": 2,
+  "reveal_build_route": "filtered network_denied; the static-files/v1 route executed without dependency acquisition",
+  "browser_runs": 2,
+  "browser_rerun_reason": "run 1 DOM acceptance passed for both; screenshot of reveal next was captured during outgoing-slide transition. Run 2 adds RAF/transition waiting only; run 1 evidence retained. No new Formation or source change.",
+  "counts": {
+    "baseline_typed_K_pass": 3,
+    "baseline_functional_established": 0,
+    "append_fresh_typed_K_pass": 2,
+    "append_unique_functional_established": 2,
+    "append_persistence_established": 0
+  },
+  "counts_note": "append evidence is not a new 50-app qualification rate; fresh receipts are not extra unique typed-K apps",
+  "model_calls": 0,
+  "model_credentials_read": false,
+  "remaining_model_reservation_usd_micros": 4513388,
+  "deploy": false,
+  "remote_migration": false,
+  "entries": [
+    {
+      "index": 21,
+      "name": "2048",
+      "repo": "https://github.com/gabrielecirulli/2048",
+      "ref": "478b6ec346e3787f589e4af751378d06ded4cbbc",
+      "archive_sha256": "4f3e35b3b9124c5a5c16231b71684288d8d781c2d534754f6b36119336231e2e",
+      "source_closure": "sha256:1b92a5799e48141d70e3f0246626833c985e51885f2a037e5ebdfefc1c5f1aa4",
+      "baseline_retained_ref": "sha256:53ba1b1cff58f964e2e76c2b1ed6d54e713860c756afaa863f1d7662a4a9b932",
+      "fresh_materialization_ref": "sha256:fb3322cfb66f6b90e05dff04f58fc94fee2ba2c0be5ee047b6c57323abd79413",
+      "fresh_receipt": {
+        "contract_ref": "sha256:13c013fe68ab460c3d3a360574f5a9fb53969860fb457ca3aef4ee0ae38abfa0",
+        "derivation_ref": "sha256:9fc21a1dc0b4b2d87bd7657e81d12ce5bce6fbfa29bac45f88ba5d7126ce285c",
+        "execution": {
+          "attempt_id": "local-2234819-3",
+          "endpoint": "http://127.0.0.1:33115/",
+          "platform": "linux/aarch64",
+          "realization": "static_web",
+          "request_id": "local-2234819-2-1790732962470684287"
+        },
+        "fully_satisfied": true,
+        "observations": [
+          {
+            "evidence": {
+              "body_sha256": "sha256:db92ec6fea128ee54890be3409cbbb1a573542f39f9f7c02db3152e5d327891b",
+              "method": "GET",
+              "path": "/",
+              "status": 200
+            },
+            "id": "root",
+            "outcome": "satisfied"
+          },
+          {
+            "evidence": {
+              "digest": "sha256:1b92a5799e48141d70e3f0246626833c985e51885f2a037e5ebdfefc1c5f1aa4",
+              "input": "workspace"
+            },
+            "id": "source-identity",
+            "outcome": "satisfied"
+          }
+        ],
+        "schema": "ato.contract-verification-receipt/1",
+        "target": {
+          "kind": "formation-runtime"
+        }
+      },
+      "same_baseline_K_D_observations": true,
+      "functional_acceptance": {
+        "passed": true,
+        "scope": "fixed keyboard operation on unchanged generated static bundle",
+        "browser_version": "154.0.8037.58",
+        "browser_host": "local macOS/arm64",
+        "served_by": "loopback manifest/blob reader; every blob digest and root body checked before serving",
+        "verified_blob_count": 29,
+        "initial": {
+          "action": "initial",
+          "tiles": [
+            {
+              "position": "tile-position-4-2",
+              "value": 2
+            },
+            {
+              "position": "tile-position-4-4",
+              "value": 2
+            }
+          ],
+          "score": 0
+        },
+        "final": {
+          "action": "ArrowDown",
+          "tiles": [
+            {
+              "position": "tile-position-2-2",
+              "value": 2
+            },
+            {
+              "position": "tile-position-2-4",
+              "value": 4
+            },
+            {
+              "position": "tile-position-3-3",
+              "value": 8
+            },
+            {
+              "position": "tile-position-3-4",
+              "value": 2
+            },
+            {
+              "position": "tile-position-4-3",
+              "value": 2
+            },
+            {
+              "position": "tile-position-4-4",
+              "value": 2
+            },
+            {
+              "position": "tile-position-4-4",
+              "value": 2
+            },
+            {
+              "position": "tile-position-4-4",
+              "value": 4
+            }
+          ],
+          "score": 20
+        },
+        "trace": "evidence/formation-static-functional-20260930/run-2/browser-results.json",
+        "external_requests_observed": 0,
+        "page_errors": [],
+        "included_in_typed_K": false
+      },
+      "persistence_acceptance": "not measured; no Ato state or restart acceptance"
+    },
+    {
+      "index": 22,
+      "name": "reveal.js",
+      "repo": "https://github.com/hakimel/reveal.js",
+      "ref": "f8c9ec3bb3b288e061b166fba5e4975920dd5cd4",
+      "archive_sha256": "b695207d618d628b888f403a26f599322018fe81311cbb2f9ad84b0dad8d842f",
+      "source_closure": "sha256:8cb73cfaf666bcc045d70b9f9ab4dcd63e6a32605bea3d6ff8170dee1b1694c0",
+      "baseline_retained_ref": "sha256:0fb8473b13e753144d3cb55963214cf089af8ee45357762b55e75e7c7096d098",
+      "fresh_materialization_ref": "sha256:b897468d2497186ac0e0d32992b9364ef87eecef36772e5feaf1f0dcdf6ca92f",
+      "fresh_receipt": {
+        "contract_ref": "sha256:fd914e5b069707d5c6c0723cfbbd2cfe8733f6f06554f6d8e40a77b7bf08eb24",
+        "derivation_ref": "sha256:05c93137349d4ad4f104025a057bae0696bbfe44e0f35f632d76afe08a4dc557",
+        "execution": {
+          "attempt_id": "local-2234825-4",
+          "endpoint": "http://127.0.0.1:37545/",
+          "platform": "linux/aarch64",
+          "realization": "static_web",
+          "request_id": "local-2234825-2-1790732965159777696"
+        },
+        "fully_satisfied": true,
+        "observations": [
+          {
+            "evidence": {
+              "body_sha256": "sha256:909168ace5a3c3fbda2e4f1c4909b3becd40916f1394f03f9d93b94f3cd0c451",
+              "method": "GET",
+              "path": "/",
+              "status": 200
+            },
+            "id": "root",
+            "outcome": "satisfied"
+          },
+          {
+            "evidence": {
+              "digest": "sha256:8cb73cfaf666bcc045d70b9f9ab4dcd63e6a32605bea3d6ff8170dee1b1694c0",
+              "input": "workspace"
+            },
+            "id": "source-identity",
+            "outcome": "satisfied"
+          }
+        ],
+        "schema": "ato.contract-verification-receipt/1",
+        "target": {
+          "kind": "formation-runtime"
+        }
+      },
+      "same_baseline_K_D_observations": true,
+      "functional_acceptance": {
+        "passed": true,
+        "scope": "fixed keyboard operation on unchanged generated static bundle",
+        "browser_version": "154.0.8037.58",
+        "browser_host": "local macOS/arm64",
+        "served_by": "loopback manifest/blob reader; every blob digest and root body checked before serving",
+        "verified_blob_count": 130,
+        "initial": {
+          "action": "initial",
+          "present": "Slide 1",
+          "classes": [
+            "present",
+            "future"
+          ]
+        },
+        "final": {
+          "action": "ArrowLeft",
+          "present": "Slide 1",
+          "classes": [
+            "present",
+            "future"
+          ]
+        },
+        "trace": "evidence/formation-static-functional-20260930/run-2/browser-results.json",
+        "external_requests_observed": 0,
+        "page_errors": [],
+        "included_in_typed_K": false
+      },
+      "persistence_acceptance": "not measured; no Ato state or restart acceptance"
+    }
+  ],
+  "artifact_hashes": {
+    "evidence/formation-static-functional-20260930/21-formation.json": "72b2bb606ecceaec8b4c0fed4963ab4cb83fe757fd386355157ac52031cd2463",
+    "evidence/formation-static-functional-20260930/22-formation.json": "35699d5b675dacfcc66c6b82cdefb0cb925326b76dd43abe7dfc2700b7caa04f",
+    "evidence/formation-static-functional-20260930/run-1/2048-after.png": "7aa999b7aba73c5e33fa5b4f77f29e3974664795f2029f0bfe61f1657e24a0f9",
+    "evidence/formation-static-functional-20260930/run-1/2048-before.png": "76b2dcd2dfed50f27408fef76bcadf3e03f44ede1f73126ec15eadf7153654de",
+    "evidence/formation-static-functional-20260930/run-1/browser-results.json": "942354131428b62db23c1a780aef319ed1450c549dc817998b619b831be64e3e",
+    "evidence/formation-static-functional-20260930/run-1/reveal-before.png": "40490ee7cf698c1981ee352f47ac428a4b041db677d33a45ff2140a6897c157e",
+    "evidence/formation-static-functional-20260930/run-1/reveal-next.png": "581d39e889dc6e027f6371983f9324ff1b87751492346aac3bd4b681e4a50b38",
+    "evidence/formation-static-functional-20260930/run-1/reveal-return.png": "c70811aa8f409f6af1f2e454012c10a57c80e5b3890d0e0ef7759fc05a19ac35",
+    "evidence/formation-static-functional-20260930/run-2/2048-after.png": "7fc0e057e48519d76cf9fa5d0e535375ec6c267a1b7e245b5bca46b97edf0a77",
+    "evidence/formation-static-functional-20260930/run-2/2048-before.png": "24d1ea05d27c3a3997ef7f0edff64ebfc69e4b94430873ecb0c65510d71c8752",
+    "evidence/formation-static-functional-20260930/run-2/browser-results.json": "15d87803e33c14918ea58534ea9409177a1afaabd88f90eff2afe096b154bf1a",
+    "evidence/formation-static-functional-20260930/run-2/reveal-before.png": "40490ee7cf698c1981ee352f47ac428a4b041db677d33a45ff2140a6897c157e",
+    "evidence/formation-static-functional-20260930/run-2/reveal-next.png": "083ae271f24690a4d604f6e53a38f3c52d0a85bc6eda2b697cfaa3afdbf49569",
+    "evidence/formation-static-functional-20260930/run-2/reveal-return.png": "2d55494c146367563a3122b59ea979a6cdba0da175678c59514c6db39eebd624"
+  }
+}
