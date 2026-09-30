@@ -94,7 +94,7 @@ class Wave:
 
     def sql(self, sql, params=None):
         name = secrets.token_hex(8)
-        command = self.root/'receiver'/'commands'/name
+        command = self.receiver/'commands'/name
         write(command.with_suffix('.in.json'), {'sql':sql,'params':params or []})
         out = command.with_suffix('.out.json')
         self.wait(out.exists, 'local SQL channel')
@@ -106,7 +106,10 @@ class Wave:
         self.root.mkdir(exist_ok=self.a.resume)
         (self.root/'.tmp').mkdir(exist_ok=self.a.resume)
         (self.root/'cells').mkdir(exist_ok=self.a.resume)
-        receiver = self.root/'receiver'
+        generation = getattr(self, 'generation', 1)
+        receiver = self.root/('receiver' if generation==1 else 'receiver-generation-'+str(generation))
+        fresh_receiver = not receiver.exists()
+        self.receiver = receiver
         receiver.mkdir(exist_ok=self.a.resume)
         shutil.copytree(self.plan['receiver_bundle'], receiver/'bundle',dirs_exist_ok=self.a.resume)
         shutil.copy2(self.plan['coordinator_script'], receiver/'coordinator.mjs')
@@ -116,13 +119,15 @@ class Wave:
         self.wait(lambda: (receiver/'commands').exists() and coordinator.poll() is None,
                   'Coordinator initialization')
         self.token = self.root/'coordinator-token'
-        if not self.a.resume:
+        if not self.token.exists():
             self.token.write_text('ato_rnr_'+secrets.token_hex(32))
             self.token.chmod(0o600)
+        if fresh_receiver:
             self.sql('INSERT INTO "user"(id,name,email) VALUES(?,?,?)',
                      ['exploration','exploration','exploration@acceptance.invalid'])
             self.sql('INSERT INTO runner_devices(id,user_id,display_name,token_hash) VALUES(?,?,?,?)',
                      ['local','exploration','isolated exploration',sha(self.token)])
+        if not (self.root/'sandbox.json').exists():
             write(self.root/'sandbox.json', self.plan['sandbox'])
         else:
             require(read(self.root/'sandbox.json') == self.plan['sandbox'], 'sandbox changed on restart')
@@ -255,16 +260,49 @@ class Wave:
             shutil.rmtree(cell/'scratch')
             shutil.rmtree(cell/'requester')
 
+    def recover_uncreated(self, app):
+        cell = self.root/'cells'/f"{app['index']:03}"
+        if (cell/'transport-recovered.json').exists(): return
+        checkpoint = read(cell/'producer.search.json')
+        projected = read(cell/'preflight.json')
+        policy = dict(self.plan['preflight_config']['policy'], exploration=checkpoint['exploration'])
+        config = {'source':projected['source'],'contract':projected['contract'],
+            'work':str(cell/'transport-recovery-work'),'routes':[],
+            'policy':policy,'budget':self.plan['preflight_config']['budget'],
+            'toolchains':self.plan['preflight_config']['toolchains'],
+            'search_id':checkpoint['search_id'],'api':self.plan['api'],
+            'token_file':str(self.token),'schedule':[],
+            'result':str(cell/'unused-result.json'),'created':str(cell/'transport-recovered.json'),
+            'submit_only':True}
+        # The old receiver has no row for this search, and Rust validated zero
+        # reservations. Submit this immutable identity once; then CLI resumes it.
+        self.budget_gate()
+        write(cell/'transport-recovery-config.json',config)
+        p=self.start([self.plan['binaries']['gate_requester']['path'],cell/'transport-recovery-config.json'],
+            self.root,cell/'transport-recovery.log')
+        require(p.wait(timeout=180)==0, 'uncreated source transport recovery failed')
+        require(read(cell/'transport-recovered.json')['request']['search_id']==checkpoint['search_id'], 'recovery changed search')
+
     def run(self):
         if self.a.check_only:
             print('NON_SECRET_GATE_PASS',flush=True)
             return
         try:
-            self.setup()
             selected = set(map(int,self.a.indices.split(',')))
             for app in self.plan['applications']:
-                if app['index'] in selected:
-                    self.app(app)
+                if app['index'] not in selected:
+                    continue
+                generation = (app['index']-1)//16+1 if self.plan.get('receiver_partition_by_index') else 1
+                if getattr(self,'generation',None) != generation:
+                    for process in reversed(self.processes): self.stop(process)
+                    self.generation = generation
+                    if self.processes:
+                        self.a.resume = True
+                    self.suffix = 'generation'+str(generation)
+                    self.setup()
+                if app['index'] == self.plan.get('uncreated_search_recovery_index'):
+                    self.recover_uncreated(app)
+                self.app(app)
         finally:
             for p in reversed(self.processes):
                 self.stop(p)

@@ -30,6 +30,8 @@ struct Config {
     created: PathBuf,
     #[serde(default)]
     resume: bool,
+    #[serde(default)]
+    submit_only: bool,
 }
 struct Script {
     schedule: Vec<Value>,
@@ -89,6 +91,10 @@ fn main() -> Result<()> {
             &c.created,
             serde_json::to_vec_pretty(&json!({"created":created,"request":submission.request}))?,
         )?;
+    }
+    if c.submit_only {
+        ensure!(!c.resume, "submit-only cannot replace an existing search");
+        return Ok(());
     }
     let id = created["satisfy_id"].as_str().context("request id")?;
     let scripted = Arc::new(Script {
