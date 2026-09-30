@@ -120,6 +120,28 @@ async fn handle_connect_inner(
         return Ok(());
     }
 
+    // Port and transfer budget are refused before DNS, like the hostname.
+    let refused_stage = if !policy.check_port(port) {
+        Some("port")
+    } else if policy.transfer_budget().is_some_and(|b| b.exhausted()) {
+        Some("budget")
+    } else {
+        None
+    };
+    if let Some(stage) = refused_stage {
+        write_error_response(&mut client, 403, stage, &host, port).await?;
+        let _ = receipt_tx.try_send(NetworkEgressDecision {
+            target: host,
+            port,
+            protocol: "tcp".to_string(),
+            decision: EgressDecision::DenyHost,
+            resolved_addr: None,
+            decided_at_unix: decided_at,
+            stage: stage.to_string(),
+        });
+        return Ok(());
+    }
+
     // ── 3. DNS resolve (skipped for IP literals) ──────────────────────────────
 
     let addrs: Vec<IpAddr> = if is_ip_literal {
@@ -244,15 +266,72 @@ async fn handle_connect_inner(
 
     // ── 7. Forward pre-buffered bytes ─────────────────────────────────────────
 
+    if let Some(budget) = policy.transfer_budget()
+        && !budget.consume(leftovers.len() as u64)
+    {
+        return Ok(());
+    }
     if !leftovers.is_empty() {
         upstream.write_all(&leftovers).await?;
     }
 
     // ── 8. Bidirectional relay ────────────────────────────────────────────────
 
-    tokio::io::copy_bidirectional(&mut client, &mut upstream).await?;
+    match policy.transfer_budget() {
+        None => {
+            tokio::io::copy_bidirectional(&mut client, &mut upstream).await?;
+        }
+        Some(budget) => relay_within_budget(client, upstream, budget.clone()).await,
+    }
 
     Ok(())
+}
+
+/// Relay both directions, accounting every chunk against the shared budget.
+/// Crossing the limit ends this tunnel (both sockets are dropped); other
+/// tunnels stop at their next chunk and new CONNECTs are refused.
+async fn relay_within_budget(
+    client: TcpStream,
+    upstream: TcpStream,
+    budget: Arc<super::policy::TransferBudget>,
+) {
+    use tokio::io::AsyncReadExt;
+
+    let (mut client_read, mut client_write) = client.into_split();
+    let (mut upstream_read, mut upstream_write) = upstream.into_split();
+    let up_budget = budget.clone();
+    let upward = async move {
+        let mut buffer = vec![0_u8; 16 * 1024];
+        loop {
+            let n = match client_read.read(&mut buffer).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            if !up_budget.consume(n as u64) || upstream_write.write_all(&buffer[..n]).await.is_err()
+            {
+                break;
+            }
+        }
+        let _ = upstream_write.shutdown().await;
+    };
+    let downward = async move {
+        let mut buffer = vec![0_u8; 16 * 1024];
+        loop {
+            let n = match upstream_read.read(&mut buffer).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            if !budget.consume(n as u64) || client_write.write_all(&buffer[..n]).await.is_err() {
+                break;
+            }
+        }
+        let _ = client_write.shutdown().await;
+    };
+    // Either direction ending on the budget ends the tunnel.
+    tokio::select! {
+        _ = upward => {}
+        _ = downward => {}
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -794,6 +873,76 @@ mod tests {
 
         assert_eq!(receipt.stage, "connect");
         assert_eq!(receipt.decision, EgressDecision::ConnectFailure);
+    }
+
+    /// A non-allowlisted port is refused before DNS.
+    #[tokio::test]
+    async fn port_outside_the_allowlist_is_refused_before_dns() {
+        let (resolver, counter) = FakeResolver::returning(vec!["127.0.0.1".parse().unwrap()]);
+        let (receipt_tx, mut receipt_rx) = mpsc::channel::<NetworkEgressDecision>(32);
+        let policy = Arc::new(
+            EgressPolicy::permissive()
+                .with_hostname_allow("allowed.test")
+                .with_port_allow(443),
+        );
+        let resolver_arc: Arc<dyn Resolver + Send + Sync> = Arc::new(resolver);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle_connect(stream, policy, resolver_arc, receipt_tx).await;
+        });
+        let (status, _) = send_connect(proxy_addr, "allowed.test:22").await;
+        assert_eq!(status, 403);
+        let receipt = receipt_rx.recv().await.unwrap();
+        assert_eq!(receipt.stage, "port");
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    /// Relayed bytes count against the shared budget; crossing it cuts the
+    /// tunnel and refuses the next CONNECT.
+    #[tokio::test]
+    async fn the_transfer_budget_cuts_the_tunnel_and_refuses_new_connects() {
+        let echo_port = start_echo_server().await;
+        let (resolver, _) = FakeResolver::returning(vec!["127.0.0.1".parse().unwrap()]);
+        let (receipt_tx, mut receipt_rx) = mpsc::channel::<NetworkEgressDecision>(32);
+        let budget = Arc::new(super::super::policy::TransferBudget::new(64));
+        let policy = Arc::new(EgressPolicy::permissive().with_transfer_budget(budget.clone()));
+        let resolver_arc: Arc<dyn Resolver + Send + Sync> = Arc::new(resolver);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                tokio::spawn(handle_connect(
+                    stream,
+                    policy.clone(),
+                    resolver_arc.clone(),
+                    receipt_tx.clone(),
+                ));
+            }
+        });
+        let (status, mut tunnel) =
+            send_connect(proxy_addr, &format!("allowed.test:{echo_port}")).await;
+        assert_eq!(status, 200);
+        let _ = receipt_rx.recv().await;
+        tunnel.write_all(&[7_u8; 20]).await.unwrap();
+        let mut echoed = [0_u8; 20];
+        tunnel.read_exact(&mut echoed).await.unwrap();
+        // 40 bytes used; the next 40 cross the 64-byte limit.
+        let _ = tunnel.write_all(&[7_u8; 40]).await;
+        let mut rest = Vec::new();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tunnel.read_to_end(&mut rest),
+        )
+        .await;
+        assert!(budget.exhausted());
+        assert!(rest.len() < 40, "the tunnel was cut at the budget");
+        let (status, _) = send_connect(proxy_addr, &format!("allowed.test:{echo_port}")).await;
+        assert_eq!(status, 403);
+        let receipt = receipt_rx.recv().await.unwrap();
+        assert_eq!(receipt.stage, "budget");
     }
 
     /// Test: pre-buffered bytes are forwarded to upstream (over-read protection).
