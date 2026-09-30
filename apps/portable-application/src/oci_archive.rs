@@ -10,8 +10,10 @@ use base64::Engine;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-const MAX_ARCHIVE_BYTES: usize = 128 * 1024 * 1024;
-const MAX_MEMBER_BYTES: u64 = 64 * 1024 * 1024;
+/// Portable OCI transport bound (raised from 128 MiB to 512 MiB on
+/// 2026-09-30 for the WBO source build; user-approved).
+pub const MAX_ARCHIVE_BYTES: usize = 512 * 1024 * 1024;
+const MAX_MEMBER_BYTES: u64 = MAX_ARCHIVE_BYTES as u64;
 const MAX_MEMBERS: usize = 32;
 
 pub struct ValidatedOciArchive {
@@ -358,6 +360,13 @@ fn select_platform(
     members: &BTreeMap<String, Member>,
     platform: &str,
 ) -> Result<String> {
+    checked_descriptor(platform_descriptor(index, platform)?, members)
+}
+
+/// The one descriptor of an image index for `platform` (`os/arch`; arm64
+/// may carry variant v8). Attestation manifests (`unknown/unknown`) never
+/// match; zero or several matches are refused.
+pub(crate) fn platform_descriptor<'a>(index: &'a Value, platform: &str) -> Result<&'a Value> {
     let (os, architecture) = platform.split_once('/').context("platform os/arch")?;
     let matches = index["manifests"]
         .as_array()
@@ -379,7 +388,7 @@ fn select_platform(
         "OCI index has {} manifests for {platform}; exactly one is required",
         matches.len()
     );
-    checked_descriptor(matches[0], members)
+    Ok(matches[0])
 }
 
 fn checked_descriptor(descriptor: &Value, members: &BTreeMap<String, Member>) -> Result<String> {
