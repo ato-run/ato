@@ -203,11 +203,25 @@ impl Submission {
             .filter(|r| !r["provider_call"].is_null())
             .map(|r| r["provider_call"].clone())
             .collect();
+        let final_basis = submitted.and_then(|success| {
+            local.accepted_rounds.values().rev().find_map(|round| {
+                if !round["outcomes"].as_array()?.iter().any(|o| {
+                    o["status"] == "admitted" && o["derivation_ref"] == success.derivation_ref
+                }) {
+                    return None;
+                }
+                let bytes = BASE64.decode(round["raw_output_base64"].as_str()?).ok()?;
+                let proposal: Value = serde_json::from_slice(&bytes).ok()?;
+                Some(proposal["proposals"][0]["operations"][0]["plan"]["basis"].clone())
+            })
+        });
         Ok(json!({
             "schema":"ato.formation-exploration-result/1", "search_id":state.search_id,
             "frozen_contract":state.frozen.base_contract,"contract_ref":state.frozen.base_contract_ref,
             "submission":submitted,"approval":"not_assessed","deployed":false,
             "final_requirements":submitted.map(|s| &s.derivation.requirements),
+            "final_requirement_basis":final_basis,
+            "requirement_basis_origin":if submitted.is_none(){"not_submitted"}else if final_basis.is_some(){"validated_source_referenced_execution_plan"}else{"declared_verified_known_derivation"},
             "rounds":rounds,"rounds_consumed":rounds.len(),"effective_max_rounds":state.frozen.policy.exploration.as_ref().unwrap().formation.max_rounds,
             "attempts":state.attempts,"budget":state.budget,"candidate_producer_calls":calls,
             "known_attempts":state.attempts.iter().filter(|a|state.frozen.candidates.iter().any(|c|c.derivation_ref==a.derivation_ref)).count(),
@@ -218,6 +232,14 @@ impl Submission {
             "permission_minimality":"only reductions established by fresh PASS receipts; mathematical minimality is not claimed"
         }))
     }
+}
+
+fn public_log_tail_limit(text: &str, limit: usize) -> String {
+    let mut start = text.len().saturating_sub(limit);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    text[start..].to_owned()
 }
 
 pub(super) fn frozen_request(request: &SatisfyRequest) -> Result<FrozenSearchV1> {
@@ -586,7 +608,7 @@ impl Submission {
             .as_ref()
             .context("producer not enabled")?;
         let state = self.proposal_search(status)?;
-        let value = ProposalRequestV2 {
+        let mut value = ProposalRequestV2 {
             schema: ProposalRequestV2Schema::V2,
             search_id: request.search_id,
             round_seq: local.frozen.policy.exploration.as_ref().map(|_| {
@@ -711,6 +733,26 @@ impl Submission {
                 })
                 .unwrap_or_else(|| local.source_context.clone()),
         };
+        if let Some(context) = &mut value.exploration_context {
+            // Preserve the latest D, latest failure and verified success. Older
+            // redundant context is bounded deterministically; the full owner
+            // evidence remains durable and the frozen source limit is unchanged.
+            while serde_jcs::to_vec(context)?.len() > 16 * 1024 {
+                if context.previous_derivations.len() > 1 {
+                    context.previous_derivations.pop();
+                } else if context.failures.len() > 1 {
+                    context.failures.pop();
+                } else if context.failures.iter().any(|f| f.log_tail.len() > 256) {
+                    for failure in &mut context.failures {
+                        failure.log_tail = public_log_tail_limit(&failure.log_tail, 256);
+                    }
+                } else if context.previous_plan.take().is_some() {
+                    // Canonical previous D still carries all execution fields.
+                } else {
+                    anyhow::bail!("exploration_context_bounds");
+                }
+            }
+        }
         value.validate(
             local
                 .frozen
