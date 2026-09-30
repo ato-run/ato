@@ -4,6 +4,7 @@ import argparse
 from collections import Counter, defaultdict
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -75,9 +76,13 @@ def aggregate(plan, root):
         known=state.get('search_state',{}).get('frozen',{}).get('candidates',[])
         generated={d['derivation_ref'] for r in result.get('rounds',[]) for d in r.get('candidates',[])}
         attempts=state.get('attempts',[])
-        admitted=[a for a in result.get('attempts',[]) if a.get('route_accepted')]
         executed=[a for a in attempts if (a.get('attestation') or {}).get('execution_started')]
-        verified=[a for a in attempts if (a.get('formation_attempt') or {}).get('receipt')]
+        # route_accepted in the requester summary describes the completed route,
+        # not admission. A started contained execution proves admission even
+        # when launch/readiness subsequently fails.
+        admitted=[a for a in attempts if (a.get('attestation') or {}).get('execution_started')]
+        verified=[a for a in attempts if (a.get('formation_attempt') or {}).get('verification')
+                  or (a.get('formation_attempt') or {}).get('receipt')]
         diagnostic=codes(result,state) + ([source_terminal['code']] if source_terminal else [])
         failures=[a for a in attempts if a.get('failure')]
         authority_recovered=False;network_recovered=False; dependency_recovered=False
@@ -110,6 +115,7 @@ def aggregate(plan, root):
             'primary': 'source/preflight' if source_terminal else primary(result,diagnostic,success),
             'secondary':diagnostic,'candidate_producer_no_call_reason':no_call,
             'proposal_generated_D_count':len(generated),'generated_D_refs':sorted(generated),
+            'generated_D_admitted':sum(a['derivation_ref'] in generated for a in admitted),
             'generated_D_executed':sum(a['derivation_ref'] in generated for a in executed),
             'generated_D_PASS':sum(a.get('status')=='pass' and a['derivation_ref'] in generated for a in attempts),
             'funnel':{'A_source_recognized':not bool(source_terminal),'B_K_formed':not bool(source_terminal),
@@ -125,11 +131,17 @@ def aggregate(plan, root):
             'final_requirement_basis':result.get('final_requirement_basis'),
             'permission_reduction':result.get('permission_reduction'),
             'provider_calls':result.get('candidate_producer_calls',[]),
+            'infrastructure_observations': ([{
+                'code':'source_upload_quota_before_search_creation',
+                'search_rounds_and_model_calls_before_recovery':0,
+                'recovery':'same original Search ID, K, source, frozen ceiling and journals; fixed receiver index partition',
+                'expired_open_round_during_requester_recompilation':'consumed; not reset or retried',
+            }] if app['index']==plan.get('uncreated_search_recovery_index') else []),
             'functional_candidate':success and not app['baseline_typed_K_pass'],
             'functional_acceptance':'not_measured','deployed':False,'approval':'not_assessed'}
         rows.append(row)
         for f in sorted(cell.rglob('*')):
-            if f.is_file() and not any(x in ('scratch','requester') for x in f.relative_to(cell).parts):
+            if f.is_file() and not any(x in ('scratch','requester','transport-recovery-work') for x in f.relative_to(cell).parts):
                 raw.append({'path':str(f.relative_to(root)),'bytes':f.stat().st_size,'sha256':sha(f)})
     return rows,raw
 
@@ -151,8 +163,10 @@ def main():
     totals={'actual_terminals':100,'baseline_typed_K_PASS':baseline,'current_typed_K_PASS':current,
         'absolute_gain':gain,'new_PASS_apps':added,'regressed_apps':regressed,
         'candidate_producer_invoked_apps':sum(r['producer_calls']>0 for r in rows),
+        'actual_LLM_call_rate':sum(r['producer_calls']>0 or r['decision_calls']>0 for r in rows)/len(rows),
         'candidate_producer_calls':cp,'decision_provider_calls':dp,
         'valid_generated_D_apps':sum(r['proposal_generated_D_count']>0 for r in rows),
+        'generated_D_admitted_apps':sum(r['generated_D_admitted']>0 for r in rows),
         'generated_D_executed_apps':sum(r['generated_D_executed']>0 for r in rows),
         'generated_D_PASS_apps':sum(r['generated_D_PASS']>0 for r in rows),
         'authority_recovered_to_execution_apps':sum(r['authority_recovered_to_execution'] for r in rows),
@@ -161,9 +175,21 @@ def main():
         'known_usage_estimated_cost_usd_micros':estimated,'conservative_charged_usd_micros':charged,
         'estimated_cost_per_additional_PASS_usd_micros':estimated/len(added) if added else None,
         'charged_cost_per_additional_PASS_usd_micros':charged/len(added) if added else None,
+        'calls_per_additional_PASS':(cp+dp)/len(added) if added else None,
         'unresolved_model_reservations':0,'new_functional_acceptance':0}
     for field in ('input_tokens','output_tokens','unknown_usage_calls'):
         totals[field]=sum(r['candidate_producer_accounting'][field]+r['decision_provider_accounting'][field] for r in rows)
+    totals['tokens_per_additional_PASS']=(totals['input_tokens']+totals['output_tokens'])/len(added) if added else None
+    cp_provenance=[c['provenance'] for r in rows for c in r['provider_calls'] if c.get('provenance')]
+    totals['candidate_producer_models']=dict(Counter(c['model'] for c in cp_provenance))
+    totals['candidate_producer_latency_ms_recorded']=sum(c.get('latency_ms',0) for c in cp_provenance)
+    totals['candidate_producer_calls_with_recorded_latency']=sum('latency_ms' in c for c in cp_provenance)
+    totals['requester_elapsed_seconds_sum']=round(sum(r.get('elapsed_seconds',0) for r in rows),3)
+    start=(root/'cells'/'001'/'preflight-config.json').stat().st_mtime
+    end=max((root/'cells'/f"{r['index']:03}"/'summary.json').stat().st_mtime for r in rows)
+    totals['wall_elapsed_seconds_including_infrastructure_recovery']=round(end-start,3)
+    totals['started_at']=datetime.fromtimestamp(start,timezone.utc).isoformat()
+    totals['completed_at']=datetime.fromtimestamp(end,timezone.utc).isoformat()
     ledger={'schema':'ato.formation-exploration-100-ledger/1','plan_sha256':sha(a.plan),
         'ato_pin':plan['ato_pin'],'ato_api_pin':plan['ato_api_pin'],'totals':totals,'funnel':funnel,
         'primary_distribution':dict(Counter(r['primary'] for r in rows)),
