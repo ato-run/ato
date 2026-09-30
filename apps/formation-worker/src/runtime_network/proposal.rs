@@ -220,7 +220,7 @@ impl Submission {
     }
 }
 
-fn frozen_request(request: &SatisfyRequest) -> Result<FrozenSearchV1> {
+pub(super) fn frozen_request(request: &SatisfyRequest) -> Result<FrozenSearchV1> {
     let mut budget = serde_json::to_value(&request.budget)?;
     let mode = budget
         .as_object_mut()

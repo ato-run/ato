@@ -277,7 +277,11 @@ pub(super) fn run(args: FormArgs) -> Result<()> {
         .transpose()?;
     let mut answered = std::collections::BTreeSet::new();
     let client = Client::new(&api, &token)?;
-    let accepted = client.submit(&submission)?;
+    let accepted = if continuation {
+        client.resume_exploration(&submission)?
+    } else {
+        client.submit(&submission)?
+    };
     let id = accepted["satisfy_id"]
         .as_str()
         .context("satisfy identity missing")?
