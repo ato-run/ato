@@ -405,7 +405,10 @@ fn e2_holdout_projections_match_preregistered_families() {
                 }
                 "C03" => {
                     assert!(!pos.server_listen && !neg.server_listen, "{case}");
-                    assert!(!pos.custom_http_handler && !neg.custom_http_handler, "{case}");
+                    assert!(
+                        !pos.custom_http_handler && !neg.custom_http_handler,
+                        "{case}"
+                    );
                 }
                 "C04" => {
                     // Deliberately indistinguishable closed summaries.
@@ -424,8 +427,10 @@ fn e2_context_v1_lacks_the_recovered_evidence() {
     for case in ["D01", "D02", "D03"] {
         let [positive, _] = e2_files(case);
         let entry = v1::project_python("k4", &positive, positive.len() as u64).unwrap();
-        assert!(!entry.server_listen && !entry.custom_http_handler && entry.imports.is_empty(),
-                "{case}");
+        assert!(
+            !entry.server_listen && !entry.custom_http_handler && entry.imports.is_empty(),
+            "{case}"
+        );
     }
     for case in ["P01", "P02", "P03"] {
         let [positive, _] = e2_files(case);
