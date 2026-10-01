@@ -1409,7 +1409,7 @@ impl Client {
         Ok(())
     }
 
-    pub fn variable_metadata(&self) -> Result<Vec<Value>> {
+    pub fn variable_metadata(&self, application: &str, search_id: &str) -> Result<Vec<Value>> {
         let reply: Value = self
             .send(self.http.get(self.url("/variables")))?
             .context("variable_metadata_empty")?;
@@ -1417,8 +1417,34 @@ impl Client {
             .get("variables")
             .and_then(Value::as_array)
             .context("variable_metadata_invalid")?;
+        let metadata = metadata
+            .iter()
+            .filter(|v| {
+                v["metadata"]["applications"]
+                    .as_array()
+                    .is_some_and(|apps| apps.iter().any(|a| a == application))
+                    && (v["metadata"]["reuse"] == "reusable"
+                        || v["metadata"]["formation_id"] == search_id)
+            })
+            .collect::<Vec<_>>();
         ensure!(metadata.len() <= 128, "variable_metadata_bounds");
         Ok(metadata.iter().map(|v|serde_json::json!({"metadata":v["metadata"],"revoked_at_ms":v["revoked_at_ms"]})).collect())
+    }
+    pub fn runtime_capabilities(&self, constraint: &RuntimeConstraintWire) -> Result<Vec<Value>> {
+        let reply: Value = self
+            .send(self.http.get(self.url("/runtimes")))?
+            .context("runtime_capabilities_empty")?;
+        let rows = reply["runtimes"]
+            .as_array()
+            .context("runtime_capabilities_invalid")?;
+        let capabilities = rows.iter().filter(|v| match constraint { RuntimeConstraintWire::Any => true, RuntimeConstraintWire::Exact{runtime_id,..} => v["descriptor"]["runtime_id"] == runtime_id.as_str() }).take(16).map(|v| {
+            let environments = v["descriptor"]["execution_environments"].as_array().into_iter().flatten().map(|e| {
+                let facts = e["facts"].as_object().into_iter().flatten().filter(|(k,value)| (matches!(k.as_str(), "os" | "arch" | "runtime.process" | "runtime.oci" | "formation.containment" | "containment" | "toolchain.root") || k.starts_with("toolchain.")) && value.as_str().is_some_and(|s| s.len() <= 128 && s.chars().all(|c| c.is_ascii_alphanumeric() || "_.+:-".contains(c)))).map(|(k,v)| (k.clone(),v.clone())).collect::<serde_json::Map<_,_>>();
+                serde_json::json!({"environment_id":e["environment_id"],"facts_ref":e["facts_ref"],"facts":facts})
+            }).collect::<Vec<_>>();
+            serde_json::json!({"runtime_id":v["descriptor"]["runtime_id"], "environments": environments, "availability": v["availability"]})
+        }).collect::<Vec<_>>();
+        Ok(capabilities)
     }
     fn resolve_variables(
         &self,

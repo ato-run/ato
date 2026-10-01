@@ -89,6 +89,8 @@ pub struct ReasoningInput {
     pub goal: Option<String>,
     #[serde(default)]
     pub available_variables: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_capabilities: Vec<Value>,
     #[serde(default)]
     pub max_retries: u32,
     pub schema: String,
@@ -231,6 +233,27 @@ fn scoped_inventory(
             }
         })
         .collect())
+}
+
+fn priority_context(mut entries: Vec<SourceContextEntry>, cap: usize) -> Vec<SourceContextEntry> {
+    let mut remaining = cap;
+    for entry in &mut entries {
+        let mut end = entry
+            .text
+            .len()
+            .min(ato_formation::proposal::MAX_SOURCE_ENTRY_BYTES)
+            .min(remaining);
+        while !entry.text.is_char_boundary(end) {
+            end -= 1;
+        }
+        entry.truncated |= end != entry.text.len();
+        entry.text.truncate(end);
+        entry.content_sha256 = digest(entry.text.as_bytes());
+        remaining -= end;
+    }
+    entries.retain(|e| !e.text.is_empty());
+    entries.sort_by(|a, b| (a.kind, &a.logical_id).cmp(&(b.kind, &b.logical_id)));
+    entries
 }
 
 #[cfg(test)]
@@ -754,6 +777,7 @@ impl ReasoningProducer {
             })
             .collect();
         let mut inspected = BTreeMap::<String, SourceReference>::new();
+        let mut latest_inspected = Vec::<String>::new();
         let mut round_inspections = Vec::new();
         let mut inspection_bytes = 0_u64;
         let mut inspection_exchanges = 0_u32;
@@ -766,6 +790,9 @@ impl ReasoningProducer {
             inspection_bytes = inspection_bytes
                 .checked_add(r.inspected_bytes)
                 .context("inspection bytes overflow")?;
+            if !r.inspected.is_empty() {
+                latest_inspected = r.inspected.iter().map(|r| r.file_id.clone()).collect();
+            }
             for source in &r.inspected {
                 ato_formation::proposal::validate_inspection_sources(
                     auth,
@@ -877,31 +904,44 @@ impl ReasoningProducer {
                     (
                         if priority == 0 {
                             0
-                        } else if inspected.contains_key(&e.logical_id) {
+                        } else if latest_inspected.contains(&e.logical_id) {
                             1
+                        } else if inspected.contains_key(&e.logical_id) {
+                            2
                         } else if matches!(
                             e.kind,
                             ato_formation::proposal::SourceContextKind::Entrypoint
                         ) {
-                            2
-                        } else if matches!(priority, 3..=5) {
                             3
-                        } else {
+                        } else if matches!(priority, 3..=5) {
                             4
+                        } else {
+                            5
                         },
                         priority,
                         e.logical_id.clone(),
                     )
                 });
             }
-            request.source_context = bounded_inspection_context(
-                entries.into_iter().take(4).collect(),
-                auth.policy.max_source_bytes,
-            );
+            let priority_order: Vec<_> = entries.iter().map(|e| e.logical_id.clone()).collect();
+            let modern = matches!(&self.config, ReasoningProviderConfig::Session(c) if c.prompt_version == deepseek::PROMPT_VERSION_V6)
+                || matches!(&self.config, ReasoningProviderConfig::Api(c) if c.prompt_version == deepseek::PROMPT_VERSION_V6);
+            request.source_context = if modern {
+                priority_context(
+                    entries.into_iter().take(4).collect(),
+                    auth.policy.max_source_bytes,
+                )
+            } else {
+                bounded_inspection_context(
+                    entries.into_iter().take(4).collect(),
+                    auth.policy.max_source_bytes,
+                )
+            };
             let mut input = ReasoningInput {
                 catalog_sources_in_inventory: true,
                 goal: limits.goal.clone(),
                 available_variables: local.available_variables.clone(),
+                runtime_capabilities: local.runtime_capabilities.clone(),
                 max_retries: policy.formation.max_retries,
                 schema: INPUT_SCHEMA.into(),
                 call_id,
@@ -978,7 +1018,16 @@ impl ReasoningProducer {
                     .request
                     .source_context
                     .iter_mut()
-                    .max_by_key(|e| e.text.len())
+                    .max_by_key(|e| {
+                        if modern {
+                            priority_order
+                                .iter()
+                                .position(|id| id == &e.logical_id)
+                                .unwrap_or(usize::MAX)
+                        } else {
+                            e.text.len()
+                        }
+                    })
                     .context("non-text reasoning context exceeds input budget")?;
                 let mut end = entry.text.len().saturating_sub(512);
                 while !entry.text.is_char_boundary(end) {
@@ -1152,13 +1201,22 @@ impl ReasoningProducer {
                 };
                 if let Some(code) = code.filter(|c| {
                     !matches!(*c, "exploration_authority_exceeded")
-                        && !c.starts_with("unsupported_")
+                        && !matches!(
+                            *c,
+                            "unsupported_toolchain"
+                                | "source_oci_builder_unavailable"
+                                | "unsupported_authority_resource"
+                                | "unsupported_state_requirement"
+                        )
                         && *c != "requires_binding"
                 }) && repairs < policy.formation.max_retries
                     && !feedback.iter().any(|f| f == code)
                 {
                     validation_error = Some(code.to_owned());
                     feedback.push(code.to_owned());
+                    if code == "unsupported_entrypoint" || code == "unsupported_node_entrypoint" {
+                        feedback.push("The selected entrypoint is not a process script. If the source manifest declares a frontend build and output directory, use static_output with manifest entrypoint, argv:[], guest_port:0, and the declared source-owned build_scripts. No new operation or K change is needed.".into());
+                    }
                     if let Some(detail) = details.take() {
                         feedback.push(detail.chars().take(512).collect());
                     }
@@ -1210,6 +1268,7 @@ impl ReasoningProducer {
                 })();
                 match result {
                     Ok(refs) => {
+                        latest_inspected = refs.iter().map(|r| r.file_id.clone()).collect();
                         inspection_bytes += retrieved_bytes;
                         for r in &refs {
                             acquired.insert(r.file_id.clone(), local.source_text(&r.file_id)?);
